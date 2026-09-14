@@ -1,0 +1,300 @@
+//! `ikigai-conformance` over the kernel this binary serves — and over a door onto it.
+//!
+//! # This crate binds ZERO endpoints
+//!
+//! Everything gonk serves is `ikigai-store`'s (twelve resources) or `ikigai-ledger`'s
+//! (fourteen), and each of those crates walks its own suite. What is gonk's to get wrong is
+//! the composition and the doors, so this file checks exactly those:
+//!
+//! - [`the_served_catalog_is_exactly_the_store_and_the_ledger`] — linkage-gating as a
+//!   machine-checked fact: a dependency bump that puts one more resource behind the ports is
+//!   a red test, and so is one that silently binds one fewer.
+//! - [`the_hub_conforms`] — the suite over [`ikigai_gonk::compose`], the function `main`
+//!   calls, with the ledger's own fixtures.
+//! - [`a_door_kernel_conforms_like_the_hub`] — the same walk through
+//!   [`ikigai_gonk::doors::door_kernel`], which is what the socket and QUIC transports
+//!   actually serve. A forwarding space that lost a contract, a verb or a declared
+//!   capability would be clean on the hub and dirty here.
+//! - [`every_entry_answers_meta_in_json_through_a_door`] — a mounting client reads every
+//!   contract through the JSON Meta face, and when that fails it degrades silently.
+//!
+//! The store's twelve resources are opted out of the invoking checks for the reason the
+//! ledger's suite gives: they are walked with real SPARQL by `ikigai-store`'s own suite, and
+//! the synthesized `"x"` this suite would hand them is not a query.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use futures::executor::block_on;
+use ikigai_conformance::{Check, Fixture, Report, Suite};
+use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
+use ikigai_gonk::{compose, doors};
+use ikigai_store::DurableStore;
+
+const STORE_IDS: [&str; 12] = [
+    "store-select",
+    "store-ask",
+    "store-construct",
+    "store-describe",
+    "store-graph-select",
+    "store-graph-ask",
+    "store-graph-construct",
+    "store-graph-describe",
+    "store-info",
+    "store-update",
+    "store-graph-update",
+    "store-load",
+];
+
+const LEDGER_IDS: [&str; 14] = [
+    "ledger-append",
+    "ledger-claim",
+    "ledger-close",
+    "ledger-comment",
+    "ledger-defer",
+    "ledger-item",
+    "ledger-items",
+    "ledger-label",
+    "ledger-ledgers",
+    "ledger-link",
+    "ledger-next",
+    "ledger-policy",
+    "ledger-purge",
+    "ledger-reopen",
+];
+
+fn hub() -> Arc<Kernel> {
+    Arc::new(compose(
+        DurableStore::in_memory().expect("an in-memory store"),
+    ))
+}
+
+fn issue(kernel: &Kernel, verb: Verb, iri: &str, args: &[(&str, &str)]) -> String {
+    let request = args.iter().fold(
+        Request::new(verb, Iri::parse(iri).expect("a test IRI")),
+        |request, (name, value)| request.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec())),
+    );
+    let repr = block_on(kernel.issue(request, &Capability::root()))
+        .unwrap_or_else(|e| panic!("{verb:?} {iri} {args:?}: {e}"));
+    String::from_utf8_lossy(&repr.bytes).into_owned()
+}
+
+/// Three items, filed through `kernel`, and their ids — A for most fixtures, B as a link
+/// target, C for purge.
+fn seed(kernel: &Kernel) -> (String, String, String) {
+    let mut ids = [
+        "The fixture item\n\nWhat the walk writes to.",
+        "A link target",
+        "A purge target",
+    ]
+    .into_iter()
+    .map(|content| {
+        let answer = issue(
+            kernel,
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &[("content", content)],
+        );
+        let iri = answer
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_else(|| panic!("append answers `#N <iri>`: {answer}"));
+        iri.rsplit(':')
+            .next()
+            .expect("an item IRI ends in its id")
+            .to_string()
+    });
+    (
+        ids.next().unwrap(),
+        ids.next().unwrap(),
+        ids.next().unwrap(),
+    )
+}
+
+/// `ikigai-ledger`'s own fixtures, pointed at the seeded items.
+fn fixtures(a: &str, b: &str, c: &str) -> Suite {
+    let item = format!("urn:iki:ledger:default:item:{a}");
+    let target = format!("urn:iki:ledger:default:item:{b}");
+    let purge_target = format!("urn:iki:ledger:default:item:{c}");
+    STORE_IDS
+        .iter()
+        .fold(Suite::new(), |suite, id| {
+            suite.opt_out(
+                *id,
+                None,
+                "ikigai-store's own conformance suite walks it with real SPARQL; it is bound \
+                 here because every ledger read and write composes over it",
+            )
+        })
+        .namespace("https://ikigai-rs.dev/ns/ledger#")
+        .fixture(Fixture::new("ledger-item", Verb::Source).binding("id", a))
+        .fixture(Fixture::new("ledger-item", Verb::Exists).binding("id", a))
+        .fixture(
+            Fixture::new("ledger-item", Verb::Sink)
+                .binding("id", a)
+                .arg("content", "An edited title\n\nAnd an edited body."),
+        )
+        .fixture(Fixture::new("ledger-item", Verb::Delete).binding("id", a))
+        .fixture(Fixture::new("ledger-policy", Verb::Source).binding("name", "leverage"))
+        .fixture(Fixture::new("ledger-policy", Verb::Exists).binding("name", "leverage"))
+        .fixture(
+            Fixture::new("ledger-comment", Verb::Sink)
+                .arg("item", &item)
+                .arg("content", "a comment from the conformance walk"),
+        )
+        .fixture(Fixture::new("ledger-close", Verb::Sink).arg("item", &item))
+        .fixture(Fixture::new("ledger-reopen", Verb::Sink).arg("item", &item))
+        .fixture(
+            Fixture::new("ledger-claim", Verb::Sink)
+                .arg("item", &item)
+                .arg("content", "the conformance walk"),
+        )
+        .fixture(Fixture::new("ledger-claim", Verb::Delete).arg("item", &item))
+        .fixture(Fixture::new("ledger-defer", Verb::Sink).arg("item", &item))
+        .fixture(Fixture::new("ledger-defer", Verb::Delete).arg("item", &item))
+        .fixture(
+            Fixture::new("ledger-link", Verb::Sink)
+                .arg("item", &item)
+                .arg("content", &target),
+        )
+        .fixture(
+            Fixture::new("ledger-link", Verb::Delete)
+                .arg("item", &item)
+                .arg("content", &target),
+        )
+        .fixture(
+            Fixture::new("ledger-label", Verb::Sink)
+                .arg("item", &item)
+                .arg("content", "conformance"),
+        )
+        .fixture(
+            Fixture::new("ledger-label", Verb::Delete)
+                .arg("item", &item)
+                .arg("content", "conformance"),
+        )
+        .fixture(Fixture::new("ledger-purge", Verb::Delete).arg("content", &purge_target))
+}
+
+/// The fixtures plus what the reads PROMISE about caching — for a kernel that caches.
+fn suite(a: &str, b: &str, c: &str) -> Suite {
+    fixtures(a, b, c)
+        .cacheable("ledger-items")
+        .cacheable("ledger-item")
+        .cacheable("ledger-next")
+        .pure("ledger-policy")
+}
+
+/// Every non-kernel entry's description id.
+fn served_ids(kernel: &Kernel) -> BTreeSet<String> {
+    kernel
+        .entries()
+        .expect("an enumerable root")
+        .iter()
+        .filter(|entry| !entry.pattern.starts_with("urn:kernel:"))
+        .map(|entry| {
+            kernel
+                .describe_pattern(&entry.pattern)
+                .unwrap_or_else(|| panic!("`{}` describes itself", entry.pattern))
+                .id
+        })
+        .collect()
+}
+
+fn walked_ledger_ids(report: &Report) -> Vec<&str> {
+    let mut walked: Vec<&str> = report
+        .walked
+        .iter()
+        .map(String::as_str)
+        .filter(|id| id.starts_with("ledger-"))
+        .collect();
+    walked.sort_unstable();
+    walked.dedup();
+    walked
+}
+
+#[test]
+fn the_served_catalog_is_exactly_the_store_and_the_ledger() {
+    let expected: BTreeSet<String> = STORE_IDS
+        .iter()
+        .chain(LEDGER_IDS.iter())
+        .map(|id| id.to_string())
+        .collect();
+    let hub = hub();
+    assert_eq!(
+        served_ids(&hub),
+        expected,
+        "the served catalog changed: a linked crate gained or lost a resource, and it is now \
+         behind every door this binary opens"
+    );
+    let door = doors::door_kernel(Arc::clone(&hub));
+    assert_eq!(
+        served_ids(&door),
+        expected,
+        "a door serves exactly the hub's catalog"
+    );
+}
+
+#[test]
+fn the_hub_conforms() {
+    let hub = hub();
+    let (a, b, c) = seed(&hub);
+    let report = suite(&a, &b, &c).run_blocking(&hub);
+    println!("--- hub ---\n{report}");
+    assert!(report.is_clean(), "{report}");
+    assert_eq!(walked_ledger_ids(&report), LEDGER_IDS, "{report}");
+}
+
+/// The reads whose representations are cacheable — cached by the HUB.
+const CACHED_READS: [&str; 5] = [
+    "ledger-ledgers",
+    "ledger-policy",
+    "ledger-items",
+    "ledger-item",
+    "ledger-next",
+];
+
+/// The same walk through a door. Every check runs except `CACHEABLE` on the five reads,
+/// and that one is waived because the door is BUILT not to cache: `CACHEABLE` watches the
+/// walked kernel's own trace for a hit, and a door kernel stores nothing by design
+/// ([`doors::NoCache`]) — its caching happens one hop in, in the hub, which
+/// [`the_hub_conforms`] walks with the check on and `tests/doors.rs` proves is invalidated
+/// by a write through a door.
+#[test]
+fn a_door_kernel_conforms_like_the_hub() {
+    let door = doors::door_kernel(hub());
+    let (a, b, c) = seed(&door);
+    let report = CACHED_READS
+        .iter()
+        .fold(fixtures(&a, &b, &c), |suite, id| {
+            suite.opt_out_check(
+                *id,
+                Check::Cacheable,
+                "a door kernel stores nothing by design; the hub it forwards to caches, and \
+                 the hub walk runs this check",
+            )
+        })
+        .run_blocking(&door);
+    println!("--- door ---\n{report}");
+    assert!(report.is_clean(), "{report}");
+    assert_eq!(walked_ledger_ids(&report), LEDGER_IDS, "{report}");
+}
+
+#[test]
+fn every_entry_answers_meta_in_json_through_a_door() {
+    let door = doors::door_kernel(hub());
+    let entries = door.entries().expect("an enumerable root");
+    let concrete: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.pattern.as_str())
+        .filter(|pattern| !pattern.starts_with("urn:kernel:") && !pattern.contains('{'))
+        .collect();
+    assert!(concrete.len() >= STORE_IDS.len(), "{concrete:?}");
+    for pattern in concrete {
+        let id = door.describe_pattern(pattern).expect("described").id;
+        let body = issue(&door, Verb::Meta, pattern, &[("as", "application/json")]);
+        assert!(
+            body.trim_start().starts_with('{') && body.contains(&id),
+            "`{pattern}`: the JSON Meta face must be JSON naming `{id}`:\n{body}"
+        );
+    }
+}

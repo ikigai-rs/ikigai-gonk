@@ -5,8 +5,74 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
 repository = "https://github.com/ikigai-rs/ikigai-gonk"
-description = "A standalone ikigai work-ledger server: one binary that holds the durable RDF store and serves named ledgers over loopback HTTP, an owner-only Unix socket, and certificate-authenticated QUIC."
+homepage = "https://github.com/ikigai-rs/ikigai-gonk"
+keywords = ["ikigai", "roc", "ledger", "rdf", "server"]
+categories = ["command-line-utilities", "development-tools"]
+description = "A standalone ikigai work-ledger server: one binary that holds the durable RDF store and serves named ledgers over loopback HTTP (port 1060), an owner-only Unix socket, and QUIC authenticated per client certificate."
 
 [[bin]]
 name = "ikigai-gonk"
 path = "src/main.rs"
+
+[dependencies]
+# ★ THE MANIFEST IS THE MODULE MANIFEST. This binary links the durable store, the work
+# ledger and three transports, and nothing else — no filesystem module, no calendar, no
+# exec, no LLM client. What is not compiled in cannot be reached, whatever a capability
+# says. `tests/conformance.rs::the_served_catalog_is_exactly_the_store_and_the_ledger`
+# pins the served catalog id by id, so a dependency bump that widens it is a red test.
+#
+# Every floor is the TRUE minimum of a set that compiles together, checked by resolving
+# this manifest from scratch with every ikigai pin written `=<floor>` — a caret resolve
+# picks the newest release and says nothing about the floor it claims.
+#
+# 0.1.70: `Kernel::with_cache_policy` and the `CachePolicy` trait arrive here, and
+# `doors::NoCache` is how the socket and QUIC doors keep ONE cache (the hub's) for the
+# whole process. Nothing lower can even be typed. ⚠ `"0.1.70"` is also a ceiling
+# (`<0.2.0`); when core reaches 0.2 this line must move.
+ikigai-core = "0.1.70"
+# The Meta renderer, and in a server that is not a formatting choice: a mounting client
+# reads every contract through the JSON Meta face (0.1.47+), and without it named
+# arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
+# `ikigai-conformance` 0.3 requires `^0.1.69` and cargo unifies a package across normal
+# and dev dependencies — one lock serves `build` and `test`, so it is the version the
+# shipped binary links.
+ikigai-vocab = "0.1.69"
+# The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
+# binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
+# 0.2.3, not 0.2.2: 0.2.2 is yanked, and it does not compile in any graph where a
+# sibling enables `oxrdf/rdf-12`. 0.2.2 is also where `cap_read_graph` — the narrow read
+# door `grants.rs` computes tokens from — first exists.
+ikigai-store = { version = "0.2.3", features = ["persistent"] }
+# Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
+# 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
+# the per-ledger grant list this server hands out could list a ledger and was denied
+# reading one item out of it.
+ikigai-ledger = "0.2.1"
+# The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
+# requirement admits only versions that compile against the core floor above (through
+# 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
+# the `canonical` field core 0.1.60 added).
+ikigai-ipc = "0.1.18"
+# The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
+# and `fingerprint_of_pem` — per-connection authority minted from which certificate
+# authenticated, refused when it maps to none — with the same resolve floor as ipc.
+ikigai-quic = "0.1.18"
+# The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
+# per request), `HttpRequest::peer`, and the route table the browse face will extend.
+ikigai-web = "0.1.16"
+# `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
+async-trait = "0.1"
+# The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net"] }
+# `clients.json` and `grants.json` — the same two files, in the same shapes, that
+# `ikigai serve quic://…` reads.
+serde_json = "1"
+
+[dev-dependencies]
+# The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
+# PRODUCTION floor too: see the vocab note above.
+ikigai-conformance = "0.3"
+# The `Resolver` trait, to drive the socket and QUIC doors from a test as a client would.
+ikigai-resolve = "0.1.18"
+futures = "0.3"
+tempfile = "3"
