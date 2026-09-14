@@ -501,9 +501,43 @@ fn read(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))
 }
 
+/// Write `contents` to `path`, readable by this user only, **atomically**.
+///
+/// Written to a temporary file beside the target and renamed over it, because
+/// `clients.json` and `grants.json` are re-read on every QUIC connection: a plain write
+/// truncates first, and a connection arriving in that window would read a partial file and
+/// refuse a client that is enrolled. A rename is seen as the old file or the new one. The
+/// temporary file is created `0600` rather than restricted afterwards, so a key is never
+/// briefly readable at the process umask.
 fn write_private(path: &Path, contents: &str) -> Result<(), String> {
-    std::fs::write(path, contents).map_err(|e| format!("writing {}: {e}", path.display()))?;
-    restrict(path, 0o600)
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let temp = path.with_file_name(format!(".{name}.tmp"));
+    create_private(&temp, contents).map_err(|e| format!("writing {}: {e}", temp.display()))?;
+    std::fs::rename(&temp, path).map_err(|e| format!("replacing {}: {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // `mode` applies only when the file is created; a leftover temporary keeps its old mode.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)
 }
 
 fn private_dir(path: &Path) -> Result<(), String> {
