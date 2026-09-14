@@ -192,13 +192,22 @@ fn client_add(
             layout.grants_json().display()
         );
     }
-    if bundle.key_minted {
-        println!("  this bundle holds the client's PRIVATE key; the server never reads it — move the directory to the client");
+    println!("  restart ikigai-gonk: trusted certificates are read at startup");
+    if cert.is_some() {
+        // An imported certificate's bundle holds no private key: the client already has one.
+        println!(
+            "  copy {} into the client's own identity directory (beside its client.crt and \
+             client.key), then from the client:",
+            bundle.dir.join("server.crt").display()
+        );
+        println!("    ikigai --connect quic://<gonk host>:1060 --cert-dir <that directory>");
+    } else {
+        println!(
+            "  this bundle holds the client's PRIVATE key and the server never reads it — move \
+             the directory to the client, then from the client:"
+        );
+        println!("    ikigai --connect quic://<gonk host>:1060 --cert-dir <the moved directory>");
     }
-    println!(
-        "  restart ikigai-gonk (trusted certificates are read at startup), then from the client:"
-    );
-    println!("    ikigai --connect quic://<gonk host>:1060 --cert-dir <this directory>");
 }
 
 fn fail(message: &str) -> ! {
