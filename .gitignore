@@ -1,0 +1,5 @@
+/target
+.DS_Store
+*.~undo-tree~
+# Cargo.lock is COMMITTED on purpose: this crate ships a binary, and the install
+# command a stranger runs is `cargo install --locked --path .`.
