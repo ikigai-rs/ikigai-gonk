@@ -10,7 +10,8 @@
 //! gonk.bind = "127.0.0.1:1060"          # the HTTP door (loopback only; this IS the default)
 //! # gonk.port = 1060                    # shorthand for gonk.bind = "127.0.0.1:<port>"
 //! gonk.socket = "~/.ikigai/gonk.sock"   # the owner-only socket (this IS the default)
-//! gonk.quic.bind = "0.0.0.0:1060"       # the QUIC door, when a client is enrolled (default)
+//! # gonk.quic.bind = "0.0.0.0:1060"     # set it to REQUIRE the QUIC door; unset, it opens at
+//!                                       # this default once a client certificate is enrolled
 //! gonk.http.ledger = "default"          # ledgers the HTTP door may read and write; repeatable
 //! ```
 //!
@@ -68,7 +69,9 @@ serve flags (each overrides its config key wholesale):
   --bind IP:PORT        the HTTP door (config `gonk.bind`); loopback only — default 127.0.0.1:1060
   --port N              shorthand for --bind 127.0.0.1:N (config `gonk.port`)
   --socket PATH         the owner-only socket (config `gonk.socket`); default ~/.ikigai/gonk.sock
-  --quic-bind IP:PORT   the QUIC door (config `gonk.quic.bind`); default 0.0.0.0:1060 (UDP)
+  --quic-bind IP:PORT   the QUIC door (config `gonk.quic.bind`); default 0.0.0.0:1060 (UDP).
+                        Unset, the door opens once a client certificate is enrolled; set,
+                        it must open, and gonk refuses to start when no client can be admitted
   --no-quic             do not open the QUIC door this run
   --http-ledger NAME    a ledger the HTTP door may read and write (repeatable; config
                         `gonk.http.ledger`); default `default`
@@ -77,7 +80,8 @@ serve flags (each overrides its config key wholesale):
 files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME says otherwise):
   config.toml               the gonk.* keys above
   store.toml, gonk.store.toml   where the dataset lives (default ~/.ikigai/store)
-  gonk/clients.json         certificate fingerprint -> grant name (the QUIC door opens when it exists)
+  gonk/clients.json         identity -> grant name: certificates under `clients` (the QUIC door
+                            opens when one is enrolled), passkeys under `passkeys` (HTTP only)
   gonk/grants.json          grant name -> capability scopes
   gonk/quic/                server identity (generated on first use) and clients/<name>/ bundles
 ";
@@ -148,11 +152,37 @@ pub struct Settings {
     pub http: SocketAddr,
     /// The socket path.
     pub socket: PathBuf,
-    /// The QUIC door's address, or `None` under `--no-quic`. Whether it actually opens also
-    /// depends on an enrolment existing; that is `main`'s decision.
-    pub quic: Option<SocketAddr>,
+    /// The QUIC door's address, and whether anyone asked for it. Whether it actually opens
+    /// is [`crate::quic::open_door`]'s decision.
+    pub quic: QuicBind,
     /// The ledgers the HTTP door may read and write.
     pub http_ledgers: Vec<String>,
+}
+
+/// The QUIC door's bind, and where it came from — which is half of whether it opens.
+///
+/// ★ The distinction exists because `gonk/clients.json` serves two doors. A passkey enrolment
+/// writes that file too, so the file existing is not a decision to face the network; an
+/// operator naming a bind is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicBind {
+    /// `--no-quic`.
+    Off,
+    /// Nobody named one: the default address, used only once a certificate is enrolled.
+    Default(SocketAddr),
+    /// `--quic-bind` or `gonk.quic.bind`: the operator asked for the door, so a door that
+    /// cannot admit anyone stops the server rather than quietly staying shut.
+    Explicit(SocketAddr),
+}
+
+impl QuicBind {
+    /// The address, unless QUIC is off.
+    pub fn addr(self) -> Option<SocketAddr> {
+        match self {
+            QuicBind::Off => None,
+            QuicBind::Default(addr) | QuicBind::Explicit(addr) => Some(addr),
+        }
+    }
 }
 
 /// The two ikigai homes, and `$HOME` for `~/` expansion.
@@ -365,18 +395,18 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         .map(|spelled| expand_home(&spelled, &homes.home))
         .unwrap_or_else(|| homes.data.join(SOCKET_NAME));
     let quic = if flags.no_quic {
-        None
+        QuicBind::Off
     } else {
-        Some(
-            match flags
-                .quic_bind
-                .clone()
-                .or_else(|| value_for(text, "gonk.quic.bind"))
-            {
-                Some(spelled) => parse_bind(&spelled).map_err(|e| format!("quic {e}"))?,
-                None => SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
-            },
-        )
+        match flags
+            .quic_bind
+            .clone()
+            .or_else(|| value_for(text, "gonk.quic.bind"))
+        {
+            Some(spelled) => {
+                QuicBind::Explicit(parse_bind(&spelled).map_err(|e| format!("quic {e}"))?)
+            }
+            None => QuicBind::Default(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))),
+        }
     };
     // A Unix socket path is bounded by `sun_path` — 104 bytes on macOS, 108 on Linux, the
     // terminator included. Refused here, before the store is opened, rather than as a door
@@ -546,7 +576,23 @@ mod tests {
         let settings = settings(&Flags::default(), "", &homes()).unwrap();
         assert_eq!(settings.http, addr("127.0.0.1:1060"));
         assert_eq!(settings.socket, PathBuf::from("/home/u/.ikigai/gonk.sock"));
-        assert_eq!(settings.quic, Some(addr("0.0.0.0:1060")));
+        assert_eq!(settings.quic, QuicBind::Default(addr("0.0.0.0:1060")));
+        // Naming the bind — even to the default address — is a decision.
+        let named = super::settings(
+            &Flags::default(),
+            "gonk.quic.bind = \"0.0.0.0:1060\"\n",
+            &homes(),
+        )
+        .unwrap();
+        assert_eq!(named.quic, QuicBind::Explicit(addr("0.0.0.0:1060")));
+        let flagged = Flags {
+            quic_bind: Some("127.0.0.1:4000".into()),
+            ..Flags::default()
+        };
+        assert_eq!(
+            super::settings(&flagged, "", &homes()).unwrap().quic,
+            QuicBind::Explicit(addr("127.0.0.1:4000"))
+        );
         assert_eq!(settings.http_ledgers, ["default"]);
     }
 
@@ -640,7 +686,7 @@ mod tests {
         };
         let overridden = settings(&flags, text, &homes()).unwrap();
         assert_eq!(overridden.http_ledgers, ["default"]);
-        assert_eq!(overridden.quic, None);
+        assert_eq!(overridden.quic, QuicBind::Off);
     }
 
     #[test]

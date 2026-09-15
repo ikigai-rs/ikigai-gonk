@@ -12,7 +12,7 @@ $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
   socket  /Users/you/.ikigai/gonk.sock — owner only
-  quic    off — no /Users/you/.config/ikigai/gonk/clients.json (enrol a client with `ikigai-gonk client add`)
+  quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
   mount   mount = "prefer urn:iki:ledger:=/Users/you/.ikigai/gonk.sock"  (and the same for urn:iki:store:)
 
 $ curl -X POST --data-binary 'Wire gonk into the cli' http://127.0.0.1:1060/iki/ledger/append
@@ -82,10 +82,23 @@ passkey invite for `brian` — grant `brian` (6 scopes) in /Users/you/.config/ik
   open  http://localhost:1060/#invite=…
 ```
 
-Open that link on this machine and choose **Create passkey**. The browser makes the credential
-(Touch ID, a security key, a phone) and the server enrols its public key under the grant
-`brian`. Then **Sign in with passkey** in the header gives that browser the grant, until it
-signs out, the session's 12 hours end, or the server restarts.
+What you will see:
+
+1. **Open the link** in a browser on this machine. A panel, *Create a passkey for this
+   server*, asks for a label (say `laptop Touch ID`).
+2. **Create passkey.** The browser's own passkey sheet appears: Touch ID, a security key, or a
+   phone. Approve it. The server enrols the credential's public key under the grant `brian`,
+   the panel closes, and the page says *Passkey created for … (grant brian). Now click Sign in
+   with passkey to use it.*
+3. **Sign in with passkey**, in the header, and approve the sheet a second time. The page
+   reloads showing *Signed in as … (grant brian)*, and that browser holds the grant until it
+   signs out, the session's 12 hours end, or the server restarts.
+
+The second click is deliberate. When the creation sheet closes it still holds the window's
+focus, and a browser refuses a sign-in prompt from a page without focus, so gonk waits for
+the click rather than chaining the two. If a sheet is cancelled or times out, the page says so
+and names the button to click again. A creation that did not finish leaves the invite unused,
+good until it expires.
 
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under
@@ -199,7 +212,11 @@ path it tried and these two lines.
 
 ## From another machine, over QUIC
 
-The QUIC door opens once a client is enrolled. On the gonk machine:
+The QUIC door opens once a client **certificate** is enrolled. Passkeys never open it: they
+live in the same `clients.json`, but they sign in on the HTTP door only. Setting
+`gonk.quic.bind` (or `--quic-bind`) turns "once a certificate is enrolled" into "must open":
+with a bind named and no certificate to admit, gonk refuses to start rather than quietly
+leaving the door shut. On the gonk machine:
 
 ```sh
 ikigai-gonk client add laptop --ledger default=write
@@ -291,6 +308,9 @@ Until then, other machines use the QUIC door.
   write door refuses the broad key anyway, so such a grant could not write either.
 - **A certificate it trusts but has no grant for**, or whose grant is unknown or empty. The
   refusal is logged with the full fingerprint.
+- **A QUIC door it was told to open and cannot.** A named QUIC bind with no client
+  certificate enrolled, or a certificate enrolled with no `client.crt` trusted, stops the
+  server. Neither case generates the server identity first.
 - **An unreadable authority file.** A `clients.json` (certificates or passkeys) or
   `grants.json` that exists and does not parse stops the server rather than serving under a
   guess.
@@ -310,7 +330,8 @@ is `~/.config/ikigai` (or `$XDG_CONFIG_HOME/ikigai`).
 # ~/.config/ikigai/config.toml
 gonk.bind = "127.0.0.1:1060"          # or gonk.port = 1060, which always means loopback
 gonk.socket = "~/.ikigai/gonk.sock"
-gonk.quic.bind = "0.0.0.0:1060"
+# gonk.quic.bind = "0.0.0.0:1060"     # unset: QUIC opens here once a certificate is enrolled;
+                                      # set: QUIC must open, or gonk refuses to start
 gonk.http.ledger = "default"          # repeatable
 ```
 

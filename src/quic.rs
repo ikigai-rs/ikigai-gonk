@@ -34,6 +34,7 @@
 //! pinned by copying it, and a client admitted today is admitted until its entry is removed.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,6 +42,7 @@ use ikigai_core::Capability;
 use ikigai_quic::{Identity, Minter, PeerIdentity, Session};
 use serde_json::{json, Map, Value};
 
+use crate::config::QuicBind;
 use crate::grants::broad_store_scopes;
 
 /// Where the QUIC door's files live.
@@ -218,6 +220,12 @@ impl Enrolment {
         self.clients.is_empty()
     }
 
+    /// Whether this file admits any client certificate at all: one enrolled fingerprint, or
+    /// an explicit shared default. Passkeys do not count — they are the HTTP door's.
+    pub fn admits_certificates(&self) -> bool {
+        !self.clients.is_empty() || self.default_grant.is_some()
+    }
+
     /// The explicitly configured shared default, if any. Absence is never a default.
     pub fn default_grant(&self) -> Option<&str> {
         self.default_grant.as_deref()
@@ -279,6 +287,91 @@ pub fn read_enrolment(path: &Path) -> Result<Option<Enrolment>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("reading {}: {e}", path.display())),
     }
+}
+
+/// The QUIC door this run: shut, with the banner's reason, or open with what it serves.
+pub enum QuicDoor {
+    /// Not opening. The text is the banner's `quic` line, written for a person to act on.
+    Off(String),
+    /// Opening.
+    Open {
+        /// The UDP address.
+        addr: SocketAddr,
+        /// This server's identity (generated now if it did not exist).
+        identity: Identity,
+        /// Trusted client certificates, PEM.
+        trusted: Vec<String>,
+        /// How many fingerprints `clients.json` enrols.
+        enrolled: usize,
+    },
+}
+
+/// Decide whether the QUIC door opens, and prepare it if so.
+///
+/// ★ **The door opens only on a decision to face the network**: an enrolled client
+/// certificate (a fingerprint under `clients`, or a `default` grant), or a bind the operator
+/// named. `clients.json` EXISTING is not one — a browser enrolling a passkey writes that file
+/// too, and through 0.1.0 that made the next start refuse (gonk PENDING §3).
+///
+/// - A default bind with no certificate enrolled: [`QuicDoor::Off`], and nothing is written.
+/// - A named bind with no certificate enrolled: refused, because the operator expects a door.
+/// - A certificate enrolled but no `client.crt` trusted: refused, as before.
+///
+/// The server identity is generated only on the path that returns [`QuicDoor::Open`], so a
+/// run that will not serve QUIC leaves no `quic/server.*` behind.
+pub fn open_door(layout: &Layout, bind: QuicBind) -> Result<QuicDoor, String> {
+    let (addr, named) = match bind {
+        QuicBind::Off => return Ok(QuicDoor::Off("off (--no-quic)".to_string())),
+        QuicBind::Default(addr) => (addr, false),
+        QuicBind::Explicit(addr) => (addr, true),
+    };
+    let clients_json = layout.clients_json();
+    let enrolment = read_enrolment(&clients_json)?;
+    if !enrolment
+        .as_ref()
+        .is_some_and(Enrolment::admits_certificates)
+    {
+        let why = match enrolment {
+            None => format!(
+                "no client certificate is enrolled (there is no {})",
+                clients_json.display()
+            ),
+            Some(_) => format!(
+                "{} enrols no client certificate (passkeys sign in on the HTTP door only)",
+                clients_json.display()
+            ),
+        };
+        let add = "`ikigai-gonk client add <name> --ledger <ledger>=write`";
+        return if named {
+            Err(format!(
+                "the QUIC door was asked for on udp {addr} (--quic-bind or gonk.quic.bind), but \
+                 {why} — enrol one with {add}, or remove the bind (or start with --no-quic)"
+            ))
+        } else {
+            Ok(QuicDoor::Off(format!(
+                "off — {why}; to open it, run {add} and restart"
+            )))
+        };
+    }
+    let trusted: Vec<String> = trusted_client_certs(layout)?
+        .into_iter()
+        .map(|(_, pem)| pem)
+        .collect();
+    if trusted.is_empty() {
+        return Err(format!(
+            "{} enrols a client certificate but none is trusted (no client.crt under {}) — add \
+             one with `ikigai-gonk client add <name>`, or start with --no-quic",
+            clients_json.display(),
+            layout.clients_dir().display()
+        ));
+    }
+    let (identity, _) = server_identity(layout)?;
+    Ok(QuicDoor::Open {
+        addr,
+        identity,
+        trusted,
+        enrolled: enrolment.map_or(0, |e| e.len()),
+    })
 }
 
 /// Parse `grants.json` — the cli's shape: grant name → an array of scopes, or an object
@@ -701,5 +794,111 @@ mod tests {
         let broad = vec!["urn:cap:store:read".to_string()];
         assert!(enrol(&layout, "laptop", &bundle.fingerprint, &broad, true).is_err());
         assert!(add_client(&layout, "Bad Name", None, false).is_err());
+    }
+
+    fn at(spelled: &str) -> SocketAddr {
+        spelled.parse().unwrap()
+    }
+
+    fn off_reason(door: Result<QuicDoor, String>) -> String {
+        match door {
+            Ok(QuicDoor::Off(why)) => why,
+            Ok(QuicDoor::Open { .. }) => panic!("the door opened"),
+            Err(e) => panic!("refused: {e}"),
+        }
+    }
+
+    fn refusal(door: Result<QuicDoor, String>) -> String {
+        match door {
+            Err(e) => e,
+            Ok(QuicDoor::Off(why)) => panic!("stayed off instead of refusing: {why}"),
+            Ok(QuicDoor::Open { .. }) => panic!("the door opened"),
+        }
+    }
+
+    /// ★ gonk PENDING §3: a file holding only passkeys is not a decision to face the network.
+    #[test]
+    fn a_passkey_only_clients_json_keeps_the_default_door_shut_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let default = QuicBind::Default(at("0.0.0.0:1060"));
+
+        let none = off_reason(open_door(&layout, default));
+        assert!(none.contains("no client certificate is enrolled"), "{none}");
+
+        private_dir(&layout.dir).unwrap();
+        write_private(
+            &layout.clients_json(),
+            r#"{"passkeys": {"cred": {"grant": "brian"}}}"#,
+        )
+        .unwrap();
+        let passkeys = off_reason(open_door(&layout, default));
+        assert!(
+            passkeys.contains("enrols no client certificate"),
+            "{passkeys}"
+        );
+        assert!(passkeys.contains("ikigai-gonk client add"), "{passkeys}");
+        assert!(!layout.quic_dir().exists(), "no identity for a shut door");
+
+        // Named, the same file refuses — and still generates nothing.
+        let named = refusal(open_door(&layout, QuicBind::Explicit(at("127.0.0.1:0"))));
+        assert!(named.contains("asked for"), "{named}");
+        assert!(!layout.quic_dir().exists());
+
+        assert_eq!(
+            off_reason(open_door(&layout, QuicBind::Off)),
+            "off (--no-quic)"
+        );
+    }
+
+    #[test]
+    fn an_enrolled_certificate_opens_the_default_door_beside_passkeys() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let bundle = add_client(&layout, "laptop", None, false).unwrap();
+        // Enrolled in clients.json, with no client.crt trusted yet: refused, nothing generated.
+        std::fs::remove_file(bundle.dir.join("client.crt")).unwrap();
+        let scopes = grants_for("default", Authority::Write).unwrap();
+        enrol(&layout, "laptop", &bundle.fingerprint, &scopes, false).unwrap();
+        let mut doc = read_object(&layout.clients_json()).unwrap();
+        doc.insert("passkeys".into(), json!({"cred": {"grant": "brian"}}));
+        write_private(
+            &layout.clients_json(),
+            &pretty(&Value::Object(doc)).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(layout.server_cert()).unwrap();
+        std::fs::remove_file(layout.server_key()).unwrap();
+        let untrusted = refusal(open_door(&layout, QuicBind::Default(at("0.0.0.0:1060"))));
+        assert!(untrusted.contains("none is trusted"), "{untrusted}");
+        assert!(!layout.server_cert().exists());
+
+        let again = add_client(&layout, "laptop2", None, false).unwrap();
+        assert!(again.dir.join("client.crt").is_file());
+        // `client add` generates the server identity itself; remove it so the assertion below
+        // shows `open_door` generating it.
+        std::fs::remove_file(layout.server_cert()).unwrap();
+        std::fs::remove_file(layout.server_key()).unwrap();
+        match open_door(&layout, QuicBind::Default(at("0.0.0.0:1060"))) {
+            Ok(QuicDoor::Open {
+                addr,
+                trusted,
+                enrolled,
+                ..
+            }) => {
+                assert_eq!(addr, at("0.0.0.0:1060"));
+                assert_eq!((trusted.len(), enrolled), (1, 1));
+            }
+            Ok(QuicDoor::Off(why)) => panic!("stayed off: {why}"),
+            Err(e) => panic!("refused: {e}"),
+        }
+        assert!(
+            layout.server_cert().is_file(),
+            "generated on the path that serves"
+        );
+        // A shared default grant is a certificate decision too.
+        assert!(parse_enrolment(r#"{"default": "rw"}"#)
+            .unwrap()
+            .admits_certificates());
     }
 }
