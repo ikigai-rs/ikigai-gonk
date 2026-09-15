@@ -86,6 +86,11 @@ impl Layout {
     pub fn grants_json(&self) -> PathBuf {
         self.dir.join("grants.json")
     }
+
+    /// Outstanding passkey invites: SHA-256 of the code → grant and expiry.
+    pub fn invites_json(&self) -> PathBuf {
+        self.dir.join("invites.json")
+    }
 }
 
 /// The server identity, generated on first use. The `bool` says whether it was just made.
@@ -345,6 +350,17 @@ pub fn authority(
     let grant = enrolment
         .grant_for(fingerprint)
         .ok_or("no grant is configured for this certificate")?;
+    let scopes = scopes_for_grant(grants, grant)?;
+    Ok((grant.to_string(), Capability::scoped(scopes)))
+}
+
+/// A grant name's scopes, **fail closed** — the one rule both identity doors apply: a grant
+/// that is unknown, that names no scopes, or that names a broad store token is refused. The
+/// QUIC door calls it per connection; the HTTP door per request carrying a passkey session.
+pub fn scopes_for_grant(
+    grants: &BTreeMap<String, Vec<String>>,
+    grant: &str,
+) -> Result<Vec<String>, String> {
     let scopes = grants
         .get(grant)
         .filter(|scopes| !scopes.is_empty())
@@ -355,7 +371,41 @@ pub fn authority(
     if !broad.is_empty() {
         return Err(broad_refusal(grant, &broad));
     }
-    Ok((grant.to_string(), Capability::scoped(scopes.clone())))
+    Ok(scopes.clone())
+}
+
+/// Write one grant into `grants.json` alone — for an identity that is not a certificate (a
+/// passkey invite). The same refusals as [`enrol`]: a broad token always, and an existing
+/// grant with different scopes unless `force`, because a grant name may be shared by a
+/// certificate and a passkey and replacing it changes both.
+pub fn put_grant(
+    layout: &Layout,
+    grant: &str,
+    scopes: &[String],
+    force: bool,
+) -> Result<(), String> {
+    valid_name(grant)?;
+    let broad = broad_store_scopes(scopes);
+    if !broad.is_empty() {
+        return Err(broad_refusal(grant, &broad));
+    }
+    private_dir(&layout.dir)?;
+    let mut grants = read_object(&layout.grants_json())?;
+    let wanted = json!(scopes);
+    if let Some(existing) = grants.get(grant) {
+        if existing != &wanted && !force {
+            return Err(format!(
+                "grant `{grant}` already exists in {} with different scopes — nothing was \
+                 written (use --force to replace it, which changes every identity enrolled \
+                 under it)",
+                layout.grants_json().display()
+            ));
+        }
+    }
+    grants.insert(grant.to_string(), wanted);
+    let text = pretty(&Value::Object(grants))?;
+    parse_grants(&text)?;
+    write_private(&layout.grants_json(), &text)
 }
 
 /// The per-connection minter: re-reads both files, and refuses — logging the full
@@ -454,7 +504,8 @@ pub fn enrol(
     write_private(&layout.clients_json(), &clients_text)
 }
 
-fn read_object(path: &Path) -> Result<Map<String, Value>, String> {
+/// A JSON object file, or an empty object when the file does not exist.
+pub(crate) fn read_object(path: &Path) -> Result<Map<String, Value>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(Value::Object(map)) => Ok(map),
@@ -466,7 +517,8 @@ fn read_object(path: &Path) -> Result<Map<String, Value>, String> {
     }
 }
 
-fn pretty(value: &Value) -> Result<String, String> {
+/// Pretty JSON with a trailing newline — how every authority file here is written.
+pub(crate) fn pretty(value: &Value) -> Result<String, String> {
     serde_json::to_string_pretty(value)
         .map(|text| text + "\n")
         .map_err(|e| e.to_string())
@@ -509,7 +561,7 @@ fn read(path: &Path) -> Result<String, String> {
 /// refuse a client that is enrolled. A rename is seen as the old file or the new one. The
 /// temporary file is created `0600` rather than restricted afterwards, so a key is never
 /// briefly readable at the process umask.
-fn write_private(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> Result<(), String> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

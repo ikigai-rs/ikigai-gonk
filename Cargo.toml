@@ -67,6 +67,26 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 # `clients.json` and `grants.json` — the same two files, in the same shapes, that
 # `ikigai serve quic://…` reads.
 serde_json = "1"
+# The HTML face's renderer: `transform_xml`, xrust's XSLT called as a library function.
+# ⚠ The CRATE, not its endpoint — `urn:xslt:transform` is never bound here, so the served
+# catalog does not widen and its `http(s)://` fetch path (through `urn:httpGet`) does not
+# exist in this binary. `transform_xml` is present from 0.1.0; 0.1.2 is what was built and
+# tested, and was not re-resolved from scratch at `=0.1.0`.
+ikigai-xslt = "0.1.2"
+# The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
+# only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so
+# nothing here needs a CBOR decoder. Present from 0.1.14; 0.1.21 is what was built and tested.
+ikigai-passkey = "0.1.21"
+# A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
+# already in the graph through `ikigai-store` (with the same `default-features = false`, so
+# this line adds no feature and no compile).
+oxigraph = { version = "0.5", default-features = false }
+# Passkey challenges and session tokens: 32 bytes from the OS.
+getrandom = "0.3"
+# base64url for WebAuthn's byte fields (credential ids, challenges, keys).
+base64 = "0.22"
+# An enrolment invite is stored as the SHA-256 of its code, never the code.
+sha2 = "0.10"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
@@ -76,3 +96,8 @@ ikigai-conformance = "0.3"
 ikigai-resolve = "0.1.18"
 futures = "0.3"
 tempfile = "3"
+# A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path
+# is exercised end to end over HTTP — the same key type `ikigai-passkey` verifies.
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+# The WCAG contrast floor the page's palette is held to, in both color schemes.
+ikigai-a11y = "0.2"

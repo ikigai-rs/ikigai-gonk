@@ -279,6 +279,109 @@ fn a_door_kernel_conforms_like_the_hub() {
     assert_eq!(walked_ledger_ids(&report), LEDGER_IDS, "{report}");
 }
 
+/// The HTTP door's own resources: bound only in [`doors::http_kernel`].
+const WEB_IDS: [&str; 10] = [
+    "gonk-page-home",
+    "gonk-page-ledger",
+    "gonk-fragment-items",
+    "gonk-page-item",
+    "gonk-fragment-item",
+    "gonk-act",
+    "gonk-sparql",
+    "gonk-fragment-sparql",
+    "gonk-passkey",
+    "gonk-asset",
+];
+
+fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
+    let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
+        ikigai_gonk::quic::Layout::in_config_home(config),
+        1060,
+    ));
+    let face = Arc::new(ikigai_gonk::web::Web {
+        hub: Arc::clone(&hub),
+        ledgers: vec!["default".to_string()],
+        passkeys,
+    });
+    doors::http_kernel(hub, ikigai_gonk::web::space(face))
+}
+
+/// ★ The HTTP door serves the hub's catalog PLUS its pages, and nothing else — and the
+/// socket and QUIC doors do not serve the pages at all.
+#[test]
+fn the_http_door_adds_exactly_its_pages() {
+    let config = tempfile::tempdir().unwrap();
+    let hub = hub();
+    let expected: BTreeSet<String> = STORE_IDS
+        .iter()
+        .chain(LEDGER_IDS.iter())
+        .chain(WEB_IDS.iter())
+        .map(|id| id.to_string())
+        .collect();
+    assert_eq!(
+        served_ids(&http_door(Arc::clone(&hub), config.path())),
+        expected
+    );
+    assert!(
+        served_ids(&doors::door_kernel(hub))
+            .iter()
+            .all(|id| !id.starts_with("gonk-")),
+        "the pages are the HTTP door's alone"
+    );
+}
+
+/// The suite over the HTTP door's kernel: the hub's resources as in the door walk, and the
+/// ten page resources walked for real.
+#[test]
+fn the_http_door_conforms() {
+    let config = tempfile::tempdir().unwrap();
+    let door = http_door(hub(), config.path());
+    let (a, b, c) = seed(&door);
+    let report = CACHED_READS
+        .iter()
+        .fold(fixtures(&a, &b, &c), |suite, id| {
+            suite.opt_out_check(
+                *id,
+                Check::Cacheable,
+                "the HTTP door's kernel stores nothing by design; the hub it forwards to \
+                 caches, and the hub walk runs this check",
+            )
+        })
+        .fixture(Fixture::new("gonk-act", Verb::Sink).arg(
+            "content",
+            "_ledger=default&_action=append&_then=items&content=Filed+by+the+walk",
+        ))
+        .fixture(Fixture::new("gonk-page-item", Verb::Source).binding("id", &a))
+        .fixture(Fixture::new("gonk-fragment-item", Verb::Source).binding("id", &a))
+        // The RDF faces of the SPARQL page answer a CONSTRUCT, so that is what it is walked
+        // with; the SELECT faces are the store's own, walked by ikigai-store's suite.
+        .fixture(
+            Fixture::new("gonk-sparql", Verb::Source).arg("query", "CONSTRUCT WHERE { ?s ?p ?o }"),
+        )
+        .fixture(
+            Fixture::new("gonk-fragment-sparql", Verb::Source)
+                .arg("query", "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"),
+        )
+        .opt_out_check(
+            "gonk-passkey",
+            Check::Authority,
+            "a sign-in door is public by design: minting a challenge and presenting an \
+             assertion are what a caller with no grant does to get one. What it can write is \
+             bounded — a challenge that expires, or an enrolment that needs a one-time invite \
+             code — and every other mutation on this door is gated by the ledger it reaches",
+        )
+        .run_blocking(&door);
+    println!("--- http door ---\n{report}");
+    assert!(report.is_clean(), "{report}");
+    let walked: BTreeSet<&str> = report
+        .walked
+        .iter()
+        .map(String::as_str)
+        .filter(|id| id.starts_with("gonk-"))
+        .collect();
+    assert_eq!(walked, WEB_IDS.iter().copied().collect(), "{report}");
+}
+
 #[test]
 fn every_entry_answers_meta_in_json_through_a_door() {
     let door = doors::door_kernel(hub());

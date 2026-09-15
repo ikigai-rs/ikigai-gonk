@@ -57,6 +57,10 @@ usage:
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
                                    with --ledger enrol its fingerprint under a grant
+  ikigai-gonk passkey invite <name> --ledger <ledger>=<read|write|delete|purge>... [--minutes N] [--port N] [--config PATH] [--force]
+                                   write grant <name> and print a one-time
+                                   http://localhost:<port>/#invite=… link; the browser that
+                                   opens it enrols a passkey under that grant
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
 
@@ -93,6 +97,19 @@ pub enum Command {
         ledgers: Vec<(String, Authority)>,
         /// Replace an existing bundle or enrolment.
         force: bool,
+    },
+    /// Invite a browser to enrol a passkey under a grant.
+    PasskeyInvite {
+        /// The grant name (and the default label).
+        name: String,
+        /// Ledgers and authorities the grant holds.
+        ledgers: Vec<(String, Authority)>,
+        /// Replace an existing grant of that name with different scopes.
+        force: bool,
+        /// How long the invite is valid.
+        minutes: u64,
+        /// `--config` / `--port`, so the printed URL names the port the server serves on.
+        flags: Flags,
     },
     /// Print the tokens for one ledger.
     Grants {
@@ -173,6 +190,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return parse_client(args);
         }
+        Some("passkey") => {
+            args.next();
+            return parse_passkey(args);
+        }
         Some("grants") => {
             args.next();
             let ledger = args
@@ -249,6 +270,64 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         cert,
         ledgers,
         force,
+    })
+}
+
+fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    match args.next().as_deref() {
+        Some("invite") => {}
+        Some(other) => {
+            return Err(format!(
+                "passkey: unknown subcommand `{other}` (expected `invite`)"
+            ))
+        }
+        None => return Err("passkey: expected `invite <name>`".to_string()),
+    }
+    let name = args
+        .next()
+        .filter(|name| !name.starts_with('-'))
+        .ok_or("passkey invite: expected <name>")?;
+    let (mut ledgers, mut force, mut minutes, mut flags) = (
+        Vec::new(),
+        false,
+        crate::identity::INVITE_MINUTES,
+        Flags::default(),
+    );
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--ledger" => {
+                let spec = value(&mut args, "--ledger")?;
+                let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
+                    format!("--ledger: expected <ledger>=<read|write|delete|purge>, got `{spec}`")
+                })?;
+                ledgers.push((ledger.to_string(), authority.parse()?));
+            }
+            "--force" => force = true,
+            "--minutes" => {
+                let spelled = value(&mut args, "--minutes")?;
+                minutes = spelled
+                    .parse()
+                    .ok()
+                    .filter(|m| (1..=24 * 60).contains(m))
+                    .ok_or_else(|| format!("--minutes: `{spelled}` is not 1 to 1440"))?;
+            }
+            "--port" => {
+                let port = value(&mut args, "--port")?;
+                flags.port = Some(
+                    port.parse()
+                        .map_err(|_| format!("--port: `{port}` is not a port number"))?,
+                );
+            }
+            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            other => return Err(format!("passkey invite: unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::PasskeyInvite {
+        name,
+        ledgers,
+        force,
+        minutes,
+        flags,
     })
 }
 

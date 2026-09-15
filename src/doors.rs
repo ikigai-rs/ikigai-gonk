@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens, and nothing for a non-loopback peer |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none |
 //!
@@ -14,11 +14,15 @@
 //! other two would go on serving the read they cached before it, indefinitely, with nothing
 //! wrong in any log.
 //!
-//! So there is one kernel, the **hub** ([`crate::compose`]), shared as `Arc<Kernel>`. The
-//! HTTP door takes it directly. The socket and QUIC doors each get a [`door_kernel`] whose
-//! only space is a [`HubSpace`] forwarding every request to the hub, under a cache policy
-//! that admits nothing ([`NoCache`]). Every read and every write passes through the hub's
-//! cache and the hub's threads, whichever door it came in by.
+//! So there is one kernel, the **hub** ([`crate::compose`]), shared as `Arc<Kernel>`. Every
+//! door gets a kernel whose space FORWARDS to the hub ([`HubSpace`]) under a cache policy that
+//! admits nothing ([`NoCache`]). Every read and every write passes through the hub's cache
+//! and the hub's threads, whichever door it came in by.
+//!
+//! The HTTP door's kernel ([`http_kernel`]) is the same shape with two more spaces around the
+//! hub: gonk's own pages in front ([`crate::web`]), and a catch-all behind ([`NotFound`]). Its
+//! pages never cache — they are cheap to render and a cached page is exactly the second
+//! cache this design exists to avoid — and every ledger read a page makes is a hub read.
 //!
 //! ⚠ **Why not `ikigai_resolve::RemoteSpace` over the hub**, which is the mount machinery
 //! and would have been the obvious reuse: its forwarding endpoint calls the synchronous
@@ -32,11 +36,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    Bindings, CachePolicy, Capability, Description, Endpoint, EntryFacts, Invocation, Kernel,
-    Representation, Request, Resolution, Resolved, Result, Scope, Space, SpaceEntry, SystemClock,
+    Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Error,
+    Fallback, Invocation, Kernel, Representation, Request, Resolution, Resolved, Result, Scope,
+    Space, SpaceEntry, SystemClock, Verb,
 };
 use ikigai_vocab::TurtleRenderer;
-use ikigai_web::{CapFn, EdgeConfig, HttpRequest, RouteTable};
+use ikigai_web::{CapFn, EdgeConfig, HttpRequest, Route, RouteTable};
+
+use crate::identity::{self, Passkeys};
 
 /// A space whose every binding is the hub's: it resolves what the hub binds, describes it
 /// with the hub's own description, enumerates the hub's catalog, and forwards invocation to
@@ -130,39 +137,213 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
         .with_cache_policy(Arc::new(NoCache))
 }
 
+/// The HTTP door's kernel: gonk's pages ([`crate::web::space`]) in front of the hub, and
+/// [`NotFound`] behind it — still storing nothing, still one cache in the process.
+pub fn http_kernel(hub: Arc<Kernel>, pages: EndpointSpace) -> Kernel {
+    let space = Fallback::new(vec![
+        Arc::new(pages) as Arc<dyn Space>,
+        Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
+        Arc::new(NotFound) as Arc<dyn Space>,
+    ]);
+    Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer))
+        .with_clock(Arc::new(SystemClock))
+        .with_cache_policy(Arc::new(NoCache))
+}
+
+/// The HTTP door's last space: anything nothing else binds is a typed `NotFound`.
+///
+/// ⚠ **This exists to route around `ikigai-web`'s status mapping**, and it is worth saying
+/// where the defect is. A path that resolves to no endpoint surfaces from the kernel as
+/// `Error::Unresolved`, and `ikigai-web` maps every error it does not name to `500` — so
+/// `GET /favicon.ico` (or a typo) answered `500 no endpoint resolved for urn:favicon.ico`.
+/// Here it resolves, to an endpoint that answers `NotFound`, which the library maps to `404`.
+/// The body is still `text/plain`: that library writes every error response as plain text,
+/// so a 404 cannot be an HTML page from this side of it.
+///
+/// It enumerates nothing, so it adds no entry to the catalog and cannot be walked or
+/// offered as an action.
+pub struct NotFound;
+
+impl Space for NotFound {
+    fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
+        Resolution::Hit(Resolved {
+            endpoint: Arc::new(NotFoundEndpoint),
+            bindings: Bindings::new(),
+            canonical: None,
+        })
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        Some(Vec::new())
+    }
+}
+
+struct NotFoundEndpoint;
+
+#[async_trait]
+impl Endpoint for NotFoundEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        Err(Error::NotFound(format!(
+            "nothing is served at `{}`. The ledger's pages start at / , the SPARQL page is \
+             /sparql, and the ledger's own resources are under /iki/ledger/ (for example \
+             /iki/ledger/items).",
+            inv.request.target
+        )))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-not-found"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-not-found")
+            .title("Nothing here")
+            .summary("Answers NotFound for every name nothing else binds.")
+            .verb(Verb::Source)
+            .verb(Verb::Sink)
+            .verb(Verb::Delete)
+            .verb(Verb::Exists)
+    }
+}
+
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —
 /// the form a dual-stack listener reports an IPv4 client in.
 pub fn is_loopback(ip: IpAddr) -> bool {
     ip.to_canonical().is_loopback()
 }
 
+/// What the HTTP door's capability is computed from.
+#[derive(Clone)]
+pub struct HttpDoor {
+    /// What an ANONYMOUS loopback caller holds — the first arc's grant, unchanged: read and
+    /// write on the ledgers in `gonk.http.ledger`.
+    pub anonymous: Vec<String>,
+    /// The port the door is bound to, which the `Host` and `Origin` checks require.
+    pub port: u16,
+    /// The passkey sessions, when passkeys are on.
+    pub passkeys: Option<Arc<Passkeys>>,
+}
+
 /// The HTTP door's capability: a function of the REQUEST, not a constant.
 ///
-/// Today the only identity the door can verify is where the connection came from, so that
-/// is what it keys on: a loopback peer gets `grants`, anything else gets an empty
-/// capability. The bind is refused beyond loopback before the server starts
-/// ([`crate::config::refuse_non_loopback`]); this is the second, per-request half, so a
-/// listener that somehow does face a network hands a remote peer nothing.
+/// ```text
+/// Host not this server's loopback name?        → nothing  (DNS rebinding)
+/// a write from another origin or site?         → nothing  (cross-site request forgery)
+/// otherwise  (loopback peer ? anonymous : ∅)  ∪  (a live passkey session ? its grant : ∅)
+/// ```
 ///
-/// ★ It is shaped this way so an authenticated identity can replace the peer check without
-/// moving the seam: a passkey session resolved from the request maps to a grant exactly the
-/// way a certificate fingerprint does on the QUIC door.
-pub fn http_cap(grants: Vec<String>) -> CapFn {
-    Arc::new(move |request: &HttpRequest| match request.peer {
-        Some(peer) if is_loopback(peer) => Capability::scoped(grants.clone()),
-        _ => Capability::scoped(Vec::<String>::new()),
+/// ★ **An anonymous caller is strictly weaker than any identity**, because an identity's
+/// capability is the anonymous one PLUS its grant, and `ikigai-gonk passkey invite` refuses a
+/// grant that adds nothing. And the identity half reads the SAME `grants.json` the QUIC door
+/// reads, through the same fail-closed [`crate::quic::scopes_for_grant`].
+///
+/// ⚠ **The two browser checks are new with the HTML face, and they close a hole the first arc
+/// had.** A door that grants writes to whatever reaches loopback also grants them to any web
+/// page open in a browser on the machine: a page on any site can send a form-encoded `POST`
+/// to `http://127.0.0.1:1060/iki/ledger/append` without a preflight. A browser always labels
+/// such a write with `Origin` (and `Sec-Fetch-Site`), which a local non-browser process —
+/// `curl`, a script — does not send, so refusing a foreign one costs those callers nothing.
+/// And a rebinding attack reaches loopback under a foreign `Host`, which is refused on every
+/// method, reads included.
+pub fn http_cap(door: HttpDoor) -> CapFn {
+    Arc::new(move |request: &HttpRequest| {
+        Capability::scoped(http_scopes(&door, request, identity::now_seconds()))
+    })
+}
+
+/// [`http_cap`]'s scope list, with the clock as an argument.
+pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<String> {
+    if !host_is_ours(request.header("host"), door.port) {
+        return Vec::new();
+    }
+    let safe = matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS");
+    if !safe && !same_origin(request, door.port) {
+        return Vec::new();
+    }
+    let mut scopes: Vec<String> = match request.peer {
+        Some(peer) if is_loopback(peer) => door.anonymous.clone(),
+        _ => Vec::new(),
+    };
+    if let (Some(passkeys), Some(token)) = (&door.passkeys, session_token(request)) {
+        if let Some(identity) = passkeys.identity(&token, now) {
+            for scope in identity.scopes {
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+        }
+    }
+    scopes
+}
+
+/// The loopback names this door answers to, with or without the port.
+fn host_is_ours(host: Option<&str>, port: u16) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    ["localhost", "127.0.0.1", "[::1]"]
+        .iter()
+        .any(|name| host == *name || host == format!("{name}:{port}"))
+}
+
+/// A browser's `Origin` and `Sec-Fetch-Site`, when present, name this server.
+fn same_origin(request: &HttpRequest, port: u16) -> bool {
+    if let Some(site) = request.header("sec-fetch-site") {
+        if !matches!(site.trim(), "same-origin" | "none") {
+            return false;
+        }
+    }
+    match request.header("origin") {
+        None => true,
+        Some(origin) => ["localhost", "127.0.0.1", "[::1]"]
+            .iter()
+            .any(|name| origin.trim() == format!("http://{name}:{port}")),
+    }
+}
+
+/// The session token in the request's `Cookie` header.
+fn session_token(request: &HttpRequest) -> Option<String> {
+    request.header("cookie")?.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == identity::SESSION_COOKIE && !value.is_empty()).then(|| value.to_string())
     })
 }
 
 /// The HTTP door's edge policy: `ikigai-web`'s strict defaults, and an explicit route table.
 ///
-/// The table is empty, so every path takes the mechanical mapping
-/// (`POST /iki/ledger/append` → `Sink urn:iki:ledger:append`). Pages, fragments and a SPARQL
-/// route are rows added here — routed onto the ledger and the store's narrow graph doors —
-/// not a second router.
+/// The page routes are rows here, each onto one of gonk's own resources ([`crate::web`]);
+/// every other path takes the mechanical mapping (`POST /iki/ledger/append` → `Sink
+/// urn:iki:ledger:append`), exactly as before. The default CSP — `default-src 'self'`, no
+/// framing, forms to self — needs no loosening: there is no inline script or style anywhere
+/// in the face, and htmx is served from this origin.
 pub fn edge_config() -> EdgeConfig {
+    let route = |pattern: &str, iri_template: &str| Route {
+        pattern: pattern.to_string(),
+        iri_template: iri_template.to_string(),
+        cap: None,
+        cors: None,
+        csp: None,
+    };
     EdgeConfig {
-        routes: RouteTable::new(Vec::new()),
+        routes: RouteTable::new(vec![
+            route("/", "urn:iki:gonk:page:home"),
+            route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
+            route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
+            route(
+                "/l/{ledger}/item/{id}",
+                "urn:iki:gonk:page:item:{ledger}:{id}",
+            ),
+            route(
+                "/l/{ledger}/item/{id}/card",
+                "urn:iki:gonk:fragment:item:{ledger}:{id}",
+            ),
+            route("/act", "urn:iki:gonk:act"),
+            route("/sparql", "urn:iki:gonk:sparql"),
+            route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
+            route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
+            route("/static/{name}", "urn:iki:gonk:asset:{name}"),
+        ]),
         routes_only: false,
         ..EdgeConfig::default()
     }

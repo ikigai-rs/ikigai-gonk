@@ -1,0 +1,1412 @@
+//! gonk's HTML face: pages, htmx fragments, the form adapter, SPARQL, passkeys, assets.
+//!
+//! ```text
+//! /                          urn:iki:gonk:page:home                 Source  the first readable ledger
+//! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
+//! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
+//! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
+//! /l/{ledger}/item/{id}/card urn:iki:gonk:fragment:item:{…}:{id}    Source  the same, as a fragment
+//! /act                       urn:iki:gonk:act                       Sink    a form → one ledger action
+//! /sparql                    urn:iki:gonk:sparql                    Source  editor, or results by conneg
+//! /sparql/results            urn:iki:gonk:fragment:sparql           Source  results as a fragment
+//! /auth/{op}                 urn:iki:gonk:passkey:{op}              Sink    passkey ceremonies, sessions
+//! /static/{name}             urn:iki:gonk:asset:{name}              Source  css, js, htmx
+//! ```
+//!
+//! These are bound ONLY in the HTTP door's kernel ([`crate::doors::http_kernel`]): the socket
+//! and QUIC doors serve exactly the hub's catalog, as before.
+//!
+//! # ★ Every page is a transform of a graph face
+//!
+//! A ledger page is `urn:iki:ledger:{ledger}:items as=text/turtle`; an item page is
+//! `…:item:{id} as=text/turtle`. Both are issued under the CALLER's capability, re-serialized
+//! as RDF/XML and rendered by one stylesheet keyed on `rdf:type` ([`crate::render`]). Nothing
+//! here reads the store directly or builds a page from anything but those graphs and the
+//! view triples added to them.
+//!
+//! # ★ Every form issues an action the manifold already offers
+//!
+//! htmx posts a form as `application/x-www-form-urlencoded`, and `ikigai-web` hands that body
+//! to one resource as `content` — so a form cannot post straight to
+//! `urn:iki:ledger:close`, whose `item` must arrive as an argument. `Act` is the adapter,
+//! and it is deliberately unable to do anything the ledger does not already declare:
+//!
+//! - the target is always `urn:iki:ledger:{ledger}:{action}` (or `:item:{id}`), built by
+//!   `ikigai-ledger`'s own naming, never a free IRI;
+//! - the verb must be one the target DESCRIBES, and every argument a name that verb's
+//!   `ActionSpec` DECLARES — checked against the hub's live `describe()`, so a form field the
+//!   manifold does not know is refused rather than dropped;
+//! - it runs under the caller's capability, so the ledger's own checks decide.
+//!
+//! That is the same contract a manifold-driven form renderer will need later; this adapter is
+//! what it will post to.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ikigai_core::{
+    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, InputSource, Invocation,
+    Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate, Verb,
+};
+use ikigai_ledger::Ledger;
+use serde_json::{json, Value};
+
+use crate::identity::{self, Passkeys, Purpose};
+use crate::render::{self, element, envelope, Graph};
+
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
+const DCTERMS: &str = "http://purl.org/dc/terms/";
+const HTML: &str = "text/html";
+
+/// What the HTML face is built from.
+pub struct Web {
+    /// The hub — for `describe()` in `Act`. Every REQUEST goes through the invocation.
+    pub hub: Arc<Kernel>,
+    /// The ledgers listed first: `gonk.http.ledger`.
+    pub ledgers: Vec<String>,
+    /// The passkey relying party.
+    pub passkeys: Arc<Passkeys>,
+}
+
+/// Bind the face.
+pub fn space(web: Arc<Web>) -> EndpointSpace {
+    let template = |t: &str| UriTemplate::parse(t).expect("a constant template");
+    EndpointSpace::new()
+        .bind(
+            Exact::new("urn:iki:gonk:page:home"),
+            LedgerView {
+                web: Arc::clone(&web),
+                shape: Shape::Home,
+            },
+        )
+        .bind(
+            template("urn:iki:gonk:page:ledger:{ledger}"),
+            LedgerView {
+                web: Arc::clone(&web),
+                shape: Shape::Page,
+            },
+        )
+        .bind(
+            template("urn:iki:gonk:fragment:items:{ledger}"),
+            LedgerView {
+                web: Arc::clone(&web),
+                shape: Shape::Fragment,
+            },
+        )
+        .bind(
+            template("urn:iki:gonk:page:item:{ledger}:{id}"),
+            ItemView {
+                web: Arc::clone(&web),
+                full: true,
+            },
+        )
+        .bind(
+            template("urn:iki:gonk:fragment:item:{ledger}:{id}"),
+            ItemView {
+                web: Arc::clone(&web),
+                full: false,
+            },
+        )
+        .bind(
+            Exact::new("urn:iki:gonk:act"),
+            Act {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            Exact::new("urn:iki:gonk:sparql"),
+            Sparql {
+                web: Arc::clone(&web),
+                fragment: false,
+            },
+        )
+        .bind(
+            Exact::new("urn:iki:gonk:fragment:sparql"),
+            Sparql {
+                web: Arc::clone(&web),
+                fragment: true,
+            },
+        )
+        .bind(
+            template("urn:iki:gonk:passkey:{op}"),
+            PasskeyDoor {
+                passkeys: Arc::clone(&web.passkeys),
+            },
+        )
+        .bind(template("urn:iki:gonk:asset:{name}"), Asset)
+}
+
+// ------------------------------------------------------------------------------ shared
+
+fn html(text: String) -> Representation {
+    Representation::new(
+        ReprType::new(HTML).with_param("charset", "utf-8"),
+        text.into_bytes(),
+    )
+}
+
+fn arg(name: &str, summary: &str) -> ArgSpec {
+    ArgSpec::new(name).summary(summary).class(XSD_STRING)
+}
+
+fn as_html_arg() -> ArgSpec {
+    arg("as", "The face: this resource serves HTML only.")
+        .one_of([HTML])
+        .default_value(HTML)
+        .optional()
+}
+
+/// Refuse any `as` but HTML — a page is HTML, and a different answer is not a better one.
+fn html_only(inv: &Invocation<'_>) -> Result<()> {
+    match inv.inline_str("as") {
+        Ok(asked) if bare(asked) != HTML => Err(Error::InvalidArgument {
+            name: "as".to_string(),
+            detail: format!("`{asked}` is not a face this page serves; it serves {HTML}"),
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn bare(media: &str) -> &str {
+    media.split(';').next().unwrap_or(media).trim()
+}
+
+fn binding(inv: &Invocation<'_>, name: &str) -> Result<String> {
+    inv.bindings
+        .get(name)
+        .map(str::to_string)
+        .ok_or_else(|| Error::Endpoint(format!("no `{name}` captured by this resource's grammar")))
+}
+
+fn optional(inv: &Invocation<'_>, name: &str) -> Option<String> {
+    inv.inline_str(name)
+        .ok()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+fn render_err(e: String) -> Error {
+    Error::Endpoint(format!("rendering the page failed: {e}"))
+}
+
+/// The exact read grants for one ledger, checked up front so a page refuses with a typed
+/// `Denied` naming the token rather than rendering an empty ledger.
+fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
+    for scope in [
+        ledger.cap_read(),
+        ikigai_store::cap_read_graph(&ledger.graph()),
+    ] {
+        if !inv.capability.allows(&scope) {
+            return Err(Error::Denied(format!(
+                "this capability does not hold `{scope}`, so this ledger's pages are not \
+                 visible to it. Sign in with a passkey whose grant names the ledger."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The ledgers to list: the configured ones, then any the caller's grant names, keeping
+/// only those it may read.
+fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
+    let mut names: Vec<String> = web.ledgers.clone();
+    if let Some(scopes) = inv.capability.scopes() {
+        for scope in scopes {
+            if let Some(name) = scope.strip_prefix("urn:cap:ledger:read:") {
+                if !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+        .iter()
+        .filter_map(|n| Ledger::parse(n).ok())
+        .filter(|l| inv.capability.allows(&l.cap_read()))
+        .collect()
+}
+
+fn nav(ledgers: &[Ledger], current: Option<&str>) -> String {
+    ledgers
+        .iter()
+        .map(|l| {
+            element(
+                "ledger",
+                &[
+                    ("name", l.name()),
+                    ("href", &format!("/l/{}", l.name())),
+                    (
+                        "current",
+                        if Some(l.name()) == current {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    ),
+                ],
+                "",
+            )
+        })
+        .collect()
+}
+
+/// `2026-09-14T10:00:00.123Z` → `2026-09-14 10:00 UTC`.
+fn when(iso: &str) -> String {
+    if iso.len() >= 16 && iso.as_bytes()[10] == b'T' {
+        format!("{} {} UTC", &iso[..10], &iso[11..16])
+    } else {
+        iso.to_string()
+    }
+}
+
+fn flag(yes: bool) -> &'static str {
+    if yes {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+/// The view triples an item needs, added to `graph` in place.
+fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_status: &str) {
+    let can_write = inv.capability.allows(&ledger.cap_write());
+    let can_delete = inv.capability.allows(&ledger.cap_delete());
+    let can_purge = inv.capability.allows(&ledger.cap_purge());
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let id = item
+            .rsplit_once(":item:")
+            .map(|(_, id)| id)
+            .unwrap_or(&item)
+            .to_string();
+        let number = graph
+            .value(&item, &format!("{LEDGER_NS}number"))
+            .unwrap_or_default();
+        let open = graph
+            .value(&item, &format!("{LEDGER_NS}status"))
+            .is_some_and(|s| s == format!("{LEDGER_NS}open"));
+        let reason = graph
+            .value(&item, &format!("{LEDGER_NS}closedReason"))
+            .and_then(|iri| ikigai_ledger::vocabulary::close_reason_name(&iri).map(str::to_string));
+        let priority = graph
+            .value(&item, &format!("{LEDGER_NS}priority"))
+            .map(|p| format!("p{p}"))
+            .unwrap_or_else(|| "p-".to_string());
+        let deferred = graph
+            .value(&item, &format!("{LEDGER_NS}deferred"))
+            .is_some_and(|d| d == "true");
+        let kind = graph
+            .values(&item, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+            .into_iter()
+            .find(|t| t != &format!("{LEDGER_NS}Item"));
+        let title = graph
+            .value(&item, &format!("{DCTERMS}title"))
+            .unwrap_or_default();
+        let body = graph
+            .value(&item, &format!("{LEDGER_NS}body"))
+            .unwrap_or_default();
+        let created = graph
+            .value(&item, &format!("{DCTERMS}created"))
+            .unwrap_or_default();
+        let modified = graph
+            .value(&item, &format!("{DCTERMS}modified"))
+            .unwrap_or_default();
+
+        graph.view(&item, "iri", item.clone());
+        graph.view(&item, "id", id.clone());
+        graph.view(
+            &item,
+            "short",
+            ledger.number(number.parse::<i64>().unwrap_or_default()),
+        );
+        graph.view(&item, "href", format!("/l/{}/item/{id}", ledger.name()));
+        graph.view(&item, "ledger", ledger.name());
+        graph.view(&item, "ledgerHref", format!("/l/{}", ledger.name()));
+        graph.view(&item, "listStatus", list_status);
+        graph.view(&item, "status", if open { "open" } else { "closed" });
+        if let Some(reason) = reason {
+            graph.view(&item, "reason", reason);
+        }
+        graph.view(&item, "priority", priority);
+        graph.view(&item, "deferred", flag(deferred));
+        if let Some(kind) = kind {
+            graph.view(&item, "kind", kind);
+        }
+        graph.view(&item, "created", when(&created));
+        graph.view(&item, "modified", when(&modified));
+        graph.view(
+            &item,
+            "content",
+            if body.is_empty() {
+                title
+            } else {
+                format!("{title}\n\n{body}")
+            },
+        );
+        graph.view(&item, "canWrite", flag(can_write));
+        graph.view(&item, "canDelete", flag(can_delete));
+        graph.view(&item, "canPurge", flag(can_purge));
+
+        // Links and about-targets become view nodes, because a repeated sub-element that needs
+        // its item's IRI cannot reach it in xrust (no parent axis worth trusting, no variable).
+        let mut order = 0;
+        for (rel, removable) in [
+            ("blocks", true),
+            ("parent", true),
+            ("related", true),
+            ("about", false),
+        ] {
+            for target in graph.values(&item, &format!("{LEDGER_NS}{rel}")) {
+                order += 1;
+                let node = format!("urn:iki:gonk:view:link:{id}:{order}");
+                graph.typed(&node, &format!("{}Link", render::VIEW_NS));
+                graph.view(&node, "order", format!("{order:04}"));
+                graph.view(&node, "rel", rel);
+                graph.view(&node, "ledger", ledger.name());
+                graph.view(&node, "id", id.clone());
+                graph.view(&node, "item", item.clone());
+                graph.view(&node, "target", target.clone());
+                match Ledger::item_iri(&target) {
+                    Some((other, _)) if removable => {
+                        let target_id = target.rsplit_once(":item:").map(|(_, t)| t).unwrap_or("");
+                        graph.view(
+                            &node,
+                            "href",
+                            format!("/l/{}/item/{target_id}", other.name()),
+                        );
+                        graph.view(&node, "text", format!("{} {target_id}", other.name()));
+                    }
+                    _ => graph.view(&node, "text", target.clone()),
+                }
+                graph.view(&node, "canUnlink", flag(removable && can_write));
+            }
+        }
+    }
+    for comment in graph.subjects_of_type(&format!("{LEDGER_NS}Comment")) {
+        let created = graph
+            .value(&comment, &format!("{DCTERMS}created"))
+            .unwrap_or_default();
+        graph.view(&comment, "created", when(&created));
+    }
+}
+
+/// Issue `request` and return its bytes.
+async fn fetch(inv: &Invocation<'_>, request: Request) -> Result<Vec<u8>> {
+    Ok(inv.issue(request).await?.bytes)
+}
+
+fn request(verb: Verb, iri: &str) -> Result<Request> {
+    Ok(Request::new(
+        verb,
+        Iri::parse(iri).map_err(|e| Error::Endpoint(format!("`{iri}`: {e}")))?,
+    ))
+}
+
+fn with(request: Request, name: &str, value: &str) -> Request {
+    request.with_arg(name, ArgRef::Inline(value.as_bytes().to_vec()))
+}
+
+// ------------------------------------------------------------------------ ledger pages
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Home,
+    Page,
+    Fragment,
+}
+
+struct LedgerView {
+    web: Arc<Web>,
+    shape: Shape,
+}
+
+/// Render one ledger's listing — the page, the fragment, and the view `Act` returns.
+async fn ledger_listing(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    status: &str,
+    text: Option<&str>,
+    full: bool,
+    flash: Option<(&str, &str)>,
+) -> Result<Representation> {
+    require_read(inv, ledger)?;
+    if !matches!(status, "open" | "closed" | "all") {
+        return Err(Error::InvalidArgument {
+            name: "status".to_string(),
+            detail: format!("`{status}` is not one of open, closed, all"),
+        });
+    }
+    let mut items = with(
+        with(
+            request(Verb::Source, &format!("{}items", ledger.prefix()))?,
+            "as",
+            "text/turtle",
+        ),
+        "status",
+        status,
+    );
+    items = with(items, "limit", "500");
+    if let Some(text) = text {
+        items = with(items, "text", text);
+    }
+    let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
+    enrich_items(&mut graph, ledger, inv, status);
+    let ledgers = readable_ledgers(web, inv);
+    let mut children = nav(&ledgers, Some(ledger.name()));
+    if let Some((kind, message)) = flash {
+        children.push_str(&element("flash", &[("kind", kind)], message));
+    }
+    children.push_str(&graph.rdfxml().map_err(render_err)?);
+    let title = if ledger.is_default() {
+        "Ledger".to_string()
+    } else {
+        format!("Ledger {}", ledger.name())
+    };
+    let doc = envelope(
+        "page",
+        &[
+            ("view", "ledger"),
+            ("full", flag(full)),
+            ("title", &title),
+            ("ledger", ledger.name()),
+            ("status", status),
+            ("text", text.unwrap_or("")),
+            ("page-url", &format!("/l/{}", ledger.name())),
+            ("items-url", &format!("/l/{}/items", ledger.name())),
+            (
+                "can-write",
+                flag(inv.capability.allows(&ledger.cap_write())),
+            ),
+        ],
+        &children,
+    );
+    Ok(html(render::render(&doc, full).map_err(render_err)?))
+}
+
+#[async_trait]
+impl Endpoint for LedgerView {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let status = optional(inv, "status").unwrap_or_else(|| "open".to_string());
+        let text = optional(inv, "text");
+        let ledger = match self.shape {
+            Shape::Home => match readable_ledgers(&self.web, inv).into_iter().next() {
+                Some(ledger) => ledger,
+                None => {
+                    let doc = envelope(
+                        "page",
+                        &[
+                            ("view", "empty"),
+                            ("full", "true"),
+                            ("title", "No ledger to show"),
+                            (
+                                "message",
+                                "This browser holds no grant to read any ledger here. Sign in \
+                                 with a passkey — `ikigai-gonk passkey invite` on the server \
+                                 makes one.",
+                            ),
+                        ],
+                        "",
+                    );
+                    return Ok(html(render::render(&doc, true).map_err(render_err)?));
+                }
+            },
+            _ => Ledger::parse(&binding(inv, "ledger")?)?,
+        };
+        ledger_listing(
+            &self.web,
+            inv,
+            &ledger,
+            &status,
+            text.as_deref(),
+            self.shape != Shape::Fragment,
+            None,
+        )
+        .await
+    }
+
+    fn name(&self) -> &str {
+        match self.shape {
+            Shape::Home => "gonk-page-home",
+            Shape::Page => "gonk-page-ledger",
+            Shape::Fragment => "gonk-fragment-items",
+        }
+    }
+
+    fn describe(&self) -> Description {
+        let (title, summary) = match self.shape {
+            Shape::Home => (
+                "The front page",
+                "The first ledger this caller may read, as an HTML page — or a sign-in page \
+                 when it may read none.",
+            ),
+            Shape::Page => (
+                "A ledger, as a page",
+                "One ledger's items as an HTML page: the ledger's Turtle face rendered through \
+                 gonk's stylesheet, with the forms this caller's grant allows.",
+            ),
+            Shape::Fragment => (
+                "A ledger, as an htmx fragment",
+                "The same listing as the ledger page, without the page around it.",
+            ),
+        };
+        let mut desc = Description::new(self.name())
+            .title(title)
+            .summary(summary)
+            .verb(Verb::Source)
+            .verb(Verb::Meta);
+        if self.shape != Shape::Home {
+            // The home page is public — it is where a caller with no grant is told how to get
+            // one. A ledger page reads the ledger, and declares exactly what that needs.
+            desc = desc
+                .requires(ikigai_ledger::CAP_READ)
+                .requires(ikigai_store::CAP_READ_GRAPH)
+                .input(
+                    arg("ledger", "Which ledger.")
+                        .binding()
+                        .default_value("default")
+                        .optional(),
+                );
+        }
+        desc.input(
+            arg("status", "Which items: open (the default), closed, or all.")
+                .one_of(["open", "closed", "all"])
+                .default_value("open")
+                .optional(),
+        )
+        .input(arg("text", "A case-insensitive substring of the title.").optional())
+        .input(as_html_arg())
+        .output(HTML)
+    }
+}
+
+// -------------------------------------------------------------------------- item pages
+
+struct ItemView {
+    web: Arc<Web>,
+    full: bool,
+}
+
+async fn item_card(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    id: &str,
+    full: bool,
+    flash: Option<(&str, &str)>,
+) -> Result<Representation> {
+    require_read(inv, ledger)?;
+    let read = with(
+        request(Verb::Source, &ledger.item(id))?,
+        "as",
+        "text/turtle",
+    );
+    let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
+    enrich_items(&mut graph, ledger, inv, "open");
+    let title = graph
+        .subjects_of_type(&format!("{LEDGER_NS}Item"))
+        .first()
+        .and_then(|item| graph.value(item, &format!("{DCTERMS}title")))
+        .unwrap_or_else(|| id.to_string());
+    let mut children = nav(&readable_ledgers(web, inv), Some(ledger.name()));
+    if let Some((kind, message)) = flash {
+        children.push_str(&element("flash", &[("kind", kind)], message));
+    }
+    children.push_str(&graph.rdfxml().map_err(render_err)?);
+    let doc = envelope(
+        "page",
+        &[
+            ("view", "item"),
+            ("full", flag(full)),
+            ("title", &title),
+            ("ledger", ledger.name()),
+            ("page-url", &format!("/l/{}", ledger.name())),
+        ],
+        &children,
+    );
+    Ok(html(render::render(&doc, full).map_err(render_err)?))
+}
+
+#[async_trait]
+impl Endpoint for ItemView {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
+        let id = binding(inv, "id")?;
+        item_card(&self.web, inv, &ledger, &id, self.full, None).await
+    }
+
+    fn name(&self) -> &str {
+        if self.full {
+            "gonk-page-item"
+        } else {
+            "gonk-fragment-item"
+        }
+    }
+
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title(if self.full {
+                "An item, as a page"
+            } else {
+                "An item, as an htmx fragment"
+            })
+            .summary(
+                "One ledger item with its comments and links — the item's Turtle face rendered \
+                 through gonk's stylesheet — and the forms this caller's grant allows: comment, \
+                 edit, close or reopen, claim, defer, label, link, and (separately) delete and \
+                 purge.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_ledger::CAP_READ)
+            .requires(ikigai_store::CAP_READ_GRAPH)
+            .input(
+                arg("ledger", "Which ledger.")
+                    .binding()
+                    .default_value("default")
+                    .optional(),
+            )
+            .input(arg("id", "The item's opaque id or its number.").binding())
+            .input(as_html_arg())
+            .output(HTML)
+    }
+}
+
+// --------------------------------------------------------------------------------- act
+
+/// The ledger actions a form may name. Everything else is refused before the manifold is
+/// even consulted — the adapter reaches the ledger and nothing else.
+const ACTIONS: [&str; 10] = [
+    "append", "comment", "close", "reopen", "claim", "defer", "link", "label", "purge", "item",
+];
+
+struct Act {
+    web: Arc<Web>,
+}
+
+/// A form that is missing a field it needs is a malformed `content`, not a missing ARGUMENT:
+/// the fields live inside the body, and the contract declares the body.
+fn bad_form(detail: String) -> Error {
+    Error::InvalidArgument {
+        name: "content".to_string(),
+        detail: format!("the form is missing {detail}"),
+    }
+}
+
+/// `application/x-www-form-urlencoded` → ordered pairs. A repeated name keeps its LAST value.
+fn form(body: &str) -> BTreeMap<String, String> {
+    let decode = |s: &str| {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'+' => out.push(b' '),
+                // ⚠ The two digits are read from the BYTES: slicing the `&str` at `i + 1`
+                // would panic when a multibyte character follows the `%`, and this body is
+                // whatever any client sent.
+                b'%' if i + 2 < bytes.len() => {
+                    match std::str::from_utf8(&bytes[i + 1..i + 3])
+                        .ok()
+                        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                    {
+                        Some(b) => {
+                            out.push(b);
+                            i += 2;
+                        }
+                        None => out.push(b'%'),
+                    }
+                }
+                c => out.push(c),
+            }
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    body.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| match pair.split_once('=') {
+            Some((k, v)) => (decode(k), decode(v)),
+            None => (decode(pair), String::new()),
+        })
+        .collect()
+}
+
+#[async_trait]
+impl Endpoint for Act {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint(
+                "`urn:iki:gonk:act` answers Sink only".to_string(),
+            ));
+        }
+        let mut fields = form(inv.inline_str("content")?);
+        let mut take = |name: &str| fields.remove(name).filter(|v| !v.trim().is_empty());
+        let ledger = Ledger::parse(
+            &take("_ledger")
+                .ok_or_else(|| bad_form("_ledger (the form names no ledger)".to_string()))?,
+        )?;
+        let action = take("_action")
+            .ok_or_else(|| bad_form("_action (the form names no action)".to_string()))?;
+        if !ACTIONS.contains(&action.as_str()) {
+            return Err(Error::InvalidArgument {
+                name: "_action".to_string(),
+                detail: format!(
+                    "`{action}` is not a ledger action a form may take; one of {}",
+                    ACTIONS.join(", ")
+                ),
+            });
+        }
+        let verb = match take("_verb").as_deref() {
+            None | Some("Sink") => Verb::Sink,
+            Some("Delete") => Verb::Delete,
+            Some(other) => {
+                return Err(Error::InvalidArgument {
+                    name: "_verb".to_string(),
+                    detail: format!("`{other}` is not Sink or Delete"),
+                })
+            }
+        };
+        let id = take("_id");
+        let then = take("_then").unwrap_or_else(|| "items".to_string());
+        let list_status = take("_status").unwrap_or_else(|| "open".to_string());
+        let target = if action == "item" {
+            ledger.item(
+                id.as_deref()
+                    .ok_or_else(|| bad_form("_id (an item action names no item)".to_string()))?,
+            )
+        } else {
+            format!("{}{action}", ledger.prefix())
+        };
+        let target_iri =
+            Iri::parse(&target).map_err(|e| Error::Endpoint(format!("`{target}`: {e}")))?;
+
+        // ★ The manifold decides what a form may send. An empty field is "not given", which
+        // is what an optional form control left blank means.
+        let description =
+            self.web.hub.describe(&target_iri).ok_or_else(|| {
+                Error::NotFound(format!("the ledger binds nothing at `{target}`"))
+            })?;
+        let spec = description
+            .action_specs()
+            .into_iter()
+            .find(|spec| spec.verb == verb)
+            .ok_or_else(|| Error::InvalidArgument {
+                name: "_verb".to_string(),
+                detail: format!("`{target}` does not declare {verb:?}"),
+            })?;
+        let mut request = Request::new(verb, target_iri);
+        for (name, value) in fields {
+            if name.starts_with('_') || value.trim().is_empty() {
+                continue;
+            }
+            // A binding is part of the IRI the adapter built, never a form field.
+            let declared = spec
+                .inputs
+                .iter()
+                .any(|input| input.name == name && input.source != InputSource::Binding);
+            if !declared {
+                return Err(Error::InvalidArgument {
+                    name,
+                    detail: format!(
+                        "`{target}` does not declare this input for {verb:?}; a form may send \
+                         only what the resource's own contract names"
+                    ),
+                });
+            }
+            request = with(request, &name, value.replace("\r\n", "\n").as_str());
+        }
+
+        let answer = inv.issue(request).await?;
+        let said = String::from_utf8_lossy(&answer.bytes).trim().to_string();
+        let flash = Some(("ok", said.as_str()));
+        match then.as_str() {
+            "card" => {
+                let id = id.ok_or_else(|| {
+                    bad_form("_id (a card to render after the action)".to_string())
+                })?;
+                item_card(&self.web, inv, &ledger, &id, false, flash).await
+            }
+            "gone" => {
+                let ledgers = readable_ledgers(&self.web, inv);
+                let doc = envelope(
+                    "page",
+                    &[
+                        ("view", "gone"),
+                        ("full", "false"),
+                        ("ledger", ledger.name()),
+                        ("page-url", &format!("/l/{}", ledger.name())),
+                    ],
+                    &format!(
+                        "{}{}",
+                        nav(&ledgers, Some(ledger.name())),
+                        element("flash", &[("kind", "ok")], &said)
+                    ),
+                );
+                Ok(html(render::render(&doc, false).map_err(render_err)?))
+            }
+            _ => ledger_listing(&self.web, inv, &ledger, &list_status, None, false, flash).await,
+        }
+    }
+
+    fn name(&self) -> &str {
+        "gonk-act"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-act")
+            .title("Take a ledger action from a form")
+            .summary(
+                "The form adapter: an urlencoded form naming `_ledger`, `_action` and `_verb` \
+                 becomes ONE request to that ledger resource, carrying only the inputs its \
+                 contract declares, under the caller's capability — then re-renders the view \
+                 named by `_then` (items, card, gone). It holds no authority of its own: the \
+                 ledger resource it reaches enforces its own grant.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            // ★ The floor EVERY reachable action shares, and nothing more: each ledger
+            // mutation declares both of the store's per-graph families. The ledger family
+            // (write, delete or purge) depends on which action the form names, and a
+            // description has no way to declare "one of these" — so that part is enforced by
+            // the target, one hop in, exactly as a mount's forward is.
+            .requires(ikigai_store::CAP_READ_GRAPH)
+            .requires(ikigai_store::CAP_WRITE_GRAPH)
+            .input(arg(
+                "content",
+                "The form body, application/x-www-form-urlencoded — where a pipe's value lands.",
+            ))
+            .output(HTML)
+    }
+}
+
+// ------------------------------------------------------------------------------ sparql
+
+const DEFAULT_QUERY: &str = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?title ?status WHERE {
+  ?item a ledger:Item ;
+        ledger:number ?number ;
+        dcterms:title ?title ;
+        ledger:status ?status .
+}
+ORDER BY DESC(?number)
+LIMIT 50";
+
+struct Sparql {
+    web: Arc<Web>,
+    fragment: bool,
+}
+
+/// The query form — `select`, `ask`, `construct` or `describe` — read past comments, `BASE`
+/// and `PREFIX`. A wrong guess costs nothing: the store refuses a query of the wrong shape at
+/// the wrong IRI, and says which IRI to use.
+pub fn query_form(query: &str) -> Option<&'static str> {
+    let mut words = query
+        .lines()
+        .map(|line| match line.find('#') {
+            // A `#` inside an IRI (`<…#>`) is not a comment; only strip one that is not
+            // inside angle brackets on this line.
+            Some(at) if line[..at].matches('<').count() == line[..at].matches('>').count() => {
+                &line[..at]
+            }
+            _ => line,
+        })
+        .flat_map(str::split_whitespace);
+    while let Some(word) = words.next() {
+        match word.to_ascii_lowercase().as_str() {
+            "prefix" => {
+                words.next();
+                words.next();
+            }
+            "base" => {
+                words.next();
+            }
+            "select" => return Some("select"),
+            "ask" => return Some("ask"),
+            "construct" => return Some("construct"),
+            "describe" => return Some("describe"),
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn cell(term: &Value) -> (String, String) {
+    let kind = term
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("literal");
+    let value = term
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match kind {
+        "uri" => ("uri".to_string(), value.to_string()),
+        "bnode" => ("bnode".to_string(), format!("_:{value}")),
+        _ => {
+            let suffix = term
+                .get("xml:lang")
+                .and_then(Value::as_str)
+                .map(|lang| format!(" @{lang}"))
+                .unwrap_or_default();
+            ("literal".to_string(), format!("{value}{suffix}"))
+        }
+    }
+}
+
+/// Run `query` against `ledger` and build the `<view:results>` element.
+///
+/// A SELECT result becomes a `view:table` whose cells are already aligned to the header —
+/// the XSLT cannot do that alignment itself (it would need a variable or `current()` to
+/// match each binding to its column), so the result face is reshaped here, not recomputed.
+/// A store refusal (a `FROM` clause, a syntax error, a query of the wrong shape) is shown as
+/// the error it is, in the page, rather than as a failed request.
+async fn sparql_results(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> String {
+    let graph = ledger.graph();
+    let wrap = |summary: String, body: String| {
+        format!(
+            "<view:results summary=\"{}\">{body}</view:results>",
+            render::escape(&summary)
+        )
+    };
+    let Some(form) = query_form(query) else {
+        return wrap(
+            String::new(),
+            element(
+                "error",
+                &[],
+                "Not a query form this page runs: SELECT, ASK, CONSTRUCT or DESCRIBE. Updates are \
+                 not accepted here.",
+            ),
+        );
+    };
+    let graph_shaped = matches!(form, "construct" | "describe");
+    let face = if graph_shaped {
+        "text/turtle"
+    } else {
+        "application/sparql-results+json"
+    };
+    let answer = match request(Verb::Source, &format!("urn:iki:store:graph-{form}")) {
+        Ok(r) => {
+            inv.issue(with(
+                with(with(r, "graph", &graph), "query", query),
+                "as",
+                face,
+            ))
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    let repr = match answer {
+        Ok(repr) => repr,
+        Err(e) => return wrap(String::new(), element("error", &[], &e.to_string())),
+    };
+    if graph_shaped {
+        return wrap(
+            format!("{form} over {graph}"),
+            element("graph", &[], &String::from_utf8_lossy(&repr.bytes)),
+        );
+    }
+    let v: Value = match serde_json::from_slice(&repr.bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return wrap(
+                String::new(),
+                element(
+                    "error",
+                    &[],
+                    &format!("the store's results were not JSON: {e}"),
+                ),
+            )
+        }
+    };
+    if let Some(b) = v.get("boolean").and_then(Value::as_bool) {
+        return wrap(
+            format!("ask over {graph}"),
+            element("boolean", &[], flag(b)),
+        );
+    }
+    let vars: Vec<&str> = v["head"]["vars"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let rows = v["results"]["bindings"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut table: String = vars.iter().map(|name| element("col", &[], name)).collect();
+    for row in rows {
+        table.push_str("<view:row>");
+        for name in &vars {
+            match row.get(*name) {
+                Some(term) => {
+                    let (kind, value) = cell(term);
+                    table.push_str(&element("cell", &[("kind", &kind)], &value));
+                }
+                None => table.push_str(&element("cell", &[("kind", "unbound")], "")),
+            }
+        }
+        table.push_str("</view:row>");
+    }
+    wrap(
+        format!("{} row(s) from {graph}", rows.len()),
+        format!("<view:table>{table}</view:table>"),
+    )
+}
+
+#[async_trait]
+impl Endpoint for Sparql {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let ledgers = readable_ledgers(&self.web, inv);
+        let ledger = match optional(inv, "ledger") {
+            Some(name) => Ledger::parse(&name)?,
+            None => ledgers.first().cloned().unwrap_or_else(Ledger::default),
+        };
+        // ★ The exact grant, checked before anything runs: the declared family is "some
+        // graph", and this names THE graph — the one the query will be confined to.
+        let scope = ikigai_store::cap_read_graph(&ledger.graph());
+        if !inv.capability.allows(&scope) {
+            return Err(Error::Denied(format!(
+                "this capability does not hold `{scope}`, so it cannot query `{}`",
+                ledger.graph()
+            )));
+        }
+        let query = optional(inv, "query");
+        let asked = inv.inline_str("as").ok().map(bare).map(str::to_string);
+
+        // Conneg: a caller asking for anything but HTML gets the store's own answer.
+        if !self.fragment {
+            if let (Some(query), Some(asked)) = (&query, &asked) {
+                if asked != HTML {
+                    let form = query_form(query).ok_or_else(|| Error::InvalidArgument {
+                        name: "query".to_string(),
+                        detail: "not a SELECT, ASK, CONSTRUCT or DESCRIBE query".to_string(),
+                    })?;
+                    let run = with(
+                        with(
+                            with(
+                                request(Verb::Source, &format!("urn:iki:store:graph-{form}"))?,
+                                "graph",
+                                &ledger.graph(),
+                            ),
+                            "query",
+                            query,
+                        ),
+                        "as",
+                        asked,
+                    );
+                    return inv.issue(run).await;
+                }
+            }
+        }
+
+        if self.fragment {
+            html_only(inv)?;
+            let query = query.ok_or_else(|| Error::MissingArgument("query".to_string()))?;
+            let results = sparql_results(inv, &ledger, &query).await;
+            let doc = envelope("page", &[("view", "results"), ("full", "false")], &results);
+            return Ok(html(render::render(&doc, false).map_err(render_err)?));
+        }
+        let results = match &query {
+            Some(query) => sparql_results(inv, &ledger, query).await,
+            None => String::new(),
+        };
+        let children = format!(
+            "{}{}{}",
+            nav(&ledgers, Some(ledger.name())),
+            element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),
+            results
+        );
+        let doc = envelope(
+            "page",
+            &[("view", "sparql"), ("full", "true"), ("title", "SPARQL")],
+            &children,
+        );
+        Ok(html(render::render(&doc, true).map_err(render_err)?))
+    }
+
+    fn name(&self) -> &str {
+        if self.fragment {
+            "gonk-fragment-sparql"
+        } else {
+            "gonk-sparql"
+        }
+    }
+
+    fn describe(&self) -> Description {
+        let desc = Description::new(self.name())
+            .title(if self.fragment {
+                "SPARQL results, as an htmx fragment"
+            } else {
+                "SPARQL over one ledger's graph"
+            })
+            .summary(
+                "A read-only SPARQL query confined BY CONSTRUCTION to one ledger's named graph: \
+                 it runs at `urn:iki:store:graph-{select,ask,construct,describe}` with \
+                 `graph=<that ledger's graph>`, under the caller's capability, so a grant \
+                 naming one ledger cannot see another's. FROM / FROM NAMED are refused by the \
+                 store. HTML when the caller asks for it; otherwise the store's own result \
+                 format, by Accept.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_store::CAP_READ_GRAPH)
+            .input(
+                arg(
+                    "ledger",
+                    "Which ledger's graph to query; the first readable one when omitted.",
+                )
+                .optional(),
+            );
+        if self.fragment {
+            desc.input(arg("query", "A SELECT, ASK, CONSTRUCT or DESCRIBE query."))
+                .input(as_html_arg())
+                .output(HTML)
+        } else {
+            desc.input(arg("query", "A SELECT, ASK, CONSTRUCT or DESCRIBE query.").optional())
+                .input(
+                    arg(
+                        "as",
+                        "text/html for the editor page; otherwise a SPARQL results or RDF \
+                         serialization the store serves.",
+                    )
+                    .one_of([
+                        HTML,
+                        "application/sparql-results+json",
+                        "application/sparql-results+xml",
+                        "text/csv",
+                        "text/tab-separated-values",
+                        "text/turtle",
+                        "application/n-triples",
+                    ])
+                    .default_value(HTML)
+                    .optional(),
+                )
+                .output(HTML)
+                .output("application/sparql-results+json")
+                .output("application/sparql-results+xml")
+                .output("text/csv")
+                .output("text/tab-separated-values")
+                .output("text/turtle")
+                .output("application/n-triples")
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------- passkeys
+
+const PASSKEY_OPS: [&str; 6] = [
+    "register-options",
+    "register",
+    "login-options",
+    "login",
+    "logout",
+    "session",
+];
+
+struct PasskeyDoor {
+    passkeys: Arc<Passkeys>,
+}
+
+fn json_repr(value: Value) -> Representation {
+    Representation::new(
+        ReprType::new("application/json"),
+        value.to_string().into_bytes(),
+    )
+}
+
+#[async_trait]
+impl Endpoint for PasskeyDoor {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint(
+                "the passkey resources answer Sink only".to_string(),
+            ));
+        }
+        let op = binding(inv, "op")?;
+        let now = identity::now_seconds();
+        let refused = |detail: String| Error::InvalidArgument {
+            name: "content".to_string(),
+            detail,
+        };
+        let content = inv.inline_str("content").unwrap_or("");
+        match op.as_str() {
+            "register-options" | "login-options" => {
+                let purpose = if op == "login-options" {
+                    Purpose::Login
+                } else {
+                    Purpose::Register
+                };
+                let challenge = self
+                    .passkeys
+                    .challenge(purpose, now)
+                    .map_err(Error::Unavailable)?;
+                Ok(json_repr(
+                    json!({ "challenge": challenge, "rpId": identity::RP_ID }),
+                ))
+            }
+            "register" => {
+                let enrolled = self
+                    .passkeys
+                    .register(content.as_bytes(), now)
+                    .map_err(refused)?;
+                Ok(json_repr(
+                    json!({ "label": enrolled.label, "grant": enrolled.grant }),
+                ))
+            }
+            "login" => {
+                let (token, who) = self
+                    .passkeys
+                    .login(content.as_bytes(), now)
+                    .map_err(Error::Denied)?;
+                Ok(json_repr(json!({
+                    "session": token,
+                    "seconds": who.expires.saturating_sub(now),
+                    "label": who.enrolled.label,
+                    "grant": who.enrolled.grant,
+                })))
+            }
+            "logout" => {
+                self.passkeys.logout(content.trim());
+                Ok(json_repr(json!({ "signedOut": true })))
+            }
+            "session" => match self.passkeys.identity(content.trim(), now) {
+                Some(who) => Ok(json_repr(json!({
+                    "label": who.enrolled.label,
+                    "grant": who.enrolled.grant,
+                    "scopes": who.scopes,
+                    "seconds": who.expires.saturating_sub(now),
+                }))),
+                None => Err(Error::NotFound(
+                    "no live session for that token".to_string(),
+                )),
+            },
+            other => Err(Error::InvalidArgument {
+                name: "op".to_string(),
+                detail: format!("`{other}` is not one of {}", PASSKEY_OPS.join(", ")),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "gonk-passkey"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-passkey")
+            .title("Passkey sign-in")
+            .summary(
+                "The WebAuthn ceremonies and the session they open. `register-options` and \
+                 `login-options` mint a single-use challenge; `register` enrols a credential \
+                 against a one-time invite; `login` verifies an assertion and opens a session \
+                 whose capability is its grant in gonk/grants.json; `session` and `logout` take \
+                 the session token as the body. Public by design — this is how a caller with no \
+                 grant gets one — so it declares no capability.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .input(
+                arg("op", "Which step.")
+                    .binding()
+                    .one_of(PASSKEY_OPS)
+                    .default_value("login-options"),
+            )
+            .input(
+                arg(
+                    "content",
+                    "The step's JSON body, or the session token for `session` and `logout` — \
+                     where a pipe's value lands.",
+                )
+                .optional(),
+            )
+            .output("application/json")
+    }
+}
+
+// ------------------------------------------------------------------------------ assets
+
+const ASSETS: [(&str, &str, &str); 3] = [
+    ("gonk.css", "text/css", include_str!("../web/gonk.css")),
+    ("gonk.js", "text/javascript", include_str!("../web/gonk.js")),
+    (
+        "htmx.min.js",
+        "text/javascript",
+        include_str!("../web/htmx.min.js"),
+    ),
+];
+
+struct Asset;
+
+#[async_trait]
+impl Endpoint for Asset {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let name = binding(inv, "name")?;
+        let (_, media, body) = ASSETS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .ok_or_else(|| Error::NotFound(format!("no asset called `{name}`")))?;
+        Ok(Representation::new(
+            ReprType::new(*media).with_param("charset", "utf-8"),
+            body.as_bytes().to_vec(),
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-asset"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-asset")
+            .title("The HTML face's static files")
+            .summary(
+                "gonk.css, gonk.js and htmx 2.0.4, compiled into the binary so the page needs \
+                 no other origin — which is what lets the default same-origin CSP stand.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                arg("name", "Which file.")
+                    .binding()
+                    .one_of(ASSETS.iter().map(|(n, _, _)| *n))
+                    .default_value("gonk.css"),
+            )
+            .output("text/css")
+            .output("text/javascript")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_form_body_decodes_plus_percent_and_repeats() {
+        let fields = form("_ledger=default&content=First+line%0A%0Abody+%26+more&x=1&x=2&flag");
+        assert_eq!(fields["content"], "First line\n\nbody & more");
+        assert_eq!(fields["x"], "2");
+        assert_eq!(fields["flag"], "");
+        assert_eq!(form("a=%zz%4")["a"], "%zz%4");
+        // A multibyte character right after `%` must not panic the request.
+        assert_eq!(form("a=%é1&b=%%")["a"], "%é1");
+    }
+
+    #[test]
+    fn the_query_form_is_read_past_the_prologue() {
+        assert_eq!(query_form(DEFAULT_QUERY), Some("select"));
+        assert_eq!(
+            query_form("# a comment\nBASE <urn:x#>\nPREFIX a: <urn:a#> ask { ?s ?p ?o }"),
+            Some("ask")
+        );
+        assert_eq!(
+            query_form("CONSTRUCT WHERE { ?s ?p ?o }"),
+            Some("construct")
+        );
+        assert_eq!(query_form("INSERT DATA { <a:b> <a:b> <a:b> }"), None);
+    }
+}
