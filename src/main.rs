@@ -2,13 +2,14 @@
 //!
 //! The composition lives in the library ([`ikigai_gonk::compose`]) so the conformance walk
 //! holds the kernel this `main` serves; the doors and what each grants are
-//! [`ikigai_gonk::doors`].
+//! [`ikigai_gonk::doors`], and the HTML face is [`ikigai_gonk::web`].
 
 use std::sync::Arc;
 
 use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
-use ikigai_gonk::{compose, doors, quic};
+use ikigai_gonk::identity::{self, Passkeys};
+use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::{DurableStore, StoreConfig};
 
 fn main() {
@@ -29,6 +30,13 @@ fn main() {
             ledgers,
             force,
         } => client_add(&name, cert.as_deref(), &ledgers, force),
+        Command::PasskeyInvite {
+            name,
+            ledgers,
+            force,
+            minutes,
+            flags,
+        } => passkey_invite(&name, &ledgers, force, minutes, &flags),
         Command::Serve(flags) => serve(&flags),
     }
 }
@@ -68,6 +76,9 @@ fn serve(flags: &config::Flags) -> ! {
         }
         Some((addr, identity, trusted, enrolment.len()))
     });
+    // The passkey file is read here too, so an unparsable `passkeys` block stops the server
+    // rather than failing every sign-in.
+    identity::read_passkeys(&layout).unwrap_or_else(|e| fail(&e));
 
     // Hold the store. A second holder is refused by RocksDB — and the fix is topology.
     let store_path = StoreConfig::load(Some("gonk"))
@@ -133,15 +144,29 @@ fn serve(flags: &config::Flags) -> ! {
         let listener = tokio::net::TcpListener::bind(settings.http)
             .await
             .unwrap_or_else(|e| fail(&format!("cannot bind http {}: {e}", settings.http)));
+        let port = listener
+            .local_addr()
+            .map(|a| a.port())
+            .unwrap_or(settings.http.port());
+        let passkeys = Arc::new(Passkeys::new(layout.clone(), port));
+        let face = Arc::new(web::Web {
+            hub: Arc::clone(&hub),
+            ledgers: settings.http_ledgers.clone(),
+            passkeys: Arc::clone(&passkeys),
+        });
+        let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         eprintln!(
             "ikigai-gonk {} — holding the store at {}",
             env!("CARGO_PKG_VERSION"),
             store_path.display()
         );
+        // ★ The `localhost` form, never the bound IP: WebAuthn refuses an IP address as a
+        // relying party, so a page opened at 127.0.0.1 cannot use a passkey at all.
         eprintln!(
-            "  http    http://{} — loopback; ledgers read+write: {}",
+            "  http    http://localhost:{port}/ — loopback ({}); anonymous read+write: {}; {} passkey(s)",
             settings.http,
-            settings.http_ledgers.join(", ")
+            settings.http_ledgers.join(", "),
+            passkeys.enrolled_count()
         );
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
@@ -150,8 +175,12 @@ fn serve(flags: &config::Flags) -> ! {
             settings.socket.display()
         );
         let error = ikigai_web::serve_with_listener(
-            hub,
-            doors::http_cap(http_grants),
+            http,
+            doors::http_cap(doors::HttpDoor {
+                anonymous: http_grants,
+                port,
+                passkeys: Some(passkeys),
+            }),
             listener,
             doors::edge_config(),
         )
@@ -208,6 +237,72 @@ fn client_add(
         );
         println!("    ikigai --connect quic://<gonk host>:1060 --cert-dir <the moved directory>");
     }
+}
+
+fn passkey_invite(
+    name: &str,
+    ledgers: &[(String, Authority)],
+    force: bool,
+    minutes: u64,
+    flags: &config::Flags,
+) {
+    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
+    let settings = config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    if ledgers.is_empty() {
+        fail(&format!(
+            "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`"
+        ));
+    }
+    let mut scopes: Vec<String> = Vec::new();
+    for (ledger, authority) in ledgers {
+        for token in grants::grants_for(ledger, *authority).unwrap_or_else(|e| fail(&e)) {
+            if !scopes.contains(&token) {
+                scopes.push(token);
+            }
+        }
+    }
+    // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
+    // in would be a ceremony that changes nothing — and a grant that looked like it limited
+    // someone would not.
+    let anonymous = grants::grants_for_all(&settings.http_ledgers, Authority::Write)
+        .unwrap_or_else(|e| fail(&e));
+    if scopes.iter().all(|scope| anonymous.contains(scope)) {
+        fail(&format!(
+            "that grant adds nothing: an anonymous loopback caller already reads and writes {}. \
+             Invite with more — `--ledger {}=delete`, or a ledger outside `gonk.http.ledger`",
+            settings.http_ledgers.join(", "),
+            settings
+                .http_ledgers
+                .first()
+                .map(String::as_str)
+                .unwrap_or("default")
+        ));
+    }
+    let code = identity::invite(
+        &layout,
+        name,
+        &scopes,
+        force,
+        minutes,
+        identity::now_seconds(),
+    )
+    .unwrap_or_else(|e| fail(&e));
+    println!(
+        "passkey invite for `{name}` — grant `{name}` ({} scopes) in {}",
+        scopes.len(),
+        layout.grants_json().display()
+    );
+    println!("  valid for {minutes} minutes, once");
+    println!(
+        "  open  http://localhost:{}/#invite={code}",
+        settings.http.port()
+    );
+    println!(
+        "  in a browser on this machine (localhost, not 127.0.0.1); the passkey is enrolled in {}",
+        layout.clients_json().display()
+    );
 }
 
 fn fail(message: &str) -> ! {

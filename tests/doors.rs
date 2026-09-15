@@ -235,10 +235,27 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let (hub, cap) = (hub(), doors::http_cap(grants.clone()));
+    let config = tempfile::tempdir().unwrap();
+    let hub = hub();
+    let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
+        quic::Layout::in_config_home(config.path()),
+        addr.port(),
+    ));
+    let face = Arc::new(ikigai_gonk::web::Web {
+        hub: Arc::clone(&hub),
+        ledgers: vec!["default".to_string()],
+        passkeys: Arc::clone(&passkeys),
+    });
+    let kernel = Arc::new(doors::http_kernel(hub, ikigai_gonk::web::space(face)));
+    let door = doors::HttpDoor {
+        anonymous: grants.clone(),
+        port: addr.port(),
+        passkeys: Some(passkeys),
+    };
+    let cap = doors::http_cap(door.clone());
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(
-            hub,
+            kernel,
             cap,
             listener,
             doors::edge_config(),
@@ -264,16 +281,19 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
     assert_eq!(status, 403, "{response}");
 
     // The capability is a function of the peer: a non-loopback one gets nothing.
-    let cap = doors::http_cap(grants);
     let at = |peer: &str| {
-        cap(&ikigai_web::HttpRequest {
-            method: "GET".into(),
-            path: "/iki/ledger/items".into(),
-            query: Vec::new(),
-            headers: Vec::new(),
-            body: Vec::new(),
-            peer: Some(peer.parse::<IpAddr>().unwrap()),
-        })
+        Capability::scoped(doors::http_scopes(
+            &door,
+            &ikigai_web::HttpRequest {
+                method: "GET".into(),
+                path: "/iki/ledger/items".into(),
+                query: Vec::new(),
+                headers: vec![("host".into(), "localhost".into())],
+                body: Vec::new(),
+                peer: Some(peer.parse::<IpAddr>().unwrap()),
+            },
+            0,
+        ))
     };
     assert!(at("127.0.0.1").allows("urn:cap:ledger:write:default"));
     assert!(at("::1").allows("urn:cap:ledger:write:default"));

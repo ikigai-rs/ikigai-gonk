@@ -33,7 +33,10 @@
 pub mod config;
 pub mod doors;
 pub mod grants;
+pub mod identity;
 pub mod quic;
+pub mod render;
+pub mod web;
 
 use std::sync::Arc;
 

@@ -1,0 +1,559 @@
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+  xmlns:ledger="https://ikigai-rs.dev/ns/ledger#"
+  xmlns:dcterms="http://purl.org/dc/terms/"
+  xmlns:view="urn:iki:gonk:view#">
+<!--
+  ⚠ This comment is INSIDE the root element on purpose: xrust refuses a stylesheet whose
+  first node is a comment ("not an XSLT stylesheet").
+
+  gonk's HTML face: ONE stylesheet, dispatching on rdf:type.
+
+  The input is a <view:page> envelope around a resource's graph face as RDF/XML
+  (src/render.rs). Each subject's primary type is written as its element name, so
+  `match="ledger:Item"` and `match="ledger:Comment"` ARE the type dispatch.
+
+  ⚠ Authored to xrust's SUBSET of XSLT 1.0, measured (src/render.rs has the table):
+  no xsl:variable, no xsl:key, no attribute value templates beyond {@name}, no
+  predicates in match patterns, no absolute paths from inside a nested template, no
+  xsl:sort inside for-each. So every dynamic attribute is xsl:attribute, every sort
+  is on apply-templates, and everything a template would otherwise compute arrives as
+  a view:* literal on the subject it describes.
+
+  ⚠ No `{` or `}` in any literal attribute value: they are AVT delimiters.
+-->
+  <xsl:output method="html" omit-xml-declaration="yes"/>
+
+  <xsl:template match="/">
+    <xsl:apply-templates select="view:page"/>
+  </xsl:template>
+
+  <!-- ============================================================ the shell -->
+
+  <xsl:template match="view:page">
+    <xsl:choose>
+      <xsl:when test="@full = 'true'">
+        <html lang="en">
+          <head>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width, initial-scale=1"/>
+            <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false}</xsl:attribute></meta>
+            <title><xsl:value-of select="@title"/> · gonk</title>
+            <link rel="stylesheet" href="/static/gonk.css"/>
+            <script src="/static/htmx.min.js" defer="defer"></script>
+            <script src="/static/gonk.js" defer="defer"></script>
+          </head>
+          <body>
+            <a class="skip" href="#main">Skip to content</a>
+            <header class="top">
+              <a class="brand" href="/">gonk</a>
+              <nav class="ledgers" aria-label="Ledgers">
+                <xsl:apply-templates select="view:ledger"/>
+              </nav>
+              <a class="navlink" href="/sparql">SPARQL</a>
+              <div id="auth" class="auth">
+                <span id="auth-who" class="who" hidden="hidden"></span>
+                <button id="auth-login" type="button" class="quiet" hidden="hidden">Sign in with passkey</button>
+                <button id="auth-logout" type="button" class="quiet" hidden="hidden">Sign out</button>
+                <a id="auth-localhost" class="note" hidden="hidden">Passkeys need localhost</a>
+              </div>
+            </header>
+            <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
+              <h2 id="enrol-title">Create a passkey for this server</h2>
+              <p>This link carries a one-time invite. Creating the passkey enrols it under the grant the invite names; after that, signing in with it gives this browser that grant.</p>
+              <form id="enrol-form" class="row">
+                <label for="enrol-label">Label</label>
+                <input id="enrol-label" name="label" type="text" autocomplete="off" placeholder="e.g. laptop Touch ID"/>
+                <button type="submit">Create passkey</button>
+              </form>
+            </section>
+            <div id="flash" class="flash-area" role="status" aria-live="polite"></div>
+            <main id="main">
+              <xsl:call-template name="body"/>
+            </main>
+          </body>
+        </html>
+      </xsl:when>
+      <xsl:otherwise>
+        <xsl:call-template name="body"/>
+      </xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template match="view:ledger">
+    <a class="ledger-link">
+      <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>
+      <xsl:value-of select="@name"/>
+    </a>
+  </xsl:template>
+
+  <xsl:template match="view:ledger" mode="option">
+    <option>
+      <xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="selected">selected</xsl:attribute></xsl:if>
+      <xsl:value-of select="@name"/>
+    </option>
+  </xsl:template>
+
+  <xsl:template match="view:flash">
+    <p>
+      <xsl:attribute name="class">flash <xsl:value-of select="@kind"/></xsl:attribute>
+      <xsl:value-of select="."/>
+    </p>
+  </xsl:template>
+
+  <xsl:template name="body">
+    <xsl:choose>
+      <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
+      <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
+      <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
+      <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
+      <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
+      <xsl:otherwise>
+        <section class="panel empty-state">
+          <h1><xsl:value-of select="@title"/></h1>
+          <p><xsl:value-of select="@message"/></p>
+        </section>
+      </xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <!-- ============================================================ a ledger -->
+
+  <xsl:template name="ledger">
+    <section id="ledger" class="ledger">
+      <header class="ledger-head">
+        <h1><xsl:value-of select="@title"/></h1>
+        <nav class="filters" aria-label="Status">
+          <xsl:call-template name="status-link"><xsl:with-param name="status" select="'open'"/></xsl:call-template>
+          <xsl:call-template name="status-link"><xsl:with-param name="status" select="'closed'"/></xsl:call-template>
+          <xsl:call-template name="status-link"><xsl:with-param name="status" select="'all'"/></xsl:call-template>
+        </nav>
+        <form class="search" method="get" role="search" hx-target="#ledger" hx-swap="outerHTML">
+          <xsl:attribute name="action"><xsl:value-of select="@page-url"/></xsl:attribute>
+          <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/></xsl:attribute>
+          <input type="hidden" name="status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
+          <label class="sr-only" for="search-text">Search titles</label>
+          <input id="search-text" type="search" name="text" placeholder="Search titles">
+            <xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute>
+          </input>
+          <button type="submit" class="quiet">Search</button>
+        </form>
+      </header>
+      <xsl:apply-templates select="view:flash"/>
+      <xsl:if test="@can-write = 'true'">
+        <form class="panel file" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
+          <input type="hidden" name="_action" value="append"/>
+          <input type="hidden" name="_then" value="items"/>
+          <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="@ledger"/></xsl:attribute></input>
+          <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
+          <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
+          <textarea id="file-content" name="content" rows="3" required="required"></textarea>
+          <details>
+            <summary>More fields</summary>
+            <div class="grid">
+              <label>Priority
+                <select name="priority">
+                  <option value="">unset</option>
+                  <option value="0">0 highest</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4 lowest</option>
+                </select>
+              </label>
+              <label>Labels <input type="text" name="labels" placeholder="comma, separated"/></label>
+              <label>About <input type="text" name="about" placeholder="resource IRIs, space separated"/></label>
+              <label>Revision <input type="text" name="revision" placeholder="commit sha or tag"/></label>
+            </div>
+          </details>
+          <button type="submit">File</button>
+        </form>
+      </xsl:if>
+      <xsl:if test="count(rdf:RDF/ledger:Item) = 0">
+        <p class="empty">No items match.</p>
+      </xsl:if>
+      <xsl:if test="count(rdf:RDF/ledger:Item) &gt; 0">
+        <ol class="items">
+          <xsl:apply-templates select="rdf:RDF/ledger:Item">
+            <xsl:sort select="dcterms:modified" order="descending"/>
+          </xsl:apply-templates>
+        </ol>
+      </xsl:if>
+    </section>
+  </xsl:template>
+
+  <xsl:template name="status-link">
+    <xsl:param name="status"/>
+    <a hx-target="#ledger" hx-swap="outerHTML">
+      <xsl:attribute name="href"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
+      <xsl:if test="@status = $status"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+      <xsl:value-of select="$status"/>
+    </a>
+  </xsl:template>
+
+  <!-- One row of a ledger listing: the default rendering of a ledger:Item. -->
+  <xsl:template match="ledger:Item">
+    <li>
+      <xsl:attribute name="class">row <xsl:value-of select="view:status"/></xsl:attribute>
+      <span class="num"><xsl:value-of select="view:short"/></span>
+      <a class="title">
+        <xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute>
+        <xsl:value-of select="dcterms:title"/>
+      </a>
+      <span class="badges">
+        <xsl:call-template name="badges"/>
+      </span>
+      <xsl:if test="view:canWrite = 'true'">
+        <xsl:if test="view:status = 'open'">
+          <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
+            <input type="hidden" name="_action" value="close"/>
+            <input type="hidden" name="_then" value="items"/>
+            <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
+            <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
+            <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
+            <button type="submit" class="quiet small">
+              <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> as done</xsl:attribute>
+              Close
+            </button>
+          </form>
+        </xsl:if>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <xsl:template name="badges">
+    <span>
+      <xsl:attribute name="class">badge <xsl:value-of select="view:status"/></xsl:attribute>
+      <xsl:value-of select="view:status"/>
+      <xsl:if test="view:reason"> · <xsl:value-of select="view:reason"/></xsl:if>
+    </span>
+    <span class="badge priority"><xsl:value-of select="view:priority"/></span>
+    <xsl:if test="view:deferred = 'true'"><span class="badge deferred">deferred</span></xsl:if>
+    <xsl:if test="ledger:claimedBy"><span class="badge claimed">claimed by <xsl:value-of select="ledger:claimedBy"/></span></xsl:if>
+    <xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each>
+  </xsl:template>
+
+  <!-- ============================================================ one item -->
+
+  <xsl:template name="item">
+    <article id="item" class="item-page">
+      <xsl:apply-templates select="view:flash"/>
+      <xsl:apply-templates select="rdf:RDF/ledger:Item" mode="card"/>
+      <xsl:if test="count(rdf:RDF/view:Link) &gt; 0">
+        <section class="panel links" aria-labelledby="links-title">
+          <h2 id="links-title">Links</h2>
+          <ul class="plain">
+            <xsl:apply-templates select="rdf:RDF/view:Link">
+              <xsl:sort select="view:order"/>
+            </xsl:apply-templates>
+          </ul>
+        </section>
+      </xsl:if>
+      <section class="panel comments" aria-labelledby="comments-title">
+        <h2 id="comments-title">Comments</h2>
+        <xsl:if test="count(rdf:RDF/ledger:Comment) = 0"><p class="empty">No comments yet.</p></xsl:if>
+        <xsl:if test="count(rdf:RDF/ledger:Comment) &gt; 0">
+          <ol class="plain comment-list">
+            <xsl:apply-templates select="rdf:RDF/ledger:Comment">
+              <xsl:sort select="dcterms:created"/>
+            </xsl:apply-templates>
+          </ol>
+        </xsl:if>
+      </section>
+      <xsl:apply-templates select="rdf:RDF/ledger:Item" mode="actions"/>
+    </article>
+  </xsl:template>
+
+  <xsl:template match="ledger:Item" mode="card">
+    <header class="item-head">
+      <p class="crumbs">
+        <a><xsl:attribute name="href"><xsl:value-of select="view:ledgerHref"/></xsl:attribute><xsl:value-of select="view:ledger"/></a>
+        <span class="num"><xsl:value-of select="view:short"/></span>
+      </p>
+      <h1 class="item-title"><xsl:value-of select="dcterms:title"/></h1>
+      <p class="badges"><xsl:call-template name="badges"/></p>
+    </header>
+    <xsl:if test="ledger:body"><div class="body"><xsl:value-of select="ledger:body"/></div></xsl:if>
+    <dl class="meta">
+      <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="ledger:author"> by <xsl:value-of select="ledger:author"/></xsl:if></dd>
+      <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
+      <xsl:if test="view:kind"><dt>Level</dt><dd><code><xsl:value-of select="view:kind"/></code></dd></xsl:if>
+      <xsl:if test="ledger:revision"><dt>Revision</dt><dd><code><xsl:value-of select="ledger:revision"/></code></dd></xsl:if>
+      <xsl:if test="ledger:purpose"><dt>Purpose</dt><dd><xsl:value-of select="ledger:purpose"/></dd></xsl:if>
+      <dt>IRI</dt><dd><code class="iri"><xsl:value-of select="view:iri"/></code></dd>
+    </dl>
+  </xsl:template>
+
+  <xsl:template match="view:Link">
+    <li>
+      <span class="rel"><xsl:value-of select="view:rel"/></span>
+      <xsl:choose>
+        <xsl:when test="view:href">
+          <a><xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute><xsl:value-of select="view:text"/></a>
+        </xsl:when>
+        <xsl:otherwise><code class="iri"><xsl:value-of select="view:text"/></code></xsl:otherwise>
+      </xsl:choose>
+      <xsl:if test="view:canUnlink = 'true'">
+        <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <input type="hidden" name="_action" value="link"/>
+          <input type="hidden" name="_verb" value="Delete"/>
+          <input type="hidden" name="_then" value="card"/>
+          <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
+          <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:id"/></xsl:attribute></input>
+          <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:item"/></xsl:attribute></input>
+          <input type="hidden" name="content"><xsl:attribute name="value"><xsl:value-of select="view:target"/></xsl:attribute></input>
+          <input type="hidden" name="type"><xsl:attribute name="value"><xsl:value-of select="view:rel"/></xsl:attribute></input>
+          <button type="submit" class="quiet small">Unlink</button>
+        </form>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="ledger:Comment">
+    <li class="comment">
+      <p class="comment-meta">
+        <xsl:value-of select="view:created"/>
+        <xsl:text> · </xsl:text>
+        <xsl:choose>
+          <xsl:when test="ledger:author"><xsl:value-of select="ledger:author"/></xsl:when>
+          <xsl:otherwise>unattributed</xsl:otherwise>
+        </xsl:choose>
+      </p>
+      <div class="body"><xsl:value-of select="ledger:body"/></div>
+    </li>
+  </xsl:template>
+
+  <!-- Everything this caller may do to the item: offered only when the grant allows it. -->
+  <xsl:template match="ledger:Item" mode="actions">
+    <xsl:if test="view:canWrite = 'true'">
+      <section class="panel actions" aria-labelledby="act-title">
+        <h2 id="act-title">Work on it</h2>
+
+        <form class="stack" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <xsl:call-template name="hidden"><xsl:with-param name="action" select="'comment'"/></xsl:call-template>
+          <label for="comment-content">Comment</label>
+          <textarea id="comment-content" name="content" rows="3" required="required"></textarea>
+          <button type="submit">Comment</button>
+        </form>
+
+        <div class="row wrap">
+          <xsl:choose>
+            <xsl:when test="view:status = 'open'">
+              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+                <xsl:call-template name="hidden"><xsl:with-param name="action" select="'close'"/></xsl:call-template>
+                <label for="close-reason">Close as</label>
+                <select id="close-reason" name="reason">
+                  <option value="done">done</option>
+                  <option value="wontfix">wontfix</option>
+                  <option value="duplicate">duplicate</option>
+                  <option value="superseded">superseded</option>
+                  <option value="audit-no-change">audit-no-change</option>
+                </select>
+                <button type="submit">Close</button>
+              </form>
+            </xsl:when>
+            <xsl:otherwise>
+              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+                <xsl:call-template name="hidden"><xsl:with-param name="action" select="'reopen'"/></xsl:call-template>
+                <button type="submit">Reopen</button>
+              </form>
+            </xsl:otherwise>
+          </xsl:choose>
+
+          <xsl:choose>
+            <xsl:when test="ledger:claimedBy">
+              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+                <xsl:call-template name="hidden"><xsl:with-param name="action" select="'claim'"/><xsl:with-param name="verb" select="'Delete'"/></xsl:call-template>
+                <button type="submit" class="quiet">Release claim</button>
+              </form>
+            </xsl:when>
+            <xsl:otherwise>
+              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+                <xsl:call-template name="hidden"><xsl:with-param name="action" select="'claim'"/></xsl:call-template>
+                <label for="claim-holder">Claim for</label>
+                <input id="claim-holder" type="text" name="content" required="required" autocomplete="off"/>
+                <button type="submit" class="quiet">Claim</button>
+              </form>
+            </xsl:otherwise>
+          </xsl:choose>
+
+          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+            <xsl:choose>
+              <xsl:when test="view:deferred = 'true'">
+                <xsl:call-template name="hidden"><xsl:with-param name="action" select="'defer'"/><xsl:with-param name="verb" select="'Delete'"/></xsl:call-template>
+                <button type="submit" class="quiet">Resume</button>
+              </xsl:when>
+              <xsl:otherwise>
+                <xsl:call-template name="hidden"><xsl:with-param name="action" select="'defer'"/></xsl:call-template>
+                <button type="submit" class="quiet">Defer</button>
+              </xsl:otherwise>
+            </xsl:choose>
+          </form>
+        </div>
+
+        <details>
+          <summary>Edit title, body and priority</summary>
+          <form class="stack" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+            <input type="hidden" name="_action" value="item"/>
+            <input type="hidden" name="_then" value="card"/>
+            <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
+            <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:id"/></xsl:attribute></input>
+            <label for="edit-content">Title, blank line, body</label>
+            <textarea id="edit-content" name="content" rows="6" required="required"><xsl:value-of select="view:content"/></textarea>
+            <label for="edit-priority">Priority</label>
+            <select id="edit-priority" name="priority">
+              <option value="">unchanged</option>
+              <option value="0">0 highest</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4 lowest</option>
+            </select>
+            <button type="submit">Save</button>
+          </form>
+        </details>
+
+        <div class="row wrap">
+          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+            <xsl:call-template name="hidden"><xsl:with-param name="action" select="'label'"/></xsl:call-template>
+            <label for="label-add">Label</label>
+            <input id="label-add" type="text" name="content" required="required" autocomplete="off"/>
+            <button type="submit" class="quiet">Add</button>
+          </form>
+          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+            <xsl:call-template name="hidden"><xsl:with-param name="action" select="'label'"/><xsl:with-param name="verb" select="'Delete'"/></xsl:call-template>
+            <label for="label-remove">Remove label</label>
+            <input id="label-remove" type="text" name="content" required="required" autocomplete="off"/>
+            <button type="submit" class="quiet">Remove</button>
+          </form>
+          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+            <xsl:call-template name="hidden"><xsl:with-param name="action" select="'link'"/></xsl:call-template>
+            <label for="link-type">Link</label>
+            <select id="link-type" name="type">
+              <option value="related">related to</option>
+              <option value="blocks">blocks</option>
+              <option value="parent">has parent</option>
+            </select>
+            <input type="text" name="content" required="required" placeholder="#12" aria-label="Linked item" autocomplete="off"/>
+            <button type="submit" class="quiet">Link</button>
+          </form>
+        </div>
+      </section>
+    </xsl:if>
+
+    <xsl:if test="view:canDelete = 'true'">
+      <section class="panel danger" aria-labelledby="delete-title">
+        <h2 id="delete-title">Delete</h2>
+        <p>Moves the item, its comments and the links pointing at it into this ledger's graveyard graph, and leaves a tombstone. Recoverable by hand; it leaves every listing now.</p>
+        <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <xsl:attribute name="hx-confirm">Delete <xsl:value-of select="view:short"/>? It can be recovered from the graveyard graph.</xsl:attribute>
+          <input type="hidden" name="_action" value="item"/>
+          <input type="hidden" name="_verb" value="Delete"/>
+          <input type="hidden" name="_then" value="gone"/>
+          <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
+          <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:id"/></xsl:attribute></input>
+          <label for="delete-reason">Reason</label>
+          <input id="delete-reason" type="text" name="reason" autocomplete="off"/>
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </section>
+    </xsl:if>
+
+    <xsl:if test="view:canPurge = 'true'">
+      <section class="panel danger purge" aria-labelledby="purge-title">
+        <h2 id="purge-title">Purge</h2>
+        <p>Destroys the content in both the live graph and the graveyard. Only a tombstone remains: the number, the time, the reason, the quad count and a hash of what was destroyed. This is not the same act as Delete and cannot be undone.</p>
+        <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <xsl:attribute name="hx-confirm">Purge <xsl:value-of select="view:short"/> permanently? This cannot be undone.</xsl:attribute>
+          <input type="hidden" name="_action" value="purge"/>
+          <input type="hidden" name="_verb" value="Delete"/>
+          <input type="hidden" name="_then" value="gone"/>
+          <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
+          <input type="hidden" name="content"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
+          <label for="purge-reason">Reason</label>
+          <input id="purge-reason" type="text" name="reason" autocomplete="off"/>
+          <button type="submit" class="danger">Purge permanently</button>
+        </form>
+      </section>
+    </xsl:if>
+  </xsl:template>
+
+  <!-- The hidden fields every item form carries. Context: the ledger:Item. -->
+  <xsl:template name="hidden">
+    <xsl:param name="action"/>
+    <xsl:param name="verb" select="'Sink'"/>
+    <input type="hidden" name="_action"><xsl:attribute name="value"><xsl:value-of select="$action"/></xsl:attribute></input>
+    <input type="hidden" name="_verb"><xsl:attribute name="value"><xsl:value-of select="$verb"/></xsl:attribute></input>
+    <input type="hidden" name="_then" value="card"/>
+    <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
+    <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:id"/></xsl:attribute></input>
+    <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
+  </xsl:template>
+
+  <xsl:template name="gone">
+    <article id="item" class="item-page">
+      <xsl:apply-templates select="view:flash"/>
+      <p><a><xsl:attribute name="href"><xsl:value-of select="@page-url"/></xsl:attribute>Back to <xsl:value-of select="@ledger"/></a></p>
+    </article>
+  </xsl:template>
+
+  <!-- ============================================================ SPARQL -->
+
+  <xsl:template name="sparql">
+    <section id="sparql" class="sparql">
+      <h1>SPARQL</h1>
+      <p class="hint">Read-only, over ONE ledger's graph at a time: the query runs at <code>urn:iki:store:graph-select</code> (or <code>-ask</code>, <code>-construct</code>, <code>-describe</code>) with that graph as its whole dataset, under your grant. <code>FROM</code> and <code>FROM NAMED</code> are refused — the graph already is the dataset — and nothing outside it is visible.</p>
+      <form class="panel stack" method="get" action="/sparql" hx-get="/sparql/results" hx-target="#results" hx-swap="innerHTML">
+        <div class="row">
+          <label for="q-ledger">Ledger</label>
+          <select id="q-ledger" name="ledger">
+            <xsl:apply-templates select="view:ledger" mode="option"/>
+          </select>
+        </div>
+        <label for="q">Query</label>
+        <textarea id="q" name="query" rows="12" spellcheck="false" class="mono"><xsl:value-of select="view:query"/></textarea>
+        <button type="submit">Run</button>
+      </form>
+      <div id="results" class="results" aria-live="polite">
+        <xsl:apply-templates select="view:results"/>
+      </div>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:results">
+    <xsl:apply-templates select="view:error"/>
+    <xsl:if test="@summary"><p class="result-meta"><xsl:value-of select="@summary"/></p></xsl:if>
+    <xsl:apply-templates select="view:table"/>
+    <xsl:if test="view:boolean"><p class="boolean"><xsl:value-of select="view:boolean"/></p></xsl:if>
+    <xsl:if test="view:graph"><pre class="mono graph"><xsl:value-of select="view:graph"/></pre></xsl:if>
+  </xsl:template>
+
+  <xsl:template match="view:error">
+    <p class="flash error" role="alert"><xsl:value-of select="."/></p>
+  </xsl:template>
+
+  <xsl:template match="view:table">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><xsl:for-each select="view:col"><th scope="col"><xsl:value-of select="."/></th></xsl:for-each></tr>
+        </thead>
+        <tbody>
+          <xsl:for-each select="view:row">
+            <tr>
+              <xsl:for-each select="view:cell">
+                <td><xsl:attribute name="class"><xsl:value-of select="@kind"/></xsl:attribute><xsl:value-of select="."/></td>
+              </xsl:for-each>
+            </tr>
+          </xsl:for-each>
+        </tbody>
+      </table>
+    </div>
+  </xsl:template>
+</xsl:stylesheet>
