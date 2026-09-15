@@ -74,6 +74,17 @@
 
   // ------------------------------------------------------------------ ceremonies
 
+  // A WebAuthn call the browser refuses rejects with NotAllowedError whatever the cause — a
+  // cancelled sheet, a timeout, or a page without focus — and its DOM text ("The document is
+  // not focused", "The operation either timed out or was not allowed") says nothing a person
+  // can act on. Say what to do instead. Anything else (a server refusal) is already words.
+  function ceremonyError(err, retry) {
+    if (err && err.name === "NotAllowedError") {
+      return "the passkey prompt was cancelled, timed out, or opened while this window did not have focus. " + retry;
+    }
+    return (err && err.message) || String(err);
+  }
+
   async function signIn() {
     try {
       const { challenge } = await post("/auth/login-options");
@@ -96,7 +107,9 @@
       setToken(done.session, done.seconds);
       location.reload();
     } catch (err) {
-      flash("Sign-in failed: " + err.message, "error");
+      flash("Sign-in did not complete: " + ceremonyError(err, "Click Sign in with passkey to try again."), "error");
+      const login = $("auth-login");
+      if (login && !login.hidden) login.focus();
     }
   }
 
@@ -140,10 +153,25 @@
       });
       history.replaceState(null, "", location.pathname + location.search);
       $("enrol").hidden = true;
-      flash("Passkey created for " + done.label + " (grant " + done.grant + "). Signing in…", "ok");
-      await signIn();
+      // ★ Do NOT chain navigator.credentials.get() here. When create() resolves, the system
+      // passkey sheet still holds focus, and Chrome refuses get() from an unfocused document
+      // ("The document is not focused") — found by the first real Touch ID enrolment. A click
+      // on the sign-in button is a fresh user gesture on a page that has focus back.
+      const created = "Passkey created for " + done.label + " (grant " + done.grant + "). ";
+      const login = $("auth-login");
+      if ($("auth-logout").hidden) {
+        login.hidden = false;
+        flash(created + "Now click Sign in with passkey to use it.", "ok");
+        login.focus();
+      } else {
+        flash(created + "Sign out, then sign in with the new passkey to use its grant.", "ok");
+      }
     } catch (err) {
-      flash("Could not create the passkey: " + err.message, "error");
+      flash(
+        "Could not create the passkey: " +
+          ceremonyError(err, "The invite is still good until it expires — click Create passkey to try again."),
+        "error"
+      );
     }
   }
 

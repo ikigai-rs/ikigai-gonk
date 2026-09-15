@@ -55,27 +55,14 @@ fn serve(flags: &config::Flags) -> ! {
     let http_grants = grants::grants_for_all(&settings.http_ledgers, Authority::Write)
         .unwrap_or_else(|e| fail(&e));
 
-    // The QUIC posture is decided before the store opens: a broken authority file stops the
-    // server instead of degrading it. The door opens only once `clients.json` exists.
+    // Authority is decided before the store opens: a broken authority file stops the server
+    // instead of degrading it. `grants.json` feeds BOTH identity doors (certificates and
+    // passkeys), so its broad-token check runs whether or not QUIC opens.
     let layout = quic::Layout::in_config_home(&homes.config);
-    let quic_door = settings.quic.and_then(|addr| {
-        let enrolment = quic::read_enrolment(&layout.clients_json()).unwrap_or_else(|e| fail(&e))?;
-        let grants = quic::read_grants(&layout.grants_json()).unwrap_or_else(|e| fail(&e));
-        quic::check_grants(&grants).unwrap_or_else(|e| fail(&e));
-        let (identity, _) = quic::server_identity(&layout).unwrap_or_else(|e| fail(&e));
-        let trusted: Vec<String> = quic::trusted_client_certs(&layout)
-            .unwrap_or_else(|e| fail(&e))
-            .into_iter()
-            .map(|(_, pem)| pem)
-            .collect();
-        if trusted.is_empty() {
-            fail(&format!(
-                "{} exists but no client certificate is trusted — add one with `ikigai-gonk client add <name>`, or start with --no-quic",
-                layout.clients_json().display()
-            ));
-        }
-        Some((addr, identity, trusted, enrolment.len()))
-    });
+    quic::read_grants(&layout.grants_json())
+        .and_then(|grants| quic::check_grants(&grants))
+        .unwrap_or_else(|e| fail(&e));
+    let quic_door = quic::open_door(&layout, settings.quic).unwrap_or_else(|e| fail(&e));
     // The passkey file is read here too, so an unparsable `passkeys` block stops the server
     // rather than failing every sign-in.
     identity::read_passkeys(&layout).unwrap_or_else(|e| fail(&e));
@@ -116,12 +103,13 @@ fn serve(flags: &config::Flags) -> ! {
     });
 
     let quic_line = match quic_door {
-        None if settings.quic.is_none() => "off (--no-quic)".to_string(),
-        None => format!(
-            "off — no {} (enrol a client with `ikigai-gonk client add`)",
-            layout.clients_json().display()
-        ),
-        Some((addr, identity, trusted, enrolled)) => {
+        quic::QuicDoor::Off(why) => why,
+        quic::QuicDoor::Open {
+            addr,
+            identity,
+            trusted,
+            enrolled,
+        } => {
             let (door, minter) = (
                 doors::door_kernel(Arc::clone(&hub)),
                 quic::minter(layout.clone()),
