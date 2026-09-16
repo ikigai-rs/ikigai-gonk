@@ -130,6 +130,30 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The backup family's two tokens — the only authority in this server that is not scoped to
+/// a ledger, and the reason it is refused as a grant rather than merely never minted.
+///
+/// ★ **These are the airlock.** `urn:cap:gonk:backup` reads EVERY graph (a backup is the
+/// whole dataset in one file, which is precisely the authority the per-graph boundary exists
+/// to avoid handing out) and `urn:cap:gonk:restore` builds a store from bytes a caller
+/// supplies. Neither can be attached to a certificate or a passkey, so neither is reachable
+/// from the QUIC door or the HTTP door at all: the privileged half of the feature lives
+/// behind the owner-only socket, whose caller can read the dataset's files anyway. That is
+/// the contact-intake airlock's shape — its own door, not a flag on the public one.
+///
+/// ⚠ Refused as a GRANT, not as a requirement. The endpoints declare them and the root
+/// capability on the socket satisfies them, exactly as it satisfies everything else.
+pub const CAP_GONK_ADMIN: [&str; 2] = [crate::backup::CAP_BACKUP, crate::backup::CAP_RESTORE];
+
+/// The scopes in `scopes` that are one of the backup family's tokens.
+pub fn gonk_admin_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| CAP_GONK_ADMIN.contains(&scope.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// `urn:cap:net:*` — the OFFERING wildcard `ikigai-browse` declares on every derivation
 /// (`explain`, `review`, the PR layers), which as a GRANT means "reach any host".
 pub const CAP_NET_ANY: &str = "urn:cap:net:*";

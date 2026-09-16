@@ -1009,6 +1009,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikigai-compress"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21936a81da3427e365df415117beb241a053645f6b9c4fbc774ede7a55cfc0e3"
+dependencies = [
+ "flate2",
+ "ikigai-core",
+]
+
+[[package]]
 name = "ikigai-conformance"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1045,6 +1055,7 @@ dependencies = [
  "getrandom 0.3.4",
  "ikigai-a11y",
  "ikigai-browse",
+ "ikigai-compress",
  "ikigai-conformance",
  "ikigai-core",
  "ikigai-ipc",
@@ -1054,6 +1065,7 @@ dependencies = [
  "ikigai-repo",
  "ikigai-resolve",
  "ikigai-store",
+ "ikigai-time",
  "ikigai-vocab",
  "ikigai-web",
  "ikigai-xslt",
@@ -1134,9 +1146,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-resolve"
-version = "0.1.21"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fd0309bbb059701f173e933234244a6d14cdbc1784febd338fd62f008a30707"
+checksum = "8a014224a80c24b8f40cdadabeb3af7311132d0ef673dcbd2c3980727c4c8f34"
 dependencies = [
  "async-trait",
  "futures",
@@ -1157,6 +1169,16 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "ikigai-time"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ccc5d6dec977e4bc6e94ad9a1cdf962f5e1b62bf5e0682e66152ba9915a744"
+dependencies = [
+ "ikigai-core",
+ "ikigai-resolve",
 ]
 
 [[package]]

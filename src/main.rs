@@ -6,12 +6,14 @@
 
 use std::sync::Arc;
 
+use ikigai_gonk::backup::{self, Backups};
 use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{browse, compose_with, doors, mount, quic, watch, web};
 use ikigai_store::{DurableStore, SharerWrites, StoreConfig};
+use ikigai_time::{JobRegistry, Schedule, ThreadTimer};
 
 fn main() {
     let command = config::parse_args(std::env::args().skip(1))
@@ -148,7 +150,34 @@ fn serve(flags: &config::Flags) -> ! {
     let mounted: Vec<Arc<dyn ikigai_core::Space>> =
         settings.mounts.iter().map(mount::space).collect();
     let mount_line = mount_line(&settings, explains);
-    let hub = Arc::new(compose_with(store, browse_space, mounted));
+
+    // The backup rotation, and the timer that fires it. Both are built before the kernel
+    // because the kernel binds the family; the timer is handed the kernel afterwards.
+    let backup_settings = Arc::new(backup::Settings {
+        dir: settings.backup.dir.clone(),
+        keep: settings.backup.keep,
+        every: settings.backup.every,
+        store_path: store_path.clone(),
+    });
+    // ★ The registry fires under exactly `backup::JOB_SCOPES` and nothing else, so a
+    // scheduled backup has the authority to read every graph and write the rotation — and
+    // no authority to write a single quad. `Capability::root()` is the registry's default
+    // and would have been silently broader than anything this server hands any caller.
+    let jobs = settings.backup.every.map(|_| {
+        JobRegistry::new(Arc::new(ThreadTimer), Arc::new(ikigai_core::SystemClock))
+            .with_capability(ikigai_core::Capability::scoped(backup::JOB_SCOPES))
+    });
+    let hub = Arc::new(compose_with(
+        store,
+        browse_space,
+        mounted,
+        Some(Backups {
+            settings: Arc::clone(&backup_settings),
+            jobs: jobs.clone(),
+        }),
+    ));
+
+    let backup_line = start_backups(&hub, &jobs, &backup_settings);
 
     // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
     // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
@@ -236,6 +265,7 @@ fn serve(flags: &config::Flags) -> ! {
             passkeys.enrolled_count()
         );
         eprintln!("  browse  {browse_line}");
+        eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
@@ -256,6 +286,99 @@ fn serve(flags: &config::Flags) -> ! {
         .await;
         fail(&format!("the http door stopped: {error:?}"))
     })
+}
+
+/// Install the kernel in the job registry and schedule the backup, returning the banner's
+/// backup line.
+///
+/// ★★ **A recurring timer's FIRST tick is one whole interval away, and that is the trap a
+/// 24-hour backup on a supervised daemon falls into.** `ThreadTimer` sleeps the interval
+/// before it fires, `KeepAlive` restarts this process on any exit, and a machine that
+/// reboots (or a binary that is reinstalled) nightly therefore never reaches the first
+/// tick — silently, with a schedule that looks correct in every readout. So startup asks
+/// the rotation directory when the last backup actually happened and, if that is longer ago
+/// than the cadence (or never), schedules a one-shot catch-up a minute out. A restart does
+/// not cost a backup, and a restart loop does not spam one either: the catch-up fires only
+/// while the newest archive is overdue.
+fn start_backups(
+    hub: &Arc<ikigai_core::Kernel>,
+    jobs: &Option<JobRegistry>,
+    settings: &Arc<backup::Settings>,
+) -> String {
+    let Some(every) = settings.every else {
+        return format!(
+            "no schedule (--no-backup or gonk.backup.every = \"off\") — {} is still bound; \
+             this process is the only thing that can export the dataset",
+            backup::BACKUP
+        );
+    };
+    let Some(jobs) = jobs else {
+        return "no schedule — the registry was not built (this is a bug)".to_string();
+    };
+    jobs.set_resolver(Arc::clone(hub) as Arc<dyn ikigai_resolve::Resolver>);
+    if let Err(e) = jobs.schedule_persistent(
+        backup::BACKUP.to_string(),
+        ikigai_core::Verb::Source,
+        Schedule::Every(every),
+        true,
+    ) {
+        // Not fatal: the ledger is served either way, and refusing to start would take the
+        // system of record offline over its backup. Loud, because a server that says it is
+        // backing up and is not is the failure this whole feature exists to prevent.
+        eprintln!("ikigai-gonk: THE BACKUP IS NOT SCHEDULED: {e}");
+        return format!("NOT SCHEDULED: {e}");
+    }
+    let overdue = overdue_by(settings, every);
+    let catch_up = if overdue {
+        match jobs.schedule(
+            backup::BACKUP.to_string(),
+            ikigai_core::Verb::Source,
+            Schedule::Every(CATCH_UP),
+            false,
+        ) {
+            Ok(_) => ", one due now (catching up in 1m)",
+            Err(_) => "",
+        }
+    } else {
+        ""
+    };
+    format!(
+        "every {} into {} — keep {}{catch_up}. `source {}` says when the last good one was",
+        humanize(every),
+        settings.dir.display(),
+        settings.keep,
+        backup::STATUS,
+    )
+}
+
+/// How long after startup the catch-up backup fires. Long enough that a restart loop does
+/// not take one per restart, short enough that an operator watching a deploy sees it.
+const CATCH_UP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether the newest archive on disk is older than one cadence — or there is none.
+///
+/// Read from the SIDECAR's timestamp rather than the file's mtime: a rotation directory
+/// copied or restored from elsewhere keeps the archive's name and contents and loses its
+/// mtime, and the name is what the sidecar agrees with.
+fn overdue_by(settings: &backup::Settings, every: std::time::Duration) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    match backup::newest_taken_at_ms(&settings.dir) {
+        None => true,
+        Some(taken) => now.saturating_sub(taken) >= every.as_millis() as u64,
+    }
+}
+
+/// A duration as the banner reads it.
+fn humanize(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s % 86_400 == 0 => format!("{}h", s / 3600),
+        s => format!("{}h{}m", s / 3600, (s % 3600) / 60),
+    }
 }
 
 /// The banner's browse line: which roots are served, and which of them are watched — because
