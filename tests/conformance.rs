@@ -285,7 +285,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 10] = [
+const WEB_IDS: [&str; 11] = [
     "gonk-page-home",
     "gonk-page-ledger",
     "gonk-fragment-items",
@@ -296,6 +296,7 @@ const WEB_IDS: [&str; 10] = [
     "gonk-fragment-sparql",
     "gonk-passkey",
     "gonk-asset",
+    "gonk-render-rules",
 ];
 
 fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
@@ -307,6 +308,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
         passkeys,
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
     });
     doors::http_kernel(hub, ikigai_gonk::web::space(face))
 }
@@ -367,6 +369,12 @@ fn the_http_door_conforms() {
             Fixture::new("gonk-fragment-sparql", Verb::Source)
                 .arg("query", "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"),
         )
+        // ★ `urn:iki:gonk:render#` is gonk's own, and gonk SERVES it: the rule table at
+        // `urn:iki:gonk:render-rules` is both the data and its documentation. It is
+        // deliberately not in `ikigai-vocab` — it says nothing about work, only about how
+        // this face renders a result cell, and a published vocabulary is a promise to
+        // everyone rather than to one server's stylesheet.
+        .namespace(ikigai_gonk::rules::RENDER_NS)
         .opt_out_check(
             "gonk-passkey",
             Check::Authority,

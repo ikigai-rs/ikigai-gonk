@@ -341,6 +341,7 @@ pub fn edge_config() -> EdgeConfig {
             route("/act", "urn:iki:gonk:act"),
             route("/sparql", "urn:iki:gonk:sparql"),
             route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
+            route("/render-rules", "urn:iki:gonk:render-rules"),
             route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
             route("/static/{name}", "urn:iki:gonk:asset:{name}"),
         ]),

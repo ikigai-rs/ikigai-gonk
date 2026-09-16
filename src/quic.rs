@@ -93,6 +93,13 @@ impl Layout {
     pub fn invites_json(&self) -> PathBuf {
         self.dir.join("invites.json")
     }
+
+    /// This deployment's render rules, replacing [`crate::rules::DEFAULT_RULES`] wholesale
+    /// when the file exists. Read once, at startup, and served at
+    /// `urn:iki:gonk:render-rules` — see [`crate::rules`].
+    pub fn render_rules_ttl(&self) -> PathBuf {
+        self.dir.join("render-rules.ttl")
+    }
 }
 
 /// The server identity, generated on first use. The `bool` says whether it was just made.

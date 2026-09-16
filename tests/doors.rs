@@ -245,6 +245,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
         passkeys: Arc::clone(&passkeys),
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
     });
     let kernel = Arc::new(doors::http_kernel(hub, ikigai_gonk::web::space(face)));
     let door = doors::HttpDoor {
