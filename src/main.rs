@@ -11,7 +11,7 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{browse, compose_with, doors, mount, quic, watch, web};
-use ikigai_store::{DurableStore, StoreConfig};
+use ikigai_store::{DurableStore, SharerWrites, StoreConfig};
 
 fn main() {
     let command = config::parse_args(std::env::args().skip(1))
@@ -84,14 +84,30 @@ fn serve(flags: &config::Flags) -> ! {
     let store_path = StoreConfig::load(Some("gonk"))
         .unwrap_or_else(|e| fail(&e.to_string()))
         .path;
-    // ★ `open_shared` ONLY when something else in this process needs the handle. The browse
-    // annotation family takes an `Arc<Store>`, which is how its quads land in the dataset the
-    // ledger lives in — the whole point of composing them here. What that costs, and why it
-    // does not cost the ledger's read cache, is `ikigai_gonk::freshness`.
+    // ★ The handle leaves this crate ONLY when something else in this process needs it. The
+    // browse annotation family takes an `Arc<Store>`, which is how its quads land in the
+    // dataset the ledger lives in — the whole point of composing them here.
+    //
+    // ★★ And when it leaves, gonk SAYS WHERE THAT HOLDER WRITES. `SharerWrites` is a promise
+    // to `ikigai-store`, which answers it per read: a scoped read of a graph outside the
+    // promise is cacheable again, and every read that can see the whole dataset stays
+    // `Expiry::Always`. Without the promise the store must assume the worst and make EVERY
+    // read `Expiry::Always` — and expiry propagates, so that would de-cache every ledger read
+    // as a side effect of adding a browse face (`tests/browse.rs` prints both numbers).
+    //
+    // `only_the_default_graph` is the true statement here and the strongest one available:
+    // `ikigai-browse` hard-codes `GraphName::DefaultGraph` in all three of its writers
+    // (annotations, the explanation archive, review passes), with no configuration knob, and
+    // the default graph has no IRI for a scoped read to name. ⚠ A FALSE promise is silent,
+    // unbounded staleness — reads of a graph the sharer does write, cached against three
+    // threads its write never cuts — so this line moves only together with what browse does,
+    // and `tests/browse.rs::a_browse_write_touches_no_reserved_graph` fingerprints the
+    // reserved graphs around a real browse write to say so.
     let opened = if settings.browse_roots.is_empty() {
         DurableStore::open(&store_path).map(|store| (store, None))
     } else {
-        DurableStore::open_shared(&store_path).map(|(store, handle)| (store, Some(handle)))
+        DurableStore::open_shared_declaring(&store_path, SharerWrites::only_the_default_graph())
+            .map(|(store, handle)| (store, Some(handle)))
     };
     let (store, handle) = opened.unwrap_or_else(|e| {
         fail(&format!(

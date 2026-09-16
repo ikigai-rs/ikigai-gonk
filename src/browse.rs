@@ -14,14 +14,18 @@
 //! # One dataset, and what that buys
 //!
 //! The annotation family takes an `Arc<Store>` — the same dataset the ledger's named graphs
-//! live in, handed over by `DurableStore::open_shared`. That is the whole point of the arc:
-//! a ledger item's `ledger:about <urn:repo:…>` and an annotation on that file are two graphs
-//! in ONE store, so the join is a local SPARQL query and not a federation problem. What the
-//! shared handle costs, and why it does not cost the ledger's read cache, is
-//! [`crate::freshness`].
+//! live in, handed over by `DurableStore::open_shared_declaring`. That is the whole point of
+//! the arc: a ledger item's `ledger:about <urn:repo:…>` and an annotation on that file are
+//! two graphs in ONE store, so the join is a local SPARQL query and not a federation problem.
+//! What the shared handle costs the ledger's read cache is **nothing**, and the reason is the
+//! declaration on that call: `SharerWrites::only_the_default_graph` names where this family
+//! writes, so `ikigai-store` keeps every scoped read of every other graph cacheable under its
+//! own write threads (`src/main.rs`, and `tests/browse.rs` prints the numbers).
 //!
 //! ⚠ **Where browse's quads land is browse's decision, not this server's, and it is the
-//! default graph.** `ikigai-browse` hard-codes `GraphName::DefaultGraph` in all three of its
+//! default graph** — so that decision is also what the declaration above promises, and a
+//! change to it makes this server's cache wrong rather than merely different.
+//! `ikigai-browse` hard-codes `GraphName::DefaultGraph` in all three of its
 //! writers. gonk cannot give the family its own named graph (`urn:iki:browse:graph:…`, which
 //! is what the ledger's graph-per-tenant shape would suggest) without a change to that
 //! crate. The consequence is a capability one, and it is stated on the doors: `ikigai-store`

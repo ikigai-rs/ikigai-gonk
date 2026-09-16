@@ -584,26 +584,33 @@ browse composition's twenty more, in the hub and through a door, pins the five t
 
 ### One dataset, and what it costs
 
-The annotation family takes a handle on the store (`DurableStore::open_shared`), so its quads
-land in the same dataset the ledgers live in and a ledger item joins an annotation on a repo
-file in one local query — the point of composing them here rather than federating.
+The annotation family takes a handle on the store, so its quads land in the same dataset the
+ledgers live in and a ledger item joins an annotation on a repo file in one local query — the
+point of composing them here rather than federating.
 
-`ikigai-store` answers a handout by making **every** read `Expiry::Always`, because a handle it
-cannot see is a writer it cannot see; and expiry propagates, so that would have de-cached every
-ledger read as a side effect of adding a browse face. Measured on a 247-item ledger,
-`urn:iki:ledger:items` goes from **11.7µs to 12.4ms** that way — a thousandfold, with every
-test still passing and the types identical.
+`ikigai-store` answers a bare handout (`open_shared`) by making **every** read
+`Expiry::Always`, because a handle it cannot see is a writer it cannot see; and expiry
+propagates, so that would have de-cached every ledger read as a side effect of adding a browse
+face. Measured on a 247-item ledger, `urn:iki:ledger:items` goes from **11.9µs to 12.9ms** that
+way — a thousandfold, with every test still passing and the types identical.
 
-gonk does not accept that. `ikigai-browse` writes every quad it stores into the store's
-**default graph**, and `ikigai-store`'s scoped read face confines a query to one NAMED graph by
-construction — the default graph has no IRI, so no scoped read can see it. So the scoped faces
-(`urn:iki:store:graph-{select,ask,construct,describe}`), which is what every ledger read is
-made of, are declared cacheable again under the store's own three write threads, and the broad
-faces are left uncacheable, by name: `urn:iki:store:{select,ask,construct,describe}`,
-`urn:iki:store:info`, and therefore `urn:iki:ledger:ledgers`, which asks *which graphs exist*
-through the broad door. Recovered, the same read is **10.7µs**. `tests/browse.rs` prints all
-three numbers and pins the assumption the argument rests on: a browse write must touch no
-named graph.
+gonk does not accept that, and it does not have to, because it knows something the store
+cannot: **who the other holder is and where it writes.** `ikigai-browse` puts every quad it
+stores into the **default graph**, hard-coded in all three of its writers, so `main` opens with
+`DurableStore::open_shared_declaring(path, SharerWrites::only_the_default_graph())` and the
+store answers freshness per read from that promise: a scoped read
+(`urn:iki:store:graph-{select,ask,construct,describe}`), whose universe is one NAMED graph by
+construction, is cacheable again under the store's own three write threads — and that is what
+every ledger read is made of. Declared, the same read is **11.9µs**. The broad faces stay
+uncacheable, by name: `urn:iki:store:{select,ask,construct,describe}`, `urn:iki:store:info`,
+and therefore `urn:iki:ledger:ledgers`, which asks *which graphs exist* through the broad door.
+
+⚠ **A false promise there would be silent, unbounded staleness** — reads of a graph the sharer
+does write, cached against threads its writes never cut. So the promise is not left to a
+comment: `tests/browse.rs` prints all three numbers and takes the store's own
+`reserved_graphs_fingerprint()` either side of a real browse write, which fingerprints the
+**quads** of every reserved graph rather than the set of graph names, and errors rather than
+passing vacuously on a store that promised nothing.
 
 ### Watched roots, and why the reads are cached at all
 
