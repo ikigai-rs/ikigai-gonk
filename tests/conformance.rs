@@ -18,6 +18,11 @@
 //! - [`every_entry_answers_meta_in_json_through_a_door`] — a mounting client reads every
 //!   contract through the JSON Meta face, and when that fails it degrades silently.
 //!
+//! ⚠ **This file walks the composition with NO browse roots** — the store and the ledgers,
+//! which is what `main` builds when nothing names a root. The browse composition adds twenty
+//! more resources and a shared store handle, and it has its own file (`tests/browse.rs`):
+//! keeping them apart is what lets this one keep asserting the catalog exactly.
+//!
 //! The store's twelve resources are opted out of the invoking checks for the reason the
 //! ledger's suite gives: they are walked with real SPARQL by `ikigai-store`'s own suite, and
 //! the synthesized `"x"` this suite would hand them is not a query.
