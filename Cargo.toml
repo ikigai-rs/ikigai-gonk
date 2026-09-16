@@ -46,10 +46,15 @@ ikigai-core = "0.1.70"
 ikigai-vocab = "0.1.69"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
-# 0.2.3, not 0.2.2: 0.2.2 is yanked, and it does not compile in any graph where a
-# sibling enables `oxrdf/rdf-12`. 0.2.2 is also where `cap_read_graph` — the narrow read
-# door `grants.rs` computes tokens from — first exists.
-ikigai-store = { version = "0.2.3", features = ["persistent"] }
+# 0.2.4 is the floor and it is the whole of what this server now says about freshness:
+# `open_shared_declaring` + `SharerWrites` let gonk NAME the graphs its sharer
+# (`ikigai-browse`) may write, so the store itself declares a scoped read of every other
+# graph cacheable — which is what `src/freshness.rs` used to do from outside, on four IRIs
+# it transcribed by hand. `reserved_graphs_fingerprint` is the tripwire that checks the
+# promise, and `tests/browse.rs` takes it. (0.2.2 is yanked and does not compile in any
+# graph where a sibling enables `oxrdf/rdf-12`; 0.2.2 is also where `cap_read_graph` — the
+# narrow read door `grants.rs` computes tokens from — first exists.)
+ikigai-store = { version = "0.2.4", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied

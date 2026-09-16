@@ -5,17 +5,19 @@
 //!
 //! - [`the_served_catalog_is_exactly_what_this_manifest_links`] — linking two more crates put
 //!   twenty more resources behind the doors; the catalog is pinned id by id, as it was.
-//! - [`a_browse_write_touches_no_named_graph`] — the ASSUMPTION [`ikigai_gonk::freshness`]
-//!   rests on, checked at the boundary rather than trusted in a comment.
+//! - [`a_browse_write_touches_no_reserved_graph`] — the PROMISE `main` makes to
+//!   `ikigai-store` (`SharerWrites::only_the_default_graph`), checked at the boundary with
+//!   the store's own tripwire rather than trusted in a comment.
 //! - [`a_ledger_item_joins_an_annotation_on_a_repo_file`] — the point of one dataset.
 //! - [`the_shared_handle_costs_the_ledger_nothing`] — the naive composition beside the one
 //!   this server builds, with the read timings printed.
 //! - [`a_watched_file_read_recomputes_after_the_file_changes_on_disk`] — the cache that
 //!   watcher makes safe, driven through the watcher's own notification path.
 //!
-//! Every store here is `in_memory_shared`, which carries the SAME coverage flag as the
-//! durable `open_shared` (`covered: false`) and takes no RocksDB lock — so these run beside
-//! a live gonk holding `~/.ikigai/store`.
+//! Every store here is an `in_memory_*` one, which carries the SAME coverage as its durable
+//! twin — `in_memory_shared_declaring` for the composition this server builds, plain
+//! `in_memory_shared` for the naive one it refused — and takes no RocksDB lock, so these run
+//! beside a live gonk holding `~/.ikigai/store`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,7 +32,7 @@ use ikigai_gonk::grants::{grants_for_all, Authority};
 use ikigai_gonk::mount::{self, Mount};
 use ikigai_gonk::watch::RootWatch;
 use ikigai_gonk::{browse, compose_with};
-use ikigai_store::DurableStore;
+use ikigai_store::{DurableStore, SharerWrites};
 use ikigai_vocab::TurtleRenderer;
 use tempfile::TempDir;
 
@@ -47,10 +49,11 @@ fn roots(dir: &TempDir) -> Vec<(String, PathBuf)> {
     vec![("demo".to_string(), dir.path().to_path_buf())]
 }
 
-/// The composition `main` builds when `gonk.browse.root` names a root: a shared store, the
-/// browse family over the same dataset, and the freshness recovery.
+/// The composition `main` builds when `gonk.browse.root` names a root: a shared store that
+/// DECLARES where its sharer writes, and the browse family over the same dataset.
 fn served(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
-    served_with(dir, None)
+    let (hub, watch, _store) = served_with(dir, None);
+    (hub, watch)
 }
 
 /// ★ The same, plus a `gonk.mount` — pointed at a socket that does not exist.
@@ -60,7 +63,8 @@ fn served(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
 /// server whose other job must not depend on a model. A test that needed a live peer could
 /// not run in CI, and would be testing the peer rather than this composition.
 fn served_explaining(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
-    served_with(dir, Some(dead_mount()))
+    let (hub, watch, _store) = served_with(dir, Some(dead_mount()));
+    (hub, watch)
 }
 
 /// A mount whose peer can never answer: a Unix socket path that is not there, so the dial
@@ -73,8 +77,20 @@ fn dead_mount() -> Mount {
     .expect("a mount line")
 }
 
-fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch) {
-    let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
+/// ⚠ The third return is the SAME store, cloned before it was composed — a `DurableStore` is
+/// a handle, so the clone reads the one dataset the kernel serves. It exists for
+/// [`a_browse_write_touches_no_reserved_graph`], which needs
+/// `reserved_graphs_fingerprint` after `compose_with` has taken the store by value; every
+/// other test drops it.
+fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch, DurableStore) {
+    // ★ `_declaring`, matching `main`: the promise that the sharer (`ikigai-browse`) writes
+    // the default graph and nothing else is what keeps every scoped read — which is every
+    // read the ledger makes — cacheable under the store's own write threads. Plain
+    // `in_memory_shared` here would test a composition this server does not build, and would
+    // do it by being slower and passing.
+    let (store, handle) =
+        DurableStore::in_memory_shared_declaring(SharerWrites::only_the_default_graph())
+            .expect("a shared in-memory store that declares where its sharer writes");
     let (watch, refused) = RootWatch::start(&roots(dir));
     assert!(refused.is_empty(), "{refused:?}");
     let tiers = ExplainTiers::default();
@@ -85,13 +101,18 @@ fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch) 
         mount.is_some().then_some(&tiers),
     );
     let mounted = mount.iter().map(mount::space).collect();
-    let hub = Arc::new(compose_with(store, Some(Arc::new(wired.space)), mounted));
-    (hub, watch)
+    let hub = Arc::new(compose_with(
+        store.clone(),
+        Some(Arc::new(wired.space)),
+        mounted,
+    ));
+    (hub, watch, store)
 }
 
-/// ★ The composition this arc REFUSED: `open_shared`, everything else as before, and no
-/// freshness recovery. It exists so the cost of the easy path is a number in the test output
-/// rather than an assertion about a counterfactual.
+/// ★ The composition this arc REFUSED: `open_shared` with NO declaration — the handle leaves
+/// and the store is told nothing about where its holder writes, so it must assume the worst
+/// and make every read `Expiry::Always`. It exists so the cost of the easy path is a number
+/// in the test output rather than an assertion about a counterfactual.
 fn naive(dir: &TempDir) -> Arc<Kernel> {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // No watcher either: a host that accepts the blanket has no reason to run one, and
@@ -134,26 +155,6 @@ fn issue(kernel: &Kernel, verb: Verb, iri: &str, args: &[(&str, &str)]) -> Repre
 
 fn text(kernel: &Kernel, verb: Verb, iri: &str, args: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&issue(kernel, verb, iri, args).bytes).into_owned()
-}
-
-/// The dataset's named graphs, by the broad read door (root only).
-fn named_graphs(kernel: &Kernel) -> Vec<String> {
-    let answer = text(
-        kernel,
-        Verb::Source,
-        "urn:iki:store:select",
-        &[(
-            "query",
-            "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g",
-        )],
-    );
-    let json: serde_json::Value = serde_json::from_str(&answer).expect("SPARQL results JSON");
-    json["results"]["bindings"]
-        .as_array()
-        .expect("bindings")
-        .iter()
-        .map(|row| row["g"]["value"].as_str().unwrap_or_default().to_string())
-        .collect()
 }
 
 /// The IRIs the kernel currently holds cached, from `urn:kernel:cache`.
@@ -462,28 +463,43 @@ fn a_peer_that_is_down_costs_explain_and_nothing_else() {
 
 // ------------------------------------------------- where browse's quads land
 
-/// ★ The assumption [`ikigai_gonk::freshness`] is built on, pinned at the boundary: every
-/// quad `ikigai-browse` writes goes into the store's DEFAULT graph, so no named-graph read —
-/// which is every read the ledger makes and every read a scoped capability can reach — can
-/// see a write made through the handle that left `ikigai-store`.
+/// ★ The PROMISE `main` makes when it hands the handle out — `SharerWrites`
+/// `::only_the_default_graph` — pinned at the boundary with `ikigai-store`'s own tripwire.
+/// Every quad `ikigai-browse` writes goes into the DEFAULT graph, so no named graph this
+/// store reserves from the sharer can move when browse writes; and a graph that cannot move
+/// is a graph whose scoped reads stay cacheable, which is every read the ledger makes.
 ///
-/// The day browse writes a named graph, this test is red HERE, where the assumption is made,
+/// ⚠ **The fingerprint is over QUADS, not over the set of graph names**, and that is the
+/// difference that matters: this server wrote the name-set version by hand until
+/// `ikigai-store` 0.2.4, and it would have missed a sharer writing into a named graph that
+/// already existed — which is exactly the case a running gonk is in, where the ledger's graph
+/// is always there. It also *errors* on a store that declared nothing, rather than passing
+/// vacuously.
+///
+/// ⚠ Both fingerprints are taken around the SHARER's write and nothing else. A write through
+/// `ikigai-store`'s own endpoints changes a reserved graph legitimately — it cut a thread when
+/// it did — and would read here as a broken promise.
+///
+/// The day browse writes a named graph, this test is red HERE, where the promise is made,
 /// instead of silently stale in the cache of a running server.
 #[test]
-fn a_browse_write_touches_no_named_graph() {
+fn a_browse_write_touches_no_reserved_graph() {
     let dir = scratch_root();
-    let (hub, _watch) = served(&dir);
+    let (hub, _watch, store) = served_with(&dir, None);
     text(
         &hub,
         Verb::Sink,
         "urn:iki:ledger:append",
-        &[("content", "an item, so a named graph exists at all")],
+        &[("content", "an item, so a reserved graph exists at all")],
     );
-    let before = named_graphs(&hub);
+    let before = store
+        .reserved_graphs_fingerprint()
+        .expect("this store declares where its sharer writes");
     assert_eq!(
-        before,
-        ["urn:iki:ledger:graph:default"],
-        "the ledger's graph is the only named one"
+        before.len(),
+        1,
+        "the ledger's graph is reserved from the sharer, and it is the only named one — a \
+         fingerprint over nothing would pass whatever browse did"
     );
 
     annotate(
@@ -493,7 +509,8 @@ fn a_browse_write_touches_no_named_graph() {
         "first",
         "a note",
     );
-    // The annotation IS in the dataset — the broad read sees it…
+    // The annotation IS in the dataset — the broad read sees it, so the tripwire below is
+    // measuring a write that really happened…
     let answer = text(
         &hub,
         Verb::Source,
@@ -504,11 +521,15 @@ fn a_browse_write_touches_no_named_graph() {
         )],
     );
     assert!(answer.contains("urn:iki:annotation:n1"), "{answer}");
-    // …and it is in no named graph, which is why a scoped read cannot see it.
-    assert_eq!(
-        named_graphs(&hub),
-        before,
-        "a browse write must not create or touch a named graph"
+    // …and it moved no reserved graph, which is why a scoped read of one stays cacheable.
+    let changed = store
+        .reserved_graphs_fingerprint()
+        .expect("still declaring")
+        .changed_since(&before);
+    assert!(
+        changed.is_empty(),
+        "a browse write moved {changed:?}, which `main` promised the sharer would not touch — \
+         every scoped read of those graphs is now cached against threads that write never cut"
     );
 }
 
@@ -595,9 +616,10 @@ fn time_reads(kernel: &Kernel, iri: &str, n: u32) -> Duration {
 /// identical either way and 68 passing tests is exactly what the cms-web regression looked
 /// like.
 ///
-/// Three kernels over the same 247-item corpus: the owned store this server composed before,
-/// the shared store with no recovery (what calling `open_shared` and accepting the blanket
-/// would have shipped), and the composition `compose_with` builds.
+/// Three kernels over the same 247-item corpus: the owned store this server composed before
+/// it had a browse face, the shared store with no declaration (what calling `open_shared` and
+/// accepting the blanket would have shipped), and the composition `main` builds — shared, and
+/// declaring where the sharer writes.
 #[test]
 fn the_shared_handle_costs_the_ledger_nothing() {
     const ITEMS: usize = 247;
@@ -612,8 +634,8 @@ fn the_shared_handle_costs_the_ledger_nothing() {
     println!("--- {ITEMS} items, mean of 20 reads ---");
     for (label, kernel) in [
         ("owned     (open — no browse face)", &owned),
-        ("shared    (open_shared, no recovery)", &naive),
-        ("recovered (open_shared + freshness)", &served),
+        ("shared    (open_shared, undeclared)", &naive),
+        ("declared  (open_shared_declaring)", &served),
     ] {
         let items = time_reads(kernel, "urn:iki:ledger:items", 20);
         let next = time_reads(kernel, "urn:iki:ledger:next", 20);
@@ -633,7 +655,7 @@ fn the_shared_handle_costs_the_ledger_nothing() {
     let hot = cached(&served);
     assert!(
         hot.iter().any(|iri| iri == "urn:iki:ledger:items"),
-        "the recovered composition must cache a ledger read: {hot:?}"
+        "the declared composition must cache a ledger read: {hot:?}"
     );
     assert!(
         hot.iter().any(|iri| iri == "urn:iki:store:graph-select"),
@@ -647,7 +669,7 @@ fn the_shared_handle_costs_the_ledger_nothing() {
     );
     // And the broad face stays uncacheable in BOTH, by name: it can see the default graph,
     // where browse's invisible writes land.
-    for (label, kernel) in [("recovered", &served), ("naive", &naive)] {
+    for (label, kernel) in [("declared", &served), ("naive", &naive)] {
         issue(
             kernel,
             Verb::Source,
@@ -787,7 +809,9 @@ fn a_watched_file_read_recomputes_after_the_file_changes_on_disk() {
 #[test]
 fn an_unwatched_roots_reads_are_not_cached() {
     let dir = scratch_root();
-    let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
+    let (store, handle) =
+        DurableStore::in_memory_shared_declaring(SharerWrites::only_the_default_graph())
+            .expect("a shared in-memory store");
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
     let wired = browse::wire(roots(&dir), handle, &[], None);

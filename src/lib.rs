@@ -36,7 +36,6 @@
 pub mod browse;
 pub mod config;
 pub mod doors;
-pub mod freshness;
 pub mod grants;
 pub mod identity;
 pub mod mount;
@@ -59,12 +58,13 @@ use ikigai_vocab::TurtleRenderer;
 ///
 /// Three things are not optional here, and each fails silently rather than loudly:
 ///
-/// - **A covered store is taken by value and never shared.** `DurableStore::open` (not
-///   `open_shared`) keeps the handle inside `ikigai-store`, which is what makes its reads
-///   cacheable under its write threads. A store whose handle DID leave — the browse
-///   composition below — keeps its scoped reads cacheable a different way
-///   ([`freshness`]), and that is decided here, from `is_covered`, rather than at the
-///   call site.
+/// - **How the store was OPENED, which this function cannot see and does not decide.**
+///   `DurableStore::open` keeps the handle inside `ikigai-store` and every read is
+///   cacheable under its write threads. When the handle must leave — the browse
+///   composition below — `main` opens with `open_shared_declaring` and names the graphs
+///   the sharer may write, and the store answers freshness per read from that promise.
+///   Either way this function takes the store as it was handed over and wraps nothing:
+///   there is exactly one place that decides what is fresh, and it is not here.
 /// - **A clock.** The ledger stamps every item, comment and tombstone, and refuses to write
 ///   on a kernel that cannot say when.
 /// - **The Meta renderer.** A client mounting gonk reads each endpoint's contract through
@@ -87,23 +87,21 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// resolve, and therefore what the explanation families derive through; a gonk with no mount
 /// binds none of them ([`crate::config::Settings::explains`]).
 ///
-/// ★ **The store space is wrapped when the handle left the crate.** A shared store makes
-/// every `ikigai-store` read `Expiry::Always`, which propagates into every ledger read;
-/// [`freshness::scoped_reads_stay_fresh`] gives back exactly the reads that cannot see the
-/// sharer's writes. The condition is `is_covered`, so an owned store is never wrapped and
-/// the two compositions cannot drift into declaring freshness twice.
+/// ★ **The store space is never wrapped, whichever way the store was opened.** A shared
+/// store used to make every `ikigai-store` read `Expiry::Always` — which propagates into
+/// every ledger read — and this server recovered the scoped reads from outside, in a
+/// `freshness` module that re-declared four IRIs it had transcribed by hand. `ikigai-store`
+/// 0.2.4 takes the promise directly (`open_shared_declaring` + `SharerWrites`, on the line
+/// in `main` where the handle is handed out) and answers freshness per read, so the wrapper
+/// is gone and there is ONE place that says what is fresh. Two would be the hazard, not the
+/// belt and braces: the day `ikigai-browse` gains a named graph of its own, a wrapper here
+/// would go on declaring a graph the sharer writes as cacheable, silently.
 pub fn compose_with(
     store: DurableStore,
     browse: Option<Arc<dyn Space>>,
     mounted: Vec<Arc<dyn Space>>,
 ) -> Kernel {
-    let covered = store.is_covered();
-    let store = ikigai_store::space(store);
-    let store: Arc<dyn Space> = if covered {
-        Arc::new(store)
-    } else {
-        Arc::new(freshness::scoped_reads_stay_fresh(store))
-    };
+    let store: Arc<dyn Space> = Arc::new(ikigai_store::space(store));
     // The mounts go FIRST — an override forwards its prefix unchanged, and precedence is
     // half of what makes it an override. Nothing local is shadowed by that today (this
     // server binds nothing under `urn:llm:`), and `crate::mount` is where the prefix a
