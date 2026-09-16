@@ -143,11 +143,40 @@ summary { cursor: pointer; color: var(--accent); }
 .samples { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.5rem; }
 .samples button { white-space: normal; text-align: left; }
 .sample-text { display: none; }
+/* ★ The ACTIVE sample (#370). The STATE is `aria-pressed` on the button — web/gonk.js sets it
+ * on click and clears it the moment the editor is typed in — so a screen reader hears which
+ * sample the editor holds; this rule is only how that looks. Two signals, because the render
+ * arc set the bar that a control is never signalled by colour alone (WCAG 1.4.1): the button
+ * fills, AND its label goes bold, the same weight change `[aria-current]` already uses for the
+ * current ledger and the current filter. --accent on --accent-fg is the pairing
+ * `the_palette_clears_the_contrast_floor` already holds to ikigai-a11y's floor in both
+ * schemes — no colour is invented here. */
+.samples button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); font-weight: 700; }
 
+/* ★ A result cell sets NO `overflow-wrap`, and that is the whole of #368's fix.
+ *
+ * This rule used to carry `overflow-wrap: anywhere`, which differs from `break-word` in that
+ * it ALSO lowers a box's MIN-CONTENT size: every character boundary becomes a soft wrap
+ * opportunity while the browser computes a column's minimum. With `width: 100%` and auto
+ * table layout the long `title` column then took the space it was allowed to take, and the
+ * short ones collapsed below one word — `number` rendered as nu/mb/er and every status broke
+ * as `ledger:` / `open`. Nothing overflowed; the table did exactly what it was told.
+ *
+ * The long-IRI case that rule was defending is already covered by `.table-wrap`. Measured in
+ * Chrome against the live page, `SELECT ?item ?number ?priority ?status ?title`: with the rule
+ * gone the table's min-content is 835px inside a 637px wrapper, the wrapper scrolls, and
+ * `document.documentElement.scrollWidth` stays at the viewport — the page body never scrolls
+ * sideways. A data table that scrolls is what the wrapper exists for, and WCAG 1.4.10 exempts
+ * it. `break-word` is not the middle ground it looks like: nothing caps this table's width,
+ * so a cell is never squeezed below its longest word and the property would never fire.
+ *
+ * ⚠ Scoping `anywhere` to `td.uri` — the obvious repair — does NOT work: a shortened status
+ * CURIE carries that same class, so it would go on breaking at its colon. */
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
-th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
-th { background: var(--surface); }
+th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+/* A column header is a short label; it never wraps, mid-word or otherwise. */
+th { background: var(--surface); white-space: nowrap; }
 td.uri { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
 td.unbound { color: var(--muted); }
 

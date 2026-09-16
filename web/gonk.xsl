@@ -538,8 +538,12 @@
     </section>
   </xsl:template>
 
+  <!-- A sample button is a TOGGLE, not a link: `aria-pressed` says whether the editor holds
+       this sample's query. The server renders every one as `false` — a freshly served page
+       holds the default query, never a sample — and web/gonk.js moves the `true` on a click
+       and clears it on the first keystroke in the editor (#370). -->
   <xsl:template match="view:sample">
-    <button type="button" class="sample quiet small">
+    <button type="button" class="sample quiet small" aria-pressed="false">
       <xsl:attribute name="data-query"><xsl:value-of select="@id"/></xsl:attribute>
       <xsl:value-of select="@label"/>
     </button>

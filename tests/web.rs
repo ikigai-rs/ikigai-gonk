@@ -14,6 +14,9 @@
 //! - [`a_ledger_iri_reads_as_its_local_name_only_in_the_html_face`]
 //! - [`a_passkey_identity_adds_its_grant_and_only_its_grant`]
 //! - [`the_palette_clears_the_contrast_floor`]
+//! - [`a_result_column_is_never_narrower_than_its_own_word`]
+//! - [`a_sample_button_is_a_toggle_the_server_renders_unpressed`]
+//! - [`the_active_sample_is_cleared_by_typing_in_the_editor`]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -1174,4 +1177,119 @@ fn the_palette_clears_the_contrast_floor() {
             );
         }
     }
+}
+
+/// The CSS declaration in [`fn@a_result_column_is_never_narrower_than_its_own_word`]'s sights,
+/// as it appears in the file.
+const TABLE_CELL_RULE: &str = "th, td {";
+
+/// ★ **#368, pinned as a rule about MIN-CONTENT and not about how a table looked once.**
+///
+/// `overflow-wrap: anywhere` on a result cell lowers the cell's *minimum* intrinsic width to a
+/// single character — unlike `break-word`, which leaves min-content at the longest word — so
+/// auto table layout was free to squeeze `number` into `nu/mb/er` and break `ledger:open` at
+/// its colon. Nothing overflowed and no test could see it: the HTML was correct and the
+/// browser was obeying the stylesheet.
+///
+/// Measured in Chrome before the change was written, on `SELECT ?item ?number ?priority
+/// ?status ?title` against the live ledger: without the declaration the table's min-content is
+/// 835px inside a 637px `.table-wrap`, the wrapper scrolls, and the document's own
+/// `scrollWidth` stays at the viewport. So the long-IRI case the declaration was defending is
+/// the case `.table-wrap` already exists to handle, and this test holds both halves together —
+/// the declaration stays gone, and the wrapper that replaces it stays.
+///
+/// ⚠ The repair that suggests itself — scope `anywhere` to `td.uri`, "the class that holds
+/// IRIs" — is wrong, and asserted against here: a shortened status CURIE wears that same
+/// class, so it would go on breaking at its colon.
+#[test]
+fn a_result_column_is_never_narrower_than_its_own_word() {
+    let css = include_str!("../web/gonk.css");
+    let at = css.find(TABLE_CELL_RULE).expect("the result-cell rule");
+    let rule = &css[at..at + css[at..].find('}').expect("an unterminated rule") + 1];
+    assert!(
+        !rule.contains("overflow-wrap"),
+        "a result cell must set no overflow-wrap — `anywhere` collapses its min-content to one \
+         character and `break-word` cannot fire in a table nothing caps: {rule}"
+    );
+    assert!(
+        css.contains(".table-wrap { overflow-x: auto;"),
+        "the wrapper that carries the long-IRI case instead must still scroll"
+    );
+    let th = css
+        .find("\nth { background:")
+        .map(|at| &css[at + 1..at + 1 + css[at + 1..].find('}').expect("unterminated") + 1])
+        .expect("the th rule");
+    assert!(
+        th.contains("white-space: nowrap"),
+        "a column header is a short label and must not wrap: {th}"
+    );
+    for line in css.lines() {
+        let line = line.trim();
+        if line.starts_with("td.uri") || line.starts_with(".uri") {
+            assert!(
+                !line.contains("overflow-wrap: anywhere"),
+                "td.uri holds BOTH a full IRI and a shortened CURIE — break-anywhere there \
+                 leaves the status column broken at its colon: {line}"
+            );
+        }
+    }
+}
+
+/// ★ **#370: an active sample is a state a screen reader can read.**
+///
+/// The samples are mutually exclusive toggles, so the state is `aria-pressed` on the button
+/// rather than a CSS class — a background tint alone says nothing to a reader that is not
+/// looking at the page. The SERVER renders every one `false`, because a freshly served page
+/// holds the default query and never a sample; only `web/gonk.js` ever writes `true`.
+#[test]
+fn a_sample_button_is_a_toggle_the_server_renders_unpressed() {
+    let server = Server::start();
+    seed(&server);
+    let page = server.page("/sparql", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let unpressed = page.body.matches("aria-pressed='false'").count();
+    assert_eq!(
+        unpressed,
+        ikigai_gonk::web::SAMPLES.len(),
+        "every sample button carries an unpressed state: {page:?}"
+    );
+    assert!(
+        !page.body.contains("aria-pressed='true'"),
+        "a served page holds the default query, so no sample is active: {page:?}"
+    );
+    assert!(
+        include_str!("../web/gonk.css").contains(".samples button[aria-pressed=\"true\"]"),
+        "the stylesheet dresses the state the markup carries"
+    );
+}
+
+/// ★ **The half of #370 that carries the design, and the only fence this repo can put around
+/// it.** There is no JavaScript runtime in this test suite, so what is asserted is the WIRING
+/// in `web/gonk.js`, not its effect: the editor's `input` event clears the pressed sample.
+///
+/// It is worth a source-shape test even so. Everything else about the feature is cosmetic and
+/// self-evident on the screen; this is the part that is invisible when it breaks, and when it
+/// breaks the page asserts something false — a badge claiming the editor holds a sample it no
+/// longer holds. Verified for real in Chrome against a locally built binary before merging;
+/// this keeps the listener from being quietly dropped afterwards.
+#[test]
+fn the_active_sample_is_cleared_by_typing_in_the_editor() {
+    let js = include_str!("../web/gonk.js");
+    let at = js
+        .find("function wireSamples()")
+        .expect("the sample wiring");
+    let body = &js[at..];
+    assert!(
+        body.contains("box.addEventListener(\"input\""),
+        "the pressed state must be cleared on `input` — not on blur, not on submit"
+    );
+    assert!(
+        !body.contains("addEventListener(\"blur\"")
+            && !body.contains("addEventListener(\"change\""),
+        "`blur` and `change` are both too late: the claim is false from the first keystroke"
+    );
+    assert!(
+        body.contains("aria-pressed"),
+        "the state the stylesheet dresses is the state this function writes"
+    );
 }
