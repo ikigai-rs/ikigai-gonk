@@ -175,7 +175,30 @@
     }
   }
 
+  // ------------------------------------------------------------------ samples
+
+  // A sample button puts its query in the editor and stops there. It never submits: the
+  // person presses Run, so a half-typed query is never lost to a click, and a query that
+  // would be expensive is never started by accident. The text lives in a hidden <pre> the
+  // server rendered (newlines survive an element; an attribute's would not).
+  function wireSamples() {
+    const box = $("q");
+    if (!box) return;
+    const buttons = document.querySelectorAll("button.sample");
+    for (const button of buttons) {
+      button.addEventListener("click", () => {
+        const source = $(button.getAttribute("data-query"));
+        if (!source) return;
+        box.value = source.textContent;
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+        flash("Loaded the sample query. Press Run to execute it.", "ok");
+      });
+    }
+  }
+
   async function init() {
+    wireSamples();
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page
     if (location.hostname !== "localhost") {

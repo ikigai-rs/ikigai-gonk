@@ -898,6 +898,168 @@ SELECT ?number ?title ?status WHERE {
 ORDER BY DESC(?number)
 LIMIT 50";
 
+/// The sample queries offered above the editor: `(id, label, query)`. Public so the test
+/// that runs every one of them can be the same list the page renders.
+///
+/// ★ **Every one is RUN, not merely written.**
+/// `tests/web.rs::every_sample_query_returns_rows` seeds a corpus in the shape
+/// `ikigai-ledger` writes and asserts each sample comes back with at least one row and no
+/// `view:error` — a sample query that errors is worse than no sample query. They are held to
+/// the ledger's real predicates: `ledger:Item`, `ledger:number`, `ledger:priority`,
+/// `ledger:status` (the IRIs `ledger:open`/`ledger:closed`), `ledger:label`, `ledger:body`,
+/// `ledger:closedReason`, `ledger:Comment` + `ledger:onItem`, `dcterms:title`,
+/// `dcterms:created`, `dcterms:modified`.
+///
+/// ⚠ **There is deliberately no "oldest p1" sample**, though that is the question that was
+/// asked. `dcterms:created` is when an item was FILED, and a bulk migration files hundreds
+/// within a minute of each other — ordering by it sorts by migration order, not by how long
+/// the work has waited. The real age of most claims lives in prose inside `ledger:body`. The
+/// page says so next to these buttons — that sentence is [`CREATED_IS_FILING_TIME`].
+pub const SAMPLES: [(&str, &str, &str); 8] = [
+    (
+        "sample-priority",
+        "Open by priority",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?priority ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:status ledger:open ;
+        ledger:number ?number ;
+        dcterms:title ?title .
+  OPTIONAL { ?item ledger:priority ?priority }
+}
+ORDER BY COALESCE(?priority, 9) ?number
+LIMIT 50",
+    ),
+    (
+        "sample-p1",
+        "p1 only",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?title ?status WHERE {
+  ?item a ledger:Item ;
+        ledger:priority 1 ;
+        ledger:status ledger:open ;
+        ledger:number ?number ;
+        dcterms:title ?title ;
+        ledger:status ?status .
+}
+ORDER BY ?number",
+    ),
+    (
+        "sample-repos",
+        "Count by repo",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+
+SELECT ?repo (COUNT(?item) AS ?open) WHERE {
+  ?item a ledger:Item ;
+        ledger:status ledger:open ;
+        ledger:label ?repo .
+  FILTER(STRSTARTS(?repo, \"repo:\"))
+}
+GROUP BY ?repo
+ORDER BY DESC(?open) ?repo",
+    ),
+    (
+        "sample-security",
+        "Security",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?priority ?status ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:label \"security\" ;
+        ledger:number ?number ;
+        ledger:status ?status ;
+        dcterms:title ?title .
+  OPTIONAL { ?item ledger:priority ?priority }
+}
+ORDER BY ?number",
+    ),
+    (
+        "sample-recent",
+        "Recently updated",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?modified ?number ?status ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:number ?number ;
+        ledger:status ?status ;
+        dcterms:title ?title ;
+        dcterms:modified ?modified .
+}
+ORDER BY DESC(?modified)
+LIMIT 25",
+    ),
+    (
+        "sample-comments",
+        "Items with comments",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?title (COUNT(?comment) AS ?comments) WHERE {
+  ?comment a ledger:Comment ;
+           ledger:onItem ?item .
+  ?item ledger:number ?number ;
+        dcterms:title ?title .
+}
+GROUP BY ?number ?title
+ORDER BY DESC(?comments) ?number",
+    ),
+    (
+        "sample-closed",
+        "Closed, with their reasons",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?reason ?modified ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:status ledger:closed ;
+        ledger:number ?number ;
+        dcterms:title ?title ;
+        dcterms:modified ?modified .
+  OPTIONAL { ?item ledger:closedReason ?reason }
+}
+ORDER BY DESC(?modified)
+LIMIT 50",
+    ),
+    (
+        "sample-text",
+        "Search the body text",
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?title ?body WHERE {
+  ?item a ledger:Item ;
+        ledger:number ?number ;
+        dcterms:title ?title ;
+        ledger:body ?body .
+  # Change the word in quotes — that is the whole search.
+  FILTER(CONTAINS(LCASE(?body), \"passkey\"))
+}
+ORDER BY ?number",
+    ),
+];
+
+/// The sentence that sits with the buttons, because the ledger cannot answer the question
+/// everyone asks first. See [`SAMPLES`].
+pub const CREATED_IS_FILING_TIME: &str =
+    "A sample replaces the query in the box; nothing runs until you press Run. There is no \
+     \"oldest\" sample on purpose: dcterms:created is when an item was FILED, and items \
+     migrated in bulk share a filing minute, so it does not say how long the work has waited.";
+
+/// The sample buttons and the sentence that goes with them, as view elements.
+fn samples() -> String {
+    let buttons: String = SAMPLES
+        .iter()
+        .map(|(id, label, query)| element("sample", &[("id", id), ("label", label)], query))
+        .collect();
+    format!("{buttons}{}", element("hint", &[], CREATED_IS_FILING_TIME))
+}
+
 struct Sparql {
     web: Arc<Web>,
     fragment: bool,
@@ -937,7 +1099,27 @@ pub fn query_form(query: &str) -> Option<&'static str> {
     None
 }
 
-fn cell(term: &Value) -> (String, String) {
+/// The local name of a `ledger:` IRI — `…/ledger#open` → `open` — or `None` for anything
+/// else.
+///
+/// ★ **Display only, and only this ONE namespace.** A `ledger:status` cell printing
+/// `https://ikigai-rs.dev/ns/ledger#open` is honest and unreadable at 200 rows; the full IRI
+/// stays on the cell as a `title`, and the BYTES the store returned never change — a caller
+/// asking for `application/sparql-results+json` gets the raw IRIs (`tests/web.rs`).
+///
+/// Nothing else is shortened, and no prefix legend is offered, because in this data no other
+/// namespace reaches a result CELL as a value: `dcterms:`, `prov:` and `sig:` name predicates
+/// whose objects are literals, and an item's own IRI (`urn:iki:ledger:{name}:item:{id}`) is
+/// the identifier a person copies — abbreviating that would hide the useful half. If a future
+/// ledger grows IRI-valued properties in another namespace, a legend beats a second special
+/// case here.
+fn ledger_local_name(value: &str) -> Option<&str> {
+    let local = value.strip_prefix(LEDGER_NS)?;
+    (!local.is_empty() && !local.contains(['/', '#'])).then_some(local)
+}
+
+/// A cell as `(kind, display, full IRI when the display was shortened)`.
+fn cell(term: &Value) -> (String, String, Option<String>) {
     let kind = term
         .get("type")
         .and_then(Value::as_str)
@@ -947,15 +1129,22 @@ fn cell(term: &Value) -> (String, String) {
         .and_then(Value::as_str)
         .unwrap_or_default();
     match kind {
-        "uri" => ("uri".to_string(), value.to_string()),
-        "bnode" => ("bnode".to_string(), format!("_:{value}")),
+        "uri" => match ledger_local_name(value) {
+            Some(local) => (
+                "uri".to_string(),
+                local.to_string(),
+                Some(value.to_string()),
+            ),
+            None => ("uri".to_string(), value.to_string(), None),
+        },
+        "bnode" => ("bnode".to_string(), format!("_:{value}"), None),
         _ => {
             let suffix = term
                 .get("xml:lang")
                 .and_then(Value::as_str)
                 .map(|lang| format!(" @{lang}"))
                 .unwrap_or_default();
-            ("literal".to_string(), format!("{value}{suffix}"))
+            ("literal".to_string(), format!("{value}{suffix}"), None)
         }
     }
 }
@@ -1046,8 +1235,12 @@ async fn sparql_results(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> S
         for name in &vars {
             match row.get(*name) {
                 Some(term) => {
-                    let (kind, value) = cell(term);
-                    table.push_str(&element("cell", &[("kind", &kind)], &value));
+                    let (kind, value, full) = cell(term);
+                    let mut attributes = vec![("kind", kind.as_str())];
+                    if let Some(full) = &full {
+                        attributes.push(("title", full.as_str()));
+                    }
+                    table.push_str(&element("cell", &attributes, &value));
                 }
                 None => table.push_str(&element("cell", &[("kind", "unbound")], "")),
             }
@@ -1118,8 +1311,9 @@ impl Endpoint for Sparql {
             None => String::new(),
         };
         let children = format!(
-            "{}{}{}",
+            "{}{}{}{}",
             nav(&ledgers, Some(ledger.name())),
+            samples(),
             element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),
             results
         );
