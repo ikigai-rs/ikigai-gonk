@@ -334,6 +334,25 @@ a client certificate the peer has enrolled, and is **the same configuration whet
 is on this machine or another one**: mounting a bigger machine's inference later changes the
 host in one line and nothing else. That is why the line above is the one this README shows.
 
+**Getting the certificate**, which is the same relationship as
+[the QUIC door](#from-another-machine-over-quic) with gonk on the other side of it. On the
+gonk machine, generate an identity for this mount and hand the peer its public half:
+
+```sh
+ikigai cert generate --dir ~/.config/ikigai/gonk/quic/peers/plasma
+# on the peer: trust it, then restart the peer (trusted certs are read at startup)
+cp ~/.config/ikigai/gonk/quic/peers/plasma/client.crt <peer cert-dir>/clients/gonk.crt
+# and back on the gonk machine, pin the peer:
+cp <peer cert-dir>/server.crt ~/.config/ikigai/gonk/quic/peers/plasma/server.crt
+```
+
+The directory holds `client.crt`, `client.key` and the `server.crt` to pin — the same layout
+`ikigai --cert-dir` uses, and the same one `ikigai-gonk client add` writes for gonk's own
+clients. `gonk.mount` is the ONLY key that names it, and `urn:llm:` is the only prefix a
+mount line may claim: a mount is composed in front of the local spaces and its catalog is
+served through every door, so what these doors can serve stays a property of the manifest
+plus one namespace.
+
 **What a derivation costs, and what bounds it.** Each grain has a provider and a `max_tokens`
 ceiling (`gonk.explain.*`), and the ceiling is the only bound on one call — a thinking model
 with no ceiling burns the budget on reasoning and returns nothing. Over time the bound is the
