@@ -18,22 +18,13 @@
 //! the arc: a ledger item's `ledger:about <urn:repo:…>` and an annotation on that file are
 //! two graphs in ONE store, so the join is a local SPARQL query and not a federation problem.
 //! What the shared handle costs the ledger's read cache is **nothing**, and the reason is the
-//! declaration on that call: `SharerWrites::only_the_default_graph` names where this family
-//! writes, so `ikigai-store` keeps every scoped read of every other graph cacheable under its
-//! own write threads (`src/main.rs`, and `tests/browse.rs` prints the numbers).
+//! declaration on that call: [`Graph::sharer_writes`] names where this family writes, so
+//! `ikigai-store` keeps every scoped read of every other graph cacheable under its own write
+//! threads (`src/main.rs`, and `tests/browse.rs` prints the numbers).
 //!
-//! ⚠ **Where browse's quads land is browse's decision, not this server's, and it is the
-//! default graph** — so that decision is also what the declaration above promises, and a
-//! change to it makes this server's cache wrong rather than merely different.
-//! `ikigai-browse` hard-codes `GraphName::DefaultGraph` in all three of its
-//! writers. gonk cannot give the family its own named graph (`urn:iki:browse:graph:…`, which
-//! is what the ledger's graph-per-tenant shape would suggest) without a change to that
-//! crate. The consequence is a capability one, and it is stated on the doors: `ikigai-store`
-//! gates named graphs exactly (`urn:cap:store:read:graph:<iri>`) and the default graph has no
-//! IRI, so a scoped reader cannot reach browse's quads at all — only the BROAD
-//! `urn:iki:store:select` under `urn:cap:store:read` can, which this server hands to nobody
-//! but the socket door's root. A join across ledger and browse data is therefore an
-//! owner-only query today.
+//! ★ **Where browse's quads land is THIS SERVER's decision since `ikigai-browse` 0.4.0**, and
+//! it is [`Graph`] — one value, flowing into the mount and into the store's coverage promise,
+//! so the two cannot say different things. Read that type before changing either.
 //!
 //! # Explanations, and what binds them
 //!
@@ -80,10 +71,135 @@ use ikigai_core::{
     Description, Endpoint, EndpointSpace, Invocation, Representation, Request, Resolution, Result,
     Scope, Space, SpaceEntry, Verb,
 };
-use ikigai_store::Store;
+use ikigai_store::{SharerWrites, Store};
+use oxigraph::model::NamedNode;
 
 use crate::config::ExplainTiers;
 use crate::watch::{root_thread, Watched};
+
+/// **Where the browse family's quads live — ONE value, read by both the people who must agree
+/// about it.**
+///
+/// # ★ Why this is a type and not a line in `main`
+///
+/// `main` hands `ikigai-browse` a handle on gonk's dataset, and in the same breath tells
+/// `ikigai-store` where that sharer writes ([`SharerWrites`]). Those two statements must agree
+/// or the store caches scoped reads against threads the sharer's write never cuts — silent,
+/// unbounded staleness, the worst failure `ikigai-store` has.
+///
+/// Until `ikigai-browse` 0.4.0 they agreed by TRANSCRIPTION: `main` wrote
+/// `SharerWrites::only_the_default_graph()` because a person had read browse's source and
+/// found `GraphName::DefaultGraph` hard-coded in its three writers. Nothing in either crate
+/// connected the sentence to the behaviour — the promise was a fact about a dependency's
+/// internals, re-typed here, with a comment asking the next person to keep it true
+/// (ledger #282). A transcribed invariant drifts, and this one drifts silently.
+///
+/// `Mount::graph(NamedNode)` inverts the direction. gonk CHOOSES, so gonk KNOWS, and the two
+/// statements are two readings of this one value: [`wire`] puts it on the mount (through the
+/// private `Graph::on`, so a caller cannot put a different one there) and
+/// [`Graph::sharer_writes`] puts it in the declaration. There is no second place to edit, and
+/// `graph_choice_and_promise_cannot_disagree` walks both arms to say so. It is the same
+/// argument that deleted the wrapper's transcribed `SCOPED_READS` array in PR #7: a value
+/// copied out of another crate is a value that goes stale.
+///
+/// ⚠ **One fact still comes from browse and cannot be derived here**: that a mount which
+/// never calls `Mount::graph` writes the DEFAULT graph. That is browse's documented default
+/// (`Mount::graph`'s doc comment: *"A mount that never calls this uses the store's default
+/// graph, which is exactly what every host had before 0.4.0, byte for byte"*), and it is one
+/// stated contract rather than three hard-coded constants in three modules — but it is still
+/// a fact this server takes on trust, and `tests/browse.rs::a_browse_write_touches_no_reserved
+/// _graph` is why it is checked rather than believed. The residual would go away if browse
+/// exposed the graph a built mount resolved to; it does not today (reported to the hub).
+///
+/// # ⚠ Why [`Graph::chosen`] is still the default graph
+///
+/// Naming a graph here is not a config change; it is a data migration, and this arc was
+/// scoped to the version bump. What it would cost, in the order it has to happen:
+///
+/// 1. run `ikigai-browse`'s `migrate-annotation-ns <store> --graph <iri> --commit`, or the
+///    archive reads EMPTY — quads left in the default graph are still there and no longer
+///    visible, with no error anywhere;
+/// 2. mint `urn:cap:store:{read,write}:graph:<iri>` grants, which is the entire point: the
+///    default graph has no IRI, so no scoped token names it and the ledger↔browse join is a
+///    ROOT-capability query today. In a named graph it becomes grantable, and the HTTP door's
+///    caller could run it;
+/// 3. redo the freshness argument. A named browse graph is visible to a scoped read, so it
+///    forfeits the exemption this server measured at ~1000× on the ledger's hot read — the
+///    browse graph's reads must be declared uncacheable, or their threads cut on a browse
+///    write. The LEDGER graph's exemption is untouched either way;
+/// 4. rewrite every cross-graph query to wrap the browse half in `GRAPH <iri> { … }`.
+///
+/// Only step 3 is work in this file. Steps 1, 2 and 4 are an operator's, and step 1 cannot be
+/// undone by restarting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Graph {
+    /// The store's **default graph** — every quad browse has ever written on this server.
+    ///
+    /// It has no IRI, so no `urn:cap:store:{read,write}:graph:` token can name it and no
+    /// graph-scoped query can see it: browse's data sits OUTSIDE the per-graph capability
+    /// boundary entirely. That is a cost (the join is root-only) and, for this server, also
+    /// the thing that makes every scoped ledger read cacheable.
+    TheDefault,
+    /// A **named graph**, inside the tenancy boundary — see the ⚠ above for what opting in
+    /// obliges. Not reached by [`chosen`](Graph::chosen) today; reached by
+    /// `tests/browse.rs::a_named_graph_choice_moves_the_promise_with_it`, which is what keeps
+    /// this arm from being a claim about untested code.
+    Named(NamedNode),
+}
+
+impl Graph {
+    /// ★ **gonk's choice, made in exactly one place.**
+    ///
+    /// `main` calls this once, before the store opens, and passes the result to both
+    /// [`sharer_writes`](Graph::sharer_writes) and [`wire`]. Changing this line is the whole
+    /// of the graph decision on this side — and the four obligations on the type's docs are
+    /// the whole of it on the other.
+    #[must_use]
+    pub fn chosen() -> Self {
+        Graph::TheDefault
+    }
+
+    /// The promise `main` hands `ikigai-store` when the handle leaves — **derived from the
+    /// choice, never written beside it.**
+    ///
+    /// The default graph is never named in a [`SharerWrites`] (it has no IRI to name), so
+    /// [`TheDefault`](Graph::TheDefault) is the bare `only_the_default_graph()` and a named
+    /// choice is that plus the one graph. `only_the_default_graph` is not a weaker promise in
+    /// the named case — it is the base every declaration carries, because a sharer can always
+    /// write a graph no scoped read can see.
+    #[must_use]
+    pub fn sharer_writes(&self) -> SharerWrites {
+        let base = SharerWrites::only_the_default_graph();
+        match self {
+            Graph::TheDefault => base,
+            Graph::Named(graph) => base.and_named_graph(graph.as_str()),
+        }
+    }
+
+    /// The same choice, put on a browse mount.
+    ///
+    /// Not calling `Mount::graph` is a DIFFERENT statement from calling it with the default
+    /// graph — browse's knob is `Option<NamedNode>` precisely so a host that never spoke can
+    /// be told from one that did — so [`TheDefault`](Graph::TheDefault) leaves the mount
+    /// alone rather than passing anything.
+    #[must_use]
+    fn on(&self, mount: Mount) -> Mount {
+        match self {
+            Graph::TheDefault => mount,
+            Graph::Named(graph) => mount.graph(graph.clone()),
+        }
+    }
+
+    /// The chosen graph's IRI, or `None` for the default graph — for a banner line or a
+    /// `GRAPH <…>` clause, never for rebuilding either statement above.
+    #[must_use]
+    pub fn named(&self) -> Option<&NamedNode> {
+        match self {
+            Graph::TheDefault => None,
+            Graph::Named(graph) => Some(graph),
+        }
+    }
+}
 
 /// Root names this server refuses, because `ikigai-repo`'s own resources start with the same
 /// segment and a reader could not tell which family answered.
@@ -128,18 +244,27 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 /// the switch. The tiers ride in as [`crate::config::ExplainTiers`] rather than as an
 /// `ExplainConfig`, so the one place that turns an operator's ceilings into browse's builder
 /// is here, beside the store handle the archive needs.
+///
+/// ★ `graph` is the SAME value `main` derived the store's `SharerWrites` from ([`Graph`]).
+/// It is a parameter rather than a call to [`Graph::chosen`] here for exactly that reason: a
+/// second call would be a second decision, and two decisions can differ.
+///
+/// ⚠ Only `Mount::graph` is set, never `ExplainConfig::graph`. browse resolves the two into
+/// ONE archive and panics at mount time if they disagree — so the way to keep them agreeing
+/// is to have one of them, not to set both carefully.
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
     store: Arc<Store>,
     watched: &[Watched],
     explain: Option<&ExplainTiers>,
+    graph: &Graph,
 ) -> Wired {
-    let mount = Mount::new(roots)
+    let mount = graph.on(Mount::new(roots)
         .annotations(Arc::clone(&store))
-        // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style` reads
-        // its themes and its contrast floor from. Without it that file would sit on disk
-        // doing nothing — the quietest kind of wrong.
-        .app("gonk");
+        // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style`
+        // reads its themes and its contrast floor from. Without it that file would sit
+        // on disk doing nothing — the quietest kind of wrong.
+        .app("gonk"));
     let mount = match explain {
         Some(tiers) => mount.explain(explain_config(store, tiers)),
         None => mount,
@@ -384,6 +509,52 @@ mod tests {
                 "{verb:?}"
             );
         }
+    }
+
+    /// ★ The derivation, walked over BOTH arms: whatever graph this server chooses, the
+    /// promise it hands `ikigai-store` names exactly that graph and no other.
+    ///
+    /// This is the compile-time half of ledger #282 — one value, two readings, checked
+    /// against each other rather than against a comment. The runtime half (that browse
+    /// actually writes where the choice says) is `tests/browse.rs`, because it needs a real
+    /// store and a real write.
+    #[test]
+    fn graph_choice_and_promise_cannot_disagree() {
+        let promised = |graph: &Graph| {
+            graph
+                .sharer_writes()
+                .named_graphs()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        let default = Graph::TheDefault;
+        assert_eq!(default.named(), None);
+        assert!(
+            promised(&default).is_empty(),
+            "the default graph has no IRI to name, so a declaration about it is the empty one"
+        );
+
+        let iri = "urn:iki:gonk:browse:graph";
+        let named = Graph::Named(NamedNode::new(iri).expect("a test IRI"));
+        assert_eq!(named.named().map(NamedNode::as_str), Some(iri));
+        assert_eq!(
+            promised(&named),
+            vec![iri.to_string()],
+            "the named choice is promised, and nothing else is — a promise wider than the \
+             choice would de-cache a graph browse never touches, and a narrower one is the \
+             silent-staleness failure"
+        );
+    }
+
+    /// What this server ships today, said out loud where a diff can see it: the choice is the
+    /// default graph, so taking `ikigai-browse` 0.4.0 moves no quad.
+    ///
+    /// ⚠ This test going red is not a bug — it is the signal that someone took the graph
+    /// decision, and that the four obligations on [`Graph`]'s docs are now owed.
+    #[test]
+    fn the_choice_this_server_ships_is_the_default_graph() {
+        assert_eq!(Graph::chosen(), Graph::TheDefault);
     }
 
     #[test]

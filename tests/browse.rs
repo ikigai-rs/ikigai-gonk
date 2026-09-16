@@ -6,8 +6,13 @@
 //! - [`the_served_catalog_is_exactly_what_this_manifest_links`] — linking two more crates put
 //!   twenty more resources behind the doors; the catalog is pinned id by id, as it was.
 //! - [`a_browse_write_touches_no_reserved_graph`] — the PROMISE `main` makes to
-//!   `ikigai-store` (`SharerWrites::only_the_default_graph`), checked at the boundary with
-//!   the store's own tripwire rather than trusted in a comment.
+//!   `ikigai-store`, checked at the boundary with the store's own tripwire rather than
+//!   trusted in a comment.
+//! - [`a_browse_read_touches_no_reserved_graph`] — the same tripwire around a READ, which is
+//!   the reason the manifest takes `ikigai-browse` 0.4.0: before it, a read could relocate
+//!   another writer's quads (ledger #265).
+//! - [`a_named_graph_choice_moves_the_promise_with_it`] — [`browse::Graph`]'s other arm, so
+//!   the derivation ledger #282 asked for is exercised rather than merely written.
 //! - [`a_ledger_item_joins_an_annotation_on_a_repo_file`] — the point of one dataset.
 //! - [`the_shared_handle_costs_the_ledger_nothing`] — the naive composition beside the one
 //!   this server builds, with the read timings printed.
@@ -32,8 +37,9 @@ use ikigai_gonk::grants::{grants_for_all, Authority};
 use ikigai_gonk::mount::{self, Mount};
 use ikigai_gonk::watch::RootWatch;
 use ikigai_gonk::{browse, compose_with};
-use ikigai_store::{DurableStore, SharerWrites};
+use ikigai_store::DurableStore;
 use ikigai_vocab::TurtleRenderer;
+use oxigraph::model::{Literal, NamedNode, Term};
 use tempfile::TempDir;
 
 /// A scratch repository: two files, no git.
@@ -52,8 +58,8 @@ fn roots(dir: &TempDir) -> Vec<(String, PathBuf)> {
 /// The composition `main` builds when `gonk.browse.root` names a root: a shared store that
 /// DECLARES where its sharer writes, and the browse family over the same dataset.
 fn served(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
-    let (hub, watch, _store) = served_with(dir, None);
-    (hub, watch)
+    let served = served_with(dir, None);
+    (served.hub, served.watch)
 }
 
 /// ★ The same, plus a `gonk.mount` — pointed at a socket that does not exist.
@@ -63,8 +69,8 @@ fn served(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
 /// server whose other job must not depend on a model. A test that needed a live peer could
 /// not run in CI, and would be testing the peer rather than this composition.
 fn served_explaining(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
-    let (hub, watch, _store) = served_with(dir, Some(dead_mount()));
-    (hub, watch)
+    let served = served_with(dir, Some(dead_mount()));
+    (served.hub, served.watch)
 }
 
 /// A mount whose peer can never answer: a Unix socket path that is not there, so the dial
@@ -78,19 +84,34 @@ fn dead_mount() -> Mount {
 }
 
 /// ⚠ The third return is the SAME store, cloned before it was composed — a `DurableStore` is
-/// a handle, so the clone reads the one dataset the kernel serves. It exists for
-/// [`a_browse_write_touches_no_reserved_graph`], which needs
-/// `reserved_graphs_fingerprint` after `compose_with` has taken the store by value; every
-/// other test drops it.
-fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch, DurableStore) {
+/// a handle, so the clone reads the one dataset the kernel serves. It exists for the two
+/// tripwire tests, which need `reserved_graphs_fingerprint` after `compose_with` has taken
+/// the store by value; every other test drops it.
+///
+/// The fourth is the sharer's own handle, cloned before it was wired: planting a decoy in
+/// another writer's graph is not something any bound endpoint of this server does, and
+/// [`a_browse_read_touches_no_reserved_graph`] has to be able to do it.
+fn served_with(dir: &TempDir, mount: Option<Mount>) -> Served {
+    served_in(dir, mount, browse::Graph::chosen())
+}
+
+/// The whole composition, parameterized by the ONE thing that decides where browse's quads
+/// live and what the store is promised about them.
+///
+/// ★ `graph` is used **twice and constructed once**, exactly as `main` does it: once as
+/// `sharer_writes()` on the store open, once as browse's mount. Passing it in rather than
+/// calling `Graph::chosen()` twice here is the point of the test fixture as much as of the
+/// server — a fixture that made the two statements separately could not fail the way the
+/// server would.
+fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Served {
     // ★ `_declaring`, matching `main`: the promise that the sharer (`ikigai-browse`) writes
-    // the default graph and nothing else is what keeps every scoped read — which is every
+    // where `graph` says and nowhere else is what keeps every scoped read — which is every
     // read the ledger makes — cacheable under the store's own write threads. Plain
     // `in_memory_shared` here would test a composition this server does not build, and would
     // do it by being slower and passing.
-    let (store, handle) =
-        DurableStore::in_memory_shared_declaring(SharerWrites::only_the_default_graph())
-            .expect("a shared in-memory store that declares where its sharer writes");
+    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+        .expect("a shared in-memory store that declares where its sharer writes");
+    let sharer = Arc::clone(&handle);
     let (watch, refused) = RootWatch::start(&roots(dir));
     assert!(refused.is_empty(), "{refused:?}");
     let tiers = ExplainTiers::default();
@@ -99,6 +120,7 @@ fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch, 
         handle,
         watch.watched(),
         mount.is_some().then_some(&tiers),
+        &graph,
     );
     let mounted = mount.iter().map(mount::space).collect();
     let hub = Arc::new(compose_with(
@@ -107,7 +129,22 @@ fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch, 
         mounted,
         None,
     ));
-    (hub, watch, store)
+    Served {
+        hub,
+        watch,
+        store,
+        sharer,
+    }
+}
+
+/// What [`served_in`] hands back.
+struct Served {
+    hub: Arc<Kernel>,
+    watch: RootWatch,
+    /// The kernel's own store, as a second handle — for `reserved_graphs_fingerprint`.
+    store: DurableStore,
+    /// The SHARER's handle, for planting quads no endpoint of this server would write.
+    sharer: Arc<ikigai_store::Store>,
 }
 
 /// ★ The composition this arc REFUSED: `open_shared` with NO declaration — the handle leaves
@@ -118,7 +155,7 @@ fn naive(dir: &TempDir) -> Arc<Kernel> {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // No watcher either: a host that accepts the blanket has no reason to run one, and
     // `ikigai-browse`'s reads are live and uncacheable exactly as it declares them.
-    let wired = browse::wire(roots(dir), handle, &[], None);
+    let wired = browse::wire(roots(dir), handle, &[], None, &browse::Graph::chosen());
     let space = Fallback::new(vec![
         Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
@@ -486,7 +523,10 @@ fn a_peer_that_is_down_costs_explain_and_nothing_else() {
 #[test]
 fn a_browse_write_touches_no_reserved_graph() {
     let dir = scratch_root();
-    let (hub, _watch, store) = served_with(&dir, None);
+    let Served {
+        hub, store, watch, ..
+    } = served_with(&dir, None);
+    let _watch = watch;
     text(
         &hub,
         Verb::Sink,
@@ -531,6 +571,275 @@ fn a_browse_write_touches_no_reserved_graph() {
         changed.is_empty(),
         "a browse write moved {changed:?}, which `main` promised the sharer would not touch — \
          every scoped read of those graphs is now cached against threads that write never cut"
+    );
+}
+
+/// The graph an annotation-shaped decoy is planted in: a name no part of this server writes,
+/// standing in for another writer's tenancy.
+const ANOTHER_WRITER: &str = "urn:iki:graph:another-writer";
+
+/// Plant a quad browse would recognize as one of its own — in someone else's graph, through
+/// the sharer's handle, because no bound endpoint of this server would ever write there.
+fn plant_decoy(sharer: &ikigai_store::Store, graph: &str, id: &str) {
+    let ik = |t: &str| NamedNode::new(format!("https://ikigai-rs.dev/ns#{t}")).expect("an IRI");
+    let oa = |t: &str| NamedNode::new(format!("http://www.w3.org/ns/oa#{t}")).expect("an IRI");
+    let graph = NamedNode::new(graph).expect("a graph IRI");
+    let decoy = NamedNode::new(id).expect("an annotation IRI");
+    for (p, o) in [
+        (
+            NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").expect("rdf:type"),
+            Term::NamedNode(oa("Annotation")),
+        ),
+        (
+            oa("bodyValue"),
+            Term::Literal(Literal::new_simple_literal("not this server's note")),
+        ),
+        (
+            ik("repo"),
+            Term::Literal(Literal::new_simple_literal("demo")),
+        ),
+        (
+            ik("path"),
+            Term::Literal(Literal::new_simple_literal("src/lib.rs")),
+        ),
+        (
+            ik("annotates"),
+            Term::NamedNode(NamedNode::new("urn:repo:demo:file:src/lib.rs").expect("a file IRI")),
+        ),
+        // ⚠ A quote that is NOT in the file, so browse's drift re-anchoring has something to
+        // do. That is the half that makes a read able to WRITE: `annotate::refresh` rewrites
+        // an annotation whose anchor has moved, during a Source.
+        (
+            oa("exact"),
+            Term::Literal(Literal::new_simple_literal("a line this file never had")),
+        ),
+    ] {
+        sharer
+            .insert(oxigraph::model::Quad::new(decoy.clone(), p, o, graph.clone()).as_ref())
+            .expect("the decoy plants");
+    }
+}
+
+/// ★ **The other end of the same promise: a browse READ moves no reserved graph either.**
+///
+/// This is why the manifest takes `ikigai-browse` 0.4.0 rather than a version number's worth
+/// of tidiness. Through 0.3.2 browse's annotation reads passed no graph at all — which in
+/// `quads_for_pattern` means EVERY graph — and `annotate::refresh` rewrites a drifted
+/// annotation *during a Source*. Together those made a plain read destructive across a graph
+/// boundary: it re-anchored an annotation-shaped quad sitting in another writer's named graph
+/// and PERSISTED the move (measured against 0.3.2 in ledger #265).
+///
+/// gonk is exactly the host with something to lose there — one dataset, browse beside a
+/// graph-scoped ledger — and the loss would be silent twice over: the other writer's quads
+/// relocate, AND this server's coverage promise becomes false, so every scoped read of the
+/// robbed graph goes on being served from cache against threads that write never cut.
+///
+/// ⚠ The mechanism is deliberately the SAME one [`a_browse_write_touches_no_reserved_graph`]
+/// uses — `reserved_graphs_fingerprint`, over quads — rather than a new assertion shape. The
+/// promise is about what the sharer writes; a read that writes is still a write, and it is
+/// the fingerprint's business whichever verb caused it. What is new here is only the verb
+/// between the two fingerprints.
+///
+/// `ikigai-browse`'s own `a_default_mount_does_not_read_another_graph` covers the VISIBILITY
+/// half (asserted below too, cheaply). Nothing stated the write-back half until this test —
+/// ledger #265 asked for it in so many words.
+#[test]
+fn a_browse_read_touches_no_reserved_graph() {
+    let dir = scratch_root();
+    let Served {
+        hub,
+        store,
+        sharer,
+        watch,
+    } = served_with(&dir, None);
+    let _watch = watch;
+    text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "an item, so a reserved graph exists at all")],
+    );
+    // One of this server's own annotations, so the read has real work to do and is not
+    // answering out of an empty archive.
+    annotate(
+        &hub,
+        "ours",
+        "urn:repo:demo:file:src/lib.rs",
+        "first",
+        "this server's own note",
+    );
+    plant_decoy(&sharer, ANOTHER_WRITER, "urn:iki:annotation:theirs");
+
+    let before = store
+        .reserved_graphs_fingerprint()
+        .expect("this store declares where its sharer writes");
+    assert_eq!(
+        before.len(),
+        2,
+        "the ledger's graph and the decoy's, both reserved from the sharer — a fingerprint \
+         over nothing would pass whatever the read did"
+    );
+
+    // Every browse read that touches the annotation overlay, plain and through the faces that
+    // fold it in. The blunt argument test in `browse::cached_reads` means the faces are not
+    // cached, so each of these really reaches the store.
+    for (iri, args) in [
+        ("urn:repo:demo:annotations", &[][..]),
+        ("urn:repo:demo:annotations:src/lib.rs", &[]),
+        (
+            "urn:repo:demo:file:src/lib.rs",
+            &[("annotations", "include")][..],
+        ),
+        ("urn:repo:demo:file:src/lib.rs", &[("as", "text/html")][..]),
+    ] {
+        let listed = text(&hub, Verb::Source, iri, args);
+        assert!(
+            !listed.contains("urn:iki:annotation:theirs"),
+            "a read of {iri} reached into <{ANOTHER_WRITER}>: {listed}"
+        );
+    }
+
+    // ★ And the half nothing stated before: it did not MOVE them either.
+    let changed = store
+        .reserved_graphs_fingerprint()
+        .expect("still declaring")
+        .changed_since(&before);
+    assert!(
+        changed.is_empty(),
+        "a browse READ moved {changed:?}. On `ikigai-browse` 0.3.2 that is <{ANOTHER_WRITER}>, \
+         whose decoy the read re-anchored into the default graph and persisted — another \
+         writer's quads relocated by a Source, and this server's `SharerWrites` promise false \
+         from that moment on"
+    );
+    // The decoy is still whole, said plainly: the fingerprint above is a digest, and a reader
+    // should not have to trust that a digest of five quads means five quads.
+    let still = text(
+        &hub,
+        Verb::Source,
+        "urn:iki:store:select",
+        &[(
+            "query",
+            &format!(
+                "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{ANOTHER_WRITER}> \
+                 {{ <urn:iki:annotation:theirs> ?p ?o }} }}"
+            ),
+        )],
+    );
+    assert!(still.contains("\"value\":\"6\""), "{still}");
+}
+
+/// ★ **The derivation on its other arm: choose a named graph and the promise goes with it.**
+///
+/// [`browse::Graph`] is one value read two ways — `sharer_writes()` for `ikigai-store` and
+/// `Mount::graph` for `ikigai-browse` — and the whole claim of ledger #282's fix is that
+/// those cannot disagree. `src/browse.rs::graph_choice_and_promise_cannot_disagree` checks
+/// that the two READINGS match; this checks that they match *the store*, with a real write
+/// through a real kernel.
+///
+/// ⚠ This server does NOT ship this arm ([`browse::Graph::chosen`] is the default graph, and
+/// a unit test says so). The test exists because an arm nobody exercises is a claim about
+/// untested code: the day the graph decision is taken, the promise must already be known to
+/// move with it rather than be discovered to.
+///
+/// It also prices obligation 3 on `Graph`'s docs, from the store's own mouth rather than by
+/// argument: a promised graph is NOT covered, so its scoped reads stop being cacheable. That
+/// is the ~1000× this server measured, and it is the cost of putting browse inside the
+/// tenancy boundary.
+#[test]
+fn a_named_graph_choice_moves_the_promise_with_it() {
+    const BROWSE_GRAPH: &str = "urn:iki:gonk:browse:graph";
+    const LEDGER_GRAPH: &str = "urn:iki:ledger:graph:default";
+
+    let dir = scratch_root();
+    let graph = browse::Graph::Named(NamedNode::new(BROWSE_GRAPH).expect("a graph IRI"));
+    let Served {
+        hub,
+        store,
+        sharer,
+        watch,
+    } = served_in(&dir, None, graph);
+    let _watch = watch;
+    text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "an item, so the ledger's graph exists")],
+    );
+    plant_decoy(&sharer, ANOTHER_WRITER, "urn:iki:annotation:theirs");
+    let before = store
+        .reserved_graphs_fingerprint()
+        .expect("this store declares where its sharer writes");
+    assert_eq!(
+        before.len(),
+        2,
+        "the ledger's graph and the decoy's are reserved — the BROWSE graph is not, because \
+         the promise derived from this choice names it"
+    );
+
+    annotate(
+        &hub,
+        "n1",
+        "urn:repo:demo:file:src/lib.rs",
+        "first",
+        "a note in its own graph",
+    );
+
+    // Where it landed: the named graph, and not the default one.
+    let count = |query: &str| {
+        let answer = text(
+            &hub,
+            Verb::Source,
+            "urn:iki:store:select",
+            &[("query", query)],
+        );
+        let json: serde_json::Value = serde_json::from_str(&answer).expect("SPARQL results JSON");
+        json["results"]["bindings"][0]["n"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .parse::<usize>()
+            .unwrap_or_else(|_| panic!("a count: {answer}"))
+    };
+    let annotates = "<https://ikigai-rs.dev/ns#annotates>";
+    assert_eq!(
+        count(&format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{BROWSE_GRAPH}> {{ ?a {annotates} ?t }} }}"
+        )),
+        1,
+        "the mount took the choice: browse's quads are in <{BROWSE_GRAPH}>"
+    );
+    assert_eq!(
+        count(&format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ ?a {annotates} ?t }}"
+        )),
+        0,
+        "…and none stayed in the default graph, which is the whole of what a migration has \
+         to move for a store that already has some"
+    );
+
+    // The promise took the choice too: the browse graph moved, and it was allowed to.
+    let changed = store
+        .reserved_graphs_fingerprint()
+        .expect("still declaring")
+        .changed_since(&before);
+    assert!(
+        changed.is_empty(),
+        "the sharer wrote {changed:?}, outside the graph this choice promised it"
+    );
+
+    // ★ And what that costs, from `ikigai-store` rather than from a comment: a graph the
+    // sharer may write is not covered, so a scoped read of it can no longer be cached.
+    assert!(
+        !store.read_is_covered(Some(BROWSE_GRAPH)),
+        "obligation 3 on `browse::Graph`: naming a graph forfeits its cacheability, and the \
+         host owes a fresh freshness argument for it"
+    );
+    assert!(
+        store.read_is_covered(Some(LEDGER_GRAPH)),
+        "…and the LEDGER's exemption is untouched, which is why this is a cost and not a cliff"
+    );
+    assert!(
+        store.read_is_covered(Some(ANOTHER_WRITER)),
+        "as is every other graph in the dataset"
     );
 }
 
@@ -810,12 +1119,12 @@ fn a_watched_file_read_recomputes_after_the_file_changes_on_disk() {
 #[test]
 fn an_unwatched_roots_reads_are_not_cached() {
     let dir = scratch_root();
-    let (store, handle) =
-        DurableStore::in_memory_shared_declaring(SharerWrites::only_the_default_graph())
-            .expect("a shared in-memory store");
+    let graph = browse::Graph::chosen();
+    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+        .expect("a shared in-memory store");
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
-    let wired = browse::wire(roots(&dir), handle, &[], None);
+    let wired = browse::wire(roots(&dir), handle, &[], None, &graph);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),

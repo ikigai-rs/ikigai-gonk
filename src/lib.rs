@@ -93,11 +93,11 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// store used to make every `ikigai-store` read `Expiry::Always` — which propagates into
 /// every ledger read — and this server recovered the scoped reads from outside, in a
 /// `freshness` module that re-declared four IRIs it had transcribed by hand. `ikigai-store`
-/// 0.2.4 takes the promise directly (`open_shared_declaring` + `SharerWrites`, on the line
-/// in `main` where the handle is handed out) and answers freshness per read, so the wrapper
-/// is gone and there is ONE place that says what is fresh. Two would be the hazard, not the
-/// belt and braces: the day `ikigai-browse` gains a named graph of its own, a wrapper here
-/// would go on declaring a graph the sharer writes as cacheable, silently.
+/// 0.2.4 takes the promise directly (`open_shared_declaring`, on the line in `main` where the
+/// handle is handed out) and answers freshness per read, so the wrapper is gone and there is
+/// ONE place that says what is fresh. Two would be the hazard, not the belt and braces: the
+/// day this server gives browse a named graph of its own ([`crate::browse::Graph`]), a
+/// wrapper here would go on declaring a graph the sharer writes as cacheable, silently.
 /// `backups` is [`crate::backup::space`]'s family — `urn:iki:gonk:backup`, its status, its
 /// archives and `urn:iki:gonk:restore` — together with the compression module they reach
 /// gzip through. Bound TOGETHER, and only together, because `urn:compress:*` is linked for

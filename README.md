@@ -575,10 +575,12 @@ compressed, and the **last five** are kept in `~/.ikigai/backups`.
 ### The format is N-Quads, and the easy mistake is Turtle
 
 **CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named
-ledger, its graveyard beside it, browse's own graphs — and that partition is what every
-per-graph capability is written against. A backup serialized as Turtle or N-Triples collapses
-every graph into one: the quad count still matches, every triple round-trips, and the restored
-dataset has every tenant's statements in the default graph with the tenancy boundary gone.
+ledger, its graveyard beside it, and browse's own the day this server gives it one
+(`src/browse.rs`'s `Graph`) — and that partition is what every per-graph capability is written
+against. A backup serialized as Turtle or N-Triples collapses every graph into one: the quad
+count still matches, every triple round-trips, and the restored dataset has every tenant's
+statements in the default graph with the tenancy boundary gone — which is also, exactly, the
+shape a browse-graph migration has to avoid producing.
 
 So an archive is N-Quads, gzipped, and every comparison this server makes about one is
 **per graph**. The dump is `urn:iki:store:select` read back through oxigraph's own
@@ -765,10 +767,20 @@ face. Measured on a 247-item ledger, `urn:iki:ledger:items` goes from **11.9µs 
 way — a thousandfold, with every test still passing and the types identical.
 
 gonk does not accept that, and it does not have to, because it knows something the store
-cannot: **who the other holder is and where it writes.** `ikigai-browse` puts every quad it
-stores into the **default graph**, hard-coded in all three of its writers, so `main` opens with
-`DurableStore::open_shared_declaring(path, SharerWrites::only_the_default_graph())` and the
-store answers freshness per read from that promise: a scoped read
+cannot: **who the other holder is and where it writes.** Since `ikigai-browse` 0.4.0 it knows
+it the strongest way available — by **choosing**. `src/browse.rs`'s `Graph` is that choice,
+made once in `main`, and the two statements that must agree about it are two readings of the
+one value: `graph.sharer_writes()` opens the store, `browse::wire(…, &graph)` puts the same
+value on the mount. There is no second place to edit.
+
+Before 0.4.0 the promise was TRANSCRIBED: `main` wrote `SharerWrites::only_the_default_graph()`
+because someone had read browse's three writers and found `GraphName::DefaultGraph` hard-coded
+in each. That is a fact about a dependency's internals, re-typed in a consumer, with a comment
+asking the next person to keep it true — and a transcribed invariant drifts. Today `main` does
+not name `SharerWrites` at all.
+
+The choice today is still the default graph (see *Not built* below for what moving it costs),
+so the store answers freshness per read from that promise: a scoped read
 (`urn:iki:store:graph-{select,ask,construct,describe}`), whose universe is one NAMED graph by
 construction, is cacheable again under the store's own three write threads — and that is what
 every ledger read is made of. Declared, the same read is **11.9µs**. The broad faces stay
@@ -781,6 +793,17 @@ comment: `tests/browse.rs` prints all three numbers and takes the store's own
 `reserved_graphs_fingerprint()` either side of a real browse write, which fingerprints the
 **quads** of every reserved graph rather than the set of graph names, and errors rather than
 passing vacuously on a store that promised nothing.
+
+⚠⚠ **And either side of a real browse READ**, which is why the manifest takes 0.4.0 rather
+than staying where it was. Through 0.3.2, browse's annotation reads passed no graph at all —
+in `quads_for_pattern` that means *every graph* — and `annotate::refresh` rewrites a drifted
+annotation **during a Source**. Together those made a plain read destructive across a graph
+boundary: it re-anchored an annotation-shaped quad sitting in another writer's named graph and
+persisted the move. gonk, with one dataset shared between browse and a graph-scoped ledger, is
+exactly the host that had something to lose, and it would have lost it twice — the other
+writer's quads relocated, and this server's coverage promise false from that moment on.
+`a_browse_read_touches_no_reserved_graph` states it; built against 0.3.2 it fails on the
+visibility half and, with that assertion removed, again on the write-back half.
 
 ### Watched roots, and why the reads are cached at all
 
@@ -856,12 +879,20 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   connection; the certificate set is read at startup.
 - **One trace per door.** A traced call through a door records the forward, not the hub's
   resolution beneath it.
-- **No browse graph of its own.** `ikigai-browse` hard-codes the default graph for every quad
-  it writes, so annotations cannot be given `urn:iki:browse:graph:…` beside the ledgers' named
-  graphs — and the default graph is exactly what `urn:cap:store:read:graph:<iri>` cannot name.
-  The consequence is that a ledger↔browse join is a **root-capability** query: the socket
-  door can run it, the HTTP door's anonymous caller cannot. Changing that needs a graph knob
-  in `ikigai-browse`.
+- **No browse graph of its own — a decision now, no longer a blocker.** `ikigai-browse` 0.4.0
+  has the knob (`Mount::graph`), and `src/browse.rs`'s `Graph` is where this server would turn
+  it; `Graph::chosen()` still answers the default graph. The cost of that is real: the default
+  graph is exactly what `urn:cap:store:read:graph:<iri>` cannot name, so a ledger↔browse join
+  is a **root-capability** query — the socket door runs it, the HTTP door's anonymous caller
+  cannot, and no narrow grant can be written that would let it. Moving is a **data migration**
+  (`migrate-annotation-ns <store> --graph <iri> --commit`), not a config flip: quads left in
+  the default graph stay there, invisible, with no error anywhere. Measured 2026-09-16 — gonk's
+  own store holds **0 quads** in the default graph (4 024 in `urn:iki:ledger:graph:default`),
+  so the move would cost nothing today; the dev server's browse archive, which route (b) would
+  eventually absorb, holds **1 876 quads over 222 subjects**, all of them identifiable by
+  subject prefix and none of them anyone else's. Opting in also forfeits the browse graph's
+  cacheability (the ~1000× above, for that graph only), which is what
+  `a_named_graph_choice_moves_the_promise_with_it` prices from the store's own mouth.
 - **No archived explanation without a net grant.** `urn:repo:{root}:explain` is ONE action
   whether it derives or serves an entry the archive already holds, so the `urn:cap:net:*` it
   declares is required either way. `version=` provably derives nothing (`ikigai-browse`

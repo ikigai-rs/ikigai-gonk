@@ -12,7 +12,9 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{browse, compose_with, doors, mount, quic, watch, web};
-use ikigai_store::{DurableStore, SharerWrites, StoreConfig};
+// ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
+// promise is not a type this file names, it is `browse::Graph` read as a declaration.
+use ikigai_store::{DurableStore, StoreConfig};
 use ikigai_time::{JobRegistry, Schedule, ThreadTimer};
 
 fn main() {
@@ -102,18 +104,20 @@ fn serve(flags: &config::Flags) -> ! {
     // read `Expiry::Always` — and expiry propagates, so that would de-cache every ledger read
     // as a side effect of adding a browse face (`tests/browse.rs` prints both numbers).
     //
-    // `only_the_default_graph` is the true statement here and the strongest one available:
-    // `ikigai-browse` hard-codes `GraphName::DefaultGraph` in all three of its writers
-    // (annotations, the explanation archive, review passes), with no configuration knob, and
-    // the default graph has no IRI for a scoped read to name. ⚠ A FALSE promise is silent,
-    // unbounded staleness — reads of a graph the sharer does write, cached against three
-    // threads its write never cuts — so this line moves only together with what browse does,
-    // and `tests/browse.rs::a_browse_write_touches_no_reserved_graph` fingerprints the
-    // reserved graphs around a real browse write to say so.
+    // ★ The promise is DERIVED, not transcribed. `browse::Graph` is gonk's choice of where
+    // the family's quads land, made once, on the line below; `sharer_writes()` is that choice
+    // read as a declaration and `browse::wire` is the same choice read as a mount. Until
+    // `ikigai-browse` 0.4.0's `Mount::graph` this line said `only_the_default_graph()` because
+    // a person had gone and read browse's three writers — a fact about a dependency's
+    // internals, re-typed here, which is what ledger #282 filed. ⚠ A FALSE promise is silent,
+    // unbounded staleness (reads of a graph the sharer does write, cached against threads its
+    // write never cuts), and `tests/browse.rs` fingerprints the reserved graphs around a real
+    // browse WRITE and a real browse READ to keep the derivation honest at both ends.
+    let browse_graph = browse::Graph::chosen();
     let opened = if settings.browse_roots.is_empty() {
         DurableStore::open(&store_path).map(|store| (store, None))
     } else {
-        DurableStore::open_shared_declaring(&store_path, SharerWrites::only_the_default_graph())
+        DurableStore::open_shared_declaring(&store_path, browse_graph.sharer_writes())
             .map(|(store, handle)| (store, Some(handle)))
     };
     let (store, handle) = opened.unwrap_or_else(|e| {
@@ -134,6 +138,9 @@ fn serve(flags: &config::Flags) -> ! {
             handle,
             root_watch.watched(),
             explains.then_some(&settings.explain),
+            // The SAME value the declaration above was derived from — not a second
+            // `Graph::chosen()`, which would be a second decision.
+            &browse_graph,
         )
     });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched());
