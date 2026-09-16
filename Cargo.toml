@@ -79,8 +79,11 @@ ikigai-repo = "0.1.6"
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
 # existed; it is a PRODUCTION dependency now, and the same pin serves both.
-# 0.1.18 for the resolve floor the transports below share.
-ikigai-resolve = "0.1.18"
+# 0.1.22 for the resolve floor the transports below share — raised from 0.1.18 by
+# `ikigai-time`, which requires `^0.1.22`. The pin states the minimum that COMPILES
+# with everything else here, so it moves when a sibling moves it; leaving it at
+# 0.1.18 would have been a floor this workspace can never resolve.
+ikigai-resolve = "0.1.22"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -101,6 +104,32 @@ ikigai-quic = "0.1.18"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 ikigai-web = "0.1.16"
+# Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
+# so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
+# by calling a gzip crate — which is the whole reason a module was built instead of a
+# helper. Three properties this server relies on and did not measure itself: the gzip
+# header fields are PINNED (so two backups of unchanged data are byte-identical), the
+# endpoints require NO capability (compression is pure computation over bytes the caller
+# already holds, so the backup path widens no authority), and decompression is BOUNDED —
+# `max-bytes` refuses rather than truncates, which is what makes restoring an archive from
+# outside this machine safe to attempt.
+# ⚠ It also registers TRANSREPTORS (`* -> application/gzip` and back). Nothing in this
+# server asks for `as=application/gzip` except `crate::backup`, so the planner gains a
+# route no page can reach; `tests/conformance.rs` pins the four ids so a version that
+# binds more is a red test.
+ikigai-compress = "0.1.0"
+# The timer that fires the backup. gonk holds the store, so gonk schedules the backup:
+# an external scheduler's failure mode is "gonk healthy, data changing, backups stopped,
+# nobody knows", and a backup job must not be able to outlive the thing it protects.
+# 0.3.0 is the floor and it is the reason this is usable at all: `JobHealth` gained
+# `last_success`, `since_last_success` and `failures_in_a_row` there, which is exactly the
+# difference between "overdue" and "failing" that a 24-hour cadence needs —
+# `urn:iki:gonk:backup:status` reports them.
+# ⚠ Only `JobRegistry` + `ThreadTimer` are used. The `urn:time:*` CONTROL PLANE is
+# deliberately NOT bound: `urn:time:schedule` fires an arbitrary target under the
+# registry's own capability, so binding it behind three doors would be a way to have this
+# server issue requests as itself. See `crate::backup` for the argument.
+ikigai-time = "0.3.0"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
 # The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic).
@@ -121,12 +150,19 @@ ikigai-passkey = "0.1.21"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
+# ★ And, since the backup family, `oxigraph::sparql::results` too: a backup is
+# `urn:iki:store:select` read back through the ENGINE'S OWN results parser and written by
+# the ENGINE'S OWN N-Quads serializer, never by string surgery on either end. That is what
+# keeps a literal containing ` .`, a language tag or a datatype from becoming a corrupt
+# line in the one file nobody reads until they need it.
 oxigraph = { version = "0.5", default-features = false }
 # Passkey challenges and session tokens: 32 bytes from the OS.
 getrandom = "0.3"
 # base64url for WebAuthn's byte fields (credential ids, challenges, keys).
 base64 = "0.22"
-# An enrolment invite is stored as the SHA-256 of its code, never the code.
+# An enrolment invite is stored as the SHA-256 of its code, never the code — and a backup
+# records the digest of both its N-Quads and its archive, so "is this backup the same data
+# as the last one" is a comparison rather than a belief.
 sha2 = "0.10"
 # The watch over the browse roots (`crate::watch`). gonk caches browse's filesystem reads —
 # browse declares them live and uncacheable, because a LIBRARY cannot know whether anyone is

@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backup;
 pub mod browse;
 pub mod config;
 pub mod doors;
@@ -72,7 +73,7 @@ use ikigai_vocab::TurtleRenderer;
 ///   `Verb::Meta as=application/json`; without a renderer that answer degrades to an
 ///   anonymous row and named arguments stop routing, with no error anywhere.
 pub fn compose(store: DurableStore) -> Kernel {
-    compose_with(store, None, Vec::new())
+    compose_with(store, None, Vec::new(), None)
 }
 
 /// [`compose`], plus the repository browse family when this server is configured for one.
@@ -97,10 +98,26 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// is gone and there is ONE place that says what is fresh. Two would be the hazard, not the
 /// belt and braces: the day `ikigai-browse` gains a named graph of its own, a wrapper here
 /// would go on declaring a graph the sharer writes as cacheable, silently.
+/// `backups` is [`crate::backup::space`]'s family — `urn:iki:gonk:backup`, its status, its
+/// archives and `urn:iki:gonk:restore` — together with the compression module they reach
+/// gzip through. Bound TOGETHER, and only together, because `urn:compress:*` is linked for
+/// them: a backup compresses by resolving `urn:compress:gzip` through this kernel rather
+/// than by calling a gzip crate, which is the whole reason a module was built instead of a
+/// helper. A gonk composed without them serves exactly the catalog it served before.
+///
+/// ⚠ **The timer's control plane is NOT bound, and that is a security decision rather than
+/// an omission.** `ikigai-time` is linked and the backup job runs in a [`JobRegistry`]
+/// ([`crate::backup::Backups`]) — but `urn:time:schedule` fires an ARBITRARY target under
+/// the registry's own capability, so binding it would put "have this server issue any
+/// request as itself" behind every door this binary opens. The target set is fixed at
+/// startup by `main`, not chosen at call time by a caller.
+///
+/// [`JobRegistry`]: ikigai_time::JobRegistry
 pub fn compose_with(
     store: DurableStore,
     browse: Option<Arc<dyn Space>>,
     mounted: Vec<Arc<dyn Space>>,
+    backups: Option<crate::backup::Backups>,
 ) -> Kernel {
     let store: Arc<dyn Space> = Arc::new(ikigai_store::space(store));
     // The mounts go FIRST — an override forwards its prefix unchanged, and precedence is
@@ -113,6 +130,10 @@ pub fn compose_with(
     if let Some(browse) = browse {
         spaces.push(browse);
         spaces.push(Arc::new(ikigai_repo::space()));
+    }
+    if let Some(backups) = backups {
+        spaces.push(Arc::new(backup::space(backups)));
+        spaces.push(Arc::new(ikigai_compress::space()));
     }
     Kernel::with_meta_renderer(Arc::new(Fallback::new(spaces)), Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock))

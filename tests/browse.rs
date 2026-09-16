@@ -105,6 +105,7 @@ fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch, 
         store.clone(),
         Some(Arc::new(wired.space)),
         mounted,
+        None,
     ));
     (hub, watch, store)
 }
@@ -815,7 +816,12 @@ fn an_unwatched_roots_reads_are_not_cached() {
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
     let wired = browse::wire(roots(&dir), handle, &[], None);
-    let hub = Arc::new(compose_with(store, Some(Arc::new(wired.space)), Vec::new()));
+    let hub = Arc::new(compose_with(
+        store,
+        Some(Arc::new(wired.space)),
+        Vec::new(),
+        None,
+    ));
     let file = "urn:repo:demo:file:src/lib.rs";
     assert_eq!(text(&hub, Verb::Source, file, &[]), "the first version\n");
     assert!(

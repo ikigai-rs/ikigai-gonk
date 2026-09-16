@@ -16,6 +16,9 @@
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"   # a browsable repository; repeatable
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
+//! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
+//! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
+//! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
 //! ```
 //!
 //! With no `gonk.browse.root` line this server composes exactly what it composed before: the
@@ -31,6 +34,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::grants::Authority;
 use crate::mount::{self, Mount};
@@ -48,8 +52,18 @@ pub const SOCKET_NAME: &str = "gonk.sock";
 /// the smaller bound is taken so a config that works on one works on both).
 pub const SOCKET_PATH_LIMIT: usize = 104;
 
+/// How often a backup is taken when no `gonk.backup.every` line says otherwise, and the
+/// requirement this feature was built to: every 24 hours, compressed, keep the last five.
+pub const DEFAULT_BACKUP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How many archives the rotation keeps by default.
+pub const DEFAULT_BACKUP_KEEP: usize = 5;
+
+/// The rotation directory's name under the data home.
+pub const BACKUP_DIR_NAME: &str = "backups";
+
 /// Every key this server reads.
-const KEYS: [&str; 16] = [
+const KEYS: [&str; 19] = [
     "gonk.bind",
     "gonk.port",
     "gonk.socket",
@@ -66,6 +80,9 @@ const KEYS: [&str; 16] = [
     "gonk.explain.pr.provider",
     "gonk.explain.pr.max_tokens",
     "gonk.explain.max_prompt_bytes",
+    "gonk.backup.dir",
+    "gonk.backup.every",
+    "gonk.backup.keep",
 ];
 
 /// How to invoke the binary.
@@ -104,6 +121,9 @@ serve flags (each overrides its config key wholesale):
                         are not bound at all: an action no kernel can satisfy is an
                         over-offer. Deriving one requires a net grant, which no grant this
                         server MINTS carries — see `grants` and the README
+  --no-backup           take no SCHEDULED backup this run (config `gonk.backup.every =
+                        \"off\"`). urn:iki:gonk:backup and urn:iki:gonk:restore stay bound:
+                        this server is the only thing that can export the dataset
   --config PATH         read this file instead of <config home>/config.toml
 
 files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME says otherwise):
@@ -176,6 +196,9 @@ pub struct Flags {
     pub browse_roots: Vec<String>,
     /// `--mount`, in order, unparsed.
     pub mounts: Vec<String>,
+    /// `--no-backup`: take no SCHEDULED backup this run. The backup family stays bound —
+    /// see [`BackupPolicy::every`].
+    pub no_backup: bool,
 }
 
 /// Everything `serve` needs, merged and validated.
@@ -198,6 +221,27 @@ pub struct Settings {
     pub mounts: Vec<Mount>,
     /// The per-kind providers and spend ceilings the explanation families derive under.
     pub explain: ExplainTiers,
+    /// Where backups land, how many are kept, and how often one is taken.
+    pub backup: BackupPolicy,
+}
+
+/// The backup rotation's settings, as configured — [`crate::backup::Settings`] is this
+/// plus the live store's path, which `main` knows and this module deliberately does not
+/// (the store's directory is `ikigai-store`'s own layered `store.toml`, so one setting has
+/// one spelling).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupPolicy {
+    /// The rotation directory.
+    pub dir: PathBuf,
+    /// How many archives to keep, pruned oldest-first.
+    pub keep: usize,
+    /// The cadence, or `None` when `gonk.backup.every = "off"` (or `--no-backup`).
+    ///
+    /// ★ Turning the timer off does NOT unbind the backup family. An operator who has
+    /// decided not to run a schedule still has a dataset only this process can export, and
+    /// a `urn:iki:gonk:backup` that vanished with the schedule would leave them with no way
+    /// to take one by hand.
+    pub every: Option<Duration>,
 }
 
 impl Settings {
@@ -369,6 +413,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             "--http-ledger" => flags.http_ledgers.push(value(&mut args, "--http-ledger")?),
             "--browse-root" => flags.browse_roots.push(value(&mut args, "--browse-root")?),
             "--mount" => flags.mounts.push(value(&mut args, "--mount")?),
+            "--no-backup" => flags.no_backup = true,
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -541,6 +586,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     let browse_roots = browse_roots(flags, text, homes)?;
     let mounts = mounts(flags, text, homes)?;
     let explain = explain_tiers(text)?;
+    let backup = backup_policy(flags, text, homes)?;
     Ok(Settings {
         http,
         socket,
@@ -549,7 +595,71 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         browse_roots,
         mounts,
         explain,
+        backup,
     })
+}
+
+/// The backup rotation, from flags then config then the defaults Brian's requirement
+/// states: every 24 hours, keep the last five, under the data home beside the store.
+///
+/// ★ **The default is ON.** A backup feature that has to be switched on is a backup feature
+/// that is off on the machine that needed it, and this dataset is the system of record for
+/// the whole workflow. `--no-backup` and `gonk.backup.every = "off"` are how an operator
+/// says otherwise, and the banner and `urn:iki:gonk:backup:status` both say which it is.
+fn backup_policy(flags: &Flags, text: &str, homes: &Homes) -> Result<BackupPolicy, String> {
+    let dir = value_for(text, "gonk.backup.dir")
+        .map(|spelled| expand_home(&spelled, &homes.home))
+        .unwrap_or_else(|| homes.data.join(BACKUP_DIR_NAME));
+    let keep = match value_for(text, "gonk.backup.keep") {
+        None => DEFAULT_BACKUP_KEEP,
+        Some(spelled) => spelled
+            .parse()
+            .ok()
+            .filter(|keep| *keep > 0)
+            .ok_or_else(|| {
+                format!(
+                    "gonk.backup.keep: `{spelled}` is not a count of archives to keep (1 or \
+                     more). To stop taking backups set `gonk.backup.every = \"off\"`; a \
+                     rotation that keeps zero would delete the backup it just took"
+                )
+            })?,
+    };
+    let every = if flags.no_backup {
+        None
+    } else {
+        match value_for(text, "gonk.backup.every") {
+            None => Some(DEFAULT_BACKUP_EVERY),
+            Some(spelled) if spelled.trim().eq_ignore_ascii_case("off") => None,
+            Some(spelled) => Some(parse_every(&spelled)?),
+        }
+    };
+    Ok(BackupPolicy { dir, keep, every })
+}
+
+/// A cadence in `ikigai-time`'s own compact grammar (`30m`, `6h`, `24h`), checked HERE so a
+/// spelling this server cannot obey stops it rather than producing a job that never fires.
+///
+/// ⚠ Not `xsd:duration`: `ikigai-time` parses `1m`/`2h`, not `PT1M`, and the error says so
+/// rather than leaving an operator to discover which grammar this is.
+fn parse_every(spelled: &str) -> Result<Duration, String> {
+    let schedule = ikigai_time::parse_schedule(spelled).map_err(|e| {
+        format!(
+            "gonk.backup.every: {e} — a duration like `24h`, `6h` or `30m`, or `off` to take \
+             no scheduled backups"
+        )
+    })?;
+    let interval = schedule.interval();
+    // A cadence under a minute is a typo with a filesystem cost: every tick writes an
+    // archive and prunes the rotation, so `24s` for `24h` would churn the disk and roll
+    // the whole keep-five window past in two minutes.
+    if interval < Duration::from_secs(60) {
+        return Err(format!(
+            "gonk.backup.every: `{spelled}` is under a minute. Every tick writes an archive \
+             and prunes the rotation, so a cadence that short destroys the history it is \
+             meant to keep — did you mean `{spelled}` with `h` rather than `s`?"
+        ));
+    }
+    Ok(interval)
 }
 
 /// The mounted peers, from flags then config — one [`crate::mount::parse`] per line, and at
@@ -785,6 +895,79 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    /// ★ The requirement as Brian stated it, as a test: every 24 hours, keep the last five,
+    /// and ON unless someone says otherwise — a backup feature that has to be switched on is
+    /// a backup feature that is off on the machine that needed it.
+    #[test]
+    fn a_backup_is_daily_keeps_five_and_is_on_by_default() {
+        let settings = settings(&Flags::default(), "", &homes()).unwrap();
+        assert_eq!(settings.backup.every, Some(DEFAULT_BACKUP_EVERY));
+        assert_eq!(settings.backup.every, Some(Duration::from_secs(86_400)));
+        assert_eq!(settings.backup.keep, 5);
+        assert_eq!(
+            settings.backup.dir,
+            PathBuf::from("/home/u/.ikigai/backups")
+        );
+    }
+
+    #[test]
+    fn the_backup_schedule_can_be_turned_off_without_unbinding_the_family() {
+        for text in [
+            "gonk.backup.every = \"off\"\n",
+            "gonk.backup.every = \"OFF\"\n",
+        ] {
+            let settings = settings(&Flags::default(), text, &homes()).unwrap();
+            assert_eq!(settings.backup.every, None);
+            // And the rotation is still configured: `urn:iki:gonk:backup` is still bound,
+            // so an operator with no schedule can still take one by hand.
+            assert_eq!(settings.backup.keep, 5);
+        }
+        let flagged = Flags {
+            no_backup: true,
+            ..Flags::default()
+        };
+        assert_eq!(
+            settings(&flagged, "gonk.backup.every = \"6h\"\n", &homes())
+                .unwrap()
+                .backup
+                .every,
+            None,
+            "the flag overrides the key, like every other flag here"
+        );
+    }
+
+    /// ⚠ A cadence this server cannot obey stops it. The sub-minute refusal is not
+    /// pedantry: every tick writes an archive and prunes, so `24s` for `24h` would roll the
+    /// whole keep-five window past in two minutes — destroying the history it exists to keep,
+    /// in the shape of a setting that looks like it is working.
+    #[test]
+    fn a_cadence_this_server_cannot_obey_stops_it() {
+        let six_hourly = settings(&Flags::default(), "gonk.backup.every = \"6h\"\n", &homes());
+        assert_eq!(
+            six_hourly.unwrap().backup.every,
+            Some(Duration::from_secs(21_600))
+        );
+        let hourly = settings(&Flags::default(), "gonk.backup.every = \"90m\"\n", &homes());
+        assert_eq!(
+            hourly.unwrap().backup.every,
+            Some(Duration::from_secs(5_400))
+        );
+
+        let iso = settings(
+            &Flags::default(),
+            "gonk.backup.every = \"PT24H\"\n",
+            &homes(),
+        )
+        .expect_err("ISO 8601 is not this grammar");
+        assert!(iso.contains("gonk.backup.every"), "{iso}");
+        let churn = settings(&Flags::default(), "gonk.backup.every = \"24s\"\n", &homes())
+            .expect_err("a sub-minute cadence");
+        assert!(churn.contains("under a minute"), "{churn}");
+        let zero = settings(&Flags::default(), "gonk.backup.keep = \"0\"\n", &homes())
+            .expect_err("a rotation that keeps nothing");
+        assert!(zero.contains("delete the backup it just took"), "{zero}");
     }
 
     #[test]

@@ -556,6 +556,111 @@ Until then, other machines use the QUIC door.
   resolve, or a `max_tokens` that is not a positive number — a ceiling is the only bound on
   what one derivation costs, so a typo in it must stop the server rather than fall back.
 
+## Backup and restore
+
+**gonk holds the only writer lock, so gonk is the only thing that can export the dataset.**
+RocksDB permits one writer per directory; a second process cannot open `~/.ikigai/store` to
+dump it, and `cp -r` of a live directory is a torn snapshot — SST files and the write-ahead
+log mutate under the copy, and the result may not open, or may open and be quietly short.
+Backup is therefore a face this server offers, not an ops script someone runs beside it.
+
+```
+ikigai -c 'source urn:iki:gonk:backup'           # take one now
+ikigai -c 'source urn:iki:gonk:backup:status'    # when the last good one was
+```
+
+Both need the owner-only socket (see below). By default a backup is taken **every 24 hours**,
+compressed, and the **last five** are kept in `~/.ikigai/backups`.
+
+### The format is N-Quads, and the easy mistake is Turtle
+
+**CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named
+ledger, its graveyard beside it, browse's own graphs — and that partition is what every
+per-graph capability is written against. A backup serialized as Turtle or N-Triples collapses
+every graph into one: the quad count still matches, every triple round-trips, and the restored
+dataset has every tenant's statements in the default graph with the tenancy boundary gone.
+
+So an archive is N-Quads, gzipped, and every comparison this server makes about one is
+**per graph**. The dump is `urn:iki:store:select` read back through oxigraph's own
+SPARQL-results parser and written by oxigraph's own N-Quads serializer — neither end is
+string surgery, which matters because ledger bodies contain newlines, quotation marks and
+trailing periods, and those are exactly the rows a hand-rolled writer corrupts.
+
+Compression is `urn:compress:gzip`, resolved **through the kernel**, which is why
+[`ikigai-compress`](https://github.com/ikigai-rs/ikigai-compress) is a dependency rather
+than `flate2`. Its header is pinned, so two backups of unchanged data are byte-identical and
+"has anything changed" is a digest comparison; the dump is `ORDER BY`ed to make that true of
+the input as well.
+
+### A merge is not a restore
+
+Loading an archive into a store that already holds quads is a **union**: it resurrects
+everything either side deleted and can never reproduce the backed-up state. So a restore
+builds a **new** store directory, and refuses a target that is not empty — or that is the
+live store, by name.
+
+```
+ikigai -c 'source urn:iki:gonk:backup:archive:gonk-store-2026-09-16T172813Z.nq.gz \
+           | sink urn:iki:gonk:restore into=/tmp/restored'
+```
+
+That leaves a complete dataset beside the live one and tells you the graph set and the
+per-graph counts it verified. Adopting it is an operator's act, with the server stopped:
+swap the directories and start gonk. The destructive step is visible, manual, and happens
+when nothing is writing.
+
+`urn:iki:gonk:restore` is also the **verifier**: it compares the restored dataset's graph set
+and per-graph counts against the archive it was built from and fails if they differ. A backup
+you have not restored is not a backup, so `tests/backup.rs` restores one on every run.
+
+### The two most dangerous grants in the system
+
+A backup reads **every** graph, which is precisely the authority the per-graph boundary
+exists to avoid handing out; a restore builds a store from bytes the caller supplies. Both
+live behind the **owner-only socket**, whose caller can read the dataset's files anyway —
+its own door, not a flag on the public one:
+
+| token | what it is | who can hold it |
+| --- | --- | --- |
+| `urn:cap:gonk:backup` | take a backup, read the status, read an archive | the socket door's root capability, and nothing else |
+| `urn:cap:gonk:restore` | build a store from an archive | the same |
+| `urn:cap:store:read` | every graph (declared by `urn:iki:gonk:backup`, because it really reads them) | the same |
+
+`gonk/grants.json` is **refused at startup** if it names any of them, exactly as it is for
+the store's broad tokens and the offering wildcards: a grant a reader could mistake for a
+narrowing must not be silently the opposite. `tests/doors.rs` drives the real HTTP door and
+asserts a `403` on every one of these, alongside `urn:iki:store:info` — the posture that had
+to survive this feature.
+
+### The schedule, and why it is not `urn:time:schedule`
+
+The job runs in an `ikigai-time` `JobRegistry` inside this process. **The control plane is
+deliberately not bound**: `urn:time:schedule` fires an arbitrary target under the registry's
+own capability, so binding it behind three doors would be a way to have this server issue any
+request as itself. The target set is fixed at startup by `main`; the registry fires under
+exactly `urn:cap:gonk:backup` and `urn:cap:store:read`, so a scheduled backup can read every
+graph and write the rotation, and cannot write a single quad.
+
+It lives here rather than on the host daemon's scheduler for one reason: **a backup job must
+not be able to outlive the thing it protects.** An external scheduler's failure mode is "gonk
+is healthy, data is changing, backups stopped, nobody knows". If gonk schedules its own
+backup, "gonk is down" also means "nothing is being written", and a missed backup is harmless.
+
+Two things make the schedule trustworthy rather than merely present:
+
+- **A recurring timer's first tick is one whole interval away.** A daily job on a
+  `KeepAlive` daemon whose machine reboots nightly never reaches it — silently, with a
+  schedule that looks correct in every readout. So startup reads the rotation directory's
+  newest sidecar and, if the last backup is older than the cadence (or there is none),
+  schedules a one-shot catch-up a minute out.
+- **`urn:iki:gonk:backup:status` answers from both sides.** A scheduled job that *hangs*
+  reads stale forever and never reads failing, and gonk is not heartbeat-watched. The status
+  reports the newest archive actually on disk with its per-graph counts and digests, the
+  whole rotation, and the timer's own health — runs, time since the last run, time since the
+  last **success**, failures in a row. A job that never fired shows as a growing "since last
+  run"; a job that fires and fails shows as "failures in a row". `as=application/json` gives
+  the same thing to a machine.
+
 ## Configuration
 
 Flags override config wholesale; there is no environment-variable channel. The config home
@@ -574,6 +679,9 @@ gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/p
 # gonk.explain.file.max_tokens = 400                   # file 400, dir 600, review 800, pr 600
 # gonk.explain.dir.provider = "urn:llm:ask"            # .dir / .review / .pr take the same pair
 # gonk.explain.max_prompt_bytes = 16384
+gonk.backup.every = "24h"             # the cadence; "off" (or --no-backup) takes none
+# gonk.backup.keep = 5                # how many archives the rotation keeps
+# gonk.backup.dir = "~/.ikigai/backups"
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
@@ -590,6 +698,7 @@ would assert instead, which arrives as a panic where the banner should be.
 | `gonk/invites.json` | outstanding passkey invites, by the SHA-256 of their codes |
 | `gonk/render-rules.ttl` | this deployment's render rules, replacing the shipped table wholesale |
 | `gonk/quic/` | `server.crt`, `server.key`, and one `clients/<name>/` bundle per client |
+| `~/.ikigai/backups/` | the rotation: `gonk-store-<stamp>.nq.gz` and a `.meta.json` sidecar each |
 
 ## What it composes
 
@@ -598,10 +707,14 @@ The manifest is the module manifest: gonk links
 [`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger),
 [`ikigai-browse`](https://github.com/ikigai-rs/ikigai-browse) and
 [`ikigai-repo`](https://github.com/ikigai-rs/ikigai-repo), the `ikigai-web`, `ikigai-ipc` and
-`ikigai-quic` transports, and `ikigai-resolve` for the mount. For the browser face it adds two
-libraries it calls as functions and binds no resources from: `ikigai-xslt` (the stylesheet
-engine) and `ikigai-passkey` (the assertion verifier). **No LLM client** — the model is
-mounted, never linked.
+`ikigai-quic` transports, and `ikigai-resolve` for the mount. For the backup family it adds
+[`ikigai-compress`](https://github.com/ikigai-rs/ikigai-compress) — whose four resources ARE
+bound, because an archive reaches gzip by resolving `urn:compress:gzip` through this kernel —
+and `ikigai-time`, whose `JobRegistry` fires the schedule and whose `urn:time:*` control plane
+is deliberately **not** bound. For the browser face it adds two libraries it calls as
+functions and binds no resources from: `ikigai-xslt` (the stylesheet engine) and
+`ikigai-passkey` (the assertion verifier). **No LLM client** — the model is mounted, never
+linked.
 
 ⚠ **That is a correction, and it has now been made twice.** Through 0.1.0 this section said
 "no filesystem module, no process execution and no outbound network client is compiled in, so
@@ -634,7 +747,10 @@ process can satisfy is an over-offer.
 ledger's fourteen, pins the HTTP door's to those plus its ten pages, and walks
 `ikigai-conformance` over the hub, a door, and the HTTP door. `tests/browse.rs` pins the
 browse composition's twenty more, in the hub and through a door, pins the five the mount adds
-(and their absence without one), and pins the spend gate per capability.
+(and their absence without one), and pins the spend gate per capability. `tests/backup.rs`
+pins the backup composition's eight more — gonk's four and compress's four — asserts that
+`urn:time:schedule`, `urn:time:cancel` and `urn:time:jobs` are bound by nothing, and restores
+a real archive, comparing the graph set and the per-graph counts rather than a total.
 
 ### One dataset, and what it costs
 
@@ -767,6 +883,22 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   recomputes every cached read of it. A per-file thread would have to be built from the file's
   own IRI, and the percent-encoding that produces it is private to `ikigai-browse`; a thread
   computed one way at the read and another way at the cut is worse than invalidating too much.
+- **Backups sit on the disk they protect.** Off-machine is a separate decision and has not
+  been made. `urn:iki:gonk:backup:archive:{name}` is what makes one copyable through the
+  socket without linking a filesystem family into the process that holds the dataset, so the
+  mechanism exists and the policy does not.
+- **No encryption at rest.** An archive is mode `0600` and is the whole dataset in one file —
+  every graph the per-graph capabilities exist to separate.
+  [`ikigai-encrypt`](https://github.com/ikigai-rs/ikigai-encrypt) is the shape that would fix
+  it and is not linked.
+- **A backup is whole, never incremental.** Five rotations of the whole dataset, on a store
+  measured in megabytes. Nothing here would scale to a store measured in gigabytes: the dump
+  is materialized in memory and ordered, which is what buys byte-identical archives.
+- **No RocksDB checkpoint.** The fast, engine-coupled snapshot (hard links, consistent,
+  opaque) is the right tool before a risky migration and is not built; the portable RDF
+  archive is the one that still works when the engine has moved or the store will not open.
+- **A restore does not adopt.** It builds a store beside the live one and tells you what it
+  verified; swapping it in is manual, with the server stopped.
 - **No browse face on the HTTP door.** The family is reachable through the socket and QUIC
   doors and by SPARQL; the browser face still serves ledgers only, and no route maps to
   `urn:repo:*`.

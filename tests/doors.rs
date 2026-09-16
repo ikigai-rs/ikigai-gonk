@@ -304,3 +304,132 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
     );
     assert!(!at("192.168.1.20").allows("urn:cap:ledger:read:default"));
 }
+
+/// ★★ **The backup family is not reachable from the public door, and this is the proof the
+/// brief asked for.** `urn:iki:gonk:backup` reads every graph in the dataset and
+/// `urn:iki:gonk:restore` builds a store from bytes a caller supplies: between them they are
+/// the two most dangerous grants in this server. The posture that must survive the feature
+/// is the one the ledger recorded on 2026-09-16 — the loopback HTTP door would not serve
+/// even `urn:iki:store:info` — and it survives structurally rather than carefully, because
+/// the HTTP door's capability is exactly a list of per-ledger tokens.
+#[test]
+fn the_public_http_door_cannot_reach_the_backup_family() {
+    let backups = tempfile::tempdir().unwrap();
+    let grants = ikigai_gonk::grants::grants_for_all(
+        &["default".to_string()],
+        ikigai_gonk::grants::Authority::Write,
+    )
+    .unwrap();
+    // Every token an anonymous loopback caller holds, and a signed-in passkey's grant can
+    // only be another ledger's: none of these three is mintable by this server at all.
+    for token in [
+        ikigai_gonk::backup::CAP_BACKUP,
+        ikigai_gonk::backup::CAP_RESTORE,
+        ikigai_store::CAP_READ,
+    ] {
+        assert!(
+            !grants.contains(&token.to_string()),
+            "`{token}` must never be in what the HTTP door hands out: {grants:?}"
+        );
+    }
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let hub = Arc::new(ikigai_gonk::compose_with(
+        DurableStore::in_memory().expect("an in-memory store"),
+        None,
+        Vec::new(),
+        Some(ikigai_gonk::backup::Backups {
+            settings: Arc::new(ikigai_gonk::backup::Settings {
+                dir: backups.path().to_path_buf(),
+                keep: 5,
+                every: Some(Duration::from_secs(86_400)),
+                store_path: backups.path().join("nonexistent-store"),
+            }),
+            jobs: None,
+        }),
+    ));
+    let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
+        quic::Layout::in_config_home(config.path()),
+        addr.port(),
+    ));
+    let face = Arc::new(ikigai_gonk::web::Web {
+        hub: Arc::clone(&hub),
+        ledgers: vec!["default".to_string()],
+        passkeys: Arc::clone(&passkeys),
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+    });
+    let kernel = Arc::new(doors::http_kernel(
+        Arc::clone(&hub),
+        ikigai_gonk::web::space(face),
+    ));
+    let door = doors::HttpDoor {
+        anonymous: grants,
+        port: addr.port(),
+        passkeys: Some(passkeys),
+    };
+    std::thread::spawn(move || {
+        runtime.block_on(ikigai_web::serve_with_listener(
+            kernel,
+            doors::http_cap(door),
+            listener,
+            doors::edge_config(),
+        ))
+    });
+
+    // The ledger still works over the public door — otherwise "denied" would prove nothing.
+    let (status, response) = http(addr, "GET", "/iki/ledger/items", "");
+    assert_eq!(status, 200, "{response}");
+
+    for (method, path) in [
+        ("GET", "/iki/gonk/backup"),
+        ("GET", "/iki/gonk/backup/status"),
+        ("GET", "/iki/gonk/backup/archive/anything.nq.gz"),
+        ("POST", "/iki/gonk/restore"),
+        // The posture the ledger recorded, re-checked with the family bound.
+        ("GET", "/iki/store/info"),
+    ] {
+        let (status, response) = http(
+            addr,
+            method,
+            path,
+            "into=/tmp/gonk-restore-should-not-happen",
+        );
+        assert_eq!(
+            status, 403,
+            "{method} {path} must be denied on the public door, got {status}: {response}"
+        );
+    }
+    assert!(
+        !std::path::Path::new("/tmp/gonk-restore-should-not-happen").exists(),
+        "a denied restore must not have built a store"
+    );
+    assert!(
+        ikigai_gonk::backup::archives(backups.path()).is_empty(),
+        "a denied backup must not have written an archive"
+    );
+}
+
+/// And the same two tokens cannot be attached to an identity either: `grants.json` is
+/// refused at startup and again per connection, so no certificate and no passkey can carry
+/// them onto a network door.
+#[test]
+fn a_grant_naming_the_backup_tokens_is_refused() {
+    for token in [
+        ikigai_gonk::backup::CAP_BACKUP,
+        ikigai_gonk::backup::CAP_RESTORE,
+    ] {
+        let grants = std::collections::BTreeMap::from([(
+            "laptop".to_string(),
+            vec!["urn:cap:ledger:read:default".to_string(), token.to_string()],
+        )]);
+        let refusal = quic::check_grants(&grants)
+            .expect_err(&format!("`{token}` must not be grantable to an identity"));
+        assert!(refusal.contains(token), "{refusal}");
+        assert!(refusal.contains("owner-only socket"), "{refusal}");
+    }
+}
