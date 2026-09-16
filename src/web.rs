@@ -938,13 +938,12 @@ LIMIT 50",
         "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
 PREFIX dcterms: <http://purl.org/dc/terms/>
 
-SELECT ?number ?title ?status WHERE {
+SELECT ?number ?title WHERE {
   ?item a ledger:Item ;
         ledger:priority 1 ;
         ledger:status ledger:open ;
         ledger:number ?number ;
-        dcterms:title ?title ;
-        ledger:status ?status .
+        dcterms:title ?title .
 }
 ORDER BY ?number",
     ),
