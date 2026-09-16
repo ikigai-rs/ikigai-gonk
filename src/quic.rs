@@ -414,12 +414,26 @@ pub fn read_grants(path: &Path) -> Result<BTreeMap<String, Vec<String>>, String>
     }
 }
 
-/// Refuse a grants file in which any grant names a broad store token.
+/// Refuse a grants file in which any grant names a broad store token, or the exec wildcard.
+///
+/// Both checks are the same check: a token whose SHAPE says "all of them", written where an
+/// operator means "this one". They run before the store opens and before either identity
+/// door reads the file, so a grant that would hand a remote client the whole dataset or the
+/// whole shell stops the server instead of admitting one connection under it.
 pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
     for (name, scopes) in grants {
         let broad = broad_store_scopes(scopes);
         if !broad.is_empty() {
             return Err(broad_refusal(name, &broad));
+        }
+        let exec = crate::grants::unbounded_exec_scopes(scopes);
+        if !exec.is_empty() {
+            return Err(format!(
+                "grant `{name}` names {} — the OFFERING wildcard `ikigai-repo` declares, which \
+                 as a grant is every program on this machine. Name the tools instead: \
+                 `urn:cap:exec:git`, `urn:cap:exec:gh`",
+                exec.join(" and ")
+            ));
         }
     }
     Ok(())
@@ -750,6 +764,35 @@ mod tests {
         let refused = authority(&enrolled("broad"), &grants(), FP).unwrap_err();
         assert!(refused.contains("urn:cap:store:write"), "{refused}");
         assert!(check_grants(&grants()).is_err());
+    }
+
+    /// ★ New with the browse family: `urn:system:exec` is compiled in, so a grants file can
+    /// now name the exec wildcard — and a wildcard written as a grant is the opposite of what
+    /// it looks like. The per-tool spelling is accepted, because that is what `ikigai-repo`
+    /// enforces at dispatch.
+    #[test]
+    fn a_grant_naming_the_exec_wildcard_is_refused_but_a_tool_is_not() {
+        let mut wildcard = BTreeMap::new();
+        wildcard.insert(
+            "shell".to_string(),
+            vec![crate::grants::CAP_EXEC_ANY.to_string()],
+        );
+        let refused = check_grants(&wildcard).unwrap_err();
+        assert!(refused.contains("urn:cap:exec:*"), "{refused}");
+        assert!(
+            refused.contains("urn:cap:exec:git"),
+            "names the fix: {refused}"
+        );
+
+        let mut narrow = BTreeMap::new();
+        narrow.insert(
+            "builder".to_string(),
+            vec![
+                "urn:cap:exec:git".to_string(),
+                "urn:cap:browse:read:core".to_string(),
+            ],
+        );
+        assert!(check_grants(&narrow).is_ok(), "a tool grant is legitimate");
     }
 
     #[test]

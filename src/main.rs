@@ -9,7 +9,8 @@ use std::sync::Arc;
 use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
-use ikigai_gonk::{compose, doors, quic, web};
+use ikigai_gonk::watch::Watched;
+use ikigai_gonk::{browse, compose_with, doors, quic, watch, web};
 use ikigai_store::{DurableStore, StoreConfig};
 
 fn main() {
@@ -67,11 +68,32 @@ fn serve(flags: &config::Flags) -> ! {
     // rather than failing every sign-in.
     identity::read_passkeys(&layout).unwrap_or_else(|e| fail(&e));
 
+    // The browse roots' watchers start BEFORE the space is built, and the set they actually
+    // got decides which roots' reads may be cached. Fail closed, in that order: a root whose
+    // platform watcher refuses is served live, exactly as `ikigai-browse` declares it.
+    let (root_watch, unwatched) = watch::RootWatch::start(&settings.browse_roots);
+    for root in &unwatched {
+        eprintln!(
+            "ikigai-gonk: browse root `{}` will not be watched ({}) — its reads are served \
+             live and uncached",
+            root.name, root.reason
+        );
+    }
+
     // Hold the store. A second holder is refused by RocksDB — and the fix is topology.
     let store_path = StoreConfig::load(Some("gonk"))
         .unwrap_or_else(|e| fail(&e.to_string()))
         .path;
-    let store = DurableStore::open(&store_path).unwrap_or_else(|e| {
+    // ★ `open_shared` ONLY when something else in this process needs the handle. The browse
+    // annotation family takes an `Arc<Store>`, which is how its quads land in the dataset the
+    // ledger lives in — the whole point of composing them here. What that costs, and why it
+    // does not cost the ledger's read cache, is `ikigai_gonk::freshness`.
+    let opened = if settings.browse_roots.is_empty() {
+        DurableStore::open(&store_path).map(|store| (store, None))
+    } else {
+        DurableStore::open_shared(&store_path).map(|(store, handle)| (store, Some(handle)))
+    };
+    let (store, handle) = opened.unwrap_or_else(|e| {
         fail(&format!(
             "cannot hold the store at {}: {e}\n  gonk is the one process on a machine that opens the dataset. If \
              the holder is another gonk, this one has nothing to add — reach that one through its socket. If it \
@@ -82,7 +104,29 @@ fn serve(flags: &config::Flags) -> ! {
             sock = settings.socket.display()
         ))
     });
-    let hub = Arc::new(compose(store));
+    let browse = handle
+        .map(|handle| browse::wire(settings.browse_roots.clone(), handle, root_watch.watched()));
+    let browse_line = browse_line(&settings.browse_roots, root_watch.watched());
+    let (browse_space, style) = match browse {
+        Some(wired) => (
+            Some(Arc::new(wired.space) as Arc<dyn ikigai_core::Space>),
+            Some(wired.style),
+        ),
+        None => (None, None),
+    };
+    let hub = Arc::new(compose_with(store, browse_space));
+
+    // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
+    // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
+    // threads are this server's own (`crate::watch`), declared only for what is watched.
+    if let Some(style) = style {
+        if let Err(e) = style.spawn(Arc::clone(&hub)) {
+            // Not fatal — the sheet still serves — but the symptom (an edit that never
+            // lands) is silent, so say it once.
+            eprintln!("ikigai-gonk: urn:repo:style will not follow a11y.toml edits: {e}");
+        }
+    }
+    root_watch.spawn(Arc::clone(&hub));
 
     // The socket door. Bound only after the store is held, so it can never replace the
     // socket of a gonk that is still running.
@@ -156,6 +200,7 @@ fn serve(flags: &config::Flags) -> ! {
             settings.http_ledgers.join(", "),
             passkeys.enrolled_count()
         );
+        eprintln!("  browse  {browse_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
         eprintln!(
@@ -175,6 +220,31 @@ fn serve(flags: &config::Flags) -> ! {
         .await;
         fail(&format!("the http door stopped: {error:?}"))
     })
+}
+
+/// The banner's browse line: which roots are served, and which of them are watched — because
+/// "watched" is exactly "its reads are cached", and an operator reading the banner should be
+/// able to tell those apart without reading this source.
+fn browse_line(roots: &[(String, std::path::PathBuf)], watched: &[Watched]) -> String {
+    if roots.is_empty() {
+        return "not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are \
+                not bound"
+            .to_string();
+    }
+    let names: Vec<String> = roots
+        .iter()
+        .map(|(name, _)| {
+            if watched.iter().any(|root| &root.name == name) {
+                format!("{name} (watched)")
+            } else {
+                format!("{name} (live, unwatched)")
+            }
+        })
+        .collect();
+    format!(
+        "urn:repo:{{{}}}:* — annotations in this dataset",
+        names.join(", ")
+    )
 }
 
 fn client_add(

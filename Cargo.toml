@@ -16,10 +16,14 @@ path = "src/main.rs"
 
 [dependencies]
 # ★ THE MANIFEST IS THE MODULE MANIFEST. This binary links the durable store, the work
-# ledger and three transports, and nothing else — no filesystem module, no calendar, no
-# exec, no LLM client. What is not compiled in cannot be reached, whatever a capability
-# says. `tests/conformance.rs::the_served_catalog_is_exactly_the_store_and_the_ledger`
-# pins the served catalog id by id, so a dependency bump that widens it is a red test.
+# ledger, the repository browse family and three transports — and nothing else: no
+# calendar, no LLM client, no inbound-network module beyond the doors themselves. What is
+# not compiled in cannot be reached, whatever a capability says; what IS compiled in is
+# reachable exactly as far as a capability carries, which is why the browse and repo
+# families below are argued one door at a time in the README rather than merely listed.
+# `tests/conformance.rs::the_served_catalog_is_exactly_the_store_and_the_ledger` (no browse
+# roots) and `tests/browse.rs::the_served_catalog_is_exactly_what_this_manifest_links` (with
+# them) pin the served catalog id by id, so a dependency bump that widens it is a red test.
 #
 # Every floor is the TRUE minimum of a set that compiles together, checked by resolving
 # this manifest from scratch with every ikigai pin written `=<floor>` — a caret resolve
@@ -48,6 +52,21 @@ ikigai-store = { version = "0.2.3", features = ["persistent"] }
 # the per-ledger grant list this server hands out could list a ledger and was denied
 # reading one item out of it.
 ikigai-ledger = "0.2.1"
+# The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
+# the PR pages and the W3C annotation family. 0.3.2 is the floor and it is load-bearing
+# twice over: `Mount::space_watched` (the `StyleWatch` that cuts `urn:repo:style`'s golden
+# threads when an `a11y.toml` layer changes) first exists there, and a host that calls the
+# older `Mount::space` declares those threads with nothing cutting them. 0.3.0 is where the
+# annotation family took its `urn:iki:annotation:` name, which is the name this server puts
+# on the wire; nothing here installs an alias for the older spelling.
+ikigai-browse = "0.3.2"
+# The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
+# `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
+# does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
+# it is what makes those rows work. Every resource here enforces `urn:cap:exec:{tool}` —
+# `urn:system:exec` included, per tool, not under the offering wildcard — so a grant naming
+# `urn:cap:exec:git` cannot run `gh`, and `grants.rs` refuses the wildcard as a GRANT.
+ikigai-repo = "0.1.6"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -87,6 +106,12 @@ getrandom = "0.3"
 base64 = "0.22"
 # An enrolment invite is stored as the SHA-256 of its code, never the code.
 sha2 = "0.10"
+# The watch over the browse roots (`crate::watch`). gonk caches browse's filesystem reads —
+# browse declares them live and uncacheable, because a LIBRARY cannot know whether anyone is
+# watching — and a declared golden thread is a promise that something cuts it. This is that
+# something. Same major as `ikigai-browse`'s own (its `StyleWatch`) and `ikigai-cli`'s, so one
+# platform watcher implementation is in the graph.
+notify = "6.1"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a

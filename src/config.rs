@@ -13,7 +13,13 @@
 //! # gonk.quic.bind = "0.0.0.0:1060"     # set it to REQUIRE the QUIC door; unset, it opens at
 //!                                       # this default once a client certificate is enrolled
 //! gonk.http.ledger = "default"          # ledgers the HTTP door may read and write; repeatable
+//! gonk.browse.root = "core=~/git-personal/ikigai-core"   # a browsable repository; repeatable
 //! ```
+//!
+//! With no `gonk.browse.root` line this server composes exactly what it composed before: the
+//! store and the ledgers. Each line adds `urn:repo:<name>:…` over that directory — and the
+//! first one also binds `ikigai-repo`'s facades, which run `git` and `gh`. That is a real
+//! widening of what is compiled in and reachable, so it is opt-in, per root, by path.
 //!
 //! **Flags override config wholesale**, the rule standalone `ikigai-web` set: `--port 9000`
 //! against `gonk.bind = "127.0.0.1:1070"` serves loopback 9000, and a repeatable flag
@@ -40,12 +46,13 @@ pub const SOCKET_NAME: &str = "gonk.sock";
 pub const SOCKET_PATH_LIMIT: usize = 104;
 
 /// Every key this server reads.
-const KEYS: [&str; 5] = [
+const KEYS: [&str; 6] = [
     "gonk.bind",
     "gonk.port",
     "gonk.socket",
     "gonk.quic.bind",
     "gonk.http.ledger",
+    "gonk.browse.root",
 ];
 
 /// How to invoke the binary.
@@ -75,6 +82,9 @@ serve flags (each overrides its config key wholesale):
   --no-quic             do not open the QUIC door this run
   --http-ledger NAME    a ledger the HTTP door may read and write (repeatable; config
                         `gonk.http.ledger`); default `default`
+  --browse-root N=PATH  serve urn:repo:N:* over PATH (repeatable; config `gonk.browse.root`).
+                        Unset, the browse family and ikigai-repo's git/gh facades are not
+                        bound at all; the socket door's root capability reaches both
   --config PATH         read this file instead of <config home>/config.toml
 
 files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME says otherwise):
@@ -143,6 +153,8 @@ pub struct Flags {
     pub no_quic: bool,
     /// `--http-ledger`, in order.
     pub http_ledgers: Vec<String>,
+    /// `--browse-root`, in order, unparsed (`name=path`).
+    pub browse_roots: Vec<String>,
 }
 
 /// Everything `serve` needs, merged and validated.
@@ -157,6 +169,9 @@ pub struct Settings {
     pub quic: QuicBind,
     /// The ledgers the HTTP door may read and write.
     pub http_ledgers: Vec<String>,
+    /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
+    /// the browse family is not composed at all.
+    pub browse_roots: Vec<(String, PathBuf)>,
 }
 
 /// The QUIC door's bind, and where it came from — which is half of whether it opens.
@@ -260,6 +275,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             "--quic-bind" => flags.quic_bind = Some(value(&mut args, "--quic-bind")?),
             "--no-quic" => flags.no_quic = true,
             "--http-ledger" => flags.http_ledgers.push(value(&mut args, "--http-ledger")?),
+            "--browse-root" => flags.browse_roots.push(value(&mut args, "--browse-root")?),
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -429,12 +445,56 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             lines
         }
     };
+    let browse_roots = browse_roots(flags, text, homes)?;
     Ok(Settings {
         http,
         socket,
         quic,
         http_ledgers,
+        browse_roots,
     })
+}
+
+/// The browsable roots, from flags then config — `name=path` per line, `~/`-expanded, the
+/// name checked the way `ikigai-browse` checks it (which it does by panicking) and the
+/// directory required to exist.
+///
+/// ★ **A root that is not there is refused, not skipped.** A missing directory is the shape
+/// of a typo or a moved checkout, and the symptom of skipping it is a resolution MISS on
+/// `urn:repo:<name>:tree` — which is what an unconfigured root looks like too, so the operator
+/// would be told nothing at all.
+fn browse_roots(
+    flags: &Flags,
+    text: &str,
+    homes: &Homes,
+) -> Result<Vec<(String, PathBuf)>, String> {
+    let lines = if flags.browse_roots.is_empty() {
+        values_for(text, "gonk.browse.root")
+    } else {
+        flags.browse_roots.clone()
+    };
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
+    for line in lines {
+        let (name, path) = line.split_once('=').ok_or_else(|| {
+            format!("browse root `{line}`: expected <name>=<path>, e.g. core=~/git/ikigai-core")
+        })?;
+        let (name, path) = (name.trim(), path.trim());
+        crate::browse::check_root_name(name)?;
+        if roots.iter().any(|(seen, _)| seen == name) {
+            return Err(format!(
+                "browse root `{name}` is named twice — one name, one directory"
+            ));
+        }
+        let dir = expand_home(path, &homes.home);
+        if !dir.is_dir() {
+            return Err(format!(
+                "browse root `{name}`: {} is not a directory",
+                dir.display()
+            ));
+        }
+        roots.push((name.to_string(), dir));
+    }
+    Ok(roots)
 }
 
 /// Parse an `IP:PORT` socket address — an IP, not a hostname: a bind is a listening

@@ -11,6 +11,7 @@ certificate and runs under the grant that certificate is enrolled for.
 $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
+  browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
   mount   mount = "prefer urn:iki:ledger:=/Users/you/.ikigai/gonk.sock"  (and the same for urn:iki:store:)
@@ -217,6 +218,26 @@ A host that used to open the store itself (`store = true` in that file) drops th
 takes these two. If both run at once, the second to start is refused by RocksDB with the
 path it tried and these two lines.
 
+With browse roots configured, two more prefixes are served here — and they are separate mount
+lines for the same reason, plus one spelling that is easy to get wrong:
+
+```toml
+mount = "prefer urn:repo:=/Users/you/.ikigai/gonk.sock"
+mount = "prefer urn:iki:annotation=/Users/you/.ikigai/gonk.sock"   # ⚠ no trailing colon
+```
+
+The annotation line has no trailing colon deliberately: mounts match by plain string prefix,
+and `urn:iki:annotation` covers both `urn:iki:annotation:{id}` and the bare
+`urn:iki:annotation` that a Sink mints under — the only write path the family has. Written
+`urn:iki:annotation:=`, every new annotation fails to route, silently.
+
+⚠ **`urn:repo:` is one prefix over two families.** That mount sends `urn:repo:{root}:file:…`
+(browse) *and* `urn:repo:status`, `urn:repo:log`, `urn:repo:pr:list` (the facades) to gonk,
+where they run in gonk's process, under gonk's working directory, with whatever capability the
+caller carried across. A host that wants the facades local and only the roots remote cannot
+say so with a prefix mount. (`urn:system:exec` is outside that prefix and stays wherever the
+calling host binds it, unless mounted by name.)
+
 ## From another machine, over QUIC
 
 The QUIC door opens once a client **certificate** is enrolled. Passkeys never open it: they
@@ -278,6 +299,36 @@ another ledger, and cannot touch the store's whole-dataset doors (`urn:iki:store
 `urn:iki:store:update`), because none of those tokens are in its grant. A passkey adds exactly
 its grant and nothing else.
 
+**And with browse roots configured, that argument has to be re-made, because more is now
+compiled in.** `urn:repo:*` reads files off the disk and runs `git`; `urn:system:exec` runs a
+named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
+
+| family | anonymous HTTP | signed-in HTTP | socket | QUIC |
+| --- | --- | --- | --- | --- |
+| the configured ledgers | read + write | + the passkey's grant | all | per grant |
+| `urn:repo:{root}:*` (`urn:cap:browse:read:{root}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:iki:annotation` (`urn:cap:annotate`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
+
+Three things make that table true rather than aspirational. `ikigai-gonk grants` mints
+per-ledger tokens only, so nothing this server writes into a grant names browse, exec or the
+whole dataset. `grants.json` is refused at startup if any grant names a whole-dataset store
+token **or the exec wildcard `urn:cap:exec:*`** — which `ikigai-repo` declares as an
+*offering* ("holds some grant under this prefix") and which as a *grant* means every program
+on the machine; the per-tool spelling `urn:cap:exec:git` is what that crate enforces at
+dispatch and what an operator means. And `urn:kernel:actions` is capability-scoped by
+construction, so an anonymous caller asking "what can I do?" is offered no browse row, no
+facade and no broad store door — `tests/browse.rs` asserts both halves, the offer and the
+typed `Denied`.
+
+**The socket door is root, and root now reaches further.** An owner-only socket client can
+read any file under a configured root and run `git`/`gh` through the facades. That is
+authority the same user already has — the socket is `0600` with the peer UID checked, and
+whoever holds it can read the dataset's files and run `git` themselves — but it IS a wider
+surface than before, and it is reached by mounting this socket, so a host that mounts gonk
+mounts all of it.
+
 **Every door shares one kernel.** A kernel owns its cache and its golden threads, and each
 transport takes one by value; separate kernels over one store would let a write through one
 door leave another serving the read it cached before. So there is one kernel, the hub, and
@@ -327,6 +378,12 @@ Until then, other machines use the QUIC door.
 - **More than 256 outstanding challenges or sessions.** Past the bound a new one is refused;
   nobody else's in-flight sign-in is evicted.
 - **A `gonk.*` config key it does not read**, and a socket path too long to bind.
+- **A browse root that is not there, is named twice, or is named something that reads as
+  another family** (`pr`, `style`, or a name containing `:`, `/`, `{`, `}`). A missing
+  directory looks exactly like an unconfigured root once the server is up — a resolution
+  miss — so it is refused while there is still somewhere to print the reason.
+- **A grant naming `urn:cap:exec:*`**, the offering wildcard, which as a grant is every
+  program on this machine. Name the tools: `urn:cap:exec:git`, `urn:cap:exec:gh`.
 
 ## Configuration
 
@@ -340,7 +397,14 @@ gonk.socket = "~/.ikigai/gonk.sock"
 # gonk.quic.bind = "0.0.0.0:1060"     # unset: QUIC opens here once a certificate is enrolled;
                                       # set: QUIC must open, or gonk refuses to start
 gonk.http.ledger = "default"          # repeatable
+gonk.browse.root = "core=~/git-personal/ikigai-core"   # repeatable; unset, no browse family
 ```
+
+A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
+The name is spliced into `urn:repo:<name>:…`, so it may not contain `:`, `/`, `{` or `}`, may
+not repeat, and may not be `pr` or `style` (those read as the other family's names); the
+directory must exist. Each is refused at startup with the line to edit — `ikigai-browse`
+would assert instead, which arrives as a panic where the banner should be.
 
 | file | what it holds |
 | --- | --- |
@@ -354,14 +418,80 @@ gonk.http.ledger = "default"          # repeatable
 
 The manifest is the module manifest: gonk links
 [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) with its RocksDB backend,
-[`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger), and the `ikigai-web`,
-`ikigai-ipc` and `ikigai-quic` transports. For the browser face it adds two libraries it calls
-as functions and binds no resources from: `ikigai-xslt` (the stylesheet engine) and
-`ikigai-passkey` (the assertion verifier). No filesystem module, no process execution and no
-outbound network client is compiled in, so none is reachable whatever a grant says.
+[`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger),
+[`ikigai-browse`](https://github.com/ikigai-rs/ikigai-browse) and
+[`ikigai-repo`](https://github.com/ikigai-rs/ikigai-repo), and the `ikigai-web`, `ikigai-ipc`
+and `ikigai-quic` transports. For the browser face it adds two libraries it calls as functions
+and binds no resources from: `ikigai-xslt` (the stylesheet engine) and `ikigai-passkey` (the
+assertion verifier).
+
+⚠ **That is a correction.** Through 0.1.0 this section said "no filesystem module, no process
+execution and no outbound network client is compiled in, so none is reachable whatever a grant
+says". With the browse family linked, two of those three are false: `urn:repo:{root}:file` and
+`:tree` read the filesystem under a configured root, and `urn:repo:{status,log,branch}`,
+`urn:repo:pr:*` and `urn:system:exec` spawn `git` and `gh`. (The third still holds: no HTTP
+client is linked — browse's PR rows reach GitHub by spawning `gh`, not by opening a socket,
+and `urn:httpGet` is not bound here.) What is compiled in is now bounded by capability rather
+than by linkage, which is a weaker guarantee and is argued door by door under
+[The three doors](#the-three-doors). Both families are also **off unless configured**: with no
+`gonk.browse.root` line, neither is bound at all and the catalog is what it always was.
+
 `tests/conformance.rs` pins the socket and QUIC catalog to the store's twelve resources and the
 ledger's fourteen, pins the HTTP door's to those plus its ten pages, and walks
-`ikigai-conformance` over the hub, a door, and the HTTP door.
+`ikigai-conformance` over the hub, a door, and the HTTP door. `tests/browse.rs` pins the
+browse composition's twenty more, in the hub and through a door.
+
+### One dataset, and what it costs
+
+The annotation family takes a handle on the store (`DurableStore::open_shared`), so its quads
+land in the same dataset the ledgers live in and a ledger item joins an annotation on a repo
+file in one local query — the point of composing them here rather than federating.
+
+`ikigai-store` answers a handout by making **every** read `Expiry::Always`, because a handle it
+cannot see is a writer it cannot see; and expiry propagates, so that would have de-cached every
+ledger read as a side effect of adding a browse face. Measured on a 247-item ledger,
+`urn:iki:ledger:items` goes from **11.7µs to 12.4ms** that way — a thousandfold, with every
+test still passing and the types identical.
+
+gonk does not accept that. `ikigai-browse` writes every quad it stores into the store's
+**default graph**, and `ikigai-store`'s scoped read face confines a query to one NAMED graph by
+construction — the default graph has no IRI, so no scoped read can see it. So the scoped faces
+(`urn:iki:store:graph-{select,ask,construct,describe}`), which is what every ledger read is
+made of, are declared cacheable again under the store's own three write threads, and the broad
+faces are left uncacheable, by name: `urn:iki:store:{select,ask,construct,describe}`,
+`urn:iki:store:info`, and therefore `urn:iki:ledger:ledgers`, which asks *which graphs exist*
+through the broad door. Recovered, the same read is **10.7µs**. `tests/browse.rs` prints all
+three numbers and pins the assumption the argument rests on: a browse write must touch no
+named graph.
+
+### Watched roots, and why the reads are cached at all
+
+`ikigai-browse` declares its `tree`, `file`, `hash` and `state` reads live and uncacheable,
+which is the only honest declaration a *library* can make: caching is a promise that something
+will notice when the file changes, and a library cannot know whether its host is watching. A
+server can. gonk watches every configured root (FSEvents/inotify, recursively, `.git`
+included — `state` is `git` output, so the refs are its input) and cuts one golden thread per
+root, `urn:iki:gonk:browse:root:{name}`, on any change beneath it.
+
+Only a **watched** root's reads are declared cacheable, and only for a plain `Source` with no
+arguments: the HTML and `annotations=include` faces read the annotation overlay, which browse
+rewrites during a read when a file has drifted, and that is state this thread does not track.
+A root whose watcher fails to start is named on the banner as `live, unwatched` and its reads
+are served exactly as browse declares them. There is no composition in which a read is cached
+and unwatched — the failure the ecosystem already had once, where `urn:file:*` was cacheable
+on a kernel with no watcher and a replaced stylesheet was served stale until restart, is the
+failure this ordering exists to make impossible. Measured on a scratch root, a watched
+`tree` read goes from 33.9µs to 6.7µs and a `file` read from 31.0µs to 8.3µs.
+
+⚠ **Invalidation is asynchronous**, with the platform's own latency between the write and the
+notification (FSEvents coalesces; a read issued in the same instant as the edit can still be
+served from the cache). It is a bound of well under a second, not a correctness hole — the cut
+always arrives — but a script that writes a file and reads it back with no gap can see the
+previous version once.
+
+`urn:repo:style` is browse's own: it is cacheable with a thread per `a11y.toml` candidate, and
+gonk starts the watch that crate ships for them (`Mount::space_watched`), so an edit to
+`~/.config/ikigai/gonk.a11y.toml` lands on the next read rather than the next restart.
 
 For the resources themselves — named ledgers, the grant table, delete versus purge, ordering
 policies — see `ikigai-ledger`'s README.
@@ -408,6 +538,22 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   connection; the certificate set is read at startup.
 - **One trace per door.** A traced call through a door records the forward, not the hub's
   resolution beneath it.
+- **No browse graph of its own.** `ikigai-browse` hard-codes the default graph for every quad
+  it writes, so annotations cannot be given `urn:iki:browse:graph:…` beside the ledgers' named
+  graphs — and the default graph is exactly what `urn:cap:store:read:graph:<iri>` cannot name.
+  The consequence is that a ledger↔browse join is a **root-capability** query: the socket
+  door can run it, the HTTP door's anonymous caller cannot. Changing that needs a graph knob
+  in `ikigai-browse`.
+- **No explanation archive.** `Mount::explain` derives through `urn:llm:*`, which this binary
+  does not link, so those rows would be actions the kernel can never satisfy. The archive the
+  dev server holds is not migrated here either — gonk starts with an empty browse dataset.
+- **Coarse browse invalidation.** One golden thread per ROOT: any change under a root
+  recomputes every cached read of it. A per-file thread would have to be built from the file's
+  own IRI, and the percent-encoding that produces it is private to `ikigai-browse`; a thread
+  computed one way at the read and another way at the cut is worse than invalidating too much.
+- **No browse face on the HTTP door.** The family is reachable through the socket and QUIC
+  doors and by SPARQL; the browser face still serves ledgers only, and no route maps to
+  `urn:repo:*`.
 
 The page's htmx is htmx 2.0.4 (Zero-Clause BSD), vendored as `web/htmx.min.js`.
 
