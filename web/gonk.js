@@ -181,20 +181,42 @@
   // person presses Run, so a half-typed query is never lost to a click, and a query that
   // would be expensive is never started by accident. The text lives in a hidden <pre> the
   // server rendered (newlines survive an element; an attribute's would not).
+  //
+  // ★ The buttons are mutually exclusive TOGGLES, and the state they carry is a claim about
+  // the editor: `aria-pressed="true"` means "the box holds this sample's query". So the
+  // interesting half is not setting it but CLEARING it — the moment a character is typed the
+  // claim is false, and a button still making it is the UI lying about what is on screen.
+  // Cleared on `input`, not on blur and not on submit.
+  //
+  // ⚠ Typing and then undoing back to the exact sample text leaves it cleared, deliberately.
+  // Re-deriving the state by comparing the text would be a guess about intent, and it is
+  // wrong in the other direction too: two samples can be edited into each other.
   function wireSamples() {
     const box = $("q");
     if (!box) return;
     const buttons = document.querySelectorAll("button.sample");
+    const active = () => document.querySelector('button.sample[aria-pressed="true"]');
+    const press = (button) => {
+      for (const b of buttons) b.setAttribute("aria-pressed", b === button ? "true" : "false");
+    };
     for (const button of buttons) {
       button.addEventListener("click", () => {
         const source = $(button.getAttribute("data-query"));
         if (!source) return;
+        // Assigning `.value` fires no `input` event, so this does not immediately undo
+        // itself. Re-clicking the pressed sample restores its text after an edit.
         box.value = source.textContent;
+        press(button);
         box.focus();
         box.setSelectionRange(box.value.length, box.value.length);
         flash("Loaded the sample query. Press Run to execute it.", "ok");
       });
     }
+    // Only when something is actually pressed: rewriting nine unchanged attributes on every
+    // keystroke is work a screen reader may notice.
+    box.addEventListener("input", () => {
+      if (active()) press(null);
+    });
   }
 
   async function init() {
