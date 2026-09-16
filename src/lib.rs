@@ -3,8 +3,9 @@
 //!
 //! [`compose`] builds the one kernel this process serves: `ikigai-store`'s durable dataset,
 //! `ikigai-ledger`'s named ledgers beside it and — when roots are configured —
-//! `ikigai-browse`'s repository family over the SAME dataset, behind a Meta renderer and a
-//! clock. The
+//! `ikigai-browse`'s repository family over the SAME dataset, with that family's explanation
+//! and review layers when a peer serving `urn:llm:*` is mounted in front of them
+//! ([`mount`]), behind a Meta renderer and a clock. The
 //! binary opens the store, calls [`compose`], and puts the result behind three doors
 //! ([`doors`]); `tests/conformance.rs` walks the same function rather than a re-creation of
 //! it, because the composition is the only thing in this crate that is its own to get wrong.
