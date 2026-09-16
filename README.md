@@ -55,9 +55,16 @@ name, and a browser refuses an IP address as one.
   graphs and leaves only the tombstone. They are separate sections with separate
   confirmations, and each appears only for a caller whose grant holds it.
 - **Query.** <http://localhost:1060/sparql> runs SELECT, ASK, CONSTRUCT and DESCRIBE over one
-  ledger's graph and renders the answer as a table (or Turtle, or a boolean). The same URL
-  answers a machine in the store's own formats: `curl -H 'Accept:
+  ledger's graph and renders the answer as a table (or Turtle, or a boolean). Eight sample
+  queries sit above the editor — open by priority, p1 only, a `COUNT` by `repo:` label,
+  security, recently updated, items with comments, closed with their reasons, and a body-text
+  search to edit. A sample fills the box and runs nothing: you press Run. A `ledger:` IRI
+  reads as its local name (`open`, not `…/ledger#open`) with the full IRI on the cell; the
+  same URL answers a machine in the store's own formats, raw IRIs and all: `curl -H 'Accept:
   application/sparql-results+json' 'http://127.0.0.1:1060/sparql?query=…'`.
+  ⚠ There is deliberately **no "oldest" sample**: `dcterms:created` is when an item was
+  *filed*, and a bulk migration files hundreds in one minute, so it does not say how long the
+  work has waited. The page says so next to the buttons.
 
 The face is hypermedia: server-rendered HTML with [htmx](https://htmx.org) for the in-place
 updates, no single-page app and no build step. Every page is a **transform of a graph face** —

@@ -18,6 +18,11 @@
 //! |---|---|---|
 //! | `xsl:if`, `xsl:choose`, `xsl:attribute`, `call-template`, modes, `apply-templates` + `xsl:sort`, `count()`, filtered `select` paths | attribute value templates beyond `{@name}` (empty), match-PATTERN predicates (ignored), `[1]` path predicates, `position()`, absolute paths from a nested template (empty) | `xsl:variable`, `xsl:sort` inside `for-each`, `xsl:key`, `string-length()` |
 //!
+//! ⚠ `xsl:sort` being refused inside `for-each` does NOT generalize: measured 2026-09-15,
+//! `xsl:if test="@attr"` wrapping an `xsl:attribute` works inside a nested `for-each`
+//! (`tests/web.rs::a_ledger_iri_reads_as_its_local_name_only_in_the_html_face` renders the
+//! `title` it emits). `xsl:sort` is the exception there, not the rule.
+//!
 //! So everything a stylesheet would normally COMPUTE — an item's href from its IRI, `#12`,
 //! whether this caller may close it — is computed here and handed over as a literal on the
 //! subject it describes (`urn:iki:gonk:view#…`). They are presentation triples: they exist

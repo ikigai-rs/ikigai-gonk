@@ -509,6 +509,18 @@
     <section id="sparql" class="sparql">
       <h1>SPARQL</h1>
       <p class="hint">Read-only, over ONE ledger's graph at a time: the query runs at <code>urn:iki:store:graph-select</code> (or <code>-ask</code>, <code>-construct</code>, <code>-describe</code>) with that graph as its whole dataset, under your grant. <code>FROM</code> and <code>FROM NAMED</code> are refused — the graph already is the dataset — and nothing outside it is visible.</p>
+      <!--
+        The sample queries. A button REPLACES the textarea's contents and runs nothing: the
+        person presses Run, so an edit is never lost to a surprise execution. Each query
+        travels as the TEXT of a view:sample (never an attribute — an XML parser normalizes
+        newlines in attribute values away, and a SPARQL query is nothing without them),
+        rendered into a hidden <pre> that web/gonk.js reads by id.
+      -->
+      <div class="samples" role="group" aria-label="Sample queries">
+        <xsl:apply-templates select="view:sample"/>
+      </div>
+      <p class="hint"><xsl:value-of select="view:hint"/></p>
+      <div id="sample-queries" hidden="hidden"><xsl:apply-templates select="view:sample" mode="text"/></div>
       <form class="panel stack" method="get" action="/sparql" hx-get="/sparql/results" hx-target="#results" hx-swap="innerHTML">
         <div class="row">
           <label for="q-ledger">Ledger</label>
@@ -524,6 +536,17 @@
         <xsl:apply-templates select="view:results"/>
       </div>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:sample">
+    <button type="button" class="sample quiet small">
+      <xsl:attribute name="data-query"><xsl:value-of select="@id"/></xsl:attribute>
+      <xsl:value-of select="@label"/>
+    </button>
+  </xsl:template>
+
+  <xsl:template match="view:sample" mode="text">
+    <pre class="sample-text"><xsl:attribute name="id"><xsl:value-of select="@id"/></xsl:attribute><xsl:value-of select="."/></pre>
   </xsl:template>
 
   <xsl:template match="view:results">
@@ -548,7 +571,7 @@
           <xsl:for-each select="view:row">
             <tr>
               <xsl:for-each select="view:cell">
-                <td><xsl:attribute name="class"><xsl:value-of select="@kind"/></xsl:attribute><xsl:value-of select="."/></td>
+                <td><xsl:attribute name="class"><xsl:value-of select="@kind"/></xsl:attribute><xsl:if test="@title"><xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute></xsl:if><xsl:value-of select="."/></td>
               </xsl:for-each>
             </tr>
           </xsl:for-each>

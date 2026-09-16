@@ -137,6 +137,13 @@ summary { cursor: pointer; color: var(--accent); }
 .flash.error { border-left-color: var(--danger); }
 .empty, .hint, .result-meta { color: var(--muted); }
 
+/* The sample-query buttons. `quiet small` reuses the palette the contrast test already
+ * holds to the floor; the focus ring is the global :focus-visible outline, so they are
+ * reachable and visible from the keyboard. They wrap at phone width rather than scroll. */
+.samples { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.5rem; }
+.samples button { white-space: normal; text-align: left; }
+.sample-text { display: none; }
+
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }

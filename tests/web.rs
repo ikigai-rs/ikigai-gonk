@@ -9,6 +9,9 @@
 //! - [`a_form_can_send_only_what_the_ledger_declares`]
 //! - [`a_cross_site_write_and_a_rebound_host_get_nothing`]
 //! - [`sparql_is_confined_to_one_ledger_graph`]
+//! - [`every_sample_query_returns_rows`]
+//! - [`the_sparql_page_offers_the_samples_without_running_them`]
+//! - [`a_ledger_iri_reads_as_its_local_name_only_in_the_html_face`]
 //! - [`a_passkey_identity_adds_its_grant_and_only_its_grant`]
 //! - [`the_palette_clears_the_contrast_floor`]
 
@@ -502,6 +505,209 @@ fn sparql_is_confined_to_one_ledger_graph() {
     assert!(
         update.body.contains("Updates are not accepted"),
         "{update:?}"
+    );
+}
+
+/// A corpus in the shape `ikigai-ledger` writes: priorities set and unset, `repo:` labels,
+/// a `security` label, comments, and a closed item with its reason. Enough for every sample
+/// query on the SPARQL page to have something true to return.
+fn seed(server: &Server) {
+    let filed: Vec<(String, String)> = [
+        (
+            "Refuse a foreign Host\n\nThe edge hands an empty capability instead of refusing.",
+            "1",
+            "repo:ikigai-gonk,security",
+        ),
+        (
+            "Drop the HTTP workarounds\n\nThe passkey path is settled; the pin can move.",
+            "1",
+            "repo:ikigai-gonk",
+        ),
+        (
+            "No passkey list or revoke command\n\nA passkey cannot be named or removed.",
+            "2",
+            "repo:ikigai-gonk,security",
+        ),
+        (
+            "Dependency floors never re-resolved at the floor\n\nA caret resolve says nothing.",
+            "3",
+            "repo:ikigai-core",
+        ),
+        (
+            "Forms are hand-written in the stylesheet\n\nNot rendered from the manifold.",
+            "",
+            "repo:ikigai-core",
+        ),
+    ]
+    .iter()
+    .map(|&(content, priority, labels)| {
+        let mut fields = vec![
+            ("_ledger", "default"),
+            ("_action", "append"),
+            ("_then", "items"),
+            ("content", content),
+            ("labels", labels),
+        ];
+        if !priority.is_empty() {
+            fields.push(("priority", priority));
+        }
+        let filed = server.form(&fields, None);
+        assert_eq!(filed.status, 200, "{filed:?}");
+        first_item(&filed.body)
+    })
+    .collect();
+
+    for (iri, id) in filed.iter().take(2) {
+        let commented = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "comment"),
+                ("_id", id),
+                ("_then", "card"),
+                ("item", iri),
+                ("content", "Looked at it; still open."),
+            ],
+            None,
+        );
+        assert_eq!(commented.status, 200, "{commented:?}");
+    }
+
+    let (iri, id) = &filed[4];
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_verb", "Sink"),
+            ("_id", id),
+            ("_then", "card"),
+            ("item", iri),
+            ("reason", "superseded"),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+}
+
+/// ★ **The samples are RUN here, not merely rendered.** A sample query that errors is worse
+/// than no sample query, and nothing else in this repo would notice: the page renders a store
+/// refusal as HTML with a 200, so a broken sample looks exactly like a working one to any
+/// test that only checks the status. Each one must come back with at least one row AND no
+/// `view:error`.
+#[test]
+fn every_sample_query_returns_rows() {
+    let server = Server::start();
+    seed(&server);
+    for (id, label, query) in ikigai_gonk::web::SAMPLES {
+        let json = server.raw(
+            "GET",
+            &format!("/sparql?query={}", encode(query)),
+            &[("Accept", "application/sparql-results+json".to_string())],
+            "",
+        );
+        assert_eq!(json.status, 200, "{label}: {json:?}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json.body).unwrap_or_else(|e| panic!("{label}: {e}: {json:?}"));
+        let rows = parsed["results"]["bindings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{label}: no bindings: {json:?}"))
+            .len();
+        assert!(rows > 0, "{label} ({id}) returned no rows: {json:?}");
+        println!("sample `{label}` ({id}): {rows} row(s)");
+
+        // And through the page, where a refusal would be rendered rather than raised.
+        let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
+        assert_eq!(fragment.status, 200, "{label}: {fragment:?}");
+        assert!(
+            !fragment.body.contains("class='flash error'"),
+            "{label}: the page rendered an error: {fragment:?}"
+        );
+        assert!(
+            fragment.body.contains(&format!("{rows} row(s) from")),
+            "{label}: the HTML face disagrees with the JSON one about the row count: \
+             {fragment:?}"
+        );
+    }
+}
+
+#[test]
+fn the_sparql_page_offers_the_samples_without_running_them() {
+    let server = Server::start();
+    seed(&server);
+    let page = server.page("/sparql", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    for (id, label, query) in ikigai_gonk::web::SAMPLES {
+        assert!(
+            page.body.contains(&format!("data-query='{id}'")),
+            "no button for {label}: {page:?}"
+        );
+        assert!(page.body.contains(&format!(">{label}<")), "{page:?}");
+        // The query text reaches the browser intact — newlines and all, which is why it
+        // travels as element text and not as an attribute.
+        let first_line = query.lines().next().unwrap();
+        assert!(
+            page.body.contains(&format!("id='{id}'")),
+            "no text block for {label}: {page:?}"
+        );
+        assert!(
+            page.body
+                .contains(&first_line.replace('<', "&lt;").replace('>', "&gt;")),
+            "{label}: the query text did not survive the render: {page:?}"
+        );
+    }
+    assert!(
+        page.body.contains("class='sample-text'"),
+        "the query text blocks are rendered: {page:?}"
+    );
+    // The page says what `dcterms:created` actually means, because the ledger cannot answer
+    // "the oldest p1" and a button labelled that way would be a lie.
+    assert!(
+        page.body.contains(
+            &ikigai_gonk::web::CREATED_IS_FILING_TIME
+                .replace('"', "&quot;")
+                .replace('\'', "&apos;")
+        ),
+        "{page:?}"
+    );
+    // Nothing ran: the editor holds the default query and no results table is present.
+    assert!(!page.body.contains("<table>"), "{page:?}");
+    assert!(!page.body.contains("row(s) from"), "{page:?}");
+}
+
+#[test]
+fn a_ledger_iri_reads_as_its_local_name_only_in_the_html_face() {
+    let server = Server::start();
+    seed(&server);
+    let query = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#> \
+                 SELECT ?status ?item WHERE { ?item a ledger:Item ; ledger:status ?status } \
+                 ORDER BY ?item LIMIT 1";
+
+    let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
+    assert_eq!(fragment.status, 200, "{fragment:?}");
+    assert!(
+        fragment
+            .body
+            .contains("<td class='uri' title='https://ikigai-rs.dev/ns/ledger#open'>open</td>"),
+        "a ledger IRI reads as its local name, with the full IRI on the cell: {fragment:?}"
+    );
+    // An item's own IRI is the identifier a person copies: never shortened, never tooltipped.
+    assert!(
+        fragment
+            .body
+            .contains("<td class='uri'>urn:iki:ledger:default:item:"),
+        "{fragment:?}"
+    );
+
+    // ★ The bytes the store returned are untouched: this is a DISPLAY change in one face.
+    let json = server.raw(
+        "GET",
+        &format!("/sparql?query={}", encode(query)),
+        &[("Accept", "application/sparql-results+json".to_string())],
+        "",
+    );
+    assert_eq!(json.status, 200, "{json:?}");
+    assert!(
+        json.body.contains("https://ikigai-rs.dev/ns/ledger#open"),
+        "the JSON face still carries the full IRI: {json:?}"
     );
 }
 
