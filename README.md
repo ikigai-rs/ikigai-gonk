@@ -12,6 +12,7 @@ $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
+  llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
   mount   mount = "prefer urn:iki:ledger:=/Users/you/.ikigai/gonk.sock"  (and the same for urn:iki:store:)
@@ -285,6 +286,73 @@ distribution — the server certificate is pinned by copying it.
 `ikigai-gonk grants <ledger> <read|write|delete|purge>` prints the token list for one
 ledger, for writing `grants.json` by hand.
 
+## Explaining what it browses
+
+With a browse root configured and a **mounted model**, gonk serves `ikigai-browse`'s
+explanation families over the same dataset: an LLM-derived orientation for a file or a
+directory, a review pass whose findings are minted as real annotations, and the same two for
+a pull request.
+
+```toml
+gonk.browse.root = "core=~/git-personal/ikigai-core"
+gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+```
+
+```text
+urn:repo:{root}:explain[:{path}]           an orientation, archived
+urn:repo:{root}:explain-versions[:{path}]  what the archive holds — derives nothing
+urn:repo:{root}:review:{path}              findings as annotations in this dataset
+urn:repo:{root}:pr:{n}:explain, :review    the same two over a pull request
+```
+
+**The model is mounted, not linked**, and that is the decision this feature turned on. gonk
+could have depended on `ikigai-llm` and talked to Ollama itself; then this binary would carry
+an outbound HTTP client, on a server whose argument for what it is safe to run is largely an
+argument about what is compiled into it. Instead `urn:llm:` resolves on a peer — an
+`ikigai serve quic://…` that lends its inference, or an ikigai host on this machine over its
+socket — and what gonk gains is one connection to one configured address.
+
+**`prefer`, and what it means for a ledger server.** The cli's `prefer` is an override
+wrapped in a failover over the local spaces: the peer when it answers, this machine when it
+does not. gonk binds nothing under `urn:llm:`, so there is no local half — and the half that
+matters here is the other one: **an absent peer costs explain and nothing else.** gonk does
+not dial at startup, a failed dial is held off for thirty seconds rather than retried per
+request, and a ledger read never touches the mount. A peer that is down makes a derivation
+`Unavailable` — the transient it is — not `Denied` and not `Unresolved`.
+
+**Binding is a property of the config, not of reachability.** With no `gonk.mount` line the
+explanation rows are not bound at all, because an action the manifold offers and the kernel
+can never satisfy is an over-offer. With one, they are bound whether or not the peer answers
+today.
+
+**Which peer to mount.** Either works, and the choice is about topology rather than
+protocol. A socket (`prefer urn:llm:=~/.ikigai/host.sock`) needs no certificates and never
+touches a network interface, but it couples gonk's model traffic to whatever else that host
+serves — on this machine, the personal agent that holds the calendar and contacts grants,
+which is the wrong neighbour for a server whose blast radius is the point. A QUIC peer needs
+a client certificate the peer has enrolled, and is **the same configuration whether the model
+is on this machine or another one**: mounting a bigger machine's inference later changes the
+host in one line and nothing else. That is why the line above is the one this README shows.
+
+**What a derivation costs, and what bounds it.** Each grain has a provider and a `max_tokens`
+ceiling (`gonk.explain.*`), and the ceiling is the only bound on one call — a thinking model
+with no ceiling burns the budget on reasoning and returns nothing. Over time the bound is the
+**archive**: an explanation is keyed by `(path, content-hash, version-tag)` in this dataset
+and derived once per content version, so the second read of an unchanged file is a store
+read. Measured on a scratch repository against `quic://127.0.0.1:4433`: the file grain
+derived in **10.2s** on `qwen3-coder:30b` and came back from the archive in **13ms**; the
+directory rollup derived in 61s on a 70B model, because a rollup asks the default tier.
+
+A model swap on the peer re-keys the archive by itself: the version tag folds the model
+identity `ikigai-browse` resolves through `urn:llm:{provider}:model` at explain time, which
+is why gonk sets no model label. A `provider=` argument may name only the tiers this server
+already asks with — widening that set would let anyone who may explain point this server at
+any backend the peer holds, and that is not a caller's decision.
+
+**Who may spend** is [the doors table](#the-three-doors), and the short form is that an
+anonymous HTTP caller holds no browse grant at all, so it can neither derive an explanation
+nor read an archived one, while the socket door's root can do both.
+
 ## The three doors
 
 | door | reaches it | runs under |
@@ -310,6 +378,26 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:iki:annotation` (`urn:cap:annotate`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
+| `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`, plus `urn:cap:annotate` for the two reviews) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+
+**Deriving is the privileged act, and it is one capability away from every door.** Explaining
+a file, reviewing one, or explaining a pull request calls a model on the mounted peer, which
+costs the operator tokens and — where the peer is metered — money. `ikigai-browse` declares
+that as `urn:cap:net:*` (the offering wildcard) on every derivation, and `declared =
+enforced`, so a caller with no net grant is refused before dispatch and never appears in
+front of a model. **This server mints no net grant**: `ikigai-gonk grants`, `client add` and
+`passkey invite` write per-ledger tokens only, so an identity that may derive is one an
+operator wrote by hand into `grants.json`, naming the host
+(`urn:cap:net:localhost`) — the wildcard itself is refused there, like `urn:cap:exec:*`.
+
+⚠ **A net grant is the authority to spend that peer's inference, not only to explain.** The
+mount serves the peer's whole `urn:llm:` namespace through every door, so the same grant that
+derives an explanation can `source urn:llm:ask` directly — and a direct ask is neither
+archived nor bounded by the `gonk.explain.*` ceilings, because those are arguments this
+server passes to an explain, not a policy the mount enforces. What bounds it is the peer's
+own ceiling (`ikigai serve quic://… --cap urn:cap:net:localhost` grants inference and nothing
+else) and the fact that reaching the mount at all takes a grant nothing here mints.
 
 Three things make that table true rather than aspirational. `ikigai-gonk grants` mints
 per-ledger tokens only, so nothing this server writes into a grant names browse, exec or the
@@ -319,8 +407,9 @@ token **or the exec wildcard `urn:cap:exec:*`** — which `ikigai-repo` declares
 on the machine; the per-tool spelling `urn:cap:exec:git` is what that crate enforces at
 dispatch and what an operator means. And `urn:kernel:actions` is capability-scoped by
 construction, so an anonymous caller asking "what can I do?" is offered no browse row, no
-facade and no broad store door — `tests/browse.rs` asserts both halves, the offer and the
-typed `Denied`.
+facade, no broad store door and no derivation — `tests/browse.rs` asserts both halves, the
+offer and the typed `Denied`, for a caller with per-ledger tokens, for one with a browse
+grant and no net grant, and for one with both.
 
 **The socket door is root, and root now reaches further.** An owner-only socket client can
 read any file under a configured root and run `git`/`gh` through the facades. That is
@@ -384,6 +473,16 @@ Until then, other machines use the QUIC door.
   miss — so it is refused while there is still somewhere to print the reason.
 - **A grant naming `urn:cap:exec:*`**, the offering wildcard, which as a grant is every
   program on this machine. Name the tools: `urn:cap:exec:git`, `urn:cap:exec:gh`.
+- **A grant naming `urn:cap:net:*`**, the offering wildcard `ikigai-browse` declares on every
+  derivation, which as a grant is every host this kernel could dial. Name the host:
+  `urn:cap:net:localhost`. Both wildcards are checked at startup and again per connection,
+  because the file is re-read per connection.
+- **A `gonk.mount` line that is not `prefer urn:llm:=<target>`**: another mode, another
+  prefix, a `quic://` target with no certificate directory (or one that is not there), a
+  socket target WITH one, or two lines claiming the same prefix.
+- **A `gonk.explain.*.provider` outside `urn:llm:`**, which nothing in this process could
+  resolve, or a `max_tokens` that is not a positive number — a ceiling is the only bound on
+  what one derivation costs, so a typo in it must stop the server rather than fall back.
 
 ## Configuration
 
@@ -398,6 +497,11 @@ gonk.socket = "~/.ikigai/gonk.sock"
                                       # set: QUIC must open, or gonk refuses to start
 gonk.http.ledger = "default"          # repeatable
 gonk.browse.root = "core=~/git-personal/ikigai-core"   # repeatable; unset, no browse family
+gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+# gonk.explain.file.provider = "urn:llm:coder:ask"     # the tiers, and the per-call ceilings
+# gonk.explain.file.max_tokens = 400                   # file 400, dir 600, review 800, pr 600
+# gonk.explain.dir.provider = "urn:llm:ask"            # .dir / .review / .pr take the same pair
+# gonk.explain.max_prompt_bytes = 16384
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
@@ -420,26 +524,44 @@ The manifest is the module manifest: gonk links
 [`ikigai-store`](https://github.com/ikigai-rs/ikigai-store) with its RocksDB backend,
 [`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger),
 [`ikigai-browse`](https://github.com/ikigai-rs/ikigai-browse) and
-[`ikigai-repo`](https://github.com/ikigai-rs/ikigai-repo), and the `ikigai-web`, `ikigai-ipc`
-and `ikigai-quic` transports. For the browser face it adds two libraries it calls as functions
-and binds no resources from: `ikigai-xslt` (the stylesheet engine) and `ikigai-passkey` (the
-assertion verifier).
+[`ikigai-repo`](https://github.com/ikigai-rs/ikigai-repo), the `ikigai-web`, `ikigai-ipc` and
+`ikigai-quic` transports, and `ikigai-resolve` for the mount. For the browser face it adds two
+libraries it calls as functions and binds no resources from: `ikigai-xslt` (the stylesheet
+engine) and `ikigai-passkey` (the assertion verifier). **No LLM client** — the model is
+mounted, never linked.
 
-⚠ **That is a correction.** Through 0.1.0 this section said "no filesystem module, no process
-execution and no outbound network client is compiled in, so none is reachable whatever a grant
-says". With the browse family linked, two of those three are false: `urn:repo:{root}:file` and
-`:tree` read the filesystem under a configured root, and `urn:repo:{status,log,branch}`,
-`urn:repo:pr:*` and `urn:system:exec` spawn `git` and `gh`. (The third still holds: no HTTP
-client is linked — browse's PR rows reach GitHub by spawning `gh`, not by opening a socket,
-and `urn:httpGet` is not bound here.) What is compiled in is now bounded by capability rather
-than by linkage, which is a weaker guarantee and is argued door by door under
-[The three doors](#the-three-doors). Both families are also **off unless configured**: with no
-`gonk.browse.root` line, neither is bound at all and the catalog is what it always was.
+⚠ **That is a correction, and it has now been made twice.** Through 0.1.0 this section said
+"no filesystem module, no process execution and no outbound network client is compiled in, so
+none is reachable whatever a grant says". The browse family made two of those three false:
+`urn:repo:{root}:file` and `:tree` read the filesystem under a configured root, and
+`urn:repo:{status,log,branch}`, `urn:repo:pr:*` and `urn:system:exec` spawn `git` and `gh`.
+
+**The third has now changed too, and it is worth stating exactly rather than dropping.** With
+a `gonk.mount` line, gonk opens an outbound connection — QUIC, or a Unix socket — **to one
+peer named in its config, presenting one client certificate, speaking ikigai's own wire
+protocol**. That is narrower than what the old sentence ruled out in three ways that matter:
+
+- **No HTTP client is linked, and none is reachable.** `urn:httpGet` and its family are not
+  bound here; `ikigai-llm` is not a dependency. A capability cannot produce a request to an
+  arbitrary URL, because nothing in this process can build one.
+- **The address is config, not an argument.** A caller cannot say where to connect. The peer
+  is the one `gonk.mount` names, and the only IRI prefix a mount line may claim is
+  `urn:llm:` — so even an operator cannot quietly put another namespace behind these doors.
+- **The peer's own ceiling is the far end.** `ikigai serve quic://… --cap urn:cap:net:localhost`
+  admits gonk's certificate to inference and to nothing else on that machine.
+
+What it is NOT narrower in: reaching the peer at all is a capability question now
+(`urn:cap:net:{host}`), not a linkage question — and that capability spends tokens. See
+[The three doors](#the-three-doors). All three families are **off unless configured**: with no
+`gonk.browse.root` line neither browse nor the facades are bound, and with no `gonk.mount`
+line the explanation families are not bound either, because an action no kernel in this
+process can satisfy is an over-offer.
 
 `tests/conformance.rs` pins the socket and QUIC catalog to the store's twelve resources and the
 ledger's fourteen, pins the HTTP door's to those plus its ten pages, and walks
 `ikigai-conformance` over the hub, a door, and the HTTP door. `tests/browse.rs` pins the
-browse composition's twenty more, in the hub and through a door.
+browse composition's twenty more, in the hub and through a door, pins the five the mount adds
+(and their absence without one), and pins the spend gate per capability.
 
 ### One dataset, and what it costs
 
@@ -544,9 +666,23 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   The consequence is that a ledger↔browse join is a **root-capability** query: the socket
   door can run it, the HTTP door's anonymous caller cannot. Changing that needs a graph knob
   in `ikigai-browse`.
-- **No explanation archive.** `Mount::explain` derives through `urn:llm:*`, which this binary
-  does not link, so those rows would be actions the kernel can never satisfy. The archive the
-  dev server holds is not migrated here either — gonk starts with an empty browse dataset.
+- **No archived explanation without a net grant.** `urn:repo:{root}:explain` is ONE action
+  whether it derives or serves an entry the archive already holds, so the `urn:cap:net:*` it
+  declares is required either way. `version=` provably derives nothing (`ikigai-browse`
+  answers `NotFound` on a miss rather than falling back to a model), but there is no way to
+  grant "may read what was already paid for" without also granting "may spend". That is the
+  grain the HTTP browse face will have to answer, since an anonymous reader is exactly the
+  caller who should see archived text and never derive.
+- **No explanation archive to start from.** The archive the dev server holds is not migrated
+  here — gonk starts with an empty browse dataset and pays for the first explanation of
+  everything.
+- **No rate limit on derivation.** The bounds on spending are the per-call `max_tokens`
+  ceilings, the archive (once per content version, reused forever), and who holds a net
+  grant. Nothing counts calls or spend over time; `ikigai-throttle`'s `RateLimit` overlay is
+  the shape that would, and it is not linked.
+- **No trace across the mount for a first call.** The tracer is forwarded to the peer only
+  when it is already connected, because `set_tracer` is called on the resolve path and
+  dialling from there would turn `trace` into a connect attempt.
 - **Coarse browse invalidation.** One golden thread per ROOT: any change under a root
   recomputes every cached read of it. A per-file thread would have to be built from the file's
   own IRI, and the percent-encoding that produces it is private to `ikigai-browse`; a thread

@@ -17,7 +17,10 @@ path = "src/main.rs"
 [dependencies]
 # ★ THE MANIFEST IS THE MODULE MANIFEST. This binary links the durable store, the work
 # ledger, the repository browse family and three transports — and nothing else: no
-# calendar, no LLM client, no inbound-network module beyond the doors themselves. What is
+# calendar, no LLM client, no inbound-network module beyond the doors themselves — and, since
+# 0.1.1, the model it explains with is MOUNTED rather than linked (`gonk.mount`, one prefix:
+# `urn:llm:`), so the outbound surface is one configured peer over ikigai's own transports
+# rather than an HTTP client any net grant could point anywhere. What is
 # not compiled in cannot be reached, whatever a capability says; what IS compiled in is
 # reachable exactly as far as a capability carries, which is why the browse and repo
 # families below are argued one door at a time in the README rather than merely listed.
@@ -67,14 +70,28 @@ ikigai-browse = "0.3.2"
 # `urn:system:exec` included, per tool, not under the offering wildcard — so a grant naming
 # `urn:cap:exec:git` cannot run `gh`, and `grants.rs` refuses the wildcard as a GRANT.
 ikigai-repo = "0.1.6"
+# The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
+# peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
+# trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
+# existed; it is a PRODUCTION dependency now, and the same pin serves both.
+# 0.1.18 for the resolve floor the transports below share.
+ikigai-resolve = "0.1.18"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
 # the `canonical` field core 0.1.60 added).
+# ⚠ Both halves of this crate are linked and both are now USED: `serve` is the door, and
+# `connect` is what a `gonk.mount` line pointed at a socket dials.
 ikigai-ipc = "0.1.18"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
+# ⚠ And the client half of this one: `connect`, `Identity` — what a `gonk.mount` line
+# pointed at `quic://` dials, presenting the client.crt in the configured directory and
+# pinning the peer's server.crt. That code was already compiled in (one crate, both roles);
+# what is new in 0.1.1 is that this binary now DIALS. See `crate::mount` for the consequence
+# that is not obvious: the client resolver owns a tokio runtime, and both wire doors dispatch
+# from inside one, so every mounted call runs on a thread of its own or panics the worker.
 ikigai-quic = "0.1.18"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
@@ -117,8 +134,6 @@ notify = "6.1"
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
 # PRODUCTION floor too: see the vocab note above.
 ikigai-conformance = "0.3"
-# The `Resolver` trait, to drive the socket and QUIC doors from a test as a client would.
-ikigai-resolve = "0.1.18"
 futures = "0.3"
 tempfile = "3"
 # A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path

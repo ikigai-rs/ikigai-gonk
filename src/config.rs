@@ -14,6 +14,8 @@
 //!                                       # this default once a client certificate is enrolled
 //! gonk.http.ledger = "default"          # ledgers the HTTP door may read and write; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"   # a browsable repository; repeatable
+//! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+//! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
 //! ```
 //!
 //! With no `gonk.browse.root` line this server composes exactly what it composed before: the
@@ -31,6 +33,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use crate::grants::Authority;
+use crate::mount::{self, Mount};
 
 /// The HTTP door's default port — and the QUIC door's, on UDP. See the README for 1060.
 pub const DEFAULT_PORT: u16 = 1060;
@@ -46,13 +49,23 @@ pub const SOCKET_NAME: &str = "gonk.sock";
 pub const SOCKET_PATH_LIMIT: usize = 104;
 
 /// Every key this server reads.
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 16] = [
     "gonk.bind",
     "gonk.port",
     "gonk.socket",
     "gonk.quic.bind",
     "gonk.http.ledger",
     "gonk.browse.root",
+    "gonk.mount",
+    "gonk.explain.file.provider",
+    "gonk.explain.file.max_tokens",
+    "gonk.explain.dir.provider",
+    "gonk.explain.dir.max_tokens",
+    "gonk.explain.review.provider",
+    "gonk.explain.review.max_tokens",
+    "gonk.explain.pr.provider",
+    "gonk.explain.pr.max_tokens",
+    "gonk.explain.max_prompt_bytes",
 ];
 
 /// How to invoke the binary.
@@ -85,6 +98,12 @@ serve flags (each overrides its config key wholesale):
   --browse-root N=PATH  serve urn:repo:N:* over PATH (repeatable; config `gonk.browse.root`).
                         Unset, the browse family and ikigai-repo's git/gh facades are not
                         bound at all; the socket door's root capability reaches both
+  --mount SPEC          `prefer urn:llm:=<target> [cert-dir]` (repeatable; config
+                        `gonk.mount`) — the peer that serves urn:llm:*, which is what binds
+                        the explain and review families over the browse roots. Unset, they
+                        are not bound at all: an action no kernel can satisfy is an
+                        over-offer. Deriving one requires a net grant, which no grant this
+                        server MINTS carries — see `grants` and the README
   --config PATH         read this file instead of <config home>/config.toml
 
 files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME says otherwise):
@@ -155,6 +174,8 @@ pub struct Flags {
     pub http_ledgers: Vec<String>,
     /// `--browse-root`, in order, unparsed (`name=path`).
     pub browse_roots: Vec<String>,
+    /// `--mount`, in order, unparsed.
+    pub mounts: Vec<String>,
 }
 
 /// Everything `serve` needs, merged and validated.
@@ -172,6 +193,77 @@ pub struct Settings {
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
     pub browse_roots: Vec<(String, PathBuf)>,
+    /// The mounted peers. Empty means `urn:llm:*` resolves nowhere, and the explanation
+    /// families are therefore not bound — see [`Settings::explains`].
+    pub mounts: Vec<Mount>,
+    /// The per-kind providers and spend ceilings the explanation families derive under.
+    pub explain: ExplainTiers,
+}
+
+impl Settings {
+    /// Whether this server binds the explanation and review families at all.
+    ///
+    /// ★ **A mount line is the switch, and it is a `declared = enforced` switch rather than
+    /// a convenience.** `urn:repo:{root}:explain`, `:review` and the PR-derived layers all
+    /// resolve `urn:llm:{provider}:ask` through the kernel; with nothing bound under
+    /// `urn:llm:`, every one of them would be an action the catalog offers, the manifold
+    /// advertises and `urn:kernel:validate` passes, which the kernel can then never satisfy
+    /// — an over-offer, which the module recipe calls the worse direction. Reachability is a
+    /// different question from bindability: a CONFIGURED peer that happens to be down makes
+    /// explain transiently `Unavailable`, which is an honest answer and what `prefer` means.
+    pub fn explains(&self) -> bool {
+        !self.mounts.is_empty() && !self.browse_roots.is_empty()
+    }
+}
+
+/// What each explanation grain asks, and at what ceiling — `ikigai-browse`'s own defaults
+/// unless the config says otherwise.
+///
+/// ★ **These ceilings are the per-call half of the spend gate.** `max_tokens` is mandatory
+/// on every ask (a thinking model with no ceiling burns the budget on reasoning and returns
+/// nothing), and it is also the only bound on what ONE derivation costs. The other halves
+/// are the archive — an explanation is derived once per content version and reused forever —
+/// and the capability, which decides who may derive at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainTiers {
+    /// `urn:repo:{root}:explain:{file}` — the file grain.
+    pub file: Tier,
+    /// `urn:repo:{root}:explain[:{dir}]` — the directory rollup.
+    pub dir: Tier,
+    /// `urn:repo:{root}:review:{path}` — the review pass, whose findings are annotations.
+    pub review: Tier,
+    /// `urn:repo:{root}:pr:{n}:explain` and `:review`.
+    pub pr: Tier,
+    /// How much of a file (or a rollup's material) is fed to the model before truncation.
+    pub max_prompt_bytes: usize,
+}
+
+/// One grain's backend and ceiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier {
+    /// The provider IRI, which must be under `urn:llm:` — the one prefix a mount may claim,
+    /// so a provider outside it could never resolve.
+    pub provider: String,
+    /// The `max_tokens` ceiling for one call.
+    pub max_tokens: u32,
+}
+
+impl Default for ExplainTiers {
+    /// `ikigai-browse`'s design-of-record tiers, spelled here rather than left implicit:
+    /// this is the table an operator is overriding, and the banner prints it.
+    fn default() -> ExplainTiers {
+        let tier = |provider: &str, max_tokens| Tier {
+            provider: provider.to_string(),
+            max_tokens,
+        };
+        ExplainTiers {
+            file: tier("urn:llm:coder:ask", 400),
+            dir: tier("urn:llm:ask", 600),
+            review: tier("urn:llm:coder:ask", 800),
+            pr: tier("urn:llm:coder:ask", 600),
+            max_prompt_bytes: 16 * 1024,
+        }
+    }
 }
 
 /// The QUIC door's bind, and where it came from — which is half of whether it opens.
@@ -276,6 +368,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             "--no-quic" => flags.no_quic = true,
             "--http-ledger" => flags.http_ledgers.push(value(&mut args, "--http-ledger")?),
             "--browse-root" => flags.browse_roots.push(value(&mut args, "--browse-root")?),
+            "--mount" => flags.mounts.push(value(&mut args, "--mount")?),
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -446,13 +539,76 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         }
     };
     let browse_roots = browse_roots(flags, text, homes)?;
+    let mounts = mounts(flags, text, homes)?;
+    let explain = explain_tiers(text)?;
     Ok(Settings {
         http,
         socket,
         quic,
         http_ledgers,
         browse_roots,
+        mounts,
+        explain,
     })
+}
+
+/// The mounted peers, from flags then config — one [`crate::mount::parse`] per line, and at
+/// most one mount per prefix.
+fn mounts(flags: &Flags, text: &str, homes: &Homes) -> Result<Vec<Mount>, String> {
+    let lines = if flags.mounts.is_empty() {
+        values_for(text, "gonk.mount")
+    } else {
+        flags.mounts.clone()
+    };
+    let mut mounts: Vec<Mount> = Vec::new();
+    for line in lines {
+        let mount = mount::parse(&line, &homes.home)?;
+        if mounts.iter().any(|seen| seen.prefix == mount.prefix) {
+            return Err(format!(
+                "gonk.mount `{}`: `{}` is mounted twice — one prefix, one peer. (The cli                  orders overlapping mounts by prefix length; there is nothing to order here,                  because this server mounts one prefix.)",
+                line, mount.prefix
+            ));
+        }
+        mounts.push(mount);
+    }
+    Ok(mounts)
+}
+
+/// The explanation tiers, from the config over [`ExplainTiers::default`].
+///
+/// A provider outside `urn:llm:` is refused here rather than at the first derivation: the
+/// only prefix a `gonk.mount` line may claim is `urn:llm:`, so such a provider could not
+/// resolve anywhere in this process — and the symptom, an `Unresolved` in the middle of an
+/// explain, would read as a peer problem rather than as the typo it is.
+fn explain_tiers(text: &str) -> Result<ExplainTiers, String> {
+    let mut tiers = ExplainTiers::default();
+    for (kind, tier) in [
+        ("file", &mut tiers.file),
+        ("dir", &mut tiers.dir),
+        ("review", &mut tiers.review),
+        ("pr", &mut tiers.pr),
+    ] {
+        if let Some(provider) = value_for(text, &format!("gonk.explain.{kind}.provider")) {
+            if !provider.starts_with(mount::LLM_PREFIX) {
+                return Err(format!(
+                    "gonk.explain.{kind}.provider: `{provider}` is not under                      `{}` — the only prefix a gonk.mount line may claim, so nothing in this                      process could resolve it",
+                    mount::LLM_PREFIX
+                ));
+            }
+            tier.provider = provider;
+        }
+        if let Some(spelled) = value_for(text, &format!("gonk.explain.{kind}.max_tokens")) {
+            tier.max_tokens = spelled.parse().ok().filter(|t| *t > 0).ok_or_else(|| {
+                format!("gonk.explain.{kind}.max_tokens: `{spelled}` is not a token count")
+            })?;
+        }
+    }
+    if let Some(spelled) = value_for(text, "gonk.explain.max_prompt_bytes") {
+        tiers.max_prompt_bytes = spelled.parse().ok().filter(|b| *b > 0).ok_or_else(|| {
+            format!("gonk.explain.max_prompt_bytes: `{spelled}` is not a byte count")
+        })?;
+    }
+    Ok(tiers)
 }
 
 /// The browsable roots, from flags then config — `name=path` per line, `~/`-expanded, the
@@ -747,6 +903,80 @@ mod tests {
         let overridden = settings(&flags, text, &homes()).unwrap();
         assert_eq!(overridden.http_ledgers, ["default"]);
         assert_eq!(overridden.quic, QuicBind::Off);
+    }
+
+    /// The mount key, end to end: the cli's spelling, at most one per prefix, and a flag
+    /// that replaces the config lines wholesale like every other repeatable one.
+    #[test]
+    fn the_mount_key_reads_the_clis_spelling() {
+        let text = "gonk.mount = \"prefer urn:llm:=~/.ikigai/host.sock\"\n";
+        let settings = settings(&Flags::default(), text, &homes()).unwrap();
+        assert_eq!(
+            settings.mounts,
+            [Mount {
+                prefix: "urn:llm:".to_string(),
+                target: crate::mount::Target::Socket(PathBuf::from("/home/u/.ikigai/host.sock")),
+            }]
+        );
+        assert!(!settings.explains(), "no browse root, nothing to explain");
+
+        let twice = format!("{text}{text}");
+        let refused = super::settings(&Flags::default(), &twice, &homes()).unwrap_err();
+        assert!(refused.contains("mounted twice"), "{refused}");
+
+        let flagged = Flags {
+            mounts: vec!["prefer urn:llm:=/tmp/other.sock".into()],
+            ..Flags::default()
+        };
+        assert_eq!(
+            super::settings(&flagged, text, &homes()).unwrap().mounts[0].target,
+            crate::mount::Target::Socket(PathBuf::from("/tmp/other.sock"))
+        );
+        assert!(super::settings(&Flags::default(), "", &homes())
+            .unwrap()
+            .mounts
+            .is_empty());
+    }
+
+    /// ★ The ceilings are the per-call half of the spend gate, so a typo in one must stop the
+    /// server rather than silently leave the default in place.
+    #[test]
+    fn the_explain_tiers_default_to_browses_own_and_are_checked_when_set() {
+        let defaults = settings(&Flags::default(), "", &homes()).unwrap().explain;
+        assert_eq!(defaults, ExplainTiers::default());
+        assert_eq!(defaults.file.provider, "urn:llm:coder:ask");
+        assert_eq!(defaults.review.max_tokens, 800);
+
+        let text = "gonk.explain.file.provider = \"urn:llm:qwen:ask\"\n\
+                    gonk.explain.file.max_tokens = 250\n\
+                    gonk.explain.max_prompt_bytes = 8192\n";
+        let tiers = super::settings(&Flags::default(), text, &homes())
+            .unwrap()
+            .explain;
+        assert_eq!(tiers.file.provider, "urn:llm:qwen:ask");
+        assert_eq!(tiers.file.max_tokens, 250);
+        assert_eq!(tiers.max_prompt_bytes, 8192);
+        // …and the untouched tiers keep browse's defaults.
+        assert_eq!(tiers.dir, ExplainTiers::default().dir);
+
+        for (spelling, expected) in [
+            (
+                "gonk.explain.file.provider = \"urn:mistral:ask\"\n",
+                "urn:llm:",
+            ),
+            (
+                "gonk.explain.dir.max_tokens = \"lots\"\n",
+                "is not a token count",
+            ),
+            ("gonk.explain.pr.max_tokens = 0\n", "is not a token count"),
+            (
+                "gonk.explain.max_prompt_bytes = -1\n",
+                "is not a byte count",
+            ),
+        ] {
+            let refused = super::settings(&Flags::default(), spelling, &homes()).unwrap_err();
+            assert!(refused.contains(expected), "{spelling}: {refused}");
+        }
     }
 
     #[test]

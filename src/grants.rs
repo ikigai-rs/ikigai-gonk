@@ -130,6 +130,31 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// `urn:cap:net:*` — the OFFERING wildcard `ikigai-browse` declares on every derivation
+/// (`explain`, `review`, the PR layers), which as a GRANT means "reach any host".
+pub const CAP_NET_ANY: &str = "urn:cap:net:*";
+
+/// The scopes in `scopes` that grant unbounded network reach.
+///
+/// ★ **The same footgun as [`unbounded_exec_scopes`], on the newest surface.** Deriving an
+/// explanation is a network act, so `ikigai-browse` declares `urn:cap:net:*` — "holds some
+/// grant under this prefix". Written into `grants.json` it says the opposite: this identity
+/// may reach ANY host that anything in reach of this kernel can dial. Today that is the
+/// mounted peer and nothing else, because `urn:llm:` is the only prefix a mount may claim
+/// and no HTTP client is linked — but a grant is durable and a manifest is not, and the
+/// narrow spelling costs an operator one word. Name the host:
+/// `urn:cap:net:localhost` for a peer on this machine.
+///
+/// ⚠ It is refused as a grant, NOT as a requirement: the narrow grant still satisfies
+/// browse's wildcard declaration, which is what the offering form means.
+pub fn unbounded_net_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| *scope == CAP_NET_ANY)
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +188,27 @@ mod tests {
             grants_for("a:b", Authority::Read).is_err(),
             "would forge a token"
         );
+    }
+
+    /// ★ The wildcard pair, both directions: refused as a GRANT, and the narrow spelling
+    /// left alone — a rule that refused `urn:cap:net:localhost` would make deriving
+    /// ungrantable rather than bounded.
+    #[test]
+    fn the_offering_wildcards_are_refused_as_grants_and_the_narrow_ones_are_not() {
+        let wild = vec![
+            "urn:cap:net:*".to_string(),
+            "urn:cap:exec:*".to_string(),
+            "urn:cap:browse:read:core".to_string(),
+        ];
+        assert_eq!(unbounded_net_scopes(&wild), ["urn:cap:net:*"]);
+        assert_eq!(unbounded_exec_scopes(&wild), ["urn:cap:exec:*"]);
+        let narrow = vec![
+            "urn:cap:net:localhost".to_string(),
+            "urn:cap:net:api.example".to_string(),
+            "urn:cap:browse:read:*".to_string(),
+        ];
+        assert!(unbounded_net_scopes(&narrow).is_empty(), "{narrow:?}");
+        assert!(unbounded_exec_scopes(&narrow).is_empty());
     }
 
     #[test]
