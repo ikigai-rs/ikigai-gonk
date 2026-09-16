@@ -61,13 +61,38 @@ ikigai-store = { version = "0.2.4", features = ["persistent"] }
 # reading one item out of it.
 ikigai-ledger = "0.2.1"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
-# the PR pages and the W3C annotation family. 0.3.2 is the floor and it is load-bearing
-# twice over: `Mount::space_watched` (the `StyleWatch` that cuts `urn:repo:style`'s golden
-# threads when an `a11y.toml` layer changes) first exists there, and a host that calls the
-# older `Mount::space` declares those threads with nothing cutting them. 0.3.0 is where the
-# annotation family took its `urn:iki:annotation:` name, which is the name this server puts
-# on the wire; nothing here installs an alias for the older spelling.
-ikigai-browse = "0.3.2"
+# the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
+# three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
+# which is the name this server puts on the wire (nothing here installs an alias for the
+# older spelling); `Mount::space_watched` — the `StyleWatch` that cuts `urn:repo:style`'s
+# golden threads when an `a11y.toml` layer changes — first exists in 0.3.2, and a host that
+# calls the older `Mount::space` declares those threads with nothing cutting them. What 0.4.0
+# adds is the two this server could not do without:
+#
+# 1. **Read confinement, and it is a correctness floor rather than a narrowing.** Through
+#    0.3.2 browse's annotation reads passed NO graph to `quads_for_pattern`, which means
+#    EVERY graph — and `annotate::refresh` REWRITES a drifted annotation during a Source. The
+#    combination made a READ destructive across a graph boundary: a plain Source of
+#    `urn:repo:{root}:annotations` re-anchored an annotation-shaped quad sitting in another
+#    writer's named graph and PERSISTED the move into the default graph (measured against
+#    0.3.2, ledger #265). In 0.4.0 the `Archive` holds the store privately and its
+#    `quads_for_pattern` takes no graph argument at all, so the every-graph read cannot be
+#    expressed. gonk shares ONE dataset between browse and a graph-scoped ledger, so it is
+#    exactly the host that had something to lose; `tests/browse.rs::a_browse_read_touches_no_
+#    reserved_graph` is this server's own statement of the property, over quads.
+# 2. **`Mount::graph(NamedNode)`** — a host CHOOSES the graph browse writes and reads. That is
+#    what lets `src/browse.rs::Graph` be one value feeding both the mount and the store's
+#    `SharerWrites` declaration, instead of `main` transcribing a fact about browse's
+#    internals (ledger #282). See that type; the promise is derived now, not re-typed.
+#
+# ⚠ `^0.3.2` was `>=0.3.2, <0.4.0` — a floor that was silently also a CEILING, so 0.4.0 was
+# published and unreachable while this manifest resolved clean and said nothing
+# (constitution rule 5's second half, ledger #367). Every caret pin here is a RANGE.
+#
+# ⚠ Taking 0.4.0 does NOT move gonk's data: a mount that never calls `Mount::graph` uses the
+# default graph, byte for byte as before. Giving browse its own graph is a separate decision
+# with a migration attached — see `src/browse.rs::Graph`.
+ikigai-browse = "0.4.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
