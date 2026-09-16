@@ -10,7 +10,7 @@ use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
-use ikigai_gonk::{browse, compose_with, doors, quic, watch, web};
+use ikigai_gonk::{browse, compose_with, doors, mount, quic, watch, web};
 use ikigai_store::{DurableStore, StoreConfig};
 
 fn main() {
@@ -104,8 +104,15 @@ fn serve(flags: &config::Flags) -> ! {
             sock = settings.socket.display()
         ))
     });
-    let browse = handle
-        .map(|handle| browse::wire(settings.browse_roots.clone(), handle, root_watch.watched()));
+    let explains = settings.explains();
+    let browse = handle.map(|handle| {
+        browse::wire(
+            settings.browse_roots.clone(),
+            handle,
+            root_watch.watched(),
+            explains.then_some(&settings.explain),
+        )
+    });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched());
     let (browse_space, style) = match browse {
         Some(wired) => (
@@ -114,7 +121,13 @@ fn serve(flags: &config::Flags) -> ! {
         ),
         None => (None, None),
     };
-    let hub = Arc::new(compose_with(store, browse_space));
+    // The mounts are built before the kernel and dialled by neither: `crate::mount` dials on
+    // first use, so a peer that is down costs this server nothing at startup and the ledger
+    // is served whether or not a model can be reached.
+    let mounted: Vec<Arc<dyn ikigai_core::Space>> =
+        settings.mounts.iter().map(mount::space).collect();
+    let mount_line = mount_line(&settings, explains);
+    let hub = Arc::new(compose_with(store, browse_space, mounted));
 
     // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
     // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
@@ -201,6 +214,7 @@ fn serve(flags: &config::Flags) -> ! {
             passkeys.enrolled_count()
         );
         eprintln!("  browse  {browse_line}");
+        eprintln!("  llm     {mount_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
         eprintln!(
@@ -244,6 +258,40 @@ fn browse_line(roots: &[(String, std::path::PathBuf)], watched: &[Watched]) -> S
     format!(
         "urn:repo:{{{}}}:* — annotations in this dataset",
         names.join(", ")
+    )
+}
+
+/// The banner's LLM line: where `urn:llm:*` resolves, whether the explanation families are
+/// bound because of it, and — when they are — what one derivation may cost.
+///
+/// The ceilings are on the banner because they are the per-call half of the spend gate, and
+/// an operator who cannot see them has no way to know what a configured tier will spend
+/// short of reading this source.
+fn mount_line(settings: &config::Settings, explains: bool) -> String {
+    let Some(mount) = settings.mounts.first() else {
+        return "not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review \
+                and the PR-derived layers are not bound"
+            .to_string();
+    };
+    if !explains {
+        return format!(
+            "{} — mounted, but no gonk.browse.root, so nothing here derives through it",
+            mount.target
+        );
+    }
+    let tiers = &settings.explain;
+    format!(
+        "{} (prefer; dialled on first use) — explain/review bound; file {} @{}, dir {} @{}, \
+         review {} @{}, pr {} @{} tokens. Deriving needs a net grant; this server mints none",
+        mount.target,
+        tiers.file.provider,
+        tiers.file.max_tokens,
+        tiers.dir.provider,
+        tiers.dir.max_tokens,
+        tiers.review.provider,
+        tiers.review.max_tokens,
+        tiers.pr.provider,
+        tiers.pr.max_tokens,
     )
 }
 

@@ -3,8 +3,9 @@
 //!
 //! [`compose`] builds the one kernel this process serves: `ikigai-store`'s durable dataset,
 //! `ikigai-ledger`'s named ledgers beside it and — when roots are configured —
-//! `ikigai-browse`'s repository family over the SAME dataset, behind a Meta renderer and a
-//! clock. The
+//! `ikigai-browse`'s repository family over the SAME dataset, with that family's explanation
+//! and review layers when a peer serving `urn:llm:*` is mounted in front of them
+//! ([`mount`]), behind a Meta renderer and a clock. The
 //! binary opens the store, calls [`compose`], and puts the result behind three doors
 //! ([`doors`]); `tests/conformance.rs` walks the same function rather than a re-creation of
 //! it, because the composition is the only thing in this crate that is its own to get wrong.
@@ -38,6 +39,7 @@ pub mod doors;
 pub mod freshness;
 pub mod grants;
 pub mod identity;
+pub mod mount;
 pub mod quic;
 pub mod render;
 pub mod watch;
@@ -69,7 +71,7 @@ use ikigai_vocab::TurtleRenderer;
 ///   `Verb::Meta as=application/json`; without a renderer that answer degrades to an
 ///   anonymous row and named arguments stop routing, with no error anywhere.
 pub fn compose(store: DurableStore) -> Kernel {
-    compose_with(store, None)
+    compose_with(store, None, Vec::new())
 }
 
 /// [`compose`], plus the repository browse family when this server is configured for one.
@@ -80,12 +82,21 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// the kernel, and without a browse face those facades would be process execution served
 /// behind three doors for nothing.
 ///
+/// `mounted` is [`crate::mount::space`] per configured peer — composed IN FRONT of
+/// everything local, claiming exactly its prefix. It is what makes `urn:llm:{provider}:ask`
+/// resolve, and therefore what the explanation families derive through; a gonk with no mount
+/// binds none of them ([`crate::config::Settings::explains`]).
+///
 /// ★ **The store space is wrapped when the handle left the crate.** A shared store makes
 /// every `ikigai-store` read `Expiry::Always`, which propagates into every ledger read;
 /// [`freshness::scoped_reads_stay_fresh`] gives back exactly the reads that cannot see the
 /// sharer's writes. The condition is `is_covered`, so an owned store is never wrapped and
 /// the two compositions cannot drift into declaring freshness twice.
-pub fn compose_with(store: DurableStore, browse: Option<Arc<dyn Space>>) -> Kernel {
+pub fn compose_with(
+    store: DurableStore,
+    browse: Option<Arc<dyn Space>>,
+    mounted: Vec<Arc<dyn Space>>,
+) -> Kernel {
     let covered = store.is_covered();
     let store = ikigai_store::space(store);
     let store: Arc<dyn Space> = if covered {
@@ -93,7 +104,13 @@ pub fn compose_with(store: DurableStore, browse: Option<Arc<dyn Space>>) -> Kern
     } else {
         Arc::new(freshness::scoped_reads_stay_fresh(store))
     };
-    let mut spaces: Vec<Arc<dyn Space>> = vec![store, Arc::new(ikigai_ledger::space())];
+    // The mounts go FIRST — an override forwards its prefix unchanged, and precedence is
+    // half of what makes it an override. Nothing local is shadowed by that today (this
+    // server binds nothing under `urn:llm:`), and `crate::mount` is where the prefix a
+    // mount may claim is decided.
+    let mut spaces: Vec<Arc<dyn Space>> = mounted;
+    spaces.push(store);
+    spaces.push(Arc::new(ikigai_ledger::space()));
     if let Some(browse) = browse {
         spaces.push(browse);
         spaces.push(Arc::new(ikigai_repo::space()));

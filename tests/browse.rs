@@ -25,7 +25,9 @@ use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock, Verb,
 };
+use ikigai_gonk::config::ExplainTiers;
 use ikigai_gonk::grants::{grants_for_all, Authority};
+use ikigai_gonk::mount::{self, Mount};
 use ikigai_gonk::watch::RootWatch;
 use ikigai_gonk::{browse, compose_with};
 use ikigai_store::DurableStore;
@@ -48,11 +50,42 @@ fn roots(dir: &TempDir) -> Vec<(String, PathBuf)> {
 /// The composition `main` builds when `gonk.browse.root` names a root: a shared store, the
 /// browse family over the same dataset, and the freshness recovery.
 fn served(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
+    served_with(dir, None)
+}
+
+/// ★ The same, plus a `gonk.mount` — pointed at a socket that does not exist.
+///
+/// That is not a shortcut around a fixture: **binding the explanation families is a function
+/// of the CONFIG, never of whether the peer answers**, which is the whole of `prefer` on a
+/// server whose other job must not depend on a model. A test that needed a live peer could
+/// not run in CI, and would be testing the peer rather than this composition.
+fn served_explaining(dir: &TempDir) -> (Arc<Kernel>, RootWatch) {
+    served_with(dir, Some(dead_mount()))
+}
+
+/// A mount whose peer can never answer: a Unix socket path that is not there, so the dial
+/// fails immediately rather than waiting out a network timeout.
+fn dead_mount() -> Mount {
+    mount::parse(
+        "prefer urn:llm:=/nonexistent/ikigai-gonk-tests/llm.sock",
+        std::path::Path::new("/home/nobody"),
+    )
+    .expect("a mount line")
+}
+
+fn served_with(dir: &TempDir, mount: Option<Mount>) -> (Arc<Kernel>, RootWatch) {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     let (watch, refused) = RootWatch::start(&roots(dir));
     assert!(refused.is_empty(), "{refused:?}");
-    let wired = browse::wire(roots(dir), handle, watch.watched());
-    let hub = Arc::new(compose_with(store, Some(Arc::new(wired.space))));
+    let tiers = ExplainTiers::default();
+    let wired = browse::wire(
+        roots(dir),
+        handle,
+        watch.watched(),
+        mount.is_some().then_some(&tiers),
+    );
+    let mounted = mount.iter().map(mount::space).collect();
+    let hub = Arc::new(compose_with(store, Some(Arc::new(wired.space)), mounted));
     (hub, watch)
 }
 
@@ -63,7 +96,7 @@ fn naive(dir: &TempDir) -> Arc<Kernel> {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // No watcher either: a host that accepts the blanket has no reason to run one, and
     // `ikigai-browse`'s reads are live and uncacheable exactly as it declares them.
-    let wired = browse::wire(roots(dir), handle, &[]);
+    let wired = browse::wire(roots(dir), handle, &[], None);
     let space = Fallback::new(vec![
         Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
@@ -144,9 +177,10 @@ fn annotate(kernel: &Kernel, id: &str, target: &str, quote: &str, note: &str) {
 
 // ---------------------------------------------------------------- the catalog
 
-/// Every resource the browse composition puts behind the doors. `explain`, `review` and the
-/// PR-derived layers are deliberately absent: they derive through `urn:llm:*`, which this
-/// binary does not link, and an action the kernel can never satisfy is an over-offer.
+/// Every resource the browse composition puts behind the doors WITHOUT a mount. `explain`,
+/// `review` and the PR-derived layers are deliberately absent: they derive through
+/// `urn:llm:*`, which nothing binds until a `gonk.mount` line names the peer that serves it,
+/// and an action the kernel can never satisfy is an over-offer.
 const BROWSE_IDS: [&str; 10] = [
     "annotation",
     "browse-annotations",
@@ -158,6 +192,20 @@ const BROWSE_IDS: [&str; 10] = [
     "browse-state",
     "browse-style",
     "browse-tree",
+];
+
+/// The five the mount adds, over seven patterns per root (`explain`, `explain:{path}`,
+/// `explain-versions`, `explain-versions:{path}`, `review:{path}`, `pr:{n}:explain`,
+/// `pr:{n}:review`). Each derives through `urn:llm:{provider}:ask`; each therefore declares
+/// `urn:cap:net:*` on top of the browse root grant, and `browse-review` and
+/// `browse-pr-review` declare `urn:cap:annotate` as well, because their findings are minted
+/// as annotations in this dataset.
+const EXPLAIN_IDS: [&str; 5] = [
+    "browse-explain",
+    "browse-explain-versions",
+    "browse-pr-explain",
+    "browse-pr-review",
+    "browse-review",
 ];
 
 /// `ikigai-repo`'s facades — bound only alongside a browse face, because that is what needs
@@ -211,6 +259,205 @@ fn the_served_catalog_is_exactly_what_this_manifest_links() {
     // forwarding space that dropped a row would be clean above and dirty here.
     let door = ikigai_gonk::doors::door_kernel(Arc::clone(&hub));
     assert_eq!(new_family_ids(&door, &expected), expected);
+}
+
+/// ★ **A mount line is what binds the explanation families, and nothing else is.** The same
+/// composition with a `gonk.mount` gains exactly five description ids and loses none — so a
+/// gonk with no peer configured cannot offer an action no kernel in this process could
+/// satisfy, and a gonk with one offers every row that peer makes satisfiable.
+///
+/// The peer here is unreachable on purpose (see [`served_explaining`]): binding is a
+/// property of the config, reachability of the moment.
+#[test]
+fn a_mount_binds_the_explanation_families_and_nothing_else_does() {
+    let dir = scratch_root();
+    let mut everything: Vec<String> = BROWSE_IDS
+        .iter()
+        .chain(REPO_IDS.iter())
+        .chain(EXPLAIN_IDS.iter())
+        .map(|id| id.to_string())
+        .collect();
+    everything.sort();
+
+    let (unmounted, _watch) = served(&dir);
+    let found = new_family_ids(&unmounted, &everything);
+    for id in EXPLAIN_IDS {
+        assert!(
+            !found.contains(&id.to_string()),
+            "`{id}` is an over-offer without a mount: {found:?}"
+        );
+    }
+
+    let (mounted, _watch) = served_explaining(&dir);
+    assert_eq!(
+        new_family_ids(&mounted, &everything),
+        everything,
+        "a mounted gonk serves the browse composition plus the five derived families"
+    );
+    let door = ikigai_gonk::doors::door_kernel(Arc::clone(&mounted));
+    assert_eq!(new_family_ids(&door, &everything), everything);
+}
+
+// ------------------------------------------------------------- the spend gate
+
+/// ★★ **The spend gate, per capability — the centre of this arc.**
+///
+/// Deriving an explanation calls a model, and this server's pages are meant to be browsed.
+/// So the question is not whether explain works but who can make it spend, and the answer is
+/// a capability rather than a door check:
+///
+/// - **Anonymous HTTP** holds per-ledger tokens only. It reaches no browse row at all, so it
+///   can neither derive an explanation nor read an archived one, and the manifold does not
+///   offer it either.
+/// - **A browse grant with no net grant** — the shape of a `grants.json` entry for a client
+///   that may read a repository — reads every browse row and `explain-versions` (which
+///   derives nothing and declares no network), and is DENIED on `explain` itself.
+/// - **Root** (the socket door) may derive.
+///
+/// The second case is the interesting one, and the last assertion is the uncomfortable
+/// truth in it: `version=` addresses an archived entry and provably derives nothing, but it
+/// is the same action and carries the same requirement, so "may read what was already paid
+/// for" is not grantable today. That is browse's grain, not gonk's, and it is what the HTTP
+/// browse face will have to answer (#258).
+#[test]
+fn deriving_needs_a_net_grant_and_listing_the_archive_does_not() {
+    let dir = scratch_root();
+    let (hub, _watch) = served_explaining(&dir);
+    let anonymous = Capability::scoped(
+        grants_for_all(&["default".to_string()], Authority::Write).expect("the ledger tokens"),
+    );
+    let reader = Capability::scoped(["urn:cap:browse:read:demo"]);
+    let deriver = Capability::scoped(["urn:cap:browse:read:demo", "urn:cap:net:localhost"]);
+
+    let explain = "urn:repo:demo:explain:src/lib.rs";
+    let versions = "urn:repo:demo:explain-versions:src/lib.rs";
+
+    for (who, capability) in [("anonymous", &anonymous), ("a browse reader", &reader)] {
+        let answer = block_on(Kernel::issue(
+            &hub,
+            request(Verb::Source, explain, &[]),
+            capability,
+        ));
+        assert!(
+            matches!(answer, Err(ikigai_core::Error::Denied(_))),
+            "{who} must not be able to make this server spend a token: {answer:?}"
+        );
+        // …and the archived entry is behind the same wall, for the same reason.
+        let archived = block_on(Kernel::issue(
+            &hub,
+            request(
+                Verb::Source,
+                explain,
+                &[("version", "code-v1@qwen3-coder:30b")],
+            ),
+            capability,
+        ));
+        assert!(
+            matches!(archived, Err(ikigai_core::Error::Denied(_))),
+            "{who} on an archived entry: {archived:?}"
+        );
+    }
+
+    // Anonymous cannot even ask what the archive holds — it holds no browse grant.
+    assert!(matches!(
+        block_on(Kernel::issue(
+            &hub,
+            request(Verb::Source, versions, &[]),
+            &anonymous
+        )),
+        Err(ikigai_core::Error::Denied(_))
+    ));
+    // A browse reader can: listing the archive derives nothing and declares no network.
+    let listed = block_on(Kernel::issue(
+        &hub,
+        request(Verb::Source, versions, &[]),
+        &reader,
+    ))
+    .expect("explain-versions requires no net grant");
+    assert!(listed.bytes.is_empty(), "nothing is archived yet");
+
+    // The manifold tells the same story it enforces: no explain row for a caller who could
+    // not invoke one, and the free row for the one who can.
+    let offered = |capability: &Capability| -> String {
+        String::from_utf8_lossy(
+            &block_on(Kernel::issue(
+                &hub,
+                request(Verb::Source, "urn:kernel:actions", &[]),
+                capability,
+            ))
+            .expect("the manifold answers any capability about itself")
+            .bytes,
+        )
+        .into_owned()
+    };
+    let to_anonymous = offered(&anonymous);
+    assert!(!to_anonymous.contains("explain"), "{to_anonymous}");
+    let to_reader = offered(&reader);
+    assert!(
+        to_reader.contains("urn:repo:demo:explain-versions"),
+        "the free row is offered: {to_reader}"
+    );
+    assert!(
+        !to_reader.contains("urn:repo:demo:explain:"),
+        "the spending row is not: {to_reader}"
+    );
+    assert!(
+        offered(&deriver).contains("urn:repo:demo:explain:"),
+        "a net grant is what puts the spending row on offer"
+    );
+}
+
+/// ★ **Explain is an addition, never a dependency.** With the peer unreachable, a caller who
+/// MAY derive gets a TRANSIENT failure — not a denial, not an unresolved name — and every
+/// other resource this server exists for answers exactly as before.
+#[test]
+fn a_peer_that_is_down_costs_explain_and_nothing_else() {
+    let dir = scratch_root();
+    let (hub, _watch) = served_explaining(&dir);
+    let filed = text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "the ledger does not depend on a model")],
+    );
+    assert!(filed.contains("urn:iki:ledger:default:item:"), "{filed}");
+    assert!(text(&hub, Verb::Source, "urn:iki:ledger:items", &[]).contains("model"));
+    assert_eq!(
+        text(&hub, Verb::Source, "urn:repo:demo:file:src/lib.rs", &[]),
+        "the first version\n",
+        "a browse read is untouched by an absent peer"
+    );
+
+    let derived = block_on(Kernel::issue(
+        &hub,
+        request(Verb::Source, "urn:repo:demo:explain:src/lib.rs", &[]),
+        &Capability::root(),
+    ));
+    let error = derived.expect_err("there is no peer to derive against");
+    assert!(
+        error.is_transient(),
+        "an absent peer is transient — a Retry or a Failover above this mount can act on it, \
+         and a caller can tell it from `the model refused`: {error:?}"
+    );
+    // The mount answered; the name is not unbound. (`Unresolved` would say the opposite, and
+    // would be what a caller saw if the mount space were composed behind the local ones.)
+    assert!(
+        !matches!(error, ikigai_core::Error::Unresolved(_)),
+        "{error:?}"
+    );
+    // And the model face itself, asked directly, says the same thing.
+    let asked = block_on(Kernel::issue(
+        &hub,
+        request(Verb::Source, "urn:llm:ask", &[("in", "hello")]),
+        &Capability::root(),
+    ));
+    assert!(
+        asked
+            .as_ref()
+            .err()
+            .is_some_and(ikigai_core::Error::is_transient),
+        "{asked:?}"
+    );
 }
 
 // ------------------------------------------------- where browse's quads land
@@ -543,8 +790,8 @@ fn an_unwatched_roots_reads_are_not_cached() {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
-    let wired = browse::wire(roots(&dir), handle, &[]);
-    let hub = Arc::new(compose_with(store, Some(Arc::new(wired.space))));
+    let wired = browse::wire(roots(&dir), handle, &[], None);
+    let hub = Arc::new(compose_with(store, Some(Arc::new(wired.space)), Vec::new()));
     let file = "urn:repo:demo:file:src/lib.rs";
     assert_eq!(text(&hub, Verb::Source, file, &[]), "the first version\n");
     assert!(

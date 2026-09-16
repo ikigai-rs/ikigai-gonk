@@ -426,17 +426,41 @@ pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String
         if !broad.is_empty() {
             return Err(broad_refusal(name, &broad));
         }
-        let exec = crate::grants::unbounded_exec_scopes(scopes);
-        if !exec.is_empty() {
-            return Err(format!(
-                "grant `{name}` names {} — the OFFERING wildcard `ikigai-repo` declares, which \
-                 as a grant is every program on this machine. Name the tools instead: \
-                 `urn:cap:exec:git`, `urn:cap:exec:gh`",
-                exec.join(" and ")
-            ));
+        if let Some(refusal) = wildcard_refusal(name, scopes) {
+            return Err(refusal);
         }
     }
     Ok(())
+}
+
+/// The offering wildcards that must never be a grant, and why each is not.
+///
+/// ★ **A wildcard is an offering form, not a grant form, and the two are the same string.**
+/// `ikigai-repo` declares `urn:cap:exec:*` and `ikigai-browse` declares `urn:cap:net:*` to
+/// mean "holds some grant under this prefix"; copied into `grants.json` each means the
+/// opposite of the narrowing a reader would take it for. Both are refused at startup and
+/// again per connection, because the file is re-read per connection and an edit after
+/// startup is exactly when this would slip in.
+fn wildcard_refusal(name: &str, scopes: &[String]) -> Option<String> {
+    let exec = crate::grants::unbounded_exec_scopes(scopes);
+    if !exec.is_empty() {
+        return Some(format!(
+            "grant `{name}` names {} — the OFFERING wildcard `ikigai-repo` declares, which \
+             as a grant is every program on this machine. Name the tools instead: \
+             `urn:cap:exec:git`, `urn:cap:exec:gh`",
+            exec.join(" and ")
+        ));
+    }
+    let net = crate::grants::unbounded_net_scopes(scopes);
+    if !net.is_empty() {
+        return Some(format!(
+            "grant `{name}` names {} — the OFFERING wildcard `ikigai-browse` declares on \
+             every derivation, which as a grant is every host this kernel could dial. Name \
+             the host instead: `urn:cap:net:localhost` for a mounted peer on this machine",
+            net.join(" and ")
+        ));
+    }
+    None
 }
 
 fn broad_refusal(grant: &str, broad: &[String]) -> String {
@@ -478,6 +502,9 @@ pub fn scopes_for_grant(
     if !broad.is_empty() {
         return Err(broad_refusal(grant, &broad));
     }
+    if let Some(refusal) = wildcard_refusal(grant, scopes) {
+        return Err(refusal);
+    }
     Ok(scopes.clone())
 }
 
@@ -495,6 +522,9 @@ pub fn put_grant(
     let broad = broad_store_scopes(scopes);
     if !broad.is_empty() {
         return Err(broad_refusal(grant, &broad));
+    }
+    if let Some(refusal) = wildcard_refusal(grant, scopes) {
+        return Err(refusal);
     }
     private_dir(&layout.dir)?;
     let mut grants = read_object(&layout.grants_json())?;

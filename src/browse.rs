@@ -31,27 +31,54 @@
 //! but the socket door's root. A join across ledger and browse data is therefore an
 //! owner-only query today.
 //!
-//! # Explanations are not wired here
+//! # Explanations, and what binds them
 //!
-//! `Mount::explain` would bind `urn:repo:{root}:explain`, `:review` and the PR-derived
-//! layers — every one of which derives through `urn:llm:{provider}:ask`. gonk links no LLM
-//! client, so those rows would be actions the manifold offers and the kernel can never
-//! satisfy: an over-offer, which is the one direction the module recipe calls worse than a
-//! missing feature. The archive they read is empty in this server anyway (gonk starts with an
-//! empty browse dataset). If an LLM face is ever composed in, `.explain(…)` is the one line
-//! that adds them.
+//! `Mount::explain` binds `urn:repo:{root}:{explain,explain-versions,review}` and the
+//! PR-derived layers, every one of which derives through `urn:llm:{provider}:ask`. gonk
+//! links no LLM client and never will — it MOUNTS one ([`crate::mount`]) — so those rows are
+//! bound **only when a `gonk.mount` line names the peer that serves them**
+//! ([`crate::config::Settings::explains`]). With no mount they would be actions the manifold
+//! offers and the kernel can never satisfy: an over-offer, which is the one direction the
+//! module recipe calls worse than a missing feature.
+//!
+//! ## ⚠ The spend gate is a capability, and it is `ikigai-browse`'s, not gonk's
+//!
+//! Every derivation declares TWO capabilities: `urn:cap:browse:read:*` (the wildcard
+//! offering — enforcement checks the target's root) and `urn:cap:net:*`, because calling a
+//! model is a network act even against localhost. `urn:repo:{root}:review:{path}` declares a
+//! third, `urn:cap:annotate`, because its findings are minted as real annotations in this
+//! dataset. Since `declared = enforced`, the kernel refuses before dispatch, and
+//! `urn:kernel:actions` — capability-scoped by construction — does not offer an explain row
+//! to a caller who could not invoke it.
+//!
+//! So the whole gate is which door's capability carries a net grant. gonk mints none:
+//! `ikigai-gonk grants`, `client add` and `passkey invite` write per-ledger tokens only, and
+//! `grants.json` refuses the wildcard `urn:cap:net:*` as a GRANT the way it refuses
+//! `urn:cap:exec:*` ([`crate::grants::unbounded_net_scopes`]). The per-door table is in the
+//! README; the short form is that **an anonymous HTTP caller cannot reach a browse row at
+//! all**, so it can neither derive an explanation nor read an archived one, and the socket
+//! door's root can do both.
+//!
+//! ⚠ **The archive read and the derivation are ONE action to a capability.** `version=`
+//! addresses an archived entry and provably derives nothing (`ikigai-browse` returns
+//! `NotFound` on a miss rather than falling back to a model), but it is the same
+//! `urn:repo:{root}:explain` row and therefore carries the same `urn:cap:net:*`
+//! requirement — so "free to read what was already paid for" cannot be granted separately
+//! today. That matters for the HTTP browse face (#258), where an anonymous reader is exactly
+//! the caller who should see archived text and never spend.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ikigai_browse::{Mount, StyleWatch};
+use ikigai_browse::{ExplainConfig, Mount, StyleWatch};
 use ikigai_core::{
     Description, Endpoint, EndpointSpace, Invocation, Representation, Request, Resolution, Result,
     Scope, Space, SpaceEntry, Verb,
 };
 use ikigai_store::Store;
 
+use crate::config::ExplainTiers;
 use crate::watch::{root_thread, Watched};
 
 /// Root names this server refuses, because `ikigai-repo`'s own resources start with the same
@@ -92,18 +119,58 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 ///
 /// `watched` is what [`crate::watch::RootWatch::start`] actually got — the reads of those
 /// roots, and only those, are made cacheable ([`cached_reads`]).
-pub fn wire(roots: Vec<(String, PathBuf)>, store: Arc<Store>, watched: &[Watched]) -> Wired {
-    let (space, style) = Mount::new(roots)
-        .annotations(store)
+///
+/// `explain` is `Some` when a peer serves `urn:llm:*` — see the module docs for why that is
+/// the switch. The tiers ride in as [`crate::config::ExplainTiers`] rather than as an
+/// `ExplainConfig`, so the one place that turns an operator's ceilings into browse's builder
+/// is here, beside the store handle the archive needs.
+pub fn wire(
+    roots: Vec<(String, PathBuf)>,
+    store: Arc<Store>,
+    watched: &[Watched],
+    explain: Option<&ExplainTiers>,
+) -> Wired {
+    let mount = Mount::new(roots)
+        .annotations(Arc::clone(&store))
         // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style` reads
         // its themes and its contrast floor from. Without it that file would sit on disk
         // doing nothing — the quietest kind of wrong.
-        .app("gonk")
-        .space_watched();
+        .app("gonk");
+    let mount = match explain {
+        Some(tiers) => mount.explain(explain_config(store, tiers)),
+        None => mount,
+    };
+    let (space, style) = mount.space_watched();
     Wired {
         space: cached_reads(space, watched),
         style,
     }
+}
+
+/// The operator's tiers as `ikigai-browse`'s config.
+///
+/// ★ **No `allow_provider` call, deliberately.** A `provider=` argument may name only what
+/// this host already asks with — the two configured tiers — and widening that set is
+/// documented by that crate as THE authority boundary: `explain`'s declared capability
+/// cannot vary by argument value, so a caller who may derive at all could otherwise point
+/// this server at any backend the peer's registry happens to hold. gonk's tiers are the
+/// operator's choice already; a caller does not get a second one.
+///
+/// The model LABELS are left unset on purpose too. Unset, `ikigai-browse` resolves the true
+/// configured model id through `urn:llm:{provider}:model` — over the mount — at explain
+/// time, so swapping the peer's model re-keys the archive with no gonk-side config. An
+/// operator override here would pin tags to a string that can silently stop being true.
+fn explain_config(store: Arc<Store>, tiers: &ExplainTiers) -> ExplainConfig {
+    ExplainConfig::new(store)
+        .file_provider(&tiers.file.provider)
+        .file_max_tokens(tiers.file.max_tokens)
+        .dir_provider(&tiers.dir.provider)
+        .dir_max_tokens(tiers.dir.max_tokens)
+        .review_provider(&tiers.review.provider)
+        .review_max_tokens(tiers.review.max_tokens)
+        .pr_provider(&tiers.pr.provider)
+        .pr_max_tokens(tiers.pr.max_tokens)
+        .max_prompt_bytes(tiers.max_prompt_bytes)
 }
 
 /// What [`wire`] hands back.
@@ -127,6 +194,7 @@ pub struct Wired {
 /// | the same with any argument (`as=text/html`, `annotations=include`, `version=`, …) | no | those faces read the annotation overlay out of the store — and `ikigai-browse` REWRITES an annotation during a Source when the file it anchors to has drifted, so the answer depends on state this thread does not track |
 /// | `urn:repo:{root}:prs`, `:pr:{n}` | no | they resolve `urn:repo:pr:*` through the kernel, which runs `gh`: the input is GitHub, not the disk, and a filesystem thread would hold a stale PR list until someone touched a file |
 /// | `urn:repo:{root}:annotations[:{path}]`, `urn:iki:annotation:{id}` | no | store-derived, and the same drift rewrite applies |
+/// | `urn:repo:{root}:explain[:{path}]`, `:explain-versions`, `:review:{path}` | no | the ARCHIVE is what makes these cheap the second time — keyed on `(path, content-hash, version-tag)` in the store, which re-keys on an edit by construction. A kernel cache entry in front of it would be a second, weaker copy of that, and one whose thread this watcher could not cut when the model changed |
 /// | `urn:repo:style` | already | `ikigai-browse` declares it cacheable under one thread per `a11y.toml` candidate, and ships the watch that cuts them ([`Wired::style`]) |
 /// | any read of an UNWATCHED root | no | fail closed: no watcher, no cache — the two halves move together or this is ledger #246 again |
 ///
@@ -276,6 +344,12 @@ mod tests {
             // `gh`, not the disk.
             "urn:repo:core:prs",
             "urn:repo:core:pr:12",
+            // The archive is the cache for these — see the table.
+            "urn:repo:core:explain",
+            "urn:repo:core:explain:src/lib.rs",
+            "urn:repo:core:explain-versions:src/lib.rs",
+            "urn:repo:core:review:src/lib.rs",
+            "urn:repo:core:pr:12:explain",
             // browse declares this one itself, under its own threads.
             "urn:repo:style",
             // ikigai-repo's facades.
