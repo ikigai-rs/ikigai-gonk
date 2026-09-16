@@ -57,16 +57,23 @@ name, and a browser refuses an IP address as one.
   graphs and leaves only the tombstone. They are separate sections with separate
   confirmations, and each appears only for a caller whose grant holds it.
 - **Query.** <http://localhost:1060/sparql> runs SELECT, ASK, CONSTRUCT and DESCRIBE over one
-  ledger's graph and renders the answer as a table (or Turtle, or a boolean). Eight sample
-  queries sit above the editor — open by priority, p1 only, a `COUNT` by `repo:` label,
+  ledger's graph and renders the answer as a table (or Turtle, or a boolean). Nine sample
+  queries sit above the editor — one named ledger (with an explicit `GRAPH` clause, because
+  each ledger is its own graph), open by priority, p1 only, a `COUNT` by `repo:` label,
   security, recently updated, items with comments, closed with their reasons, and a body-text
   search to edit. A sample fills the box and runs nothing: you press Run. A `ledger:` IRI
-  reads as its local name (`open`, not `…/ledger#open`) with the full IRI on the cell; the
-  same URL answers a machine in the store's own formats, raw IRIs and all: `curl -H 'Accept:
-  application/sparql-results+json' 'http://127.0.0.1:1060/sparql?query=…'`.
+  reads as a CURIE (`ledger:open`, not `…/ledger#open`), with the prefix bound once above the
+  table; the same URL answers a machine in the store's own formats, raw IRIs and all: `curl -H
+  'Accept: application/sparql-results+json' 'http://127.0.0.1:1060/sparql?query=…'`.
   ⚠ There is deliberately **no "oldest" sample**: `dcterms:created` is when an item was
   *filed*, and a bulk migration files hundreds in one minute, so it does not say how long the
   work has waited. The page says so next to the buttons.
+- **A result set is somewhere to go next, not a wall of text.** An item IRI or an item number
+  in a result becomes a link to that item; a `repo:` label becomes a link that asks the ledger
+  a *new* question — the open items with that label — so an item the first query never
+  returned still appears. What becomes a control is decided by
+  [a rule table that is itself a resource](#the-render-rules-are-a-resource), not by a list of
+  blessed column names.
 
 The face is hypermedia: server-rendered HTML with [htmx](https://htmx.org) for the in-place
 updates, no single-page app and no build step. Every page is a **transform of a graph face** —
@@ -160,6 +167,7 @@ page says so. It is read-only: an update is not a query form it runs.
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
 | `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | query |
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
+| `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
@@ -169,6 +177,51 @@ the ledger, as before, and `tests/conformance.rs` pins both catalogs.
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
 verb the target does not describe, and refuses any field that the verb's contract does not
 name. It runs under the caller's capability, so the ledger's checks decide.
+
+## The render rules are a resource
+
+A SPARQL result set is terminal by default: numbers you read out of the table and type
+somewhere else. gonk turns some of its cells into controls — an item links to that item, a
+`repo:` label asks the ledger for that repo's open items — and **what becomes a control is
+decided by a rule table you can read, diff and replace**, served at `/render-rules` as Turtle:
+
+```sh
+curl http://127.0.0.1:1060/render-rules
+```
+
+Why a resource rather than a config key, or a list of column names in the binary: **a SPARQL
+result set carries whatever variable names its author chose.** A renderer that special-cases a
+column called `number` works for the queries shipped with it and fails for the query you write
+tomorrow. So the rules match on what a cell IS — its term kind, the shape of its value, a value
+prefix — and the table is data about how to read *this deployment's* data, which belongs in the
+graph rather than in the code. Drop your own file at `<config home>/gonk/render-rules.ttl` and
+gonk serves and obeys that one instead; a table it cannot obey stops the server at startup,
+because a rule that silently did nothing would look exactly like one in effect.
+
+| the rule shipped | matches | what the cell becomes |
+| --- | --- | --- |
+| `rule:item-iri` | a `urn:iki:ledger:{ledger}:item:{id}` value, under any column | a link to that item |
+| `rule:item-number` | a bare integer, under a column named `number`, `item`, `n`, … | a link to that item |
+| `rule:repo-label` | a literal starting `repo:` | a link that runs that repo's **open** items |
+
+⚠ **A bare integer is genuinely ambiguous, and that is why one rule reads a column name.**
+`SELECT ?number ?title (COUNT(?comment) AS ?comments)` renders `244 … 3`: a result set carries
+no provenance, so the renderer cannot see that one integer came from `ledger:number` and the
+other from a `COUNT`, and linking every integer would send "3 comments" to item #3. Checking
+that item 3 exists does not help — it does. So that rule alone consults the name, its default
+covers the obvious spellings, and the list lives in the table where you can extend it.
+
+⚠ **Substitution is escaped for the grammar it lands in, by the renderer, never by the rule.**
+Values come out of the store and the store holds text other people wrote. A `render:link`
+template percent-encodes every substitution; a `render:query` template escapes it for the
+SPARQL string-literal grammar, so a label containing a quote and a closing brace is *content*
+and cannot change the shape of the query it runs. A rule author writes `"{value}"` and has no
+way to opt out.
+
+The vocabulary is `urn:iki:gonk:render#` and it is deliberately **not** in `ikigai-vocab`: it
+says nothing about work, only about how one HTML face renders a result cell. The shipped table
+is its own documentation — `web/render-rules.ttl` is a commented file, and it is the file
+`/render-rules` serves.
 
 ## Filing and reading work over HTTP
 
@@ -535,6 +588,7 @@ would assert instead, which arrives as a panic where the banner should be.
 | `gonk/clients.json` | identity → grant name: certificate fingerprints under `clients` (the same shape `ikigai serve quic://…` reads), passkeys under `passkeys` |
 | `gonk/grants.json` | grant name → capability scopes (the same shape as the cli's `grants.json`) |
 | `gonk/invites.json` | outstanding passkey invites, by the SHA-256 of their codes |
+| `gonk/render-rules.ttl` | this deployment's render rules, replacing the shipped table wholesale |
 | `gonk/quic/` | `server.crt`, `server.key`, and one `clients/<name>/` bundle per client |
 
 ## What it composes

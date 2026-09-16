@@ -552,6 +552,9 @@
   <xsl:template match="view:results">
     <xsl:apply-templates select="view:error"/>
     <xsl:if test="@summary"><p class="result-meta"><xsl:value-of select="@summary"/></p></xsl:if>
+    <!-- The prefix legend: once per result set, as TEXT, so a shortened IRI is reachable
+         without a tooltip. See web::PREFIX_LEGEND. -->
+    <xsl:if test="view:prefix"><p class="result-meta legend"><xsl:value-of select="view:prefix"/></p></xsl:if>
     <xsl:apply-templates select="view:table"/>
     <xsl:if test="view:boolean"><p class="boolean"><xsl:value-of select="view:boolean"/></p></xsl:if>
     <xsl:if test="view:graph"><pre class="mono graph"><xsl:value-of select="view:graph"/></pre></xsl:if>
@@ -571,7 +574,7 @@
           <xsl:for-each select="view:row">
             <tr>
               <xsl:for-each select="view:cell">
-                <td><xsl:attribute name="class"><xsl:value-of select="@kind"/></xsl:attribute><xsl:if test="@title"><xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute></xsl:if><xsl:value-of select="."/></td>
+                <td><xsl:attribute name="class"><xsl:value-of select="@kind"/></xsl:attribute><xsl:if test="@title"><xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute></xsl:if><xsl:choose><xsl:when test="@href"><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:attribute name="aria-label"><xsl:value-of select="@label"/></xsl:attribute><xsl:attribute name="class">cell-link</xsl:attribute><xsl:attribute name="data-action"><xsl:value-of select="@action"/></xsl:attribute><xsl:value-of select="."/></a></xsl:when><xsl:otherwise><xsl:value-of select="."/></xsl:otherwise></xsl:choose></td>
               </xsl:for-each>
             </tr>
           </xsl:for-each>

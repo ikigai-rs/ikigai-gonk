@@ -377,6 +377,22 @@ fn the_refusals_that_are_right_still_stop_the_server() {
     broad.write("grants.json", "{\"everything\": [\"urn:cap:store:read\"]}");
     let said = broad.refused(&[]);
     assert!(said.contains("urn:cap:store:read"), "{said}");
+
+    // ★ And a render-rules table the renderer could not obey. A rule that silently did
+    // nothing would look exactly like one in effect, so it is read and parsed at startup
+    // rather than at the first result set — see `read_render_rules` in main.
+    let rules = Scratch::new();
+    rules.write("clients.json", "{\"passkeys\": {}}");
+    rules.write(
+        "render-rules.ttl",
+        "@prefix render: <urn:iki:gonk:render#> .\n\
+         <urn:x:r> a render:Rule ; render:matchVar \"n\" .\n",
+    );
+    let said = rules.refused(&[]);
+    assert!(
+        said.contains("render-rules.ttl") && said.contains("does nothing"),
+        "{said}"
+    );
 }
 
 #[test]

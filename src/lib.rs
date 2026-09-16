@@ -41,6 +41,7 @@ pub mod identity;
 pub mod mount;
 pub mod quic;
 pub mod render;
+pub mod rules;
 pub mod watch;
 pub mod web;
 

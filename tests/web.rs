@@ -39,6 +39,12 @@ struct Server {
 
 impl Server {
     fn start() -> Server {
+        Server::start_with_rules(ikigai_gonk::rules::DEFAULT_RULES)
+    }
+
+    /// A server whose render rules are `rules` rather than the shipped table — what a
+    /// deployment gets by dropping its own `gonk/render-rules.ttl` beside `grants.json`.
+    fn start_with_rules(rules: &str) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -52,6 +58,7 @@ impl Server {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
             passkeys: Arc::clone(&passkeys),
+            rules: rules.into(),
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         let cap = doors::http_cap(doors::HttpDoor {
@@ -510,8 +517,9 @@ fn sparql_is_confined_to_one_ledger_graph() {
 
 /// A corpus in the shape `ikigai-ledger` writes: priorities set and unset, `repo:` labels,
 /// a `security` label, comments, and a closed item with its reason. Enough for every sample
-/// query on the SPARQL page to have something true to return.
-fn seed(server: &Server) {
+/// query on the SPARQL page to have something true to return. Returns the filed items as
+/// `(iri, id)`, in filing order — so item N is `filed[N - 1]`.
+fn seed(server: &Server) -> Vec<(String, String)> {
     let filed: Vec<(String, String)> = [
         (
             "Refuse a foreign Host\n\nThe edge hands an empty capability instead of refusing.",
@@ -586,6 +594,24 @@ fn seed(server: &Server) {
         None,
     );
     assert_eq!(closed.status, 200, "{closed:?}");
+    filed
+}
+
+/// One more comment on one item, so a test can make a COUNT and an item number differ.
+fn comment(server: &Server, item: &(String, String), text: &str) {
+    let (iri, id) = item;
+    let posted = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", id),
+            ("_then", "card"),
+            ("item", iri),
+            ("content", text),
+        ],
+        None,
+    );
+    assert_eq!(posted.status, 200, "{posted:?}");
 }
 
 /// ★ **The samples are RUN here, not merely rendered.** A sample query that errors is worse
@@ -683,17 +709,46 @@ fn a_ledger_iri_reads_as_its_local_name_only_in_the_html_face() {
 
     let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
     assert_eq!(fragment.status, 200, "{fragment:?}");
+    // ★ #241's answer for a cell that does NOT become a link: the shortening is a CURIE,
+    // and the prefix it uses is bound once in the page as TEXT. The `title` is still there
+    // for a pointer user, but it is no longer the only place the full IRI exists — which
+    // was the whole complaint, since screen readers mostly do not announce it.
     assert!(
-        fragment
-            .body
-            .contains("<td class='uri' title='https://ikigai-rs.dev/ns/ledger#open'>open</td>"),
-        "a ledger IRI reads as its local name, with the full IRI on the cell: {fragment:?}"
+        fragment.body.contains(
+            "<td class='uri' title='https://ikigai-rs.dev/ns/ledger#open'>ledger:open</td>"
+        ),
+        "a ledger IRI reads as a CURIE, with the full IRI on the cell: {fragment:?}"
     );
-    // An item's own IRI is the identifier a person copies: never shortened, never tooltipped.
+    assert!(
+        fragment.body.contains(&format!(
+            "<p class='result-meta legend'>{}</p>",
+            ikigai_gonk::web::PREFIX_LEGEND
+        )),
+        "the prefix is bound once, in text: {fragment:?}"
+    );
+    // And exactly once, however many rows shortened an IRI.
+    assert_eq!(
+        fragment.body.matches("result-meta legend").count(),
+        1,
+        "{fragment:?}"
+    );
+    // An item's own IRI is the identifier a person copies: never shortened — and now a
+    // LINK, which is a better answer to #241 than a tooltip ever was.
     assert!(
         fragment
             .body
-            .contains("<td class='uri'>urn:iki:ledger:default:item:"),
+            .contains("<td class='uri'><a aria-label='Open urn:iki:ledger:default:item:"),
+        "{fragment:?}"
+    );
+    assert!(
+        fragment
+            .body
+            .contains("class='cell-link' data-action='link' href='/l/default/item/"),
+        "{fragment:?}"
+    );
+    // A linked cell drops the tooltip rather than carrying both.
+    assert!(
+        !fragment.body.contains("title='urn:iki:ledger:"),
         "{fragment:?}"
     );
 
@@ -708,6 +763,251 @@ fn a_ledger_iri_reads_as_its_local_name_only_in_the_html_face() {
     assert!(
         json.body.contains("https://ikigai-rs.dev/ns/ledger#open"),
         "the JSON face still carries the full IRI: {json:?}"
+    );
+}
+
+/// ★★ **THE ACCEPTANCE TEST** — the `Items with comments` query, which is the one that was
+/// on screen when this work was asked for. It renders `number` and `comments` side by side,
+/// both as bare integers, and the whole difficulty of "any query" lives in that pair.
+///
+/// ⚠ The counterexample is made SHARP here on purpose: the counts are 3 and 2 while the
+/// numbers are 1 and 2, and items 2 and 3 both EXIST. So a renderer that linked every
+/// integer, or that linked an integer only when an item with that number exists, would send
+/// "3 comments" to item #3. Neither would fail a gentler corpus; both fail this one.
+#[test]
+fn the_issues_with_comments_query_links_numbers_and_leaves_counts_alone() {
+    let server = Server::start();
+    let filed = seed(&server);
+    // seed() leaves one comment each on items 1 and 2. Make the counts 3 and 2.
+    comment(&server, &filed[0], "Second look.");
+    comment(&server, &filed[0], "Third look.");
+    comment(&server, &filed[1], "Second look.");
+
+    let (_, _, query) = ikigai_gonk::web::SAMPLES
+        .iter()
+        .find(|(id, _, _)| *id == "sample-comments")
+        .expect("the issues-with-comments sample");
+    let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
+    assert_eq!(fragment.status, 200, "{fragment:?}");
+
+    // The item numbers are links.
+    for number in [1, 2] {
+        assert!(
+            fragment
+                .body
+                .contains(&format!("href='/l/default/item/{number}'")),
+            "item {number} is not linked: {fragment:?}"
+        );
+    }
+    // ★ And the COUNT is not — even though item 3 exists and is reachable by its own number.
+    assert!(
+        !fragment.body.contains("href='/l/default/item/3'"),
+        "a comment count of 3 was linked to item #3: {fragment:?}"
+    );
+    assert!(
+        fragment.body.contains("<td class='literal'>3</td>"),
+        "the count renders as plain text: {fragment:?}"
+    );
+    // The accessible name contains the visible text, so the link is not renamed out from
+    // under a screen-reader user (WCAG 2.5.3).
+    assert!(
+        fragment
+            .body
+            .contains("<a aria-label='Open item 1 in default' class='cell-link' data-action='link' href='/l/default/item/1'>1</a>"),
+        "{fragment:?}"
+    );
+    // Title stays plain text: an unmatched cell is exactly what it was.
+    assert!(
+        fragment
+            .body
+            .contains("<td class='literal'>Refuse a foreign Host</td>"),
+        "{fragment:?}"
+    );
+}
+
+/// ★ #315: a repo label is a control, and activating it LEAVES the current result set.
+///
+/// The `Count by repo` sample returns one row per repo and no item at all. Following the
+/// `repo:ikigai-gonk` cell must answer with that repo's OPEN items — items the first query
+/// never returned — because the point is to ask the ledger a new question rather than to
+/// filter the rows already on screen. The closed one must not come back.
+#[test]
+fn a_repo_label_asks_the_ledger_the_next_question() {
+    let server = Server::start();
+    seed(&server);
+    let (_, _, counts) = ikigai_gonk::web::SAMPLES
+        .iter()
+        .find(|(id, _, _)| *id == "sample-repos")
+        .expect("the count-by-repo sample");
+    let fragment = server.page(&format!("/sparql/results?query={}", encode(counts)), None);
+    assert_eq!(fragment.status, 200, "{fragment:?}");
+    assert!(
+        fragment.body.contains("data-action='query'"),
+        "a repo label is a query control: {fragment:?}"
+    );
+    assert!(
+        fragment
+            .body
+            .contains("aria-label='Open items labelled repo:ikigai-gonk'"),
+        "{fragment:?}"
+    );
+
+    // Follow it exactly as a browser would: the href, verbatim.
+    let href = {
+        let at = fragment
+            .body
+            .find("aria-label='Open items labelled repo:ikigai-gonk'")
+            .expect("the repo cell");
+        let rest = &fragment.body[at..];
+        let start = rest.find("href='").expect("an href") + "href='".len();
+        let end = rest[start..].find('\'').expect("the closing quote");
+        rest[start..start + end].replace("&amp;", "&")
+    };
+    let followed = server.page(&href, None);
+    assert_eq!(followed.status, 200, "{followed:?}");
+    assert!(
+        !followed.body.contains("class='flash error'"),
+        "the query the rule built was refused: {followed:?}"
+    );
+    // The three OPEN ikigai-gonk items, and not the ikigai-core ones.
+    assert!(
+        followed.body.contains("Refuse a foreign Host"),
+        "{followed:?}"
+    );
+    assert!(
+        followed.body.contains("Drop the HTTP workarounds"),
+        "{followed:?}"
+    );
+    assert!(followed.body.contains("No passkey list"), "{followed:?}");
+    assert!(
+        !followed.body.contains("Dependency floors"),
+        "another repo's item came back: {followed:?}"
+    );
+    assert!(
+        followed
+            .body
+            .contains("3 row(s) from urn:iki:ledger:graph:default"),
+        "{followed:?}"
+    );
+}
+
+/// ⚠ The label comes out of the store, and the store holds text other people wrote. A label
+/// carrying a quote and a closing brace must not be able to change the SHAPE of the query it
+/// runs — the whole value stays one string literal, so the query is well-formed and simply
+/// matches nothing.
+#[test]
+fn a_label_that_looks_like_sparql_cannot_reshape_the_query_it_runs() {
+    let server = Server::start();
+    let hostile = r#"repo:x" } INSERT DATA { <urn:x:a> <urn:x:b> "pwned" } #"#;
+    let filed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "append"),
+            ("_then", "items"),
+            ("content", "A label that reads like a query\n\nbody"),
+            ("labels", hostile),
+        ],
+        None,
+    );
+    assert_eq!(filed.status, 200, "{filed:?}");
+
+    let query = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>\n\
+                 SELECT ?label WHERE { ?i a ledger:Item ; ledger:label ?label \
+                 FILTER(STRSTARTS(?label, \"repo:\")) }";
+    let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
+    assert_eq!(fragment.status, 200, "{fragment:?}");
+    assert!(
+        fragment.body.contains("data-action='query'"),
+        "{fragment:?}"
+    );
+
+    let href = {
+        let start = fragment.body.find("href='").expect("an href") + "href='".len();
+        let end = fragment.body[start..]
+            .find('\'')
+            .expect("the closing quote");
+        fragment.body[start..start + end].replace("&amp;", "&")
+    };
+    let followed = server.page(&href, None);
+    assert_eq!(followed.status, 200, "{followed:?}");
+    // Well-formed, so no parse error — and matching nothing, because no item carries that
+    // exact label... except the one that does, which is the point: it is DATA, not syntax.
+    assert!(
+        !followed.body.contains("class='flash error'"),
+        "the escaped query did not parse: {followed:?}"
+    );
+    assert!(
+        followed.body.contains("A label that reads like a query"),
+        "the literal matched the item it names: {followed:?}"
+    );
+    // Nothing was written: the INSERT DATA inside the label is text.
+    let count = server.raw(
+        "GET",
+        &format!(
+            "/sparql?query={}",
+            encode("SELECT (COUNT(*) AS ?n) WHERE { <urn:x:a> ?p ?o }")
+        ),
+        &[("Accept", "application/sparql-results+json".to_string())],
+        "",
+    );
+    assert!(count.body.contains("\"value\":\"0\""), "{count:?}");
+}
+
+/// ★ The rule table is a RESOURCE: served, readable, and replaceable per deployment.
+#[test]
+fn the_render_rules_are_a_resource_a_deployment_can_replace() {
+    let server = Server::start();
+    let served = server.raw("GET", "/render-rules", &[], "");
+    assert_eq!(served.status, 200, "{served:?}");
+    assert!(
+        served.body.contains("text/turtle"),
+        "the table is served as Turtle: {served:?}"
+    );
+    assert!(
+        served.body.contains("urn:iki:gonk:render:rule:item-number"),
+        "{served:?}"
+    );
+    // What is served is what the renderer acted on, byte for byte.
+    assert!(
+        served.body.ends_with(ikigai_gonk::rules::DEFAULT_RULES),
+        "{served:?}"
+    );
+
+    // A deployment whose queries spell the column differently writes its own table, and
+    // gonk obeys THAT — no patch to this binary.
+    let theirs = r#"@prefix render: <urn:iki:gonk:render#> .
+<urn:x:rule:ticket> a render:Rule ;
+    render:order 5 ;
+    render:matchKind "literal" ;
+    render:matchShape "integer" ;
+    render:matchVar "ticket" ;
+    render:link "/l/{ledger}/item/{value}" ;
+    render:label "Open ticket {value}" .
+"#;
+    let server = Server::start_with_rules(theirs);
+    seed(&server);
+    let query = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#> \
+                 SELECT ?ticket ?number WHERE { ?i a ledger:Item ; ledger:number ?ticket \
+                 BIND(?ticket AS ?number) } ORDER BY ?ticket LIMIT 1";
+    let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
+    assert_eq!(fragment.status, 200, "{fragment:?}");
+    assert!(
+        fragment.body.contains("aria-label='Open ticket 1'"),
+        "their column links: {fragment:?}"
+    );
+    // And the shipped default is GONE, not merged: `number` is no longer special here.
+    assert!(
+        !fragment
+            .body
+            .contains("aria-label='Open item 1 in default'"),
+        "the shipped table was merged rather than replaced: {fragment:?}"
+    );
+    assert!(
+        server
+            .raw("GET", "/render-rules", &[], "")
+            .body
+            .contains("urn:x:rule:ticket"),
+        "the served table is the one in effect"
     );
 }
 

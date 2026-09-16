@@ -54,6 +54,7 @@ use serde_json::{json, Value};
 
 use crate::identity::{self, Passkeys, Purpose};
 use crate::render::{self, element, envelope, Graph};
+use crate::rules::{self, Rules};
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
@@ -68,6 +69,10 @@ pub struct Web {
     pub ledgers: Vec<String>,
     /// The passkey relying party.
     pub passkeys: Arc<Passkeys>,
+    /// The render rules in effect, as Turtle — the TEXT, not a parsed table, because the
+    /// text is what `urn:iki:gonk:render-rules` serves and what the renderer resolves back.
+    /// [`crate::rules::DEFAULT_RULES`] unless this deployment named its own file.
+    pub rules: Arc<str>,
 }
 
 /// Bind the face.
@@ -133,6 +138,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             template("urn:iki:gonk:passkey:{op}"),
             PasskeyDoor {
                 passkeys: Arc::clone(&web.passkeys),
+            },
+        )
+        .bind(
+            Exact::new(rules::RULES_IRI),
+            RenderRules {
+                turtle: Arc::clone(&web.rules),
             },
         )
         .bind(template("urn:iki:gonk:asset:{name}"), Asset)
@@ -915,7 +926,36 @@ LIMIT 50";
 /// within a minute of each other — ordering by it sorts by migration order, not by how long
 /// the work has waited. The real age of most claims lives in prose inside `ledger:body`. The
 /// page says so next to these buttons — that sentence is [`CREATED_IS_FILING_TIME`].
-pub const SAMPLES: [(&str, &str, &str); 8] = [
+pub const SAMPLES: [(&str, &str, &str); 9] = [
+    (
+        "sample-ledger",
+        "One named ledger",
+        // ★ The partition, taught by a query. Each named ledger is its OWN graph — gated by
+        // `urn:cap:ledger:read:{name}` and `urn:cap:store:read:graph:<iri>` — and nothing
+        // else on this page shows that, because every other sample leans on the graph the
+        // editor already scopes to. Measured 2026-09-16: `urn:iki:ledger:graph:default`
+        // holds every quad and the default graph proper holds none, so naming the graph is
+        // how a query says which ledger it is about, even while there is one.
+        //
+        // ⚠ `GRAPH <other>` matches NOTHING rather than erroring (ikigai-store confines the
+        // query's available named graphs to the one it was issued for), so editing this to
+        // another ledger's graph without also choosing that ledger above returns zero rows.
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+# Each named ledger lives in its own graph. Name it, and the query says which
+# ledger it is about — change `default` here AND in the Ledger box above.
+SELECT ?number ?status ?title WHERE {
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?item a ledger:Item ;
+          ledger:number ?number ;
+          ledger:status ?status ;
+          dcterms:title ?title .
+  }
+}
+ORDER BY DESC(?number)
+LIMIT 50",
+    ),
     (
         "sample-priority",
         "Open by priority",
@@ -1102,23 +1142,48 @@ pub fn query_form(query: &str) -> Option<&'static str> {
 /// else.
 ///
 /// ★ **Display only, and only this ONE namespace.** A `ledger:status` cell printing
-/// `https://ikigai-rs.dev/ns/ledger#open` is honest and unreadable at 200 rows; the full IRI
-/// stays on the cell as a `title`, and the BYTES the store returned never change — a caller
-/// asking for `application/sparql-results+json` gets the raw IRIs (`tests/web.rs`).
+/// `https://ikigai-rs.dev/ns/ledger#open` is honest and unreadable at 200 rows. The BYTES the
+/// store returned never change — a caller asking for `application/sparql-results+json` gets
+/// the raw IRIs (`tests/web.rs`).
 ///
-/// Nothing else is shortened, and no prefix legend is offered, because in this data no other
-/// namespace reaches a result CELL as a value: `dcterms:`, `prov:` and `sig:` name predicates
-/// whose objects are literals, and an item's own IRI (`urn:iki:ledger:{name}:item:{id}`) is
-/// the identifier a person copies — abbreviating that would hide the useful half. If a future
-/// ledger grows IRI-valued properties in another namespace, a legend beats a second special
-/// case here.
+/// Nothing else is shortened, because in this data no other namespace reaches a result CELL
+/// as a value: `dcterms:`, `prov:` and `sig:` name predicates whose objects are literals, and
+/// an item's own IRI (`urn:iki:ledger:{name}:item:{id}`) is the identifier a person copies —
+/// abbreviating that would hide the useful half, and it becomes a LINK instead
+/// ([`crate::rules`]). If a future ledger grows IRI-valued properties in another namespace,
+/// a second entry in [`PREFIX_LEGEND`] beats a second special case here.
 fn ledger_local_name(value: &str) -> Option<&str> {
     let local = value.strip_prefix(LEDGER_NS)?;
     (!local.is_empty() && !local.contains(['/', '#'])).then_some(local)
 }
 
-/// A cell as `(kind, display, full IRI when the display was shortened)`.
-fn cell(term: &Value) -> (String, String, Option<String>) {
+/// The sentence printed ONCE above a result set that shortened an IRI.
+///
+/// ★ **This is #241's answer for a cell that does not become a link.** The shortening used
+/// to live entirely in a `title` attribute, which is not keyboard-reachable and which most
+/// screen readers do not announce — so for those readers the full IRI was simply gone from
+/// the HTML face. It is in the page as TEXT now, and the cell reads as a CURIE
+/// (`ledger:open`, not `open`) so the legend has something to bind. Once per result set, not
+/// once per row: a 200-row answer must not read the same IRI 200 times either.
+///
+/// The `title` stays as well, for a pointer user who wants it without moving their eye — but
+/// it no longer carries the information alone, which is the whole of the complaint.
+pub const PREFIX_LEGEND: &str =
+    "ledger: is short for https://ikigai-rs.dev/ns/ledger# — this table writes it that way.";
+
+/// One result cell, ready to render.
+struct Cell {
+    /// `uri`, `literal`, `bnode`, as the store reported it.
+    kind: &'static str,
+    /// What the cell reads as.
+    display: String,
+    /// The full IRI, when [`display`](Cell::display) shortened it.
+    full: Option<String>,
+    /// The value as the store returned it — what a rule matches on, never the display.
+    lexical: String,
+}
+
+fn cell(term: &Value) -> Cell {
     let kind = term
         .get("type")
         .and_then(Value::as_str)
@@ -1127,25 +1192,59 @@ fn cell(term: &Value) -> (String, String, Option<String>) {
         .get("value")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let lexical = value.to_string();
     match kind {
         "uri" => match ledger_local_name(value) {
-            Some(local) => (
-                "uri".to_string(),
-                local.to_string(),
-                Some(value.to_string()),
-            ),
-            None => ("uri".to_string(), value.to_string(), None),
+            Some(local) => Cell {
+                kind: "uri",
+                display: format!("ledger:{local}"),
+                full: Some(lexical.clone()),
+                lexical,
+            },
+            None => Cell {
+                kind: "uri",
+                display: lexical.clone(),
+                full: None,
+                lexical,
+            },
         },
-        "bnode" => ("bnode".to_string(), format!("_:{value}"), None),
+        "bnode" => Cell {
+            kind: "bnode",
+            display: format!("_:{value}"),
+            full: None,
+            lexical,
+        },
         _ => {
             let suffix = term
                 .get("xml:lang")
                 .and_then(Value::as_str)
                 .map(|lang| format!(" @{lang}"))
                 .unwrap_or_default();
-            ("literal".to_string(), format!("{value}{suffix}"), None)
+            Cell {
+                kind: "literal",
+                display: format!("{value}{suffix}"),
+                full: None,
+                lexical,
+            }
         }
     }
+}
+
+/// The rule table in effect, RESOLVED — `urn:iki:gonk:render-rules`, through the kernel,
+/// like every other thing this face is built from.
+///
+/// A failure here falls back to the shipped table rather than failing the page: `main`
+/// already refused to start on a table it could not parse, so the only way to arrive here
+/// with a bad one is a defect, and a results page with no links beats no results page.
+async fn rules_in_effect(inv: &Invocation<'_>) -> Rules {
+    let answer = match request(Verb::Source, rules::RULES_IRI) {
+        Ok(r) => inv.issue(with(r, "as", "text/turtle")).await,
+        Err(e) => Err(e),
+    };
+    answer
+        .ok()
+        .and_then(|repr| Rules::parse(&String::from_utf8_lossy(&repr.bytes)).ok())
+        .unwrap_or_default()
 }
 
 /// Run `query` against `ledger` and build the `<view:results>` element.
@@ -1228,27 +1327,48 @@ async fn sparql_results(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> S
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let rules = rules_in_effect(inv).await;
+    let mut shortened = false;
     let mut table: String = vars.iter().map(|name| element("col", &[], name)).collect();
     for row in rows {
         table.push_str("<view:row>");
         for name in &vars {
             match row.get(*name) {
                 Some(term) => {
-                    let (kind, value, full) = cell(term);
-                    let mut attributes = vec![("kind", kind.as_str())];
-                    if let Some(full) = &full {
-                        attributes.push(("title", full.as_str()));
+                    let cell = cell(term);
+                    let action = rules.action(name, cell.kind, &cell.lexical, ledger.name());
+                    let mut attributes = vec![("kind", cell.kind)];
+                    match &action {
+                        // A link IS the reachable form of the full value, so the tooltip
+                        // stops carrying it here — keeping both would be answering #241
+                        // with the thing #241 is about.
+                        Some(action) => {
+                            attributes.push(("href", action.href.as_str()));
+                            attributes.push(("label", action.label.as_str()));
+                            attributes.push(("action", action.kind));
+                        }
+                        None => {
+                            if let Some(full) = &cell.full {
+                                shortened = true;
+                                attributes.push(("title", full.as_str()));
+                            }
+                        }
                     }
-                    table.push_str(&element("cell", &attributes, &value));
+                    table.push_str(&element("cell", &attributes, &cell.display));
                 }
                 None => table.push_str(&element("cell", &[("kind", "unbound")], "")),
             }
         }
         table.push_str("</view:row>");
     }
+    let legend = if shortened {
+        element("prefix", &[], PREFIX_LEGEND)
+    } else {
+        String::new()
+    };
     wrap(
         format!("{} row(s) from {graph}", rows.len()),
-        format!("<view:table>{table}</view:table>"),
+        format!("{legend}<view:table>{table}</view:table>"),
     )
 }
 
@@ -1519,6 +1639,59 @@ impl Endpoint for PasskeyDoor {
                 .optional(),
             )
             .output("application/json")
+    }
+}
+
+// ------------------------------------------------------------------------- render rules
+
+/// The rule table, served. See [`crate::rules`] for what it decides and why it is a
+/// resource rather than a constant.
+struct RenderRules {
+    turtle: Arc<str>,
+}
+
+#[async_trait]
+impl Endpoint for RenderRules {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if let Ok(asked) = inv.inline_str("as") {
+            if !matches!(bare(asked), "text/turtle" | "text/plain") {
+                return Err(Error::InvalidArgument {
+                    name: "as".to_string(),
+                    detail: format!("`{asked}` is not a face this table serves; it serves Turtle"),
+                });
+            }
+        }
+        Ok(Representation::new(
+            ReprType::new("text/turtle").with_param("charset", "utf-8"),
+            self.turtle.as_bytes().to_vec(),
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-render-rules"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-render-rules")
+            .title("Which SPARQL result cells become controls")
+            .summary(
+                "The render rules as Turtle: a rule matches a cell on its term KIND, its value \
+                 SHAPE, a value PREFIX or (where the value alone cannot say — a bare integer) \
+                 the variable NAME, and turns it into a link or into a query the editor runs. \
+                 A resource rather than a compiled-in list of blessed column names, because a \
+                 result set carries whatever variables its author chose: a deployment replaces \
+                 the whole table with <config home>/gonk/render-rules.ttl. Read-only here; \
+                 public, because it describes presentation and reads no ledger.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                arg("as", "The face: this table serves Turtle.")
+                    .one_of(["text/turtle", "text/plain"])
+                    .default_value("text/turtle")
+                    .optional(),
+            )
+            .output("text/turtle")
     }
 }
 

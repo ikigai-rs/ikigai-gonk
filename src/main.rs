@@ -67,6 +67,11 @@ fn serve(flags: &config::Flags) -> ! {
     // The passkey file is read here too, so an unparsable `passkeys` block stops the server
     // rather than failing every sign-in.
     identity::read_passkeys(&layout).unwrap_or_else(|e| fail(&e));
+    // And the render rules, for the same reason: a rule table this server cannot obey is a
+    // setting that would look exactly like one in effect. Read once, checked once, then
+    // SERVED — `urn:iki:gonk:render-rules` is what the renderer resolves, so what a page
+    // acted on is what a person can read back.
+    let render_rules = read_render_rules(&layout).unwrap_or_else(|e| fail(&e));
 
     // The browse roots' watchers start BEFORE the space is built, and the set they actually
     // got decides which roots' reads may be cached. Fail closed, in that order: a root whose
@@ -214,6 +219,7 @@ fn serve(flags: &config::Flags) -> ! {
             hub: Arc::clone(&hub),
             ledgers: settings.http_ledgers.clone(),
             passkeys: Arc::clone(&passkeys),
+            rules: Arc::clone(&render_rules),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         eprintln!(
@@ -309,6 +315,24 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
         tiers.pr.provider,
         tiers.pr.max_tokens,
     )
+}
+
+/// The render rules in effect: this deployment's `gonk/render-rules.ttl`, else the table
+/// gonk ships. Parsed here so a table the renderer could not obey stops the server — the
+/// house rule for configuration, and the reason [`web::Web`] carries the TEXT rather than a
+/// parsed table: the text is what `urn:iki:gonk:render-rules` serves back.
+fn read_render_rules(layout: &quic::Layout) -> Result<Arc<str>, String> {
+    let path = layout.render_rules_ttl();
+    let turtle: Arc<str> = match std::fs::read_to_string(&path) {
+        Ok(text) => text.into(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ikigai_gonk::rules::DEFAULT_RULES.into())
+        }
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    ikigai_gonk::rules::Rules::parse(&turtle)
+        .map_err(|e| format!("{}: {e}", path.display()))
+        .map(|_| turtle)
 }
 
 fn client_add(

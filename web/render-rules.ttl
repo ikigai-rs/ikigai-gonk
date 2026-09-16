@@ -1,0 +1,113 @@
+# The render rules — which SPARQL result cells become controls, and what they do.
+#
+# ★ This is a RESOURCE, not a constant and not a config key. It is served at
+# `urn:iki:gonk:render-rules` (HTTP `/render-rules`, text/turtle), so it can be resolved,
+# read, diffed and replaced per deployment: drop your own file at
+# `<config home>/gonk/render-rules.ttl` and gonk serves THAT instead of this. A mapping is
+# data about how to read this deployment's data; it belongs in the graph, not in the binary.
+#
+# ★★ A RULE NEVER MATCHES ON A COLUMN NAME ALONE. A SPARQL result set carries whatever
+# variable names its author chose, so a rule keyed only on the name works for today's sample
+# queries and fails for the query someone writes tomorrow. The rules below match on the
+# VALUE wherever the value is unambiguous, and reach for the variable name only where it is
+# not — see `rule:item-number`, which says so in its own comment.
+#
+# Match conditions (a rule applies when EVERY condition it states holds; several values of
+# ONE condition are alternatives):
+#
+#   render:matchKind    "uri" | "literal" | "bnode"   — the term kind the store reported
+#   render:matchShape   "ledgerItemIri" | "integer"   — a shape of the value itself
+#   render:matchPrefix  "repo:"                       — the value starts with this text
+#   render:matchVar     "number"                      — the SPARQL variable this cell is under
+#
+# Actions (exactly one per rule):
+#
+#   render:link   "<url template>"      the cell becomes an anchor to that URL
+#   render:query  "<SPARQL template>"   the cell becomes an anchor that RUNS that query
+#
+# Substitutions, in either template and in render:label:
+#
+#   {value}       the cell's lexical value, as the store returned it
+#   {ledger}      the ledger this query ran against
+#   {itemLedger}  the ledger named inside a `urn:iki:ledger:…:item:…` value
+#   {itemId}      the item id inside such a value
+#
+# A template whose substitution comes out EMPTY produces no action at all — so a rule that
+# reaches for {itemId} without also matching `ledgerItemIri` simply does nothing, rather
+# than emitting a broken link.
+#
+# ⚠ Substitution is ESCAPED FOR THE GRAMMAR IT LANDS IN, always, by the renderer and never
+# by the rule: percent-encoding for a `render:link` URL, the SPARQL string-literal grammar
+# for a `render:query`. These values come out of the store, and the store holds text other
+# people wrote. Writing your own rules does not let you concatenate.
+#
+# `render:order` is the tie-break; the lowest-numbered matching rule wins, and ties break on
+# the rule's IRI so the outcome never depends on parse order.
+
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix render: <urn:iki:gonk:render#> .
+
+# ------------------------------------------------------------------ 1. an item IRI links
+
+# The free case: `urn:iki:ledger:default:item:01m2kw5328wttezn` can only be one thing, so no
+# heuristic and no false positive is possible. It links whatever the column is called, which
+# is the whole of "any query" for item IRIs.
+<urn:iki:gonk:render:rule:item-iri>
+    a                  render:Rule ;
+    rdfs:label         "A ledger item IRI links to that item" ;
+    render:order       10 ;
+    render:matchKind   "uri" ;
+    render:matchShape  "ledgerItemIri" ;
+    render:link        "/l/{itemLedger}/item/{itemId}" ;
+    render:label       "Open {value}" .
+
+# ------------------------------------------------------------ 2. an item NUMBER links
+
+# ⚠ THE AMBIGUOUS ONE, and it is ambiguous by construction. A SPARQL result carries no
+# provenance: in `SELECT ?number ?title (COUNT(?comment) AS ?comments)` the renderer cannot
+# tell that 244 came from `ledger:number` and 3 from a COUNT — both are bare integers. A
+# value-only rule would turn "3 comments" into a link to item #3.
+#
+# So this rule, alone among these, consults the variable NAME, and the names are listed here
+# rather than compiled in precisely so a deployment whose queries spell it differently can
+# add its own without patching gonk. Add yours; do not widen this to every integer column.
+<urn:iki:gonk:render:rule:item-number>
+    a                  render:Rule ;
+    rdfs:label         "A bare integer under a column that names items links to that item" ;
+    render:order       20 ;
+    render:matchKind   "literal" ;
+    render:matchShape  "integer" ;
+    render:matchVar    "number", "item", "n", "itemNumber", "item_number" ;
+    render:link        "/l/{ledger}/item/{value}" ;
+    render:label       "Open item {value} in {ledger}" .
+
+# ------------------------------------------------ 3. a repo label asks the next question
+
+# `repo:ikigai-gonk` is a value shape, so this one needs no column name either. The action
+# LEAVES the current result set and asks the ledger a fresh question — the OPEN items with
+# that label — rather than filtering the rows already on screen, so an item that was not in
+# the original answer still appears. That is the point: a result is somewhere to go next.
+<urn:iki:gonk:render:rule:repo-label>
+    a                  render:Rule ;
+    rdfs:label         "A repo: label runs the open items for that repo" ;
+    render:order       30 ;
+    render:matchKind   "literal" ;
+    render:matchPrefix "repo:" ;
+    render:label       "Open items labelled {value}" ;
+    # ⚠ ONE interpolation point on purpose: the label lands inside the string literal and
+    # nowhere else. A comment is a weaker container than a literal — do not write a
+    # placeholder into a comment, here or in a rule of your own. (Keep the query's own
+    # comments short for a second reason: the whole text travels in the editor's URL.)
+    render:query       """PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+# The open items with this label. Edit the label, or the status, and press Run.
+SELECT ?number ?priority ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:status ledger:open ;
+        ledger:label "{value}" ;
+        ledger:number ?number ;
+        dcterms:title ?title .
+  OPTIONAL { ?item ledger:priority ?priority }
+}
+ORDER BY COALESCE(?priority, 9) ?number""" .

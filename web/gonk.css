@@ -150,6 +150,16 @@ th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(
 th { background: var(--surface); }
 td.uri { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
 td.unbound { color: var(--muted); }
+
+/* A cell the render rules turned into a control (see src/rules.rs). It is a real anchor:
+ * keyboard-reachable in reading order, activated by Enter, and wearing the global
+ * :focus-visible ring. The color is --accent, the one the contrast test already holds to
+ * ikigai-a11y's floor in BOTH schemes — a link colour invented here would not be checked.
+ * Underlined always, so the control is not signalled by colour alone (WCAG 1.4.1); a
+ * `query` link is dotted because it does something rather than going somewhere. */
+a.cell-link { color: var(--accent); text-decoration: underline; text-underline-offset: 0.15em; }
+a.cell-link[data-action="query"] { text-decoration-style: dotted; }
+a.cell-link:hover { text-decoration-thickness: 2px; }
 .graph { white-space: pre-wrap; overflow-x: auto; background: var(--surface); padding: 0.75rem; border-radius: var(--radius); }
 
 @media (max-width: 40rem) {
