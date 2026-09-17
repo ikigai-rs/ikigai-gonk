@@ -143,6 +143,13 @@ summary { cursor: pointer; color: var(--accent); }
 .samples { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 0.5rem; }
 .samples button { white-space: normal; text-align: left; }
 .sample-text { display: none; }
+/* The cross-graph example. Deliberately NOT a sample: it is a collapsed `details` below the
+ * buttons, with a dashed edge rather than the buttons' filled one, so nothing about it invites
+ * a click that would load it into the editor (the page sends one graph; see web::CROSS_GRAPH).
+ * No colour is invented — --surface, --line and --muted are the ones the contrast test already
+ * holds to ikigai-a11y's floor. It scrolls sideways at phone width rather than wrapping a
+ * query mid-token; the page body never scrolls, the block does. */
+.cross-graph-text { white-space: pre; overflow-x: auto; background: var(--surface); border: 1px dashed var(--line); padding: 0.75rem; border-radius: var(--radius); margin: 0; }
 /* ★ The ACTIVE sample (#370). The STATE is `aria-pressed` on the button — web/gonk.js sets it
  * on click and clears it the moment the editor is typed in — so a screen reader hears which
  * sample the editor holds; this rule is only how that looks. Two signals, because the render

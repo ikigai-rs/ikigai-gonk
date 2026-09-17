@@ -11,6 +11,7 @@
 //! - [`sparql_is_confined_to_one_ledger_graph`]
 //! - [`every_sample_query_returns_rows`]
 //! - [`the_sparql_page_offers_the_samples_without_running_them`]
+//! - [`the_cross_graph_example_is_shown_and_never_loadable`]
 //! - [`a_ledger_iri_reads_as_its_local_name_only_in_the_html_face`]
 //! - [`a_passkey_identity_adds_its_grant_and_only_its_grant`]
 //! - [`the_palette_clears_the_contrast_floor`]
@@ -700,6 +701,50 @@ fn the_sparql_page_offers_the_samples_without_running_them() {
     // Nothing ran: the editor holds the default query and no results table is present.
     assert!(!page.body.contains("<table>"), "{page:?}");
     assert!(!page.body.contains("row(s) from"), "{page:?}");
+}
+
+/// ★ The cross-graph example is SHOWN and must never become loadable (#401).
+///
+/// The page sends one graph, so a multi-graph query pressed into the editor returns no rows —
+/// which would present a real capability of `urn:iki:store:graph-select` as a broken feature.
+/// The prose is what drifted here and prose is not testable; the MARKUP constraint is, so that
+/// is what this pins: the example reaches the reader, and the only things a click can load are
+/// the [`SAMPLES`](ikigai_gonk::web::SAMPLES) themselves.
+#[test]
+fn the_cross_graph_example_is_shown_and_never_loadable() {
+    let server = Server::start();
+    seed(&server);
+    let page = server.page("/sparql", None);
+    assert_eq!(page.status, 200, "{page:?}");
+
+    // It is there, as its own block, and it says why it is not a button.
+    assert!(page.body.contains("class='cross-graph'"), "{page:?}");
+    assert!(page.body.contains("shown, not loadable"), "{page:?}");
+    // The query survives the render — both graphs named, and the FILTER at the top level of
+    // the WHERE, which is the difference between 39 rows and zero (see web::CROSS_GRAPH).
+    for line in [
+        "GRAPH <urn:iki:browse:graph:default> {",
+        "GRAPH <urn:iki:ledger:graph:default> {",
+        "FILTER(?label = CONCAT(\"repo:ikigai-\", ?repo))",
+    ] {
+        let escaped = line
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        assert!(
+            page.body.contains(&escaped),
+            "the cross-graph example lost `{line}`: {page:?}"
+        );
+    }
+
+    // ⚠ The pin that matters: nothing clickable was added. `web/gonk.js` loads a query by
+    // looking a button's `data-query` up as an element id, so one `data-query` per sample and
+    // no more is exactly "the example cannot be loaded into the editor".
+    assert_eq!(
+        page.body.matches("data-query='").count(),
+        ikigai_gonk::web::SAMPLES.len(),
+        "only the samples are loadable: {page:?}"
+    );
 }
 
 #[test]

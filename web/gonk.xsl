@@ -508,7 +508,12 @@
   <xsl:template name="sparql">
     <section id="sparql" class="sparql">
       <h1>SPARQL</h1>
-      <p class="hint">Read-only, over ONE ledger's graph at a time: the query runs at <code>urn:iki:store:graph-select</code> (or <code>-ask</code>, <code>-construct</code>, <code>-describe</code>) with that graph as its whole dataset, under your grant. <code>FROM</code> and <code>FROM NAMED</code> are refused — the graph already is the dataset — and nothing outside it is visible.</p>
+      <!-- ★ The limit belongs to THIS PAGE, not to the endpoint (#401). Since ikigai-store
+           0.2.5 a scoped read takes a SET of graphs, so the paragraph that read as "the
+           endpoint can only do one" was true of every sentence and false as a whole — a
+           reader concluded the ledger↔browse join was impossible, which it is not. Keep the
+           two halves apart: what this box sends, and what the endpoint accepts. -->
+      <p class="hint">Read-only. <strong>This page</strong> runs your query over one ledger's graph, as its whole dataset, under your grant. The endpoint behind it — <code>urn:iki:store:graph-select</code> (or <code>-ask</code>, <code>-construct</code>, <code>-describe</code>) — accepts <em>several</em> graphs in one read, so a caller holding a read token for each can join across them; this page has no graph selector yet. <code>FROM</code> and <code>FROM NAMED</code> are refused either way: the named graphs already are the dataset, and nothing outside them is visible.</p>
       <!--
         The sample queries. A button REPLACES the textarea's contents and runs nothing: the
         person presses Run, so an edit is never lost to a surprise execution. Each query
@@ -520,6 +525,7 @@
         <xsl:apply-templates select="view:sample"/>
       </div>
       <p class="hint"><xsl:value-of select="view:hint"/></p>
+      <xsl:apply-templates select="view:cross-graph"/>
       <div id="sample-queries" hidden="hidden"><xsl:apply-templates select="view:sample" mode="text"/></div>
       <form class="panel stack" method="get" action="/sparql" hx-get="/sparql/results" hx-target="#results" hx-swap="innerHTML">
         <div class="row">
@@ -551,6 +557,20 @@
 
   <xsl:template match="view:sample" mode="text">
     <pre class="sample-text"><xsl:attribute name="id"><xsl:value-of select="@id"/></xsl:attribute><xsl:value-of select="."/></pre>
+  </xsl:template>
+
+  <!-- ★ The cross-graph example: SHOWN, never loadable. It is a `details` (the same idiom the
+       item form already uses) and NOT a `.sample` button — no `data-query`, no id under
+       `#sample-queries` — because web/gonk.js loads a sample by looking its `data-query` up as
+       an element id, and this page sends ONE graph: a multi-graph query run from the box would
+       come back empty and present a working capability as a broken feature. See
+       web::CROSS_GRAPH. -->
+  <xsl:template match="view:cross-graph">
+    <details class="cross-graph">
+      <summary>Joining two graphs — a query for the endpoint, not for this box</summary>
+      <p class="hint"><xsl:value-of select="@why"/></p>
+      <pre class="mono cross-graph-text"><xsl:value-of select="."/></pre>
+    </details>
   </xsl:template>
 
   <xsl:template match="view:results">

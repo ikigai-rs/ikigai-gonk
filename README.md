@@ -157,6 +157,14 @@ dataset before evaluation, so there is nothing else to see, and a grant naming o
 cannot read another. `FROM` and `FROM NAMED` are refused rather than silently overridden; the
 page says so. It is read-only: an update is not a query form it runs.
 
+⚠ The confinement to ONE graph is **this page's**, not the endpoint's. Since `ikigai-store`
+0.2.5 a scoped read takes a whitespace-separated SET of graphs, so a caller holding a read
+token for each can join across them — a ledger and the browse graph, say — by calling
+`urn:iki:store:graph-select` directly; `FROM` stays refused over a set as much as over one
+graph, and `GRAPH <g>` for a `g` outside the issued set matches nothing rather than erroring.
+This page has no graph selector yet, so it shows that join as an example and does not offer to
+run it (`web::CROSS_GRAPH`).
+
 ### Routes
 
 | path | resource | |
