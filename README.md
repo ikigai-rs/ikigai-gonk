@@ -449,6 +449,7 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:repo:{root}:*` (`urn:cap:browse:read:{root}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:annotation` (`urn:cap:annotate`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `passkey invite … --browse-graph read` | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
 | `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`, plus `urn:cap:annotate` for the two reviews) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
@@ -459,7 +460,7 @@ costs the operator tokens and — where the peer is metered — money. `ikigai-b
 that as `urn:cap:net:*` (the offering wildcard) on every derivation, and `declared =
 enforced`, so a caller with no net grant is refused before dispatch and never appears in
 front of a model. **This server mints no net grant**: `ikigai-gonk grants`, `client add` and
-`passkey invite` write per-ledger tokens only, so an identity that may derive is one an
+`passkey invite` write per-ledger and per-graph store tokens only, so an identity that may derive is one an
 operator wrote by hand into `grants.json`, naming the host
 (`urn:cap:net:localhost`) — the wildcard itself is refused there, like `urn:cap:exec:*`.
 
@@ -471,9 +472,35 @@ server passes to an explain, not a policy the mount enforces. What bounds it is 
 own ceiling (`ikigai serve quic://… --cap urn:cap:net:localhost` grants inference and nothing
 else) and the fact that reaching the mount at all takes a grant nothing here mints.
 
+★ **The browse-graph row is new, and it is the one thing the graph decision bought.** Until
+2026-09-16 browse's quads lived in the store's DEFAULT graph, which has no IRI — so no
+`urn:cap:store:read:graph:` token could name them and every query over an annotation or an
+archived explanation needed root. They now live in `urn:iki:browse:graph:default`, and that
+token is mintable:
+
+```
+ikigai-gonk grants --browse-graph read      # print the token
+ikigai-gonk passkey invite reader --browse-graph read
+ikigai-gonk client add box --ledger default=read --browse-graph read
+```
+
+What it carries is **quads in one graph** — every annotation, every archived explanation,
+every review finding, through `urn:iki:store:graph-{select,ask,construct,describe}`. That is
+the archive **without the spend**: reading an explanation through `urn:repo:{root}:explain`
+requires the `urn:cap:net:*` that deriving one does, and this route requires none. What it
+does not carry is the browse family: no file contents, no tree, no `gh`, no deriving, and no
+other graph. ⚠ And it is not given to the anonymous HTTP caller, whose grant stays exactly
+`gonk.http.ledger`'s ledgers — signing in is how the HTTP door spells "a caller who may".
+
+⚠ **The ledger↔browse join is still a root query**, and no grant fixes it:
+`urn:iki:store:graph-select` confines a query to ONE graph, so two graphs in one query cannot
+be expressed through the narrow door however many tokens the caller holds. Each half is now
+grantable; the join is not. That is `ikigai-store`'s scoped read face, not this server's
+composition.
+
 Three things make that table true rather than aspirational. `ikigai-gonk grants` mints
-per-ledger tokens only, so nothing this server writes into a grant names browse, exec or the
-whole dataset. `grants.json` is refused at startup if any grant names a whole-dataset store
+per-ledger and per-graph tokens only, so nothing this server writes into a grant names browse
+(the family), exec or the whole dataset. `grants.json` is refused at startup if any grant names a whole-dataset store
 token **or the exec wildcard `urn:cap:exec:*`** — which `ikigai-repo` declares as an
 *offering* ("holds some grant under this prefix") and which as a *grant* means every program
 on the machine; the per-tool spelling `urn:cap:exec:git` is what that crate enforces at
@@ -575,8 +602,8 @@ compressed, and the **last five** are kept in `~/.ikigai/backups`.
 ### The format is N-Quads, and the easy mistake is Turtle
 
 **CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named
-ledger, its graveyard beside it, and browse's own the day this server gives it one
-(`src/browse.rs`'s `Graph`) — and that partition is what every per-graph capability is written
+ledger, its graveyard beside it, and browse's own (`urn:iki:browse:graph:default`,
+`src/browse.rs`'s `Graph`) — and that partition is what every per-graph capability is written
 against. A backup serialized as Turtle or N-Triples collapses every graph into one: the quad
 count still matches, every triple round-trips, and the restored dataset has every tenant's
 statements in the default graph with the tenancy boundary gone — which is also, exactly, the
@@ -779,13 +806,29 @@ in each. That is a fact about a dependency's internals, re-typed in a consumer, 
 asking the next person to keep it true — and a transcribed invariant drifts. Today `main` does
 not name `SharerWrites` at all.
 
-The choice today is still the default graph (see *Not built* below for what moving it costs),
-so the store answers freshness per read from that promise: a scoped read
+The choice since 2026-09-16 is **`urn:iki:browse:graph:default`** (see *Giving browse its own
+graph* below, and read it before upgrading a store that has one), so the store answers
+freshness per read from that promise: a scoped read
 (`urn:iki:store:graph-{select,ask,construct,describe}`), whose universe is one NAMED graph by
-construction, is cacheable again under the store's own three write threads — and that is what
-every ledger read is made of. Declared, the same read is **11.9µs**. The broad faces stay
-uncacheable, by name: `urn:iki:store:{select,ask,construct,describe}`, `urn:iki:store:info`,
-and therefore `urn:iki:ledger:ledgers`, which asks *which graphs exist* through the broad door.
+construction, is cacheable under the store's own three write threads **for every graph the
+promise does not name** — and that is what every ledger read is made of. Declared, the same
+read is **10.9µs**. The broad faces stay uncacheable, by name:
+`urn:iki:store:{select,ask,construct,describe}`, `urn:iki:store:info`, and therefore
+`urn:iki:ledger:ledgers`, which asks *which graphs exist* through the broad door.
+
+★ **What naming a graph costs is that graph's cacheability, and nothing else's.** A scoped
+read of `urn:iki:browse:graph:default` is `Expiry::Always` — the sharer may write it, and the
+store says so per read rather than this crate declaring it anywhere. The ledger's reads are
+untouched, and that is measured rather than argued: the same 247-item corpus, the same
+composition, once with browse in the default graph and once with it in its own.
+
+```
+--- 247 items, mean of 20 reads ---
+  owned     (open — no browse face)                  items    12.16µs  next    13.42µs
+  shared    (open_shared, undeclared)                items    12.63ms  next    22.60ms
+  declared  (browse in the DEFAULT graph)            items    10.82µs  next    12.70µs
+  declared  (browse in its NAMED graph — shipped)    items    10.85µs  next    12.43µs
+```
 
 ⚠ **A false promise there would be silent, unbounded staleness** — reads of a graph the sharer
 does write, cached against threads its writes never cut. So the promise is not left to a
@@ -804,6 +847,73 @@ exactly the host that had something to lose, and it would have lost it twice —
 writer's quads relocated, and this server's coverage promise false from that moment on.
 `a_browse_read_touches_no_reserved_graph` states it; built against 0.3.2 it fails on the
 visibility half and, with that assertion removed, again on the write-back half.
+
+### Giving browse its own graph — and upgrading a store that predates it
+
+**Since 2026-09-16 browse's quads live in `urn:iki:browse:graph:default`.** Before that they
+were in the store's default graph, which has no IRI: no `urn:cap:store:*:graph:` token could
+name them, so every query over an annotation or an archived explanation was a root one, and
+the ledger↔browse join was reachable from the socket door and from nowhere else.
+
+⚠⚠ **This is a data migration, not a setting, and the failure mode is silence.** A binary
+carrying this choice reads and writes ONE graph. Quads an older gonk wrote into the default
+graph are still on disk and are no longer visible to any browse read — the annotation panel is
+empty, the archive is empty, a review's findings are gone, and **nothing errors, at any
+layer**. New explanations land in the named graph and never join the old ones.
+
+So gonk counts them before the doors open, using `ikigai-browse`'s own counting function — the
+number in the banner is the number `migrate-annotation-ns` prints:
+
+```
+ikigai-gonk: ⚠⚠ THE BROWSE ARCHIVE IS INVISIBLE — 10 quad(s) are outside <urn:iki:browse:graph:default>
+```
+
+**The upgrade, in order. gonk must be STOPPED for step 4** — it holds the RocksDB write lock,
+so the migration cannot run beside it, and it should not: the migration is a rewrite of the
+dataset this server is serving.
+
+```sh
+# 1. the migration tool (a feature-gated binary of ikigai-browse, not shipped with gonk)
+cargo install ikigai-browse --version 0.4.0 --locked --features migrate --bin migrate-annotation-ns
+
+# 2. a backup, taken through the running server — it is the only thing that can export the
+#    dataset, and `--commit` in step 5 cannot be undone by restarting
+ikigai -c 'source urn:iki:gonk:backup'
+ikigai -c 'source urn:iki:gonk:backup:status'      # confirm it succeeded before going on
+
+# 3. what is there now, read-only, through the socket — no lock taken
+ikigai --connect ~/.ikigai/gonk.sock -c \
+  'source urn:iki:store:select query="SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"'
+
+# 4. STOP gonk — the store has one writer
+launchctl bootout gui/$(id -u)/dev.ikigai-rs.gonk        # or however it is supervised
+
+# 5. migrate: dry run first, and it prints PASS/FAIL with the four counts
+migrate-annotation-ns ~/.ikigai/store --graph urn:iki:browse:graph:default
+migrate-annotation-ns ~/.ikigai/store --graph urn:iki:browse:graph:default --commit
+
+# 6. install the new binary, THEN start it — a gonk with the new choice must not run against
+#    an unmigrated store, and a gonk with the old one must not run against a migrated one
+cargo install --path . --locked                          # or the released version
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ikigai-rs.gonk.plist
+
+# 7. the banner says where the quads land, and says nothing about a migration
+#      browse  urn:repo:{…}:* — annotations and archive in <urn:iki:browse:graph:default>
+```
+
+⚠ **Steps 5 and 6 are one window, in that order.** Migrating first and starting the OLD binary
+strands the quads the other way (it reads the default graph and the data is now in the named
+one) — gonk says so too, but the window is a window either way. Keep it short.
+
+**After the migration**, two things are an operator's and neither is automatic:
+
+- **Grants.** Nobody holds the browse graph's tokens until someone mints them —
+  `ikigai-gonk grants --browse-graph read`, or `--browse-graph read` on `passkey invite` /
+  `client add`. See *The three doors*.
+- **Saved queries.** Any query of yours that read browse's quads as a bare pattern now
+  matches nothing, silently. Wrap that half in `GRAPH <urn:iki:browse:graph:default> { … }`.
+  Backups need no change: an archive is N-Quads and every comparison this server makes about
+  one is per graph, so the browse graph simply appears as a graph.
 
 ### Watched roots, and why the reads are cached at all
 
@@ -879,27 +989,28 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   connection; the certificate set is read at startup.
 - **One trace per door.** A traced call through a door records the forward, not the hub's
   resolution beneath it.
-- **No browse graph of its own — a decision now, no longer a blocker.** `ikigai-browse` 0.4.0
-  has the knob (`Mount::graph`), and `src/browse.rs`'s `Graph` is where this server would turn
-  it; `Graph::chosen()` still answers the default graph. The cost of that is real: the default
-  graph is exactly what `urn:cap:store:read:graph:<iri>` cannot name, so a ledger↔browse join
-  is a **root-capability** query — the socket door runs it, the HTTP door's anonymous caller
-  cannot, and no narrow grant can be written that would let it. Moving is a **data migration**
-  (`migrate-annotation-ns <store> --graph <iri> --commit`), not a config flip: quads left in
-  the default graph stay there, invisible, with no error anywhere. Measured 2026-09-16 — gonk's
-  own store holds **0 quads** in the default graph (4 024 in `urn:iki:ledger:graph:default`),
-  so the move would cost nothing today; the dev server's browse archive, which route (b) would
-  eventually absorb, holds **1 876 quads over 222 subjects**, all of them identifiable by
-  subject prefix and none of them anyone else's. Opting in also forfeits the browse graph's
-  cacheability (the ~1000× above, for that graph only), which is what
-  `a_named_graph_choice_moves_the_promise_with_it` prices from the store's own mouth.
+- **No ledger↔browse join below root — and no grant fixes it.** Both halves are now grantable
+  (browse's quads are in a named graph since 2026-09-16), but `urn:iki:store:graph-select`
+  confines a query to ONE graph: `ikigai-store`'s `confine` sets the prepared query's whole
+  dataset specification to the graph it was issued for, so a two-graph join is not expressible
+  through the narrow door however many per-graph tokens the caller holds, and `GRAPH <other>`
+  matches nothing rather than erroring. The join stays `urn:iki:store:select`, which is root.
+  What would change it is a scoped read face that takes several graphs and confines to exactly
+  the set the caller holds tokens for — `ikigai-store`'s, not this server's.
+- **No browse graph on the `/sparql` page.** The editor scopes to a LEDGER (its box picks a
+  ledger name, and the query runs against that ledger's graph), so `urn:iki:browse:graph:default`
+  is not reachable from the page even by an identity holding its token. A graph selector rather
+  than a ledger selector is what that would take.
 - **No archived explanation without a net grant.** `urn:repo:{root}:explain` is ONE action
   whether it derives or serves an entry the archive already holds, so the `urn:cap:net:*` it
   declares is required either way. `version=` provably derives nothing (`ikigai-browse`
-  answers `NotFound` on a miss rather than falling back to a model), but there is no way to
-  grant "may read what was already paid for" without also granting "may spend". That is the
-  grain the HTTP browse face will have to answer, since an anonymous reader is exactly the
-  caller who should see archived text and never derive.
+  answers `NotFound` on a miss rather than falling back to a model), so through that ROW there
+  is still no way to grant "may read what was already paid for" without also granting "may
+  spend". ★ Since the graph decision there is a way around it that is not a hole:
+  `--browse-graph read` reads the archive as QUADS through `urn:iki:store:graph-select`, with
+  no net grant — the text without the spending. It is not the browse face (no rendering, no
+  `version=` resolution, no file), so the grain the HTTP browse face has to answer is
+  narrower than it was, not gone.
 - **No explanation archive to start from.** The archive the dev server holds is not migrated
   here — gonk starts with an empty browse dataset and pays for the first explanation of
   everything.

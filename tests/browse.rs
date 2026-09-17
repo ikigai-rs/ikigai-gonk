@@ -11,11 +11,18 @@
 //! - [`a_browse_read_touches_no_reserved_graph`] — the same tripwire around a READ, which is
 //!   the reason the manifest takes `ikigai-browse` 0.4.0: before it, a read could relocate
 //!   another writer's quads (ledger #265).
-//! - [`a_named_graph_choice_moves_the_promise_with_it`] — [`browse::Graph`]'s other arm, so
-//!   the derivation ledger #282 asked for is exercised rather than merely written.
-//! - [`a_ledger_item_joins_an_annotation_on_a_repo_file`] — the point of one dataset.
+//! - [`a_named_graph_choice_moves_the_promise_with_it`] — the graph this server CHOSE, walked
+//!   end to end: browse's quads land in it, none in the default graph, and the promise moved
+//!   with the choice rather than beside it (ledger #282).
+//! - [`the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are`] — obligation
+//!   3 of the graph decision, asked of the kernel rather than of the promise.
+//! - [`a_scoped_token_reads_browse_and_still_cannot_join`] — obligation 2: what
+//!   `urn:cap:store:read:graph:<browse graph>` buys, and the boundary it does not cross.
+//! - [`a_ledger_item_joins_an_annotation_on_a_repo_file`] — the point of one dataset, with
+//!   both halves naming their graph (obligation 4).
 //! - [`the_shared_handle_costs_the_ledger_nothing`] — the naive composition beside the one
-//!   this server builds, with the read timings printed.
+//!   this server builds, and the default-graph composition beside the named one, with the
+//!   read timings printed.
 //! - [`a_watched_file_read_recomputes_after_the_file_changes_on_disk`] — the cache that
 //!   watcher makes safe, driven through the watcher's own notification path.
 //!
@@ -501,11 +508,16 @@ fn a_peer_that_is_down_costs_explain_and_nothing_else() {
 
 // ------------------------------------------------- where browse's quads land
 
-/// ★ The PROMISE `main` makes when it hands the handle out — `SharerWrites`
-/// `::only_the_default_graph` — pinned at the boundary with `ikigai-store`'s own tripwire.
-/// Every quad `ikigai-browse` writes goes into the DEFAULT graph, so no named graph this
-/// store reserves from the sharer can move when browse writes; and a graph that cannot move
-/// is a graph whose scoped reads stay cacheable, which is every read the ledger makes.
+/// ★ The PROMISE `main` makes when it hands the handle out — the [`browse::Graph`] choice
+/// read as `SharerWrites` — pinned at the boundary with `ikigai-store`'s own tripwire.
+/// Every quad `ikigai-browse` writes goes into the graph this server chose (and, before
+/// 2026-09-16, into the default one), so no graph this store RESERVES from the sharer can
+/// move when browse writes; and a graph that cannot move is a graph whose scoped reads stay
+/// cacheable, which is every read the ledger makes.
+///
+/// ★ Since the graph decision the promise names one graph, so the browse graph is not among
+/// the reserved ones and the ledger's still is — the assertion on `before.len()` below is
+/// that sentence, and it would have been 2 with the promise left at the bare default.
 ///
 /// ⚠ **The fingerprint is over QUADS, not over the set of graph names**, and that is the
 /// difference that matters: this server wrote the name-set version by hand until
@@ -518,8 +530,8 @@ fn a_peer_that_is_down_costs_explain_and_nothing_else() {
 /// `ikigai-store`'s own endpoints changes a reserved graph legitimately — it cut a thread when
 /// it did — and would read here as a broken promise.
 ///
-/// The day browse writes a named graph, this test is red HERE, where the promise is made,
-/// instead of silently stale in the cache of a running server.
+/// The day browse writes a graph the promise does not name, this test is red HERE, where the
+/// promise is made, instead of silently stale in the cache of a running server.
 #[test]
 fn a_browse_write_touches_no_reserved_graph() {
     let dir = scratch_root();
@@ -552,13 +564,18 @@ fn a_browse_write_touches_no_reserved_graph() {
     );
     // The annotation IS in the dataset — the broad read sees it, so the tripwire below is
     // measuring a write that really happened…
+    //
+    // ⚠ `GRAPH ?g` rather than a bare pattern, and that is obligation 4 in one line: browse
+    // writes a NAMED graph now, so a bare `{ ?a ik:annotates ?t }` reads the default graph and
+    // finds nothing. It would not have failed — it would have passed the tripwire below
+    // vacuously, measuring a write it could not see.
     let answer = text(
         &hub,
         Verb::Source,
         "urn:iki:store:select",
         &[(
             "query",
-            "SELECT ?a WHERE { ?a <https://ikigai-rs.dev/ns#annotates> ?t }",
+            "SELECT ?a WHERE { GRAPH ?g { ?a <https://ikigai-rs.dev/ns#annotates> ?t } }",
         )],
     );
     assert!(answer.contains("urn:iki:annotation:n1"), "{answer}");
@@ -736,10 +753,12 @@ fn a_browse_read_touches_no_reserved_graph() {
 /// that the two READINGS match; this checks that they match *the store*, with a real write
 /// through a real kernel.
 ///
-/// ⚠ This server does NOT ship this arm ([`browse::Graph::chosen`] is the default graph, and
-/// a unit test says so). The test exists because an arm nobody exercises is a claim about
-/// untested code: the day the graph decision is taken, the promise must already be known to
-/// move with it rather than be discovered to.
+/// ★ Since 2026-09-16 this is the arm the server SHIPS, and the test takes the shipped
+/// choice rather than an IRI of its own: it is now the end-to-end statement that a real write
+/// through a real kernel lands in the graph an operator was told to migrate into, and in no
+/// other. (It was written a version earlier, against a made-up IRI, so that the day the
+/// decision was taken the promise would already be known to move with it rather than be
+/// discovered to. It was.)
 ///
 /// It also prices obligation 3 on `Graph`'s docs, from the store's own mouth rather than by
 /// argument: a promised graph is NOT covered, so its scoped reads stop being cacheable. That
@@ -747,11 +766,15 @@ fn a_browse_read_touches_no_reserved_graph() {
 /// tenancy boundary.
 #[test]
 fn a_named_graph_choice_moves_the_promise_with_it() {
-    const BROWSE_GRAPH: &str = "urn:iki:gonk:browse:graph";
     const LEDGER_GRAPH: &str = "urn:iki:ledger:graph:default";
 
     let dir = scratch_root();
-    let graph = browse::Graph::Named(NamedNode::new(BROWSE_GRAPH).expect("a graph IRI"));
+    let graph = browse::Graph::chosen();
+    let browse_graph: String = graph
+        .named()
+        .expect("this server chooses a named browse graph")
+        .as_str()
+        .to_string();
     let Served {
         hub,
         store,
@@ -802,10 +825,10 @@ fn a_named_graph_choice_moves_the_promise_with_it() {
     let annotates = "<https://ikigai-rs.dev/ns#annotates>";
     assert_eq!(
         count(&format!(
-            "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{BROWSE_GRAPH}> {{ ?a {annotates} ?t }} }}"
+            "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{browse_graph}> {{ ?a {annotates} ?t }} }}"
         )),
         1,
-        "the mount took the choice: browse's quads are in <{BROWSE_GRAPH}>"
+        "the mount took the choice: browse's quads are in <{browse_graph}>"
     );
     assert_eq!(
         count(&format!(
@@ -829,7 +852,7 @@ fn a_named_graph_choice_moves_the_promise_with_it() {
     // ★ And what that costs, from `ikigai-store` rather than from a comment: a graph the
     // sharer may write is not covered, so a scoped read of it can no longer be cached.
     assert!(
-        !store.read_is_covered(Some(BROWSE_GRAPH)),
+        !store.read_is_covered(Some(&browse_graph)),
         "obligation 3 on `browse::Graph`: naming a graph forfeits its cacheability, and the \
          host owes a fresh freshness argument for it"
     );
@@ -846,11 +869,18 @@ fn a_named_graph_choice_moves_the_promise_with_it() {
 /// The point of one dataset: a ledger item that is ABOUT a repo file joins an annotation on
 /// that same file, in one query, with no federation.
 ///
-/// ⚠ Under a ROOT capability, and that is not an accident of the test. The join has to read
-/// the default graph (browse's quads) and a named graph (the ledger's) at once, which only
-/// the broad `urn:iki:store:select` can do — and this server hands the broad store tokens to
-/// nobody. The socket door is root; the HTTP door's anonymous caller holds per-graph tokens
-/// and cannot run this query at all.
+/// ★ **Obligation 4, in the one query this repo owns.** Both halves name their graph now —
+/// before the graph decision the browse half was a bare pattern, because browse's quads were
+/// in the default graph. The failure mode of forgetting is an empty result set, never an
+/// error, which is why the README's migration steps say it out loud for an operator's own
+/// saved queries.
+///
+/// ⚠ Still under a ROOT capability, and that is NOT for want of the graph decision — it is
+/// the store's shape. `urn:iki:store:graph-select` takes ONE graph
+/// (`ikigai-store`'s `confine` sets the query's whole dataset to it), so a two-graph join
+/// cannot be expressed through the narrow door however many per-graph tokens the caller
+/// holds. What the decision bought is that each HALF is now grantable; what it did not buy is
+/// the join. See `a_scoped_token_reads_browse_and_still_cannot_join`.
 #[test]
 fn a_ledger_item_joins_an_annotation_on_a_repo_file() {
     let dir = scratch_root();
@@ -865,19 +895,25 @@ fn a_ledger_item_joins_an_annotation_on_a_repo_file() {
     assert!(filed.contains("urn:iki:ledger:default:item:"), "{filed}");
     annotate(&hub, "n1", file, "first", "this line is the one");
 
+    let chosen = browse::Graph::chosen();
+    // ⚠ `.as_str()`: `NamedNode`'s Display brackets the IRI itself, so `<{node}>` writes
+    // `<<urn:…>>` and the query fails to parse.
+    let browse_graph = chosen.named().expect("a named browse graph").as_str();
     let answer = text(
         &hub,
         Verb::Source,
         "urn:iki:store:select",
         &[(
             "query",
-            "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+            &format!(
+                "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
              PREFIX ik: <https://ikigai-rs.dev/ns#>
              PREFIX oa: <http://www.w3.org/ns/oa#>
-             SELECT ?item ?file ?note WHERE {
-               GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?file }
-               ?annotation ik:annotates ?file ; oa:bodyValue ?note .
-             }",
+             SELECT ?item ?file ?note WHERE {{
+               GRAPH <urn:iki:ledger:graph:default> {{ ?item ledger:about ?file }}
+               GRAPH <{browse_graph}> {{ ?annotation ik:annotates ?file ; oa:bodyValue ?note }}
+             }}"
+            ),
         )],
     );
     println!("--- the join ---\n{answer}");
@@ -892,6 +928,228 @@ fn a_ledger_item_joins_an_annotation_on_a_repo_file() {
             .unwrap_or_default()
             .starts_with("urn:iki:ledger:default:item:"),
         "{answer}"
+    );
+}
+
+/// ★ **Obligation 3, from the running kernel rather than from the store's promise.**
+///
+/// `a_named_graph_choice_moves_the_promise_with_it` asks `ikigai-store` whether the browse
+/// graph is covered. This asks the KERNEL what it actually did with two reads — the one thing
+/// an operator would notice — and the pair is the whole of the freshness redo:
+///
+/// - a scoped read of the BROWSE graph is `Expiry::Always` and leaves nothing in the cache,
+///   because the sharer (`ikigai-browse`) may write it behind the store's back;
+/// - a scoped read of the LEDGER graph is cacheable and is cached, exactly as before the
+///   graph decision — which is the ~1000× this server refuses to give up.
+///
+/// ⚠ Both reads are the same IRI with different arguments, so `urn:kernel:cache`'s rows
+/// cannot tell them apart: the count of rows for that IRI is what moves, and it moves once.
+#[test]
+fn the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let chosen = browse::Graph::chosen();
+    let browse_graph = chosen.named().expect("a named browse graph").as_str();
+    let ledger_graph = "urn:iki:ledger:graph:default";
+
+    text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "an item, so the ledger's graph has quads")],
+    );
+    annotate(
+        &hub,
+        "n1",
+        "urn:repo:demo:file:src/lib.rs",
+        "first",
+        "a note",
+    );
+    let any = "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1";
+    let rows = |kernel: &Kernel| {
+        cached(kernel)
+            .iter()
+            .filter(|iri| *iri == "urn:iki:store:graph-select")
+            .count()
+    };
+    // The writes above already read the ledger's graph through the scoped door, so the
+    // baseline is whatever they left behind: what this test measures is which of the two
+    // reads below ADDS a row.
+    let baseline = rows(&hub);
+
+    let ledger = issue(
+        &hub,
+        Verb::Source,
+        "urn:iki:store:graph-select",
+        &[("graph", ledger_graph), ("query", any)],
+    );
+    assert_ne!(
+        ledger.expiry,
+        ikigai_core::Expiry::Always,
+        "the ledger's graph is outside the sharer's promise, so its scoped reads stay \
+         cacheable — this is the exemption the graph decision must not have cost"
+    );
+    let after_the_ledger = rows(&hub);
+    assert_eq!(
+        after_the_ledger,
+        baseline + 1,
+        "…and it is in the cache: {:?}",
+        cached(&hub)
+    );
+
+    let browse_read = issue(
+        &hub,
+        Verb::Source,
+        "urn:iki:store:graph-select",
+        &[("graph", browse_graph), ("query", any)],
+    );
+    assert_eq!(
+        browse_read.expiry,
+        ikigai_core::Expiry::Always,
+        "obligation 3: a graph the sharer may write cannot be cached, and `ikigai-store` \
+         answers that per read from the promise `main` derived — there is no declaration in \
+         this crate that could have got it wrong, and none that could have got it right"
+    );
+    assert_eq!(
+        rows(&hub),
+        after_the_ledger,
+        "the browse read added no cache entry: {:?}",
+        cached(&hub)
+    );
+}
+
+/// ★ **Obligation 2, end to end: what a per-graph token over browse's data now buys — and
+/// the boundary it does not cross.**
+///
+/// Before the graph decision this test could not have been written. Browse's quads were in
+/// the default graph, which has no IRI, so no `urn:cap:store:read:graph:` token could name
+/// them and every read of an annotation or an archived explanation needed root.
+///
+/// The four assertions are the grant's shape:
+///
+/// 1. the token READS browse's quads — the archive without the spend, which is what the
+///    `urn:cap:net:*` on `urn:repo:{root}:explain` makes impossible through the browse row;
+/// 2. it reaches no other graph, so it is not a ledger grant in disguise;
+/// 3. it reaches no browse ENDPOINT — no file, no tree, no `gh`;
+/// 4. ⚠ **and it cannot run the join.** Not because of anything gonk chose:
+///    `urn:iki:store:graph-select` confines a query to ONE graph, so two graphs in one query
+///    is not expressible through the narrow door at all, whatever tokens are held. The join
+///    stays a root query, and that is a gap in `ikigai-store`'s scoped read face rather than
+///    an unfinished obligation here (reported to the hub).
+#[test]
+fn a_scoped_token_reads_browse_and_still_cannot_join() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let chosen = browse::Graph::chosen();
+    let browse_graph = chosen.named().expect("a named browse graph").as_str();
+    let file = "urn:repo:demo:file:src/lib.rs";
+    text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "lib.rs needs a doc comment"), ("about", file)],
+    );
+    annotate(&hub, "n1", file, "first", "this line is the one");
+
+    // EXACTLY the tokens `ikigai-gonk grants --browse-graph read` prints, and nothing else.
+    let reader = Capability::scoped(
+        ikigai_gonk::grants::browse_graph_grants(Authority::Read).expect("a named browse graph"),
+    );
+    let scoped = |graph: &str, query: &str| {
+        block_on(Kernel::issue(
+            &hub,
+            request(
+                Verb::Source,
+                "urn:iki:store:graph-select",
+                &[("graph", graph), ("query", query)],
+            ),
+            &reader,
+        ))
+    };
+
+    // 1. The archive, as data, to a caller holding one narrow token.
+    let note = scoped(
+        browse_graph,
+        "PREFIX oa: <http://www.w3.org/ns/oa#>
+         SELECT ?note WHERE { ?a oa:bodyValue ?note }",
+    )
+    .expect("the browse graph's own token reads the browse graph");
+    let note = String::from_utf8_lossy(&note.bytes).into_owned();
+    assert!(note.contains("this line is the one"), "{note}");
+
+    // 2. One graph, not the dataset.
+    assert!(
+        matches!(
+            scoped(
+                "urn:iki:ledger:graph:default",
+                "SELECT ?s WHERE { ?s ?p ?o }"
+            ),
+            Err(ikigai_core::Error::Denied(_))
+        ),
+        "a browse-graph token must not read the ledger's graph"
+    );
+    for broad in ["urn:iki:store:select", "urn:iki:store:info"] {
+        assert!(
+            matches!(
+                block_on(Kernel::issue(
+                    &hub,
+                    request(
+                        Verb::Source,
+                        broad,
+                        &[("query", "SELECT ?s WHERE { ?s ?p ?o }")]
+                    ),
+                    &reader,
+                )),
+                Err(ikigai_core::Error::Denied(_))
+            ),
+            "{broad} must stay root-only: it can see every graph, including the default one"
+        );
+    }
+
+    // 3. The data, not the family: no file, no tree, no `gh`, no annotation endpoint.
+    for denied in [
+        file,
+        "urn:repo:demo:tree",
+        "urn:repo:demo:annotations",
+        "urn:iki:annotation:n1",
+        "urn:repo:status",
+    ] {
+        assert!(
+            matches!(
+                block_on(Kernel::issue(
+                    &hub,
+                    request(Verb::Source, denied, &[]),
+                    &reader
+                )),
+                Err(ikigai_core::Error::Denied(_))
+            ),
+            "`{denied}` is the browse FAMILY, which this grant does not carry"
+        );
+    }
+
+    // 4. ⚠ The join is still out of reach, and the reason is the door's shape. Naming the
+    // ledger's graph inside a query scoped to the browse graph matches NOTHING — no error,
+    // no rows — because `confine` sets the query's available named graphs to the one it was
+    // issued for. A caller holding BOTH graphs' tokens gets the same empty answer.
+    let joined = scoped(
+        browse_graph,
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+         PREFIX ik: <https://ikigai-rs.dev/ns#>
+         SELECT ?item WHERE {
+           GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?file }
+           ?a ik:annotates ?file .
+         }",
+    )
+    .expect("the query is legal; it simply cannot see the other graph");
+    let joined = String::from_utf8_lossy(&joined.bytes).into_owned();
+    let json: serde_json::Value = serde_json::from_str(&joined).expect("SPARQL results JSON");
+    assert!(
+        json["results"]["bindings"]
+            .as_array()
+            .expect("bindings")
+            .is_empty(),
+        "a scoped read is ONE graph: the ledger half is invisible, so the join returns \
+         nothing rather than failing — {joined}"
     );
 }
 
@@ -937,7 +1195,14 @@ fn the_shared_handle_costs_the_ledger_nothing() {
     let (served, _watch) = served(&dir);
     let naive = naive(&dir);
     let owned = owned();
-    for kernel in [&owned, &naive, &served] {
+    // ★ The CONTROL for the graph decision: the same composition with the choice this server
+    // shipped until 2026-09-16. `served` above is the named graph — so the two rows printed
+    // below are exactly "before" and "after" for the ledger's hot read, and the claim that
+    // naming a graph cost the ledger nothing is a number rather than an argument.
+    let before_the_decision = served_in(&dir, None, browse::Graph::TheDefault);
+    let default_graph = before_the_decision.hub;
+    let _watch = before_the_decision.watch;
+    for kernel in [&owned, &naive, &served, &default_graph] {
         seed_items(kernel, ITEMS);
     }
 
@@ -945,7 +1210,8 @@ fn the_shared_handle_costs_the_ledger_nothing() {
     for (label, kernel) in [
         ("owned     (open — no browse face)", &owned),
         ("shared    (open_shared, undeclared)", &naive),
-        ("declared  (open_shared_declaring)", &served),
+        ("declared  (browse in the DEFAULT graph)", &default_graph),
+        ("declared  (browse in its NAMED graph — shipped)", &served),
     ] {
         let items = time_reads(kernel, "urn:iki:ledger:items", 20);
         let next = time_reads(kernel, "urn:iki:ledger:next", 20);
@@ -976,6 +1242,16 @@ fn the_shared_handle_costs_the_ledger_nothing() {
         !cold.iter().any(|iri| iri == "urn:iki:ledger:items"),
         "the naive composition caches nothing store-derived — that is the cost this arc \
          refused to pay: {cold:?}"
+    );
+    // ★ And the control, asserted rather than only printed: the ledger's read is cached on
+    // BOTH sides of the graph decision. If naming the browse graph had de-cached the ledger —
+    // the regression obligation 3 exists to prevent — this is where it would show, with the
+    // timings above as the size of it.
+    let before = cached(&default_graph);
+    assert!(
+        before.iter().any(|iri| iri == "urn:iki:ledger:items")
+            && before.iter().any(|iri| iri == "urn:iki:store:graph-select"),
+        "the composition as it shipped before the graph decision: {before:?}"
     );
     // And the broad face stays uncacheable in BOTH, by name: it can see the default graph,
     // where browse's invisible writes land.

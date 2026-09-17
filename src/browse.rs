@@ -11,13 +11,13 @@
 //! urn:iki:annotation[:{id}]            Source/Sink/Delete  W3C annotations, in THIS dataset
 //! ```
 //!
-//! # One dataset, and what that buys
+//! # One dataset, two named graphs
 //!
 //! The annotation family takes an `Arc<Store>` — the same dataset the ledger's named graphs
 //! live in, handed over by `DurableStore::open_shared_declaring`. That is the whole point of
 //! the arc: a ledger item's `ledger:about <urn:repo:…>` and an annotation on that file are
 //! two graphs in ONE store, so the join is a local SPARQL query and not a federation problem.
-//! What the shared handle costs the ledger's read cache is **nothing**, and the reason is the
+//! What the shared handle costs the LEDGER's read cache is **nothing**, and the reason is the
 //! declaration on that call: [`Graph::sharer_writes`] names where this family writes, so
 //! `ikigai-store` keeps every scoped read of every other graph cacheable under its own write
 //! threads (`src/main.rs`, and `tests/browse.rs` prints the numbers).
@@ -25,6 +25,17 @@
 //! ★ **Where browse's quads land is THIS SERVER's decision since `ikigai-browse` 0.4.0**, and
 //! it is [`Graph`] — one value, flowing into the mount and into the store's coverage promise,
 //! so the two cannot say different things. Read that type before changing either.
+//!
+//! ★★ **Since 2026-09-16 that decision is a NAMED graph** — [`Graph::chosen`] —
+//! so browse's quads are inside the per-graph capability boundary: `urn:cap:store:read:graph:`
+//! `urn:iki:browse:graph:default` is a token an operator can mint
+//! ([`crate::grants::browse_graph_grants`]), where the default graph had no IRI and could be
+//! named by no token at all. What that costs is this graph's cacheability, and nothing else:
+//! see obligation 3 on [`Graph`].
+//!
+//! ⚠ **It is a data migration, not a setting.** A binary carrying this choice, run against a
+//! store whose browse quads are still in the default graph, reads an EMPTY archive with no
+//! error anywhere — so [`unmigrated_quads`] is checked at startup and `main` says so loudly.
 //!
 //! # Explanations, and what binds them
 //!
@@ -47,8 +58,10 @@
 //! to a caller who could not invoke it.
 //!
 //! So the whole gate is which door's capability carries a net grant. gonk mints none:
-//! `ikigai-gonk grants`, `client add` and `passkey invite` write per-ledger tokens only, and
-//! `grants.json` refuses the wildcard `urn:cap:net:*` as a GRANT the way it refuses
+//! `ikigai-gonk grants`, `client add` and `passkey invite` write per-ledger tokens and — since
+//! the graph decision — the browse graph's two STORE tokens, which are authority over quads in
+//! one graph and over nothing else. `grants.json` refuses the wildcard `urn:cap:net:*` as a
+//! GRANT the way it refuses
 //! `urn:cap:exec:*` ([`crate::grants::unbounded_net_scopes`]). The per-door table is in the
 //! README; the short form is that **an anonymous HTTP caller cannot reach a browse row at
 //! all**, so it can neither derive an explanation nor read an archived one, and the socket
@@ -59,8 +72,17 @@
 //! `NotFound` on a miss rather than falling back to a model), but it is the same
 //! `urn:repo:{root}:explain` row and therefore carries the same `urn:cap:net:*`
 //! requirement — so "free to read what was already paid for" cannot be granted separately
-//! today. That matters for the HTTP browse face (#258), where an anonymous reader is exactly
-//! the caller who should see archived text and never spend.
+//! **through the browse row**. That matters for the HTTP browse face (#258), where an
+//! anonymous reader is exactly the caller who should see archived text and never spend.
+//!
+//! ★ The graph decision opens the other route, and it is worth saying plainly because it
+//! reads like a hole and is not: `urn:cap:store:read:graph:urn:iki:browse:graph:default`
+//! makes every archived explanation, annotation and review finding readable as QUADS through
+//! `urn:iki:store:graph-select`, with no net grant and no `urn:cap:browse:read:*` — the
+//! archive without the spend, which is what #258 asked for. What it does NOT carry is the
+//! rest of the browse family: no file contents, no tree, no `gh`, and no way to derive
+//! anything. The two authorities are genuinely separate, and this is the first spelling of
+//! either that an operator can write down.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,7 +94,7 @@ use ikigai_core::{
     Scope, Space, SpaceEntry, Verb,
 };
 use ikigai_store::{SharerWrites, Store};
-use oxigraph::model::NamedNode;
+use oxigraph::model::{GraphName, NamedNode};
 
 use crate::config::ExplainTiers;
 use crate::watch::{root_thread, Watched};
@@ -111,41 +133,76 @@ use crate::watch::{root_thread, Watched};
 /// _graph` is why it is checked rather than believed. The residual would go away if browse
 /// exposed the graph a built mount resolved to; it does not today (reported to the hub).
 ///
-/// # ⚠ Why [`Graph::chosen`] is still the default graph
+/// # ★ The decision, taken 2026-09-16: a named graph, and what it obliged
 ///
-/// Naming a graph here is not a config change; it is a data migration, and this arc was
-/// scoped to the version bump. What it would cost, in the order it has to happen:
+/// [`chosen`](Graph::chosen) answers `urn:iki:browse:graph:default`. Naming a graph is not a
+/// config change; it is a data migration, and these are the four obligations it carries, in
+/// the order they have to happen — written as they were paid, because the next person who
+/// changes that IRI owes the same four again:
 ///
-/// 1. run `ikigai-browse`'s `migrate-annotation-ns <store> --graph <iri> --commit`, or the
-///    archive reads EMPTY — quads left in the default graph are still there and no longer
-///    visible, with no error anywhere;
-/// 2. mint `urn:cap:store:{read,write}:graph:<iri>` grants, which is the entire point: the
-///    default graph has no IRI, so no scoped token names it and the ledger↔browse join is a
-///    ROOT-capability query today. In a named graph it becomes grantable, and the HTTP door's
-///    caller could run it;
-/// 3. redo the freshness argument. A named browse graph is visible to a scoped read, so it
-///    forfeits the exemption this server measured at ~1000× on the ledger's hot read — the
-///    browse graph's reads must be declared uncacheable, or their threads cut on a browse
-///    write. The LEDGER graph's exemption is untouched either way;
-/// 4. rewrite every cross-graph query to wrap the browse half in `GRAPH <iri> { … }`.
+/// 1. **run `ikigai-browse`'s `migrate-annotation-ns <store> --graph <iri> --commit`**, or
+///    the archive reads EMPTY — quads left in the default graph are still there and no longer
+///    visible, with no error anywhere. An OPERATOR's step, with this server STOPPED (RocksDB
+///    holds one writer lock), and it cannot be undone by restarting. gonk no longer takes it
+///    on trust: [`unmigrated_quads`] counts what is stranded, `main` runs it before the doors
+///    open, and a non-zero answer is a banner nobody can miss. That check is browse's own
+///    counting function, so it reports the same number as the migration's dry run.
+/// 2. **mint `urn:cap:store:{read,write}:graph:<iri>`**, which is the entire point: the
+///    default graph has no IRI, so no scoped token could name it and every query over
+///    browse's quads was a ROOT one. [`crate::grants::browse_graph_grants`] computes those two
+///    tokens FROM this choice, and `--browse-graph read|write` mints them onto a certificate
+///    or a passkey. What that buys, exactly: an identity can read (or write) browse's quads
+///    through `urn:iki:store:graph-{select,ask,construct,describe}` — the archive without the
+///    spend — and reaches no browse endpoint, no file and no `gh` by doing so.
+///    ⚠ **The anonymous HTTP caller is deliberately NOT given it.** Its grant is exactly
+///    `gonk.http.ledger`'s ledgers, computed in `main`, and widening that silently in a
+///    version bump is not something a config file could take back. A signed-in passkey is the
+///    HTTP door's spelling of "a caller who may".
+/// 3. **redo the freshness argument.** Done, and it is in [`cached_reads`]'s table and in
+///    `tests/browse.rs`: a promised graph is not covered, so `ikigai-store` answers every
+///    scoped read of THIS graph `Expiry::Always` by itself — there is no second place where
+///    this server would have to declare it, and a wrapper that did would be the ledger #282
+///    failure again. The LEDGER graph's exemption is untouched, which is the ~1000× this
+///    server measured, and `the_shared_handle_costs_the_ledger_nothing` measures it against
+///    this shipped choice rather than against the one that was cheap.
+/// 4. **wrap the browse half of every cross-graph query in `GRAPH <iri> { … }`.** In this
+///    repo that is `tests/browse.rs`'s join and the `/sparql` page's samples; an operator's
+///    own queries and any consumer's are theirs, and the failure mode is an empty result
+///    rather than an error, which is why it is called out in the README's migration steps.
 ///
-/// Only step 3 is work in this file. Steps 1, 2 and 4 are an operator's, and step 1 cannot be
-/// undone by restarting.
+/// # ⚠ Changing the IRI is a SECOND migration
+///
+/// The literal is asserted by `the_choice_this_server_ships_is_its_own_named_graph`, so a new
+/// spelling is a red test rather than a silent re-strand. Why this one:
+/// `urn:iki:browse:graph:default` sits beside `urn:iki:ledger:graph:default` in the same
+/// shape (family · `graph` · name), leaves the last segment free for a per-root or per-tenant
+/// browse graph later, and — deliberately — does **not** name gonk. The dev server's archive
+/// (ledger #244) holds the same kind of quads written by the same crate; a host-neutral name
+/// makes absorbing it a union rather than a rename.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Graph {
-    /// The store's **default graph** — every quad browse has ever written on this server.
+    /// The store's **default graph** — where every quad browse wrote on this server before
+    /// 2026-09-16, and where a host that never calls `Mount::graph` still writes.
     ///
     /// It has no IRI, so no `urn:cap:store:{read,write}:graph:` token can name it and no
     /// graph-scoped query can see it: browse's data sits OUTSIDE the per-graph capability
-    /// boundary entirely. That is a cost (the join is root-only) and, for this server, also
-    /// the thing that makes every scoped ledger read cacheable.
+    /// boundary entirely. That is what the decision above moved away from. Not reached by
+    /// [`chosen`](Graph::chosen) any more; still walked by
+    /// `graph_choice_and_promise_cannot_disagree` and by
+    /// `the_default_arm_still_promises_only_the_default_graph`, because the arm a server can
+    /// go back to is an arm that has to keep working.
     TheDefault,
-    /// A **named graph**, inside the tenancy boundary — see the ⚠ above for what opting in
-    /// obliges. Not reached by [`chosen`](Graph::chosen) today; reached by
-    /// `tests/browse.rs::a_named_graph_choice_moves_the_promise_with_it`, which is what keeps
-    /// this arm from being a claim about untested code.
+    /// A **named graph**, inside the tenancy boundary — what this server ships, and what the
+    /// four obligations above are about.
     Named(NamedNode),
 }
+
+/// The graph [`Graph::chosen`] names — the one literal this decision is written as.
+///
+/// Private on purpose: a second public name for it is a second place a caller could build
+/// the choice from, and the whole shape of ledger #282's fix is that there is one value.
+/// Everything that needs the IRI reads it off the choice ([`Graph::named`]).
+const CHOSEN_GRAPH: &str = "urn:iki:browse:graph:default";
 
 impl Graph {
     /// ★ **gonk's choice, made in exactly one place.**
@@ -154,9 +211,13 @@ impl Graph {
     /// [`sharer_writes`](Graph::sharer_writes) and [`wire`]. Changing this line is the whole
     /// of the graph decision on this side — and the four obligations on the type's docs are
     /// the whole of it on the other.
+    ///
+    /// ⚠ `new_unchecked` because `CHOSEN_GRAPH` is a literal in this file, and
+    /// `the_choice_this_server_ships_is_its_own_named_graph` parses it for real. A `.expect()`
+    /// here would move a compile-time-checkable fact into a startup panic.
     #[must_use]
     pub fn chosen() -> Self {
-        Graph::TheDefault
+        Graph::Named(NamedNode::new_unchecked(CHOSEN_GRAPH))
     }
 
     /// The promise `main` hands `ikigai-store` when the handle leaves — **derived from the
@@ -190,8 +251,9 @@ impl Graph {
         }
     }
 
-    /// The chosen graph's IRI, or `None` for the default graph — for a banner line or a
-    /// `GRAPH <…>` clause, never for rebuilding either statement above.
+    /// The chosen graph's IRI, or `None` for the default graph — for a banner line, a
+    /// `GRAPH <…>` clause or a capability token ([`crate::grants::browse_graph_grants`]),
+    /// never for rebuilding either statement above.
     #[must_use]
     pub fn named(&self) -> Option<&NamedNode> {
         match self {
@@ -199,6 +261,47 @@ impl Graph {
             Graph::Named(graph) => Some(graph),
         }
     }
+
+    /// The same choice as oxigraph's own graph name — what [`unmigrated_quads`] asks the
+    /// store about.
+    #[must_use]
+    pub fn graph_name(&self) -> GraphName {
+        match self {
+            Graph::TheDefault => GraphName::DefaultGraph,
+            Graph::Named(graph) => GraphName::NamedNode(graph.clone()),
+        }
+    }
+}
+
+/// ★ **Obligation 1, checked instead of assumed: how many quads `ikigai-browse` wrote that
+/// this binary can no longer see.**
+///
+/// The choice on [`Graph`] confines browse's reads to one graph. A store whose browse quads
+/// are somewhere else — the default graph, before the migration; a previously chosen name,
+/// after someone edits the IRI — still holds every one of them on disk, and every browse read
+/// answers as if the archive were empty. **There is no error to observe, at any layer**: an
+/// empty annotation list and an empty archive are legitimate answers, and that is exactly the
+/// failure `ikigai-browse`'s own `Mount::graph` docs warn a host about.
+///
+/// So `main` asks, once, before the doors open, and says so loudly when the answer is not
+/// zero. The counting is `ikigai-browse`'s own `migrate::counts_for_graph` rather than a
+/// query written here, for two reasons that are the same reason: the set of subject prefixes
+/// browse mints is browse's fact (`BROWSE_SUBJECT_PREFIXES`, pinned in that crate against its
+/// real writers), and **the number this reports is then the same number the migration's dry
+/// run reports** — an operator comparing the banner with `migrate-annotation-ns` is comparing
+/// one function with itself.
+///
+/// It is a pass over the dataset, which is why it is a startup check and not a per-read one.
+///
+/// # Errors
+///
+/// When the store cannot be iterated.
+pub fn unmigrated_quads(store: &Store, graph: &Graph) -> std::result::Result<u64, String> {
+    let counts = ikigai_browse::migrate::counts_for_graph(store, Some(&graph.graph_name()))
+        .map_err(|e| e.to_string())?;
+    // `None` is impossible here — a graph was named — but a panic in a startup check would be
+    // a worse answer than the honest zero.
+    Ok(counts.outside_target_graph.unwrap_or_default())
 }
 
 /// Root names this server refuses, because `ikigai-repo`'s own resources start with the same
@@ -331,6 +434,21 @@ pub struct Wired {
 /// arguments that are safe. A new face in a later `ikigai-browse` arrives as a new argument,
 /// and the failure of the permissive rule is a silently stale read; the failure of this one
 /// is a read that is merely not cached.
+///
+/// # ★ Obligation 3, and why this table did not have to change for it
+///
+/// Naming a graph ([`Graph`]) forfeits that graph's cacheability: `ikigai-store` is promised
+/// the sharer writes it, so `read_is_covered` is false for it and every scoped read of it is
+/// `Expiry::Always` — answered by the store, per read, from the promise this server derived.
+/// **Nothing here had to be re-declared, and that is the point.** Every row above that
+/// touches the store is already `no`, and a wrapper in this crate that declared the browse
+/// graph uncacheable would be a second place saying what is fresh — ledger #282's failure
+/// with the sign flipped, and the thing `crate::compose_with` deleted a `freshness` module to
+/// be rid of.
+///
+/// The obligation is therefore *checked* rather than *paid* here:
+/// `tests/browse.rs::the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are`
+/// issues both reads through a real kernel and looks at what the cache holds.
 pub fn cached_reads(inner: EndpointSpace, watched: &[Watched]) -> CachedReads {
     CachedReads {
         inner,
@@ -547,14 +665,118 @@ mod tests {
         );
     }
 
-    /// What this server ships today, said out loud where a diff can see it: the choice is the
-    /// default graph, so taking `ikigai-browse` 0.4.0 moves no quad.
+    /// ★ What this server ships, said out loud where a diff can see it — **as a literal**,
+    /// because this string is not a setting: it is where the quads on disk are.
     ///
-    /// ⚠ This test going red is not a bug — it is the signal that someone took the graph
-    /// decision, and that the four obligations on [`Graph`]'s docs are now owed.
+    /// ⚠ This test going red is not a bug — it is the signal that someone changed the graph,
+    /// and that the four obligations on [`Graph`]'s docs are owed AGAIN. In particular
+    /// obligation 1: a store migrated into the old name strands every browse quad under the
+    /// new one, silently, exactly as an unmigrated store does.
+    ///
+    /// It also parses the literal, which is what lets [`Graph::chosen`] use `new_unchecked`.
     #[test]
-    fn the_choice_this_server_ships_is_the_default_graph() {
-        assert_eq!(Graph::chosen(), Graph::TheDefault);
+    fn the_choice_this_server_ships_is_its_own_named_graph() {
+        assert!(
+            NamedNode::new(CHOSEN_GRAPH).is_ok(),
+            "`{CHOSEN_GRAPH}` must be an IRI — `chosen()` builds it unchecked"
+        );
+        assert_eq!(
+            Graph::chosen().named().map(NamedNode::as_str),
+            Some("urn:iki:browse:graph:default"),
+            "the graph gonk's store is migrated into"
+        );
+    }
+
+    /// The arm this server no longer ships, kept honest: a host that chooses the default
+    /// graph promises nothing named, writes no `Mount::graph` call, and — the half that
+    /// matters for a rollback — has NOTHING stranded by its own choice once its quads are
+    /// there.
+    #[test]
+    fn the_default_arm_still_promises_only_the_default_graph() {
+        let default = Graph::TheDefault;
+        assert_eq!(default.named(), None);
+        assert_eq!(default.graph_name(), GraphName::DefaultGraph);
+        assert_eq!(default.sharer_writes().named_graphs().len(), 0);
+    }
+
+    /// A quad shaped like one `ikigai-browse` writes — a subject under one of its minted
+    /// prefixes — in `graph`.
+    fn browse_quad(store: &Store, graph: GraphName, subject: &str) {
+        let quad = oxigraph::model::Quad::new(
+            NamedNode::new(subject).expect("a subject IRI"),
+            NamedNode::new("https://ikigai-rs.dev/ns#repo").expect("a predicate"),
+            oxigraph::model::Literal::new_simple_literal("demo"),
+            graph,
+        );
+        store.insert(quad.as_ref()).expect("the quad lands");
+    }
+
+    /// ★ Obligation 1's tripwire, on the case it exists for: a store written by a binary that
+    /// had not taken the decision, read by one that has.
+    ///
+    /// The count is what an operator will see in the banner, and it is the same function the
+    /// migration's dry run prints — so this test is also the statement that the two agree.
+    #[test]
+    fn quads_left_in_the_default_graph_are_counted_as_invisible() {
+        let store = Store::new().expect("an in-memory store");
+        let chosen = Graph::chosen();
+        assert_eq!(
+            unmigrated_quads(&store, &chosen),
+            Ok(0),
+            "an empty store strands nothing"
+        );
+
+        // What a pre-decision gonk wrote: an explanation in the default graph.
+        browse_quad(
+            &store,
+            GraphName::DefaultGraph,
+            "urn:ikigai:browse:explain:gonk:sha256:abc:note-v1@m:README.md",
+        );
+        // …and an annotation, under the other prefix browse mints.
+        browse_quad(&store, GraphName::DefaultGraph, "urn:iki:annotation:n1");
+        assert_eq!(
+            unmigrated_quads(&store, &chosen),
+            Ok(2),
+            "both are browse-minted, both are outside the chosen graph, and neither is \
+             visible to a read confined to it"
+        );
+
+        // A quad nobody's migration should move: not browse's subject.
+        browse_quad(
+            &store,
+            GraphName::DefaultGraph,
+            "urn:iki:ledger:default:item:x",
+        );
+        assert_eq!(
+            unmigrated_quads(&store, &chosen),
+            Ok(2),
+            "the count is browse-owned quads, not everything in the default graph — a \
+             migration would not move this one and the banner must not claim it would"
+        );
+
+        // Where the same quads belong after the migration.
+        let migrated = Store::new().expect("an in-memory store");
+        browse_quad(&migrated, chosen.graph_name(), "urn:iki:annotation:n1");
+        assert_eq!(unmigrated_quads(&migrated, &chosen), Ok(0));
+    }
+
+    /// The tripwire works on the arm this server does not ship, which is what makes it a
+    /// check on the CHOICE rather than on one value of it: a host that went back to the
+    /// default graph would have everything stranded in the named one.
+    #[test]
+    fn the_tripwire_reads_a_rollback_the_same_way() {
+        let store = Store::new().expect("an in-memory store");
+        browse_quad(
+            &store,
+            Graph::chosen().graph_name(),
+            "urn:iki:annotation:n1",
+        );
+        assert_eq!(unmigrated_quads(&store, &Graph::chosen()), Ok(0));
+        assert_eq!(
+            unmigrated_quads(&store, &Graph::TheDefault),
+            Ok(1),
+            "rolling the binary back without rolling the data back strands it just as badly"
+        );
     }
 
     #[test]
