@@ -941,11 +941,15 @@ pub const SAMPLES: [(&str, &str, &str); 9] = [
         // `urn:iki:browse:graph:default` (`crate::browse::Graph`), and this editor scopes to
         // a LEDGER — the box above picks a ledger name, not a graph — so an annotation or an
         // archived explanation is invisible here whatever token the caller holds. A graph
-        // selector rather than a ledger selector is what that would take.
+        // selector rather than a ledger selector is what that would take. ★ The DOOR can do
+        // it since `ikigai-store` 0.2.5 (a scoped read takes a SET of graphs, and a caller
+        // holding both read tokens runs the ledger↔browse join through
+        // `urn:iki:store:graph-select` directly); it is this PAGE that names one graph.
         //
         // ⚠ `GRAPH <other>` matches NOTHING rather than erroring (ikigai-store confines the
-        // query's available named graphs to the one it was issued for), so editing this to
-        // another ledger's graph without also choosing that ledger above returns zero rows.
+        // query's available named graphs to the set it was issued for, and this page always
+        // issues one), so editing this to another ledger's graph without also choosing that
+        // ledger above returns zero rows.
         "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
 PREFIX dcterms: <http://purl.org/dc/terms/>
 

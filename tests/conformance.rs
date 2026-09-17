@@ -2,7 +2,7 @@
 //!
 //! # This crate binds ZERO endpoints
 //!
-//! Everything gonk serves is `ikigai-store`'s (twelve resources) or `ikigai-ledger`'s
+//! Everything gonk serves is `ikigai-store`'s (thirteen resources) or `ikigai-ledger`'s
 //! (fourteen), and each of those crates walks its own suite. What is gonk's to get wrong is
 //! the composition and the doors, so this file checks exactly those:
 //!
@@ -23,7 +23,7 @@
 //! more resources and a shared store handle, and it has its own file (`tests/browse.rs`):
 //! keeping them apart is what lets this one keep asserting the catalog exactly.
 //!
-//! The store's twelve resources are opted out of the invoking checks for the reason the
+//! The store's thirteen resources are opted out of the invoking checks for the reason the
 //! ledger's suite gives: they are walked with real SPARQL by `ikigai-store`'s own suite, and
 //! the synthesized `"x"` this suite would hand them is not a query.
 
@@ -36,7 +36,7 @@ use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::{compose, doors};
 use ikigai_store::DurableStore;
 
-const STORE_IDS: [&str; 12] = [
+const STORE_IDS: [&str; 13] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -46,6 +46,7 @@ const STORE_IDS: [&str; 12] = [
     "store-graph-construct",
     "store-graph-describe",
     "store-info",
+    "store-graphs",
     "store-update",
     "store-graph-update",
     "store-load",
