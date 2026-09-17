@@ -198,7 +198,7 @@ fn serve(flags: &config::Flags) -> ! {
         }),
     ));
 
-    let backup_line = start_backups(&hub, &jobs, &backup_settings);
+    let backup_line = start_backups(&hub, &jobs, &backup_settings, &settings.socket);
 
     // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
     // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
@@ -325,6 +325,7 @@ fn start_backups(
     hub: &Arc<ikigai_core::Kernel>,
     jobs: &Option<JobRegistry>,
     settings: &Arc<backup::Settings>,
+    socket: &std::path::Path,
 ) -> String {
     let Some(every) = settings.every else {
         return format!(
@@ -363,11 +364,30 @@ fn start_backups(
     } else {
         ""
     };
+    scheduled_line(every, &settings.dir, settings.keep, catch_up, socket)
+}
+
+/// The banner's backup line once the schedule is in — separate so a test can read it,
+/// because **the command in it is one an operator will paste**.
+///
+/// ⚠ The status command names THIS server's socket. The backup family is bound only behind
+/// it: no config-home `mount` claims `urn:iki:gonk:`, so a bare `ikigai -c 'source …'`
+/// reaches nothing and HANGS rather than failing (ledger #381, an `ikigai-cli` defect). And
+/// the path is the one this process binds, not `~/.ikigai/gonk.sock`, so a host configured
+/// differently is told the truth.
+fn scheduled_line(
+    every: std::time::Duration,
+    dir: &std::path::Path,
+    keep: usize,
+    catch_up: &str,
+    socket: &std::path::Path,
+) -> String {
     format!(
-        "every {} into {} — keep {}{catch_up}. `source {}` says when the last good one was",
+        "every {} into {} — keep {keep}{catch_up}. \
+         `ikigai --connect {} -c 'source {}'` says when the last good one was",
         humanize(every),
-        settings.dir.display(),
-        settings.keep,
+        dir.display(),
+        socket.display(),
         backup::STATUS,
     )
 }
@@ -506,7 +526,8 @@ fn browse_line(
         })
         .collect();
     let where_they_land = match graph.named() {
-        Some(iri) => format!("annotations and archive in <{iri}>"),
+        // ⚠ `.as_str()`: `NamedNode`'s Display brackets the IRI itself (ledger #382).
+        Some(iri) => format!("annotations and archive in <{}>", iri.as_str()),
         None => "annotations and archive in this dataset's DEFAULT graph — no token can name \
                  it, so every query over them is a root one"
             .to_string(),
@@ -758,5 +779,44 @@ mod tests {
         );
         assert!(!back.contains("migrate-annotation-ns"), "{back}");
         assert!(back.contains("rolled back"), "{back}");
+    }
+
+    /// The backup line's command is one an operator pastes, so it must be the form that
+    /// RETURNS: through the socket this server binds (#381), not a bare `ikigai -c`.
+    #[test]
+    fn the_backup_line_names_a_status_command_that_reaches_this_server() {
+        let line = scheduled_line(
+            std::time::Duration::from_secs(86_400),
+            std::path::Path::new("/var/backups/gonk"),
+            7,
+            "",
+            std::path::Path::new("/tmp/elsewhere/gonk.sock"),
+        );
+        assert!(
+            line.contains(
+                "`ikigai --connect /tmp/elsewhere/gonk.sock -c 'source urn:iki:gonk:backup:status'`"
+            ),
+            "{line}"
+        );
+        assert!(!line.contains("`source "), "the bare form hangs: {line}");
+        assert!(
+            line.contains("every 24h into /var/backups/gonk — keep 7."),
+            "{line}"
+        );
+    }
+
+    /// The browse line names the graph with exactly one pair of brackets (#382). "Contains
+    /// the IRI" alone passes on `<<urn:…>>`, so the whole bracketed form is pinned and `<<`
+    /// is refused.
+    #[test]
+    fn the_browse_line_brackets_the_graph_once() {
+        let graph = browse::Graph::chosen();
+        let iri = graph.named().expect("a named graph").as_str();
+        let line = browse_line(&[("demo".to_string(), "/tmp/demo".into())], &[], &graph);
+        assert!(
+            line.ends_with(&format!("annotations and archive in <{iri}>")),
+            "{line}"
+        );
+        assert!(!line.contains("<<") && !line.contains(">>"), "{line}");
     }
 }
