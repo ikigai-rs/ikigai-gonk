@@ -944,7 +944,9 @@ pub const SAMPLES: [(&str, &str, &str); 9] = [
         // selector rather than a ledger selector is what that would take. ★ The DOOR can do
         // it since `ikigai-store` 0.2.5 (a scoped read takes a SET of graphs, and a caller
         // holding both read tokens runs the ledger↔browse join through
-        // `urn:iki:store:graph-select` directly); it is this PAGE that names one graph.
+        // `urn:iki:store:graph-select` directly); it is this PAGE that names one graph. The
+        // page says so itself now, and shows that join without offering to run it —
+        // [`CROSS_GRAPH`], #401.
         //
         // ⚠ `GRAPH <other>` matches NOTHING rather than erroring (ikigai-store confines the
         // query's available named graphs to the set it was issued for, and this page always
@@ -1107,6 +1109,68 @@ fn samples() -> String {
         .map(|(id, label, query)| element("sample", &[("id", id), ("label", label)], query))
         .collect();
     format!("{buttons}{}", element("hint", &[], CREATED_IS_FILING_TIME))
+}
+
+/// Why the cross-graph example is SHOWN and not offered as a button. See [`CROSS_GRAPH`].
+pub const CROSS_GRAPH_WHY: &str =
+    "This one is shown, not loadable: the box above sends a single ledger's graph, so this \
+     query pressed into it would return no rows and make a working capability look broken. \
+     Run it where the graphs are named — from ikigai -c, or any caller holding a read token \
+     for each graph. Within the set you were issued, GRAPH <…> picks one; outside it, GRAPH <…> \
+     matches nothing rather than erroring.";
+
+/// ★ The join, SHOWN rather than offered — the widened capability made visible without
+/// pretending this page has it.
+///
+/// `sparql_results` sends `ledger.graph()` and nothing else, so loading this into the editor
+/// would return zero rows: a real feature presented as a broken one. It therefore travels as
+/// a `view:cross-graph` element with no `id` and no `label`, is rendered outside
+/// `#sample-queries`, and carries no `data-query` — so `web/gonk.js`, which loads a sample by
+/// looking up `data-query` as an element id, cannot reach it.
+///
+/// ⚠ Verified live 2026-09-17 against plasma's store (39 rows, one explanation). Three traps
+/// it is shaped around, and each of the three returns **zero rows with no error** when got
+/// wrong — which reads exactly like "the join does not work":
+///
+/// 1. ★ the `FILTER` sits at the TOP level of the `WHERE`, not inside the ledger's `GRAPH`
+///    block. Inside it, `?repo` is bound only in the sibling group, so the filter sees it
+///    unbound and is false everywhere. Measured both ways. Re-run the query if this is ever
+///    restructured for readability;
+/// 2. `ledger:status` is an IRI (`ledger:open`), not the string `"open"`;
+/// 3. the title is `dcterms:title`, not `ledger:title`.
+pub const CROSS_GRAPH: &str = "# Two graphs in ONE read — at the endpoint, not in the box above:
+#
+#   ikigai -c 'source urn:iki:store:graph-select
+#     graph=\"urn:iki:ledger:graph:default urn:iki:browse:graph:default\"
+#     query=\"…\" as=text/csv'
+#
+# `graph=` is whitespace-separated BARE IRIs, no angle brackets, and the caller
+# holds urn:cap:store:read:graph:<that graph> for EACH of them.
+
+PREFIX ik: <https://ikigai-rs.dev/ns#>
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?title ?file WHERE {
+  GRAPH <urn:iki:browse:graph:default> {
+    ?ex a ik:Explanation ; ik:repo ?repo ; ik:about ?file .
+  }
+  GRAPH <urn:iki:ledger:graph:default> {
+    ?item a ledger:Item ; ledger:number ?number ; dcterms:title ?title ;
+          ledger:label ?label ; ledger:status ledger:open .
+  }
+  # The join key is a STRING bridge — ik:repo is \"gonk\", the label is
+  # \"repo:ikigai-gonk\" — because nothing yet links an item to a repo file.
+  # ★ The FILTER stays HERE, at the top level of the WHERE: inside either GRAPH
+  # block the other group's variable is unbound and this returns zero rows in
+  # silence.
+  FILTER(?label = CONCAT(\"repo:ikigai-\", ?repo))
+}
+ORDER BY ?number";
+
+/// The cross-graph example and its explanation, as one view element. See [`CROSS_GRAPH`].
+fn cross_graph() -> String {
+    element("cross-graph", &[("why", CROSS_GRAPH_WHY)], CROSS_GRAPH)
 }
 
 struct Sparql {
@@ -1440,9 +1504,10 @@ impl Endpoint for Sparql {
             None => String::new(),
         };
         let children = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             nav(&ledgers, Some(ledger.name())),
             samples(),
+            cross_graph(),
             element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),
             results
         );
@@ -1467,15 +1532,20 @@ impl Endpoint for Sparql {
             .title(if self.fragment {
                 "SPARQL results, as an htmx fragment"
             } else {
-                "SPARQL over one ledger's graph"
+                "SPARQL over one ledger's graph (this page's limit, not the store's)"
             })
             .summary(
-                "A read-only SPARQL query confined BY CONSTRUCTION to one ledger's named graph: \
-                 it runs at `urn:iki:store:graph-{select,ask,construct,describe}` with \
-                 `graph=<that ledger's graph>`, under the caller's capability, so a grant \
-                 naming one ledger cannot see another's. FROM / FROM NAMED are refused by the \
-                 store. HTML when the caller asks for it; otherwise the store's own result \
-                 format, by Accept.",
+                "A read-only SPARQL query. THIS page sends exactly one graph — the named \
+                 ledger's — as the whole dataset: it runs at \
+                 `urn:iki:store:graph-{select,ask,construct,describe}` with `graph=<that \
+                 ledger's graph>`, under the caller's capability, so a grant naming one ledger \
+                 cannot see another's. That store endpoint itself accepts a SET of graphs in \
+                 one read (`graph=` is whitespace-separated), so a caller holding a read token \
+                 for each can join across them — a ledger and the browse graph, say — by \
+                 calling it directly; this page has no graph selector yet. FROM / FROM NAMED \
+                 are refused by the store either way, over a set as much as over one graph. \
+                 HTML when the caller asks for it; otherwise the store's own result format, by \
+                 Accept.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
