@@ -144,7 +144,7 @@ fn serve(flags: &config::Flags) -> ! {
     // empty archive are legitimate answers. So this server counts them and says so, in
     // browse's own numbers.
     if let Some(handle) = handle.as_deref() {
-        warn_unmigrated(handle, &browse_graph, &store_path);
+        warn_unmigrated(handle, &browse_graph, &store_path, &settings.socket);
     }
     let browse = handle.map(|handle| {
         browse::wire(
@@ -421,10 +421,14 @@ fn warn_unmigrated(
     store: &ikigai_store::Store,
     graph: &browse::Graph,
     store_path: &std::path::Path,
+    socket: &std::path::Path,
 ) {
     match browse::unmigrated_quads(store, graph) {
         Ok(0) => {}
-        Ok(stranded) => eprint!("{}", unmigrated_warning(stranded, graph, store_path)),
+        Ok(stranded) => eprint!(
+            "{}",
+            unmigrated_warning(stranded, graph, store_path, socket)
+        ),
         Err(e) => eprintln!("ikigai-gonk: could not check where browse's quads are: {e}"),
     }
 }
@@ -441,6 +445,7 @@ fn unmigrated_warning(
     stranded: u64,
     graph: &browse::Graph,
     store_path: &std::path::Path,
+    socket: &std::path::Path,
 ) -> String {
     let Some(iri) = graph.named().map(oxigraph::model::NamedNode::as_str) else {
         // The default-graph arm: browse's quads are stranded in some NAMED graph, which only
@@ -454,6 +459,7 @@ fn unmigrated_warning(
         );
     };
     let store = store_path.display();
+    let socket = socket.display();
     format!(
         "ikigai-gonk: ⚠⚠ THE BROWSE ARCHIVE IS INVISIBLE — {stranded} quad(s) are outside \
          <{iri}>\n  \
@@ -468,8 +474,10 @@ fn unmigrated_warning(
          migrate-annotation-ns {store} --graph {iri}\n    \
          migrate-annotation-ns {store} --graph {iri} --commit\n  \
          The dry run (no --commit) reports this same count. ⚠ --commit is a one-shot \
-         destructive rewrite and restarting does not undo it: take a backup through this \
-         server first (`ikigai -c 'source urn:iki:gonk:backup'`), while it is still up.\n"
+         destructive rewrite and restarting does not undo it. Take a backup through this \
+         server FIRST, while it is still up — it holds the lock, so nothing else can export \
+         the dataset:\n    \
+         ikigai --connect {socket} -c 'source urn:iki:gonk:backup'\n"
     )
 }
 
@@ -705,7 +713,12 @@ mod tests {
     fn the_migration_warning_names_a_command_that_would_run() {
         let graph = browse::Graph::chosen();
         let iri = graph.named().expect("a named graph").as_str().to_string();
-        let text = unmigrated_warning(10, &graph, std::path::Path::new("/tmp/store"));
+        let text = unmigrated_warning(
+            10,
+            &graph,
+            std::path::Path::new("/tmp/store"),
+            std::path::Path::new("/tmp/gonk.sock"),
+        );
 
         assert!(text.contains("10 quad(s)"), "{text}");
         assert!(
@@ -727,8 +740,13 @@ mod tests {
         );
         assert!(text.contains(&format!("--graph {iri}")), "{text}");
         assert!(text.contains(&format!("<{iri}>")), "{text}");
-        // The irreversible half is never implicit.
-        assert!(text.contains("backup"), "{text}");
+        // The irreversible half is never implicit — and the backup command names the socket,
+        // because the backup family is bound behind it and a bare `ikigai -c` does not reach
+        // this server at all.
+        assert!(
+            text.contains("ikigai --connect /tmp/gonk.sock -c 'source urn:iki:gonk:backup'"),
+            "{text}"
+        );
         assert!(text.contains("restarting does not undo it"), "{text}");
 
         // The rollback arm names no command, because none of these would perform it.
@@ -736,6 +754,7 @@ mod tests {
             10,
             &browse::Graph::TheDefault,
             std::path::Path::new("/tmp/store"),
+            std::path::Path::new("/tmp/gonk.sock"),
         );
         assert!(!back.contains("migrate-annotation-ns"), "{back}");
         assert!(back.contains("rolled back"), "{back}");
