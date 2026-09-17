@@ -16,8 +16,12 @@
 //!   with the choice rather than beside it (ledger #282).
 //! - [`the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are`] — obligation
 //!   3 of the graph decision, asked of the kernel rather than of the promise.
-//! - [`a_scoped_token_reads_browse_and_still_cannot_join`] — obligation 2: what
-//!   `urn:cap:store:read:graph:<browse graph>` buys, and the boundary it does not cross.
+//! - [`a_scoped_token_reads_browse_and_both_tokens_run_the_join`] — obligation 2: what
+//!   `urn:cap:store:read:graph:<browse graph>` buys, the boundary it does not cross, and the
+//!   ledger↔browse join below root that `ikigai-store` 0.2.5 made expressible.
+//! - [`the_join_runs_through_the_http_door_under_a_signed_in_grant`] — the same join asked
+//!   for the way a caller outside this process asks: over loopback HTTP, under a passkey
+//!   identity's grant.
 //! - [`a_ledger_item_joins_an_annotation_on_a_repo_file`] — the point of one dataset, with
 //!   both halves naming their graph (obligation 4).
 //! - [`the_shared_handle_costs_the_ledger_nothing`] — the naive composition beside the one
@@ -31,19 +35,24 @@
 //! `in_memory_shared` for the naive one it refused — and takes no RocksDB lock, so these run
 //! beside a live gonk holding `~/.ikigai/store`.
 
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+mod common;
 
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock, Verb,
 };
 use ikigai_gonk::config::ExplainTiers;
-use ikigai_gonk::grants::{grants_for_all, Authority};
+use ikigai_gonk::grants::{browse_graph_grants, grants_for, grants_for_all, Authority};
+use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::mount::{self, Mount};
 use ikigai_gonk::watch::RootWatch;
-use ikigai_gonk::{browse, compose_with};
+use ikigai_gonk::{browse, compose_with, doors, quic, web};
 use ikigai_store::DurableStore;
 use ikigai_vocab::TurtleRenderer;
 use oxigraph::model::{Literal, NamedNode, Term};
@@ -875,12 +884,14 @@ fn a_named_graph_choice_moves_the_promise_with_it() {
 /// error, which is why the README's migration steps say it out loud for an operator's own
 /// saved queries.
 ///
-/// ⚠ Still under a ROOT capability, and that is NOT for want of the graph decision — it is
-/// the store's shape. `urn:iki:store:graph-select` takes ONE graph
-/// (`ikigai-store`'s `confine` sets the query's whole dataset to it), so a two-graph join
-/// cannot be expressed through the narrow door however many per-graph tokens the caller
-/// holds. What the decision bought is that each HALF is now grantable; what it did not buy is
-/// the join. See `a_scoped_token_reads_browse_and_still_cannot_join`.
+/// ⚠ This one runs under ROOT, through the broad `urn:iki:store:select`, and it stays that
+/// way on purpose: it is the WHOLE-DATASET statement of the property — both halves in one
+/// store, named, with no federation — and root is what the socket door hands the owner.
+/// The same join **below** root, through `urn:iki:store:graph-select` with both graphs in one
+/// `graph=` value and nothing but the two read tokens, is
+/// `a_scoped_token_reads_browse_and_both_tokens_run_the_join`. Until `ikigai-store` 0.2.5 that
+/// second test could not exist: `confine` set the query's whole dataset to the one graph the
+/// read was issued for, so each HALF was grantable and the join was not (ledger #380).
 #[test]
 fn a_ledger_item_joins_an_annotation_on_a_repo_file() {
     let dir = scratch_root();
@@ -1016,28 +1027,67 @@ fn the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are() {
         "the browse read added no cache entry: {:?}",
         cached(&hub)
     );
+
+    // ★ And the SET, since `ikigai-store` 0.2.5: a multi-graph read is covered only if EVERY
+    // member is, so the ledger↔browse join inherits the browse graph's exposure and is
+    // uncached — while the ledger's own scoped read, one line above, is not. That is the
+    // honest shape of the payoff and it is the reason it is asserted rather than assumed: the
+    // two reads are the same IRI with different arguments, so nothing but this distinguishes
+    // "the join is cheap" from "the join is a fresh query every time".
+    let together = issue(
+        &hub,
+        Verb::Source,
+        "urn:iki:store:graph-select",
+        &[
+            ("graph", &format!("{ledger_graph} {browse_graph}")),
+            ("query", any),
+        ],
+    );
+    assert_eq!(
+        together.expiry,
+        ikigai_core::Expiry::Always,
+        "a set is covered only if every graph is: the join reads a graph the sharer may \
+         write, so it cannot be cached even though the ledger half could be"
+    );
+    assert_eq!(
+        rows(&hub),
+        after_the_ledger,
+        "…and it left nothing in the cache either: {:?}",
+        cached(&hub)
+    );
 }
 
-/// ★ **Obligation 2, end to end: what a per-graph token over browse's data now buys — and
-/// the boundary it does not cross.**
+/// ★ **Obligation 2, end to end: what a per-graph token over browse's data buys, the
+/// boundary it does not cross — and, since `ikigai-store` 0.2.5, what TWO tokens buy
+/// together.**
 ///
 /// Before the graph decision this test could not have been written. Browse's quads were in
 /// the default graph, which has no IRI, so no `urn:cap:store:read:graph:` token could name
 /// them and every read of an annotation or an archived explanation needed root.
 ///
-/// The four assertions are the grant's shape:
+/// The assertions are the grant's shape:
 ///
 /// 1. the token READS browse's quads — the archive without the spend, which is what the
 ///    `urn:cap:net:*` on `urn:repo:{root}:explain` makes impossible through the browse row;
 /// 2. it reaches no other graph, so it is not a ledger grant in disguise;
 /// 3. it reaches no browse ENDPOINT — no file, no tree, no `gh`;
-/// 4. ⚠ **and it cannot run the join.** Not because of anything gonk chose:
-///    `urn:iki:store:graph-select` confines a query to ONE graph, so two graphs in one query
-///    is not expressible through the narrow door at all, whatever tokens are held. The join
-///    stays a root query, and that is a gap in `ikigai-store`'s scoped read face rather than
-///    an unfinished obligation here (reported to the hub).
+/// 4. ★ **and the two read tokens together RUN THE JOIN** — the motivating query of the
+///    graph decision, of ledger #250 and of #376, under a grant an operator can mint
+///    (`ikigai-gonk client add … --ledger default=read --browse-graph read`, whose two halves
+///    are the two lists composed below). Until `ikigai-store` 0.2.5 this test asserted the
+///    opposite: `confine` set the query's whole dataset to the ONE graph the read was issued
+///    for, so the join was inexpressible through the narrow door however many tokens were
+///    held, and — worse — came back EMPTY rather than refused (ledger #380);
+/// 5. ⚠ **and the ledger's token alone is REFUSED on that same query, naming the browse
+///    graph's token.** Refused, not answered over the half it holds: an answer computed from
+///    a narrower dataset than the one asked for returns rows that look right and are not.
+///
+/// ⚠ **The set is ONE whitespace-separated `graph` value.** `graph=A graph=B` is last-wins in
+/// the engine — silently, with no error (ledger #387) — so the repeated form asks for the
+/// LAST graph alone and a join written that way comes back empty. The final block below pins
+/// that, because it is the same silent narrowing assertion 4 exists to have closed.
 #[test]
-fn a_scoped_token_reads_browse_and_still_cannot_join() {
+fn a_scoped_token_reads_browse_and_both_tokens_run_the_join() {
     let dir = scratch_root();
     let (hub, _watch) = served(&dir);
     let chosen = browse::Graph::chosen();
@@ -1127,30 +1177,126 @@ fn a_scoped_token_reads_browse_and_still_cannot_join() {
         );
     }
 
-    // 4. ⚠ The join is still out of reach, and the reason is the door's shape. Naming the
-    // ledger's graph inside a query scoped to the browse graph matches NOTHING — no error,
-    // no rows — because `confine` sets the query's available named graphs to the one it was
-    // issued for. A caller holding BOTH graphs' tokens gets the same empty answer.
-    let joined = scoped(
+    // 3b. One graph is still one graph: naming the LEDGER's graph inside a query scoped to
+    // the browse graph alone matches nothing, because the available named graphs are the set
+    // the read was issued for and this set has one member. The narrowing is what a token
+    // means; what 0.2.5 changed is that a caller may now ASK for both.
+    let unasked = scoped(
         browse_graph,
         "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
-         PREFIX ik: <https://ikigai-rs.dev/ns#>
-         SELECT ?item WHERE {
-           GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?file }
-           ?a ik:annotates ?file .
-         }",
+         SELECT ?item WHERE { GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?f } }",
     )
-    .expect("the query is legal; it simply cannot see the other graph");
-    let joined = String::from_utf8_lossy(&joined.bytes).into_owned();
-    let json: serde_json::Value = serde_json::from_str(&joined).expect("SPARQL results JSON");
+    .expect("the query is legal; the graph it names is simply not in the set");
     assert!(
-        json["results"]["bindings"]
-            .as_array()
-            .expect("bindings")
-            .is_empty(),
-        "a scoped read is ONE graph: the ledger half is invisible, so the join returns \
-         nothing rather than failing — {joined}"
+        rows_of(&unasked).is_empty(),
+        "a graph outside the set matches nothing rather than erroring — ikigai-store's own \
+         `GRAPH <other>` row, and the reason the set is named in `graph=` and not in the query"
     );
+
+    // 4. ★ THE JOIN, under the two read tokens an operator can mint — and nothing else.
+    // `grants_for(.., Read)` and `browse_graph_grants(Read)` are the two halves `main`'s
+    // `scopes_for` composes for `client add`/`passkey invite`.
+    let mut both = grants_for("default", Authority::Read).expect("the ledger's read tokens");
+    both.extend(browse_graph_grants(Authority::Read).expect("a named browse graph"));
+    let both = Capability::scoped(both);
+    // ⚠ ONE value, whitespace-separated. Ledger first, which is NOT the canonical spelling
+    // (the store sorts the set and re-issues a non-canonical spelling under the canonical
+    // one, so every spelling shares one computed entry) — the answer must not depend on it.
+    let set = format!("urn:iki:ledger:graph:default {browse_graph}");
+    let join = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+         PREFIX ik: <https://ikigai-rs.dev/ns#>
+         PREFIX oa: <http://www.w3.org/ns/oa#>
+         SELECT DISTINCT ?item ?file ?note WHERE {
+           GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?file }
+           GRAPH <URN_BROWSE> { ?a ik:annotates ?file ; oa:bodyValue ?note }
+         }"
+    .replace("URN_BROWSE", browse_graph);
+    let joined = block_on(Kernel::issue(
+        &hub,
+        request(
+            Verb::Source,
+            "urn:iki:store:graph-select",
+            &[("graph", &set), ("query", &join)],
+        ),
+        &both,
+    ))
+    .expect("both read tokens run the join — ikigai-store 0.2.5");
+    let rows = rows_of(&joined);
+    assert_eq!(
+        rows.len(),
+        1,
+        "one item, one annotation, one row — the ledger↔browse join, below root at last: {}",
+        String::from_utf8_lossy(&joined.bytes)
+    );
+    assert_eq!(rows[0]["file"]["value"], file);
+    assert_eq!(rows[0]["note"]["value"], "this line is the one");
+    assert!(
+        rows[0]["item"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("urn:iki:ledger:default:item:"),
+        "{rows:?}"
+    );
+
+    // 5. ⚠ The same query under the LEDGER's tokens alone is REFUSED, and the refusal names
+    // the token that is missing — never answered over the ledger half, which would be rows
+    // that look right and are not.
+    let ledger_only = Capability::scoped(
+        grants_for("default", Authority::Read).expect("the ledger's read tokens"),
+    );
+    let denied = block_on(Kernel::issue(
+        &hub,
+        request(
+            Verb::Source,
+            "urn:iki:store:graph-select",
+            &[("graph", &set), ("query", &join)],
+        ),
+        &ledger_only,
+    ));
+    let Err(ikigai_core::Error::Denied(detail)) = denied else {
+        panic!("a graph the caller holds no token for must be refused: {denied:?}");
+    };
+    assert!(
+        detail.contains(&ikigai_store::cap_read_graph(browse_graph)),
+        "the refusal must name the browse graph's own token, because that is what an \
+         operator has to mint: {detail}"
+    );
+
+    // ⚠ And the trap this spelling avoids. `graph=A graph=B` is not a set: `Request::args`
+    // holds ONE value per name and the engine inserts named arguments last-wins, silently
+    // (ledger #387), so the repeated form asks for the LAST graph alone. Holding both tokens
+    // does not save it — the read is legal, and the join is empty with nothing said.
+    let repeated = block_on(Kernel::issue(
+        &hub,
+        request(
+            Verb::Source,
+            "urn:iki:store:graph-select",
+            &[
+                ("graph", "urn:iki:ledger:graph:default"),
+                ("graph", browse_graph),
+                ("query", &join),
+            ],
+        ),
+        &both,
+    ))
+    .expect("last-wins leaves a legal one-graph read, which is exactly the problem");
+    assert!(
+        rows_of(&repeated).is_empty(),
+        "the repeated form silently narrows to the last value — pinned here so that a fix \
+         upstream (a refusal, or a declared repeatable argument) shows up as a red test in \
+         the repo that would otherwise go on spelling it the safe way by folklore"
+    );
+}
+
+/// The `results.bindings` of a SPARQL results JSON representation.
+fn rows_of(repr: &Representation) -> Vec<serde_json::Value> {
+    let text = String::from_utf8_lossy(&repr.bytes).into_owned();
+    let json: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("SPARQL results JSON ({e}): {text}"));
+    json["results"]["bindings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("bindings: {text}"))
+        .clone()
 }
 
 // ------------------------------------------------------------ what it costs
@@ -1419,4 +1565,272 @@ fn an_unwatched_roots_reads_are_not_cached() {
         "the second version\n",
         "…and its reads are therefore never stale"
     );
+}
+
+// ------------------------------------------------- the join, through the HTTP door
+
+/// ★ **The question the arc was dispatched to answer honestly: can a caller holding both
+/// read tokens run the ledger↔browse join through the HTTP door, or only through the socket?**
+///
+/// It can — and not through a page. The `/sparql` editor picks a LEDGER (its box names a
+/// ledger, and the query runs against that ledger's graph alone), so the join is not
+/// reachable from the editor whatever tokens the caller holds; that is gonk's "Not built"
+/// list, unchanged by 0.2.5. What is reachable is the STORE's own resource under
+/// `ikigai-web`'s mechanical path mapping: `/iki/store/graph-select` → the IRI, query
+/// parameters → arguments, `Accept` → the face. So a client that speaks HTTP rather than a
+/// browser gets the join, under exactly the capability the door computed for its request.
+///
+/// Three assertions, in the order an operator meets them:
+///
+/// 1. the ANONYMOUS loopback caller — `gonk.http.ledger`'s ledgers, and nothing else — is
+///    REFUSED, and the refusal names the browse graph's token. The browse token is never
+///    anonymous authority on this door;
+/// 2. a passkey identity enrolled with `--ledger default=read --browse-graph read` runs the
+///    join and gets the row;
+/// 3. ⚠ and the natural repeated spelling `graph=A&graph=B` comes back **200 with no rows**,
+///    because query parameters become named arguments one per name (ledger #387) — the
+///    engine's last-wins narrowing, reachable from a URL. Same value, one door further out.
+#[test]
+fn the_join_runs_through_the_http_door_under_a_signed_in_grant() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let chosen = browse::Graph::chosen();
+    let browse_graph = chosen
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+    let file = "urn:repo:demo:file:src/lib.rs";
+    text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "lib.rs needs a doc comment"), ("about", file)],
+    );
+    annotate(&hub, "n1", file, "first", "this line is the one");
+
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let query = format!(
+        "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+         PREFIX ik: <https://ikigai-rs.dev/ns#>
+         PREFIX oa: <http://www.w3.org/ns/oa#>
+         SELECT DISTINCT ?item ?file ?note WHERE {{
+           GRAPH <urn:iki:ledger:graph:default> {{ ?item ledger:about ?file }}
+           GRAPH <{browse_graph}> {{ ?a ik:annotates ?file ; oa:bodyValue ?note }}
+         }}"
+    );
+    // ONE `graph` parameter, the two IRIs separated by whitespace — the same wire shape the
+    // socket door takes, because it is the same resource behind both.
+    let path = format!(
+        "/iki/store/graph-select?graph={}&query={}",
+        urlencode(&format!("urn:iki:ledger:graph:default {browse_graph}")),
+        urlencode(&query)
+    );
+
+    // 1. Anonymous: the ledgers' tokens only.
+    let refused = door.get(&path, None);
+    assert_eq!(
+        refused.0, 403,
+        "an anonymous loopback caller holds `gonk.http.ledger`'s ledgers and NOT the browse \
+         graph — the join must be refused: {}",
+        refused.1
+    );
+    assert!(
+        refused
+            .1
+            .contains(&ikigai_store::cap_read_graph(&browse_graph)),
+        "…and the refusal names the token that is missing: {}",
+        refused.1
+    );
+
+    // 2. Signed in with both read tokens: the row.
+    let token = door.enrol_and_sign_in();
+    let (status, body) = door.get(&path, Some(&token));
+    assert_eq!(status, 200, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("SPARQL results JSON");
+    let rows = json["results"]["bindings"].as_array().expect("bindings");
+    assert_eq!(rows.len(), 1, "the ledger↔browse join, over HTTP: {body}");
+    assert_eq!(rows[0]["file"]["value"], file);
+    assert_eq!(rows[0]["note"]["value"], "this line is the one");
+
+    // 3. ⚠ The repeated form, which is what anyone writes first in a URL.
+    let repeated = format!(
+        "/iki/store/graph-select?graph={}&graph={}&query={}",
+        urlencode("urn:iki:ledger:graph:default"),
+        urlencode(&browse_graph),
+        urlencode(&query)
+    );
+    let (status, body) = door.get(&repeated, Some(&token));
+    assert_eq!(status, 200, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("SPARQL results JSON");
+    assert!(
+        json["results"]["bindings"]
+            .as_array()
+            .expect("bindings")
+            .is_empty(),
+        "`graph=A&graph=B` is one argument, last value wins: the join silently narrows to \
+         one graph and answers 200 with nothing (ledger #387) — {body}"
+    );
+}
+
+/// Percent-encode everything but the unreserved set, so a query parameter carries an IRI,
+/// a space and a newline unchanged.
+fn urlencode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// The REAL HTTP door over one hub: `doors::http_kernel` with gonk's pages in front,
+/// `doors::http_cap`'s per-request capability, and `doors::edge_config`'s route table — the
+/// three things `main` wires. Only the listener is a test's (an ephemeral loopback port).
+struct HttpDoorHarness {
+    addr: SocketAddr,
+    layout: quic::Layout,
+    _config: TempDir,
+}
+
+impl HttpDoorHarness {
+    fn start(hub: Arc<Kernel>) -> HttpDoorHarness {
+        let runtime = tokio::runtime::Runtime::new().expect("a tokio runtime");
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("a loopback listener");
+        let addr = listener.local_addr().expect("a local address");
+        let config = tempfile::tempdir().expect("a config home");
+        let layout = quic::Layout::in_config_home(config.path());
+        let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()));
+        let face = Arc::new(web::Web {
+            hub: Arc::clone(&hub),
+            ledgers: vec!["default".to_string()],
+            passkeys: Arc::clone(&passkeys),
+            rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        });
+        let http = Arc::new(doors::http_kernel(hub, web::space(face)));
+        // ★ The anonymous grant this server ships: the configured ledgers, read and write.
+        // It does NOT include the browse graph, which is the whole of assertion 1.
+        let cap = doors::http_cap(doors::HttpDoor {
+            anonymous: grants_for("default", Authority::Write).expect("the ledger's tokens"),
+            port: addr.port(),
+            passkeys: Some(passkeys),
+        });
+        std::thread::spawn(move || {
+            runtime.block_on(ikigai_web::serve_with_listener(
+                http,
+                cap,
+                listener,
+                doors::edge_config(),
+            ))
+        });
+        HttpDoorHarness {
+            addr,
+            layout,
+            _config: config,
+        }
+    }
+
+    fn origin(&self) -> String {
+        format!("http://localhost:{}", self.addr.port())
+    }
+
+    fn raw(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String) {
+        let mut stream = TcpStream::connect(self.addr).expect("connect");
+        let mut head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
+            self.addr.port()
+        );
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str(&format!(
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        ));
+        stream.write_all(head.as_bytes()).expect("write head");
+        stream.write_all(body.as_bytes()).expect("write body");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read");
+        let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line: {response}"));
+        (status, body.to_string())
+    }
+
+    /// A GET asking for the store's own result format, with an optional session cookie.
+    fn get(&self, path: &str, session: Option<&str>) -> (u16, String) {
+        let mut headers = vec![
+            ("Accept", "application/sparql-results+json".to_string()),
+            ("Sec-Fetch-Site", "none".to_string()),
+        ];
+        if let Some(session) = session {
+            headers.push(("Cookie", format!("{}={session}", identity::SESSION_COOKIE)));
+        }
+        self.raw("GET", path, &headers, "")
+    }
+
+    fn post_json(&self, path: &str, body: &str) -> (u16, String) {
+        self.raw(
+            "POST",
+            path,
+            &[
+                ("Accept", "application/json".to_string()),
+                ("Content-Type", "application/json".to_string()),
+                ("Origin", self.origin()),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+            ],
+            body,
+        )
+    }
+
+    fn challenge(&self, op: &str) -> String {
+        let (status, body) = self.post_json(&format!("/auth/{op}"), "{}");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("a challenge");
+        v["challenge"].as_str().expect("challenge").to_string()
+    }
+
+    /// Enrol an identity whose grant is `--ledger default=read --browse-graph read` — the two
+    /// halves `main`'s `scopes_for` composes — and sign in. Returns the session token.
+    fn enrol_and_sign_in(&self) -> String {
+        let mut scopes = grants_for("default", Authority::Read).expect("the ledger's tokens");
+        scopes.extend(browse_graph_grants(Authority::Read).expect("a named browse graph"));
+        let authenticator = common::Authenticator::new();
+        let invite = identity::invite(
+            &self.layout,
+            "reader",
+            &scopes,
+            false,
+            30,
+            identity::now_seconds(),
+        )
+        .expect("an invite");
+        let c = self.challenge("register-options");
+        let (status, body) = self.post_json(
+            "/auth/register",
+            &authenticator.register_body(&c, &invite, &self.origin()),
+        );
+        assert_eq!(status, 200, "{body}");
+        let c = self.challenge("login-options");
+        let (status, body) = self.post_json(
+            "/auth/login",
+            &authenticator.login_body(&c, &self.origin(), 1),
+        );
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("a session");
+        v["session"].as_str().expect("session").to_string()
+    }
 }

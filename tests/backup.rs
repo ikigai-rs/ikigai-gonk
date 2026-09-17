@@ -31,7 +31,7 @@ use ikigai_store::DurableStore;
 /// the code, and this one says out loud that it did not run.
 const STOPGAP: &str = "gonk-store-2026-09-16T172813Z.nq";
 
-const STORE_IDS: [&str; 12] = [
+const STORE_IDS: [&str; 13] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -41,6 +41,7 @@ const STORE_IDS: [&str; 12] = [
     "store-graph-construct",
     "store-graph-describe",
     "store-info",
+    "store-graphs",
     "store-update",
     "store-graph-update",
     "store-load",

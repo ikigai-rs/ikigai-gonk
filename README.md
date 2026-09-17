@@ -492,11 +492,36 @@ does not carry is the browse family: no file contents, no tree, no `gh`, no deri
 other graph. ⚠ And it is not given to the anonymous HTTP caller, whose grant stays exactly
 `gonk.http.ledger`'s ledgers — signing in is how the HTTP door spells "a caller who may".
 
-⚠ **The ledger↔browse join is still a root query**, and no grant fixes it:
-`urn:iki:store:graph-select` confines a query to ONE graph, so two graphs in one query cannot
-be expressed through the narrow door however many tokens the caller holds. Each half is now
-grantable; the join is not. That is `ikigai-store`'s scoped read face, not this server's
-composition.
+★ **And since `ikigai-store` 0.2.5 the two read tokens together RUN THE LEDGER↔BROWSE JOIN** —
+the query the graph decision was for, below root at last. A scoped read takes a SET of graphs:
+
+```
+ikigai-gonk client add box --ledger default=read --browse-graph read
+```
+
+```sparql
+# urn:iki:store:graph-select, graph="urn:iki:ledger:graph:default urn:iki:browse:graph:default"
+SELECT DISTINCT ?item ?file ?note WHERE {
+  GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?file }
+  GRAPH <urn:iki:browse:graph:default> { ?a ik:annotates ?file ; oa:bodyValue ?note }
+}
+```
+
+Three things about it are worth knowing before you write one, and each is a test here
+(`a_scoped_token_reads_browse_and_both_tokens_run_the_join`):
+
+- ⚠ **The set is ONE `graph` value, separated by whitespace.** `graph=A graph=B` is a repeated
+  named argument, and the engine keeps the LAST value silently — so the repeated spelling asks
+  for one graph and the join comes back empty with nothing said. That is upstream of this
+  server (and of the store), and it is pinned here so a fix shows up as a red test.
+- **A graph you hold no token for refuses the WHOLE read**, naming every missing
+  `urn:cap:store:read:graph:` token — never an answer computed over the half you do hold.
+- **The join is UNCACHED, and the ledger's own scoped read is not.** A multi-graph read is
+  covered only if every member is, and browse's graph is written by the sharer. So the join is
+  a fresh query every time by construction; the ~1000× on the ledger's hot read is untouched.
+
+⚠ **`SELECT DISTINCT`** wherever a triple could be in both graphs: oxigraph's merged default
+graph is a bag, so a triple present in two members matches once per member.
 
 Three things make that table true rather than aspirational. `ikigai-gonk grants` mints
 per-ledger and per-graph tokens only, so nothing this server writes into a grant names browse
@@ -776,7 +801,7 @@ What it is NOT narrower in: reaching the peer at all is a capability question no
 line the explanation families are not bound either, because an action no kernel in this
 process can satisfy is an over-offer.
 
-`tests/conformance.rs` pins the socket and QUIC catalog to the store's twelve resources and the
+`tests/conformance.rs` pins the socket and QUIC catalog to the store's thirteen resources and the
 ledger's fourteen, pins the HTTP door's to those plus its ten pages, and walks
 `ikigai-conformance` over the hub, a door, and the HTTP door. `tests/browse.rs` pins the
 browse composition's twenty more, in the hub and through a door, pins the five the mount adds
@@ -993,18 +1018,20 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   connection; the certificate set is read at startup.
 - **One trace per door.** A traced call through a door records the forward, not the hub's
   resolution beneath it.
-- **No ledger↔browse join below root — and no grant fixes it.** Both halves are now grantable
-  (browse's quads are in a named graph since 2026-09-16), but `urn:iki:store:graph-select`
-  confines a query to ONE graph: `ikigai-store`'s `confine` sets the prepared query's whole
-  dataset specification to the graph it was issued for, so a two-graph join is not expressible
-  through the narrow door however many per-graph tokens the caller holds, and `GRAPH <other>`
-  matches nothing rather than erroring. The join stays `urn:iki:store:select`, which is root.
-  What would change it is a scoped read face that takes several graphs and confines to exactly
-  the set the caller holds tokens for — `ikigai-store`'s, not this server's.
-- **No browse graph on the `/sparql` page.** The editor scopes to a LEDGER (its box picks a
-  ledger name, and the query runs against that ledger's graph), so `urn:iki:browse:graph:default`
-  is not reachable from the page even by an identity holding its token. A graph selector rather
-  than a ledger selector is what that would take.
+- **No browse graph on the `/sparql` page — the join is reachable, the EDITOR is not where.**
+  Since `ikigai-store` 0.2.5 a scoped read takes a set of graphs, so an identity holding both
+  read tokens runs the ledger↔browse join through the socket door, the QUIC door and the HTTP
+  door — over HTTP as the store's own resource under `ikigai-web`'s mechanical path mapping
+  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…`, which
+  `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). What is
+  not built is the join from the PAGE: the editor's box picks a LEDGER and the query runs
+  against that ledger's graph alone, so `urn:iki:browse:graph:default` is invisible there
+  whatever tokens the caller holds. A graph selector rather than a ledger selector is what
+  that would take, and it is its own decision — the page would have to offer the graphs a
+  capability can read (`urn:iki:store:graphs` answers exactly that) rather than the ledgers.
+- **No refusal for a graph outside the set.** `GRAPH <other>` inside a scoped read matches
+  nothing rather than erroring, so a query naming a graph the `graph=` argument left out is
+  answered, emptily. `ikigai-store` reports it; nothing here can see it.
 - **No archived explanation without a net grant.** `urn:repo:{root}:explain` is ONE action
   whether it derives or serves an entry the archive already holds, so the `urn:cap:net:*` it
   declares is required either way. `version=` provably derives nothing (`ikigai-browse`
