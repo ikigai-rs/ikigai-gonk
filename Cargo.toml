@@ -124,18 +124,24 @@ ikigai-repo = "0.1.6"
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
 # existed; it is a PRODUCTION dependency now, and the same pin serves both.
-# 0.1.22 for the resolve floor the transports below share — raised from 0.1.18 by
-# `ikigai-time`, which requires `^0.1.22`. The pin states the minimum that COMPILES
-# with everything else here, so it moves when a sibling moves it; leaving it at
-# 0.1.18 would have been a floor this workspace can never resolve.
-ikigai-resolve = "0.1.22"
+# The resolve floor the transports below share. It has been raised twice for reasons worth
+# keeping: 0.1.18 -> 0.1.22 by `ikigai-time`, which requires `^0.1.22`; 0.1.22 -> 0.1.24
+# because ipc and quic below need 0.1.24, and all three ship from one workspace on a single
+# shared version — so a lower pin here is a floor this build can never resolve. The pin
+# states the minimum that COMPILES with everything else here, and it moves when a sibling
+# moves it.
+ikigai-resolve = "0.1.24"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
 # the `canonical` field core 0.1.60 added).
 # ⚠ Both halves of this crate are linked and both are now USED: `serve` is the door, and
 # `connect` is what a `gonk.mount` line pointed at a socket dials.
-ikigai-ipc = "0.1.18"
+# ★ 0.1.24 is the floor for a REASON THIS BINARY NEEDS: a mount's self-description is
+# bounded (`describe.timeout`, ikigai-cli #342, ledger #404). Before it, an enumeration of
+# a peer that accepts and never answers blocks forever, and gonk is the peer that does
+# exactly that to everyone else — it federates its LLM mount inside its own `entries()`.
+ikigai-ipc = "0.1.24"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -145,7 +151,11 @@ ikigai-ipc = "0.1.18"
 # what is new in 0.1.1 is that this binary now DIALS. See `crate::mount` for the consequence
 # that is not obvious: the client resolver owns a tokio runtime, and both wire doors dispatch
 # from inside one, so every mounted call runs on a thread of its own or panics the worker.
-ikigai-quic = "0.1.18"
+# ★ 0.1.24 is what makes THIS SERVER answer an enumeration. gonk blocks in
+# `QuicResolver::entries` against its `gonk.mount` LLM peer, so a caller enumerating gonk
+# waits on a hop gonk itself never bounds — measured unanswered past 240s (ledger #404).
+# The bound is per call and shared with ipc as `describe.timeout` in the config home.
+ikigai-quic = "0.1.24"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 ikigai-web = "0.1.16"
