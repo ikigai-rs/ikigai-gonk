@@ -592,12 +592,15 @@ log mutate under the copy, and the result may not open, or may open and be quiet
 Backup is therefore a face this server offers, not an ops script someone runs beside it.
 
 ```
-ikigai -c 'source urn:iki:gonk:backup'           # take one now
-ikigai -c 'source urn:iki:gonk:backup:status'    # when the last good one was
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup'           # take one now
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup:status'    # when the last good one was
 ```
 
-Both need the owner-only socket (see below). By default a backup is taken **every 24 hours**,
-compressed, and the **last five** are kept in `~/.ikigai/backups`.
+⚠ **`--connect` is part of the command, not decoration.** The backup family is bound behind
+the owner-only socket and is not one of the prefixes a `mount` line in the config home claims
+(`urn:iki:store:` and `urn:iki:ledger:` are), so a bare `ikigai -c 'source
+urn:iki:gonk:backup'` does not reach this server. By default a backup is taken **every 24
+hours**, compressed, and the **last five** are kept in `~/.ikigai/backups`.
 
 ### The format is N-Quads, and the easy mistake is Turtle
 
@@ -629,8 +632,9 @@ builds a **new** store directory, and refuses a target that is not empty — or 
 live store, by name.
 
 ```
-ikigai -c 'source urn:iki:gonk:backup:archive:gonk-store-2026-09-16T172813Z.nq.gz \
-           | sink urn:iki:gonk:restore into=/tmp/restored'
+ikigai --connect ~/.ikigai/gonk.sock -c \
+  'source urn:iki:gonk:backup:archive:gonk-store-2026-09-16T172813Z.nq.gz \
+   | sink urn:iki:gonk:restore into=/tmp/restored'
 ```
 
 That leaves a complete dataset beside the live one and tells you the graph set and the
@@ -878,8 +882,8 @@ cargo install ikigai-browse --version 0.4.0 --locked --features migrate --bin mi
 
 # 2. a backup, taken through the running server — it is the only thing that can export the
 #    dataset, and `--commit` in step 5 cannot be undone by restarting
-ikigai -c 'source urn:iki:gonk:backup'
-ikigai -c 'source urn:iki:gonk:backup:status'      # confirm it succeeded before going on
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup'
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup:status'   # confirm it succeeded
 
 # 3. what is there now, read-only, through the socket — no lock taken
 ikigai --connect ~/.ikigai/gonk.sock -c \
