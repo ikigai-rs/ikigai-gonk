@@ -5,6 +5,11 @@
 //! token for that ledger's named graph, because a sub-request carries the caller's
 //! capability unchanged. [`grants_for`] is the whole list.
 //!
+//! ★ Since 2026-09-16 there is a second subject: **the browse graph**
+//! ([`browse_graph_grants`]). It is the same shape — a per-graph store token — and it exists
+//! at all only because [`crate::browse::Graph::chosen`] named a graph; the default graph has
+//! no IRI, so browse's quads used to sit outside this file's reach entirely.
+//!
 //! ⚠ **The broad store tokens are refused everywhere in this server.** `urn:cap:store:read`
 //! is every graph in the dataset and `urn:cap:store:write` is `DROP ALL`; a grant naming
 //! either would make the per-ledger boundary decorative. They are also useless here —
@@ -84,6 +89,65 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
         return Ok(grants);
     }
     grants.push(ledger.cap_purge());
+    Ok(grants)
+}
+
+/// ★ **Obligation 2 of the graph decision: the browse graph's tokens, computed from the
+/// choice.**
+///
+/// Before 2026-09-16 browse's quads were in the DEFAULT graph, which has no IRI — so there
+/// was no token to compute, no grant an operator could write, and every query over an
+/// annotation or an archived explanation was a ROOT one. [`crate::browse::Graph::chosen`]
+/// named a graph, and these are the two tokens that names buys:
+///
+/// ```
+/// use ikigai_gonk::grants::{browse_graph_grants, Authority};
+/// assert_eq!(
+///     browse_graph_grants(Authority::Write).unwrap(),
+///     [
+///         "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+///         "urn:cap:store:write:graph:urn:iki:browse:graph:default",
+///     ]
+/// );
+/// ```
+///
+/// # What they are, and what they are not
+///
+/// They are authority over **quads in one graph**, through
+/// `urn:iki:store:graph-{select,ask,construct,describe}` and `urn:iki:store:graph-update`.
+/// Read gets every annotation, every archived explanation and every review finding as data —
+/// *the archive without the spend*, which no grant could express while the data sat in the
+/// default graph. Write lets an identity mint or edit those quads directly.
+///
+/// They are **not** the browse family: `urn:cap:browse:read:*` (file contents, trees, the
+/// PR rows), `urn:cap:annotate` (the annotation endpoints) and `urn:cap:net:*` (deriving)
+/// are separate, and this function mints none of them. An identity holding only these two
+/// can read browse's graph and cannot read a file.
+///
+/// ⚠ **Delete and Purge are the ledger's vocabulary, not this one.** A ledger's Delete needs
+/// a second graph (its graveyard) and Purge is a ledger verb; browse has neither — deleting
+/// an annotation is an ordinary write in this one graph. So anything above [`Authority::Read`]
+/// is exactly read+write here, and it says so rather than refusing, because an operator
+/// spelling `--browse-graph delete` means "and may remove things".
+///
+/// # Errors
+///
+/// When this server's choice is the DEFAULT graph ([`crate::browse::Graph::TheDefault`]),
+/// which has no IRI for a token to name. The error is the explanation, because the operator
+/// asking has every reason to think a grant should exist.
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn browse_graph_grants(authority: Authority) -> Result<Vec<String>, String> {
+    let chosen = crate::browse::Graph::chosen();
+    let graph = chosen.named().ok_or_else(|| {
+        "this server writes browse's quads in the DEFAULT graph, which has no IRI — no \
+         `urn:cap:store:*:graph:` token can name it, so there is no grant to mint. See \
+         `browse::Graph`."
+            .to_string()
+    })?;
+    let mut grants = vec![ikigai_store::cap_read_graph(graph.as_str())];
+    if authority != Authority::Read {
+        grants.push(ikigai_store::cap_write_graph(graph.as_str()));
+    }
     Ok(grants)
 }
 
@@ -203,6 +267,50 @@ mod tests {
         assert!(broad_store_scopes(&grants).is_empty());
         let purge = grants_for("acme", Authority::Purge).unwrap();
         assert_eq!(purge.last().unwrap(), "urn:cap:ledger:purge:acme");
+    }
+
+    /// ★ The browse graph's tokens, as literals for the same reason the ledger's are: they
+    /// go into an operator's `grants.json`, and they are the FIRST spelling of "may read
+    /// browse's data" this server has ever been able to offer.
+    ///
+    /// ⚠ The token embeds the graph IRI, so changing `browse::Graph::chosen` invalidates
+    /// every grant already written — which is the other half of why that IRI is pinned by a
+    /// test in `browse.rs`. A store migration and a grant rewrite, not one of them.
+    #[test]
+    fn the_browse_graphs_tokens_are_the_choices_two_store_doors() {
+        assert_eq!(
+            browse_graph_grants(Authority::Read).unwrap(),
+            ["urn:cap:store:read:graph:urn:iki:browse:graph:default"]
+        );
+        let write = browse_graph_grants(Authority::Write).unwrap();
+        assert_eq!(
+            write,
+            [
+                "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+                "urn:cap:store:write:graph:urn:iki:browse:graph:default",
+            ]
+        );
+        // Nothing broad, and nothing that widens what the identity may RUN: these are data
+        // tokens, and a reader of grants.json should be able to see that at a glance.
+        assert!(broad_store_scopes(&write).is_empty());
+        assert!(unbounded_net_scopes(&write).is_empty());
+        assert!(unbounded_exec_scopes(&write).is_empty());
+        assert!(gonk_admin_scopes(&write).is_empty());
+        // Delete and Purge are the ledger's words; here they are write.
+        assert_eq!(browse_graph_grants(Authority::Delete).unwrap(), write);
+        assert_eq!(browse_graph_grants(Authority::Purge).unwrap(), write);
+    }
+
+    /// ★ The token names the graph the server actually writes — derived, not transcribed.
+    /// A test that spelled the IRI itself would pass on a server that had moved.
+    #[test]
+    fn the_browse_token_names_the_graph_this_server_chose() {
+        let chosen = crate::browse::Graph::chosen();
+        let graph = chosen.named().expect("this server names a browse graph");
+        assert_eq!(
+            browse_graph_grants(Authority::Read).unwrap(),
+            [ikigai_store::cap_read_graph(graph.as_str())]
+        );
     }
 
     #[test]

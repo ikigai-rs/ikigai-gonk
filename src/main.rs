@@ -23,7 +23,11 @@ fn main() {
     match command {
         Command::Help => print!("{}", config::USAGE),
         Command::Grants { ledger, authority } => {
-            let tokens = grants::grants_for(&ledger, authority).unwrap_or_else(|e| fail(&e));
+            let tokens = match &ledger {
+                Some(ledger) => grants::grants_for(ledger, authority),
+                None => grants::browse_graph_grants(authority),
+            }
+            .unwrap_or_else(|e| fail(&e));
             println!(
                 "{}",
                 serde_json::to_string_pretty(&tokens).expect("strings serialize")
@@ -33,15 +37,17 @@ fn main() {
             name,
             cert,
             ledgers,
+            browse_graph,
             force,
-        } => client_add(&name, cert.as_deref(), &ledgers, force),
+        } => client_add(&name, cert.as_deref(), &ledgers, browse_graph, force),
         Command::PasskeyInvite {
             name,
             ledgers,
+            browse_graph,
             force,
             minutes,
             flags,
-        } => passkey_invite(&name, &ledgers, force, minutes, &flags),
+        } => passkey_invite(&name, &ledgers, browse_graph, force, minutes, &flags),
         Command::Serve(flags) => serve(&flags),
     }
 }
@@ -132,6 +138,14 @@ fn serve(flags: &config::Flags) -> ! {
         ))
     });
     let explains = settings.explains();
+    // ★★ Obligation 1, checked before a single door opens. The choice above confines browse's
+    // reads to one graph; quads it wrote into another are still on disk and no longer visible
+    // to any of them, and NOTHING anywhere reports that — an empty annotation list and an
+    // empty archive are legitimate answers. So this server counts them and says so, in
+    // browse's own numbers.
+    if let Some(handle) = handle.as_deref() {
+        warn_unmigrated(handle, &browse_graph, &store_path);
+    }
     let browse = handle.map(|handle| {
         browse::wire(
             settings.browse_roots.clone(),
@@ -143,7 +157,7 @@ fn serve(flags: &config::Flags) -> ! {
             &browse_graph,
         )
     });
-    let browse_line = browse_line(&settings.browse_roots, root_watch.watched());
+    let browse_line = browse_line(&settings.browse_roots, root_watch.watched(), &browse_graph);
     let (browse_space, style) = match browse {
         Some(wired) => (
             Some(Arc::new(wired.space) as Arc<dyn ikigai_core::Space>),
@@ -388,10 +402,86 @@ fn humanize(duration: std::time::Duration) -> String {
     }
 }
 
-/// The banner's browse line: which roots are served, and which of them are watched — because
+/// ★ **Say, loudly, when this binary's graph choice and the store's contents disagree.**
+///
+/// The failure this exists for is the quietest one in the server: a gonk that names a graph,
+/// run against a store whose browse quads are in another one, serves an EMPTY archive and an
+/// EMPTY annotation list, with no error at any layer. Nothing else in the process can tell —
+/// the reads succeed.
+///
+/// ⚠ It warns rather than refusing to start, and that is a judgement worth stating: the
+/// ledger, the doors and the backup are unaffected by this condition, and turning a
+/// browse-only data problem into a total outage would be the wrong trade for a server whose
+/// job is holding the ledger. The operator sequence in the README puts the migration where it
+/// belongs — with the server stopped, between two runs.
+///
+/// A failure to COUNT (an unreadable store) is reported the same way and is not fatal either:
+/// this is a check, and a check that can stop the server is a new way to fail.
+fn warn_unmigrated(
+    store: &ikigai_store::Store,
+    graph: &browse::Graph,
+    store_path: &std::path::Path,
+) {
+    match browse::unmigrated_quads(store, graph) {
+        Ok(0) => {}
+        Ok(stranded) => eprint!("{}", unmigrated_warning(stranded, graph, store_path)),
+        Err(e) => eprintln!("ikigai-gonk: could not check where browse's quads are: {e}"),
+    }
+}
+
+/// The text [`warn_unmigrated`] prints — separate so a test can read it, because **the
+/// commands in it are the operator's only lifeline out of this condition** and a wrong one
+/// would be found at the worst moment.
+///
+/// ⚠ Every IRI here is `as_str()`. `NamedNode`'s `Display` brackets it, so `{iri}` inside
+/// `<…>` writes `<<urn:…>>` and `--graph {iri}` hands the migration tool an argument it
+/// refuses as "not an IRI". That is not hypothetical: it was written that way first, and
+/// `the_migration_warning_names_a_command_that_would_run` is why it did not ship.
+fn unmigrated_warning(
+    stranded: u64,
+    graph: &browse::Graph,
+    store_path: &std::path::Path,
+) -> String {
+    let Some(iri) = graph.named().map(oxigraph::model::NamedNode::as_str) else {
+        // The default-graph arm: browse's quads are stranded in some NAMED graph, which only
+        // a rollback produces. Say it without naming a migration command that cannot express
+        // the reverse move.
+        return format!(
+            "ikigai-gonk: ⚠ {stranded} quad(s) ikigai-browse wrote are in a NAMED graph, and \
+             this binary reads the default one — the archive and every annotation will read \
+             EMPTY. This is a binary rolled back past a graph migration; roll it forward \
+             again, or migrate the data back.\n"
+        );
+    };
+    let store = store_path.display();
+    format!(
+        "ikigai-gonk: ⚠⚠ THE BROWSE ARCHIVE IS INVISIBLE — {stranded} quad(s) are outside \
+         <{iri}>\n  \
+         This binary reads and writes browse's quads in that graph. The quads above are still \
+         on disk and are no longer visible to ANY browse read: no annotation, no archived \
+         explanation, no review finding, and no error anywhere. New writes land in <{iri}> \
+         and the two sets will not join.\n  \
+         Stop this server and migrate the store — it holds the RocksDB write lock, so nothing \
+         else can:\n    \
+         cargo install ikigai-browse --version 0.4.0 --locked --features migrate --bin \
+         migrate-annotation-ns\n    \
+         migrate-annotation-ns {store} --graph {iri}\n    \
+         migrate-annotation-ns {store} --graph {iri} --commit\n  \
+         The dry run (no --commit) reports this same count. ⚠ --commit is a one-shot \
+         destructive rewrite and restarting does not undo it: take a backup through this \
+         server first (`ikigai -c 'source urn:iki:gonk:backup'`), while it is still up.\n"
+    )
+}
+
+/// The banner's browse line: which roots are served, which of them are watched — because
 /// "watched" is exactly "its reads are cached", and an operator reading the banner should be
-/// able to tell those apart without reading this source.
-fn browse_line(roots: &[(String, std::path::PathBuf)], watched: &[Watched]) -> String {
+/// able to tell those apart without reading this source — and WHERE the family's quads land,
+/// which is the one line an operator needs before writing a SPARQL query or a grant.
+fn browse_line(
+    roots: &[(String, std::path::PathBuf)],
+    watched: &[Watched],
+    graph: &browse::Graph,
+) -> String {
     if roots.is_empty() {
         return "not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are \
                 not bound"
@@ -407,10 +497,13 @@ fn browse_line(roots: &[(String, std::path::PathBuf)], watched: &[Watched]) -> S
             }
         })
         .collect();
-    format!(
-        "urn:repo:{{{}}}:* — annotations in this dataset",
-        names.join(", ")
-    )
+    let where_they_land = match graph.named() {
+        Some(iri) => format!("annotations and archive in <{iri}>"),
+        None => "annotations and archive in this dataset's DEFAULT graph — no token can name \
+                 it, so every query over them is a root one"
+            .to_string(),
+    };
+    format!("urn:repo:{{{}}}:* — {where_they_land}", names.join(", "))
 }
 
 /// The banner's LLM line: where `urn:llm:*` resolves, whether the explanation families are
@@ -465,23 +558,43 @@ fn read_render_rules(layout: &quic::Layout) -> Result<Arc<str>, String> {
         .map(|_| turtle)
 }
 
+/// Every token an enrolment asks for: the ledgers' grants, plus — when `--browse-graph` was
+/// given — the browse graph's two store doors, in first-seen order.
+///
+/// ★ One function for both minting paths, because a grant that means different things on a
+/// certificate and on a passkey would be a difference nothing in this server could justify.
+/// Every name is checked here, before anything is written: a typo refused at mint time is a
+/// grant that never exists, and a typo written is a silent denial at first use.
+fn scopes_for(ledgers: &[(String, Authority)], browse_graph: Option<Authority>) -> Vec<String> {
+    let mut scopes: Vec<String> = Vec::new();
+    let mut add = |token: String| {
+        if !scopes.contains(&token) {
+            scopes.push(token);
+        }
+    };
+    for (ledger, authority) in ledgers {
+        for token in grants::grants_for(ledger, *authority).unwrap_or_else(|e| fail(&e)) {
+            add(token);
+        }
+    }
+    if let Some(authority) = browse_graph {
+        for token in grants::browse_graph_grants(authority).unwrap_or_else(|e| fail(&e)) {
+            add(token);
+        }
+    }
+    scopes
+}
+
 fn client_add(
     name: &str,
     cert: Option<&std::path::Path>,
     ledgers: &[(String, Authority)],
+    browse_graph: Option<Authority>,
     force: bool,
 ) {
     let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
-    // Every ledger name is checked before anything is written.
-    let mut scopes: Vec<String> = Vec::new();
-    for (ledger, authority) in ledgers {
-        for token in grants::grants_for(ledger, *authority).unwrap_or_else(|e| fail(&e)) {
-            if !scopes.contains(&token) {
-                scopes.push(token);
-            }
-        }
-    }
+    let scopes = scopes_for(ledgers, browse_graph);
     let bundle = quic::add_client(&layout, name, cert, force).unwrap_or_else(|e| fail(&e));
     println!("client `{name}`  {}", bundle.dir.display());
     println!("  fingerprint  {}", bundle.fingerprint);
@@ -518,6 +631,7 @@ fn client_add(
 fn passkey_invite(
     name: &str,
     ledgers: &[(String, Authority)],
+    browse_graph: Option<Authority>,
     force: bool,
     minutes: u64,
     flags: &config::Flags,
@@ -526,19 +640,13 @@ fn passkey_invite(
     let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     let settings = config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
-    if ledgers.is_empty() {
+    if ledgers.is_empty() && browse_graph.is_none() {
         fail(&format!(
-            "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`"
+            "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`, \
+             or `--browse-graph read` for the browse graph alone"
         ));
     }
-    let mut scopes: Vec<String> = Vec::new();
-    for (ledger, authority) in ledgers {
-        for token in grants::grants_for(ledger, *authority).unwrap_or_else(|e| fail(&e)) {
-            if !scopes.contains(&token) {
-                scopes.push(token);
-            }
-        }
-    }
+    let scopes = scopes_for(ledgers, browse_graph);
     // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
     // in would be a ceremony that changes nothing — and a grant that looked like it limited
     // someone would not.
@@ -584,4 +692,52 @@ fn passkey_invite(
 fn fail(message: &str) -> ! {
     eprintln!("ikigai-gonk: {message}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★ The one message in this server that is itself a procedure: an operator reading it has
+    /// an invisible archive and no other instructions. So the commands are checked — that they
+    /// name THIS store, THIS graph, and spell the IRI the way a shell would have to.
+    #[test]
+    fn the_migration_warning_names_a_command_that_would_run() {
+        let graph = browse::Graph::chosen();
+        let iri = graph.named().expect("a named graph").as_str().to_string();
+        let text = unmigrated_warning(10, &graph, std::path::Path::new("/tmp/store"));
+
+        assert!(text.contains("10 quad(s)"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "migrate-annotation-ns /tmp/store --graph {iri} --commit"
+            )),
+            "the command an operator will paste: {text}"
+        );
+        assert!(
+            text.contains(&format!("migrate-annotation-ns /tmp/store --graph {iri}\n")),
+            "the dry run comes first: {text}"
+        );
+        // ⚠ `NamedNode`'s Display brackets the IRI. A `{node}` anywhere in that message
+        // produces `<<urn:…>>` in the prose and `--graph <urn:…>` in the command, which the
+        // migration tool refuses as not an IRI.
+        assert!(
+            !text.contains("<<"),
+            "an IRI was printed through Display: {text}"
+        );
+        assert!(text.contains(&format!("--graph {iri}")), "{text}");
+        assert!(text.contains(&format!("<{iri}>")), "{text}");
+        // The irreversible half is never implicit.
+        assert!(text.contains("backup"), "{text}");
+        assert!(text.contains("restarting does not undo it"), "{text}");
+
+        // The rollback arm names no command, because none of these would perform it.
+        let back = unmigrated_warning(
+            10,
+            &browse::Graph::TheDefault,
+            std::path::Path::new("/tmp/store"),
+        );
+        assert!(!back.contains("migrate-annotation-ns"), "{back}");
+        assert!(back.contains("rolled back"), "{back}");
+    }
 }

@@ -91,16 +91,21 @@ ikigai-gonk — a standalone ikigai work-ledger server
 
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
-  ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--cert <client.crt>] [--force]
+  ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>] [--cert <client.crt>] [--force]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
                                    with --ledger enrol its fingerprint under a grant
-  ikigai-gonk passkey invite <name> --ledger <ledger>=<read|write|delete|purge>... [--minutes N] [--port N] [--config PATH] [--force]
+  ikigai-gonk passkey invite <name> --ledger <ledger>=<read|write|delete|purge>... [--browse-graph <read|write>] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrols a passkey under that grant
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
+  ikigai-gonk grants --browse-graph [read|write]
+                                   print the tokens for the BROWSE graph — SPARQL access to
+                                   annotations, archived explanations and review findings as
+                                   quads, through urn:iki:store:graph-*. Not the browse
+                                   endpoints: no file contents, no gh, and no deriving
 
 serve flags (each overrides its config key wholesale):
   --bind IP:PORT        the HTTP door (config `gonk.bind`); loopback only — default 127.0.0.1:1060
@@ -148,6 +153,8 @@ pub enum Command {
         cert: Option<PathBuf>,
         /// Ledgers and authorities to enrol the client under.
         ledgers: Vec<(String, Authority)>,
+        /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
+        browse_graph: Option<Authority>,
         /// Replace an existing bundle or enrolment.
         force: bool,
     },
@@ -157,6 +164,8 @@ pub enum Command {
         name: String,
         /// Ledgers and authorities the grant holds.
         ledgers: Vec<(String, Authority)>,
+        /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
+        browse_graph: Option<Authority>,
         /// Replace an existing grant of that name with different scopes.
         force: bool,
         /// How long the invite is valid.
@@ -164,10 +173,10 @@ pub enum Command {
         /// `--config` / `--port`, so the printed URL names the port the server serves on.
         flags: Flags,
     },
-    /// Print the tokens for one ledger.
+    /// Print the tokens for one ledger, or for the browse graph.
     Grants {
-        /// The ledger.
-        ledger: String,
+        /// The ledger — `None` for `--browse-graph`, whose subject is not a ledger.
+        ledger: Option<String>,
         /// The authority.
         authority: Authority,
     },
@@ -377,9 +386,19 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         }
         Some("grants") => {
             args.next();
-            let ledger = args
+            let subject = args
                 .next()
-                .ok_or("grants: expected <ledger> [read|write|delete|purge]")?;
+                .ok_or("grants: expected <ledger> [read|write|delete|purge], or --browse-graph")?;
+            // ★ A FLAG, not a reserved ledger name. `grants browse …` would have read
+            // better and would have been a trap: `browse` is a name `Ledger::parse`
+            // accepts, so a server with a ledger called that could never print its tokens.
+            let ledger = match subject.as_str() {
+                "--browse-graph" => None,
+                other if other.starts_with('-') => {
+                    return Err(format!("grants: unknown argument `{other}`"))
+                }
+                other => Some(other.to_string()),
+            };
             let authority = match args.next() {
                 Some(value) => value.parse()?,
                 None => Authority::Write,
@@ -434,7 +453,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         .next()
         .filter(|name| !name.starts_with('-'))
         .ok_or("client add: expected <name>")?;
-    let (mut cert, mut ledgers, mut force) = (None, Vec::new(), false);
+    let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
@@ -445,6 +464,9 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
                 })?;
                 ledgers.push((ledger.to_string(), authority.parse()?));
             }
+            "--browse-graph" => {
+                browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
+            }
             "--force" => force = true,
             other => return Err(format!("client add: unknown argument `{other}`")),
         }
@@ -453,6 +475,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         name,
         cert,
         ledgers,
+        browse_graph,
         force,
     })
 }
@@ -471,8 +494,9 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         .next()
         .filter(|name| !name.starts_with('-'))
         .ok_or("passkey invite: expected <name>")?;
-    let (mut ledgers, mut force, mut minutes, mut flags) = (
+    let (mut ledgers, mut browse_graph, mut force, mut minutes, mut flags) = (
         Vec::new(),
+        None,
         false,
         crate::identity::INVITE_MINUTES,
         Flags::default(),
@@ -485,6 +509,9 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                     format!("--ledger: expected <ledger>=<read|write|delete|purge>, got `{spec}`")
                 })?;
                 ledgers.push((ledger.to_string(), authority.parse()?));
+            }
+            "--browse-graph" => {
+                browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
             }
             "--force" => force = true,
             "--minutes" => {
@@ -509,6 +536,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
     Ok(Command::PasskeyInvite {
         name,
         ledgers,
+        browse_graph,
         force,
         minutes,
         flags,
@@ -1173,6 +1201,7 @@ mod tests {
             Command::ClientAdd {
                 name,
                 ledgers,
+                browse_graph,
                 cert,
                 force,
             } => {
@@ -1184,7 +1213,7 @@ mod tests {
                         ("acme".to_string(), Authority::Read)
                     ]
                 );
-                assert!(cert.is_none() && !force);
+                assert!(cert.is_none() && !force && browse_graph.is_none());
             }
             other => panic!("{other:?}"),
         }
@@ -1201,5 +1230,62 @@ mod tests {
         ));
         assert!(parse_args(args("client add laptop --ledger default=admin")).is_err());
         assert!(parse_args(args("--bogus")).is_err());
+    }
+
+    /// ★ The browse graph is a SUBJECT of a grant, not a ledger — every spelling, because
+    /// the tokens it mints are the point of the graph decision and an operator who cannot
+    /// spell the command holds none of them.
+    #[test]
+    fn the_browse_graph_is_grantable_on_every_minting_path() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        match parse_args(args("grants --browse-graph read")).unwrap() {
+            Command::Grants { ledger, authority } => {
+                assert_eq!(ledger, None, "its subject is not a ledger name");
+                assert_eq!(authority, Authority::Read);
+            }
+            other => panic!("{other:?}"),
+        }
+        // The authority is optional here exactly as it is for a ledger.
+        assert!(matches!(
+            parse_args(args("grants --browse-graph")).unwrap(),
+            Command::Grants {
+                ledger: None,
+                authority: Authority::Write
+            }
+        ));
+        match parse_args(args("client add laptop --browse-graph read")).unwrap() {
+            Command::ClientAdd {
+                ledgers,
+                browse_graph,
+                ..
+            } => {
+                assert!(ledgers.is_empty());
+                assert_eq!(browse_graph, Some(Authority::Read));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(args(
+            "passkey invite reader --ledger default=read --browse-graph read",
+        ))
+        .unwrap()
+        {
+            Command::PasskeyInvite {
+                ledgers,
+                browse_graph,
+                ..
+            } => {
+                assert_eq!(ledgers, [("default".to_string(), Authority::Read)]);
+                assert_eq!(browse_graph, Some(Authority::Read));
+            }
+            other => panic!("{other:?}"),
+        }
+        // ⚠ `browse` is a name `Ledger::parse` accepts, so the subject had to be a flag: this
+        // asserts the ledger spelling still means a LEDGER called browse.
+        assert!(matches!(
+            parse_args(args("grants browse read")).unwrap(),
+            Command::Grants { ledger: Some(name), .. } if name == "browse"
+        ));
+        assert!(parse_args(args("grants --browse read")).is_err(), "a typo");
+        assert!(parse_args(args("client add x --browse-graph nonsense")).is_err());
     }
 }

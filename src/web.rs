@@ -934,8 +934,14 @@ pub const SAMPLES: [(&str, &str, &str); 9] = [
         // `urn:cap:ledger:read:{name}` and `urn:cap:store:read:graph:<iri>` — and nothing
         // else on this page shows that, because every other sample leans on the graph the
         // editor already scopes to. Measured 2026-09-16: `urn:iki:ledger:graph:default`
-        // holds every quad and the default graph proper holds none, so naming the graph is
-        // how a query says which ledger it is about, even while there is one.
+        // holds every ledger quad, so naming the graph is how a query says which ledger it
+        // is about, even while there is one.
+        //
+        // ⚠ browse's quads are NOT reachable from this page. They live in
+        // `urn:iki:browse:graph:default` (`crate::browse::Graph`), and this editor scopes to
+        // a LEDGER — the box above picks a ledger name, not a graph — so an annotation or an
+        // archived explanation is invisible here whatever token the caller holds. A graph
+        // selector rather than a ledger selector is what that would take.
         //
         // ⚠ `GRAPH <other>` matches NOTHING rather than erroring (ikigai-store confines the
         // query's available named graphs to the one it was issued for), so editing this to
