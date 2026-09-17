@@ -1019,9 +1019,10 @@ A `launchd` agent needs only the binary; everything else comes from the config h
 - **One trace per door.** A traced call through a door records the forward, not the hub's
   resolution beneath it.
 - **No browse graph on the `/sparql` page — the join is reachable, the EDITOR is not where.**
-  Since `ikigai-store` 0.2.5 a scoped read takes a set of graphs, so an identity holding both
-  read tokens runs the ledger↔browse join through the socket door, the QUIC door and the HTTP
-  door — over HTTP as the store's own resource under `ikigai-web`'s mechanical path mapping
+  Since `ikigai-store` 0.2.5 a scoped read takes a set of graphs, so the join runs through
+  every door: the socket door's owner holds root, and a QUIC certificate or a passkey identity
+  whose grant carries both read tokens runs it with no root anywhere — over HTTP as the
+  store's own resource under `ikigai-web`'s mechanical path mapping
   (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…`, which
   `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). What is
   not built is the join from the PAGE: the editor's box picks a LEDGER and the query runs
