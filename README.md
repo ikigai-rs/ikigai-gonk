@@ -1153,9 +1153,13 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   Since `ikigai-store` 0.2.5 a scoped read takes a set of graphs, so the join runs through
   every door: the socket door's owner holds root, and a QUIC certificate or a passkey identity
   whose grant carries both read tokens runs it with no root anywhere — over HTTP as the
-  store's own resource under `ikigai-web`'s mechanical path mapping
-  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…`, which
-  `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). What is
+  store's own resource under **this server's** mechanical path mapping
+  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…` on port 1060, which
+  `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). ⚠ An
+  earlier revision credited that path to `ikigai-web`. It is gonk's own door's mapping;
+  `ikigai-web` writes the whole IRI in the path instead (`GET
+  /urn:iki:store:graph-select?graph=…`, over a `mount = "prefer urn:iki:store:=…gonk.sock"`
+  line), and mixing the two spellings earns a 404 that reads like a missing resource. What is
   not built is the join from the PAGE: the editor's box picks a LEDGER and the query runs
   against that ledger's graph alone, so `urn:iki:browse:graph:default` is invisible there
   whatever tokens the caller holds. A graph selector rather than a ledger selector is what
