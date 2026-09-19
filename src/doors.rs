@@ -316,7 +316,15 @@ fn session_token(request: &HttpRequest) -> Option<String> {
 /// every other path takes the mechanical mapping (`POST /iki/ledger/append` → `Sink
 /// urn:iki:ledger:append`), exactly as before. The default CSP — `default-src 'self'`, no
 /// framing, forms to self — needs no loosening: there is no inline script or style anywhere
-/// in the face, and htmx is served from this origin.
+/// in the face, and htmx is served from this origin. That holds for the browse family's
+/// faces too: `ikigai-browse` asserts in its own tests that it emits no `style=` attribute,
+/// and its affordances are htmx attributes rather than script.
+///
+/// The last two rows are the browse door ([`crate::k`]): `/k` for the adapter every browse
+/// affordance targets, and `/browse/…` for the page they render inside. Neither takes a
+/// per-route `cap`, deliberately — a route ceiling would REPLACE the per-request capability
+/// [`http_cap`] computes, and with it the `Host` and cross-site checks that make a POST to
+/// `/k` safe on a machine with a browser open.
 pub fn edge_config() -> EdgeConfig {
     let route = |pattern: &str, iri_template: &str| Route {
         pattern: pattern.to_string(),
@@ -326,26 +334,67 @@ pub fn edge_config() -> EdgeConfig {
         csp: None,
     };
     EdgeConfig {
-        routes: RouteTable::new(vec![
-            route("/", "urn:iki:gonk:page:home"),
-            route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
-            route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
-            route(
-                "/l/{ledger}/item/{id}",
-                "urn:iki:gonk:page:item:{ledger}:{id}",
-            ),
-            route(
-                "/l/{ledger}/item/{id}/card",
-                "urn:iki:gonk:fragment:item:{ledger}:{id}",
-            ),
-            route("/act", "urn:iki:gonk:act"),
-            route("/sparql", "urn:iki:gonk:sparql"),
-            route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
-            route("/render-rules", "urn:iki:gonk:render-rules"),
-            route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
-            route("/static/{name}", "urn:iki:gonk:asset:{name}"),
-        ]),
+        routes: RouteTable::new(
+            vec![
+                route("/", "urn:iki:gonk:page:home"),
+                route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
+                route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
+                route(
+                    "/l/{ledger}/item/{id}",
+                    "urn:iki:gonk:page:item:{ledger}:{id}",
+                ),
+                route(
+                    "/l/{ledger}/item/{id}/card",
+                    "urn:iki:gonk:fragment:item:{ledger}:{id}",
+                ),
+                route("/act", "urn:iki:gonk:act"),
+                route("/sparql", "urn:iki:gonk:sparql"),
+                route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
+                route("/render-rules", "urn:iki:gonk:render-rules"),
+                route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
+                route("/static/{name}", "urn:iki:gonk:asset:{name}"),
+                route("/k", crate::k::K_IRI),
+            ]
+            .into_iter()
+            .chain(browse_routes())
+            .collect(),
+        ),
         routes_only: false,
         ..EdgeConfig::default()
     }
+}
+
+/// How many path segments a `/browse/` URL may carry — see `browse_routes` below.
+pub const BROWSE_DEPTH: usize = 16;
+
+/// `/browse/{iri}` → `urn:iki:gonk:page:browse:{iri}`, enumerated once per path DEPTH.
+///
+/// ⚠ **A route pattern's `{var}` captures exactly ONE path segment**, and the browse family's
+/// file IRIs carry slashes (`urn:repo:ikigai-core:file:crates/ikigai-vocab/src/lib.rs`), so
+/// a single route cannot match them and `ikigai-web`'s table has no trailing-segment
+/// capture. The arity is therefore written out — `{p1}`, `{p1}/{p2}`, … — and the IRI
+/// template rejoins the captures with `/`, which is lossless: an IRI has no spaces, so
+/// unlike the `/k/` command (which is why [`crate::k`] carries its command as an argument)
+/// it survives the trip through a decoded path.
+///
+/// Past [`BROWSE_DEPTH`] no route matches, the path takes the library's mechanical mapping
+/// and the answer is a 404 — the bound REFUSES rather than serving a truncated name. Sixteen
+/// against the four the deepest repository here needs; the ceiling is a report to the hub
+/// (the library wants a trailing-segment capture), not a number worth tuning.
+fn browse_routes() -> Vec<Route> {
+    (1..=BROWSE_DEPTH)
+        .map(|depth| {
+            let captures = (1..=depth)
+                .map(|n| format!("{{p{n}}}"))
+                .collect::<Vec<_>>()
+                .join("/");
+            Route {
+                pattern: format!("/browse/{captures}"),
+                iri_template: crate::k::BROWSE_PAGE_TEMPLATE.replace("{start}", &captures),
+                cap: None,
+                cors: None,
+                csp: None,
+            }
+        })
+        .collect()
 }

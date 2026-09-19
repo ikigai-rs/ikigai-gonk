@@ -1751,6 +1751,270 @@ fn the_join_runs_through_the_http_door_under_a_signed_in_grant() {
     );
 }
 
+// --------------------------------------------------------------- the browse door
+
+/// A grant that can actually browse: the ledger it lands on, the browse graph read AND
+/// write, the browse family's read floor, and the authority to annotate. Every one of these
+/// is a scope this server mints for NO anonymous caller — which is the whole design, and
+/// what the two refusal tests below are about.
+///
+/// ⚠ No `urn:cap:net:*` of any spelling, so nothing here can derive. That is not an omission
+/// in the fixture: gonk mints no net grant, and a test that granted one would be testing a
+/// server nobody runs.
+fn browsing_scopes() -> Vec<String> {
+    let mut scopes = grants_for("default", Authority::Read).expect("the ledger's tokens");
+    scopes.extend(browse_graph_grants(Authority::Write).expect("a named browse graph"));
+    scopes.push(ikigai_browse::CAP_WILDCARD.to_string());
+    scopes.push(ikigai_browse::CAP_ANNOTATE.to_string());
+    scopes
+}
+
+/// The command form this door speaks — `/k?c=<command>`, the command percent-encoded whole.
+fn k(command: &str) -> String {
+    format!("/k?c={}", urlencode(command))
+}
+
+/// ★ The door itself: the page, the adapter, and the affordances arriving UNCHANGED.
+///
+/// The last assertion is the one that matters most, and it is deliberately an assertion
+/// about `ikigai-browse`'s bytes rather than about gonk's: the face gonk serves still says
+/// `hx-get="/k/source …"`, in the path spelling, because nothing here rewrites what browse
+/// emits. Folding that path into this door's query form happens in the browser
+/// (`web/gonk.js`), which is why a face can grow a Review button — or any other — without a
+/// line changing here.
+#[test]
+fn the_browse_door_serves_the_faces_and_their_own_affordances() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+
+    // 1. The page: gonk's own chrome, and ONE region that loads the named face.
+    let (status, page) = door.get_html("/browse/urn:repo:demo:tree", Some(&token));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains("auth-login"),
+        "the browse page is a gonk page — same header, same sign-in control: {page}"
+    );
+    assert!(
+        page.contains(&urlencode("source urn:repo:demo:tree as=text/html")),
+        "…whose one region loads the start resource through the adapter: {page}"
+    );
+    assert!(
+        page.contains(&urlencode("source urn:repo:style")),
+        "…and links the browse family's own stylesheet, through the same adapter: {page}"
+    );
+
+    // 2. A file IRI carries SLASHES, so the page's path is several segments.
+    let (status, deep) = door.get_html("/browse/urn:repo:demo:file:src/lib.rs", Some(&token));
+    assert_eq!(status, 200, "{deep}");
+    assert!(
+        deep.contains(&urlencode(
+            "source urn:repo:demo:file:src/lib.rs as=text/html"
+        )),
+        "the start IRI keeps its slashes across the route: {deep}"
+    );
+
+    // 3. The face itself, through the adapter — and its affordances, verbatim.
+    let (status, face) = door.get_html(&k("source urn:repo:demo:tree as=text/html"), Some(&token));
+    assert_eq!(status, 200, "{face}");
+    assert!(
+        face.contains("hx-get=\"/k/source urn:repo:demo:file:README.md as=text/html\""),
+        "browse's own affordance, in browse's own path spelling, untouched: {face}"
+    );
+
+    let (status, file) = door.get_html(
+        &k("source urn:repo:demo:file:src/lib.rs as=text/html"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{file}");
+    assert!(file.contains("the first version"), "{file}");
+    assert!(
+        file.contains("hx-post=\"/k/sink urn:iki:annotation\""),
+        "the annotate affordance is browse's too: {file}"
+    );
+
+    // 4. ⚠ The depth ceiling REFUSES; it does not serve a truncated name.
+    let too_deep = format!("/browse/urn:repo:demo:file:{}", vec!["d"; 20].join("/"));
+    let (status, _) = door.get_html(&too_deep, Some(&token));
+    assert_eq!(
+        status, 404,
+        "past `doors::BROWSE_DEPTH` no route matches and the answer is a refusal"
+    );
+}
+
+/// ★★ **An anonymous caller cannot derive**, which is the whole economic boundary of this
+/// door: a click on Explain spends inference, and gonk mints no net grant for anybody, let
+/// alone for whoever reaches loopback.
+///
+/// The shell is still served — and says why it is empty, with the sign-in control on the
+/// page — because a 403 in plain text would take the only affordance that fixes it away.
+/// Enforcement is the kernel's, one hop in, on the row itself.
+#[test]
+fn an_anonymous_caller_cannot_derive_or_even_read_through_the_adapter() {
+    let dir = scratch_root();
+    // With a mount, so the explanation families are BOUND: a refusal that came from an
+    // unbound resource would prove nothing about the capability.
+    let (hub, _watch) = served_explaining(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+
+    let (status, page) = door.get_html("/browse/urn:repo:demo:tree", None);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        !page.contains("hx-get"),
+        "a page that cannot read the family must not OFFER to load it: {page}"
+    );
+    assert!(
+        page.contains("urn:cap:browse:read:"),
+        "…and must say which grant it is short of: {page}"
+    );
+
+    for command in [
+        "source urn:repo:demo:tree as=text/html",
+        "source urn:repo:demo:file:src/lib.rs as=text/html",
+        "source urn:repo:demo:explain:src/lib.rs as=text/html",
+        "source urn:repo:demo:explain as=text/html",
+    ] {
+        let (status, body) = door.get_html(&k(command), None);
+        assert_eq!(
+            status, 403,
+            "`{command}` must be refused anonymously: {body}"
+        );
+        assert!(
+            body.contains("urn:cap:"),
+            "…by a typed refusal naming the token: {body}"
+        );
+    }
+}
+
+/// ⚠⚠ The dangerous half of the port. `/k?c=sink …` is a POST that MINTS, and the first arc
+/// of this server let any web page POST to loopback 1060 — closed by computing an EMPTY
+/// capability for a foreign `Host` or a cross-site `Origin`. This adapter is inside that
+/// check, not around it, and the proof is that the same session cookie that mints from this
+/// origin writes nothing from another one.
+#[test]
+fn a_cross_site_post_cannot_annotate_through_the_adapter() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    let command = k("sink urn:iki:annotation");
+    let form = |note: &str| {
+        format!(
+            "target={}&exact={}&body={}",
+            urlencode("urn:repo:demo:file:src/lib.rs"),
+            urlencode("the first version"),
+            urlencode(note)
+        )
+    };
+    let listed = || {
+        text(
+            &hub,
+            Verb::Source,
+            "urn:repo:demo:annotations:src/lib.rs",
+            &[],
+        )
+    };
+
+    // 1. Same origin, signed in: the annotation is minted through browse's own Sink.
+    let (status, body) = door.post_form(&command, &form("a note from this page"), Some(&token));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        listed().contains("a note from this page"),
+        "the adapter's write is the family's own write: {}",
+        listed()
+    );
+
+    // 2. The SAME cookie, from somewhere else: nothing.
+    let (status, body) = door.post_form_from(
+        &command,
+        &form("a note from another site"),
+        Some(&token),
+        "https://evil.example",
+    );
+    assert_eq!(
+        status, 403,
+        "a cross-site write computes an EMPTY capability: {body}"
+    );
+    assert!(
+        !listed().contains("a note from another site"),
+        "…and nothing reached the store: {}",
+        listed()
+    );
+
+    // 3. A rebound `Host` is refused on every method, reads included.
+    let (status, body) = door.get_from_host(
+        &k("source urn:repo:demo:tree as=text/html"),
+        "gonk.evil.example",
+    );
+    assert_eq!(status, 403, "a foreign Host holds nothing: {body}");
+}
+
+/// ⚠ **The reason `web/gonk.js` folds the path spelling, as an assertion rather than a
+/// comment.** The affordance browse emits is `/k/source {iri} [k=v …]`, and at this door
+/// that is a `400` from the `ikigai-web` library — it percent-decodes the path and then
+/// rebuilds a target IRI from it, and a command has spaces in it. The query form is not.
+///
+/// So both halves are pinned here: the refusal that makes the fold necessary, and the fold
+/// itself travelling in the script this server actually serves. If the first assertion ever
+/// fails because the path form started working, the fold has become removable and someone
+/// should decide whether to remove it.
+#[test]
+fn the_path_spelling_is_refused_by_this_door_and_the_script_folds_it() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+
+    let (status, body) = door.get_html(
+        "/k/source%20urn:repo:demo:tree%20as=text/html",
+        Some(&token),
+    );
+    assert_eq!(
+        status, 400,
+        "the path spelling cannot be parsed back into a resource here: {body}"
+    );
+
+    let (status, face) = door.get_html(&k("source urn:repo:demo:tree as=text/html"), Some(&token));
+    assert_eq!(
+        status, 200,
+        "…and the query form is the one that works: {face}"
+    );
+
+    let (status, script) = door.get_html("/static/gonk.js", Some(&token));
+    assert_eq!(status, 200, "{script}");
+    assert!(
+        script.contains("/k?c=") && script.contains("htmx:configRequest"),
+        "the script this server serves is what folds one into the other: {script}"
+    );
+}
+
+/// The bound on the write surface: an adapter may not widen a door. `source` reaches
+/// whatever the caller's capability reaches — which is exactly what the direct route already
+/// reaches — but `sink` reaches the annotation family and nothing else, and a verb word that
+/// disagrees with the HTTP method is refused rather than reinterpreted.
+#[test]
+fn the_adapter_sinks_the_annotation_family_and_nothing_else() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+
+    let (status, body) = door.post_form(
+        &k("sink urn:iki:ledger:append"),
+        "content=filed%20through%20the%20browse%20door",
+        Some(&token),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("annotation family"), "{body}");
+
+    let (status, body) = door.get_html(&k("sink urn:iki:annotation"), Some(&token));
+    assert_eq!(status, 400, "a GET does not carry a sink: {body}");
+
+    let (status, body) = door.post_form(&k("source urn:repo:demo:tree"), "", Some(&token));
+    assert_eq!(status, 400, "a POST does not carry a source: {body}");
+}
+
 /// Percent-encode everything but the unreserved set, so a query parameter carries an IRI,
 /// a space and a newline unchanged.
 fn urlencode(text: &str) -> String {
@@ -1823,11 +2087,27 @@ impl HttpDoorHarness {
         headers: &[(&str, String)],
         body: &str,
     ) -> (u16, String) {
+        self.raw_to(
+            method,
+            path,
+            &format!("localhost:{}", self.addr.port()),
+            headers,
+            body,
+        )
+    }
+
+    /// [`raw`](Self::raw) with the `Host` header spelled out — what a DNS-rebinding attempt
+    /// looks like from this side of the socket.
+    fn raw_to(
+        &self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String) {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
-        let mut head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
-            self.addr.port()
-        );
+        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
         for (k, v) in headers {
             head.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -1860,6 +2140,66 @@ impl HttpDoorHarness {
         self.raw("GET", path, &headers, "")
     }
 
+    /// A GET the way a browser asks for a page — Chrome's `Accept`, so the face negotiated
+    /// is the one a person would be served.
+    fn get_html(&self, path: &str, session: Option<&str>) -> (u16, String) {
+        let mut headers = vec![
+            (
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string(),
+            ),
+            ("Sec-Fetch-Site", "same-origin".to_string()),
+        ];
+        if let Some(session) = session {
+            headers.push(("Cookie", format!("{}={session}", identity::SESSION_COOKIE)));
+        }
+        self.raw("GET", path, &headers, "")
+    }
+
+    /// The same read arriving under a `Host` this server does not answer to.
+    fn get_from_host(&self, path: &str, host: &str) -> (u16, String) {
+        self.raw_to(
+            "GET",
+            path,
+            host,
+            &[("Accept", "text/html".to_string())],
+            "",
+        )
+    }
+
+    /// What htmx posts: a form-encoded body, from this origin.
+    fn post_form(&self, path: &str, body: &str, session: Option<&str>) -> (u16, String) {
+        self.post_form_from(path, body, session, &self.origin())
+    }
+
+    /// …and the same post claiming another origin — a page on any site, in a browser on
+    /// this machine.
+    fn post_form_from(
+        &self,
+        path: &str,
+        body: &str,
+        session: Option<&str>,
+        origin: &str,
+    ) -> (u16, String) {
+        let cross = origin != self.origin();
+        let mut headers = vec![
+            ("Accept", "text/html".to_string()),
+            (
+                "Content-Type",
+                "application/x-www-form-urlencoded".to_string(),
+            ),
+            ("Origin", origin.to_string()),
+            (
+                "Sec-Fetch-Site",
+                if cross { "cross-site" } else { "same-origin" }.to_string(),
+            ),
+        ];
+        if let Some(session) = session {
+            headers.push(("Cookie", format!("{}={session}", identity::SESSION_COOKIE)));
+        }
+        self.raw("POST", path, &headers, body)
+    }
+
     fn post_json(&self, path: &str, body: &str) -> (u16, String) {
         self.raw(
             "POST",
@@ -1886,6 +2226,13 @@ impl HttpDoorHarness {
     fn enrol_and_sign_in(&self) -> String {
         let mut scopes = grants_for("default", Authority::Read).expect("the ledger's tokens");
         scopes.extend(browse_graph_grants(Authority::Read).expect("a named browse graph"));
+        self.enrol_and_sign_in_with(scopes)
+    }
+
+    /// The same ceremony under an arbitrary grant — what the browse door's tests need, since
+    /// reading a repository and annotating one are scopes this server mints for nobody by
+    /// default.
+    fn enrol_and_sign_in_with(&self, scopes: Vec<String>) -> String {
         let authenticator = common::Authenticator::new();
         let invite = identity::invite(
             &self.layout,

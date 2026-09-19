@@ -286,7 +286,9 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 11] = [
+const WEB_IDS: [&str; 13] = [
+    "gonk-k",
+    "gonk-browse-page",
     "gonk-page-home",
     "gonk-page-ledger",
     "gonk-fragment-items",
@@ -359,6 +361,57 @@ fn the_http_door_conforms() {
             "content",
             "_ledger=default&_action=append&_then=items&content=Filed+by+the+walk",
         ))
+        // ★ The `/k/` adapter, walked through a target this composition actually binds. Its
+        // command grammar is `ikigai-browse`'s, so a fixture is the only way the walk can
+        // resolve it at all — the IRI it reads is inside an argument, not in its own name.
+        //
+        // ⚠ Its SINK is left unprobed here, deliberately and with the reason the report asks
+        // for: the one family a sink may reach is `urn:iki:annotation`, which this
+        // composition does not bind (no browse root, by design — `the_http_door_adds_exactly
+        // _its_pages` pins that catalog). The AUTHORITY question it would answer — can a
+        // caller holding no grants mutate through an adapter that declares no `requires`? —
+        // is answered where the family IS bound and over real HTTP, by
+        // `tests/browse.rs::a_cross_site_post_cannot_annotate_through_the_adapter` (an empty
+        // capability writes nothing) and `…::the_adapter_sinks_the_annotation_family_and_
+        // nothing_else` (the surface it can reach at all).
+        .fixture(Fixture::new("gonk-k", Verb::Source).arg("c", "source urn:iki:ledger:items"))
+        // ★ Three waivers, and they are ONE fact about pass-through adapters rather than
+        // three excuses: this resource's capability floor, its faces and its cache validity
+        // all belong to whatever the command names, which is not known until the command is
+        // read. Reported to the hub, because `gonk-act`, a mount's forwarding endpoint and
+        // this are the same shape and the suite cannot currently tell any of them from an
+        // endpoint that enforces what it did not declare.
+        .opt_out_check(
+            "gonk-k",
+            Check::Enforced,
+            "a pass-through adapter enforces NOTHING of its own: the refusal the walk sees \
+             is the kernel refusing the TARGET's declared floor, one hop in, under the \
+             caller's own capability. Declaring a floor here would be a promise about every \
+             resource a command could name — and `gonk-act` can declare one only because \
+             every action it can reach shares it",
+        )
+        .opt_out_check(
+            "gonk-k",
+            Check::Outputs,
+            "its face is its target's face. `source urn:repo:…:file:… as=text/html` serves \
+             HTML and `source urn:iki:ledger:items` serves plain text, from ONE action, so \
+             any declared list would be a face list for resources this endpoint does not \
+             own. The sink is unprobed for a second reason: the one family it may reach \
+             (`urn:iki:annotation`) is not bound in this composition — see `tests/browse.rs`, \
+             where it is, and where an empty capability is shown to write nothing through it",
+        )
+        .opt_out_check(
+            "gonk-k",
+            Check::Cacheable,
+            "the same waiver as the five reads above, reached the other way: the adapter \
+             forwards the target's representation WHOLE — its bytes, its media type, its \
+             cache validity and its golden threads — so a cacheable read stays cacheable to \
+             the hub that caches it, and recomputes here because this door kernel stores \
+             nothing by design",
+        )
+        .fixture(
+            Fixture::new("gonk-browse-page", Verb::Source).binding("start", "urn:repo:demo:tree"),
+        )
         .fixture(Fixture::new("gonk-page-item", Verb::Source).binding("id", &a))
         .fixture(Fixture::new("gonk-fragment-item", Verb::Source).binding("id", &a))
         // The RDF faces of the SPARQL page answer a CONSTRUCT, so that is what it is walked

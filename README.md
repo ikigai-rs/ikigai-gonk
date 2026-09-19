@@ -177,6 +177,8 @@ run it (`web::CROSS_GRAPH`).
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
 | `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
+| `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
+| `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, or one annotation |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, and `tests/conformance.rs` pins both catalogs.
@@ -185,6 +187,63 @@ the ledger, as before, and `tests/conformance.rs` pins both catalogs.
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
 verb the target does not describe, and refuses any field that the verb's contract does not
 name. It runs under the caller's capability, so the ledger's checks decide.
+
+### Browsing a repository at this port
+
+```sh
+open http://127.0.0.1:1060/browse/urn:repo:ikigai-core:tree
+```
+
+The page is a gonk page — same header, same sign-in control — with one region that loads
+`ikigai-browse`'s own HTML face into it. **Everything after that first paint is the face's
+markup and the face's affordances**: crumbs, directory entries, file views, the annotate
+form, Explain and Explain With, and whatever a later `ikigai-browse` adds. gonk renders none
+of it and knows about none of it; it supplies the door and the identity.
+
+Those affordances are written `hx-get="/k/source {iri} [k=v …]"` and
+`hx-post="/k/sink urn:iki:annotation"` — a command, in the path. ⚠ **This door cannot parse
+that back into a resource**: it is the `ikigai-web` library, which percent-decodes the path
+and then rebuilds a target IRI from it, and a command has spaces in it, which no IRI may. So
+the command travels as one query value here —
+
+```sh
+curl 'http://127.0.0.1:1060/k?c=source%20urn:repo:ikigai-core:file:README.md%20as=text/html'
+```
+
+— and `web/gonk.js` folds the path spelling into that query form in the browser, on
+`htmx:configRequest`, in one line that knows about commands and nothing about buttons. (The
+standalone `ikigai-web` server parses the raw request-target itself, which is why the same
+affordances work there untouched.)
+
+**What a browser may do here is entirely its grant.** `/k` runs every request under the
+per-request capability above — so a cross-site `POST` mints nothing, a rebound `Host` reads
+nothing, and the anonymous loopback caller, which holds ledger tokens only, cannot read a
+repository at all, let alone spend inference on explaining one. A signed-in identity can do
+exactly what its grant names, and browsing needs four tokens beyond a ledger's:
+
+```text
+urn:cap:browse:read:*     read the repository at all (the wildcard browse declares)
+urn:cap:annotate          mint annotations — the human ones and a review's findings
+urn:cap:net:localhost     reach the mounted model, which is what deriving costs authority for
+urn:cap:store:{read,write}:graph:urn:iki:browse:graph:default    the archive those land in
+```
+
+⚠ **Only the last pair can be minted by this binary** (`passkey invite … --browse-graph
+write`). The first three have no flag: `passkey invite` and `client add` mint per-ledger
+grants and the browse graph's store doors, and nothing else — so a browsing identity is made
+today by adding those names to its entry in `~/.config/ikigai/gonk/grants.json` by hand. That
+is not a hole in the boundary: the file is re-read on every request and checked fail-closed
+each time, so the store's whole-dataset tokens and the `urn:cap:net:*` / `urn:cap:exec:*`
+offering wildcards are refused whether they were written by this binary or by an editor —
+but that the tooling cannot express a grant an operator is expected to hold is a real gap
+(ledger #435).
+
+⚠ **A click on Explain spends inference, and nothing here counts it.** The per-face token
+ceilings (`gonk.explain.*.max_tokens`) bound ONE call. A directory-grain explanation fans out
+per child inside `ikigai-browse` — each child's own explanation, recursively, with unchanged
+children as archive hits — so one click on a large directory is many model calls, and the
+door cannot see that from outside. `/k` issues exactly one kernel request per HTTP request
+and prefetches nothing; the rest is the resource's economics, not the door's.
 
 ## The render rules are a resource
 

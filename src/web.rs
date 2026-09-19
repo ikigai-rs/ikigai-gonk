@@ -11,7 +11,13 @@
 //! /sparql/results            urn:iki:gonk:fragment:sparql           Source  results as a fragment
 //! /auth/{op}                 urn:iki:gonk:passkey:{op}              Sink    passkey ceremonies, sessions
 //! /static/{name}             urn:iki:gonk:asset:{name}              Source  css, js, htmx
+//! /k?c={command}             urn:iki:gonk:k                         Source/Sink  the browse faces' adapter
+//! /browse/{iri}              urn:iki:gonk:page:browse:{iri}         Source  the page they render inside
 //! ```
+//!
+//! The last two are [`crate::k`] — the door `ikigai-browse`'s HTML faces are authored
+//! against. They are pages of this face and bound with the rest of it; what is different
+//! about them, and why the command travels as an argument here, is that module's own doc.
 //!
 //! These are bound ONLY in the HTTP door's kernel ([`crate::doors::http_kernel`]): the socket
 //! and QUIC doors serve exactly the hub's catalog, as before.
@@ -147,11 +153,25 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             },
         )
         .bind(template("urn:iki:gonk:asset:{name}"), Asset)
+        // The browse family's door — see [`crate::k`]. Bound here because these are pages
+        // of this face, reachable through the HTTP door and no other.
+        .bind(
+            Exact::new(crate::k::K_IRI),
+            crate::k::KAdapter {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            template(crate::k::BROWSE_PAGE_TEMPLATE),
+            crate::k::BrowseShell {
+                web: Arc::clone(&web),
+            },
+        )
 }
 
 // ------------------------------------------------------------------------------ shared
 
-fn html(text: String) -> Representation {
+pub(crate) fn html(text: String) -> Representation {
     Representation::new(
         ReprType::new(HTML).with_param("charset", "utf-8"),
         text.into_bytes(),
@@ -162,7 +182,7 @@ fn arg(name: &str, summary: &str) -> ArgSpec {
     ArgSpec::new(name).summary(summary).class(XSD_STRING)
 }
 
-fn as_html_arg() -> ArgSpec {
+pub(crate) fn as_html_arg() -> ArgSpec {
     arg("as", "The face: this resource serves HTML only.")
         .one_of([HTML])
         .default_value(HTML)
@@ -170,7 +190,7 @@ fn as_html_arg() -> ArgSpec {
 }
 
 /// Refuse any `as` but HTML — a page is HTML, and a different answer is not a better one.
-fn html_only(inv: &Invocation<'_>) -> Result<()> {
+pub(crate) fn html_only(inv: &Invocation<'_>) -> Result<()> {
     match inv.inline_str("as") {
         Ok(asked) if bare(asked) != HTML => Err(Error::InvalidArgument {
             name: "as".to_string(),
@@ -184,7 +204,7 @@ fn bare(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
 }
 
-fn binding(inv: &Invocation<'_>, name: &str) -> Result<String> {
+pub(crate) fn binding(inv: &Invocation<'_>, name: &str) -> Result<String> {
     inv.bindings
         .get(name)
         .map(str::to_string)
@@ -199,7 +219,7 @@ fn optional(inv: &Invocation<'_>, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn render_err(e: String) -> Error {
+pub(crate) fn render_err(e: String) -> Error {
     Error::Endpoint(format!("rendering the page failed: {e}"))
 }
 
@@ -222,7 +242,7 @@ fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
 
 /// The ledgers to list: the configured ones, then any the caller's grant names, keeping
 /// only those it may read.
-fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
+pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
     let mut names: Vec<String> = web.ledgers.clone();
     if let Some(scopes) = inv.capability.scopes() {
         for scope in scopes {
@@ -240,7 +260,7 @@ fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
         .collect()
 }
 
-fn nav(ledgers: &[Ledger], current: Option<&str>) -> String {
+pub(crate) fn nav(ledgers: &[Ledger], current: Option<&str>) -> String {
     ledgers
         .iter()
         .map(|l| {
@@ -709,7 +729,7 @@ fn bad_form(detail: String) -> Error {
 }
 
 /// `application/x-www-form-urlencoded` → ordered pairs. A repeated name keeps its LAST value.
-fn form(body: &str) -> BTreeMap<String, String> {
+pub(crate) fn form(body: &str) -> BTreeMap<String, String> {
     let decode = |s: &str| {
         let bytes = s.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
