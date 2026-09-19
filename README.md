@@ -952,6 +952,129 @@ one) — gonk says so too, but the window is a window either way. Keep it short.
   Backups need no change: an archive is N-Quads and every comparison this server makes about
   one is per graph, so the browse graph simply appears as a graph.
 
+### Importing an archive from another host's store
+
+A gonk that starts with browse roots configured has an **empty** browse graph, and pays in
+inference for the first explanation of everything. If another host has already derived that
+archive over the SAME directories — a standalone `ikigai-dev-server`, or another gonk — the
+archive can be carried across rather than re-derived. The tool is `migrate-archive-roots`, a
+second feature-gated binary of `ikigai-browse`, and it is a different operation from the
+in-place move above on every axis: two stores, only the target written; a source that may stay
+LIVE, because it is opened read-only; and roots RENAMED on the way, because the two hosts
+need not have named the same directories the same thing.
+
+★ **The root name is inside the data, in five places, and a partial rewrite is silent.** The
+subject IRI (`urn:ikigai:browse:explain:{root}:…`, `…:review:{root}:…`), the `ik:repo`
+literal, and three object positions (`ik:about`, `ik:annotates`, `prov:used`) — plus
+`prov:wasGeneratedBy` on an annotation, pointing at the review pass whose IRI also carries the
+root, which is the one an obvious list misses. Rewrite some and not the others and the archive
+is present, countable, SPARQL-visible and **answered by nothing**, because a read builds its
+IRI from THIS host's root name. The tool keys on the IRI position rather than on a list of
+predicates, and it refuses rather than guessing: every root the source mentions must be
+mapped or dropped, every browse-minted subject must be assignable to a root, and no two roots
+may be renamed onto one name.
+
+⚠ **Identical root names on both hosts is the cheap way out of all of that**, because then
+every rename is the identity and no IRI is rewritten at all. It is worth renaming this
+server's roots to match the source's BEFORE the import rather than mapping afterwards; the
+per-root `rewritten` column is `0` for every row when you have.
+
+**The import, in order. gonk must be STOPPED for step 4 — it holds the target's writer
+lock. The SOURCE host does not have to stop**: two different store paths, two different
+locks, and the source is never written.
+
+```sh
+# 1. the tool — feature-gated, and NOT the same binary as the in-place move above. It arrived
+#    in ikigai-browse 0.4.1; until that is on crates.io, build it from a checkout.
+cargo install ikigai-browse --version 0.4.1 --locked --features migrate --bin migrate-archive-roots
+#    or, from a checkout of ikigai-browse:
+cargo build --release --features migrate --bin migrate-archive-roots
+
+# 2. a backup, taken through the running server — `--commit` cannot be undone by restarting
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup'
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup:status'
+
+# 3. the SURVEY: run it with no --root and no --drop at all. It prints one row per root the
+#    source holds, with quad and explanation/review/annotation counts, and then refuses.
+#    Both stores are open read-only here, so this runs against a live pair.
+migrate-archive-roots <source-store> ~/.ikigai/store --graph urn:iki:browse:graph:default
+
+# 4. STOP gonk — the store has one writer
+launchctl bootout gui/$(id -u)/dev.ikigai-rs.gonk        # or however it is supervised
+
+# 5. decide every root, dry run, then commit. The dry run's "would be" column is the same
+#    counting function over a projection of the plan, not a second prediction.
+migrate-archive-roots <source-store> ~/.ikigai/store \
+  --root ikigai-core=ikigai-core --root ikigai-cli=ikigai-cli \
+  --drop some-root-this-host-does-not-serve \
+  --graph urn:iki:browse:graph:default
+#   … then the same line again with --commit
+
+# 6. start gonk. The banner's unmigrated-quads check is about the GRAPH, not about this
+#    import, so it says nothing either way — step 7 is the acceptance.
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ikigai-rs.gonk.plist
+```
+
+⚠ **A root this host does not serve is a DROP, and a drop is a decision to state, not to
+discover.** Carried under a name no root of this host produces, an archive is unreachable by
+every read — which is the failure the tool exists to prevent — so it refuses the carry and
+makes you write `--drop`. The survey's quad and explanation counts for that root are what the
+drop costs, and they are worth reading before you type it.
+
+⚠ **The import is a one-shot, not a sync.** Anything the source derives after it is not here.
+Re-running is safe and cheap — the transfer is idempotent, and a second run reports every
+quad as `already in target` and `new to target 0` — so re-run it immediately before retiring
+the source rather than trusting the first run's numbers.
+
+#### Verifying it — and the three ways a `0` lies
+
+★ **The counts prove a copy happened; only a resolution proves the rewrite was right**, and
+on this server the obvious count is the one thing that cannot tell you. Read an entry back:
+
+```sh
+# derives NOTHING by declaration, and joins on ik:about rather than the working tree —
+# so an empty answer here for a path the archive holds is a migration defect
+ikigai --connect ~/.ikigai/gonk.sock \
+  -c 'source urn:repo:ikigai-core:explain-versions:src/lib.rs as=application/json'
+```
+
+⚠ **Never verify with a bare `explain`**: with a `gonk.mount` LLM peer configured it derives,
+spends, and answers — which looks exactly like success. `explain-versions` derives nothing;
+`explain … version={tag}` answers `NotFound` on a miss rather than falling back to a model.
+Both are safe; `explain` alone is not.
+
+And when you do count, count IN THE GRAPH, through a door that can see it. A `0` from this
+server means three different things and only one of them is "the import did not run":
+
+| what you ran | why it says `0` |
+| --- | --- |
+| `SELECT (COUNT(*)) WHERE { GRAPH <urn:iki:browse:graph:default> { ?s ?p ?o } }` at `/sparql`, anonymously | the browse graph is **outside the caller's scope** — the anonymous HTTP door holds its ledgers' tokens and nothing else, and a scoped read answers a graph outside the set *emptily rather than erroring* (see *Not built*) |
+| `SELECT (COUNT(*)) WHERE { ?s ?p ?o }` through the socket | the pattern matches the store's **default graph**, which holds nothing: every quad here is in a named graph, and `urn:iki:store:select` does not union them into the default one |
+| either of the above, correctly scoped | the import really did not run |
+
+So the one query that answers the question is graph-named AND run where the graph is readable
+— the socket door, or an identity holding `urn:cap:store:read:graph:urn:iki:browse:graph:default`:
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:store:select as=text/csv \
+  query="SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g"'
+```
+
+A per-root breakdown of what landed is the `ik:repo` literal, which the import rewrote to this
+host's names — so it is also the check that the rename took:
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:store:select as=text/csv \
+  query="SELECT ?repo (COUNT(*) AS ?n) WHERE { GRAPH <urn:iki:browse:graph:default> { \
+         ?s <https://ikigai-rs.dev/ns#repo> ?repo } } GROUP BY ?repo ORDER BY ?repo"'
+```
+
+A dropped root must not appear in it, and no root this server does not serve may either.
+
+★ **A backup's own metadata is the cheapest before/after you will get**, and it needs no
+query at all: `urn:iki:gonk:backup:status` prints per-graph counts, so a backup taken at step
+2 and another after step 6 bracket the import in numbers this server produced itself.
+
 ### Watched roots, and why the reads are cached at all
 
 `ikigai-browse` declares its `tree`, `file`, `hash` and `state` reads live and uncacheable,
@@ -1030,9 +1153,13 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   Since `ikigai-store` 0.2.5 a scoped read takes a set of graphs, so the join runs through
   every door: the socket door's owner holds root, and a QUIC certificate or a passkey identity
   whose grant carries both read tokens runs it with no root anywhere — over HTTP as the
-  store's own resource under `ikigai-web`'s mechanical path mapping
-  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…`, which
-  `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). What is
+  store's own resource under **this server's** mechanical path mapping
+  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…` on port 1060, which
+  `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). ⚠ An
+  earlier revision credited that path to `ikigai-web`. It is gonk's own door's mapping;
+  `ikigai-web` writes the whole IRI in the path instead (`GET
+  /urn:iki:store:graph-select?graph=…`, over a `mount = "prefer urn:iki:store:=…gonk.sock"`
+  line), and mixing the two spellings earns a 404 that reads like a missing resource. What is
   not built is the join from the PAGE: the editor's box picks a LEDGER and the query runs
   against that ledger's graph alone, so `urn:iki:browse:graph:default` is invisible there
   whatever tokens the caller holds. A graph selector rather than a ledger selector is what
@@ -1051,9 +1178,15 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   no net grant — the text without the spending. It is not the browse face (no rendering, no
   `version=` resolution, no file), so the grain the HTTP browse face has to answer is
   narrower than it was, not gone.
-- **No explanation archive to start from.** The archive the dev server holds is not migrated
-  here — gonk starts with an empty browse dataset and pays for the first explanation of
-  everything.
+- **No explanation archive to start from, and no sync with one.** A gonk with browse roots
+  configured begins with an empty browse graph and pays in inference for the first explanation
+  of everything. An archive another host already derived over the same directories can be
+  CARRIED in — see *Importing an archive from another host's store* — but that import is a
+  one-shot: it is an operator running a tool with the server stopped, not a subscription.
+  Anything the source derives afterwards stays there until the import is run again, and
+  nothing here notices the difference. ⚠ Two hosts serving the same roots from two archives
+  therefore DIVERGE silently, which is an argument for retiring the source rather than
+  running both.
 - **No rate limit on derivation.** The bounds on spending are the per-call `max_tokens`
   ceilings, the archive (once per content version, reused forever), and who holds a net
   grant. Nothing counts calls or spend over time; `ikigai-throttle`'s `RateLimit` overlay is
