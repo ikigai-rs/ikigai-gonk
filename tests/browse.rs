@@ -16,6 +16,10 @@
 //!   with the choice rather than beside it (ledger #282).
 //! - [`the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are`] — obligation
 //!   3 of the graph decision, asked of the kernel rather than of the promise.
+//! - [`a_bare_pattern_select_sees_nothing_because_every_quad_is_in_a_named_graph`] — the
+//!   other half of that: where the quads land is a fact about the data, and what an UNSCOPED
+//!   query sees is a fact about the dataset. A `0` from the broad door is the default graph,
+//!   not an empty store, and the README's import-verification table rests on it.
 //! - [`a_scoped_token_reads_browse_and_both_tokens_run_the_join`] — obligation 2: what
 //!   `urn:cap:store:read:graph:<browse graph>` buys, the boundary it does not cross, and the
 //!   ledger↔browse join below root that `ikigai-store` 0.2.5 made expressible.
@@ -1054,6 +1058,80 @@ fn the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are() {
         after_the_ledger,
         "…and it left nothing in the cache either: {:?}",
         cached(&hub)
+    );
+}
+
+/// ★ **A bare `{ ?s ?p ?o }` through the broad door answers `0` here, and that is not an
+/// empty store** — it is the store's DEFAULT graph, which this server never writes. Every
+/// quad it holds is in a named graph (a ledger's, or browse's), and `urn:iki:store:select`
+/// does not union named graphs into the default one.
+///
+/// This is asserted rather than left to prose because the README now hands an operator a
+/// table of three reasons a `0` lies while verifying an archive import, and this is the row
+/// nothing else in the suite covers: the sibling
+/// [`a_named_graph_choice_moves_the_promise_with_it`] checks where the quads LAND, which is a
+/// fact about the data; this checks what the unscoped QUERY sees, which is a fact about
+/// `ikigai-store`'s dataset construction and is exactly the kind of claim that drifts
+/// silently when a dependency changes its default. If a future `ikigai-store` unions, this
+/// fails and the README's table is wrong in the same commit.
+///
+/// ⚠ It is also the more dangerous direction of the two. A wrong answer here reads as
+/// "nothing was imported" and invites an operator to run a destructive step again.
+#[test]
+fn a_bare_pattern_select_sees_nothing_because_every_quad_is_in_a_named_graph() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let browse_graph = browse::Graph::chosen()
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+
+    text(
+        &hub,
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "an item, so the ledger's graph has quads")],
+    );
+    annotate(
+        &hub,
+        "n1",
+        "urn:repo:demo:file:src/lib.rs",
+        "first",
+        "a note",
+    );
+
+    let count = "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }";
+    let unscoped = text(
+        &hub,
+        Verb::Source,
+        "urn:iki:store:select",
+        &[("query", count), ("as", "text/csv")],
+    );
+    assert!(
+        unscoped.lines().any(|line| line.trim() == "0"),
+        "the broad door's bare pattern reads the default graph, which holds nothing — a \
+         non-zero here means either this server started writing the default graph or \
+         `ikigai-store` began unioning, and the README's verification table is wrong either \
+         way. Got:\n{unscoped}"
+    );
+
+    // The control, so the zero above cannot be a store this test failed to populate: the SAME
+    // query, named at the graph, finds the annotation's quads.
+    let scoped = text(
+        &hub,
+        Verb::Source,
+        "urn:iki:store:graph-select",
+        &[
+            ("graph", &browse_graph),
+            ("query", count),
+            ("as", "text/csv"),
+        ],
+    );
+    assert!(
+        !scoped.lines().any(|line| line.trim() == "0"),
+        "the control: browse's graph is not empty, so the zero above is about the DATASET \
+         and not about the data. Got:\n{scoped}"
     );
 }
 
