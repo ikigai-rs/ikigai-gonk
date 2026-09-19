@@ -42,6 +42,12 @@
             <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false}</xsl:attribute></meta>
             <title><xsl:value-of select="@title"/> · gonk</title>
             <link rel="stylesheet" href="/static/gonk.css"/>
+            <!-- A page that hosts another family's faces links that family's own stylesheet
+                 (urn:repo:style, through the /k/ adapter). Withheld when the caller could
+                 not read it, so the page does not paint itself with a 403. -->
+            <xsl:if test="@stylesheet">
+              <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@stylesheet"/></xsl:attribute></link>
+            </xsl:if>
             <script src="/static/htmx.min.js" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
           </head>
@@ -111,6 +117,7 @@
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
+      <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
       <xsl:otherwise>
         <section class="panel empty-state">
@@ -119,6 +126,32 @@
         </section>
       </xsl:otherwise>
     </xsl:choose>
+  </xsl:template>
+
+  <!-- ======================================================== browse shell -->
+
+  <!--
+    The region ikigai-browse's own HTML faces render into. Everything after the first
+    paint is THEIR markup and THEIR affordances (hx-get/hx-post at the /k/ adapter), so
+    there is nothing here to keep in step with them — which is the point.
+  -->
+  <xsl:template name="browse">
+    <section class="browse-shell" aria-label="Browse">
+      <xsl:choose>
+        <xsl:when test="@start-url">
+          <div id="browse" class="browse" hx-trigger="load" hx-swap="innerHTML">
+            <xsl:attribute name="hx-get"><xsl:value-of select="@start-url"/></xsl:attribute>
+            <p class="note"><xsl:value-of select="@message"/></p>
+          </div>
+        </xsl:when>
+        <xsl:otherwise>
+          <div id="browse" class="browse panel">
+            <h1><xsl:value-of select="@title"/></h1>
+            <p class="note"><xsl:value-of select="@message"/></p>
+          </div>
+        </xsl:otherwise>
+      </xsl:choose>
+    </section>
   </xsl:template>
 
   <!-- ============================================================ a ledger -->

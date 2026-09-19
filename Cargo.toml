@@ -112,7 +112,16 @@ ikigai-ledger = "0.2.1"
 # ⚠ Taking 0.4.0 does NOT move gonk's data: a mount that never calls `Mount::graph` uses the
 # default graph, byte for byte as before. Giving browse its own graph is a separate decision
 # with a migration attached — see `src/browse.rs::Graph`.
-ikigai-browse = "0.4.0"
+#
+# ⚠ **0.4.1, not 0.4.0, and the reason is rule 5 rather than a feature this binary calls.**
+# `^0.4.0` resolves 0.4.1 anyway; what the pin has to state is the true minimum of the
+# CONTRACT this server's door offers. 0.4.1 is the first release where `review` takes
+# `provider=` and `ExplainConfig::selectable()` covers the review and pull-request tiers as
+# well as the two explain ones — so it is the first release whose faces emit a "Review With"
+# affordance, and the first on which `provider=<the configured review backend>` is not
+# refused by the manifold that offers it. `crate::k` serves whatever affordance browse
+# emits, which makes browse's emitted surface part of what this door promises.
+ikigai-browse = "0.4.1"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

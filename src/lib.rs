@@ -39,6 +39,7 @@ pub mod config;
 pub mod doors;
 pub mod grants;
 pub mod identity;
+pub mod k;
 pub mod mount;
 pub mod quic;
 pub mod render;

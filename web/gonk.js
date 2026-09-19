@@ -1,10 +1,12 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does two things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does three things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
-// standard one, with byte fields carried as base64url.
+// standard one, with byte fields carried as base64url. (3) the browse family's affordances
+// name the /k/ adapter with a COMMAND in the path, which gonk's door cannot parse back into
+// a resource — so the command is folded into a query value here, one line, grammar-level.
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -32,6 +34,26 @@
   });
   document.addEventListener("htmx:sendError", () => flash("The server did not answer.", "error"));
   document.addEventListener("htmx:beforeRequest", () => flash("", "ok"));
+
+  // ---------------------------------------------- the /k/ adapter's path spelling
+  //
+  // ikigai-browse authors every affordance as hx-get="/k/source {iri} [k=v ...]" or
+  // hx-post="/k/sink urn:iki:annotation" — a COMMAND in the path, with spaces in it, and
+  // with slashes inside the IRI. gonk's HTTP door percent-decodes the path and then rebuilds
+  // a target IRI from it, so such a path is a 400 before any of gonk's code sees it: a space
+  // is not legal in an IRI. (ikigai-web's standalone server parses the raw request-target
+  // itself, which is why the same affordances work at 8642 untouched.)
+  //
+  // So the command travels as one query value instead, and this is where the two spellings
+  // meet. It is grammar-level and knows nothing about which button was pressed: any /k/
+  // request, from any face, present or future, folds the same way. The server's own shell
+  // already emits the query form, so a broken rewrite here cannot make the first paint fail
+  // silently — it fails on the first affordance, loudly, in #flash.
+  document.addEventListener("htmx:configRequest", (e) => {
+    const path = e.detail && e.detail.path;
+    if (typeof path !== "string" || path.slice(0, 3) !== "/k/") return;
+    e.detail.path = "/k?c=" + encodeURIComponent(path.slice(3));
+  });
 
   // ------------------------------------------------------------------ bytes
 
