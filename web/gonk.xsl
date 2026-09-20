@@ -113,9 +113,32 @@
   <!-- The review queue, present only when this caller may read a root AND may decide
        (src/queue.rs::offers_queue). Ledger #444 settled the label: it names the THING,
        because the page shows the whole pipeline and "Review" is already the file face's
-       button that RUNS a pass. -->
+       button that RUNS a pass.
+
+       ⚠ The badge beside it is the armed trigger's ONLY liveness signal (ledger #466), not
+       decoration: `watch()` catches up at startup and then lives on a thread nothing else
+       observes, so a depth that stops falling is the whole symptom of a dead watcher. It
+       polls rather than blinking — the web-demo nav clock's shape, at the interval
+       src/queue.rs::BADGE_EVERY names, so the number and the cadence are the Rust side's
+       and not this file's. -->
   <xsl:template match="view:queue">
-    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Queue</a>
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Queue<xsl:if test="@depth-url">
+      <span class="queue-badge" hx-swap="innerHTML">
+        <xsl:attribute name="hx-get"><xsl:value-of select="@depth-url"/></xsl:attribute>
+        <xsl:attribute name="hx-trigger">load, every <xsl:value-of select="@every"/></xsl:attribute>
+      </span>
+    </xsl:if></a>
+  </xsl:template>
+
+  <!-- The badge's own answer: one number, one state word as a class, and the depth
+       resource's whole sentence as the tooltip. `stuck` is the one a person is looking
+       for — armed, not empty, nothing running. -->
+  <xsl:template name="queue-badge">
+    <span>
+      <xsl:attribute name="class">badge-depth <xsl:value-of select="@kind"/></xsl:attribute>
+      <xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute>
+      <xsl:value-of select="@count"/>
+    </span>
   </xsl:template>
 
   <xsl:template match="view:ledger" mode="option">
@@ -142,6 +165,7 @@
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
+      <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
       <xsl:otherwise>
         <section class="panel empty-state">

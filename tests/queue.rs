@@ -54,16 +54,29 @@ fn roots(dir: &TempDir) -> Vec<(String, PathBuf)> {
 /// No watcher: `ikigai-browse`'s filesystem reads are live and uncacheable exactly as it
 /// declares them, and nothing here reads a file twice. The `review` argument is the trigger
 /// the Queue page reports the depth of.
+///
+/// ⚠ A configured trigger composes the trigger's SPACES too, because the page reads the
+/// depth through `urn:iki:gonk:review:depth` rather than around it (ledger #466). A fixture
+/// that left them out would exercise only the "could not be read" arm, which is exactly the
+/// arm that must never be reached in ordinary use.
 fn door(dir: &TempDir, review: Option<Trigger>) -> (Kernel, TempDir) {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store that declares where its sharer writes");
     let wired = browse::wire(roots(dir), handle, &[], None, &graph);
+    let trigger_spaces = match &review {
+        Some(t) => ikigai_gonk::trigger::space(
+            t,
+            Arc::new(ikigai_gonk::trigger::Activity::default()),
+            false,
+        ),
+        None => Vec::new(),
+    };
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
         Vec::new(),
-        Vec::new(),
+        trigger_spaces,
         None,
     ));
     let config = tempfile::tempdir().expect("a config home");
@@ -71,7 +84,6 @@ fn door(dir: &TempDir, review: Option<Trigger>) -> (Kernel, TempDir) {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
         browse_roots: vec![ROOT.to_string()],
-        review: review.map(Arc::new),
         passkeys: Arc::new(Passkeys::new(
             quic::Layout::in_config_home(config.path()),
             1060,
@@ -232,7 +244,9 @@ fn the_queue_page_offers_no_decision_to_a_caller_that_could_not_make_one() {
 
     let reviewer = page(&door, &[], &reviewer());
     assert!(
-        reviewer.contains(">Queue</a>"),
+        // ⚠ `>Queue<`, not `>Queue</a>`: the link now carries the live depth badge
+        // inside it (ledger #466), so the close tag is no longer adjacent to the label.
+        reviewer.contains(">Queue<"),
         "a caller holding both authorities is offered the page:\n{reviewer}"
     );
     assert!(
@@ -377,6 +391,7 @@ fn the_intray_depth_tells_absent_empty_and_unreadable_apart() {
         space: "reviews".to_string(),
         grant: None,
         root: spaces.path().to_path_buf(),
+        arm: false,
     };
 
     // Configured and never prepared: the inbox is not there, and that is NOT zero.
@@ -430,6 +445,7 @@ fn the_queue_page_says_what_is_waiting() {
         space: "reviews".to_string(),
         grant: None,
         root: spaces.path().to_path_buf(),
+        arm: false,
     };
     ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
     let (empty, _c2) = door(&dir, Some(trigger.clone()));
@@ -669,5 +685,87 @@ fn a_second_different_decision_is_refused_and_the_refusal_is_legible() {
     assert!(
         changed.contains("flash error"),
         "a second, different decision must be refused:\n{changed}"
+    );
+}
+
+/// ★★ **The live badge, rendered — the armed trigger's only liveness signal.**
+///
+/// Ledger [#466](http://localhost:1060/l/default/item/466). `SpaceReactor::watch()` catches
+/// up at startup and then lives on a thread nothing else observes, and gonk runs no log
+/// ([#383](http://localhost:1060/l/default/item/383)), so a depth that stops falling is the
+/// whole symptom of a dead watcher. The header is where a person is already looking.
+///
+/// ⚠ The fragment is rendered through the SAME stylesheet as every page, and `xrust` is an
+/// XSLT-1.0 subset — a template that silently produced nothing would leave a badge that is
+/// permanently blank, which reads exactly like an empty queue. So this asserts the markup,
+/// not just the absence of an error.
+#[test]
+fn the_header_badge_renders_the_depth_and_polls_for_it() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    for n in 0..7 {
+        std::fs::write(trigger.inbox().join(format!("{n}.tuple")), "x").expect("a tuple");
+    }
+    let (served, _config) = door(&dir, Some(trigger));
+
+    // The nav link carries the poll, at the interval the Rust side names — never the
+    // stylesheet's own number.
+    let rendered = page(&served, &[], &reviewer());
+    assert!(
+        rendered.contains(&format!("hx-get='{}'", ikigai_gonk::queue::BADGE_PATH)),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "hx-trigger='load, every {}'",
+            ikigai_gonk::queue::BADGE_EVERY
+        )),
+        "{rendered}"
+    );
+
+    // …and the fragment it polls.
+    let answer = issue(
+        &served,
+        Verb::Source,
+        ikigai_gonk::queue::BADGE_IRI,
+        &[],
+        &reviewer(),
+    )
+    .expect("the badge renders");
+    let badge = String::from_utf8(answer.bytes).expect("utf-8");
+    assert!(
+        badge.contains(">7<"),
+        "the number a person came to see: {badge}"
+    );
+    // ⚠ Not empty, and not stuck: unarmed, nothing is supposed to be draining, so seven
+    // waiting is correct rather than alarming.
+    assert!(badge.contains("badge-depth count"), "{badge}");
+    assert!(!badge.contains("stuck"), "{badge}");
+    // ★ The whole sentence rides as the tooltip, so colour is never the message (WCAG 1.4.1)
+    // and the one fact that tells a slow queue from a stuck one is readable.
+    assert!(badge.contains("NOTHING IS DRAINING"), "{badge}");
+
+    // ⚠ No queue configured: NOTHING, not a zero. A zero on the badge says "empty queue",
+    // which is a different statement (ledger #446).
+    let (no_queue, _c) = door(&dir, None);
+    let answer = issue(
+        &no_queue,
+        Verb::Source,
+        ikigai_gonk::queue::BADGE_IRI,
+        &[],
+        &reviewer(),
+    )
+    .expect("the badge renders without a queue too");
+    assert!(
+        answer.bytes.is_empty(),
+        "an unconfigured queue draws no badge at all: {}",
+        String::from_utf8_lossy(&answer.bytes)
     );
 }

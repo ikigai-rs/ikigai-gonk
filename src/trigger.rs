@@ -29,33 +29,54 @@
 //! — the same verb, the same IRI, one argument, no `provider`. It is a pure function so the
 //! claim is a unit test over a value rather than a belief about a call site.
 //!
-//! # ⚠⚠ THE TRIGGER IS COMPLETE AND DELIBERATELY UNARMED
+//! # ⚠⚠ THE TRIGGER WAS UNARMED UNTIL 2026-09-20, AND WHAT CHANGED IS THE ARITHMETIC
 //!
 //! Brian, 2026-09-19: **"Nothing gets published to Gonk except by the human."** Not only
-//! critical findings — nothing. And today a review pass mints its annotations as its
-//! terminal step, so a pass that ran with no human present would publish with no human
-//! present.
+//! critical findings — nothing. Until `ikigai-browse` 0.5.0 a review pass minted its
+//! annotations as its terminal step, so a pass that ran with no human present would publish
+//! with no human present, and the only thing standing between the two was that **no grant
+//! this server could mint carried the authority a pass needed**.
 //!
-//! ★ **The thing that stops it is the authority, not a flag.** A pass needs
-//! `urn:cap:annotate`, `urn:cap:net:*` and `urn:cap:browse:read:*`, and this server mints
-//! none of them for anybody. There is no background worker in this binary: the queue fills,
-//! and a person drains it one tuple at a time over the owner-only socket, which is a human
-//! publishing. See [`DRAIN_ONE`].
+//! ★ **browse 0.5.0 moved that line, and moved it in the capability layer rather than in a
+//! flag.** A pass now writes PENDING FINDINGS at `urn:iki:finding:{id}` and `review` no
+//! longer declares `urn:cap:annotate` at all (`review.rs:953` says the absence IS the
+//! point). `Sink urn:iki:finding:{id} decision=publish` is the only path into the
+//! `urn:iki:annotation:` family, and that Sink still demands the token. So a reviewer that
+//! holds browse-read + a narrow net grant + the browse graph's two store doors **cannot
+//! publish, by arithmetic**: it is not policed into not publishing, it is unable to. That is
+//! what made arming this safe, and ledger
+//! [#466](http://localhost:1060/l/default/item/466) is the decision.
 //!
-//! What arms it is **ledger #444** — a pending state for a finding, which is a change in
-//! `ikigai-browse` (where the minting is) and in gonk's queue UI. Not a config key someone
-//! flips. When it lands, the automatic drainer is `ikigai-intray`'s `SpaceReactor` over this
-//! same space with a `handler` file naming [`PASS`] — and [`PassEndpoint::invoke`] is still
-//! the single place a pass completes, so that is the one call site a pending state changes.
+//! ⚠ **This module's declared capabilities move WITH browse's.** [`PassEndpoint`] declares
+//! exactly what `review` declares and no more — declaring `urn:cap:annotate` here would
+//! refuse the very grant this design hands the reviewer, and it would do so one hop before
+//! the review that no longer wants it. `tests/browse.rs` reads both contracts off a kernel
+//! that composes real browse and asserts they are the same set, because the last time
+//! browse's `requires` shrank, this crate's copy **compiled clean and went stale**
+//! ([`reviewer_grant_shape`] had the same bug).
+//!
+//! # ★ What arms it: an operator's line, and an authority they wrote down
+//!
+//! Two facts, both required, neither implicit — `gonk.review.arm = true` **and** a
+//! `gonk.review.grant` that `grants.json` can honour ([`reviewer_scopes`]). `arm` without a
+//! usable grant is a startup refusal, not a degraded server; a grant without `arm` is read,
+//! checked and printed, exactly as before. The grant alone is deliberately NOT the switch:
+//! this server spent a release inviting operators to write one down *so they could see it*,
+//! and a line written under that invitation must not silently start spending inference.
+//!
+//! When armed, [`arm`] gives `ikigai-intray`'s `SpaceReactor` this server's own kernel as
+//! its resolver and the reviewer's capability as its ceiling, and calls `watch()`. Its
+//! contract is *drain what is already pending, then watch* — the catch-up half is what makes
+//! a push design survive a restart of this process.
 //!
 //! # ⚠ Why the reactor's own `cap` file is not how this server grants authority
 //!
-//! `SpaceReactor::capability_for` reads `<root>/{space}/cap` and builds
+//! `SpaceReactor::capability_for` used to read `<root>/{space}/cap` and build
 //! `Capability::scoped` from its lines — the TRUSTED minting path, not an attenuation, so
-//! that file REPLACES the reactor's default and can exceed it without limit. And it sits in
+//! that file REPLACED the reactor's default and could exceed it without limit. And it sits in
 //! the same directory, with the same owner and mode, as the `inbox/` a dropper writes into:
-//! anything that can drop a tuple can rewrite the authority the tuple runs under, and
-//! nothing validates the result.
+//! anything that can drop a tuple could rewrite the authority the tuple ran under, and
+//! nothing validated the result.
 //!
 //! gonk refuses the broad store tokens, the offering wildcards and the backup family's
 //! tokens on every certificate and every passkey it admits ([`crate::quic::check_grants`]),
@@ -63,6 +84,28 @@
 //! the widest grant in the server and the one nothing reads. So this server names a GRANT
 //! (`gonk.review.grant`, resolved through [`reviewer_scopes`]) and refuses to run a trigger
 //! beside a `cap` file at all ([`refuse_cap_file`]).
+//!
+//! ★ **Three independent refusals of the same bad idea, and none of them is redundant.**
+//! `ikigai-intray` 0.1.24 fixed its half twice over (ledger
+//! [#445](http://localhost:1060/l/default/item/445)): `Capability::attenuate` makes the file
+//! unable to widen, and `SpaceReactor::with_host_authority` — which this module uses — takes
+//! the crate out of the business of reading authority off the dropper's tree at all. Under
+//! the host seam a `cap` file is INERT, which is its own trap, so [`refuse_cap_file`] runs at
+//! startup and [`arm`] additionally asks the reactor's own `ignored_cap_files()` and refuses
+//! to go live beside one. A file that does nothing, that an operator believes is doing
+//! something, is the failure the seam introduced while fixing the other.
+//!
+//! # ⚠ The `handler` file IS a control surface, and it lives in the dropper's tree
+//!
+//! `SpaceReactor` reads `<root>/{space}/handler` **per tuple** and fires whatever IRI it
+//! names, under the capability the host supplied. So anything that can write that directory
+//! can retarget the reviewer's authority at another resource — narrower than the old `cap`
+//! hazard (it cannot ADD a scope) and the same shape. gonk owns this tree `0700` and is its
+//! only writer outside `inbox/`, so the boundary today is the unix user; [`set_handler`]
+//! re-asserts gonk's own value at every startup and removes the file when this server is not
+//! armed, so an unarmed gonk leaves nothing behind that a later armed one would fire.
+//! Reported up: the seam `with_host_authority` is for authority wants an exact analogue for
+//! the HANDLER, so a host can say what fires as well as what it fires as.
 //!
 //! # The tuple
 //!
@@ -79,18 +122,40 @@
 //! which is exactly what a person clicking `review` would get.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgSpec, Description, Endpoint, Error, Invocation, Iri, Representation, Request, Result, Space,
-    Verb,
+    ArgSpec, Capability, Description, Endpoint, Error, Invocation, Iri, Kernel, ReprType,
+    Representation, Request, Result, Space, Verb,
 };
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::store::Store;
 
 /// `urn:iki:gonk:review:pass` — one tuple, one review pass.
 pub const PASS: &str = "urn:iki:gonk:review:pass";
+
+/// `urn:iki:gonk:review:depth` — how deep the queue is, and whether anything is draining it.
+///
+/// ★ **This is the liveness signal, and it is the ONLY one this design has.** `watch()`
+/// catches up at startup, so a reactor thread that dies while gonk LIVES drains nothing and
+/// says nothing until a restart — the unfalsifiable shape of the dead annotation mount. gonk
+/// runs no log at all ([#383](http://localhost:1060/l/default/item/383)), so a depth that
+/// stops falling while the queue is armed is the visible symptom, and something has to make
+/// it visible. Ledger [#464](http://localhost:1060/l/default/item/464) asked whether the
+/// depth should be a resource of gonk's own or the space's read token should become
+/// mintable; [#466](http://localhost:1060/l/default/item/466) chose the first, and this is it.
+pub const DEPTH: &str = "urn:iki:gonk:review:depth";
+
+/// `urn:cap:exec:gh` — the PR review tier shells out through `ikigai-repo`'s `gh` facade.
+///
+/// ⚠ The per-tool spelling, never `urn:cap:exec:*`: that is the OFFERING wildcard, and
+/// [`crate::quic::check_grants`] refuses it as a grant. A reviewer that may run `gh` may not
+/// run anything else.
+pub const CAP_EXEC_GH: &str = "urn:cap:exec:gh";
+
+/// The file `SpaceReactor` reads to decide what a dropped tuple fires — see the module doc.
+pub const HANDLER_FILE: &str = "handler";
 
 /// The directory under the data home that holds the spaces tree.
 ///
@@ -130,14 +195,22 @@ pub const DRAIN_ONE: &str = "source urn:space:{space} tuple=ID | urn:iki:gonk:re
 pub struct Trigger {
     /// The space name — one segment, the `{name}` of `urn:space:{name}`.
     pub space: String,
-    /// The grant in `grants.json` a pass would run under, when one is named.
+    /// The grant in `grants.json` a pass runs under, when one is named.
     ///
-    /// ⚠ Nothing in this binary runs a pass under it today; the banner prints what it
-    /// resolves to so an operator can SEE the authority they have written down before
-    /// anything can use it.
+    /// ⚠ Naming it is not arming: with `arm` unset the banner prints what it resolves to so
+    /// an operator can SEE the authority they have written down before anything uses it,
+    /// which is what this line meant for its first release and must go on meaning.
     pub grant: Option<String>,
     /// The spaces tree, `<data home>/spaces` unless `gonk.review.root` says otherwise.
     pub root: PathBuf,
+    /// `gonk.review.arm` — whether a reactor watches this queue and fires [`PASS`] on a drop.
+    ///
+    /// ★ Both halves are required and neither is implicit: `arm` without a usable [`grant`]
+    /// is a startup refusal, because a server that says it is reviewing and is not is worse
+    /// than one that refuses to start.
+    ///
+    /// [`grant`]: Trigger::grant
+    pub arm: bool,
 }
 
 impl Trigger {
@@ -206,27 +279,97 @@ pub fn reviewer_scopes(
     crate::quic::scopes_for_grant(grants, grant)
 }
 
-/// The five scopes a review pass actually needs, for an operator writing the grant by hand.
+/// The scopes a review pass actually needs, **read off the contract of the review this
+/// server would run** — for an operator writing `gonk.review.grant` by hand.
 ///
-/// ⚠ `net` is deliberately the NARROW form. `urn:cap:net:*` is the OFFERING wildcard
-/// `ikigai-browse` declares on every derivation, and as a grant it means every host this
-/// kernel could dial; [`crate::quic::check_grants`] refuses it. `host` is where the mounted
-/// peer lives.
+/// # ★★ Why this reads a live kernel instead of listing constants
 ///
-/// ⚠ And all five are needed EVEN WHEN THE PASS IS A FREE ARCHIVE HIT. `review` declares its
-/// three capabilities flatly on its `Description`, so the kernel checks them before the
-/// endpoint runs and long before it looks in the archive. There is no cheaper grant for the
-/// cheap case.
-pub fn reviewer_grant_shape(host: &str) -> Vec<String> {
-    let mut scopes = vec![
-        ikigai_browse::CAP_WILDCARD.to_string(),
-        format!("urn:cap:net:{host}"),
-        ikigai_browse::CAP_ANNOTATE.to_string(),
-    ];
-    if let Ok(graph) = crate::grants::browse_graph_grants(crate::grants::Authority::Write) {
-        scopes.extend(graph);
+/// It used to list them, and on 2026-09-20 that list was found to be **wrong and silent**.
+/// `ikigai-browse` 0.5.0 dropped `urn:cap:annotate` from what `review` declares — the whole
+/// point of that release — and this helper went on emitting it. It **compiled clean** through
+/// the pin bump, because the constant still exists; only the requirement went away. An
+/// operator following it would have written exactly the grant this design excludes, handing
+/// the headless reviewer the publish token, and the interlock would have disappeared with no
+/// error anywhere. Rule 5's second half in a different costume: a pin that moves and a
+/// transcription that does not.
+///
+/// So the browse half is `hub.describe(review_iri)`'s own `requires` for `Source`, and the
+/// next capability change reaches an operator's `grants.json` without anyone remembering to
+/// come here. ⚠ Two mappings are applied, and each is a real difference between an OFFERING
+/// form and a GRANT form rather than an edit:
+///
+/// - `urn:cap:net:*` becomes `urn:cap:net:{host}`. The wildcard is what `ikigai-browse`
+///   declares on every derivation to mean "holds some grant under this prefix"; as a grant it
+///   means every host this kernel could dial, and [`crate::quic::check_grants`] refuses it.
+///   `host` is where the mounted peer lives — for `quic://127.0.0.1:4433` that is
+///   `127.0.0.1` and **not** `localhost`, because `Capability::allows` is exact string
+///   containment.
+/// - Nothing is dropped. A `requires` this function does not recognise passes through
+///   unchanged, because an unknown token is a capability an operator needs and not one this
+///   crate gets to decide about.
+///
+/// # What the contract cannot tell you, and is added here
+///
+/// Two sets, both of them authority a pass reaches through a SUB-REQUEST — a capability
+/// travels down unchanged, so the caller must hold what the hop needs, and the hop's
+/// declaration is not on the resource the caller named:
+///
+/// - the browse graph's two store doors ([`crate::grants::browse_graph_grants`]), which are
+///   how a finding is written at all; and
+/// - [`CAP_EXEC_GH`], which the PR review tier reaches `gh` through.
+///
+/// ⚠ **The space's own three tokens are NOT here, and that is measured rather than assumed.**
+/// `SpaceReactor` claims, reads and settles a tuple with filesystem renames of its own and
+/// issues only the HANDLER request through the kernel, so a reviewer needs no
+/// `urn:cap:space:{out,read,take}` at all. Granting them would widen the reviewer to the
+/// queue for nothing.
+///
+/// ⚠ And every one of these is needed EVEN WHEN THE PASS IS A FREE ARCHIVE HIT: the kernel
+/// checks a `requires` before the endpoint runs and long before it looks in the archive.
+/// There is no cheaper grant for the cheap case.
+///
+/// # Errors
+///
+/// When `review_iri` does not resolve on this kernel, or declares no `Source`. That is a gonk
+/// with no `gonk.browse.root` or no `gonk.mount`, and the honest answer is to say so rather
+/// than emit a remembered list — the failure this function exists to stop.
+pub fn reviewer_grant_shape(
+    hub: &Kernel,
+    review_iri: &str,
+    host: &str,
+) -> std::result::Result<Vec<String>, String> {
+    let target = Iri::parse(review_iri).map_err(|e| format!("{review_iri}: {e}"))?;
+    let described = hub.describe(&target).ok_or_else(|| {
+        format!(
+            "`{review_iri}` does not resolve on this server, so its capabilities cannot be \
+             read off its contract. A review is bound only with a `gonk.browse.root` for that \
+             repository AND a `gonk.mount` serving `urn:llm:`"
+        )
+    })?;
+    let requires = described
+        .action_specs()
+        .into_iter()
+        .find(|spec| spec.verb == Verb::Source)
+        .map(|spec| spec.requires)
+        .ok_or_else(|| format!("`{review_iri}` declares no Source, so nothing runs a pass"))?;
+    let mut scopes: Vec<String> = Vec::new();
+    let mut add = |scope: String| {
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    };
+    for scope in requires {
+        if scope == crate::grants::CAP_NET_ANY {
+            add(format!("urn:cap:net:{host}"));
+        } else {
+            add(scope);
+        }
     }
-    scopes
+    for scope in crate::grants::browse_graph_grants(crate::grants::Authority::Write)? {
+        add(scope);
+    }
+    add(CAP_EXEC_GH.to_string());
+    Ok(scopes)
 }
 
 // ---------------------------------------------------------------------- the tuple
@@ -393,6 +536,163 @@ fn literal(term: &oxigraph::model::Term) -> Option<String> {
     }
 }
 
+// ------------------------------------------------------------------- what it spends
+
+/// What this process has spent on review passes, and whether one is running right now.
+///
+/// # ★★ The bound on a forty-file push, stated rather than inherited
+///
+/// [#308](http://localhost:1060/l/default/item/308) — nothing counts spend over time — was
+/// the standing objection to arming the trigger, and a TIMER would have answered it by
+/// construction: one pass per tick. A WATCHER does not. Forty changed files drop forty tuples
+/// at once, and something has to say what happens then.
+///
+/// The answer is that **passes are serial, one per gonk process**, and this type is what
+/// makes that a statement rather than a hope. `SpaceReactor::watch` drains and then reads its
+/// notify channel on ONE thread, calling `process` inline, so a second tuple waits on the
+/// first — but that is a property of a dependency's thread shape, invisible from here, and it
+/// would change without a compile error. So [`Activity::begin`] **refuses** a pass that
+/// starts while another is in flight, and the tuple dead-letters with that sentence in its
+/// `.err` note. The assumption is now load-bearing AND falsifiable: if the reactor ever fires
+/// concurrently, this server says so in the one place an operator is already looking instead
+/// of quietly doubling what it spends.
+///
+/// ⚠ What is NOT bounded here, said plainly: **wall clock**. Brian is not fussed about the
+/// cost of local inference, and serial passes over forty files at a minute each is still
+/// forty minutes of a reviewer nobody can see. That is what [`DEPTH`] and the Queue badge are
+/// for — `waiting` falling steadily is a slow queue, `waiting` not falling is a stuck one —
+/// and it is why the queue's depth is a liveness mechanism rather than decoration. A per-pass
+/// wall-clock ceiling would have to come from the ASK (`urn:llm:*` through the mount), which
+/// bounds its describe and not its derivation; reported up rather than faked here.
+#[derive(Debug, Default)]
+pub struct Activity {
+    record: Mutex<Record>,
+}
+
+/// The counters behind [`Activity`], taken as a snapshot so a reader never holds the lock.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Passes {
+    /// When the pass now running began, in milliseconds since the epoch. `None` = idle.
+    pub in_flight_since_ms: Option<u64>,
+    /// Passes begun in this process.
+    pub started: u64,
+    /// …of which completed with an answer.
+    pub succeeded: u64,
+    /// …and failed, for any reason including a refusal.
+    pub failed: u64,
+    /// When the last pass ENDED, either way.
+    pub last_end_ms: Option<u64>,
+    /// How long it took.
+    pub last_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct Record {
+    in_flight_since_ms: Option<u64>,
+    started: u64,
+    succeeded: u64,
+    failed: u64,
+    last_end_ms: Option<u64>,
+    last_ms: Option<u64>,
+}
+
+impl Activity {
+    /// Claim the one pass slot, or refuse.
+    ///
+    /// # Errors
+    ///
+    /// When a pass is already in flight — see the type's doc: the serialization is this
+    /// server's own statement, not a belief about `SpaceReactor`'s thread shape.
+    pub fn begin(self: &Arc<Self>, now_ms: u64) -> Result<Pass> {
+        let mut record = self.record.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(since) = record.in_flight_since_ms {
+            return Err(Error::Unavailable(format!(
+                "a review pass has been running since {since}ms and this server runs ONE at a \
+                 time. `SpaceReactor::watch` processes tuples on a single thread, so a second \
+                 concurrent pass means that is no longer true — this refusal is where that \
+                 would be noticed rather than paid for. The tuple is dead-lettered and can be \
+                 re-dropped"
+            )));
+        }
+        record.in_flight_since_ms = Some(now_ms);
+        record.started += 1;
+        drop(record);
+        Ok(Pass {
+            activity: Arc::clone(self),
+            began_ms: now_ms,
+            settled: false,
+        })
+    }
+
+    /// The counters as they stand.
+    pub fn snapshot(&self) -> Passes {
+        let record = self.record.lock().unwrap_or_else(|e| e.into_inner());
+        Passes {
+            in_flight_since_ms: record.in_flight_since_ms,
+            started: record.started,
+            succeeded: record.succeeded,
+            failed: record.failed,
+            last_end_ms: record.last_end_ms,
+            last_ms: record.last_ms,
+        }
+    }
+
+    fn settle(&self, began_ms: u64, ok: bool) {
+        let mut record = self.record.lock().unwrap_or_else(|e| e.into_inner());
+        record.in_flight_since_ms = None;
+        let end = now_ms();
+        record.last_end_ms = Some(end);
+        record.last_ms = Some(end.saturating_sub(began_ms));
+        if ok {
+            record.succeeded += 1;
+        } else {
+            record.failed += 1;
+        }
+    }
+}
+
+/// The in-flight pass, released when it drops.
+///
+/// ⚠ **A pass that ends by `?` counts as a failure**, which is why this is a guard and not a
+/// pair of calls: every early return in [`PassEndpoint::invoke`] is a pass that was begun and
+/// did not answer, and a slot that leaked would wedge this server's reviewer for the life of
+/// the process with no symptom but a queue that stops draining.
+pub struct Pass {
+    activity: Arc<Activity>,
+    began_ms: u64,
+    settled: bool,
+}
+
+impl Pass {
+    /// Record an answer. Anything else — including a panic-free early return — is a failure.
+    pub fn succeeded(mut self) {
+        self.settled = true;
+        self.activity.settle(self.began_ms, true);
+    }
+}
+
+impl Drop for Pass {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.activity.settle(self.began_ms, false);
+        }
+    }
+}
+
+/// Wall clock in milliseconds since the epoch.
+///
+/// ⚠ Read from the OS rather than through the kernel's `Clock`, and only here. Everything
+/// this server puts in a GRAPH is stamped by the kernel — a fixed clock in a test must move
+/// those — but these are liveness counters about this process, and a test clock that made
+/// "the last pass ended 40 minutes ago" say `0` would break the one readout whose whole job
+/// is to be true about the wall.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------- the pass
 
 /// ★★ **THE INVARIANT, as a value.**
@@ -437,10 +737,21 @@ pub fn review_request(repo: &str, path: &str) -> Result<Request> {
 /// # Capability
 ///
 /// The caller's, unchanged and unwidened: `inv.issue` carries it into the review. This
-/// endpoint declares exactly what the review declares — browse read, net, annotate — because
-/// it can never do less and must not advertise that it might. Declaring nothing would be an
+/// endpoint declares exactly what the review declares — browse read and net — because it can
+/// never do less and must not advertise that it might. Declaring nothing would be an
 /// over-offer that fails one hop in; declaring more would refuse callers the review accepts.
-pub struct PassEndpoint;
+///
+/// ⚠⚠ **`urn:cap:annotate` is NOT among them, and its absence is the interlock.** Until
+/// `ikigai-browse` 0.5.0 it was, because a pass minted annotations; the day that changed,
+/// this declaration became an over-declaration that would have refused the reviewer grant
+/// **one hop before the review that no longer wants it** — a headless pass denied by gonk's
+/// own contract, with browse perfectly willing. Declared = enforced runs in both directions,
+/// and `tests/browse.rs` reads both contracts off a kernel composing real browse rather than
+/// trusting either copy.
+pub struct PassEndpoint {
+    /// What this process has spent, and the one-at-a-time bound. See [`Activity`].
+    pub activity: Arc<Activity>,
+}
 
 #[async_trait]
 impl Endpoint for PassEndpoint {
@@ -451,6 +762,11 @@ impl Endpoint for PassEndpoint {
                 inv.request.verb
             )));
         }
+        // ★ The slot is claimed BEFORE the tuple is parsed, so a malformed tuple counts as a
+        // pass that failed rather than as nothing having happened: the counters are what an
+        // operator reads to tell a stuck queue from a slow one, and a tuple that fails
+        // instantly forty times in a row is exactly the shape they need to see.
+        let pass = self.activity.begin(now_ms())?;
         // The tuple arrives as `content` — the name a pipe's value lands in, and the name
         // `ikigai-intray`'s reactor passes it under.
         let bytes = inv
@@ -461,6 +777,7 @@ impl Endpoint for PassEndpoint {
         // ★ THE ONE CALL. Nothing before it builds a prompt; nothing after it touches a
         // finding. The review's own answer is the answer, whole.
         let answer = inv.issue(request).await?;
+        pass.succeeded();
         Ok(answer)
     }
 
@@ -487,7 +804,11 @@ impl Endpoint for PassEndpoint {
             // this server's own `grants::CAP_NET_ANY`, which is the string `grants.json` is
             // checked against, rather than typed a third time.
             .requires(crate::grants::CAP_NET_ANY)
-            .requires(ikigai_browse::CAP_ANNOTATE)
+            // ⚠⚠ NO `urn:cap:annotate`. It was here until 2026-09-20, correctly, because a
+            // pass used to mint annotations; browse 0.5.0 made a pass produce PENDING
+            // findings instead and dropped the token from `review`'s own `requires`. Leaving
+            // it would refuse the reviewer grant HERE, one hop before the review that
+            // accepts it — see the struct's doc.
             .input(
                 ArgSpec::new("content")
                     .class(XSD_STRING)
@@ -516,20 +837,279 @@ impl Endpoint for PassEndpoint {
 
 // ---------------------------------------------------------------------- composition
 
-/// The trigger's space: the queue at `urn:space:{name}` and the pass in front of it.
+/// The trigger's space: the queue at `urn:space:{name}`, the pass in front of it, and the
+/// depth that says whether anything is draining it.
 ///
 /// ⚠ **The queue's three tokens are minted by nobody.** `urn:cap:space:{out,read,take}` have
 /// no flag in this server's provisioning and appear in no grant it writes, so the HTTP door
 /// and the QUIC door both answer a typed `Denied` — the queue is reachable from the
-/// owner-only socket, which is the door a person drains it through.
-pub fn space(trigger: &Trigger) -> Vec<Arc<dyn Space>> {
+/// owner-only socket, which is the door a person drains it through. [`DEPTH`] is the one
+/// reading of this tree that a network caller can get, and it is deliberately a different
+/// authority: see [`DepthEndpoint`].
+pub fn space(trigger: &Trigger, activity: Arc<Activity>, armed: bool) -> Vec<Arc<dyn Space>> {
+    let queue = Arc::new(trigger.clone());
     vec![
         Arc::new(
-            ikigai_core::EndpointSpace::new().bind(ikigai_core::Exact::new(PASS), PassEndpoint),
+            ikigai_core::EndpointSpace::new()
+                .bind(
+                    ikigai_core::Exact::new(PASS),
+                    PassEndpoint {
+                        activity: Arc::clone(&activity),
+                    },
+                )
+                .bind(
+                    ikigai_core::Exact::new(DEPTH),
+                    DepthEndpoint {
+                        trigger: Some(queue),
+                        activity,
+                        armed,
+                    },
+                ),
         ) as Arc<dyn Space>,
         Arc::new(ikigai_intray::space(trigger.root.clone())) as Arc<dyn Space>,
     ]
 }
+
+// ------------------------------------------------------------------- going live
+
+/// A concrete review IRI over `root`, for reading the review's contract off this kernel.
+///
+/// ⚠ The path is a placeholder and no file is read: `Kernel::describe` answers from the
+/// endpoint's `Description`, which is the same for every path the template matches. A real
+/// path would work identically and would suggest, wrongly, that this server had chosen one.
+pub fn review_probe_iri(root: &str) -> String {
+    format!("urn:repo:{root}:review:{PROBE_PATH}")
+}
+
+/// The placeholder [`review_probe_iri`] uses. Any path the template accepts would do.
+const PROBE_PATH: &str = "README.md";
+
+/// ⚠⚠ **Refuse to arm a reviewer whose grant cannot do the job — or can do too much.**
+///
+/// Run at startup, against the contract of the review this server would actually issue, so
+/// both failures are a refusal to start rather than a queue that dead-letters every tuple
+/// with a permission error nobody is watching.
+///
+/// Two directions, and the second is the one this whole design rests on:
+///
+/// - **Too little.** Every scope `review` declares is checked the way the kernel will check
+///   it — `Capability::allows` over the capability this grant builds — so the offering
+///   wildcard `urn:cap:net:*` is satisfied by the narrow `urn:cap:net:127.0.0.1` exactly as
+///   it will be at dispatch, and a grant that names `localhost` for a peer at `127.0.0.1`
+///   fails HERE instead of on the first commit. The browse graph's two store doors are
+///   checked too: they are not on the review's contract (a finding is written through a
+///   sub-request, and a capability travels down unchanged), and without them a pass derives
+///   an answer and cannot record it.
+/// - **Too much.** `urn:cap:annotate` in a reviewer's grant is the interlock gone. browse
+///   0.5.0 made a pass unable to publish *by arithmetic*; handing the reviewer the publish
+///   token restores exactly the thing Brian's rule forbids — "nothing gets published to Gonk
+///   except by the human" — and it would do so silently, because everything would work.
+///
+/// # Errors
+///
+/// With the token named and the line that fixes it, in both directions.
+pub fn check_reviewer(
+    hub: &Kernel,
+    review_iri: &str,
+    host: &str,
+    scopes: &[String],
+) -> std::result::Result<(), String> {
+    let capability = Capability::scoped(scopes.to_vec());
+    if satisfies(&capability, ikigai_browse::CAP_ANNOTATE) {
+        return Err(format!(
+            "the reviewer grant carries `{}` — the token that PUBLISHES. A review pass \
+             produces pending findings and cannot reach the annotation family on its own \
+             (ikigai-browse 0.5.0), and that arithmetic is the only thing standing between \
+             an armed trigger and unattended publishing. Remove it from this grant; the \
+             signed-in person's grant is where it belongs",
+            ikigai_browse::CAP_ANNOTATE
+        ));
+    }
+    let target = Iri::parse(review_iri).map_err(|e| format!("{review_iri}: {e}"))?;
+    let described = hub.describe(&target).ok_or_else(|| {
+        format!("`{review_iri}` does not resolve on this server, so nothing would run a pass")
+    })?;
+    let required = described
+        .action_specs()
+        .into_iter()
+        .find(|spec| spec.verb == Verb::Source)
+        .map(|spec| spec.requires)
+        .unwrap_or_default();
+    let store = crate::grants::browse_graph_grants(crate::grants::Authority::Write)?;
+    for scope in required.iter().chain(store.iter()) {
+        if !satisfies(&capability, scope) {
+            return Err(format!(
+                "the reviewer grant does not satisfy `{scope}`, which a review pass needs. \
+                 Every pass would dead-letter with a permission error, so this server \
+                 refuses to arm instead.\n{}",
+                grant_stanza(hub, review_iri, host)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `capability` satisfies a DECLARED scope, the way the kernel will.
+///
+/// ⚠⚠ **This is a hand copy of `ikigai_core`'s `cap_satisfies`, because that predicate is
+/// `pub(crate)`.** `Capability::allows` is exact containment and is the WRONG test for a
+/// declared scope: a trailing `*` is the parameterized-ACL family form — `urn:cap:net:*`
+/// means "holds some grant under this prefix" — and the kernel resolves it with a prefix
+/// match before dispatch. Using `allows` here would make this whole check refuse every
+/// correct reviewer grant, which it did on the first draft.
+///
+/// ★ Reported up as friction: a host cannot pre-flight a grant against a contract without
+/// re-deriving this, and a re-derivation that drifts gives a startup check that disagrees
+/// with the kernel in one direction or the other. Both directions are bad, and the wrong one
+/// is worse: a check that is more permissive than the kernel passes a grant every pass then
+/// dead-letters on.
+fn satisfies(capability: &Capability, scope: &str) -> bool {
+    match scope.strip_suffix('*') {
+        Some(prefix) => match capability.scopes() {
+            None => true, // root
+            Some(held) => held.iter().any(|s| s.starts_with(prefix)),
+        },
+        None => capability.allows(scope),
+    }
+}
+
+/// The `grants.json` stanza this kernel's own contracts say a reviewer needs — for a refusal
+/// message and for the banner.
+///
+/// ★ **The message an operator is reading is the one place a remembered list would do the
+/// most damage**, so this is derived from [`reviewer_grant_shape`] like everything else, and
+/// it prints JSON they can paste rather than prose they must translate.
+pub fn grant_stanza(hub: &Kernel, review_iri: &str, host: &str) -> String {
+    match reviewer_grant_shape(hub, review_iri, host) {
+        Ok(scopes) => format!(
+            "  This kernel's contracts say a reviewer grant is:\n    \"reviewer\": {}\n  \
+             ⚠ WITHOUT `{}` — a reviewer that may publish is the interlock gone.",
+            serde_json::to_string_pretty(&scopes)
+                .unwrap_or_default()
+                .replace('\n', "\n    "),
+            ikigai_browse::CAP_ANNOTATE
+        ),
+        Err(e) => format!("  (the shape could not be read off this kernel: {e})"),
+    }
+}
+
+/// Put a reactor over this queue: catch up on what is waiting, then watch for drops.
+///
+/// ★ **`with_host_authority` is the whole reason this is safe to do at all**, and it was
+/// added to `ikigai-intray` 0.1.24 the day before this arc, for this
+/// ([#445](http://localhost:1060/l/default/item/445), `ikigai-cli` PR #347). Without it a
+/// reactor takes its handler's authority from `<root>/{space}/cap` — a file in the same
+/// directory as the `inbox/` anything can drop into. With it the HOST supplies the
+/// capability and the crate never reads that file, so the authority a pass runs under is the
+/// one an operator wrote into `grants.json` and this server already checks on every
+/// certificate and every passkey it admits.
+///
+/// ⚠ **A space that is not ours gets an EMPTY capability, not the reviewer's.** The watch is
+/// recursive over the whole spaces tree, so a second space appearing beside this one would
+/// otherwise fire its handler under the reviewer's authority. gonk creates only its own and
+/// writes a `handler` only there, so this is belt-and-braces — and it is the cheap half of
+/// the two.
+///
+/// # Errors
+///
+/// When the handler cannot be written, or a `cap` file is sitting in a space this reactor
+/// would now IGNORE. The second is the trap the host seam introduces while closing the
+/// other: under `with_host_authority` such a file does nothing at all, and an operator who
+/// wrote one believes it is bounding a reviewer that it is not.
+pub fn arm(
+    trigger: &Trigger,
+    hub: Arc<Kernel>,
+    scopes: &[String],
+) -> std::result::Result<(), String> {
+    set_handler(trigger, true)?;
+    let space = trigger.space.clone();
+    let reviewer = Capability::scoped(scopes.to_vec());
+    let reactor = ikigai_intray::SpaceReactor::new(
+        trigger.root.clone(),
+        hub as Arc<dyn ikigai_resolve::Resolver>,
+        reviewer.clone(),
+    )
+    .with_host_authority(move |name| {
+        if name == space {
+            Some(reviewer.clone())
+        } else {
+            // Not `None`: `None` means "no opinion", and the reactor would fall back to its
+            // own configured capability — which is the reviewer's. An empty capability is
+            // the only way to say "this space gets nothing".
+            Some(Capability::scoped(Vec::<String>::new()))
+        }
+    });
+    let ignored = reactor.ignored_cap_files();
+    if !ignored.is_empty() {
+        return Err(format!(
+            "{} carr{} a `cap` file, and this server supplies the reactor's authority \
+             itself — so that file is INERT: it bounds nothing, and an operator who wrote it \
+             is wrong about what a pass may do. Remove it; the authority a pass runs under is \
+             `gonk.review.grant` in grants.json",
+            ignored
+                .iter()
+                .map(|name| trigger.root.join(name).join("cap").display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if ignored.len() == 1 { "ies" } else { "y" }
+        ));
+    }
+    // ⚠⚠ **`watch()` does NOT return immediately, whatever its doc says — the startup
+    // catch-up runs in the CALLING thread.** `for name in space_names() { drain(name) }`
+    // happens before the watcher thread is spawned, and a drain is one full review pass per
+    // waiting tuple. Called inline from `main`, a queue holding forty tuples from the last
+    // push would hold this server's doors shut for as long as forty model calls take, and
+    // the ledger — the thing gonk exists to serve — would be unreachable the whole time,
+    // looking exactly like a hang. So the catch-up goes on a thread of its own and startup
+    // continues. ⚠ The refusals above stay SYNCHRONOUS: a `cap` file or an unwritable
+    // handler must stop this server, and a refusal on a background thread would not.
+    // Reported up: the crate's doc says "returns immediately", and for any host with a
+    // non-empty inbox that is not true.
+    std::thread::spawn(move || Arc::new(reactor).watch());
+    Ok(())
+}
+
+/// Write (or remove) the `handler` file that makes this space reactive.
+///
+/// ⚠ **Rewritten at every startup, and REMOVED when this server is not armed.** The file is
+/// read per tuple by `SpaceReactor` and names what fires, so it is a control surface living
+/// in the tree a dropper writes into (see the module doc). gonk owns this tree and is its
+/// only writer outside `inbox/`, so the honest posture is that gonk's value is the value:
+/// an unarmed gonk leaves nothing behind for a later armed one to fire, and an armed one does
+/// not inherit whatever was there.
+///
+/// # Errors
+///
+/// When the file cannot be written or removed — a queue whose handler is not what this
+/// server says it is must not start.
+pub fn set_handler(trigger: &Trigger, armed: bool) -> std::result::Result<(), String> {
+    let path = trigger.dir().join(HANDLER_FILE);
+    if !armed {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!(
+                "{} could not be removed, and this server is not armed — a handler left \
+                 behind is what a reactor fires: {e}",
+                path.display()
+            )),
+        };
+    }
+    std::fs::write(&path, format!("{PASS}\n"))
+        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    restrict_file(&path);
+    Ok(())
+}
+
+/// `0600` on the handler file.
+#[cfg(unix)]
+fn restrict_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) {}
 
 /// Create the trigger's directories, `0700`, before anything can write into them.
 ///
@@ -624,16 +1204,20 @@ pub enum Depth {
 /// [`Depth`] for a configured trigger, or [`Depth::NotConfigured`] for `None`.
 ///
 /// ⚠ **This counts FILES, where everything else in this server reads through the kernel** —
-/// and the reason is a real gap rather than a shortcut. The count lives behind
+/// and the reason was a real gap rather than a shortcut. The count lives behind
 /// `Source urn:space:{name}`, which requires `urn:cap:space:read`, and this server mints that
 /// token for NOBODY ([`space`]): not for an anonymous caller, not for a passkey identity, not
 /// for a certificate. So there is no capability any page could be rendering under that would
 /// be allowed to ask the kernel, and a read through it would be a typed `Denied` on every
-/// request — which is exactly the missing number the page exists to supply. Counting the
-/// directory is what [`pending`] already does for the banner; this is the same read, told
-/// apart from its two failure modes. Reported up as the design question it is: either the
-/// depth becomes a resource of gonk's own with its own floor, or the space's read token
-/// becomes mintable.
+/// request — which is exactly the missing number the page exists to supply.
+///
+/// ★ Ledger [#464](http://localhost:1060/l/default/item/464) put two options on that: make
+/// the depth a resource of gonk's own with its own floor, or make the space's read token
+/// mintable. [#466](http://localhost:1060/l/default/item/466) chose the first — gonk is the
+/// drainer now, so gonk knows the depth internally — and [`DEPTH`] is that resource. This
+/// function is still the counting, because a directory listing is what there is; what
+/// changed is that the number is now reachable by a caller, under a capability that is
+/// argued rather than absent.
 pub fn depth(trigger: Option<&Trigger>) -> Depth {
     let Some(trigger) = trigger else {
         return Depth::NotConfigured;
@@ -662,6 +1246,263 @@ fn count_tuples(dir: &Path) -> std::io::Result<usize> {
                 .is_some_and(|n| n.ends_with(".tuple"))
         })
         .count())
+}
+
+// ------------------------------------------------------------------- the depth resource
+
+/// The whole of what [`DEPTH`] answers: the queue, whether anything is draining it, and what
+/// that thing has done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    /// What is in the three stage directories, or why that is not a number.
+    pub depth: Depth,
+    /// Whether a reactor is watching this queue in this process.
+    pub armed: bool,
+    /// What this process has spent on passes.
+    pub passes: Passes,
+}
+
+impl Status {
+    /// One sentence, and it is the sentence a human reads to tell a SLOW queue from a STUCK
+    /// one.
+    ///
+    /// ★ The distinction is the whole point and it is not a number: a queue that is deep and
+    /// has a pass in flight is working; a queue that is deep with nothing in flight and a
+    /// last-pass time growing is wedged. Both render as "12 waiting" if you only print the
+    /// count, and one of them needs somebody.
+    pub fn sentence(&self, now_ms: u64) -> String {
+        let (waiting, done) = match &self.depth {
+            Depth::NotConfigured => {
+                return "No review queue is configured (`gonk.review.space`), so nothing is \
+                        dropping review requests here."
+                    .to_string()
+            }
+            Depth::Unreadable(why) => {
+                return format!(
+                    "The review queue could not be read, so its depth is unknown: {why}"
+                )
+            }
+            Depth::Counted {
+                inbox,
+                outbox,
+                error,
+            } => (*inbox, handled(*outbox, *error)),
+        };
+        // ⚠ "empty" keeps its own affirmative sentence rather than becoming "0 waiting".
+        // Ledger #446: "nothing is waiting" and "the page failed to load" must not look
+        // alike, and a bare zero is halfway to looking like the second.
+        let mut out = if waiting == 0 {
+            format!("The review queue is empty: no request is waiting to be reviewed{done}.")
+        } else {
+            format!(
+                "{waiting} review request{} waiting to be reviewed{done}.",
+                if waiting == 1 { " is" } else { "s are" }
+            )
+        };
+        if !self.armed {
+            out.push_str(
+                " NOTHING IS DRAINING THIS QUEUE: this server is not armed \
+                 (`gonk.review.arm`), so a request waits for a person to run it.",
+            );
+            return out;
+        }
+        match self.passes.in_flight_since_ms {
+            Some(since) => out.push_str(&format!(
+                " A pass has been running for {}.",
+                humanize_ms(now_ms.saturating_sub(since))
+            )),
+            None if waiting > 0 => out.push_str(" NONE IN FLIGHT."),
+            None => {}
+        }
+        out.push_str(&format!(
+            " {} pass(es) this run, {} failed",
+            self.passes.succeeded, self.passes.failed
+        ));
+        match self.passes.last_end_ms {
+            Some(end) => out.push_str(&format!(
+                "; the last ended {} ago.",
+                humanize_ms(now_ms.saturating_sub(end))
+            )),
+            None if self.passes.in_flight_since_ms.is_none() => {
+                out.push_str("; none since this server started.");
+            }
+            None => out.push('.'),
+        }
+        if self.stuck() {
+            out.push_str(
+                " ⚠ A queue that is not empty with nothing in flight is a STUCK reviewer: the \
+                 watcher thread is gone, and only a restart of this server brings it back.",
+            );
+        }
+        out
+    }
+
+    /// The numbers, for anything that wants to compute rather than read.
+    fn json(&self, now_ms: u64) -> String {
+        let (configured, inbox, outbox, error, unreadable) = match &self.depth {
+            Depth::NotConfigured => (false, None, None, None, None),
+            Depth::Unreadable(why) => (true, None, None, None, Some(why.clone())),
+            Depth::Counted {
+                inbox,
+                outbox,
+                error,
+            } => (true, Some(*inbox), Some(*outbox), Some(*error), None),
+        };
+        serde_json::json!({
+            // ★ The prose, beside the numbers, so a face that renders the sentence and a
+            // caller that computes on the numbers are reading ONE answer. The Queue badge
+            // takes this string verbatim rather than re-deriving it, which is the only way
+            // the header, the page and the socket cannot disagree about what is happening.
+            "sentence": self.sentence(now_ms),
+            "configured": configured,
+            "armed": self.armed,
+            "waiting": inbox,
+            "handled": outbox,
+            "dead_lettered": error,
+            "unreadable": unreadable,
+            "in_flight": self.passes.in_flight_since_ms.is_some(),
+            "in_flight_ms": self
+                .passes
+                .in_flight_since_ms
+                .map(|since| now_ms.saturating_sub(since)),
+            "passes_started": self.passes.started,
+            "passes_succeeded": self.passes.succeeded,
+            "passes_failed": self.passes.failed,
+            "since_last_pass_ms": self
+                .passes
+                .last_end_ms
+                .map(|end| now_ms.saturating_sub(end)),
+            "last_pass_ms": self.passes.last_ms,
+            "stuck": self.stuck(),
+        })
+        .to_string()
+    }
+
+    /// The one boolean an operator's eye is looking for: armed, something waiting, nothing
+    /// running.
+    pub fn stuck(&self) -> bool {
+        self.armed
+            && self.passes.in_flight_since_ms.is_none()
+            && matches!(self.depth, Depth::Counted { inbox, .. } if inbox > 0)
+    }
+}
+
+/// `", 3 handled"` / `", 3 handled and 1 dead-lettered"` / `""`.
+fn handled(outbox: usize, error: usize) -> String {
+    match (outbox, error) {
+        (0, 0) => String::new(),
+        (n, 0) => format!(", {n} handled"),
+        (0, n) => format!(", {n} dead-lettered"),
+        (n, e) => format!(", {n} handled and {e} dead-lettered"),
+    }
+}
+
+/// A duration as a badge reads it.
+fn humanize_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        s if s < 90 => format!("{s}s"),
+        s if s < 5400 => format!("{}m", s / 60),
+        s => format!("{}h{}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// `urn:iki:gonk:review:depth` — the queue's depth and the reviewer's liveness.
+///
+/// # ★ Its own floor, and the argument for that floor
+///
+/// The space's own `urn:cap:space:read` is minted for nobody, which is what made this number
+/// unreachable ([#464](http://localhost:1060/l/default/item/464)). This resource does not
+/// reuse it: it declares **`urn:cap:browse:read:*`**, and the reason is what the depth
+/// actually discloses. A queued request is a `(repo, path)` pair naming a file in a browse
+/// root; even reduced to a count it is a statement about those roots and about what someone
+/// is working on. A caller who may not read the roots has no business reading the shape of
+/// the work over them — the same argument `urn:iki:gonk:backup:status` makes about naming
+/// every graph.
+///
+/// It also lands exactly where the Queue page already stands: that page is offered only to a
+/// caller who may read a root AND may decide, so the badge on it never asks for something its
+/// viewer lacks. An anonymous loopback caller holds ledger tokens and nothing else, so it is
+/// a typed `Denied` — the queue's depth is process state, not public.
+///
+/// ⚠ It is `Expiry::Always` by omission: nothing here calls `.cacheable()`, because the whole
+/// value of the number is that it is the current one. A cached depth is a badge that lies
+/// about a stuck queue, which is the single thing it exists to show.
+pub struct DepthEndpoint {
+    /// The queue, or `None` when none is configured.
+    pub trigger: Option<Arc<Trigger>>,
+    /// The counters [`PassEndpoint`] writes.
+    pub activity: Arc<Activity>,
+    /// Whether [`arm`] ran in this process.
+    pub armed: bool,
+}
+
+impl DepthEndpoint {
+    /// The status as it stands.
+    pub fn status(&self) -> Status {
+        Status {
+            depth: depth(self.trigger.as_deref()),
+            armed: self.armed,
+            passes: self.activity.snapshot(),
+        }
+    }
+}
+
+#[async_trait]
+impl Endpoint for DepthEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(format!(
+                "gonk-review-depth answers Source (how deep the queue is), not {:?}",
+                inv.request.verb
+            )));
+        }
+        let status = self.status();
+        let now = inv.now().map(|t| t.as_millis()).unwrap_or_else(now_ms);
+        if matches!(inv.inline_str("as"), Ok(JSON)) {
+            return Ok(Representation::new(
+                ReprType::new(JSON).with_param("charset", "utf-8"),
+                status.json(now).into_bytes(),
+            ));
+        }
+        Ok(Representation::new(
+            ReprType::new("text/plain").with_param("charset", "utf-8"),
+            status.sentence(now).into_bytes(),
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-review-depth"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-review-depth")
+            .title("How deep the review queue is, and whether anything is draining it")
+            .summary(
+                "The git-event review queue's three stages (waiting, handled, \
+                 dead-lettered), whether this process is ARMED to drain it, whether a pass \
+                 is in flight right now, and what this run has spent. ⚠ It is a LIVENESS \
+                 signal, not a statistic: `watch()` catches up at startup, so a watcher \
+                 thread that dies while this server lives drains nothing and says nothing \
+                 until a restart. A queue that is armed and not empty with nothing in \
+                 flight is stuck — `stuck` in the JSON face says so directly. Four \
+                 answers, and three of them are not a number: not configured, unreadable, \
+                 empty and counted are different statements.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_browse::CAP_WILDCARD)
+            .input(
+                ArgSpec::new("as")
+                    .optional()
+                    .class(XSD_STRING)
+                    .one_of(["text/plain", JSON])
+                    .default_value("text/plain")
+                    .summary("the face: a sentence, or the numbers"),
+            )
+            .output("text/plain")
+            .output(JSON)
+    }
 }
 
 /// The tuple ids waiting in a trigger's inbox, sorted — what the banner counts.

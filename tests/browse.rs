@@ -2190,7 +2190,6 @@ impl HttpDoorHarness {
             ledgers: vec!["default".to_string()],
             // The one root every fixture here configures — see `served`.
             browse_roots: vec!["demo".to_string()],
-            review: None,
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         });
@@ -2406,4 +2405,112 @@ impl HttpDoorHarness {
         let v: serde_json::Value = serde_json::from_str(&body).expect("a session");
         v["session"].as_str().expect("session").to_string()
     }
+}
+
+// ------------------------------------------------- the armed trigger's contract
+
+/// ★★ **THE ANTI-DRIFT DEVICE: gonk's pass and browse's review, read off ONE kernel.**
+///
+/// This is the test that would have caught the bug this arc found. `ikigai-browse` 0.5.0
+/// dropped `urn:cap:annotate` from what `review` requires — a pass writes PENDING findings
+/// and cannot publish, which is the entire safety interlock behind arming the git-event
+/// trigger (ledger [#466](http://localhost:1060/l/default/item/466)). Two places in this
+/// crate went on naming that constant and **compiled clean**, because the constant still
+/// exists; only the requirement went away:
+///
+/// - `trigger::PassEndpoint::describe` would have DENIED the reviewer grant one hop before
+///   the review that accepts it, and
+/// - `trigger::reviewer_grant_shape` would have told an operator to write the publish token
+///   into the reviewer's grant — the interlock gone, silently, with everything working.
+///
+/// `tests/trigger.rs` cannot catch either: its review is a stub, and a stub is a copy. This
+/// one composes REAL browse over a real root with a mount, and asks the kernel for both
+/// contracts. The day browse's `requires` moves again, this goes red.
+#[test]
+fn the_pass_requires_exactly_what_the_real_review_requires() {
+    let dir = scratch_root();
+    let graph = browse::Graph::chosen();
+    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+        .expect("a shared in-memory store");
+    let (watch, refused) = RootWatch::start(&roots(&dir));
+    assert!(refused.is_empty(), "{refused:?}");
+    let tiers = ExplainTiers::default();
+    let wired = browse::wire(roots(&dir), handle, watch.watched(), Some(&tiers), &graph);
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let queue = ikigai_gonk::trigger::Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&queue).expect("the tree");
+    let hub = compose_with(
+        store,
+        Some(Arc::new(wired.space)),
+        vec![mount::space(&dead_mount())],
+        ikigai_gonk::trigger::space(
+            &queue,
+            Arc::new(ikigai_gonk::trigger::Activity::default()),
+            false,
+        ),
+        None,
+    );
+
+    let review = "urn:repo:demo:review:src/lib.rs".to_string();
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v.dedup();
+        v
+    };
+    let described = |iri: &str| {
+        sorted(
+            hub.describe(&Iri::parse(iri).expect("an IRI"))
+                .unwrap_or_else(|| panic!("`{iri}` describes itself"))
+                .requires,
+        )
+    };
+    let pass = described(ikigai_gonk::trigger::PASS);
+    let real = described(&review);
+    assert_eq!(
+        pass, real,
+        "the pass must declare EXACTLY what the review it issues declares — more refuses \
+         callers browse accepts, less is an over-offer that fails one hop in"
+    );
+    assert!(
+        !real.contains(&ikigai_browse::CAP_ANNOTATE.to_string()),
+        "⚠⚠ THE INTERLOCK: browse 0.5.0 stopped a review pass from minting annotations, and \
+         that absence is what makes an ARMED headless trigger safe. If this is red, browse \
+         can publish again and `gonk.review.arm` must not be on: {real:?}"
+    );
+
+    // ★ And the grant an operator is told to write is that contract, mapped from the
+    // offering forms to the grant forms — not a list, and never carrying the publish token.
+    let shape = ikigai_gonk::trigger::reviewer_grant_shape(&hub, &review, "127.0.0.1")
+        .expect("the review is bound");
+    assert!(
+        !shape.contains(&ikigai_browse::CAP_ANNOTATE.to_string()),
+        "a reviewer that may publish is the interlock gone: {shape:?}"
+    );
+    assert!(
+        shape.contains(&"urn:cap:net:127.0.0.1".to_string()),
+        "⚠ the NARROW net form, and the host asked for — `Capability::allows` is exact \
+         containment, so `localhost` is a different host from `127.0.0.1`: {shape:?}"
+    );
+    assert!(
+        !shape.contains(&"urn:cap:net:*".to_string()),
+        "`quic::check_grants` refuses the offering wildcard as a grant: {shape:?}"
+    );
+    for token in browse_graph_grants(Authority::Write).expect("the browse graph") {
+        assert!(
+            shape.contains(&token),
+            "a pass writes its findings through the store's per-graph door, and a \
+             capability travels down unchanged: {token} is missing from {shape:?}"
+        );
+    }
+
+    // ⚠ And the whole shape actually satisfies the kernel: this is the check `main` runs
+    // before it arms, so a shape that passed here and failed there would be a startup
+    // refusal on a grant this crate itself derived.
+    ikigai_gonk::trigger::check_reviewer(&hub, &review, "127.0.0.1", &shape)
+        .expect("the derived shape is the one that arms");
 }

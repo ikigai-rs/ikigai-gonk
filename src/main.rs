@@ -192,14 +192,23 @@ fn serve(flags: &config::Flags) -> ! {
     // The review queue, when one is configured. `prepare` creates the tree 0700 up front for
     // the reason `ikigai-intray`'s own watcher does: a directory that appears later races
     // whatever writes into it, and `review request` writes with no server running.
+    //
+    // ★ The reviewer's SCOPES are resolved here, before the kernel exists, because a grant
+    // that `grants.json` cannot honour must stop this server rather than arm a reactor that
+    // dead-letters everything. The reactor itself needs the kernel, so it is installed after
+    // the hub below — the two halves of arming, in the only order they can happen.
+    let reviewer = match &settings.review {
+        Some(t) => resolve_reviewer(t, &layout),
+        None => None,
+    };
+    let activity = Arc::new(trigger::Activity::default());
     let trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
-            trigger::space(t)
+            trigger::space(t, Arc::clone(&activity), reviewer.is_some())
         }
         None => Vec::new(),
     };
-    let review_line = review_line(&settings, &layout);
     let hub = Arc::new(compose_with(
         store,
         browse_space,
@@ -210,6 +219,37 @@ fn serve(flags: &config::Flags) -> ! {
             jobs: jobs.clone(),
         }),
     ));
+
+    // ★★ ARMING, and it is deliberately the last thing before the doors: the reviewer's
+    // grant is checked against the CONTRACT of the review this kernel actually binds, and a
+    // grant that is short of it — or that carries the publish token — stops this server.
+    let review_line = match (&settings.review, &reviewer) {
+        (Some(queue), Some(scopes)) => {
+            let host = mount_host(&settings);
+            let probe = settings
+                .browse_roots
+                .first()
+                .map(|(name, _)| trigger::review_probe_iri(name))
+                .unwrap_or_else(|| {
+                    fail(
+                        "gonk.review.arm is set and no gonk.browse.root is configured: there \
+                         is no repository to review, so no pass could ever resolve",
+                    )
+                });
+            trigger::check_reviewer(&hub, &probe, &host, scopes).unwrap_or_else(|e| fail(&e));
+            trigger::arm(queue, Arc::clone(&hub), scopes).unwrap_or_else(|e| fail(&e));
+            armed_line(queue, scopes.len(), &host)
+        }
+        _ => {
+            // Not armed: make sure nothing is left behind that a reactor would fire. The
+            // handler file lives in the tree a dropper writes into, and an unarmed gonk that
+            // left one there would be a loaded gun for the next process that is armed.
+            if let Some(queue) = &settings.review {
+                trigger::set_handler(queue, false).unwrap_or_else(|e| fail(&e));
+            }
+            review_line(&settings, &layout)
+        }
+    };
 
     let backup_line = start_backups(&hub, &jobs, &backup_settings, &settings.socket);
 
@@ -288,9 +328,6 @@ fn serve(flags: &config::Flags) -> ! {
                 .iter()
                 .map(|(name, _)| name.clone())
                 .collect(),
-            // The queue the Queue page reports the depth of — the same `Trigger` the banner
-            // counts, so the page and the startup line cannot disagree.
-            review: settings.review.clone().map(Arc::new),
             passkeys: Arc::clone(&passkeys),
             rules: Arc::clone(&render_rules),
         });
@@ -769,8 +806,9 @@ fn review_request(repo: &str, path: &str, flags: &config::Flags) {
     let Some(queue) = settings.review else {
         fail(
             "no review queue is configured: add `gonk.review.space = \"reviews\"` to the \
-             config home's config.toml. Binding the queue does not arm anything — see the \
-             README's \"the trigger is unarmed\" section",
+             config home's config.toml. Binding the queue does not arm anything — that takes \
+             `gonk.review.arm = true` AND a `gonk.review.grant` grants.json can honour; see \
+             the README's \"Arming it\" section",
         )
     };
     let tuple = trigger::Tuple {
@@ -781,14 +819,72 @@ fn review_request(repo: &str, path: &str, flags: &config::Flags) {
     println!("{id}");
 }
 
+/// The reviewer's scopes when this server is armed, `None` when it is not.
+///
+/// ★ **`arm` without a usable grant stops this server**, rather than serving a queue nothing
+/// drains while the banner says otherwise. The two facts are independent on purpose (see
+/// [`config`]), so the failure of one has to be loud.
+fn resolve_reviewer(queue: &trigger::Trigger, layout: &quic::Layout) -> Option<Vec<String>> {
+    if !queue.arm {
+        return None;
+    }
+    let Some(grant) = &queue.grant else {
+        fail(
+            "gonk.review.arm is set and gonk.review.grant names nothing. Arming is a grant \
+             plus a word, never a word alone: a pass runs under an authority an operator \
+             wrote into grants.json, and there is nothing here to run one under",
+        )
+    };
+    let scopes = quic::read_grants(&layout.grants_json())
+        .and_then(|grants| trigger::reviewer_scopes(&grants, grant))
+        .unwrap_or_else(|e| fail(&format!("gonk.review.arm is set, and {e}")));
+    Some(scopes)
+}
+
+/// The host a `urn:cap:net:` grant must name — where the mounted peer lives.
+///
+/// ⚠ **The authority's HOST, not the whole authority and not `localhost`.**
+/// `Capability::allows` is exact string containment, so `urn:cap:net:localhost` does not
+/// satisfy a call to `127.0.0.1`: the two spellings are different hosts as far as a
+/// capability is concerned, however the same they are to a resolver. A socket mount reaches
+/// a peer on this machine and has no authority to take a host from, so it takes the name a
+/// person would write.
+fn mount_host(settings: &config::Settings) -> String {
+    match settings.mounts.first().map(|m| &m.target) {
+        Some(mount::Target::Quic { authority, .. }) => authority
+            .rsplit_once(':')
+            .map(|(host, _)| host.to_string())
+            .unwrap_or_else(|| authority.clone()),
+        _ => "localhost".to_string(),
+    }
+}
+
+/// The banner's review line when the trigger IS armed.
+///
+/// ⚠ It says what bounds a push, because that is the question an operator has the moment
+/// this is on: passes are serial, one per this process, and nothing bounds the wall clock.
+fn armed_line(queue: &trigger::Trigger, scopes: usize, host: &str) -> String {
+    format!(
+        "urn:space:{} — ARMED: a drop fires {} under grant `{}` ({scopes} scopes, \
+         net {host}, no urn:cap:annotate — a pass CANNOT publish). {} waiting now. Passes \
+         run ONE AT A TIME in this process and nothing bounds wall clock, so a push \
+         touching forty files occupies the reviewer for forty passes; watch `{}` or the \
+         Queue badge. A queue that is not empty with nothing in flight is STUCK",
+        queue.space,
+        trigger::PASS,
+        queue.grant.as_deref().unwrap_or("?"),
+        trigger::pending(queue),
+        trigger::DEPTH,
+    )
+}
+
 /// The banner's review line — the queue, what is waiting in it, and, when a grant is named,
 /// whether `grants.json` can honour it.
 ///
-/// ⚠ **It says plainly that nothing drains this.** Brian, 2026-09-19: *"Nothing gets
-/// published to Gonk except by the human."* A review pass mints its findings as annotations
-/// as its terminal step, so an unattended drainer would publish unattended; the queue is
-/// therefore drained by a person, and the banner prints how. What changes that is ledger
-/// #444 (a pending state for a finding, in `ikigai-browse`), not a flag.
+/// ⚠ **It says plainly that nothing drains this** — because with `gonk.review.arm` unset
+/// nothing does, and a queue filling with nobody reading it is the quietest way for this
+/// feature to be useless. A person drains it one tuple at a time over the socket; the line
+/// prints how, and what the word is that changes it.
 fn review_line(settings: &config::Settings, layout: &quic::Layout) -> String {
     let Some(queue) = &settings.review else {
         return "not configured — no gonk.review.space; no queue is bound and \
@@ -806,9 +902,9 @@ fn review_line(settings: &config::Settings, layout: &quic::Layout) -> String {
         },
     };
     format!(
-        "urn:space:{} — {pending} request(s) waiting, {grant}. NOTHING DRAINS THIS: a pass \
-         publishes its findings as annotations, and nothing is published to gonk except by \
-         a human. Run one with `{}` over the socket",
+        "urn:space:{} — {pending} request(s) waiting, {grant}. NOT ARMED (no \
+         gonk.review.arm = true): nothing in this process drains this queue. Run one with \
+         `{}` over the socket",
         queue.space,
         trigger::DRAIN_ONE.replace("{space}", &queue.space),
     )

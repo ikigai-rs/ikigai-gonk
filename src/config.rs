@@ -17,7 +17,8 @@
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
 //! gonk.review.space = "reviews"        # bind the git-event review QUEUE (urn:space:reviews)
-//! # gonk.review.grant = "reviewer"     # the grant a pass WOULD run under; nothing runs one yet
+//! # gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
+//! # gonk.review.arm = true             # ⚠ ARM it: watch the queue and review on every drop
 //! # gonk.review.root = "~/.ikigai/spaces"   # the spaces tree (this IS the default)
 //! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
@@ -66,7 +67,7 @@ pub const DEFAULT_BACKUP_KEEP: usize = 5;
 pub const BACKUP_DIR_NAME: &str = "backups";
 
 /// Every key this server reads.
-const KEYS: [&str; 22] = [
+const KEYS: [&str; 23] = [
     "gonk.bind",
     "gonk.port",
     "gonk.socket",
@@ -89,6 +90,7 @@ const KEYS: [&str; 22] = [
     "gonk.review.space",
     "gonk.review.grant",
     "gonk.review.root",
+    "gonk.review.arm",
 ];
 
 /// How to invoke the binary.
@@ -701,12 +703,26 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
 /// and serves exactly the catalog it served before. A queue nothing can fill would be an
 /// over-offer, which the module recipe calls the worse direction.
 ///
-/// ⚠ `gonk.review.grant` is READ but nothing in this binary runs under it. It is printed by
+/// ⚠ `gonk.review.grant` is READ whether or not anything runs under it. It is printed by
 /// the banner so an operator can see the authority they wrote down, and it is refused early
 /// if `grants.json` cannot honour it — a grant that is a typo should not first be noticed
-/// on the day a pending state (#444) arms the drainer.
+/// on the day the drainer is armed.
+///
+/// ★★ **`gonk.review.arm` is the second of two facts, and neither is implicit.** Naming a
+/// grant is deliberately NOT arming: this server spent a release inviting operators to write
+/// one down *so they could see it* (this doc said so, and so did the README), and a line
+/// written under that invitation must not silently start spending inference on every commit.
+/// So arming takes its own word — and `arm` without a usable grant is a startup refusal
+/// rather than a server that quietly reviews nothing (`main`, [`crate::trigger::arm`]).
 fn review_trigger(text: &str, homes: &Homes) -> Result<Option<crate::trigger::Trigger>, String> {
     let Some(space) = value_for(text, "gonk.review.space") else {
+        if value_for(text, "gonk.review.arm").is_some() {
+            return Err(
+                "gonk.review.arm is set and gonk.review.space is not: there is no \
+                        queue to arm. Name the space first"
+                    .to_string(),
+            );
+        }
         return Ok(None);
     };
     crate::trigger::check_space_name(&space)?;
@@ -714,7 +730,24 @@ fn review_trigger(text: &str, homes: &Homes) -> Result<Option<crate::trigger::Tr
         .map(|spelled| expand_home(&spelled, &homes.home))
         .unwrap_or_else(|| homes.data.join(crate::trigger::SPACES_DIR));
     let grant = value_for(text, "gonk.review.grant");
-    let trigger = crate::trigger::Trigger { space, grant, root };
+    let arm = match value_for(text, "gonk.review.arm").as_deref() {
+        None => false,
+        Some("true") => true,
+        Some("false") => false,
+        Some(other) => {
+            return Err(format!(
+                "gonk.review.arm = `{other}` is neither `true` nor `false`. It decides \
+                 whether this server runs review passes unattended, so it is not a setting \
+                 to guess at"
+            ))
+        }
+    };
+    let trigger = crate::trigger::Trigger {
+        space,
+        grant,
+        root,
+        arm,
+    };
     crate::trigger::refuse_cap_file(&trigger)?;
     Ok(Some(trigger))
 }

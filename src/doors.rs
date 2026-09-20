@@ -362,6 +362,10 @@ pub fn edge_config() -> EdgeConfig {
                 route("/queue", crate::queue::QUEUE_IRI),
                 route("/queue/rows", crate::queue::ROWS_IRI),
                 route("/queue/decide", crate::queue::DECIDE_IRI),
+                // The header's depth badge, polled every `queue::BADGE_EVERY`. It is a GET
+                // of a fragment like `/queue/rows`, and it is the trigger's only liveness
+                // signal — see `queue::Badge`.
+                route("/queue/depth", crate::queue::BADGE_IRI),
                 // The browse family's landing page. ⚠ It must be listed BEFORE the
                 // `/browse/{p1}…` arities below — not for precedence (the patterns cannot
                 // both match: this one has no segment after `/browse`) but because reading

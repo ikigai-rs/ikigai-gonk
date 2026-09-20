@@ -121,7 +121,6 @@ fn door(root: &str, path: &Path) -> Kernel {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
         browse_roots: roots.iter().map(|(name, _)| name.clone()).collect(),
-        review: None,
         passkeys: Arc::new(Passkeys::new(quic::Layout::in_config_home(&config), 1060)),
         rules: rules::DEFAULT_RULES.into(),
     });

@@ -153,24 +153,33 @@ ikigai-repo = "0.1.6"
 # convenience: a queue whose tuples are FILES survives a restart of this process, and a
 # commit that happens while nothing is draining is not lost.
 #
-# ⚠ **`SpaceReactor` is linked and deliberately NOT used**, for the same class of reason
-# `urn:time:schedule` is not bound: it fires a handler under the scopes in a `cap` file
-# beside the space, built with `Capability::scoped` — the TRUSTED minting path, not an
+# ★★ **0.1.24 IS THE FLOOR AND IT IS THE WHOLE REASON THIS ARC COULD HAPPEN.**
+# `SpaceReactor` was linked and deliberately NOT USED through 0.1.23, for the same class of
+# reason `urn:time:schedule` is not bound: it fired a handler under the scopes in a `cap`
+# file beside the space, built with `Capability::scoped` — the TRUSTED minting path, not an
 # attenuation — from a directory anything that can drop a tuple can also write. That would
-# be a second authority file with none of the refusals `quic::check_grants` applies to a
-# certificate or a passkey. `crate::trigger::refuse_cap_file` stops this server rather than
-# reading one. What this binary uses is the SPACE.
+# have been a second authority file with none of the refusals `quic::check_grants` applies
+# to a certificate or a passkey, so this server used the SPACE and nothing else.
 #
-# 0.1.23 is the floor because it is the newest PUBLISHED release: the crate ships from the
-# cli's workspace on a shared version, and 0.1.24 (which the siblings above are pinned to)
-# was not published for this member. Its own floors are `ikigai-core ^0.1.64` and
-# `ikigai-resolve ^0.1.23`, both of which the pins here already exceed.
+# 0.1.24 fixes that twice over (ledger #445, ikigai-cli PR #347), and this binary uses the
+# stronger half: `SpaceReactor::with_host_authority` lets the HOST supply the capability, so
+# the crate never reads a `cap` file at all and a pass runs under the grant an operator wrote
+# into `grants.json` — the same file every certificate and every passkey is checked against.
+# (The other half, `Capability::attenuate`, makes the file unable to widen even where it is
+# read.) `crate::trigger::arm` is the call; `refuse_cap_file` stays as it was and becomes
+# belt-and-braces, joined by the reactor's own `ignored_cap_files()` — under the host seam a
+# `cap` file is INERT, which is a new way to be wrong about your own configuration.
+#
+# ⚠ It is a FLOOR and a CEILING both (`^0.1.24` is `<0.2.0`), and the crate ships from the
+# cli's workspace on a shared version, so this line moves when that workspace releases.
+# Its own floors are `ikigai-core ^0.1.64` and `ikigai-resolve ^0.1.23`, both of which the
+# pins here already exceed.
 #
 # ⚠ It brings `oxigraph` with DEFAULT FEATURES, where every other oxigraph line in this
 # graph sets `default-features = false`. Cargo unions features per package, so this widens
 # the oxigraph build for the whole binary — a compile-time cost, not a served-surface one;
 # `tests/conformance.rs` still pins the catalog id by id.
-ikigai-intray = "0.1.23"
+ikigai-intray = "0.1.24"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`

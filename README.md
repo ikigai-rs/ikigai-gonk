@@ -191,6 +191,7 @@ run it (`web::CROSS_GRAPH`).
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, or one annotation |
 | `/queue` · `/queue/rows` | `urn:iki:gonk:page:queue` · `…:fragment:queue` | the review queue, and the section it swaps |
 | `POST /queue/decide` | `urn:iki:gonk:queue:decide` | one human decision on one finding |
+| `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, and `tests/conformance.rs` pins both catalogs.
@@ -244,7 +245,10 @@ exactly what its grant names, and browsing needs four tokens beyond a ledger's:
 
 ```text
 urn:cap:browse:read:*     read the repository at all (the wildcard browse declares)
-urn:cap:annotate          mint annotations — the human ones and a review's findings
+urn:cap:annotate          mint annotations — publishing a finding, and the human ones.
+                          ⚠ A review PASS no longer declares it (browse 0.5.0): a pass
+                          writes pending findings and cannot publish, which is what lets
+                          the git-event trigger be armed at all
 urn:cap:net:localhost     reach the mounted model, which is what deriving costs authority for
 urn:cap:store:{read,write}:graph:urn:iki:browse:graph:default    the archive those land in
 ```
@@ -581,41 +585,88 @@ Nothing decides a file was not worth reviewing.
 
 ```toml
 gonk.review.space = "reviews"        # bind the queue at urn:space:reviews
-# gonk.review.grant = "reviewer"     # the grant a pass WOULD run under; see below
+# gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
+# gonk.review.arm = true             # ⚠ ARM it: review on every drop. See below
 # gonk.review.root = "~/.ikigai/spaces"
 ```
 
 ```text
 urn:space:{name}              the queue — rd (list/read), out (drop), take (claim, atomic)
 urn:iki:gonk:review:pass      one tuple -> one review pass
+urn:iki:gonk:review:depth     how deep the queue is, and whether anything is draining it
 ```
 
-### ⚠⚠ The trigger is complete and deliberately UNARMED
+### ⚠⚠ Arming it: two facts, and the interlock is arithmetic
 
-Nothing in this binary drains the queue, and that is the feature rather than an omission.
-**Nothing is published to gonk except by a human.** A review pass mints its findings as
-annotations as its terminal step, so a pass that ran with nobody present would publish with
-nobody present.
+**Nothing is published to gonk except by a human**, and since `ikigai-browse` 0.5.0 that is
+a capability fact rather than a policy. A review pass writes **pending findings** at
+`urn:iki:finding:{id}` and `review` no longer declares `urn:cap:annotate` at all;
+`Sink urn:iki:finding:{id} decision=publish` is the only path into the `urn:iki:annotation:`
+family and it still demands the token. So a reviewer holding browse-read and a narrow net
+grant **cannot publish** — not "is not supposed to", *cannot*. That is what made an
+unattended drainer safe, and it is why arming this is a decision about a grant.
 
-What stops it is **the authority, not a flag**. A pass needs
+Arming takes **both** of:
 
-```text
-urn:cap:browse:read:*
-urn:cap:net:localhost     # the narrow form; the `urn:cap:net:*` wildcard is refused as a grant
-urn:cap:annotate
-urn:cap:store:read:graph:urn:iki:browse:graph:default
-urn:cap:store:write:graph:urn:iki:browse:graph:default
+```toml
+gonk.review.grant = "reviewer"   # an authority written into grants.json
+gonk.review.arm = true           # and the word that says to use it
 ```
 
-and **this server mints none of the first three for anybody** — they have no provisioning
-flag at all. So there is nothing for an unattended drainer to run under, and there is no
-unattended drainer. What arms it is a *pending* state for a finding, so that a pass produces
-something a person then publishes; that is a change in `ikigai-browse`, where the minting
-is, not a line in this file. Configuring `gonk.review.space` binds the queue and arms
-nothing.
+`arm` without a usable grant **stops this server**. Naming a grant without `arm` does what
+it has always done: it is read, checked and printed on the banner, so an operator can see
+the authority before anything uses it.
 
-`gonk.review.grant` is read and checked at startup, and printed on the banner, so an
-operator can see what a pass *would* run under before anything can use it. Nothing runs one.
+The grant is exactly:
+
+```json
+"reviewer": [
+  "urn:cap:browse:read:*",
+  "urn:cap:net:127.0.0.1",
+  "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+  "urn:cap:store:write:graph:urn:iki:browse:graph:default",
+  "urn:cap:exec:gh"
+]
+```
+
+⚠ **Without `urn:cap:annotate`.** A reviewer that may publish is the interlock gone, and
+this server refuses to start rather than arm one. The signed-in person's grant is where that
+token belongs.
+
+⚠ `urn:cap:net:` takes the **host of the mounted peer**, narrow. `urn:cap:net:*` is the
+OFFERING wildcard `ikigai-browse` declares and is refused as a grant — and
+`urn:cap:net:localhost` does **not** satisfy a call to `127.0.0.1`, because a capability is
+matched by exact string containment. Take the host from `gonk.mount`.
+
+★ The list above is not maintained by hand: it is read off the review's own contract on the
+running kernel (`trigger::reviewer_grant_shape`), and the startup refusal prints it as JSON
+to paste. The previous version of that helper was a list of constants, and it went stale and
+silent the day browse 0.5.0 dropped the publish token from `review` — it would have told an
+operator to write exactly the grant this design excludes.
+
+### What an armed trigger costs, and what a stuck one looks like
+
+**Passes are serial: one per gonk process.** The reactor reads its filesystem notifications
+on one thread and runs each pass inline, so forty dropped files are forty passes back to
+back — and because that is a property of a dependency's thread shape rather than a promise,
+this server **refuses** a second concurrent pass instead of quietly paying for it.
+
+⚠ **Nothing bounds wall clock.** Forty files at a minute each is forty minutes, and the only
+thing that makes that visible is the depth:
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:review:depth'
+```
+
+and the **live badge on the Queue link** in the header, which polls the same resource every
+ten seconds. It reads four ways, and three of them are not a number: not configured, empty,
+counted, unreadable.
+
+★ **A queue that is armed and not empty with nothing in flight is STUCK.** `watch()` catches
+up at startup and then lives on a thread nothing else observes, so a watcher that dies while
+gonk lives drains nothing and says nothing until a restart — and gonk runs no log. A depth
+that stops falling is the whole symptom; the readout says `NONE IN FLIGHT` and the badge
+turns red. The fix is to restart this server.
 
 ### Filling the queue from a hook
 
@@ -650,7 +701,10 @@ delete urn:space:reviews tuple=<id>                     # once its findings are 
 The read is non-destructive, so a pass is spent only when a person asks for it, and the
 request stays queued until they say it is done. The queue's three tokens
 (`urn:cap:space:{out,read,take}`) are minted by nobody either, so neither network door can
-reach it — this is the owner-only socket's work.
+reach it — this is the owner-only socket's work. ⚠ `urn:iki:gonk:review:depth` is the one
+reading of this tree a network caller can get, and it is deliberately a different authority:
+it declares `urn:cap:browse:read:*`, because a queued request names a file in a browse root
+and even a count is a statement about those roots.
 
 **"Is this file already queued?" is a query, not a scan.** A request is Turtle, so the
 intray's associative match selects over it:
@@ -673,10 +727,19 @@ gonk's. Nothing here assembles a prompt, post-processes a finding, or writes an 
 
 ### What this server will not read
 
-`ikigai-intray`'s reactor takes its authority from a `cap` file beside the space, and that
-file **mints** a capability rather than narrowing one — from a directory anything that can
-drop a request can also write. gonk refuses to start beside one. Authority here is a grant
+`ikigai-intray`'s reactor used to take its authority from a `cap` file beside the space, and
+that file **minted** a capability rather than narrowing one — from a directory anything that
+can drop a request can also write. Since 0.1.24 gonk supplies the reactor's authority itself
+(`with_host_authority`), so the crate never reads that file at all: authority here is a grant
 in `grants.json`, checked the same way a certificate's and a passkey's are.
+
+gonk still refuses to start beside a `cap` file, and refuses to **arm** beside one it would
+now ignore — under the host seam such a file does nothing, and an operator who wrote one
+believes they have bounded a reviewer they have not.
+
+The `handler` file in that same directory is gonk's: it is written when this server is armed,
+rewritten at every startup, and removed when it is not. It decides what a dropped tuple
+fires, so an unarmed gonk must leave nothing behind for a later armed one to run.
 
 ## The three doors
 
@@ -704,7 +767,7 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `passkey invite … --browse-graph read` | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
-| `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`, plus `urn:cap:annotate` for the two reviews) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`; ⚠ the two reviews no longer require `urn:cap:annotate` — browse 0.5.0 — so a pass writes pending findings and cannot publish) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 
 **Deriving is the privileged act, and it is one capability away from every door.** Explaining
@@ -994,7 +1057,8 @@ gonk.backup.every = "24h"             # the cadence; "off" (or --no-backup) take
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
 # gonk.review.space = "reviews"       # bind the git-event review QUEUE; arms nothing
-# gonk.review.grant = "reviewer"      # the grant a pass WOULD run under; nothing runs one
+# gonk.review.grant = "reviewer"      # the grant a pass runs under; naming it arms nothing
+# gonk.review.arm = true              # ⚠ and the word that arms it; needs the grant above
 # gonk.review.root = "~/.ikigai/spaces"
 ```
 
