@@ -65,6 +65,7 @@
                 <xsl:apply-templates select="view:ledger"/>
               </nav>
               <xsl:apply-templates select="view:browse"/>
+              <xsl:apply-templates select="view:queue"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <div id="auth" class="auth">
                 <span id="auth-who" class="who" hidden="hidden"></span>
@@ -109,6 +110,14 @@
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Browse</a>
   </xsl:template>
 
+  <!-- The review queue, present only when this caller may read a root AND may decide
+       (src/queue.rs::offers_queue). Ledger #444 settled the label: it names the THING,
+       because the page shows the whole pipeline and "Review" is already the file face's
+       button that RUNS a pass. -->
+  <xsl:template match="view:queue">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Queue</a>
+  </xsl:template>
+
   <xsl:template match="view:ledger" mode="option">
     <option>
       <xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute>
@@ -132,6 +141,7 @@
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
+      <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
       <xsl:otherwise>
         <section class="panel empty-state">
@@ -196,6 +206,197 @@
         </xsl:otherwise>
       </xsl:choose>
     </section>
+  </xsl:template>
+
+
+  <!-- ==================================================== the review queue -->
+
+  <!--
+    Ledger #444. The rows come from `urn:repo:{root}:findings` in the order that resource
+    returns them (triage order: severity rank, then path, then position) and are NOT
+    re-sorted here. The severity menu, the decision buttons and this state nav are all
+    rendered from `view:*` elements the Rust side built out of the resources' own
+    `one_of` declarations — there is no severity word, decision word or state word written
+    anywhere in this stylesheet, and that is deliberate (src/queue.rs).
+  -->
+  <xsl:template name="queue">
+    <section id="queue" class="queue">
+      <header class="queue-head">
+        <h1><xsl:value-of select="@title"/></h1>
+        <p class="note"><xsl:value-of select="@message"/></p>
+        <nav class="filters" aria-label="Pipeline state">
+          <xsl:apply-templates select="view:state"/>
+        </nav>
+      </header>
+      <xsl:apply-templates select="view:intray"/>
+      <xsl:apply-templates select="view:flash"/>
+      <xsl:if test="@posture-text">
+        <p class="note posture"><xsl:value-of select="@posture-text"/></p>
+      </xsl:if>
+      <xsl:apply-templates select="view:denied"/>
+      <xsl:if test="@empty = 'true'">
+        <p class="empty"><xsl:value-of select="@empty-text"/></p>
+      </xsl:if>
+      <xsl:if test="@count-text">
+        <p class="count">
+          <span class="how-many"><xsl:value-of select="@count-text"/></span>
+          <xsl:if test="@more = 'true'">
+            <a class="more" hx-target="#queue" hx-swap="outerHTML">
+              <xsl:attribute name="href"><xsl:value-of select="@more-url"/></xsl:attribute>
+              <xsl:attribute name="hx-get"><xsl:value-of select="@more-rows-url"/></xsl:attribute>
+              <xsl:attribute name="hx-push-url"><xsl:value-of select="@more-url"/></xsl:attribute>
+              <xsl:value-of select="@more-label"/>
+            </a>
+          </xsl:if>
+        </p>
+      </xsl:if>
+      <ol class="findings">
+        <xsl:apply-templates select="view:finding"/>
+      </ol>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:state">
+    <a hx-target="#queue" hx-swap="outerHTML">
+      <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@rows-url"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+      <xsl:value-of select="@name"/>
+    </a>
+  </xsl:template>
+
+  <!-- The trigger's intray depth, which no other face has. ⚠ Four kinds, and three of
+       them are NOT a number: "no queue configured", "empty", and "could not be read" are
+       different statements and must not render alike (ledger #446). -->
+  <xsl:template match="view:intray">
+    <p>
+      <xsl:attribute name="class">intray <xsl:value-of select="@kind"/></xsl:attribute>
+      <xsl:value-of select="."/>
+    </p>
+  </xsl:template>
+
+  <!-- One repository's read was refused. The page still renders the others: a partial
+       answer that says which part is missing beats a whole page replaced by one 403. -->
+  <xsl:template match="view:denied">
+    <p class="flash error">
+      <xsl:value-of select="@repo"/><xsl:text>: </xsl:text><xsl:value-of select="."/>
+    </p>
+  </xsl:template>
+
+  <xsl:template match="view:finding">
+    <li>
+      <xsl:attribute name="class">finding <xsl:value-of select="@state"/></xsl:attribute>
+      <div class="finding-head">
+        <span>
+          <xsl:attribute name="class">badge sev <xsl:value-of select="@severity"/></xsl:attribute>
+          <xsl:value-of select="@severity-label"/>
+        </span>
+        <xsl:if test="@effective">
+          <span class="badge final"><xsl:text>human: </xsl:text><xsl:value-of select="@effective"/></span>
+        </xsl:if>
+        <span>
+          <xsl:attribute name="class">badge state <xsl:value-of select="@state"/></xsl:attribute>
+          <xsl:value-of select="@state"/>
+        </span>
+        <xsl:if test="@orphaned = 'true'"><span class="badge warn">orphaned</span></xsl:if>
+        <xsl:if test="@reanchored = 'true'"><span class="badge warn">re-anchored</span></xsl:if>
+        <xsl:choose>
+          <xsl:when test="@browse-href">
+            <a class="finding-where">
+              <xsl:attribute name="href"><xsl:value-of select="@browse-href"/></xsl:attribute>
+              <xsl:value-of select="@repo"/><xsl:text>/</xsl:text><xsl:value-of select="@where"/>
+            </a>
+          </xsl:when>
+          <xsl:otherwise>
+            <span class="finding-where"><xsl:value-of select="@repo"/><xsl:text>/</xsl:text><xsl:value-of select="@where"/></span>
+          </xsl:otherwise>
+        </xsl:choose>
+      </div>
+      <p class="finding-body"><xsl:value-of select="view:body"/></p>
+      <xsl:if test="view:quote">
+        <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
+      </xsl:if>
+      <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
+      <xsl:apply-templates select="view:decision"/>
+      <xsl:apply-templates select="view:decide"/>
+      <xsl:apply-templates select="view:no-form"/>
+    </li>
+  </xsl:template>
+
+  <!-- A decision already taken. ★ It is final: the form is gone, and the line says what
+       undoing it would actually be — deleting the ANNOTATION (a separate, visible act) for
+       a publication, and nothing at all for a decline, because the decline is the record. -->
+  <xsl:template match="view:decision">
+    <div>
+      <xsl:attribute name="class">decision <xsl:value-of select="@outcome"/></xsl:attribute>
+      <p class="decision-line">
+        <xsl:value-of select="@outcome"/><xsl:text> as </xsl:text><xsl:value-of select="@severity"/><xsl:text> · </xsl:text><xsl:value-of select="@at"/>
+      </p>
+      <xsl:if test="view:note">
+        <p class="decision-note"><xsl:value-of select="view:note"/></p>
+      </xsl:if>
+      <p class="note"><xsl:value-of select="@undo"/></p>
+      <xsl:if test="@minted-href">
+        <a class="minted">
+          <xsl:attribute name="href"><xsl:value-of select="@minted-href"/></xsl:attribute>
+          <xsl:value-of select="@minted"/>
+        </a>
+      </xsl:if>
+    </div>
+  </xsl:template>
+
+  <!-- The human's answer. The `action` is a plain form post as well as an htmx one, so the
+       page works with scripting off; the buttons carry `hx-vals` built in Rust rather than
+       a JSON literal here, because a literal attribute value in this engine may not contain
+       a curly brace at all (they are attribute-value-template delimiters), and JSON is
+       nothing but curly braces. -->
+  <xsl:template match="view:decide">
+    <form class="decide" method="post">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <input type="hidden" name="id"><xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute></input>
+      <input type="hidden" name="_state"><xsl:attribute name="value"><xsl:value-of select="@state"/></xsl:attribute></input>
+      <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
+      <label class="decide-severity">
+        <xsl:text>Severity</xsl:text>
+        <select name="severity">
+          <xsl:if test="@required = 'true'"><xsl:attribute name="required">required</xsl:attribute></xsl:if>
+          <xsl:apply-templates select="view:severity-option"/>
+        </select>
+      </label>
+      <label class="decide-reason">
+        <xsl:text>Reason — kept on both outcomes</xsl:text>
+        <textarea name="content" rows="2"></textarea>
+      </label>
+      <div class="decide-buttons">
+        <xsl:apply-templates select="view:decision-option"/>
+      </div>
+    </form>
+  </xsl:template>
+
+  <xsl:template match="view:severity-option">
+    <option>
+      <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
+      <xsl:if test="@selected = 'true'"><xsl:attribute name="selected">selected</xsl:attribute></xsl:if>
+      <xsl:if test="@placeholder = 'true'"><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:if>
+      <xsl:value-of select="@label"/>
+    </option>
+  </xsl:template>
+
+  <xsl:template match="view:decision-option">
+    <button type="submit" name="decision" hx-target="#queue" hx-swap="outerHTML" hx-include="closest form">
+      <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
+      <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:attribute name="hx-vals"><xsl:value-of select="@vals"/></xsl:attribute>
+      <xsl:attribute name="class">decide-button <xsl:value-of select="@value"/></xsl:attribute>
+      <xsl:value-of select="@label"/>
+    </button>
+  </xsl:template>
+
+  <!-- ⚠ The manifold went quiet: the finding resource did not describe its menus, so this
+       page renders NO form rather than inventing one. -->
+  <xsl:template match="view:no-form">
+    <p class="note warn"><xsl:value-of select="."/></p>
   </xsl:template>
 
   <!-- ============================================================ a ledger -->

@@ -107,6 +107,13 @@ pub struct Web {
     /// a page never needs one, and holding one here would put a filesystem path one
     /// rendering mistake away from a caller who may not read the root it belongs to.
     pub browse_roots: Vec<String>,
+    /// The git-event review queue this server was configured with, or `None`.
+    ///
+    /// ★ Held here for ONE number: how many review requests are waiting. `ikigai-browse`
+    /// deliberately does not expose it — the intray belongs to the trigger, which lives in
+    /// this repo — so the Queue page is the only place the two halves of "what is happening"
+    /// can be shown together (ledger #444 item 4, and #446's silent-absence shape).
+    pub review: Option<Arc<crate::trigger::Trigger>>,
     /// The passkey relying party.
     pub passkeys: Arc<Passkeys>,
     /// The render rules in effect, as Turtle — the TEXT, not a parsed table, because the
@@ -204,6 +211,29 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         .bind(
             template(crate::k::BROWSE_PAGE_TEMPLATE),
             crate::k::BrowseShell {
+                web: Arc::clone(&web),
+            },
+        )
+        // The review queue — see [`crate::queue`]. A page of this face like the others: it
+        // reads `ikigai-browse`'s findings and writes its decisions under the CALLER's
+        // capability, and binds nothing of its own behind the socket or QUIC.
+        .bind(
+            Exact::new(crate::queue::QUEUE_IRI),
+            crate::queue::QueuePage {
+                web: Arc::clone(&web),
+                fragment: false,
+            },
+        )
+        .bind(
+            Exact::new(crate::queue::ROWS_IRI),
+            crate::queue::QueuePage {
+                web: Arc::clone(&web),
+                fragment: true,
+            },
+        )
+        .bind(
+            Exact::new(crate::queue::DECIDE_IRI),
+            crate::queue::Decide {
                 web: Arc::clone(&web),
             },
         )
@@ -337,11 +367,18 @@ pub(crate) fn nav(
     if !crate::k::readable_roots(web, inv).is_empty() {
         out.push_str(&element("browse", &[("href", crate::k::ROOTS_PATH)], ""));
     }
+    // ★ And the Queue, on the same rule one step stronger: a caller is offered it only when
+    // it may read a repository AND may DECIDE. Ledger #444 settled the label and the gate —
+    // "a link to a page of things you cannot decide is worse than no link" — so the token
+    // this one keys on is `urn:cap:annotate`, not a browse read.
+    if crate::queue::offers_queue(web, inv) {
+        out.push_str(&element("queue", &[("href", crate::queue::QUEUE_PATH)], ""));
+    }
     out
 }
 
 /// `2026-09-14T10:00:00.123Z` → `2026-09-14 10:00 UTC`.
-fn when(iso: &str) -> String {
+pub(crate) fn when(iso: &str) -> String {
     if iso.len() >= 16 && iso.as_bytes()[10] == b'T' {
         format!("{} {} UTC", &iso[..10], &iso[11..16])
     } else {

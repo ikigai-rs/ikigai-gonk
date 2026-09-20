@@ -226,3 +226,45 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---------------------------------------------------------- the review queue
+ *
+ * Ledger #444. No new color token: every rule here reuses one the contrast test above
+ * already holds to ikigai-a11y's 4.5:1 floor in BOTH schemes (see
+ * `tests/web.rs::the_palette_clears_the_contrast_floor`). A severity is never signalled by
+ * colour alone — the badge carries its word — so the palette here is emphasis, not meaning
+ * (WCAG 1.4.1). */
+.queue-head { margin: 0 0 var(--gap); }
+.intray { border-left: 4px solid var(--line); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+/* Waiting work is the one state worth an accent: it is the number a person came to see. */
+.intray.count { border-left-color: var(--accent); }
+.intray.error { border-left-color: var(--danger); }
+.posture { margin: 0 0 var(--gap); }
+.findings { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.findings:empty { border-top: 0; }
+.finding { padding: 0.75rem 0.25rem; border-bottom: 1px solid var(--line); }
+.finding-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: baseline; }
+.finding-where { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; overflow-wrap: anywhere; }
+.badge.sev.critical, .badge.sev.major { color: var(--danger); border-color: var(--danger); }
+.badge.sev.praise { color: var(--ok); border-color: var(--ok); }
+.badge.final { color: var(--accent); border-color: var(--accent); }
+.finding-body { margin: 0.4rem 0; overflow-wrap: anywhere; }
+.finding-quote { white-space: pre-wrap; overflow-x: auto; background: var(--surface); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0.4rem 0; font-size: 0.9em; }
+.finding-prov { margin: 0.25rem 0; overflow-wrap: anywhere; }
+.decision { border-left: 4px solid var(--line); padding: 0.4rem 0.75rem; margin: 0.5rem 0 0; }
+.decision.published { border-left-color: var(--ok); }
+.decision-line { margin: 0; font-weight: 600; }
+.decision-note { margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.minted { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8em; overflow-wrap: anywhere; }
+.decide { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: flex-end; margin: 0.5rem 0 0; }
+.decide label { display: flex; flex-direction: column; gap: 0.2rem; }
+.decide-reason { flex: 1 1 18rem; }
+.decide-buttons { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+/* ★ Declining is not destructive and must not wear the danger colour: it is a RECORD that a
+ * human looked and said no, and the finding is kept. Publishing is the consequential act. */
+.decide-button.decline { background: transparent; color: var(--accent); }
+
+@media (max-width: 40rem) {
+  .decide { flex-direction: column; align-items: stretch; }
+  .decide-reason { flex: 1 1 auto; }
+}

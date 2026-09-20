@@ -288,6 +288,9 @@ fn serve(flags: &config::Flags) -> ! {
                 .iter()
                 .map(|(name, _)| name.clone())
                 .collect(),
+            // The queue the Queue page reports the depth of — the same `Trigger` the banner
+            // counts, so the page and the startup line cannot disagree.
+            review: settings.review.clone().map(Arc::new),
             passkeys: Arc::clone(&passkeys),
             rules: Arc::clone(&render_rules),
         });

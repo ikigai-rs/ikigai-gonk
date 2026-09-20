@@ -41,6 +41,7 @@ pub mod grants;
 pub mod identity;
 pub mod k;
 pub mod mount;
+pub mod queue;
 pub mod quic;
 pub mod render;
 pub mod rules;

@@ -238,6 +238,22 @@ pub fn envelope(name: &str, attributes: &[(&str, &str)], children: &str) -> Stri
     out
 }
 
+/// A child element in the view namespace carrying ELEMENTS rather than text — for a view
+/// node the stylesheet walks into (`view:finding/view:decide/view:severity-option`).
+///
+/// ⚠ `children` is markup and is **not** escaped: build it from [`element`] or from this,
+/// never from a caller's string. [`element`] is the leaf, and it escapes.
+pub fn wrap(name: &str, attributes: &[(&str, &str)], children: &str) -> String {
+    let mut out = format!("<view:{name}");
+    for (key, value) in attributes {
+        out.push_str(&format!(" {key}=\"{}\"", escape(value)));
+    }
+    out.push('>');
+    out.push_str(children);
+    out.push_str(&format!("</view:{name}>"));
+    out
+}
+
 /// A child element in the view namespace (the namespace is declared on the envelope).
 pub fn element(name: &str, attributes: &[(&str, &str)], text: &str) -> String {
     let mut out = format!("<view:{name}");
