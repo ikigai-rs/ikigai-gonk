@@ -123,13 +123,23 @@ ikigai-ledger = "0.2.1"
 # faces emit a "Review With" affordance, and the first on which `provider=<the configured
 # review backend>` is not refused by the manifold that offers it.
 #
-# ★ 0.4.2 is the first release carrying `urn:repo:style:layout` (`ikigai_browse::LAYOUT_IRI`)
+# ★ 0.5.0 (ledger #444) is the release where a review pass stops MINTING annotations. It produces
+# PENDING findings at `urn:iki:finding:{id}`, and promotion by a human is the only path into the
+# `urn:iki:annotation:` family — "nothing gets published to Gonk except by the human". The review
+# actions' `requires` SHRANK with it: they no longer declare `urn:cap:annotate`, because they no
+# longer write annotations, so a browse+net grant derives a pass and is Denied on the publish.
+# That is the safety interlock this door needs before the trigger (ledger #261) is ever armed, and
+# it is why this pin moves in the same wave as the publish rather than later: `^0.4.2` means
+# `<0.5.0`, so leaving it would have ceilinged this repo out of the exact change it was waiting
+# for, silently and with no diagnostic (rule 5's second half).
+#
+# ★ 0.4.2 was the first release carrying `urn:repo:style:layout` (`ikigai_browse::LAYOUT_IRI`)
 # — the layout rules for the `browse-*` classes those faces emit, as a RESOURCE. Before it the
 # only browse layout CSS in the world was a const string inside `ikigai-web`'s binary, so every
 # other host served browse's markup unstyled (ledger #441) and this door rendered a tree as a
 # cascade of gonk-chrome chips. `crate::k` links it beside `urn:repo:style`; without 0.4.2 that
 # link is a 404, which makes this the one pin here that a page would visibly miss.
-ikigai-browse = "0.4.2"
+ikigai-browse = "0.5.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
