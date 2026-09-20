@@ -28,9 +28,51 @@
     area.appendChild(p);
   }
 
+  // ★ A REFUSAL FROM ONE AFFORDANCE IS NOT A PAGE FAILURE (ledger #442).
+  //
+  // Everything a browse page shows after the first paint is fetched by an affordance of its
+  // own: the tree, a file, an explanation, and — with hx-trigger="load", before anyone has
+  // clicked anything — the recent-pull-requests block. When the caller's grant does not
+  // carry `urn:cap:exec:gh`, that last one answers a typed 403 while the tree underneath is
+  // perfectly fine, and writing it into #flash made the whole page read as broken. So the
+  // message goes where the request came FROM, and the page keeps its head.
+  //
+  // ⚠ This knows nothing about which affordance failed, on purpose — the same rule that
+  // keeps the /k/ rewrite below grammar-level. It asks only where the element sits, which
+  // is why a face that grows a new button tomorrow is covered without an edit here.
+  //
+  // ⚠ Only a 403 disables the control: an authority refusal is permanent for this grant, so
+  // a retry cannot succeed and a live button would lie. Every other status (a 404 from an
+  // unbound facade, a 503, a 500) leaves the control usable — those can change under it.
+  function denyAt(elt, text, status) {
+    if (!elt || !elt.closest || !elt.closest("#browse")) return false;
+    const note = document.createElement("p");
+    note.className = "affordance-error";
+    note.setAttribute("role", "status");
+    note.textContent = text;
+    // An element htmx would have swapped INTO itself (the lazy blocks: no hx-target, or
+    // "this") gets the note in place of its "loading…" placeholder — otherwise that
+    // placeholder sits there spinning forever on a refusal.
+    const target = elt.getAttribute("hx-target");
+    if (!target || target === "this") {
+      elt.textContent = "";
+      elt.appendChild(note);
+    } else {
+      elt.insertAdjacentElement("afterend", note);
+    }
+    if (status === 403) {
+      elt.setAttribute("aria-disabled", "true");
+      elt.setAttribute("data-denied", "true");
+      if (elt.tagName === "BUTTON") elt.disabled = true;
+    }
+    return true;
+  }
+
   document.addEventListener("htmx:responseError", (e) => {
     const xhr = e.detail.xhr;
-    flash(((xhr && xhr.responseText) || "The server refused that.").trim(), "error");
+    const text = ((xhr && xhr.responseText) || "The server refused that.").trim();
+    if (denyAt(e.detail.elt, text, xhr && xhr.status)) return;
+    flash(text, "error");
   });
   document.addEventListener("htmx:sendError", () => flash("The server did not answer.", "error"));
   document.addEventListener("htmx:beforeRequest", () => flash("", "ok"));

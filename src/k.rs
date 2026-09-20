@@ -4,6 +4,7 @@
 //! /k?c=source {iri} [k=v …]   urn:iki:gonk:k                    Source  one read, the caller's cap
 //! /k?c=sink {iri} [k=v …]     urn:iki:gonk:k                    Sink    the annotation family only
 //! /browse/{iri}               urn:iki:gonk:page:browse:{iri}    Source  the page those faces live in
+//! /browse                     urn:iki:gonk:page:browse          Source  the roots this caller may read
 //! ```
 //!
 //! # ★ The buttons already exist; this is the door they were missing
@@ -115,7 +116,17 @@ pub const BROWSE_PAGE_TEMPLATE: &str = "urn:iki:gonk:page:browse:{start}";
 /// (`urn:cap:browse:read:*`). Held here as the PREFIX rather than the wildcard because that
 /// is how the kernel reads it: a `…:*` requirement is satisfied by any grant under the
 /// prefix, so a per-root token satisfies it and a literal-string test would not.
-const BROWSE_READ_PREFIX: &str = "urn:cap:browse:read:";
+///
+/// ★ Taken from `ikigai-browse` rather than typed, so the spelling cannot drift from the
+/// crate that enforces it.
+const BROWSE_READ_PREFIX: &str = ikigai_browse::CAP_PREFIX;
+
+/// `urn:iki:gonk:page:browse` — the browse family's landing page, and the only browse IRI
+/// here that is not a template. See [`BrowseRoots`].
+pub const ROOTS_IRI: &str = "urn:iki:gonk:page:browse";
+
+/// Where that page is served, for the header link (`crate::web`'s `nav`).
+pub const ROOTS_PATH: &str = "/browse";
 
 /// The one family a `sink` command may reach.
 const ANNOTATION_ROOT: &str = "urn:iki:annotation";
@@ -399,6 +410,134 @@ fn can_browse(inv: &Invocation<'_>) -> bool {
     }
 }
 
+/// Whether this capability may annotate — the posture the layout sheet keys on.
+///
+/// `urn:cap:annotate` is a plain scope, not a wildcard offering, so `allows` IS the test
+/// and this is the crate's own constant. Presentation only: `urn:iki:annotation`'s Sink is
+/// capability-gated whatever a page shows, so the worst case of getting this wrong is a
+/// visible form whose submission is refused.
+fn can_annotate(inv: &Invocation<'_>) -> bool {
+    inv.capability.allows(ikigai_browse::CAP_ANNOTATE)
+}
+
+/// The configured browse roots this caller may READ, in configured order.
+///
+/// ★ This is `ikigai-browse`'s OWN enforcement read back through its public constants.
+/// `granted()` passes a root when the capability holds `urn:cap:browse:read:{root}` or the
+/// literal all-roots wildcard — both EXACT scopes — so two [`ikigai_core::Capability::allows`]
+/// calls are the whole test and **no prefix rule is reimplemented here**.
+///
+/// ⚠ That distinction is the line ledger #439 draws, and it is worth stating because the
+/// function directly above does the other thing. The kernel's rule for a wildcard
+/// REQUIREMENT ("a `…:*` requirement is satisfied by any grant under the prefix") is
+/// `pub(crate)`, so a door that wants to ask "may this caller use this affordance?" in
+/// general cannot, and [`can_browse`] approximates it with `starts_with`. A ROOT LIST does
+/// not need that rule and must not borrow its approximation: a caller holding exactly
+/// `urn:cap:browse:read:ikigai-core` may read that one root, and an offer computed from the
+/// prefix would list all seven and mean six refusals.
+pub(crate) fn readable_roots(web: &Web, inv: &Invocation<'_>) -> Vec<String> {
+    web.browse_roots
+        .iter()
+        .filter(|root| {
+            inv.capability
+                .allows(&format!("{BROWSE_READ_PREFIX}{root}"))
+                || inv.capability.allows(ikigai_browse::CAP_WILDCARD)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The tree IRI a root's link opens on — the browse family's own entry face.
+fn tree_iri(root: &str) -> String {
+    format!("urn:repo:{root}:tree")
+}
+
+/// `urn:iki:gonk:page:browse` — the roots this caller may read, each a link into its tree.
+///
+/// ★ **Why a landing page rather than one nav entry per root.** gonk's ledger nav lists
+/// every readable ledger, and the same shape was the obvious first answer here; it does not
+/// survive the numbers. This machine configures seven roots and a header that carries seven
+/// repository names next to `gonk`, `default` and `SPARQL` is no longer a header. There is
+/// also no natural first root to make `Browse` point at — every choice is arbitrary and
+/// wrong for six of them. So the header carries ONE link, and the page behind it is the
+/// list. (Ledger #442, which asked the question and left it open.)
+pub struct BrowseRoots {
+    pub web: Arc<Web>,
+}
+
+#[async_trait]
+impl Endpoint for BrowseRoots {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(
+                "a browse page answers Source only".to_string(),
+            ));
+        }
+        web::html_only(inv)?;
+        let roots = readable_roots(&self.web, inv);
+        let message = if roots.is_empty() && self.web.browse_roots.is_empty() {
+            "This server has no browse root configured (`gonk.browse.root`), so there is \
+             nothing to browse here."
+                .to_string()
+        } else if roots.is_empty() {
+            format!(
+                "This browser holds no grant naming a repository here. A grant names one \
+                 root as `{BROWSE_READ_PREFIX}<root>`, or every root as \
+                 `{}`. Sign in with a passkey whose grant carries one.",
+                ikigai_browse::CAP_WILDCARD
+            )
+        } else {
+            "The repositories this grant may read. Each opens on its tree; everything after \
+             that is the browse family's own pages."
+                .to_string()
+        };
+        let mut children = web::nav(&self.web, inv, &web::readable_ledgers(&self.web, inv), None);
+        for root in &roots {
+            children.push_str(&element(
+                "root",
+                &[
+                    ("name", root),
+                    ("href", &format!("{ROOTS_PATH}/{}", tree_iri(root))),
+                    ("iri", &tree_iri(root)),
+                ],
+                "",
+            ));
+        }
+        let doc = envelope(
+            "page",
+            &[
+                ("view", "roots"),
+                ("full", "true"),
+                ("title", "Browse"),
+                ("message", &message),
+            ],
+            &children,
+        );
+        Ok(web::html(
+            render::render(&doc, true).map_err(web::render_err)?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-browse-roots"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-browse-roots")
+            .title("The repositories this grant may browse")
+            .summary(
+                "The browse family's landing page: one link per configured root the caller's \
+                 capability grants (`urn:cap:browse:read:{root}`, or the all-roots wildcard), \
+                 into that root's tree. A root the caller cannot read is not listed — the \
+                 page offers no door that answers a 403.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(web::as_html_arg())
+            .output("text/html")
+    }
+}
+
 #[async_trait]
 impl Endpoint for BrowseShell {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
@@ -428,6 +567,25 @@ impl Endpoint for BrowseShell {
         if can_browse(inv) {
             attributes.push(("start-url", k_url(&format!("source {start} as=text/html"))));
             attributes.push(("stylesheet", k_url("source urn:repo:style")));
+            // ★ The SECOND sheet, and the one that makes the faces legible: `urn:repo:style`
+            // is the syntax theme for the `hl-` classes inside a file view, and
+            // `urn:repo:style:layout` is the page furniture — crumbs, entry lists, the action
+            // strip, the disclosure menus, annotation cards, the PR listings. Until
+            // `ikigai-browse` 0.4.2 the only copy of those rules in the world was a const
+            // string inside `ikigai-web`'s binary, so this door rendered every tree entry as
+            // a gonk chip (ledger #441). Both links are withheld together, under the same
+            // gate, because both resources are refused to exactly the same caller.
+            attributes.push((
+                "layout-stylesheet",
+                k_url(&format!("source {}", ikigai_browse::LAYOUT_IRI)),
+            ));
+            // The layout sheet hides `.browse-annotate` under this attribute. Honesty of
+            // presentation, never the boundary: the annotation Sink requires
+            // `urn:cap:annotate` whatever this says, so a door that set nothing would show a
+            // form whose submission is refused — safe, and rude.
+            if !can_annotate(inv) {
+                attributes.push(("posture", "read-only".to_string()));
+            }
             attributes.push(("message", format!("loading {start}…")));
         } else {
             attributes.push((
@@ -444,7 +602,11 @@ impl Endpoint for BrowseShell {
         let doc = envelope(
             "page",
             &attributes,
-            &format!("{}{}", web::nav(&ledgers, None), element("flash", &[], "")),
+            &format!(
+                "{}{}",
+                web::nav(&self.web, inv, &ledgers, None),
+                element("flash", &[], "")
+            ),
         );
         Ok(web::html(
             render::render(&doc, true).map_err(web::render_err)?,

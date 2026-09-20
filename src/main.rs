@@ -268,6 +268,13 @@ fn serve(flags: &config::Flags) -> ! {
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: settings.http_ledgers.clone(),
+            // The NAMES of the configured roots, for the header's entry point and the page
+            // behind it. The paths went to the mount above; a page never needs one.
+            browse_roots: settings
+                .browse_roots
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
             passkeys: Arc::clone(&passkeys),
             rules: Arc::clone(&render_rules),
         });

@@ -177,6 +177,7 @@ run it (`web::CROSS_GRAPH`).
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
 | `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
+| `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, or one annotation |
 
@@ -191,8 +192,17 @@ name. It runs under the caller's capability, so the ledger's checks decide.
 ### Browsing a repository at this port
 
 ```sh
-open http://127.0.0.1:1060/browse/urn:repo:ikigai-core:tree
+open http://127.0.0.1:1060/browse                             # the roots this grant may read
+open http://127.0.0.1:1060/browse/urn:repo:ikigai-core:tree   # straight into one
 ```
+
+**The header carries a `Browse` link** whenever the caller may read at least one configured
+root, next to the ledgers and `SPARQL`, and it lands on `/browse` — the list. One link rather
+than one per root: seven repository names in a header stop being a header, and there is no
+natural first root for a single link to point at. Both the link and the list are built from
+the roots the caller may READ (`ikigai-browse`'s own two checks: a grant naming the root, or
+the all-roots wildcard), so a caller is never offered a door that answers it a 403, and a
+caller who may read nothing sees no link at all.
 
 The page is a gonk page — same header, same sign-in control — with one region that loads
 `ikigai-browse`'s own HTML face into it. **Everything after that first paint is the face's
@@ -1162,6 +1172,41 @@ previous version once.
 `urn:repo:style` is browse's own: it is cacheable with a thread per `a11y.toml` candidate, and
 gonk starts the watch that crate ships for them (`Mount::space_watched`), so an edit to
 `~/.config/ikigai/gonk.a11y.toml` lands on the next read rather than the next restart.
+
+★ **The browse page links TWO of browse's stylesheets, and both are that family's own
+resources rather than anything of gonk's.** `urn:repo:style` is the syntax theme for the
+`hl-` classes inside a file view; `urn:repo:style:layout` (`ikigai-browse` 0.4.2) is the page
+furniture — crumbs, entry lists, the action strip, the disclosure menus, annotation cards,
+the pull-request listings. Until that release the only copy of those rules anywhere was a
+const string inside `ikigai-web`'s binary, so every other host served browse's markup
+unstyled and this door rendered a tree as a cascade of gonk chips (ledger #441). Both links
+are withheld from a caller who cannot read them, together, for the same reason.
+
+`gonk.css` defines **no `browse-*` rule** and must not grow one: a rule here would silently
+win against the family's own sheet and drift the moment browse changed its markup. When this
+door knows the caller cannot annotate, it states that as a FACT on the shell —
+`data-browse-posture="read-only"` — and the layout sheet decides what to hide. Presentation
+only: the annotation Sink requires `urn:cap:annotate` whatever the page shows.
+
+★ **Looking at these pages is a tool, not a ceremony:**
+`cargo run --example page-preview -- <out-dir> [root=<path>]` writes the root list, a tree
+page and a file page as files — the same bytes the door serves, with htmx's first swap
+already done and both stylesheets beside them — under a capability the example states in one
+place. It exists because the browse pages cannot be opened by hand: the only way to hold
+`urn:cap:browse:read:*` over HTTP is a passkey ceremony in a browser. ⚠ It shows how a page
+LOOKS and never what a caller may do; `tests/browse.rs` holds the second half. Serve the
+directory with something that answers `/k…` a 403 and the page also shows what a caller who
+may not use one affordance sees.
+
+⚠ **A refusal from one affordance is not a page failure.** Every browse page fetches its
+parts through affordances of its own, including a recent-pull-requests block that loads
+itself; a caller without `urn:cap:exec:gh` gets a typed 403 there while the tree underneath
+is fine. `web/gonk.js` writes such a message where the request came FROM — in place of that
+block's "loading…", or beside the control that issued it — and only a 403 disables the
+control, because an authority refusal is permanent for that grant while a 404 or a 503 is
+not. ⚠ What this door still cannot do is decide UP FRONT whether a caller may use a control:
+the kernel's rule for a wildcard requirement is `pub(crate)`, so "may this caller?" has no
+public answer (ledger #439). Catching the refusal is the achievable half.
 
 For the resources themselves — named ledgers, the grant table, delete versus purge, ordering
 policies — see `ikigai-ledger`'s README.

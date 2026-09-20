@@ -137,6 +137,19 @@ summary { cursor: pointer; color: var(--accent); }
 .flash.error { border-left-color: var(--danger); }
 .empty, .hint, .result-meta { color: var(--muted); }
 
+/* A refusal that belongs to ONE affordance, shown where that affordance is (web/gonk.js;
+ * ledger #442). Deliberately quieter than .flash: the page around it is fine, and a band
+ * that shouts would re-create the failure it replaces. ⚠ These are gonk's own chrome
+ * classes, not browse's — no `browse-*` rule is defined here (that is #441's whole point,
+ * and the layout sheet the page links owns those). */
+.affordance-error { color: var(--danger); font-size: 0.9rem; margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-denied="true"] { opacity: 0.6; }
+
+/* The browse landing page: the roots this grant may read. */
+.root-list { list-style: none; margin: 0; padding: 0; }
+.root-list > li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+.root-link { font-weight: 600; }
+
 /* The sample-query buttons. `quiet small` reuses the palette the contrast test already
  * holds to the floor; the focus ring is the global :focus-visible outline, so they are
  * reachable and visible from the keyboard. They wrap at phone width rather than scroll. */

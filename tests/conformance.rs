@@ -286,9 +286,10 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 13] = [
+const WEB_IDS: [&str; 14] = [
     "gonk-k",
     "gonk-browse-page",
+    "gonk-browse-roots",
     "gonk-page-home",
     "gonk-page-ledger",
     "gonk-fragment-items",
@@ -310,6 +311,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
     let face = Arc::new(ikigai_gonk::web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
+        browse_roots: Vec::new(),
         passkeys,
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
     });

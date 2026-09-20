@@ -48,6 +48,12 @@
             <xsl:if test="@stylesheet">
               <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@stylesheet"/></xsl:attribute></link>
             </xsl:if>
+            <!-- …and that family's LAYOUT sheet (urn:repo:style:layout, ikigai-browse 0.4.2+),
+                 which is the one that makes its markup legible: the theme above only colours
+                 the hl- classes inside a file view. Same gate, same reason. Ledger #441. -->
+            <xsl:if test="@layout-stylesheet">
+              <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@layout-stylesheet"/></xsl:attribute></link>
+            </xsl:if>
             <script src="/static/htmx.min.js" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
           </head>
@@ -58,6 +64,7 @@
               <nav class="ledgers" aria-label="Ledgers">
                 <xsl:apply-templates select="view:ledger"/>
               </nav>
+              <xsl:apply-templates select="view:browse"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <div id="auth" class="auth">
                 <span id="auth-who" class="who" hidden="hidden"></span>
@@ -96,6 +103,12 @@
     </a>
   </xsl:template>
 
+  <!-- The browse family's entry point, present only when this caller may read a root
+       (src/web.rs::nav). A link into a refusal is worse than no link. -->
+  <xsl:template match="view:browse">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Browse</a>
+  </xsl:template>
+
   <xsl:template match="view:ledger" mode="option">
     <option>
       <xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute>
@@ -118,6 +131,7 @@
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
+      <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
       <xsl:otherwise>
         <section class="panel empty-state">
@@ -135,8 +149,38 @@
     paint is THEIR markup and THEIR affordances (hx-get/hx-post at the /k/ adapter), so
     there is nothing here to keep in step with them — which is the point.
   -->
+  <!--
+    The roots this caller may browse. One link each, into that root's tree; the rest of
+    the browse family is reached from there. ⚠ A root the caller cannot read is not in
+    this list at all — the page is built from `k::readable_roots`, not from the config.
+  -->
+  <xsl:template name="roots">
+    <section class="panel roots" aria-labelledby="roots-title">
+      <h1 id="roots-title"><xsl:value-of select="@title"/></h1>
+      <p class="note"><xsl:value-of select="@message"/></p>
+      <ul class="root-list">
+        <xsl:apply-templates select="view:root"/>
+      </ul>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:root">
+    <li>
+      <a class="root-link">
+        <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:value-of select="@name"/>
+      </a>
+      <span class="note"><xsl:value-of select="@iri"/></span>
+    </li>
+  </xsl:template>
+
   <xsl:template name="browse">
     <section class="browse-shell" aria-label="Browse">
+      <!-- The posture the layout sheet keys on, when the door knows this caller cannot
+           write annotations. Unanchored in that sheet, so this ancestor will do. -->
+      <xsl:if test="@posture">
+        <xsl:attribute name="data-browse-posture"><xsl:value-of select="@posture"/></xsl:attribute>
+      </xsl:if>
       <xsl:choose>
         <xsl:when test="@start-url">
           <div id="browse" class="browse" hx-trigger="load" hx-swap="innerHTML">
