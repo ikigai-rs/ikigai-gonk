@@ -581,6 +581,18 @@ request stays queued until they say it is done. The queue's three tokens
 (`urn:cap:space:{out,read,take}`) are minted by nobody either, so neither network door can
 reach it — this is the owner-only socket's work.
 
+**"Is this file already queued?" is a query, not a scan.** A request is Turtle, so the
+intray's associative match selects over it:
+
+```text
+source urn:space:reviews match="PREFIX ik: <https://ikigai-rs.dev/ns#>
+                                ASK { ?s ik:repo \"ikigai-gonk\" ; ik:path \"src/k.rs\" }"
+```
+
+returns the ids of the requests that match, and `delete … match=<the same ASK>` claims the
+first of them. That is the reason a request is RDF rather than a line of text — a non-RDF
+tuple can never be selected by a template.
+
 **The trigger and the button are one call with two causes.** A pass issues
 `Source urn:repo:{repo}:review:{path}` with `as=application/json` and nothing else — the
 same IRI the **review** button sends, so both land on one archive entry and one set of
