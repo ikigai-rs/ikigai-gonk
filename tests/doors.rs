@@ -344,6 +344,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         DurableStore::in_memory().expect("an in-memory store"),
         None,
         Vec::new(),
+        Vec::new(),
         Some(ikigai_gonk::backup::Backups {
             settings: Arc::new(ikigai_gonk::backup::Settings {
                 dir: backups.path().to_path_buf(),

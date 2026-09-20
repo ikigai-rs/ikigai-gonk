@@ -1058,6 +1058,7 @@ dependencies = [
  "ikigai-compress",
  "ikigai-conformance",
  "ikigai-core",
+ "ikigai-intray",
  "ikigai-ipc",
  "ikigai-ledger",
  "ikigai-passkey",
@@ -1076,6 +1077,20 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "ikigai-intray"
+version = "0.1.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520aee5ba7ce976dd381ad734eeda1ea79fcd4530311d0c93d37bf816b54f69f"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "ikigai-core",
+ "ikigai-resolve",
+ "notify",
+ "oxigraph",
 ]
 
 [[package]]
