@@ -75,11 +75,11 @@ fn main() {
         write(&out, name, &read(&kernel, &cap, iri, &[]));
     }
 
-    write(
-        &out,
-        "index.html",
-        &local(&read(&kernel, &cap, "urn:iki:gonk:page:browse", &[])),
-    );
+    // The root list, with its one link pointed at the tree page written below — so the
+    // preview is navigable the way the door is.
+    let roots = local(&read(&kernel, &cap, "urn:iki:gonk:page:browse", &[]))
+        .replace(&format!("'/browse/urn:repo:{root}:tree'"), "'tree.html'");
+    write(&out, "index.html", &roots);
     for (name, start) in [
         ("tree.html", format!("urn:repo:{root}:tree")),
         ("file.html", format!("urn:repo:{root}:file:README.md")),
@@ -178,8 +178,9 @@ fn local(page: &str) -> String {
     ]
     .into_iter()
     .collect();
-    // Longest first: `/browse` is a prefix of `/browse/urn:repo:…`, and the tree links must
-    // keep pointing at the page they name.
+    // ⚠ Each rewrite matches a WHOLE quoted attribute value, which is what keeps `/browse`
+    // from eating the `/browse/urn:repo:…` links that start with it. The rendered face
+    // quotes attributes with `'` (xrust's serializer), so that is the quote matched.
     for (from, to) in rewrites.iter().rev() {
         out = out.replace(&format!("'{from}'"), &format!("'{to}'"));
     }
