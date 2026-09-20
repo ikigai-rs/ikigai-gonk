@@ -282,6 +282,47 @@ pub fn tuple_turtle(tuple: &Tuple) -> String {
 /// The vocabulary namespace the tuple's two predicates come from.
 const IK_NS: &str = "https://ikigai-rs.dev/ns#";
 
+/// ⚠ **Refuse a request this module cannot express, rather than writing a tuple nothing can
+/// read back.**
+///
+/// [`tuple_turtle`] is a `format!` and not a Turtle serializer, deliberately — a serializer
+/// would be free to reorder or re-quote and would break the byte-determinism the queue's
+/// deduplication rests on. The price of that choice is that it does no escaping, so a `"`,
+/// a `\` or a newline in a path would emit Turtle that [`parse_tuple`] then refuses. A git
+/// path may legally contain all three.
+///
+/// A poison tuple is the worst outcome available here: the drop succeeds, the hook reports
+/// nothing, and a request sits in the inbox failing every time anyone runs it. So the check
+/// is at the DROP, where a person is still watching, and it refuses rather than mangling —
+/// a bound refuses, it does not truncate.
+///
+/// The set is the union of what Turtle's quoted literal and an IRI each forbid, so one rule
+/// covers both positions a value is emitted in.
+///
+/// # Errors
+///
+/// When either field is empty or carries a character this module cannot emit.
+pub fn check_request(tuple: &Tuple) -> std::result::Result<(), String> {
+    for (field, value) in [("repository", &tuple.repo), ("path", &tuple.path)] {
+        if value.is_empty() {
+            return Err(format!("a review request's {field} may not be empty"));
+        }
+        if let Some(bad) = value
+            .chars()
+            .find(|c| c.is_whitespace() || c.is_control() || "\"\\<>{}|^`".contains(*c))
+        {
+            return Err(format!(
+                "a review request's {field} may not contain `{}`: this server emits a \
+                 request as Turtle with a `urn:iki:gonk:review:request:` IRI, and that \
+                 character is legal in neither. Refused here rather than queued as a tuple \
+                 nothing can read back",
+                bad.escape_default()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Read a tuple back.
 ///
 /// Parsed as RDF rather than by string surgery, so a tuple dropped by something other than
@@ -535,6 +576,7 @@ fn restrict(_dir: &Path) -> std::result::Result<(), String> {
 /// When the space name is not a name, the tree cannot be created, or the drop fails.
 pub fn drop_tuple(trigger: &Trigger, tuple: &Tuple) -> std::result::Result<String, String> {
     check_space_name(&trigger.space)?;
+    check_request(tuple)?;
     prepare(trigger)?;
     let kernel = ikigai_core::Kernel::new(Arc::new(ikigai_intray::space(trigger.root.clone())));
     let iri = Iri::parse(format!("urn:space:{}", trigger.space))

@@ -646,3 +646,64 @@ fn the_pass_declares_what_a_review_declares() {
         "`content` is the one required by-value input, so a piped tuple routes to it"
     );
 }
+
+/// ⚠ A request this module cannot emit is refused at the DROP, not queued as a tuple nothing
+/// can read back.
+///
+/// [`trigger::tuple_turtle`] is a `format!` rather than a Turtle serializer — that is what
+/// makes its bytes deterministic, and therefore what makes an identical request collapse to
+/// one queue entry — so it escapes nothing. A git path may legally carry a `"`, a `\` or a
+/// newline, and each would emit Turtle that `parse_tuple` then refuses. A drop that
+/// succeeded and left a request failing forever is the worst outcome available here.
+#[test]
+fn a_request_this_server_cannot_emit_is_refused_at_the_drop() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    for path in [
+        "src/a\"b.rs",
+        "src/a\\b.rs",
+        "src/a b.rs",
+        "src/a\nb.rs",
+        "src/a<b>.rs",
+        "",
+    ] {
+        let tuple = Tuple {
+            repo: "demo".to_string(),
+            path: path.to_string(),
+        };
+        let refusal = trigger::drop_tuple(&q, &tuple)
+            .expect_err(&format!("`{path}` must be refused, not queued"));
+        assert!(
+            refusal.contains("review request's path"),
+            "`{path}` gave {refusal}"
+        );
+    }
+    assert_eq!(trigger::pending(&q), 0, "nothing poisoned the queue");
+    // And an ordinary path still drops, so the rule is a bound and not a wall.
+    trigger::drop_tuple(
+        &q,
+        &Tuple {
+            repo: "demo".to_string(),
+            path: "src/a-b_c.2.rs".to_string(),
+        },
+    )
+    .expect("an ordinary path");
+    assert_eq!(trigger::pending(&q), 1);
+}
+
+/// Every request this server WILL emit round-trips — the check and the writer agree.
+#[test]
+fn everything_that_passes_the_check_parses_back() {
+    for path in ["a.rs", "src/lib.rs", "a/b/c/d-e_f.2.rs", "README.md"] {
+        let tuple = Tuple {
+            repo: "ikigai-gonk".to_string(),
+            path: path.to_string(),
+        };
+        trigger::check_request(&tuple).expect("accepted");
+        assert_eq!(
+            trigger::parse_tuple(trigger::tuple_turtle(&tuple).as_bytes()).unwrap(),
+            tuple,
+            "`{path}` did not round-trip"
+        );
+    }
+}
