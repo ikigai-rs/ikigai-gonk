@@ -147,6 +147,7 @@ fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Serve
         store.clone(),
         Some(Arc::new(wired.space)),
         mounted,
+        Vec::new(),
         None,
     ));
     Served {
@@ -1628,6 +1629,7 @@ fn an_unwatched_roots_reads_are_not_cached() {
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
+        Vec::new(),
         Vec::new(),
         None,
     ));

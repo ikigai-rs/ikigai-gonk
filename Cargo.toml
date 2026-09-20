@@ -137,6 +137,30 @@ ikigai-browse = "0.4.2"
 # `urn:system:exec` included, per tool, not under the offering wildcard — so a grant naming
 # `urn:cap:exec:git` cannot run `gh`, and `grants.rs` refuses the wildcard as a GRANT.
 ikigai-repo = "0.1.6"
+# The tuplespace behind the git-event review trigger (`crate::trigger`, ledger #261):
+# `urn:space:{name}` — `out` drops a tuple, `rd` reads without consuming, `take` claims one
+# with an atomic rename compare-and-swap. Linked for ONE property that is not a
+# convenience: a queue whose tuples are FILES survives a restart of this process, and a
+# commit that happens while nothing is draining is not lost.
+#
+# ⚠ **`SpaceReactor` is linked and deliberately NOT used**, for the same class of reason
+# `urn:time:schedule` is not bound: it fires a handler under the scopes in a `cap` file
+# beside the space, built with `Capability::scoped` — the TRUSTED minting path, not an
+# attenuation — from a directory anything that can drop a tuple can also write. That would
+# be a second authority file with none of the refusals `quic::check_grants` applies to a
+# certificate or a passkey. `crate::trigger::refuse_cap_file` stops this server rather than
+# reading one. What this binary uses is the SPACE.
+#
+# 0.1.23 is the floor because it is the newest PUBLISHED release: the crate ships from the
+# cli's workspace on a shared version, and 0.1.24 (which the siblings above are pinned to)
+# was not published for this member. Its own floors are `ikigai-core ^0.1.64` and
+# `ikigai-resolve ^0.1.23`, both of which the pins here already exceed.
+#
+# ⚠ It brings `oxigraph` with DEFAULT FEATURES, where every other oxigraph line in this
+# graph sets `default-features = false`. Cargo unions features per package, so this widens
+# the oxigraph build for the whole binary — a compile-time cost, not a served-surface one;
+# `tests/conformance.rs` still pins the catalog id by id.
+ikigai-intray = "0.1.23"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`

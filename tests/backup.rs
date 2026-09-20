@@ -84,6 +84,7 @@ fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
         DurableStore::in_memory().expect("an in-memory store"),
         None,
         Vec::new(),
+        Vec::new(),
         Some(Backups {
             settings: Arc::new(backup::Settings {
                 dir: dir.to_path_buf(),
@@ -504,6 +505,7 @@ fn restoring_over_the_live_store_is_refused() {
     let hub = Arc::new(compose_with(
         DurableStore::in_memory().expect("an in-memory store"),
         None,
+        Vec::new(),
         Vec::new(),
         Some(Backups {
             settings: Arc::new(backup::Settings {

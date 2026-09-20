@@ -11,7 +11,7 @@ use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
-use ikigai_gonk::{browse, compose_with, doors, mount, quic, watch, web};
+use ikigai_gonk::{browse, compose_with, doors, mount, quic, trigger, watch, web};
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
 use ikigai_store::{DurableStore, StoreConfig};
@@ -33,6 +33,7 @@ fn main() {
                 serde_json::to_string_pretty(&tokens).expect("strings serialize")
             );
         }
+        Command::ReviewRequest { repo, path, flags } => review_request(&repo, &path, &flags),
         Command::ClientAdd {
             name,
             cert,
@@ -188,10 +189,22 @@ fn serve(flags: &config::Flags) -> ! {
         JobRegistry::new(Arc::new(ThreadTimer), Arc::new(ikigai_core::SystemClock))
             .with_capability(ikigai_core::Capability::scoped(backup::JOB_SCOPES))
     });
+    // The review queue, when one is configured. `prepare` creates the tree 0700 up front for
+    // the reason `ikigai-intray`'s own watcher does: a directory that appears later races
+    // whatever writes into it, and `review request` writes with no server running.
+    let trigger_spaces = match &settings.review {
+        Some(t) => {
+            trigger::prepare(t).unwrap_or_else(|e| fail(&e));
+            trigger::space(t)
+        }
+        None => Vec::new(),
+    };
+    let review_line = review_line(&settings, &layout);
     let hub = Arc::new(compose_with(
         store,
         browse_space,
         mounted,
+        trigger_spaces,
         Some(Backups {
             settings: Arc::clone(&backup_settings),
             jobs: jobs.clone(),
@@ -295,6 +308,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  browse  {browse_line}");
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
+        eprintln!("  review  {review_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
         eprintln!(
@@ -728,6 +742,73 @@ fn passkey_invite(
 fn fail(message: &str) -> ! {
     eprintln!("ikigai-gonk: {message}");
     std::process::exit(1);
+}
+
+/// `ikigai-gonk review request <repo> <path>` — drop one tuple and exit.
+///
+/// ★ **This is the whole of what a git hook runs.** No store is opened, no door is bound,
+/// nothing is dialled: the tuple is written into the queue's inbox through the space's own
+/// Sink (staging write, then an atomic rename, with the id blake3 of the content) and the
+/// process exits. So a `post-commit` hook can call it once per changed file, in the
+/// background, and the commit never waits — on this server being up, on a peer, or on a
+/// model. A tuple is a REQUEST, not an authority: dropping one spends nothing and needs no
+/// grant, which is exactly why the hook can be three lines and hold nothing.
+///
+/// The repository is NOT validated against `gonk.browse.root` here. It could be, and it is
+/// not on purpose: the hook runs in a checkout, this command runs with whatever config it
+/// can find, and a request for a root this server does not serve should fail where a pass
+/// is run — with the kernel's own `Unresolved` naming the IRI — rather than be silently
+/// dropped at the door by a second copy of the root list.
+fn review_request(repo: &str, path: &str, flags: &config::Flags) {
+    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
+    let settings = config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e));
+    let Some(queue) = settings.review else {
+        fail(
+            "no review queue is configured: add `gonk.review.space = \"reviews\"` to the \
+             config home's config.toml. Binding the queue does not arm anything — see the \
+             README's \"the trigger is unarmed\" section",
+        )
+    };
+    let tuple = trigger::Tuple {
+        repo: repo.to_string(),
+        path: path.to_string(),
+    };
+    let id = trigger::drop_tuple(&queue, &tuple).unwrap_or_else(|e| fail(&e));
+    println!("{id}");
+}
+
+/// The banner's review line — the queue, what is waiting in it, and, when a grant is named,
+/// whether `grants.json` can honour it.
+///
+/// ⚠ **It says plainly that nothing drains this.** Brian, 2026-09-19: *"Nothing gets
+/// published to Gonk except by the human."* A review pass mints its findings as annotations
+/// as its terminal step, so an unattended drainer would publish unattended; the queue is
+/// therefore drained by a person, and the banner prints how. What changes that is ledger
+/// #444 (a pending state for a finding, in `ikigai-browse`), not a flag.
+fn review_line(settings: &config::Settings, layout: &quic::Layout) -> String {
+    let Some(queue) = &settings.review else {
+        return "not configured — no gonk.review.space; no queue is bound and \
+                urn:iki:gonk:review:pass is not offered"
+            .to_string();
+    };
+    let pending = trigger::pending(queue);
+    let grant = match &queue.grant {
+        None => "no gonk.review.grant named".to_string(),
+        Some(name) => match quic::read_grants(&layout.grants_json())
+            .and_then(|grants| trigger::reviewer_scopes(&grants, name))
+        {
+            Ok(scopes) => format!("grant `{name}` ({} scopes)", scopes.len()),
+            Err(e) => format!("grant `{name}` UNUSABLE: {e}"),
+        },
+    };
+    format!(
+        "urn:space:{} — {pending} request(s) waiting, {grant}. NOTHING DRAINS THIS: a pass \
+         publishes its findings as annotations, and nothing is published to gonk except by \
+         a human. Run one with `{}` over the socket",
+        queue.space,
+        trigger::DRAIN_ONE.replace("{space}", &queue.space),
+    )
 }
 
 #[cfg(test)]

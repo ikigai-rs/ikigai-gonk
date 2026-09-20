@@ -502,6 +502,111 @@ any backend the peer holds, and that is not a caller's decision.
 anonymous HTTP caller holds no browse grant at all, so it can neither derive an explanation
 nor read an archived one, while the socket door's root can do both.
 
+## Reviewing on a git event
+
+A commit can put its changed files in front of the review pass. **The queue is the bound**:
+a commit touching forty files drops forty requests, and they come back out one at a time.
+Nothing decides a file was not worth reviewing.
+
+```toml
+gonk.review.space = "reviews"        # bind the queue at urn:space:reviews
+# gonk.review.grant = "reviewer"     # the grant a pass WOULD run under; see below
+# gonk.review.root = "~/.ikigai/spaces"
+```
+
+```text
+urn:space:{name}              the queue — rd (list/read), out (drop), take (claim, atomic)
+urn:iki:gonk:review:pass      one tuple -> one review pass
+```
+
+### ⚠⚠ The trigger is complete and deliberately UNARMED
+
+Nothing in this binary drains the queue, and that is the feature rather than an omission.
+**Nothing is published to gonk except by a human.** A review pass mints its findings as
+annotations as its terminal step, so a pass that ran with nobody present would publish with
+nobody present.
+
+What stops it is **the authority, not a flag**. A pass needs
+
+```text
+urn:cap:browse:read:*
+urn:cap:net:localhost     # the narrow form; the `urn:cap:net:*` wildcard is refused as a grant
+urn:cap:annotate
+urn:cap:store:read:graph:urn:iki:browse:graph:default
+urn:cap:store:write:graph:urn:iki:browse:graph:default
+```
+
+and **this server mints none of the first three for anybody** — they have no provisioning
+flag at all. So there is nothing for an unattended drainer to run under, and there is no
+unattended drainer. What arms it is a *pending* state for a finding, so that a pass produces
+something a person then publishes; that is a change in `ikigai-browse`, where the minting
+is, not a line in this file. Configuring `gonk.review.space` binds the queue and arms
+nothing.
+
+`gonk.review.grant` is read and checked at startup, and printed on the banner, so an
+operator can see what a pass *would* run under before anything can use it. Nothing runs one.
+
+### Filling the queue from a hook
+
+```sh
+ikigai-gonk review request <repo> <path>
+```
+
+opens no store, binds no door and dials nothing: it writes one file into the queue and
+exits. It works while gonk is down, which is the property a `post-commit` hook needs — a
+commit must never wait on this server, let alone on a model. Dropping a request spends
+nothing and needs no grant: **a tuple is a request, not an authority.**
+
+Identical requests collapse. The drop is content-addressed and a request is exactly
+`(repo, path)`, so the same file committed three times while the queue waits is one entry —
+and the pass reads the file's content hash from the live tree when it runs, so what gets
+reviewed is the current content, exactly as it would be for someone clicking **review**.
+
+⚠ That is also why a request carries **no commit SHA**: a SHA would make every drop unique
+and the queue would grow rather than collapse. The trade is deliberate.
+
+### Draining it, by hand, over the socket
+
+```text
+source urn:space:reviews                                # what is waiting
+source urn:space:reviews tuple=<id> | urn:iki:gonk:review:pass
+delete urn:space:reviews tuple=<id>                     # once its findings are yours
+```
+
+⚠ The later stages of a pipeline are **bare IRIs** — `| urn:iki:gonk:review:pass`, not
+`| source urn:…`, which fails with `invalid IRI: No scheme found`.
+
+The read is non-destructive, so a pass is spent only when a person asks for it, and the
+request stays queued until they say it is done. The queue's three tokens
+(`urn:cap:space:{out,read,take}`) are minted by nobody either, so neither network door can
+reach it — this is the owner-only socket's work.
+
+**"Is this file already queued?" is a query, not a scan.** A request is Turtle, so the
+intray's associative match selects over it:
+
+```text
+source urn:space:reviews match="PREFIX ik: <https://ikigai-rs.dev/ns#>
+                                ASK { ?s ik:repo \"ikigai-gonk\" ; ik:path \"src/k.rs\" }"
+```
+
+returns the ids of the requests that match, and `delete … match=<the same ASK>` claims the
+first of them. That is the reason a request is RDF rather than a line of text — a non-RDF
+tuple can never be selected by a template.
+
+**The trigger and the button are one call with two causes.** A pass issues
+`Source urn:repo:{repo}:review:{path}` with `as=application/json` and nothing else — the
+same IRI the **review** button sends, so both land on one archive entry and one set of
+minted annotations. `ikigai-browse` holds that from its side
+(`the_button_and_a_trigger_are_one_call_with_two_causes`) and `tests/trigger.rs` holds
+gonk's. Nothing here assembles a prompt, post-processes a finding, or writes an annotation.
+
+### What this server will not read
+
+`ikigai-intray`'s reactor takes its authority from a `cap` file beside the space, and that
+file **mints** a capability rather than narrowing one — from a directory anything that can
+drop a request can also write. gonk refuses to start beside one. Authority here is a grant
+in `grants.json`, checked the same way a certificate's and a passkey's are.
+
 ## The three doors
 
 | door | reaches it | runs under |
@@ -817,6 +922,9 @@ gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/p
 gonk.backup.every = "24h"             # the cadence; "off" (or --no-backup) takes none
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
+# gonk.review.space = "reviews"       # bind the git-event review QUEUE; arms nothing
+# gonk.review.grant = "reviewer"      # the grant a pass WOULD run under; nothing runs one
+# gonk.review.root = "~/.ikigai/spaces"
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.

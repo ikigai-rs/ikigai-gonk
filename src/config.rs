@@ -16,6 +16,9 @@
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"   # a browsable repository; repeatable
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
+//! gonk.review.space = "reviews"        # bind the git-event review QUEUE (urn:space:reviews)
+//! # gonk.review.grant = "reviewer"     # the grant a pass WOULD run under; nothing runs one yet
+//! # gonk.review.root = "~/.ikigai/spaces"   # the spaces tree (this IS the default)
 //! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
@@ -63,7 +66,7 @@ pub const DEFAULT_BACKUP_KEEP: usize = 5;
 pub const BACKUP_DIR_NAME: &str = "backups";
 
 /// Every key this server reads.
-const KEYS: [&str; 19] = [
+const KEYS: [&str; 22] = [
     "gonk.bind",
     "gonk.port",
     "gonk.socket",
@@ -83,6 +86,9 @@ const KEYS: [&str; 19] = [
     "gonk.backup.dir",
     "gonk.backup.every",
     "gonk.backup.keep",
+    "gonk.review.space",
+    "gonk.review.grant",
+    "gonk.review.root",
 ];
 
 /// How to invoke the binary.
@@ -99,6 +105,12 @@ usage:
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrols a passkey under that grant
+  ikigai-gonk review request <repo> <path> [--config PATH]
+                                   drop ONE review request into the queue `gonk.review.space`
+                                   names. Writes one file and exits: no store, no door, no
+                                   network — so a git hook can call it per changed file and a
+                                   commit never waits. Identical requests collapse to one
+                                   tuple (the drop is content-addressed)
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
@@ -157,6 +169,15 @@ pub enum Command {
         browse_graph: Option<Authority>,
         /// Replace an existing bundle or enrolment.
         force: bool,
+    },
+    /// Drop one review request into the configured queue.
+    ReviewRequest {
+        /// The `gonk.browse.root` name.
+        repo: String,
+        /// The file's path within that root.
+        path: String,
+        /// Where to read the config from.
+        flags: Flags,
     },
     /// Invite a browser to enrol a passkey under a grant.
     PasskeyInvite {
@@ -232,6 +253,10 @@ pub struct Settings {
     pub explain: ExplainTiers,
     /// Where backups land, how many are kept, and how often one is taken.
     pub backup: BackupPolicy,
+    /// The git-event review queue, or `None` when no `gonk.review.space` line exists.
+    ///
+    /// ⚠ Configuring it binds the QUEUE; it does not arm anything. See [`crate::trigger`].
+    pub review: Option<crate::trigger::Trigger>,
 }
 
 /// The backup rotation's settings, as configured — [`crate::backup::Settings`] is this
@@ -384,6 +409,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return parse_passkey(args);
         }
+        Some("review") => {
+            args.next();
+            return parse_review(args);
+        }
         Some("grants") => {
             args.next();
             let subject = args
@@ -437,6 +466,42 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         }
     }
     Ok(Command::Serve(flags))
+}
+
+/// `ikigai-gonk review request <repo> <path> [--config PATH]` — drop one tuple.
+///
+/// ★ Deliberately tiny, because a `post-commit` hook calls it once per changed file. It
+/// opens no store, binds no door and dials nothing: it writes one file into the configured
+/// queue and exits. It therefore works while gonk is DOWN, which is the property a hook
+/// needs — a commit must never wait on this server being up, let alone on a model.
+fn parse_review(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    match args.next().as_deref() {
+        Some("request") => {}
+        Some(other) => {
+            return Err(format!(
+                "review: `{other}` is not a subcommand (request <repo> <path>)"
+            ))
+        }
+        None => return Err("review: expected `request <repo> <path>`".to_string()),
+    }
+    let repo = args.next().ok_or(
+        "review request: expected <repo> <path> — the `gonk.browse.root` NAME, then \
+                the file's path within it",
+    )?;
+    let path = args
+        .next()
+        .ok_or("review request: expected <path> after the repository name")?;
+    let mut flags = Flags::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            other => return Err(format!("review request: unknown argument `{other}`")),
+        }
+    }
+    if repo.is_empty() || path.is_empty() {
+        return Err("review request: neither the repository nor the path may be empty".to_string());
+    }
+    Ok(Command::ReviewRequest { repo, path, flags })
 }
 
 fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
@@ -615,6 +680,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     let mounts = mounts(flags, text, homes)?;
     let explain = explain_tiers(text)?;
     let backup = backup_policy(flags, text, homes)?;
+    let review = review_trigger(text, homes)?;
     Ok(Settings {
         http,
         socket,
@@ -624,7 +690,33 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         mounts,
         explain,
         backup,
+        review,
     })
+}
+
+/// The review queue, from `gonk.review.*` — `None` unless `gonk.review.space` names one.
+///
+/// ★ **One line is the whole switch**, the shape `gonk.mount` established: with no
+/// `gonk.review.space` this server binds no space, offers no `urn:iki:gonk:review:pass`,
+/// and serves exactly the catalog it served before. A queue nothing can fill would be an
+/// over-offer, which the module recipe calls the worse direction.
+///
+/// ⚠ `gonk.review.grant` is READ but nothing in this binary runs under it. It is printed by
+/// the banner so an operator can see the authority they wrote down, and it is refused early
+/// if `grants.json` cannot honour it — a grant that is a typo should not first be noticed
+/// on the day a pending state (#444) arms the drainer.
+fn review_trigger(text: &str, homes: &Homes) -> Result<Option<crate::trigger::Trigger>, String> {
+    let Some(space) = value_for(text, "gonk.review.space") else {
+        return Ok(None);
+    };
+    crate::trigger::check_space_name(&space)?;
+    let root = value_for(text, "gonk.review.root")
+        .map(|spelled| expand_home(&spelled, &homes.home))
+        .unwrap_or_else(|| homes.data.join(crate::trigger::SPACES_DIR));
+    let grant = value_for(text, "gonk.review.grant");
+    let trigger = crate::trigger::Trigger { space, grant, root };
+    crate::trigger::refuse_cap_file(&trigger)?;
+    Ok(Some(trigger))
 }
 
 /// The backup rotation, from flags then config then the defaults Brian's requirement

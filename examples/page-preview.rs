@@ -113,6 +113,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         store,
         Some(Arc::new(wired.space)),
         Vec::new(),
+        Vec::new(),
         None,
     ));
     let config = std::env::temp_dir().join("ikigai-gonk-preview");

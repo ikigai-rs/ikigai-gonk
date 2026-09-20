@@ -44,6 +44,7 @@ pub mod mount;
 pub mod quic;
 pub mod render;
 pub mod rules;
+pub mod trigger;
 pub mod watch;
 pub mod web;
 
@@ -74,7 +75,7 @@ use ikigai_vocab::TurtleRenderer;
 ///   `Verb::Meta as=application/json`; without a renderer that answer degrades to an
 ///   anonymous row and named arguments stop routing, with no error anywhere.
 pub fn compose(store: DurableStore) -> Kernel {
-    compose_with(store, None, Vec::new(), None)
+    compose_with(store, None, Vec::new(), Vec::new(), None)
 }
 
 /// [`compose`], plus the repository browse family when this server is configured for one.
@@ -114,10 +115,21 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// startup by `main`, not chosen at call time by a caller.
 ///
 /// [`JobRegistry`]: ikigai_time::JobRegistry
+/// (continued) `trigger` is [`crate::trigger::space`]'s pair — the review queue
+/// (`urn:space:{name}`) and the pass in front of it (`urn:iki:gonk:review:pass`) — bound
+/// only when a `gonk.review.space` line configured one, the same switch shape as a mount.
+///
+/// ⚠ **Binding the queue is not arming the trigger.** A pass declares everything
+/// `ikigai-browse`'s review declares — browse read, net, annotate — and this server mints
+/// none of those for anyone, so the queue fills and a person drains it. Nothing in this
+/// binary drains it unattended: Brian, 2026-09-19, *"Nothing gets published to Gonk except
+/// by the human."* See [`crate::trigger`] for what arms it (ledger #444) and why that is a
+/// missing grant rather than a missing flag.
 pub fn compose_with(
     store: DurableStore,
     browse: Option<Arc<dyn Space>>,
     mounted: Vec<Arc<dyn Space>>,
+    trigger: Vec<Arc<dyn Space>>,
     backups: Option<crate::backup::Backups>,
 ) -> Kernel {
     let store: Arc<dyn Space> = Arc::new(ikigai_store::space(store));
@@ -132,6 +144,7 @@ pub fn compose_with(
         spaces.push(browse);
         spaces.push(Arc::new(ikigai_repo::space()));
     }
+    spaces.extend(trigger);
     if let Some(backups) = backups {
         spaces.push(Arc::new(backup::space(backups)));
         spaces.push(Arc::new(ikigai_compress::space()));
