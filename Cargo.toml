@@ -246,9 +246,26 @@ serde_json = "1"
 # The HTML face's renderer: `transform_xml`, xrust's XSLT called as a library function.
 # ⚠ The CRATE, not its endpoint — `urn:xslt:transform` is never bound here, so the served
 # catalog does not widen and its `http(s)://` fetch path (through `urn:httpGet`) does not
-# exist in this binary. `transform_xml` is present from 0.1.0; 0.1.2 is what was built and
+# exist in this binary. `transform_xml` is present from 0.1.0; 0.1.3 is what is built and
 # tested, and was not re-resolved from scratch at `=0.1.0`.
-ikigai-xslt = "0.1.2"
+#
+# ★ **0.1.3 CACHES THE COMPILED STYLESHEET, and for this binary that is the difference
+# between paying to compile `gonk.xsl` on every HTML request and paying once per process**
+# (ledger #453). Measured here with `cargo run --release --example render-cost` over 425 real
+# ledger items, two renders in one process, which is the shape a long-lived server has:
+#
+#   0.1.2   first render 224ms · second (50 rows) 638ms
+#   0.1.3   first render 226ms · second (50 rows) 455ms
+#
+# The FIRST render is unchanged — compiling is not faster, it is amortized — and every render
+# after it in the process drops by ~183ms. That floor sits under every page this server
+# serves, the Queue page included, so it is a larger share of a small page than of a big one.
+#
+# ⚠ It is a PERFORMANCE property, not an API floor: `transform_xml`'s signature is unchanged
+# and 0.1.2 still compiles. The pin states what is built and tested, which is what this
+# manifest's pins have always meant — and stating it is what makes the property reachable for
+# anyone building without our lockfile, which `cargo install` without `--locked` is (rule 9d).
+ikigai-xslt = "0.1.3"
 # The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
 # only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so
 # nothing here needs a CBOR decoder. Present from 0.1.14; 0.1.21 is what was built and tested.
