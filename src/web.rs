@@ -73,6 +73,14 @@ pub struct Web {
     pub hub: Arc<Kernel>,
     /// The ledgers listed first: `gonk.http.ledger`.
     pub ledgers: Vec<String>,
+    /// The browse roots this server was configured with (`gonk.browse.root`), by NAME —
+    /// the `{root}` in `urn:repo:{root}:tree`. Empty when no root is configured, in which
+    /// case `main` wires no browse space at all and the header offers no way in.
+    ///
+    /// ⚠ The names only. The paths are the mount's business ([`crate::browse::wire`]);
+    /// a page never needs one, and holding one here would put a filesystem path one
+    /// rendering mistake away from a caller who may not read the root it belongs to.
+    pub browse_roots: Vec<String>,
     /// The passkey relying party.
     pub passkeys: Arc<Passkeys>,
     /// The render rules in effect, as Turtle — the TEXT, not a parsed table, because the
@@ -158,6 +166,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         .bind(
             Exact::new(crate::k::K_IRI),
             crate::k::KAdapter {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            Exact::new(crate::k::ROOTS_IRI),
+            crate::k::BrowseRoots {
                 web: Arc::clone(&web),
             },
         )
@@ -260,8 +274,20 @@ pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
         .collect()
 }
 
-pub(crate) fn nav(ledgers: &[Ledger], current: Option<&str>) -> String {
-    ledgers
+/// The header's navigation: one element per readable ledger, then the browse family's
+/// entry point when this caller may read at least one root.
+///
+/// ★ The browse link is computed the same way the ledger links are — from what the caller
+/// may READ, not from what the server has — so a caller is never offered a door that
+/// answers it a 403. Ledger #442: before this, `/browse/{iri}` was reachable only by
+/// typing an IRI, and a door nobody can find is most of the way to not having one.
+pub(crate) fn nav(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledgers: &[Ledger],
+    current: Option<&str>,
+) -> String {
+    let mut out: String = ledgers
         .iter()
         .map(|l| {
             element(
@@ -281,7 +307,11 @@ pub(crate) fn nav(ledgers: &[Ledger], current: Option<&str>) -> String {
                 "",
             )
         })
-        .collect()
+        .collect();
+    if !crate::k::readable_roots(web, inv).is_empty() {
+        out.push_str(&element("browse", &[("href", crate::k::ROOTS_PATH)], ""));
+    }
+    out
 }
 
 /// `2026-09-14T10:00:00.123Z` → `2026-09-14 10:00 UTC`.
@@ -486,7 +516,7 @@ async fn ledger_listing(
     let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, status);
     let ledgers = readable_ledgers(web, inv);
-    let mut children = nav(&ledgers, Some(ledger.name()));
+    let mut children = nav(web, inv, &ledgers, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
@@ -527,6 +557,9 @@ impl Endpoint for LedgerView {
             Shape::Home => match readable_ledgers(&self.web, inv).into_iter().next() {
                 Some(ledger) => ledger,
                 None => {
+                    // ⚠ The nav still renders: a grant may carry browse roots and no
+                    // ledger at all, and such a caller used to land here with a header
+                    // that offered nothing and a page that said the server was empty.
                     let doc = envelope(
                         "page",
                         &[
@@ -540,7 +573,7 @@ impl Endpoint for LedgerView {
                                  makes one.",
                             ),
                         ],
-                        "",
+                        &nav(&self.web, inv, &[], None),
                     );
                     return Ok(html(render::render(&doc, true).map_err(render_err)?));
                 }
@@ -642,7 +675,7 @@ async fn item_card(
         .first()
         .and_then(|item| graph.value(item, &format!("{DCTERMS}title")))
         .unwrap_or_else(|| id.to_string());
-    let mut children = nav(&readable_ledgers(web, inv), Some(ledger.name()));
+    let mut children = nav(web, inv, &readable_ledgers(web, inv), Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
@@ -874,7 +907,7 @@ impl Endpoint for Act {
                     ],
                     &format!(
                         "{}{}",
-                        nav(&ledgers, Some(ledger.name())),
+                        nav(&self.web, inv, &ledgers, Some(ledger.name())),
                         element("flash", &[("kind", "ok")], &said)
                     ),
                 );
@@ -1525,7 +1558,7 @@ impl Endpoint for Sparql {
         };
         let children = format!(
             "{}{}{}{}{}",
-            nav(&ledgers, Some(ledger.name())),
+            nav(&self.web, inv, &ledgers, Some(ledger.name())),
             samples(),
             cross_graph(),
             element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),

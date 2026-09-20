@@ -354,6 +354,11 @@ pub fn edge_config() -> EdgeConfig {
                 route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
                 route("/static/{name}", "urn:iki:gonk:asset:{name}"),
                 route("/k", crate::k::K_IRI),
+                // The browse family's landing page. ⚠ It must be listed BEFORE the
+                // `/browse/{p1}…` arities below — not for precedence (the patterns cannot
+                // both match: this one has no segment after `/browse`) but because reading
+                // the table top to bottom should meet the door before its depths.
+                route("/browse", crate::k::ROOTS_IRI),
             ]
             .into_iter()
             .chain(browse_routes())

@@ -1843,6 +1843,142 @@ fn the_browse_door_serves_the_faces_and_their_own_affordances() {
     );
 }
 
+/// ★ **Both of the browse family's stylesheets, and the LAYOUT one actually resolves.**
+///
+/// `urn:repo:style` is the syntax theme for the `hl-` classes inside a file view;
+/// `urn:repo:style:layout` (ikigai-browse 0.4.2) is the page furniture every other face is
+/// made of. Linking one and not the other is what made this door render a tree as a cascade
+/// of gonk chips (ledger #441), and the interesting half of this test is the second: the
+/// link is fetched through the same adapter a browser would use, so a pin that went
+/// backwards would fail here rather than in someone's eyes.
+#[test]
+fn the_browse_page_links_the_layout_stylesheet_and_it_resolves() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+
+    let (status, page) = door.get_html("/browse/urn:repo:demo:tree", Some(&token));
+    assert_eq!(status, 200, "{page}");
+    for sheet in ["source urn:repo:style", "source urn:repo:style:layout"] {
+        assert!(
+            page.contains(&urlencode(sheet)),
+            "the page links `{sheet}`: {page}"
+        );
+    }
+
+    let (status, css) = door.get_html(
+        &k(&format!("source {}", ikigai_browse::LAYOUT_IRI)),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{css}");
+    assert!(
+        css.contains(".browse-entries") && css.contains(".browse-crumbs"),
+        "…and that link answers the layout rules for the classes the faces emit: {css}"
+    );
+    assert!(
+        css.contains("data-browse-posture"),
+        "…including the read-only posture rule this door drives: {css}"
+    );
+}
+
+/// The posture the door states, and the two ways it can be wrong.
+///
+/// ⚠ Presentation only — `urn:iki:annotation`'s Sink requires `urn:cap:annotate` whatever
+/// the page says. What this pins is that a caller who cannot write is not shown a form that
+/// will refuse it, and that a caller who CAN write is not quietly denied the affordance.
+#[test]
+fn the_read_only_posture_is_stated_only_when_the_caller_cannot_annotate() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+
+    let writer = door.enrol_and_sign_in_with(browsing_scopes());
+    let (_, page) = door.get_html("/browse/urn:repo:demo:tree", Some(&writer));
+    assert!(
+        !page.contains("data-browse-posture"),
+        "a caller holding `urn:cap:annotate` states no posture, and sees the form: {page}"
+    );
+
+    let read_only: Vec<String> = browsing_scopes()
+        .into_iter()
+        .filter(|s| s != ikigai_browse::CAP_ANNOTATE)
+        .collect();
+    let reader = door.enrol_and_sign_in_as("read-only", read_only);
+    let (_, page) = door.get_html("/browse/urn:repo:demo:tree", Some(&reader));
+    assert!(
+        page.contains("data-browse-posture='read-only'"),
+        "a caller who cannot annotate is not shown the create form: {page}"
+    );
+}
+
+/// ★ The way IN (ledger #442): a header link, and the landing page behind it — both built
+/// from the roots this caller may READ, never from the roots the server has.
+///
+/// ⚠ The last block is the one that would have been wrong the easy way. A grant naming ONE
+/// root by name is not the all-roots wildcard, and it is not a prefix match either: the
+/// offer is `ikigai-browse`'s own two exact tests (`readable_roots`), so a token for a root
+/// this server does not configure offers nothing, and a token for `demo` offers `demo`.
+#[test]
+fn the_header_offers_browse_only_where_a_root_is_readable() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+
+    // 1. Anonymous: gonk mints no browse token for anyone, so there is no way in and no
+    //    link to one — but the page behind it still says which grant would open it.
+    let (status, page) = door.get_html("/", None);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        !page.contains(">Browse<") && !page.contains("href='/browse'"),
+        "no readable root, no link into a refusal: {page}"
+    );
+    let (status, roots) = door.get_html("/browse", None);
+    assert_eq!(status, 200, "{roots}");
+    assert!(
+        !roots.contains("/browse/urn:repo:demo:tree"),
+        "…and the landing page offers no root either: {roots}"
+    );
+    assert!(
+        roots.contains(ikigai_browse::CAP_PREFIX),
+        "…while naming the grant that would: {roots}"
+    );
+
+    // 2. The all-roots wildcard: the link is there on an ordinary ledger page, and the
+    //    landing page lists the configured root.
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    let (_, page) = door.get_html("/", Some(&token));
+    assert!(
+        page.contains("href='/browse'"),
+        "the header carries the way in: {page}"
+    );
+    let (status, roots) = door.get_html("/browse", Some(&token));
+    assert_eq!(status, 200, "{roots}");
+    assert!(
+        roots.contains("/browse/urn:repo:demo:tree"),
+        "…and the landing page opens on the root's tree: {roots}"
+    );
+
+    // 3. A PER-ROOT grant, both ways round.
+    let mut named = grants_for("default", Authority::Read).expect("the ledger's tokens");
+    named.push(format!("{}demo", ikigai_browse::CAP_PREFIX));
+    let token = door.enrol_and_sign_in_as("one-root", named);
+    let (_, roots) = door.get_html("/browse", Some(&token));
+    assert!(
+        roots.contains("/browse/urn:repo:demo:tree"),
+        "a grant naming one root offers exactly that root: {roots}"
+    );
+
+    let mut elsewhere = grants_for("default", Authority::Read).expect("the ledger's tokens");
+    elsewhere.push(format!("{}not-configured-here", ikigai_browse::CAP_PREFIX));
+    let token = door.enrol_and_sign_in_as("another-root", elsewhere);
+    let (_, page) = door.get_html("/", Some(&token));
+    assert!(
+        !page.contains("href='/browse'"),
+        "a grant naming a root this server does not configure offers nothing: {page}"
+    );
+}
+
 /// ★★ **An anonymous caller cannot derive**, which is the whole economic boundary of this
 /// door: a click on Explain spends inference, and gonk mints no net grant for anybody, let
 /// alone for whoever reaches loopback.
@@ -2050,6 +2186,8 @@ impl HttpDoorHarness {
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
+            // The one root every fixture here configures — see `served`.
+            browse_roots: vec!["demo".to_string()],
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         });
@@ -2233,10 +2371,17 @@ impl HttpDoorHarness {
     /// reading a repository and annotating one are scopes this server mints for nobody by
     /// default.
     fn enrol_and_sign_in_with(&self, scopes: Vec<String>) -> String {
-        let authenticator = common::Authenticator::new();
+        self.enrol_and_sign_in_as("reader", scopes)
+    }
+
+    /// ⚠ The same, under a NAMED grant. A grant name is a key in `grants.json`, so enrolling
+    /// a second identity in one harness needs a second name — re-using one with different
+    /// scopes is refused by design (it would change every identity already under it).
+    fn enrol_and_sign_in_as(&self, grant: &str, scopes: Vec<String>) -> String {
+        let authenticator = common::Authenticator::named(grant);
         let invite = identity::invite(
             &self.layout,
-            "reader",
+            grant,
             &scopes,
             false,
             30,

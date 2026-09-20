@@ -61,6 +61,7 @@ impl Server {
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
+            browse_roots: Vec::new(),
             passkeys: Arc::clone(&passkeys),
             rules: rules.into(),
         });

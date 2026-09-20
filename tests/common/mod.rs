@@ -12,11 +12,28 @@ pub struct Authenticator {
     pub id: Vec<u8>,
 }
 
+// ⚠ Each test binary compiles this module WHOLE and uses part of it, so a constructor no
+// single binary calls is normal here rather than dead: `tests/web.rs` signs with `new`,
+// `tests/browse.rs` enrols several identities and needs `named`.
+#[allow(dead_code)]
 impl Authenticator {
     pub fn new() -> Authenticator {
         Authenticator {
             key: SigningKey::from_bytes(&[0x42u8; 32].into()).unwrap(),
             id: b"software-credential-1".to_vec(),
+        }
+    }
+
+    /// A DIFFERENT authenticator, deterministically derived from `name`.
+    ///
+    /// ⚠ Needed the moment one test enrols twice: a credential id is unique per server, so
+    /// a second [`Authenticator::new`] is refused with "this credential is already
+    /// enrolled" — which reads like a test-harness bug and is the server being right.
+    pub fn named(name: &str) -> Authenticator {
+        let seed = Sha256::digest(name.as_bytes());
+        Authenticator {
+            key: SigningKey::from_bytes(&seed).expect("a valid P-256 scalar"),
+            id: format!("software-credential-{name}").into_bytes(),
         }
     }
 
