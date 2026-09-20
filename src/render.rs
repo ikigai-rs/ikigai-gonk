@@ -77,6 +77,16 @@ impl Graph {
         &self.triples
     }
 
+    /// Keep only the triples `keep` accepts.
+    ///
+    /// ★ **This is a render-cost control, not a filter for correctness.** `xrust` builds a
+    /// node for every element in its input and pays again for every element it writes, so a
+    /// page whose stylesheet reads ten predicates and is handed forty pays for thirty it
+    /// never looks at — see `web::ROW_PREDICATES`.
+    pub fn retain(&mut self, keep: impl FnMut(&Triple) -> bool) {
+        self.triples.retain(keep);
+    }
+
     /// Subjects carrying `rdf:type <class>`, in first-seen order.
     pub fn subjects_of_type(&self, class: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();

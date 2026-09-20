@@ -253,7 +253,22 @@
       <xsl:if test="count(rdf:RDF/ledger:Item) = 0">
         <p class="empty">No items match.</p>
       </xsl:if>
+      <!-- ⚠ What this page rendered and what the filter MATCHED are different numbers, and
+           the page says both: a listing that reports its own length as the total is the
+           defect in #419, one surface over. The sentence and the link are built in Rust
+           (`web::Count`) because the engine has no variables to build them with. -->
       <xsl:if test="count(rdf:RDF/ledger:Item) &gt; 0">
+        <p class="count">
+          <span class="how-many"><xsl:value-of select="@count"/></span>
+          <xsl:if test="@more = 'true'">
+            <a class="more" hx-target="#ledger" hx-swap="outerHTML">
+              <xsl:attribute name="href"><xsl:value-of select="@more-url"/></xsl:attribute>
+              <xsl:attribute name="hx-get"><xsl:value-of select="@more-items-url"/></xsl:attribute>
+              <xsl:attribute name="hx-push-url"><xsl:value-of select="@more-url"/></xsl:attribute>
+              <xsl:value-of select="@more-label"/>
+            </a>
+          </xsl:if>
+        </p>
         <ol class="items">
           <xsl:apply-templates select="rdf:RDF/ledger:Item">
             <xsl:sort select="dcterms:modified" order="descending"/>
