@@ -104,6 +104,10 @@ summary { cursor: pointer; color: var(--accent); }
 .filters a[aria-current] { font-weight: 700; color: var(--fg); text-decoration: none; }
 .search { display: flex; gap: 0.5rem; margin-left: auto; flex-wrap: wrap; }
 
+/* How many rows this page rendered, and out of how many — above the list, not under it,
+ * because it is the answer to "is this everything?" and that question is asked first. */
+.count { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; margin: 0 0 0.4rem; }
+.count .how-many { color: var(--muted); }
 .items { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
 .row.open, .row.closed {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem;

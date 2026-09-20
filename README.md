@@ -49,6 +49,15 @@ name, and a browser refuses an IP address as one.
 - **Browse.** The front page is the first ledger you may read, open items first, with filters
   for closed and all and a title search. Each item has its own page: body, filing metadata,
   labels, links, `about` targets and comments.
+- **A listing renders fifty rows and says so.** The line above the list is the count the
+  filter matched, not the count the page drew — "showing the 50 most recently updated of 411
+  open items", with a link for the rest. `?limit=<n>` or `?limit=all` asks for more, up to
+  500 in one render. ⚠ The bound is latency, and the number is measured: the server-side
+  XSLT costs about 6 ms per row at fifty rows and about 16 ms at four hundred, so a page of
+  410 items cost **6.5 seconds** — slow enough to read as a hung server rather than a slow
+  page. Reading the ledger is not the expensive part (0.09 s for the whole set), which is why
+  the page still counts everything and bounds only what it draws.
+  `cargo run --release --example render-cost -- <items.ttl> [rows|all]` takes the numbers again.
 - **File, edit, work.** A form on the ledger page files an item (first line the title, a blank
   line, then the body). An item page comments, edits the title, body and priority, closes with
   a reason or reopens, claims or releases, defers or resumes, labels and links.

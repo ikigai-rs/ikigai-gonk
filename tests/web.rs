@@ -4,6 +4,7 @@
 //! `*/*`. `ikigai-web` turns the FIRST type in `Accept` into `as=`, so a page that served
 //! only plain text would answer a browser `400` while every `*/*` test passed.
 //!
+//! - [`a_listing_renders_a_bounded_number_of_rows_and_says_what_it_left_out`]
 //! - [`a_browser_gets_html_pages_and_a_readable_404`]
 //! - [`a_person_files_edits_comments_and_closes_through_forms`]
 //! - [`a_form_can_send_only_what_the_ledger_declares`]
@@ -220,6 +221,77 @@ fn file(server: &Server, content: &str) -> (String, String) {
     );
     assert_eq!(filed.status, 200, "{filed:?}");
     first_item(&filed.body)
+}
+
+/// ★ **A listing renders a BOUNDED number of rows and says so.** `xrust` costs ~6–15 ms per
+/// row and the cost per row GROWS with the set, so 410 rows measured 6.5 s on the live
+/// server — a page whose slowness reads as an outage (ledger #443). The bound is only half
+/// of it: a page that silently showed its first fifty would repeat the defect ledger #419
+/// records on the text face, where a page's length is reported as a total.
+#[test]
+fn a_listing_renders_a_bounded_number_of_rows_and_says_what_it_left_out() {
+    let server = Server::start();
+    for n in 1..=6 {
+        file(&server, &format!("Item number {n}"));
+    }
+
+    let three = server.page("/l/default?limit=3", None);
+    assert_eq!(three.status, 200, "{three:?}");
+    assert_eq!(
+        three.body.matches("<li class='row open'>").count(),
+        3,
+        "three rows, not six: {three:?}"
+    );
+    assert!(
+        three
+            .body
+            .contains("showing the 3 most recently updated of 6 open items"),
+        "the page says what it rendered and out of what: {three:?}"
+    );
+    // The NEWEST three, which is the order the stylesheet sorts in — not an arbitrary three.
+    assert!(
+        three.body.contains("Item number 6")
+            && three.body.contains("Item number 4")
+            && !three.body.contains("Item number 3"),
+        "{three:?}"
+    );
+    assert!(
+        three.body.contains(">Show 6</a>")
+            && three
+                .body
+                .contains("href='/l/default?status=open&amp;limit=6'"),
+        "and offers the rest: {three:?}"
+    );
+
+    let all = server.page("/l/default?limit=all", None);
+    assert_eq!(
+        all.body.matches("<li class='row open'>").count(),
+        6,
+        "{all:?}"
+    );
+    assert!(
+        all.body.contains("6 open items") && !all.body.contains("Show 6"),
+        "nothing is left out, so nothing is offered: {all:?}"
+    );
+
+    // A search narrows the total the page reports, and the link carries the search on.
+    let searched = server.page("/l/default?limit=1&text=number", None);
+    assert!(
+        searched
+            .body
+            .contains("showing the 1 most recently updated of 6 open items")
+            && searched.body.contains("limit=6&amp;text=number"),
+        "{searched:?}"
+    );
+
+    let refused = server.page("/l/default?limit=none", None);
+    assert_eq!(refused.status, 400, "{refused:?}");
+    assert!(
+        refused
+            .body
+            .contains("`none` is not a positive number of rows"),
+        "{refused:?}"
+    );
 }
 
 #[test]

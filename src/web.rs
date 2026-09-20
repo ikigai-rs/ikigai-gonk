@@ -47,7 +47,7 @@
 //! That is the same contract a manifold-driven form renderer will need later; this adapter is
 //! what it will post to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -56,6 +56,7 @@ use ikigai_core::{
     Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
 use ikigai_ledger::Ledger;
+use oxigraph::model::NamedOrBlankNode;
 use serde_json::{json, Value};
 
 use crate::identity::{self, Passkeys, Purpose};
@@ -66,6 +67,31 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
 const DCTERMS: &str = "http://purl.org/dc/terms/";
 const HTML: &str = "text/html";
+
+/// How many rows a ledger listing RENDERS unless the caller asks for more.
+///
+/// ★ **This is a latency bound and the number is measured, not chosen.** `xrust` builds the
+/// result tree node by node and the cost is in what it WRITES, not what it reads: the list
+/// page costs ~150 ms of chrome plus ~6 ms per row at fifty rows and ~15 ms per row at four
+/// hundred — 410 rows measured 6.5 s, which is the whole of the ~6 s page (parsing the
+/// Turtle, adding the view triples and serializing RDF/XML together cost 70 ms of it).
+/// Handing the stylesheet a SMALLER GRAPH does not help — a 3.4× smaller input moved the
+/// same render by 3% — so the only lever is fewer rows. `examples/render-cost.rs` is how to
+/// take those numbers again; ledger #443 carries the first set.
+const ROWS: usize = 50;
+
+/// The ceiling on one render, whatever `limit` asks for — about eight seconds' worth.
+/// A caller who wants the whole ledger wants the Turtle face, not this page.
+const MAX_ROWS: usize = 500;
+
+/// How many items the listing READS in order to count them.
+///
+/// The read is cheap — 411 items is 0.09 s, two orders off the render — so the page reads
+/// the whole filtered set and counts it, and bounds only the rendering. That is what lets
+/// the banner say "the 50 most recently updated of 411" instead of reporting a page as a
+/// total, which is the mistake ledger #419 records on the text face. A set that fills this
+/// cap is reported as a floor (`411+`), never as a total.
+const COUNT_CAP: usize = 2000;
 
 /// What the HTML face is built from.
 pub struct Web {
@@ -484,15 +510,30 @@ struct LedgerView {
 }
 
 /// Render one ledger's listing — the page, the fragment, and the view `Act` returns.
+/// What a listing request asks for: which items, and how much of the answer to draw.
+struct Listing<'a> {
+    /// `open`, `closed` or `all`.
+    status: &'a str,
+    /// A case-insensitive substring of the title.
+    text: Option<&'a str>,
+    /// How many rows to render — see [`rows_wanted`]. The filter above is what gets
+    /// COUNTED; this is only what gets drawn.
+    limit: Option<&'a str>,
+}
+
 async fn ledger_listing(
     web: &Web,
     inv: &Invocation<'_>,
     ledger: &Ledger,
-    status: &str,
-    text: Option<&str>,
+    listing: &Listing<'_>,
     full: bool,
     flash: Option<(&str, &str)>,
 ) -> Result<Representation> {
+    let Listing {
+        status,
+        text,
+        limit,
+    } = *listing;
     require_read(inv, ledger)?;
     if !matches!(status, "open" | "closed" | "all") {
         return Err(Error::InvalidArgument {
@@ -500,6 +541,7 @@ async fn ledger_listing(
             detail: format!("`{status}` is not one of open, closed, all"),
         });
     }
+    let rows = rows_wanted(limit)?;
     let mut items = with(
         with(
             request(Verb::Source, &format!("{}items", ledger.prefix()))?,
@@ -509,11 +551,12 @@ async fn ledger_listing(
         "status",
         status,
     );
-    items = with(items, "limit", "500");
+    items = with(items, "limit", &COUNT_CAP.to_string());
     if let Some(text) = text {
         items = with(items, "text", text);
     }
     let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
+    let count = newest_rows(&mut graph, rows);
     enrich_items(&mut graph, ledger, inv, status);
     let ledgers = readable_ledgers(web, inv);
     let mut children = nav(web, inv, &ledgers, Some(ledger.name()));
@@ -526,6 +569,9 @@ async fn ledger_listing(
     } else {
         format!("Ledger {}", ledger.name())
     };
+    let page_url = format!("/l/{}", ledger.name());
+    let items_url = format!("/l/{}/items", ledger.name());
+    let query = count.more_query(status, text);
     let doc = envelope(
         "page",
         &[
@@ -535,8 +581,25 @@ async fn ledger_listing(
             ("ledger", ledger.name()),
             ("status", status),
             ("text", text.unwrap_or("")),
-            ("page-url", &format!("/l/{}", ledger.name())),
-            ("items-url", &format!("/l/{}/items", ledger.name())),
+            ("page-url", &page_url),
+            ("items-url", &items_url),
+            ("count", &count.sentence(status)),
+            ("more", flag(query.is_some())),
+            ("more-label", &count.more_label()),
+            (
+                "more-url",
+                &query
+                    .as_ref()
+                    .map(|q| format!("{page_url}{q}"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "more-items-url",
+                &query
+                    .as_ref()
+                    .map(|q| format!("{items_url}{q}"))
+                    .unwrap_or_default(),
+            ),
             (
                 "can-write",
                 flag(inv.capability.allows(&ledger.cap_write())),
@@ -547,12 +610,136 @@ async fn ledger_listing(
     Ok(html(render::render(&doc, full).map_err(render_err)?))
 }
 
+/// How many rows the caller asked to see: [`ROWS`] by default, `all` for as many as one
+/// render is allowed, and anything above [`MAX_ROWS`] clamped down to it rather than
+/// refused — a bound that refuses a number a person typed into a URL helps nobody, and the
+/// page SAYS what it rendered.
+fn rows_wanted(limit: Option<&str>) -> Result<usize> {
+    match limit {
+        None => Ok(ROWS),
+        Some("all") => Ok(MAX_ROWS),
+        Some(other) => match other.parse::<usize>() {
+            Ok(n) if n > 0 => Ok(n.min(MAX_ROWS)),
+            _ => Err(Error::InvalidArgument {
+                name: "limit".to_string(),
+                detail: format!("`{other}` is not a positive number of rows, or `all`"),
+            }),
+        },
+    }
+}
+
+/// What a listing rendered, and out of what.
+struct Count {
+    /// Rows left in the graph.
+    shown: usize,
+    /// Items the ledger returned for this filter.
+    total: usize,
+    /// The read filled [`COUNT_CAP`], so `total` is a floor and not a total.
+    capped: bool,
+}
+
+impl Count {
+    /// The sentence over the list. `status` is the filter in force, so "411 open items"
+    /// and "411 items" (for `all`) both read as English.
+    fn sentence(&self, status: &str) -> String {
+        let kind = match status {
+            "all" => "items".to_string(),
+            other => format!("{other} items"),
+        };
+        let total = if self.capped {
+            format!("{}+", self.total)
+        } else {
+            self.total.to_string()
+        };
+        if self.shown >= self.total && !self.capped {
+            format!("{total} {kind}")
+        } else {
+            format!(
+                "showing the {} most recently updated of {total} {kind}",
+                self.shown
+            )
+        }
+    }
+
+    fn more_label(&self) -> String {
+        format!("Show {}", self.next_rows())
+    }
+
+    fn next_rows(&self) -> usize {
+        self.total.min(MAX_ROWS)
+    }
+
+    /// The query string of the "show more" link, or `None` when there is nothing more this
+    /// page can render.
+    fn more_query(&self, status: &str, text: Option<&str>) -> Option<String> {
+        if self.shown >= self.total || self.next_rows() <= self.shown {
+            return None;
+        }
+        let mut query = format!("?status={status}&limit={}", self.next_rows());
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
+            query.push_str(&format!("&text={}", percent_encode(text)));
+        }
+        Some(query)
+    }
+}
+
+/// Percent-encode a query-string VALUE. Nothing here builds a URL from anything but a
+/// filter the caller already typed, and a search for `a & b` must not become two
+/// parameters.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Cut `graph` down to the `rows` most recently updated items, and report what it held.
+///
+/// ★ **The order is the STYLESHEET's order**, `dcterms:modified` descending — an ISO-8601
+/// instant sorts lexically, which is why `xsl:sort` and this agree without a date type.
+/// A truncation that kept a different set would render a page whose rows are not the ones
+/// the banner describes.
+///
+/// It also drops every subject that is not a kept item: a listing renders rows, and a
+/// comment or a link node is input the row templates never look at.
+fn newest_rows(graph: &mut Graph, rows: usize) -> Count {
+    let mut items: Vec<(String, String)> = graph
+        .subjects_of_type(&format!("{LEDGER_NS}Item"))
+        .into_iter()
+        .map(|iri| {
+            let modified = graph
+                .value(&iri, &format!("{DCTERMS}modified"))
+                .unwrap_or_default();
+            (modified, iri)
+        })
+        .collect();
+    let total = items.len();
+    items.sort_by(|a, b| b.cmp(a));
+    let keep: HashSet<String> = items.into_iter().take(rows).map(|(_, iri)| iri).collect();
+    let shown = keep.len();
+    graph.retain(
+        |t| matches!(&t.subject, NamedOrBlankNode::NamedNode(s) if keep.contains(s.as_str())),
+    );
+    Count {
+        shown,
+        total,
+        capped: total >= COUNT_CAP,
+    }
+}
+
 #[async_trait]
 impl Endpoint for LedgerView {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
         let status = optional(inv, "status").unwrap_or_else(|| "open".to_string());
         let text = optional(inv, "text");
+        let limit = optional(inv, "limit");
         let ledger = match self.shape {
             Shape::Home => match readable_ledgers(&self.web, inv).into_iter().next() {
                 Some(ledger) => ledger,
@@ -584,8 +771,11 @@ impl Endpoint for LedgerView {
             &self.web,
             inv,
             &ledger,
-            &status,
-            text.as_deref(),
+            &Listing {
+                status: &status,
+                text: text.as_deref(),
+                limit: limit.as_deref(),
+            },
             self.shape != Shape::Fragment,
             None,
         )
@@ -642,6 +832,16 @@ impl Endpoint for LedgerView {
                 .optional(),
         )
         .input(arg("text", "A case-insensitive substring of the title.").optional())
+        .input(
+            arg(
+                "limit",
+                "How many rows to render: a number, or `all` for as many as one render is \
+                 allowed. The page counts the whole filtered set either way and says what \
+                 it rendered.",
+            )
+            .default_value(ROWS.to_string())
+            .optional(),
+        )
         .input(as_html_arg())
         .output(HTML)
     }
@@ -913,7 +1113,14 @@ impl Endpoint for Act {
                 );
                 Ok(html(render::render(&doc, false).map_err(render_err)?))
             }
-            _ => ledger_listing(&self.web, inv, &ledger, &list_status, None, false, flash).await,
+            _ => {
+                let listing = Listing {
+                    status: &list_status,
+                    text: None,
+                    limit: None,
+                };
+                ledger_listing(&self.web, inv, &ledger, &listing, false, flash).await
+            }
         }
     }
 
