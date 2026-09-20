@@ -594,6 +594,76 @@ pub fn drop_tuple(trigger: &Trigger, tuple: &Tuple) -> std::result::Result<Strin
     Ok(String::from_utf8_lossy(&answer.bytes).trim().to_string())
 }
 
+/// How deep the queue is — or why that number is not available.
+///
+/// ★ **Three answers, never one, because two of them are "no number" and they mean opposite
+/// things.** A page that renders `0` for an unconfigured queue, an empty queue and an
+/// unreadable one says "nothing has happened" in all three cases; only one of those is true.
+/// Ledger [#446](http://localhost:1060/l/default/item/446) is that shape, and the Queue page
+/// is the one surface whose entire job is to show process state, so it is the last place a
+/// silent absence belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Depth {
+    /// No `gonk.review.space`: this server binds no queue, and nothing can drop into one.
+    NotConfigured,
+    /// The three stages' counts. `outbox` and `error` are the reactor's, and are zero on
+    /// this server because it runs no reactor — they are read anyway, so that the day one
+    /// runs the page does not have to change.
+    Counted {
+        /// Waiting to be reviewed.
+        inbox: usize,
+        /// Handled.
+        outbox: usize,
+        /// Dead-lettered.
+        error: usize,
+    },
+    /// The tree is configured and could not be read. The string is the reason.
+    Unreadable(String),
+}
+
+/// [`Depth`] for a configured trigger, or [`Depth::NotConfigured`] for `None`.
+///
+/// ⚠ **This counts FILES, where everything else in this server reads through the kernel** —
+/// and the reason is a real gap rather than a shortcut. The count lives behind
+/// `Source urn:space:{name}`, which requires `urn:cap:space:read`, and this server mints that
+/// token for NOBODY ([`space`]): not for an anonymous caller, not for a passkey identity, not
+/// for a certificate. So there is no capability any page could be rendering under that would
+/// be allowed to ask the kernel, and a read through it would be a typed `Denied` on every
+/// request — which is exactly the missing number the page exists to supply. Counting the
+/// directory is what [`pending`] already does for the banner; this is the same read, told
+/// apart from its two failure modes. Reported up as the design question it is: either the
+/// depth becomes a resource of gonk's own with its own floor, or the space's read token
+/// becomes mintable.
+pub fn depth(trigger: Option<&Trigger>) -> Depth {
+    let Some(trigger) = trigger else {
+        return Depth::NotConfigured;
+    };
+    // The inbox is created 0700 by `prepare` at startup, so a missing one is a fact worth
+    // reporting rather than a zero. The other two stages belong to a reactor that has never
+    // run here, so their absence IS zero.
+    let inbox = match count_tuples(&trigger.inbox()) {
+        Ok(n) => n,
+        Err(e) => return Depth::Unreadable(format!("{}: {e}", trigger.inbox().display())),
+    };
+    Depth::Counted {
+        inbox,
+        outbox: count_tuples(&trigger.dir().join("outbox")).unwrap_or(0),
+        error: count_tuples(&trigger.dir().join("error")).unwrap_or(0),
+    }
+}
+
+/// The `*.tuple` files in one stage directory.
+fn count_tuples(dir: &Path) -> std::io::Result<usize> {
+    Ok(std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with(".tuple"))
+        })
+        .count())
+}
+
 /// The tuple ids waiting in a trigger's inbox, sorted — what the banner counts.
 pub fn pending(trigger: &Trigger) -> usize {
     match std::fs::read_dir(trigger.inbox()) {

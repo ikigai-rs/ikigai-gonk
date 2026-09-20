@@ -354,6 +354,14 @@ pub fn edge_config() -> EdgeConfig {
                 route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
                 route("/static/{name}", "urn:iki:gonk:asset:{name}"),
                 route("/k", crate::k::K_IRI),
+                // The review queue (ledger #444): the page, the section it swaps, and the
+                // one write a human makes on it. `/queue/decide` takes no per-route `cap`
+                // for the reason the browse rows do not — a route ceiling would REPLACE the
+                // per-request capability, and with it the `Host` and cross-site checks that
+                // make a POST safe on a machine with a browser open.
+                route("/queue", crate::queue::QUEUE_IRI),
+                route("/queue/rows", crate::queue::ROWS_IRI),
+                route("/queue/decide", crate::queue::DECIDE_IRI),
                 // The browse family's landing page. ⚠ It must be listed BEFORE the
                 // `/browse/{p1}…` arities below — not for precedence (the patterns cannot
                 // both match: this one has no segment after `/browse`) but because reading

@@ -286,10 +286,13 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 14] = [
+const WEB_IDS: [&str; 17] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
+    "gonk-page-queue",
+    "gonk-fragment-queue",
+    "gonk-queue-decide",
     "gonk-page-home",
     "gonk-page-ledger",
     "gonk-fragment-items",
@@ -312,6 +315,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
         browse_roots: Vec::new(),
+        review: None,
         passkeys,
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
     });
@@ -413,6 +417,29 @@ fn the_http_door_conforms() {
         )
         .fixture(
             Fixture::new("gonk-browse-page", Verb::Source).binding("start", "urn:repo:demo:tree"),
+        )
+        // ★ The Queue's form adapter, walked in a composition that binds NO browse family
+        // (this door has no root, by design — `the_http_door_adds_exactly_its_pages` pins
+        // that catalog). So the fixture's finding resolves to nothing, and what the walk
+        // observes is the half that matters here: the action DECLARES `urn:cap:annotate`, so
+        // the ENFORCED check sees the kernel refuse it under an empty capability before the
+        // target is ever consulted. What it could not observe — the face a successful
+        // decision serves — the report lists as unprobed, which is the honest word for it.
+        .fixture(Fixture::new("gonk-queue-decide", Verb::Sink).arg(
+            "content",
+            "id=0123456789abcdef01234567&decision=publish&severity=minor",
+        ))
+        .opt_out_check(
+            "gonk-queue-decide",
+            Check::Outputs,
+            "every call this adapter can make is `Sink urn:iki:finding:{id}`, and this \
+             composition binds NO browse family — `the_http_door_adds_exactly_its_pages` pins \
+             that catalog — so its target is absent and the minimal resolution is a typed \
+             NotFound rather than a face. The half that IS observable here is the one worth \
+             checking, and it ran: the action declares `urn:cap:annotate`, so ENFORCED saw \
+             the kernel refuse it under no grants before the target was ever consulted. The \
+             face a successful decision serves is exercised where a browse root exists, by \
+             `tests/queue.rs::a_planted_finding_renders_the_contracts_menu_and_publishes`",
         )
         .fixture(Fixture::new("gonk-page-item", Verb::Source).binding("id", &a))
         .fixture(Fixture::new("gonk-fragment-item", Verb::Source).binding("id", &a))

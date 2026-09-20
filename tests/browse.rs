@@ -2190,6 +2190,7 @@ impl HttpDoorHarness {
             ledgers: vec!["default".to_string()],
             // The one root every fixture here configures — see `served`.
             browse_roots: vec!["demo".to_string()],
+            review: None,
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         });

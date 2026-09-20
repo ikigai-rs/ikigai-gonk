@@ -189,6 +189,8 @@ run it (`web::CROSS_GRAPH`).
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, or one annotation |
+| `/queue` · `/queue/rows` | `urn:iki:gonk:page:queue` · `…:fragment:queue` | the review queue, and the section it swaps |
+| `POST /queue/decide` | `urn:iki:gonk:queue:decide` | one human decision on one finding |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, and `tests/conformance.rs` pins both catalogs.
@@ -263,6 +265,66 @@ per child inside `ikigai-browse` — each child's own explanation, recursively, 
 children as archive hits — so one click on a large directory is many model calls, and the
 door cannot see that from outside. `/k` issues exactly one kernel request per HTTP request
 and prefetches nothing; the rest is the resource's economics, not the door's.
+
+### The review Queue: a human publishes, or nothing does
+
+```sh
+open http://127.0.0.1:1060/queue                      # what is pending, in triage order
+open 'http://127.0.0.1:1060/queue?state=published'    # what was published, and who rated it what
+```
+
+Since `ikigai-browse` 0.5.0 a review pass no longer mints annotations. It produces **pending
+findings** at `urn:iki:finding:{id}`, and `Sink urn:iki:finding:{id} decision=publish` — gated
+by `urn:cap:annotate` — is the only path into the `urn:iki:annotation:` family. Brian's rule,
+2026-09-19: *"Nothing gets published to Gonk except by the human."* This page is the face for
+that act, and the interlock it creates is the reason the git-event trigger above can land
+complete and deliberately unable to publish anything.
+
+⚠ **A queue is not a gate.** Nothing in it blocks a commit, a push or a merge. The word reads
+like a gate to anyone who has used one, so the page says so in as many words.
+
+**The header carries a `Queue` link** only when the caller may read at least one root **and**
+holds `urn:cap:annotate` — a link to a page of things you cannot decide is worse than no link.
+For the same reason the decision form is drawn only for a caller who could submit it: an offer
+you refuse teaches people to ignore refusals. An **anonymous loopback caller can do nothing to
+a finding in either direction** — it cannot read the queue (that needs `urn:cap:browse:read:*`)
+and cannot publish one (that needs `urn:cap:annotate` as well), and
+`tests/queue.rs::an_anonymous_loopback_caller_can_neither_read_nor_decide_a_finding` measures
+both rather than asserting the reasoning.
+
+★ **The severity menu, the decision buttons and the state nav are rendered from the
+CONTRACT** — `Meta urn:iki:finding:{id}` and `Meta urn:repo:{repo}:findings`, read through the
+kernel — never from a list in this crate. `ikigai-browse` deliberately serves one constant to
+the Sink's `one_of`, to the review prompt and to its own menu so the three cannot drift; a
+fourth copy here would be the one that went stale in silence, and the refusal would arrive at
+the click. `tests/queue.rs::no_severity_word_is_written_down_in_this_crate` holds the page code
+and the stylesheet to it, with the contract as the oracle. ⚠ When a contract cannot be read,
+**no form is rendered at all** rather than a fallback menu.
+
+**Both ratings are kept.** The model's proposal rides on the finding; the human's final rating
+rides on the decision node. That is what makes *"is this reviewer calibrated?"* a query rather
+than an impression, and it is why `published` and `declined` are states on this page rather
+than clutter swept off it.
+
+⚠ **A decision is final, and the page says what undoing one would be.** An identical repeat is
+a no-op; anything that would change the record is refused naming what is on file. There is
+**no Delete on a finding** — declining is how a human removes one, and the decline is the
+record. Undoing a *publication* is `delete urn:iki:annotation:{id}`, a separate visible act
+under the same capability.
+
+**The intray depth is on this page and nowhere else.** `ikigai-browse` does not expose it and
+deliberately did not add it: that number belongs to the trigger above, which lives in this
+repo. Without it *"nothing has happened yet"* and *"39 still queued"* render identically, which
+is exactly the silent absence this page exists to prevent — so the line has four shapes, and
+three of them are not a number: no queue configured, the queue is empty, N waiting, and *the
+queue could not be read*.
+
+⚠ **That count is read from the directory, not through the kernel**, and the reason is a gap
+worth naming: the depth lives behind `Source urn:space:{name}`, which requires
+`urn:cap:space:read`, and this server mints that token for **nobody** — so there is no
+capability any page could run under that would be allowed to ask. Either the depth becomes a
+resource of gonk's own with its own floor, or the space's read token becomes mintable; until
+one of those, the page counts files the way the startup banner already does.
 
 ## The render rules are a resource
 
