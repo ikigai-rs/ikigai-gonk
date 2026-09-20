@@ -1,9 +1,8 @@
-//! The git-event review trigger: the queue, the pass, and the grant that is missing on
-//! purpose. Ledger #261.
+//! The git-event review trigger: the queue, the pass, the reviewer's grant, and the bound on
+//! what an armed one spends. Ledger [#261](http://localhost:1060/l/default/item/261) built
+//! it; [#466](http://localhost:1060/l/default/item/466) armed it.
 //!
 //! # What this file is actually asserting
-//!
-//! Three things, and only the first is about code that runs:
 //!
 //! 1. **The trigger's call is the button's call.** `ikigai-browse` pinned the other half —
 //!    `the_button_and_a_trigger_are_one_call_with_two_causes` derives the button's exact
@@ -12,14 +11,22 @@
 //!    `as=application/json` and nothing else, and the pass endpoint issues exactly that and
 //!    returns the answer whole.
 //! 2. **The queue is a queue.** Tuples are files, an identical request collapses to one
-//!    tuple, and what is in the inbox is still there for a process that starts later.
-//! 3. ⚠ **The trigger is unarmed, and the test says so out loud.**
-//!    [`the_trigger_is_unarmed_and_this_test_is_what_changes_when_444_lands`] asserts that no
-//!    grant this server can MINT carries the authority a pass needs. Brian, 2026-09-19:
-//!    *"Nothing gets published to Gonk except by the human."* A pass mints its findings as
-//!    annotations as its terminal step, so until ledger #444 gives a finding a pending state,
-//!    granting that authority to an unattended drainer would publish unattended. That test is
-//!    the thing a #444 arc has to change deliberately rather than drift past.
+//!    tuple, and what is in the inbox is still there for a process that starts later —
+//!    including, since [`an_armed_trigger_reviews_what_was_already_waiting`], for a process
+//!    that then reviews it without anybody asking.
+//! 3. ⚠ **The interlock is arithmetic, and nothing here may erode it.**
+//!    [`no_provisioning_command_can_mint_a_reviewer`] holds that no command this server
+//!    offers can produce the reviewer's authority, so arming stays something a person wrote
+//!    into `grants.json`; [`a_reviewer_grant_that_could_publish_is_refused_before_anything_is_armed`]
+//!    holds that a reviewer carrying `urn:cap:annotate` stops the server. Brian, 2026-09-19:
+//!    *"Nothing gets published to Gonk except by the human."* Since `ikigai-browse` 0.5.0 a
+//!    pass writes PENDING findings and **cannot** publish, which is what made arming safe —
+//!    and `tests/browse.rs::the_pass_requires_exactly_what_the_real_review_requires` is the
+//!    one that reads that claim off real browse rather than off the stub below.
+//! 4. ⚠ **The spend bound is falsifiable.** [`a_second_concurrent_pass_is_refused_rather_than_paid_for`]
+//!    turns "the reactor happens to be single-threaded" into a refusal this server issues,
+//!    and [`the_depth_tells_a_slow_queue_from_a_stuck_one`] is the liveness readout that is
+//!    the only symptom a dead watcher has.
 
 use std::sync::Arc;
 
@@ -38,12 +45,20 @@ fn queue(dir: &std::path::Path) -> Trigger {
         space: "reviews".to_string(),
         grant: None,
         root: dir.join("spaces"),
+        arm: false,
     }
 }
 
-/// The exact scopes a review pass needs, as `ikigai-browse` declares them.
-fn reviewer() -> Capability {
-    Capability::scoped(trigger::reviewer_grant_shape("localhost"))
+/// The exact scopes a review pass needs, **read off the kernel's own contract** — the same
+/// function an operator's banner and refusal messages go through.
+///
+/// ⚠ Not a list: [`trigger::reviewer_grant_shape`] used to be one, and it went stale the day
+/// browse 0.5.0 dropped `urn:cap:annotate` while still compiling. A test that spelled the
+/// scopes here would have gone stale with it.
+fn reviewer(kernel: &Kernel, review_iri: &str) -> Capability {
+    Capability::scoped(
+        trigger::reviewer_grant_shape(kernel, review_iri, "localhost").expect("a bound review"),
+    )
 }
 
 /// One recorded call: the verb, the target, and the arguments in name order.
@@ -89,14 +104,21 @@ impl Endpoint for Recorder {
     }
 
     fn describe(&self) -> Description {
-        // The same three capabilities the real review declares, so a capability that would
-        // be refused by `ikigai-browse` is refused here too.
+        // The same capabilities the real review declares, so a capability that would be
+        // refused by `ikigai-browse` is refused here too.
+        //
+        // ⚠⚠ **`urn:cap:annotate` is NOT among them, and this stub is a copy of a contract
+        // that has already changed under this crate once.** browse 0.5.0 dropped it — a pass
+        // writes pending findings and cannot publish — and that absence IS the interlock the
+        // armed trigger rests on. A stub that still demanded it would make every test here
+        // pass against a reviewer grant the real browse refuses, which is the exact shape of
+        // the bug that shipped in `reviewer_grant_shape`. `tests/browse.rs` reads both real
+        // contracts off a composed kernel; this one is the cheap fixture beside it.
         Description::new("recorder")
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .requires(ikigai_browse::CAP_WILDCARD)
             .requires(grants::CAP_NET_ANY)
-            .requires(ikigai_browse::CAP_ANNOTATE)
             .output("application/json")
     }
 }
@@ -114,7 +136,13 @@ fn kernel_with_recorder(trigger_queue: &Trigger, review_iri: &str) -> (Kernel, S
             seen: Arc::clone(&seen),
         },
     );
-    let mut spaces = trigger::space(trigger_queue);
+    let mut spaces = trigger::space(
+        trigger_queue,
+        Arc::new(trigger::Activity::default()),
+        // Unarmed: these tests drive the pass directly, which is what a person piping a
+        // tuple does. `armed` changes only what `urn:iki:gonk:review:depth` SAYS.
+        false,
+    );
     spaces.push(Arc::new(recorder) as Arc<dyn Space>);
     (Kernel::new(Arc::new(Fallback::new(spaces))), seen)
 }
@@ -188,7 +216,7 @@ fn the_pass_issues_the_button_s_call_and_returns_the_answer_whole() {
         &kernel,
         Request::new(Verb::Source, Iri::parse(trigger::PASS).unwrap())
             .with_arg("content", tuple_arg(&tuple)),
-        &reviewer(),
+        &reviewer(&kernel, "urn:repo:demo:review:a.rs"),
     )
     .expect("the pass runs");
     assert_eq!(
@@ -212,11 +240,15 @@ fn the_pass_issues_the_button_s_call_and_returns_the_answer_whole() {
 
 /// The pass declares exactly what a review declares, and the kernel refuses short of it.
 ///
-/// ⚠ All three are needed EVEN FOR A FREE ARCHIVE HIT: `review` declares them flatly on its
+/// ⚠ Each is needed EVEN FOR A FREE ARCHIVE HIT: `review` declares them flatly on its
 /// `Description`, so the kernel checks them before the endpoint runs and long before it
 /// looks in the archive. There is no cheaper grant for the cheap case.
+///
+/// ★ The dropped set is DERIVED from the shape rather than listed, so the day another
+/// capability joins or leaves the review's contract this test covers it without an edit —
+/// which is the property `reviewer_grant_shape` itself lacked until 2026-09-20.
 #[test]
-fn a_pass_is_denied_short_of_any_one_of_the_three() {
+fn a_pass_is_denied_short_of_any_one_of_them() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let q = queue(dir.path());
     trigger::prepare(&q).expect("prepare");
@@ -225,12 +257,12 @@ fn a_pass_is_denied_short_of_any_one_of_the_three() {
         repo: "demo".to_string(),
         path: "a.rs".to_string(),
     };
-    let full = trigger::reviewer_grant_shape("localhost");
-    for dropped in [
-        ikigai_browse::CAP_WILDCARD,
-        "urn:cap:net:localhost",
-        ikigai_browse::CAP_ANNOTATE,
-    ] {
+    let full = trigger::reviewer_grant_shape(&kernel, "urn:repo:demo:review:a.rs", "localhost")
+        .expect("a bound review");
+    // The scopes the PASS itself declares — the browse half. The store and exec tokens in
+    // the shape are for hops past this endpoint, so dropping one of those is not refused
+    // here, and asserting that it would be would be asserting an over-declaration.
+    for dropped in [ikigai_browse::CAP_WILDCARD, "urn:cap:net:localhost"] {
         let scopes: Vec<String> = full.iter().filter(|s| *s != dropped).cloned().collect();
         let error = issue(
             &kernel,
@@ -250,19 +282,28 @@ fn a_pass_is_denied_short_of_any_one_of_the_three() {
     );
 }
 
-/// ⚠⚠ **THE TRIGGER IS UNARMED, AND THIS TEST IS WHAT A #444 ARC HAS TO CHANGE.**
+/// ⚠⚠ **ARMING IS AN OPERATOR'S ACT, AND NO PROVISIONING COMMAND CAN PERFORM IT.**
 ///
-/// Brian, 2026-09-19: *"Nothing gets published to Gonk except by the human."* A review pass
-/// mints its findings as annotations as its terminal step, so an unattended drainer would
-/// publish unattended. What stops it is not a flag — it is that **no grant this server can
-/// mint carries the authority a pass needs**, so there is nothing to run one under and no
-/// drainer in this binary at all.
+/// The trigger can be armed now (ledger
+/// [#466](http://localhost:1060/l/default/item/466)) — browse 0.5.0 made a pass unable to
+/// publish, so a headless reviewer no longer violates Brian's rule. What has NOT changed, and
+/// is what this test holds, is that **nothing this server MINTS can carry the authority a
+/// pass needs**. `client add --ledger`, `passkey invite --ledger` and `--browse-graph` hand
+/// out ledger tokens and the browse graph's two store doors; the browse read and the net
+/// grant have no flag at all, so a reviewer grant is something a person wrote into
+/// `grants.json` with their hands. An arming path that could be reached by enrolling a client
+/// would be a very different feature.
 ///
-/// When ledger #444 gives a finding a pending state, this assertion is the thing that must
-/// be consciously revisited, rather than a comment that drifts.
+/// ★ And the second half: `urn:cap:annotate` — the publish token — must stay unmintable by
+/// the browse-graph flag too, because the interlock is exactly that the reviewer lacks it.
 #[test]
-fn the_trigger_is_unarmed_and_this_test_is_what_changes_when_444_lands() {
-    let needed = trigger::reviewer_grant_shape("localhost");
+fn no_provisioning_command_can_mint_a_reviewer() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let needed = trigger::reviewer_grant_shape(&kernel, "urn:repo:demo:review:a.rs", "localhost")
+        .expect("a bound review");
     let mut mintable: Vec<String> = Vec::new();
     for authority in [
         Authority::Read,
@@ -277,16 +318,18 @@ fn the_trigger_is_unarmed_and_this_test_is_what_changes_when_444_lands() {
         ikigai_browse::CAP_WILDCARD,
         ikigai_browse::CAP_ANNOTATE,
         "urn:cap:net:localhost",
+        trigger::CAP_EXEC_GH,
     ] {
         assert!(
             !mintable.contains(&token.to_string()),
-            "`{token}` is now mintable by this server's own provisioning. That is what arms \
-             a headless review pass, and a pass publishes its findings the moment it runs — \
-             so this needs ledger #444 (a pending state for a finding) first, not a flag"
+            "`{token}` is now mintable by this server's own provisioning. Arming a headless \
+             reviewer must stay a thing an operator writes into grants.json by hand — and if \
+             the token is `urn:cap:annotate`, a mintable one would hand the reviewer the \
+             publish authority the whole interlock rests on its lacking"
         );
     }
-    // The two store tokens ARE mintable (`--browse-graph write`), which is the point: three
-    // of the five scopes a pass needs have no flag at all. Ledger #435.
+    // The two store tokens ARE mintable (`--browse-graph write`), which is the point: the
+    // rest of what a pass needs has no flag at all. Ledger #435.
     for token in grants::browse_graph_grants(Authority::Write).expect("the browse graph") {
         assert!(
             needed.contains(&token),
@@ -294,6 +337,63 @@ fn the_trigger_is_unarmed_and_this_test_is_what_changes_when_444_lands() {
              transcription of them"
         );
     }
+    // ⚠ And the shape itself never carries the publish token, whatever the contract says.
+    assert!(
+        !needed.contains(&ikigai_browse::CAP_ANNOTATE.to_string()),
+        "the shape an operator is told to write must not include `{}`: a reviewer that can \
+         publish is the interlock gone, and this helper shipped exactly that bug once",
+        ikigai_browse::CAP_ANNOTATE
+    );
+}
+
+/// ★★ **A grant that can publish is refused at STARTUP, not discovered at the first commit.**
+///
+/// This is the one check standing between an operator's copy-paste and unattended publishing,
+/// so it is asserted in both directions: a reviewer carrying `urn:cap:annotate` stops the
+/// server, and one short of what the review declares stops it too rather than dead-lettering
+/// every tuple with a permission error nobody is watching.
+#[test]
+fn a_reviewer_grant_that_could_publish_is_refused_before_anything_is_armed() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let probe = "urn:repo:demo:review:a.rs";
+    let good = trigger::reviewer_grant_shape(&kernel, probe, "localhost").expect("a bound review");
+    trigger::check_reviewer(&kernel, probe, "localhost", &good).expect("the derived shape passes");
+
+    let mut publishing = good.clone();
+    publishing.push(ikigai_browse::CAP_ANNOTATE.to_string());
+    let refusal = trigger::check_reviewer(&kernel, probe, "localhost", &publishing)
+        .expect_err("a reviewer that can publish must be refused");
+    assert!(refusal.contains(ikigai_browse::CAP_ANNOTATE), "{refusal}");
+    assert!(refusal.contains("PUBLISHES"), "{refusal}");
+
+    // Short of the browse read: every pass would be Denied, so this stops the server too —
+    // and the message carries the stanza that fixes it.
+    let short: Vec<String> = good
+        .iter()
+        .filter(|s| *s != ikigai_browse::CAP_WILDCARD)
+        .cloned()
+        .collect();
+    let refusal = trigger::check_reviewer(&kernel, probe, "localhost", &short)
+        .expect_err("a reviewer short of the browse read must be refused");
+    assert!(refusal.contains(ikigai_browse::CAP_WILDCARD), "{refusal}");
+    assert!(
+        refusal.contains("\"reviewer\""),
+        "the refusal hands over the stanza to paste: {refusal}"
+    );
+
+    // ⚠ The narrow net form satisfies the offering wildcard exactly as the kernel's own
+    // check does — a grant naming the HOST must not read as a grant that is missing one.
+    assert!(
+        good.iter().any(|s| s == "urn:cap:net:localhost"),
+        "{good:?}"
+    );
+    assert!(
+        !good.iter().any(|s| s == grants::CAP_NET_ANY),
+        "the offering wildcard is not a grant: {good:?}"
+    );
 }
 
 /// The queue's own three tokens are minted by nobody either, so neither network door can
@@ -511,7 +611,7 @@ fn a_taken_tuple_feeds_the_pass() {
         &kernel,
         Request::new(Verb::Source, Iri::parse(trigger::PASS).unwrap())
             .with_arg("content", ArgRef::Inline(taken.bytes.clone())),
-        &reviewer(),
+        &reviewer(&kernel, "urn:repo:demo:review:a.rs"),
     )
     .expect("the pass runs");
     assert_eq!(
@@ -551,15 +651,31 @@ fn a_space_name_is_one_segment() {
     }
 }
 
-/// The reviewer grant's shape is COMPUTED from the crates that enforce it, never typed — so
-/// a spelling cannot drift from the token that is checked.
+/// ★★ **The reviewer grant's shape is READ OFF THE CONTRACT of the review this kernel binds,
+/// so it cannot go stale the way it did.**
+///
+/// It was a list of constants until 2026-09-20, and browse 0.5.0 made that list wrong while
+/// it went on compiling: the `urn:cap:annotate` constant still existed, only the requirement
+/// had gone. An operator following the helper would have written the reviewer the publish
+/// token. This test drives the derivation against a stub whose contract is browse's, and then
+/// CHANGES that contract to prove the shape follows it.
 #[test]
-fn the_reviewer_grant_shape_is_computed_from_the_crates_that_enforce_it() {
-    let scopes = trigger::reviewer_grant_shape("localhost");
+fn the_reviewer_grant_shape_follows_the_review_it_reads() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let scopes = trigger::reviewer_grant_shape(&kernel, "urn:repo:demo:review:a.rs", "localhost")
+        .expect("a bound review");
     assert!(scopes.contains(&ikigai_browse::CAP_WILDCARD.to_string()));
-    assert!(scopes.contains(&ikigai_browse::CAP_ANNOTATE.to_string()));
     assert!(scopes.contains(&"urn:cap:net:localhost".to_string()));
-    assert_eq!(scopes.len(), 5, "three browse tokens and the graph's two");
+    assert!(scopes.contains(&trigger::CAP_EXEC_GH.to_string()));
+    for token in grants::browse_graph_grants(Authority::Write).expect("the browse graph") {
+        assert!(
+            scopes.contains(&token),
+            "{token} is missing from {scopes:?}"
+        );
+    }
     // ⚠ The narrow net form, never the offering wildcard: `quic::check_grants` refuses
     // `urn:cap:net:*` as a grant, so a shape carrying it could not be written down.
     assert!(
@@ -570,22 +686,73 @@ fn the_reviewer_grant_shape_is_computed_from_the_crates_that_enforce_it() {
         grants::unbounded_net_scopes(&scopes).is_empty(),
         "and this server's own check agrees"
     );
+    assert!(
+        grants::unbounded_exec_scopes(&scopes).is_empty(),
+        "nor the exec one: `gh` is named, never `*`"
+    );
+
+    // ★ The derivation FOLLOWS: a review that declared one more capability would put it in
+    // the operator's grant, with nobody editing this crate.
+    struct Wider;
+    #[async_trait::async_trait]
+    impl Endpoint for Wider {
+        async fn invoke(&self, _: &Invocation<'_>) -> Result<Representation> {
+            Err(Error::Endpoint("never invoked".into()))
+        }
+        fn name(&self) -> &str {
+            "wider"
+        }
+        fn describe(&self) -> Description {
+            Description::new("wider")
+                .verb(Verb::Source)
+                .verb(Verb::Meta)
+                .requires(ikigai_browse::CAP_WILDCARD)
+                .requires(grants::CAP_NET_ANY)
+                .requires("urn:cap:invented:later")
+        }
+    }
+    let wider = Kernel::new(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:repo:demo:review:a.rs"), Wider),
+    ));
+    let scopes =
+        trigger::reviewer_grant_shape(&wider, "urn:repo:demo:review:a.rs", "127.0.0.1").unwrap();
+    assert!(
+        scopes.contains(&"urn:cap:invented:later".to_string()),
+        "a capability this crate has never heard of must reach the operator's grant: \
+         {scopes:?}"
+    );
+    assert!(
+        scopes.contains(&"urn:cap:net:127.0.0.1".to_string()),
+        "and the host is the one asked for, not `localhost`: {scopes:?}"
+    );
+
+    // ⚠ A review that does not resolve is an ERROR, never a remembered list. A gonk with no
+    // browse root or no mount has nothing to read, and a helpful guess is what shipped the
+    // wrong grant in the first place.
+    let bare = Kernel::new(Arc::new(EndpointSpace::new()));
+    let refusal = trigger::reviewer_grant_shape(&bare, "urn:repo:demo:review:a.rs", "localhost")
+        .expect_err("no review, no shape");
+    assert!(refusal.contains("does not resolve"), "{refusal}");
 }
 
 // ---------------------------------------------------- 6. what the doors are offered
 
-/// ★ **A configured trigger adds exactly two resources and no more.**
+/// ★ **A configured trigger adds exactly three resources and no more.**
 ///
 /// The sibling of `tests/conformance.rs`'s catalog pin, from the other side: that one holds
 /// the catalog of a gonk with no trigger, this one holds the DELTA a `gonk.review.space`
-/// line makes. `ikigai-intray` binds one template and this crate binds one endpoint; a
-/// version that bound a third would be behind every door this binary opens, silently.
+/// line makes. `ikigai-intray` binds one template and this crate binds two endpoints; a
+/// version that bound a fourth would be behind every door this binary opens, silently.
 #[test]
-fn a_configured_trigger_adds_exactly_the_queue_and_the_pass() {
+fn a_configured_trigger_adds_exactly_the_queue_the_pass_and_the_depth() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let q = queue(dir.path());
     trigger::prepare(&q).expect("prepare");
-    let kernel = Kernel::new(Arc::new(Fallback::new(trigger::space(&q))));
+    let kernel = Kernel::new(Arc::new(Fallback::new(trigger::space(
+        &q,
+        Arc::new(trigger::Activity::default()),
+        false,
+    ))));
     let mut ids: Vec<String> = kernel
         .entries()
         .expect("an enumerable root")
@@ -601,17 +768,25 @@ fn a_configured_trigger_adds_exactly_the_queue_and_the_pass() {
     ids.sort();
     assert_eq!(
         ids,
-        ["gonk-review-pass".to_string(), "space".to_string()],
+        [
+            "gonk-review-depth".to_string(),
+            "gonk-review-pass".to_string(),
+            "space".to_string()
+        ],
         "the trigger's whole served surface"
     );
 }
 
-/// The pass declares the three capabilities it can never do without, and says it Sources.
+/// ★★ **The pass declares EXACTLY what the review it issues declares — no more, no less.**
 ///
 /// ⚠ Declaring NOTHING would be an over-offer — the manifold would say any caller may run a
 /// pass, and the refusal would arrive one hop in, from a resource the caller never named.
+/// ⚠⚠ Declaring MORE is the failure this arc found: `urn:cap:annotate` was declared here
+/// after browse 0.5.0 stopped requiring it, so the reviewer grant this design hands out
+/// would have been refused by gonk's own contract one hop before the review that accepts it.
+/// The assertion is therefore against the REVIEW's contract on the same kernel, not a list.
 #[test]
-fn the_pass_declares_what_a_review_declares() {
+fn the_pass_declares_exactly_what_the_review_declares() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let q = queue(dir.path());
     trigger::prepare(&q).expect("prepare");
@@ -619,20 +794,26 @@ fn the_pass_declares_what_a_review_declares() {
     let described = kernel
         .describe(&Iri::parse(trigger::PASS).unwrap())
         .expect("the pass describes itself");
-    let mut requires = described.requires.clone();
-    requires.sort();
+    let review = kernel
+        .describe(&Iri::parse("urn:repo:demo:review:a.rs").unwrap())
+        .expect("the review describes itself");
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v.dedup();
+        v
+    };
     assert_eq!(
-        requires,
-        [
-            ikigai_browse::CAP_ANNOTATE.to_string(),
-            ikigai_browse::CAP_WILDCARD.to_string(),
-            grants::CAP_NET_ANY.to_string(),
-        ]
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>(),
+        sorted(described.requires.clone()),
+        sorted(review.requires.clone()),
+        "the pass and the review must require the same set: more refuses callers the review \
+         accepts, less is an over-offer that fails one hop in"
+    );
+    assert!(
+        !described
+            .requires
+            .contains(&ikigai_browse::CAP_ANNOTATE.to_string()),
+        "a pass writes PENDING findings and cannot publish — declaring the publish token \
+         here would deny the reviewer grant before browse ever saw it"
     );
     assert!(described.verbs.contains(&Verb::Source));
     let names: Vec<&str> = described
@@ -706,4 +887,261 @@ fn everything_that_passes_the_check_parses_back() {
             "`{path}` did not round-trip"
         );
     }
+}
+
+// ------------------------------------------------------------ 7. armed, and bounded
+
+/// ★★ **The arc's whole point, end to end: a tuple already waiting is reviewed without a
+/// person.**
+///
+/// `SpaceReactor::watch()`'s contract is *drain what is pending, then watch*, and the
+/// catch-up half is what makes a push design survive a restart of this server — a commit
+/// while gonk was down is not lost, it is the first thing reviewed when gonk comes back.
+/// This drives that half through gonk's own [`trigger::arm`], under the reviewer capability
+/// [`trigger::reviewer_grant_shape`] derives, and asserts the review was actually issued.
+#[test]
+fn an_armed_trigger_reviews_what_was_already_waiting() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut q = queue(dir.path());
+    q.arm = true;
+    trigger::prepare(&q).expect("prepare");
+    let tuple = Tuple {
+        repo: "demo".to_string(),
+        path: "a.rs".to_string(),
+    };
+    trigger::drop_tuple(&q, &tuple).expect("a drop with no server running");
+    assert_eq!(trigger::pending(&q), 1);
+
+    let (kernel, seen) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let hub = Arc::new(kernel);
+    let scopes = trigger::reviewer_grant_shape(&hub, "urn:repo:demo:review:a.rs", "localhost")
+        .expect("a bound review");
+    trigger::arm(&q, Arc::clone(&hub), &scopes).expect("arming");
+
+    // ⚠ Polled rather than slept: `arm` puts the catch-up on a thread of its own (the crate's
+    // `watch()` runs it in the CALLING thread, which would hold a real server's doors shut
+    // for one model call per waiting tuple).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && seen.lock().expect("not poisoned").is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let calls = seen.lock().expect("not poisoned").clone();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the waiting tuple must reach the review exactly once: {calls:?}"
+    );
+    assert_eq!(calls[0].1, "urn:repo:demo:review:a.rs");
+    assert_eq!(trigger::pending(&q), 0, "and leave the inbox");
+    assert_eq!(
+        trigger::depth(Some(&q)),
+        trigger::Depth::Counted {
+            inbox: 0,
+            outbox: 1,
+            error: 0
+        },
+        "a handled tuple lands in the outbox, which is what `handled` counts"
+    );
+}
+
+/// ⚠ **A `cap` file stops ARMING too, and the reason is the opposite of the old one.**
+///
+/// `refuse_cap_file` stops this server because the file used to MINT authority. Under
+/// `with_host_authority` the crate never reads it — so the file is INERT, and an operator who
+/// wrote one believes they have bounded a reviewer they have not. `arm` asks the reactor's
+/// own `ignored_cap_files()` and refuses rather than going live beside a lie.
+#[test]
+fn arming_beside_an_ignored_cap_file_is_refused() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut q = queue(dir.path());
+    q.arm = true;
+    trigger::prepare(&q).expect("prepare");
+    std::fs::write(q.dir().join("cap"), "urn:cap:store:write\n").expect("write");
+    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let refusal = trigger::arm(&q, Arc::new(kernel), &["urn:cap:browse:read:*".to_string()])
+        .expect_err("a cap file must stop arming");
+    assert!(refusal.contains("INERT"), "{refusal}");
+    assert!(refusal.contains("gonk.review.grant"), "{refusal}");
+}
+
+/// The `handler` file is gonk's, written when armed and REMOVED when not.
+///
+/// ⚠ It is a control surface in the tree a dropper writes into: `SpaceReactor` reads it per
+/// tuple and fires whatever IRI it names, under the reviewer's authority. An unarmed gonk
+/// that left one behind would be loading the gun for the next process that is armed.
+#[test]
+fn the_handler_file_is_this_servers_and_goes_away_when_it_is_not_armed() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    let handler = q.dir().join("handler");
+
+    trigger::set_handler(&q, true).expect("armed");
+    assert_eq!(
+        std::fs::read_to_string(&handler).expect("a handler"),
+        format!("{}\n", trigger::PASS),
+        "the handler names gonk's own pass and nothing else"
+    );
+
+    // Something else rewrote it: gonk's value is the value, re-asserted at startup.
+    std::fs::write(&handler, "urn:system:exec\n").expect("a retarget");
+    trigger::set_handler(&q, true).expect("armed again");
+    assert_eq!(
+        std::fs::read_to_string(&handler).expect("a handler"),
+        format!("{}\n", trigger::PASS)
+    );
+
+    trigger::set_handler(&q, false).expect("unarmed");
+    assert!(!handler.exists(), "an unarmed gonk leaves nothing to fire");
+    trigger::set_handler(&q, false).expect("unarming twice is not an error");
+}
+
+/// ★★ **The spend bound, made falsifiable rather than inherited.**
+///
+/// Passes are serial because `SpaceReactor::watch` reads its channel on one thread and calls
+/// `process` inline — a property of a dependency's thread shape, invisible from this crate
+/// and free to change without a compile error. [#308](http://localhost:1060/l/default/item/308)
+/// asked what bounds a forty-file push, and "the reactor happens to be single-threaded" is an
+/// answer that stops being true silently. So a second concurrent pass is REFUSED, and this is
+/// that refusal.
+#[test]
+fn a_second_concurrent_pass_is_refused_rather_than_paid_for() {
+    let activity = Arc::new(trigger::Activity::default());
+    let first = activity.begin(1_000).expect("the first pass");
+    let refusal = activity
+        .begin(1_100)
+        .err()
+        .expect("a second concurrent pass must be refused");
+    assert!(
+        matches!(refusal, Error::Unavailable(_)),
+        "transient, so a re-dropped tuple can succeed: {refusal:?}"
+    );
+    assert!(format!("{refusal}").contains("ONE at a time"), "{refusal}");
+
+    // ⚠ A pass that ends by `?` counts as a failure and RELEASES the slot: a leaked slot
+    // would wedge the reviewer for the life of the process with no symptom but a queue that
+    // stops draining — which is the exact failure the depth resource exists to show.
+    drop(first);
+    let counts = activity.snapshot();
+    assert_eq!((counts.started, counts.succeeded, counts.failed), (1, 0, 1));
+    assert!(counts.in_flight_since_ms.is_none(), "the slot is released");
+
+    let second = activity.begin(2_000).expect("the slot is free again");
+    second.succeeded();
+    let counts = activity.snapshot();
+    assert_eq!((counts.started, counts.succeeded, counts.failed), (2, 1, 1));
+    assert!(counts.last_end_ms.is_some());
+}
+
+/// ★ **A queue that is not empty with nothing in flight is STUCK, and says so.**
+///
+/// The armed trigger's only liveness signal (`watch()` catches up at startup and then lives
+/// on a thread nothing observes; gonk runs no log at all,
+/// [#383](http://localhost:1060/l/default/item/383)). A page that printed only the count
+/// would render a slow queue and a dead watcher identically, and exactly one of them needs a
+/// person.
+#[test]
+fn the_depth_tells_a_slow_queue_from_a_stuck_one() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    for n in 0..3 {
+        std::fs::write(q.inbox().join(format!("{n}.tuple")), "x").expect("a tuple");
+    }
+    let activity = Arc::new(trigger::Activity::default());
+    let armed = trigger::DepthEndpoint {
+        trigger: Some(Arc::new(q.clone())),
+        activity: Arc::clone(&activity),
+        armed: true,
+    };
+
+    // Armed, three waiting, nothing running: stuck.
+    let status = armed.status();
+    assert!(status.stuck(), "{status:?}");
+    let sentence = status.sentence(10_000);
+    assert!(sentence.contains("NONE IN FLIGHT"), "{sentence}");
+    assert!(sentence.contains("STUCK reviewer"), "{sentence}");
+
+    // A pass in flight: the same three waiting, and not stuck.
+    let pass = activity.begin(5_000).expect("a pass");
+    let status = armed.status();
+    assert!(!status.stuck(), "{status:?}");
+    let sentence = status.sentence(65_000);
+    assert!(!sentence.contains("STUCK"), "{sentence}");
+    assert!(sentence.contains("running for 60s"), "{sentence}");
+    pass.succeeded();
+
+    // ⚠ UNARMED is a third statement, and it is not "stuck": nothing is supposed to be
+    // draining, so a number that does not fall is correct rather than alarming.
+    let unarmed = trigger::DepthEndpoint {
+        trigger: Some(Arc::new(q)),
+        activity,
+        armed: false,
+    };
+    let status = unarmed.status();
+    assert!(!status.stuck(), "{status:?}");
+    let sentence = status.sentence(10_000);
+    assert!(sentence.contains("NOTHING IS DRAINING"), "{sentence}");
+    assert!(sentence.contains("gonk.review.arm"), "{sentence}");
+
+    // …and NOT CONFIGURED is a fourth, which is neither a number nor a failure (ledger #446).
+    let absent = trigger::DepthEndpoint {
+        trigger: None,
+        activity: Arc::new(trigger::Activity::default()),
+        armed: false,
+    };
+    let sentence = absent.status().sentence(0);
+    assert!(
+        sentence.contains("No review queue is configured"),
+        "{sentence}"
+    );
+}
+
+/// The depth is reachable through the kernel under the browse read it declares, and refused
+/// without it — the floor ledger [#464](http://localhost:1060/l/default/item/464) asked for,
+/// instead of the space's own token, which this server mints for nobody.
+#[test]
+fn the_depth_has_its_own_floor_and_answers_both_faces() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+
+    let denied = issue(
+        &kernel,
+        Request::new(Verb::Source, Iri::parse(trigger::DEPTH).unwrap()),
+        // A ledger grant, which is all an anonymous loopback caller holds.
+        &Capability::scoped(grants::grants_for("default", Authority::Write).unwrap()),
+    )
+    .expect_err("the depth is process state, not public");
+    assert!(matches!(denied, Error::Denied(_)), "{denied:?}");
+
+    let reader = Capability::scoped([ikigai_browse::CAP_WILDCARD]);
+    let plain = issue(
+        &kernel,
+        Request::new(Verb::Source, Iri::parse(trigger::DEPTH).unwrap()),
+        &reader,
+    )
+    .expect("a browse reader may see the depth");
+    assert!(
+        String::from_utf8_lossy(&plain.bytes).contains("The review queue is empty"),
+        "{}",
+        String::from_utf8_lossy(&plain.bytes)
+    );
+
+    let json = issue(
+        &kernel,
+        Request::new(Verb::Source, Iri::parse(trigger::DEPTH).unwrap())
+            .with_arg("as", ArgRef::Inline(b"application/json".to_vec())),
+        &reader,
+    )
+    .expect("the machine face");
+    let v: serde_json::Value = serde_json::from_slice(&json.bytes).expect("json");
+    assert_eq!(v["configured"], true);
+    assert_eq!(v["armed"], false);
+    assert_eq!(v["waiting"], 0);
+    assert_eq!(v["stuck"], false);
+    // ★ The sentence rides WITH the numbers, so the badge, the page and the socket cannot
+    // disagree about what the queue is doing.
+    assert!(v["sentence"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
 }

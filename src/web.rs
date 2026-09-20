@@ -66,7 +66,7 @@ use crate::rules::{self, Rules};
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
 const DCTERMS: &str = "http://purl.org/dc/terms/";
-const HTML: &str = "text/html";
+pub(crate) const HTML: &str = "text/html";
 
 /// How many rows a ledger listing RENDERS unless the caller asks for more.
 ///
@@ -107,13 +107,14 @@ pub struct Web {
     /// a page never needs one, and holding one here would put a filesystem path one
     /// rendering mistake away from a caller who may not read the root it belongs to.
     pub browse_roots: Vec<String>,
-    /// The git-event review queue this server was configured with, or `None`.
-    ///
-    /// ★ Held here for ONE number: how many review requests are waiting. `ikigai-browse`
-    /// deliberately does not expose it — the intray belongs to the trigger, which lives in
-    /// this repo — so the Queue page is the only place the two halves of "what is happening"
-    /// can be shown together (ledger #444 item 4, and #446's silent-absence shape).
-    pub review: Option<Arc<crate::trigger::Trigger>>,
+    // ★ **No `review` field, and its absence is the shape of ledger
+    // [#466](http://localhost:1060/l/default/item/466)'s fix.** This face used to hold the
+    // trigger so the Queue page could count its inbox directly — the only way to reach a
+    // number that lived behind `urn:cap:space:read`, a token this server mints for nobody
+    // ([#464](http://localhost:1060/l/default/item/464)). The depth is a RESOURCE now
+    // (`urn:iki:gonk:review:depth`) with a floor of its own, so the page reads it through
+    // the kernel under the caller's capability like everything else, and this face holds no
+    // process state about the queue at all.
     /// The passkey relying party.
     pub passkeys: Arc<Passkeys>,
     /// The render rules in effect, as Turtle — the TEXT, not a parsed table, because the
@@ -234,6 +235,13 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         .bind(
             Exact::new(crate::queue::DECIDE_IRI),
             crate::queue::Decide {
+                web: Arc::clone(&web),
+            },
+        )
+        // The header's live depth badge — see [`crate::queue::Badge`].
+        .bind(
+            Exact::new(crate::queue::BADGE_IRI),
+            crate::queue::Badge {
                 web: Arc::clone(&web),
             },
         )
@@ -371,8 +379,23 @@ pub(crate) fn nav(
     // it may read a repository AND may DECIDE. Ledger #444 settled the label and the gate —
     // "a link to a page of things you cannot decide is worse than no link" — so the token
     // this one keys on is `urn:cap:annotate`, not a browse read.
+    // ★ And it carries a LIVE badge. `depth-url` + `every` are what the stylesheet turns
+    // into `hx-get` + `hx-trigger="load, every Ns"` — the web-demo nav-clock shape, and the
+    // only liveness signal the armed review trigger has: a queue depth that stops falling is
+    // the visible symptom of a watcher thread that died while this server lived
+    // ([#466](http://localhost:1060/l/default/item/466)). The badge is on the nav rather
+    // than the Queue page because the page is where you go once you already suspect
+    // something.
     if crate::queue::offers_queue(web, inv) {
-        out.push_str(&element("queue", &[("href", crate::queue::QUEUE_PATH)], ""));
+        out.push_str(&element(
+            "queue",
+            &[
+                ("href", crate::queue::QUEUE_PATH),
+                ("depth-url", crate::queue::BADGE_PATH),
+                ("every", crate::queue::BADGE_EVERY),
+            ],
+            "",
+        ));
     }
     out
 }

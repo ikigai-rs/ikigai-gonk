@@ -237,8 +237,19 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .queue-head { margin: 0 0 var(--gap); }
 .intray { border-left: 4px solid var(--line); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
 /* Waiting work is the one state worth an accent: it is the number a person came to see. */
-.intray.count { border-left-color: var(--accent); }
-.intray.error { border-left-color: var(--danger); }
+.intray.count, .intray.working { border-left-color: var(--accent); }
+.intray.error, .intray.stuck { border-left-color: var(--danger); }
+
+/* The header's live depth badge (ledger #466). ⚠ Colour is emphasis and never the message:
+ * the number is the number, and the whole sentence — including "NONE IN FLIGHT", which is
+ * what tells a stuck reviewer from a slow one — is the `title`, so nothing here is carried
+ * by hue alone (WCAG 1.4.1). It is `:empty`-collapsed so the header does not jump between
+ * the first paint and the first poll. */
+.queue-badge:empty { display: none; }
+.badge-depth { display: inline-block; margin-left: 0.35rem; padding: 0 0.35rem; border: 1px solid var(--line); border-radius: 999px; font-size: 0.8em; line-height: 1.5; }
+.badge-depth.empty { opacity: 0.55; }
+.badge-depth.count, .badge-depth.working { color: var(--accent); border-color: var(--accent); }
+.badge-depth.stuck, .badge-depth.error { color: var(--danger); border-color: var(--danger); font-weight: 600; }
 .posture { margin: 0 0 var(--gap); }
 .findings { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
 .findings:empty { border-top: 0; }

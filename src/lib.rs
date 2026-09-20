@@ -116,16 +116,19 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// startup by `main`, not chosen at call time by a caller.
 ///
 /// [`JobRegistry`]: ikigai_time::JobRegistry
-/// (continued) `trigger` is [`crate::trigger::space`]'s pair — the review queue
-/// (`urn:space:{name}`) and the pass in front of it (`urn:iki:gonk:review:pass`) — bound
-/// only when a `gonk.review.space` line configured one, the same switch shape as a mount.
+/// (continued) `trigger` is [`crate::trigger::space`]'s three — the review queue
+/// (`urn:space:{name}`), the pass in front of it (`urn:iki:gonk:review:pass`) and the depth
+/// behind it (`urn:iki:gonk:review:depth`) — bound only when a `gonk.review.space` line
+/// configured one, the same switch shape as a mount.
 ///
-/// ⚠ **Binding the queue is not arming the trigger.** A pass declares everything
-/// `ikigai-browse`'s review declares — browse read, net, annotate — and this server mints
-/// none of those for anyone, so the queue fills and a person drains it. Nothing in this
-/// binary drains it unattended: Brian, 2026-09-19, *"Nothing gets published to Gonk except
-/// by the human."* See [`crate::trigger`] for what arms it (ledger #444) and why that is a
-/// missing grant rather than a missing flag.
+/// ⚠ **Binding the queue is still not arming the trigger**, and composing it never was:
+/// arming happens in `main`, after this function, and takes `gonk.review.arm = true` plus a
+/// `gonk.review.grant` that `grants.json` can honour ([`crate::trigger::arm`]). What changed
+/// on 2026-09-20 is that arming became safe rather than possible: `ikigai-browse` 0.5.0 made
+/// a review pass produce PENDING findings and stop declaring `urn:cap:annotate`, so a
+/// headless reviewer **cannot publish** — Brian's rule, *"Nothing gets published to Gonk
+/// except by the human"*, is arithmetic now. See [`crate::trigger`] and ledger
+/// [#466](http://localhost:1060/l/default/item/466).
 pub fn compose_with(
     store: DurableStore,
     browse: Option<Arc<dyn Space>>,

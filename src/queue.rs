@@ -67,7 +67,6 @@ use ikigai_core::{
 use serde_json::Value;
 
 use crate::render::{self, element, envelope, wrap};
-use crate::trigger::Depth;
 use crate::web::{self, Web};
 
 /// `urn:iki:gonk:page:queue` — the whole page.
@@ -82,10 +81,20 @@ pub const ROWS_PATH: &str = "/queue/rows";
 pub const DECIDE_IRI: &str = "urn:iki:gonk:queue:decide";
 /// Where the form posts.
 pub const DECIDE_PATH: &str = "/queue/decide";
+/// `urn:iki:gonk:fragment:queue-depth` — the nav badge, one number and one state word.
+pub const BADGE_IRI: &str = "urn:iki:gonk:fragment:queue-depth";
+/// Where the badge polls.
+pub const BADGE_PATH: &str = "/queue/depth";
+
+/// How often the badge asks. See [`Badge`] for why it is not one second.
+pub const BADGE_EVERY: &str = "10s";
 
 /// The finding family's own name — the Sink a decision reaches, and the description the
 /// menu is rendered from. Taken one id at a time (`{prefix}{id}`), never guessed.
 const FINDING_PREFIX: &str = "urn:iki:finding:";
+
+/// The machine face this module asks every resource it reads for.
+const JSON: &str = "application/json";
 
 /// How many rows a page draws before it stops and says so.
 ///
@@ -304,7 +313,7 @@ impl QueuePage {
         if let Some((kind, text)) = flash {
             children.push_str(&element("flash", &[("kind", kind)], text));
         }
-        children.push_str(&self.intray_element());
+        children.push_str(&self.intray_element(inv).await);
         if let Some(known) = &states {
             for name in known {
                 children.push_str(&element(
@@ -441,43 +450,42 @@ impl QueuePage {
     }
 
     /// The intray's depth, as one affirmative sentence — see [`crate::trigger::depth`].
-    fn intray_element(&self) -> String {
-        let (kind, text) = match crate::trigger::depth(self.web.review.as_deref()) {
-            Depth::NotConfigured => (
-                "absent",
+    ///
+    /// ⚠ Since the trigger can be ARMED ([#466](http://localhost:1060/l/default/item/466))
+    /// the count alone is no longer the statement: a queue with twelve waiting and a pass in
+    /// flight is working, and a queue with twelve waiting and nothing in flight is a dead
+    /// watcher. Both render as "12 waiting" if only the number is printed, and exactly one
+    /// of them needs a person. So the trigger's own [`crate::trigger::Status`] writes the
+    /// sentence and this only chooses the word the stylesheet colours it by.
+    async fn intray_element(&self, inv: &Invocation<'_>) -> String {
+        match read_depth(inv).await {
+            Ok(status) => element(
+                "intray",
+                &[("kind", depth_kind(&status))],
+                depth_sentence(&status),
+            ),
+            // ★ **An UNRESOLVED depth is "no queue configured", and it is the manifold
+            // saying so rather than this page guessing.** `gonk.review.space` is the whole
+            // switch: with no line, `trigger::space` binds nothing, so the absence of the
+            // resource IS the absence of the queue. Reading it that way keeps
+            // declared = enforced — an unconfigured gonk must not advertise a queue — and
+            // leaves the page with one fewer fact of its own to get wrong.
+            Err(Error::Unresolved(_) | Error::NotFound(_)) => element(
+                "intray",
+                &[("kind", "absent")],
                 "No review queue is configured (`gonk.review.space`), so nothing is dropping \
-                 review requests here."
-                    .to_string(),
+                 review requests here.",
             ),
-            Depth::Unreadable(why) => (
-                "error",
-                format!("The review queue could not be read, so its depth is unknown: {why}"),
+            // ⚠ Anything else is NOT "no queue". This page renders only for callers holding
+            // the browse read the depth asks for, so a failure here is a real one rather
+            // than a posture — and a depth that cannot be read is the one thing this line
+            // must not render as a zero (ledger #446).
+            Err(e) => element(
+                "intray",
+                &[("kind", "error")],
+                &format!("The review queue's depth could not be read: {e}"),
             ),
-            Depth::Counted {
-                inbox: 0,
-                outbox,
-                error,
-            } => (
-                "empty",
-                format!(
-                    "The review queue is empty: no request is waiting to be reviewed{}.",
-                    handled(outbox, error)
-                ),
-            ),
-            Depth::Counted {
-                inbox,
-                outbox,
-                error,
-            } => (
-                "count",
-                format!(
-                    "{inbox} review request{} waiting to be reviewed{}.",
-                    if inbox == 1 { " is" } else { "s are" },
-                    handled(outbox, error)
-                ),
-            ),
-        };
-        element("intray", &[("kind", kind)], &text)
+        }
     }
 
     /// One row.
@@ -708,13 +716,151 @@ fn provenance(row: &Value) -> String {
     parts.join(" · ")
 }
 
-/// `", 3 handled"` / `", 3 handled and 1 dead-lettered"` / `""`.
-fn handled(outbox: usize, error: usize) -> String {
-    match (outbox, error) {
-        (0, 0) => String::new(),
-        (n, 0) => format!(", {n} handled"),
-        (0, n) => format!(", {n} dead-lettered"),
-        (n, e) => format!(", {n} handled and {e} dead-lettered"),
+// ------------------------------------------------------------------ the live badge
+
+/// Read [`crate::trigger::DEPTH`]'s JSON face through the kernel, under the CALLER's
+/// capability.
+///
+/// ★ **Through the kernel, although this very process holds the counters.** The depth is a
+/// resource with a capability floor now
+/// ([#464](http://localhost:1060/l/default/item/464) chose that over minting the space's read
+/// token), and a page reaching past the floor into `crate::trigger`'s own functions would
+/// make the floor decorative: the rendering caller would be shown a number the same caller is
+/// refused at the door. It also means the badge and the socket answer from one place.
+async fn read_depth(inv: &Invocation<'_>) -> Result<Value> {
+    let answer = inv
+        .issue(
+            Request::new(
+                Verb::Source,
+                Iri::parse(crate::trigger::DEPTH)
+                    .map_err(|e| Error::Endpoint(format!("{}: {e}", crate::trigger::DEPTH)))?,
+            )
+            .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec())),
+        )
+        .await?;
+    serde_json::from_slice(&answer.bytes).map_err(|e| {
+        Error::Endpoint(format!(
+            "{} did not answer JSON: {e}",
+            crate::trigger::DEPTH
+        ))
+    })
+}
+
+/// The sentence that resource wrote — never re-derived here, so the badge, the page and the
+/// socket cannot disagree about what a queue is doing.
+fn depth_sentence(status: &Value) -> &str {
+    status
+        .get("sentence")
+        .and_then(Value::as_str)
+        .unwrap_or("The review queue's depth could not be read.")
+}
+
+/// The word the stylesheet colours by. The only thing this face adds to the resource's own
+/// answer, because a colour is presentation and a count is not.
+fn depth_kind(status: &Value) -> &'static str {
+    let yes = |key: &str| status.get(key).and_then(Value::as_bool).unwrap_or(false);
+    if !yes("configured") {
+        return "absent";
+    }
+    if status.get("unreadable").is_some_and(|v| !v.is_null()) {
+        return "error";
+    }
+    if yes("stuck") {
+        return "stuck";
+    }
+    match status.get("waiting").and_then(Value::as_u64) {
+        Some(0) | None => "empty",
+        Some(_) if yes("in_flight") => "working",
+        Some(_) => "count",
+    }
+}
+
+/// `urn:iki:gonk:fragment:queue-depth` — the nav badge, polled by htmx.
+///
+/// # ★ Why this exists at all: it is the liveness signal, not decoration
+///
+/// Brian asked for *"notifications so someone knows there are things in the queue (kind of
+/// like the Live indicator in the Web demo)"*. ⚠ That indicator is a **static dot**; what is
+/// actually live in web-demo is `hx-trigger="load, every 1s"` on the nav clock, and this is
+/// that shape. But the reason is stronger than a nicety: `SpaceReactor::watch` catches up at
+/// startup and then lives on a thread, and **a watcher thread that dies while gonk lives
+/// drains nothing and says nothing until a restart**. gonk runs no log at all
+/// ([#383](http://localhost:1060/l/default/item/383)), so a depth that stops falling is the
+/// only symptom there is, and it has to be somewhere a person is already looking.
+///
+/// A stuck queue looks like this: the badge shows a number, it does not go down, and the
+/// Queue page's own line says `NONE IN FLIGHT`. A slow one shows a number that falls and a
+/// pass in flight. They are told apart by the second fact, never by the first.
+///
+/// ⚠ **[`BADGE_EVERY`] is ten seconds, not one.** The clock in web-demo is a clock and has to
+/// tick; this is a queue whose entries take a model call each, and every poll here is an
+/// XSLT render plus a directory listing. A second would cost this server more than the thing
+/// it is watching.
+pub struct Badge {
+    pub web: Arc<Web>,
+}
+
+#[async_trait]
+impl Endpoint for Badge {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(format!(
+                "the queue badge answers Source, not {:?}",
+                inv.request.verb
+            )));
+        }
+        let (kind, text, count) = match read_depth(inv).await {
+            Ok(status) => (
+                depth_kind(&status),
+                depth_sentence(&status).to_string(),
+                status
+                    .get("waiting")
+                    .and_then(Value::as_u64)
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+            ),
+            // No `gonk.review.space`: nothing is bound, so there is nothing to show — and
+            // nothing is the right answer rather than a zero, which would say "empty queue".
+            // The host span collapses on `.queue-badge:empty`.
+            Err(Error::Unresolved(_) | Error::NotFound(_)) => return Ok(web::html(String::new())),
+            // ⚠ A badge that renders nothing when it cannot read is a badge that looks like
+            // an empty queue. It says so instead, in the one character it has room for.
+            Err(e) => ("error", format!("{e}"), "!".to_string()),
+        };
+        let doc = envelope(
+            "page",
+            &[
+                ("view", "queue-badge"),
+                ("kind", kind),
+                ("count", &count),
+                ("title", &text),
+            ],
+            "",
+        );
+        Ok(web::html(
+            render::render(&doc, false).map_err(web::render_err)?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-queue-badge"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-queue-badge")
+            .title("The review queue's depth, for the header")
+            .summary(
+                "One number and one state word, polled by the Queue link in the header. It \
+                 renders `urn:iki:gonk:review:depth` and adds nothing to it but a colour — \
+                 and it is a LIVENESS signal rather than a count: a queue that is armed and \
+                 not empty with nothing in flight is a dead watcher, and this is where that \
+                 shows.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_browse::CAP_WILDCARD)
+            .input(web::as_html_arg())
+            .output(web::HTML)
     }
 }
 
