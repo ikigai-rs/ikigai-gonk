@@ -123,6 +123,18 @@ ikigai-ledger = "0.2.1"
 # faces emit a "Review With" affordance, and the first on which `provider=<the configured
 # review backend>` is not refused by the manifold that offers it.
 #
+# ★ 0.6.0 (ledger #449 and #450) is where the reviewer's OUTPUT changed shape twice over. The
+# 3-to-6 quota became a threshold, so a pass can now be archived with ZERO findings and a
+# statement saying so — `nothing above threshold · reviewed the whole file (4812 bytes)`. ⚠ A
+# caller reading `minted.is_empty()` as failure was correct before this and is wrong after it;
+# this server's queue must treat a clean pass as a pass that HAPPENED, not as one that failed.
+# And truncation is gone: a file is split into regions that TILE it, so `ik:reviewedBytes ==
+# ik:totalBytes` is an invariant rather than a disclosure, and `(input truncated)` became
+# `(coverage incomplete)` — a short reading now means a region that did not come back.
+# ★ Measured before shipping, and worth knowing here because this server pays it: a whole-file
+# pass over a 167 KB file is 8 regions and ~34 SECONDS, not the minutes anyone assumed. Wall
+# clock tracks OUTPUT tokens, not input size.
+#
 # ★ 0.5.0 (ledger #444) is the release where a review pass stops MINTING annotations. It produces
 # PENDING findings at `urn:iki:finding:{id}`, and promotion by a human is the only path into the
 # `urn:iki:annotation:` family — "nothing gets published to Gonk except by the human". The review
@@ -139,7 +151,7 @@ ikigai-ledger = "0.2.1"
 # other host served browse's markup unstyled (ledger #441) and this door rendered a tree as a
 # cascade of gonk-chrome chips. `crate::k` links it beside `urn:repo:style`; without 0.4.2 that
 # link is a 404, which makes this the one pin here that a page would visibly miss.
-ikigai-browse = "0.5.0"
+ikigai-browse = "0.6.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
