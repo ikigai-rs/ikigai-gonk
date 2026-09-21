@@ -132,11 +132,30 @@
 
   <!-- The badge's own answer: one number, one state word as a class, and the depth
        resource's whole sentence as the tooltip. `stuck` is the one a person is looking
-       for — armed, not empty, nothing running. -->
+       for — armed, not empty, nothing running.
+
+       ⚠ Two things ride along that are NOT the number (ledger #469, and both are computed
+       in src/queue.rs — this file decides nothing):
+
+       `@activity` draws a spark: a pass running now, or one that ended inside the window
+       the server measures against its own poll interval. Without it a pass shorter than the
+       cadence is invisible, which is the whole complaint — the depth was 0 before it and 0
+       after it, and the badge had nothing to say either time.
+
+       `@rev` is the queue's whole state as one token. web/gonk.js compares it with the
+       previous poll's and, when it differs, tells the findings list there is news. It is an
+       attribute rather than markup because the badge must not know what a list looks
+       like. -->
   <xsl:template name="queue-badge">
     <span>
       <xsl:attribute name="class">badge-depth <xsl:value-of select="@kind"/></xsl:attribute>
       <xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute>
+      <xsl:if test="@rev"><xsl:attribute name="data-rev"><xsl:value-of select="@rev"/></xsl:attribute></xsl:if>
+      <xsl:if test="@activity">
+        <span aria-hidden="true">
+          <xsl:attribute name="class">spark <xsl:value-of select="@activity"/></xsl:attribute>
+        </span>
+      </xsl:if>
       <xsl:value-of select="@count"/>
     </span>
   </xsl:template>
@@ -245,6 +264,20 @@
   -->
   <xsl:template name="queue">
     <section id="queue" class="queue">
+      <!-- ★ The one page in gonk whose content changes with nobody touching it, and until
+           ledger #469 the one page that never refreshed itself.
+
+           It has NO clock of its own. `@news` is the event the header badge's existing poll
+           raises when the queue's revision changes (web/gonk.js relays it), so this list is
+           re-fetched when there is something to show and never on a timer — one cadence on
+           this server, and it is src/queue.rs::BADGE_EVERY. `@refresh-url` keeps the filter
+           AND the row bound the human is looking at. -->
+      <xsl:if test="@refresh-url">
+        <xsl:attribute name="hx-get"><xsl:value-of select="@refresh-url"/></xsl:attribute>
+        <xsl:attribute name="hx-trigger"><xsl:value-of select="@news"/></xsl:attribute>
+        <xsl:attribute name="hx-target">#queue</xsl:attribute>
+        <xsl:attribute name="hx-swap">outerHTML</xsl:attribute>
+      </xsl:if>
       <header class="queue-head">
         <h1><xsl:value-of select="@title"/></h1>
         <p class="note"><xsl:value-of select="@message"/></p>
@@ -273,6 +306,12 @@
             </a>
           </xsl:if>
         </p>
+      </xsl:if>
+      <!-- ⚠ A refresh that was HELD BACK, because a human had a decision open on this list
+           (web/gonk.js decides; the sentence is the server's). Hidden until that happens,
+           and `role="status"` so it is announced rather than only seen. -->
+      <xsl:if test="@stale-text">
+        <p class="stale" id="queue-stale" hidden="hidden" role="status"><xsl:value-of select="@stale-text"/></p>
       </xsl:if>
       <ol class="findings">
         <xsl:apply-templates select="view:finding"/>

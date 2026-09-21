@@ -86,8 +86,44 @@ pub const BADGE_IRI: &str = "urn:iki:gonk:fragment:queue-depth";
 /// Where the badge polls.
 pub const BADGE_PATH: &str = "/queue/depth";
 
-/// How often the badge asks. See [`Badge`] for why it is not one second.
+/// How often the badge asks, as htmx spells an interval. See [`Badge`] for why it is not
+/// one second.
 pub const BADGE_EVERY: &str = "10s";
+
+/// The same cadence as arithmetic — the number [`BADGE_RECENT_MS`] is derived from.
+///
+/// ⚠ Two spellings of one number, because htmx wants `"10s"` and a window wants
+/// milliseconds. `tests/queue.rs::the_badge_cadence_has_one_number_in_two_spellings` is what
+/// keeps them the same number; nothing else can.
+pub const BADGE_EVERY_MS: u64 = 10_000;
+
+/// How long after a pass ENDS the badge still reports that something happened.
+///
+/// ★ **The window is the poll interval, and that is the whole of the fix for
+/// [#469](http://localhost:1060/l/default/item/469).** A depth gauge can only report what is
+/// true at the instant it is asked, so a pass that starts and finishes between two polls is
+/// invisible to it — which is exactly what happened on the first live run: three seconds of
+/// work between two ten-second polls, and the badge read 0 then 0. A window at least as long
+/// as the interval makes *"anything since the last poll"* the unit, and then nothing can
+/// happen entirely unseen: whatever the phase, at least one poll lands inside the window.
+///
+/// Twice the interval rather than exactly one, so the afterglow lasts one or two polls and a
+/// person who looks up a moment late still sees it.
+pub const BADGE_RECENT_MS: u64 = 2 * BADGE_EVERY_MS;
+
+/// ⚠ The guarantee the fix rests on, checked by the COMPILER rather than believed: a window
+/// shorter than the interval would let a pass begin and end between two polls and be seen by
+/// neither, which is the bug itself.
+const _: () = assert!(BADGE_RECENT_MS >= BADGE_EVERY_MS);
+
+/// The event the header's badge asks the Queue page's list to refresh on, when its
+/// `depth_rev` has changed — `web/gonk.js` relays it, `web/gonk.xsl` listens for it.
+///
+/// ★ **One cadence, not two.** The badge already polls; a second `every Ns` on the list
+/// would double the server's clock and let the two drift. So the list has no clock of its
+/// own: it refreshes when the poll that is already happening brings news, and never
+/// otherwise.
+pub const NEWS_EVENT: &str = "gonk:news";
 
 /// The finding family's own name — the Sink a decision reaches, and the description the
 /// menu is rendered from. Taken one id at a time (`{prefix}{id}`), never guessed.
@@ -364,6 +400,29 @@ impl QueuePage {
             ("state", state.clone()),
             ("page-url", page_url(&state_query(&state, only.as_deref()))),
             ("rows-url", rows_url(&state_query(&state, only.as_deref()))),
+            // ★ How this section re-fetches ITSELF when the header's poll brings news
+            // ([#469](http://localhost:1060/l/default/item/469)). It is the rows URL with
+            // this request's own `limit` kept, because a human who asked to see all 300
+            // findings must not be quietly cut back to the first 50 by a refresh nobody
+            // asked for.
+            (
+                "refresh-url",
+                rows_url(&refresh_query(
+                    &state,
+                    only.as_deref(),
+                    params.limit.as_deref(),
+                )),
+            ),
+            ("news", NEWS_EVENT.to_string()),
+            // ⚠ Shown only when a refresh was HELD BACK — `web/gonk.js` unhides it. The
+            // wording lives here with every other sentence this face speaks, so the
+            // stylesheet stays a stylesheet and the script stays a relay.
+            (
+                "stale-text",
+                "New findings arrived while you were deciding. They will appear when this \
+                 decision is submitted or the selection is left as it was."
+                    .to_string(),
+            ),
             (
                 "message",
                 "The review pipeline. ⚠ A queue, not a gate: nothing here blocks a commit, a \
@@ -757,6 +816,12 @@ fn depth_sentence(status: &Value) -> &str {
 
 /// The word the stylesheet colours by. The only thing this face adds to the resource's own
 /// answer, because a colour is presentation and a count is not.
+///
+/// ⚠ **`in_flight` is asked BEFORE the count, and that ordering is a bug fix.** It used to be
+/// a guard on the `Some(_)` arm, so a pass running against an EMPTY inbox — which is the
+/// ordinary case, because the reactor moves the tuple out of the inbox before it starts the
+/// work — rendered as `empty`. The badge was showing "nothing is happening" during the one
+/// interval when something was ([#469](http://localhost:1060/l/default/item/469)).
 fn depth_kind(status: &Value) -> &'static str {
     let yes = |key: &str| status.get(key).and_then(Value::as_bool).unwrap_or(false);
     if !yes("configured") {
@@ -768,11 +833,67 @@ fn depth_kind(status: &Value) -> &'static str {
     if yes("stuck") {
         return "stuck";
     }
+    if yes("in_flight") {
+        return "working";
+    }
     match status.get("waiting").and_then(Value::as_u64) {
-        Some(0) | None => "empty",
-        Some(_) if yes("in_flight") => "working",
+        // An empty queue that JUST finished something is a different statement from an empty
+        // queue that has been idle for an hour, and only the first one answers "is anything
+        // happening". See [`BADGE_RECENT_MS`].
+        Some(0) | None => match depth_activity(status) {
+            Some(_) => "recent",
+            None => "empty",
+        },
         Some(_) => "count",
     }
+}
+
+/// What the badge draws a spark for: a pass running now, or one that ended inside
+/// [`BADGE_RECENT_MS`]. `None` = nothing to say.
+///
+/// ★ This is the ACTIVITY question, and it is not the depth question. "Is there a backlog"
+/// and "is anything happening" have different answers on a fast queue, and the badge was
+/// only ever answering the first ([#469](http://localhost:1060/l/default/item/469)). Both
+/// answers come out of the same poll of the same resource — the numbers were already in
+/// `urn:iki:gonk:review:depth` and were being discarded here.
+fn depth_activity(status: &Value) -> Option<&'static str> {
+    if status.get("in_flight").and_then(Value::as_bool) == Some(true) {
+        return Some("running");
+    }
+    match status.get("since_last_pass_ms").and_then(Value::as_u64) {
+        Some(ms) if ms <= BADGE_RECENT_MS => Some("recent"),
+        _ => None,
+    }
+}
+
+/// The queue's whole observable state as one opaque token: what a poll compares against the
+/// poll before it to decide whether there is anything new to show.
+///
+/// ★ **It is a REVISION, not a timestamp**, so it is stable while nothing moves — which is
+/// what makes "refresh the list only on news" possible at all. Every number here is one the
+/// depth resource already publishes, and each one changing means a finding may have appeared,
+/// been handed to a pass, or been given up on.
+///
+/// ⚠ **What it cannot see: a finding minted by ANOTHER process.** `passes_*` are this
+/// server's own counters ([`crate::trigger::Passes`] — "what this process has spent"), and
+/// `waiting`/`handled` are this server's queue. A review run from a second gonk, or by hand
+/// through the CLI, writes findings into the same browse graph and moves none of these, so
+/// this page will not learn of it until its own queue moves. A revision on the findings
+/// resource itself is `ikigai-browse`'s to offer and is reported up rather than guessed at
+/// here.
+fn depth_rev(status: &Value) -> String {
+    let n = |key: &str| match status.get(key).and_then(Value::as_u64) {
+        Some(value) => value.to_string(),
+        None => "-".to_string(),
+    };
+    format!(
+        "{}.{}.{}.{}.{}",
+        n("waiting"),
+        n("handled"),
+        n("dead_lettered"),
+        n("passes_succeeded"),
+        n("passes_failed")
+    )
 }
 
 /// `urn:iki:gonk:fragment:queue-depth` — the nav badge, polled by htmx.
@@ -796,6 +917,23 @@ fn depth_kind(status: &Value) -> &'static str {
 /// tick; this is a queue whose entries take a model call each, and every poll here is an
 /// XSLT render plus a directory listing. A second would cost this server more than the thing
 /// it is watching.
+///
+/// # ★★ What one poll carries, after [#469](http://localhost:1060/l/default/item/469)
+///
+/// The first live end-to-end run showed the cadence was not the problem and the RENDERING
+/// was: a pass ran in three seconds between two polls, and a badge that draws only a depth
+/// had nothing to say about it either time. One poll now answers three questions from the
+/// one read it was already doing:
+///
+/// - **how deep** — `count` and `kind`, as before;
+/// - **is anything happening** — `depth_activity`, which survives a pass shorter than the
+///   interval because its window IS the interval ([`BADGE_RECENT_MS`]);
+/// - **is there anything new to show** — `depth_rev`, which `web/gonk.js` compares against
+///   the previous poll's and turns into one [`NEWS_EVENT`] when it changes.
+///
+/// ★ So the Queue page's findings list refreshes off THIS poll and has no clock of its own:
+/// one cadence, owned in Rust, and a list that is re-fetched when there is news rather than
+/// every ten seconds regardless.
 pub struct Badge {
     pub web: Arc<Web>,
 }
@@ -809,7 +947,7 @@ impl Endpoint for Badge {
                 inv.request.verb
             )));
         }
-        let (kind, text, count) = match read_depth(inv).await {
+        let (kind, text, count, activity, rev) = match read_depth(inv).await {
             Ok(status) => (
                 depth_kind(&status),
                 depth_sentence(&status).to_string(),
@@ -818,6 +956,8 @@ impl Endpoint for Badge {
                     .and_then(Value::as_u64)
                     .map(|n| n.to_string())
                     .unwrap_or_default(),
+                depth_activity(&status),
+                depth_rev(&status),
             ),
             // No `gonk.review.space`: nothing is bound, so there is nothing to show — and
             // nothing is the right answer rather than a zero, which would say "empty queue".
@@ -825,18 +965,31 @@ impl Endpoint for Badge {
             Err(Error::Unresolved(_) | Error::NotFound(_)) => return Ok(web::html(String::new())),
             // ⚠ A badge that renders nothing when it cannot read is a badge that looks like
             // an empty queue. It says so instead, in the one character it has room for.
-            Err(e) => ("error", format!("{e}"), "!".to_string()),
+            // ⚠ And NO revision: a depth that cannot be read says nothing about whether the
+            // findings list has changed, so the list is left alone. A stale list beside a red
+            // badge is honest; a list that re-fetches every ten seconds because the badge is
+            // broken is a second failure on top of the first.
+            Err(e) => (
+                "error",
+                format!("{e}"),
+                "!".to_string(),
+                None,
+                String::new(),
+            ),
         };
-        let doc = envelope(
-            "page",
-            &[
-                ("view", "queue-badge"),
-                ("kind", kind),
-                ("count", &count),
-                ("title", &text),
-            ],
-            "",
-        );
+        let mut attributes = vec![
+            ("view", "queue-badge"),
+            ("kind", kind),
+            ("count", count.as_str()),
+            ("title", text.as_str()),
+        ];
+        if let Some(activity) = activity {
+            attributes.push(("activity", activity));
+        }
+        if !rev.is_empty() {
+            attributes.push(("rev", rev.as_str()));
+        }
+        let doc = envelope("page", &attributes, "");
         Ok(web::html(
             render::render(&doc, false).map_err(web::render_err)?,
         ))
@@ -850,11 +1003,14 @@ impl Endpoint for Badge {
         Description::new("gonk-queue-badge")
             .title("The review queue's depth, for the header")
             .summary(
-                "One number and one state word, polled by the Queue link in the header. It \
-                 renders `urn:iki:gonk:review:depth` and adds nothing to it but a colour — \
-                 and it is a LIVENESS signal rather than a count: a queue that is armed and \
-                 not empty with nothing in flight is a dead watcher, and this is where that \
-                 shows.",
+                "One number, one state word and one revision, polled by the Queue link in \
+                 the header. It renders `urn:iki:gonk:review:depth` and adds nothing to it \
+                 but a colour — and it is a LIVENESS signal rather than a count: a queue \
+                 that is armed and not empty with nothing in flight is a dead watcher, and a \
+                 pass shorter than the poll interval still reports itself, because the \
+                 window the activity is measured over is the interval itself. The revision \
+                 is what the Queue page's findings list refreshes on, so there is one \
+                 cadence on this server and not two.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -902,6 +1058,15 @@ fn page_url(query: &str) -> String {
 
 fn rows_url(query: &str) -> String {
     format!("{ROWS_PATH}?{query}")
+}
+
+/// The query a self-refresh repeats: the filter AND the row bound this request was made
+/// with, so a refresh shows what the human is already looking at rather than the default.
+fn refresh_query(state: &str, repo: Option<&str>, limit: Option<&str>) -> String {
+    match limit.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(limit) => format!("{}&limit={limit}", state_query(state, repo)),
+        None => state_query(state, repo),
+    }
 }
 
 /// A `urn:*` resource's page in gonk's own browse shell.

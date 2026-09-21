@@ -60,16 +60,29 @@ fn roots(dir: &TempDir) -> Vec<(String, PathBuf)> {
 /// that left them out would exercise only the "could not be read" arm, which is exactly the
 /// arm that must never be reached in ordinary use.
 fn door(dir: &TempDir, review: Option<Trigger>) -> (Kernel, TempDir) {
+    door_watching(
+        dir,
+        review,
+        Arc::new(ikigai_gonk::trigger::Activity::default()),
+        false,
+    )
+}
+
+/// The same door, with the pass counters held by the CALLER and the armed flag its own
+/// argument — so a test can put a pass in flight, end it, and ask the badge what it says
+/// about each, which is the whole of ledger #469's first half.
+fn door_watching(
+    dir: &TempDir,
+    review: Option<Trigger>,
+    activity: Arc<ikigai_gonk::trigger::Activity>,
+    armed: bool,
+) -> (Kernel, TempDir) {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store that declares where its sharer writes");
     let wired = browse::wire(roots(dir), handle, &[], None, &graph);
     let trigger_spaces = match &review {
-        Some(t) => ikigai_gonk::trigger::space(
-            t,
-            Arc::new(ikigai_gonk::trigger::Activity::default()),
-            false,
-        ),
+        Some(t) => ikigai_gonk::trigger::space(t, activity, armed),
         None => Vec::new(),
     };
     let hub = Arc::new(compose_with(
@@ -767,5 +780,230 @@ fn the_header_badge_renders_the_depth_and_polls_for_it() {
         answer.bytes.is_empty(),
         "an unconfigured queue draws no badge at all: {}",
         String::from_utf8_lossy(&answer.bytes)
+    );
+}
+
+// ------------------------------------------------- liveness: ledger #469
+
+/// Epoch milliseconds, the way `crate::trigger` counts them.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_millis() as u64
+}
+
+/// The badge fragment, rendered.
+fn badge(kernel: &Kernel) -> String {
+    let answer = issue(kernel, Verb::Source, queue::BADGE_IRI, &[], &reviewer())
+        .unwrap_or_else(|e| panic!("the badge: {e}"));
+    String::from_utf8(answer.bytes).expect("utf-8")
+}
+
+/// A trigger over its own empty scratch tree.
+fn armed_trigger(spaces: &TempDir) -> Trigger {
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: true,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    trigger
+}
+
+/// ⚠ **One cadence, two spellings, and nothing but this test holding them together.**
+///
+/// htmx wants `"10s"` and an activity window wants milliseconds, so the number is written
+/// twice. The window must also be at least the interval — that is the guarantee the whole
+/// fix rests on ([#469](http://localhost:1060/l/default/item/469)): if the window were
+/// shorter than the gap between two polls, a pass could still finish entirely unseen, which
+/// is precisely the failure being fixed.
+#[test]
+fn the_badge_cadence_has_one_number_in_two_spellings() {
+    assert_eq!(
+        queue::BADGE_EVERY,
+        format!("{}s", queue::BADGE_EVERY_MS / 1000),
+        "the htmx interval and its milliseconds are the same number, or the badge polls at \
+         one rate and measures activity against another"
+    );
+    // ⚠ The window-is-at-least-the-interval guarantee is a `const _: () = assert!(…)` in
+    // `src/queue.rs`: it is constant, so the compiler is a better place for it than a test.
+}
+
+/// ★★ **A pass shorter than the poll interval still reports itself.**
+///
+/// [#469](http://localhost:1060/l/default/item/469), the first live end-to-end run: a commit
+/// dropped a tuple, the pass ran, the queue drained, three findings landed — in about three
+/// seconds, between two ten-second polls. The badge read 0, then 0.
+///
+/// Two defects, both asserted here.
+///
+/// 1. **A pass in flight against an EMPTY inbox rendered as `empty`**, because `in_flight`
+///    was only consulted on the `waiting > 0` arm — and the reactor moves the tuple OUT of
+///    the inbox before it starts the work, so the ordinary case is a running pass with an
+///    empty queue. The badge said "nothing is happening" during the one interval when
+///    something was.
+/// 2. **A pass that has ENDED left no trace at all.** It does now, for
+///    [`queue::BADGE_RECENT_MS`] — and the window is the poll interval, so no phase of the
+///    clock can hide a pass from every poll.
+#[test]
+fn a_pass_shorter_than_the_poll_interval_still_reports_itself() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let activity = Arc::new(ikigai_gonk::trigger::Activity::default());
+    let (served, _config) = door_watching(
+        &dir,
+        Some(armed_trigger(&spaces)),
+        Arc::clone(&activity),
+        true,
+    );
+
+    // Idle, and nothing has ever run: a dim zero and no spark. An armed server that has done
+    // nothing yet must not claim otherwise.
+    let idle = badge(&served);
+    assert!(idle.contains("badge-depth empty"), "{idle}");
+    assert!(!idle.contains("spark"), "nothing has happened yet: {idle}");
+
+    // A pass, running, with NOTHING in the inbox — the shape the old code called `empty`.
+    let pass = activity.begin(now_ms()).expect("the one pass slot");
+    let running = badge(&served);
+    assert!(
+        running.contains("badge-depth working"),
+        "a running pass against an empty inbox is WORKING, not empty: {running}"
+    );
+    assert!(
+        running.contains("spark running"),
+        "and it is drawn, not only coloured: {running}"
+    );
+    assert!(
+        running.contains("A pass has been running for"),
+        "the sentence rides as the tooltip, so the state is readable and not only visible: \
+         {running}"
+    );
+
+    // …and when it ends, the badge goes on saying so for the window. This is the assertion
+    // that would have caught the reported bug: the pass is OVER, the queue is empty, and the
+    // page still has something true to say about the last few seconds.
+    pass.succeeded();
+    let after = badge(&served);
+    assert!(
+        after.contains("badge-depth recent"),
+        "a pass that ended within the window is RECENT, not idle: {after}"
+    );
+    assert!(after.contains("spark recent"), "{after}");
+    assert!(
+        after.contains("the last ended"),
+        "and the sentence says how long ago: {after}"
+    );
+}
+
+/// ★ **The revision is what the findings list refreshes on, and it moves only when the queue
+/// does.**
+///
+/// A token that changed every poll would make the list re-fetch every ten seconds, which is
+/// the cost the single-cadence design exists to avoid; one that never changed would leave
+/// the page exactly as stale as before ([#469](http://localhost:1060/l/default/item/469)).
+#[test]
+fn the_badge_revision_moves_only_when_the_queue_does() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let activity = Arc::new(ikigai_gonk::trigger::Activity::default());
+    let (served, _config) = door_watching(
+        &dir,
+        Some(armed_trigger(&spaces)),
+        Arc::clone(&activity),
+        true,
+    );
+
+    let rev = |markup: &str| {
+        let at = markup
+            .find("data-rev=")
+            .expect("the badge carries a revision");
+        let rest = &markup[at + "data-rev=".len() + 1..];
+        rest[..rest.find('\'').expect("a closed attribute")].to_string()
+    };
+
+    let first = rev(&badge(&served));
+    assert_eq!(
+        first,
+        rev(&badge(&served)),
+        "two polls with nothing happening between them must agree, or the list re-fetches \
+         for nothing every interval"
+    );
+
+    activity.begin(now_ms()).expect("the slot").succeeded();
+    assert_ne!(
+        first,
+        rev(&badge(&served)),
+        "a completed pass may have minted findings, and that is exactly when the list has \
+         something new to show"
+    );
+}
+
+/// ★★ **The findings list refreshes without a reload — off the badge's poll, not a clock of
+/// its own.**
+///
+/// The second half of [#469](http://localhost:1060/l/default/item/469): `web/gonk.xsl`
+/// carried exactly one `hx-trigger` for this surface, the badge's, so the one page in gonk
+/// whose content changes with no user action was the one page that never refreshed itself.
+///
+/// ⚠ The event name is a THIRD spelling of one fact — Rust names it, the stylesheet renders
+/// it, the script raises it — so this asserts the script against the constant. A rename that
+/// reached two of the three would leave a page that quietly stopped updating, with nothing
+/// failing anywhere.
+#[test]
+fn the_findings_list_listens_for_the_badges_news() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let (served, _config) = door(&dir, Some(armed_trigger(&spaces)));
+
+    let rendered = page(&served, &[("state", "pending")], &reviewer());
+    assert!(
+        rendered.contains(&format!("hx-trigger='{}'", queue::NEWS_EVENT)),
+        "the queue section listens for the badge's news: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("hx-get='{}?state=pending'", queue::ROWS_PATH)),
+        "…and re-fetches ITSELF, at the filter the human is looking at: {rendered}"
+    );
+    // ⚠ No second interval. The cadence is the server's one number, and a page that grew its
+    // own `every Ns` would be a clock this crate does not control.
+    assert!(
+        !rendered.contains("hx-trigger='every"),
+        "the list must not poll on a clock of its own: {rendered}"
+    );
+
+    // A human who asked to see everything keeps seeing everything across a refresh.
+    let all = page(
+        &served,
+        &[("state", "pending"), ("limit", "all")],
+        &reviewer(),
+    );
+    assert!(
+        all.contains(&format!(
+            "hx-get='{}?state=pending&amp;limit=all'",
+            queue::ROWS_PATH
+        )),
+        "a refresh keeps the row bound the human chose: {all}"
+    );
+
+    // The held-refresh notice exists and starts hidden: the page says a refresh was held
+    // rather than silently going stale.
+    assert!(
+        rendered.contains("id='queue-stale'") && rendered.contains("hidden='hidden'"),
+        "{rendered}"
+    );
+
+    // The three spellings of the one event.
+    let script = include_str!("../web/gonk.js");
+    assert!(
+        script.contains(&format!("\"{}\"", queue::NEWS_EVENT)),
+        "`web/gonk.js` raises `{}` — the constant the stylesheet renders",
+        queue::NEWS_EVENT
+    );
+    assert!(
+        script.contains("data-rev"),
+        "…and compares the revision the badge carries"
     );
 }
