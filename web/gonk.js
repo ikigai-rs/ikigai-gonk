@@ -1,12 +1,15 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does three things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does four things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
 // standard one, with byte fields carried as base64url. (3) the browse family's affordances
 // name the /k/ adapter with a COMMAND in the path, which gonk's door cannot parse back into
 // a resource — so the command is folded into a query value here, one line, grammar-level.
+// (4) one fragment tells another there is news, because gonk cannot send an `HX-Trigger`
+// response header — and it holds that news back while a human is mid-decision, which is a
+// question about the DOM that only the browser can answer (ledger #469).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
