@@ -147,9 +147,27 @@ const MAX_ROWS: usize = 500;
 /// The closed set a resource's own contract declares for one argument of one verb — the
 /// ONLY source of a menu's options in this module.
 ///
-/// `None` when the resource does not resolve, declares no such action, does not name that
-/// input, or leaves it open-valued. Every caller treats `None` as "do not render a menu",
-/// never as "use the usual list".
+/// `None` for five reasons, in the order the body rules them out. Every caller treats
+/// `None` the same way — "do not render a menu", never "use the usual list" — so the code
+/// cannot act on the difference, and the list is for the person holding a card that has no
+/// form and wanting to know which thing is missing.
+///
+/// 1. `iri` is not a well-formed IRI. A bug on this side; it says nothing about the
+///    resource, which was never asked.
+/// 2. **It does not resolve.** Nothing is bound there, or what is bound does not answer
+///    `Meta` — either way the kernel has no description to hand back at all. The resource
+///    is ABSENT.
+/// 3. **It resolves and does not answer that verb.** The endpoint is present and describes
+///    itself; `verb` is simply not among the verbs it lists. The resource is PRESENT and
+///    answers a different question. ⚠ This is not "declares no [`ActionSpec`]" — an
+///    endpoint that answers the verb but authors flat gets a spec synthesized from its own
+///    `inputs`, so a missing per-verb spec never reaches here. ⚠ And `Verb::Meta` is
+///    filtered out of `action_specs()` upstream, so asking for it is `None` whatever the
+///    contract says.
+/// 4. It answers the verb and names no such input.
+/// 5. It names the input and leaves it open-valued. A contract saying "any string" — a
+///    decision, not an omission, and the reason this collapses to `None` with the rest is
+///    that an open-valued input has no menu to draw either.
 pub fn one_of(hub: &Kernel, iri: &str, verb: Verb, argument: &str) -> Option<Vec<String>> {
     let target = Iri::parse(iri).ok()?;
     let values = hub
@@ -178,8 +196,15 @@ fn finding_iri(id: &str) -> String {
 /// Whether this capability may decide — the token `urn:iki:finding:{id}`'s Sink declares.
 ///
 /// Presentation only: the Sink enforces it whatever this page shows, and
-/// [`Decide`] declares it too, so the kernel refuses before dispatch. What this decides is
-/// whether a form is drawn at all.
+/// [`Decide`] declares it too, so the kernel refuses before dispatch. A wrong answer here
+/// costs a misdrawn page, never an unauthorized decision.
+///
+/// It is still worth asking, and for two things rather than one: whether a decision form is
+/// drawn on a card at all, and — when it is not — whether the list carries the `read-only`
+/// posture that NAMES the grant a caller is missing. Without the second, a reader holding
+/// only a read grant gets a queue of findings, no buttons, and nothing on the page saying
+/// why; the layers that actually enforce this refuse at submit time, which is too late to
+/// be an explanation.
 fn can_decide(inv: &Invocation<'_>) -> bool {
     inv.capability.allows(ikigai_browse::CAP_ANNOTATE)
 }
