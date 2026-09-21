@@ -248,8 +248,23 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .queue-badge:empty { display: none; }
 .badge-depth { display: inline-block; margin-left: 0.35rem; padding: 0 0.35rem; border: 1px solid var(--line); border-radius: 999px; font-size: 0.8em; line-height: 1.5; }
 .badge-depth.empty { opacity: 0.55; }
-.badge-depth.count, .badge-depth.working { color: var(--accent); border-color: var(--accent); }
+.badge-depth.count, .badge-depth.working, .badge-depth.recent { color: var(--accent); border-color: var(--accent); }
 .badge-depth.stuck, .badge-depth.error { color: var(--danger); border-color: var(--danger); font-weight: 600; }
+
+/* The activity spark (ledger #469): a pass running now, or one that ended within the window
+ * the server measures against its own poll interval. ⚠ It is a DOT FIRST and an animation
+ * second — the reduced-motion rule above kills every animation on this page, so a spark that
+ * was only a pulse would say nothing at all to a reader who asked for less motion. And as
+ * everywhere else here, the hue is emphasis: the sentence ("A pass has been running for 3s",
+ * "the last ended 4s ago") is the badge's `title`. */
+.spark { display: inline-block; width: 0.5em; height: 0.5em; margin-right: 0.3em; border-radius: 50%; background: currentColor; }
+.spark.running { animation: spark-pulse 1.2s ease-in-out infinite; }
+.spark.recent { opacity: 0.55; }
+@keyframes spark-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+
+/* A refresh that was held back because a decision was open. Unhidden by web/gonk.js. */
+.stale { border-left: 4px solid var(--accent); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+.stale[hidden] { display: none; }
 .posture { margin: 0 0 var(--gap); }
 .findings { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
 .findings:empty { border-top: 0; }

@@ -97,6 +97,100 @@
     e.detail.path = "/k?c=" + encodeURIComponent(path.slice(3));
   });
 
+  // ------------------------------------------------- the queue's news, and who is mid-decision
+  //
+  // ★ THE FINDINGS LIST HAS NO CLOCK (ledger #469). The header badge already polls the
+  // depth at the server's own interval; every answer carries `data-rev`, the queue's whole
+  // state as one token. When that token changes there is something new to show, and this
+  // relays it to the list as one event. When it does not change nothing is fetched, which
+  // is the difference between this and a second `every 10s` on the list.
+  //
+  // ⚠ Why this is a script at all, when everything else the page shows comes from the
+  // server: the badge cannot carry an `HX-Trigger` response header — gonk's HTTP transport
+  // has no way to add one, which is the same limitation that puts the session cookie here —
+  // and the badge must not know what a findings list looks like. So the DECISION is the
+  // server's (it computes the revision) and this is the wire between two fragments.
+  //
+  // ⚠⚠ AND IT NEVER YANKS A ROW SOMEONE IS DECIDING ON. A swap that replaces the list while
+  // a human is choosing a severity or typing a reason is worse than a stale page: it throws
+  // away work they did. So news arriving during a decision is HELD — the page says so, out
+  // loud — and delivered when the decision is submitted (which swaps the list anyway) or
+  // abandoned.
+  const NEWS = "gonk:news";
+  let seenRev = null;
+  let held = false;
+
+  function queueSection() {
+    return $("queue");
+  }
+
+  // Is a human in the middle of deciding? Focus is the obvious half; the other half is a
+  // control they have already changed and not yet submitted, which survives losing focus.
+  function midDecision(queue) {
+    const active = document.activeElement;
+    if (active && queue.contains(active) && active.matches("select, textarea, input, button")) {
+      return true;
+    }
+    const changed = (sel) => {
+      const rendered = sel.querySelector("option[selected]");
+      const initial = rendered ? rendered.value : sel.options.length ? sel.options[0].value : "";
+      return sel.value !== initial;
+    };
+    if (Array.prototype.some.call(queue.querySelectorAll("select"), changed)) return true;
+    return Array.prototype.some.call(queue.querySelectorAll("textarea"), (t) => t.value !== "");
+  }
+
+  function deliver() {
+    const queue = queueSection();
+    // Not on the Queue page: the badge still polls (it is in every header) and there is
+    // simply nothing here to refresh.
+    if (!queue) return;
+    if (midDecision(queue)) {
+      held = true;
+      const notice = $("queue-stale");
+      if (notice) notice.hidden = false;
+      return;
+    }
+    held = false;
+    if (window.htmx) window.htmx.trigger(queue, NEWS);
+  }
+
+  // The badge's own span is the swap target; its answer is the element inside it.
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target || !target.classList || !target.classList.contains("queue-badge")) return;
+    const badge = target.querySelector("[data-rev]");
+    if (!badge) return;
+    const rev = badge.getAttribute("data-rev");
+    // ⚠ The FIRST poll only establishes the baseline. Treating it as news would refresh the
+    // list once on every page load, for nothing.
+    if (seenRev === null) {
+      seenRev = rev;
+      return;
+    }
+    if (rev === seenRev) return;
+    seenRev = rev;
+    deliver();
+  });
+
+  // A held refresh, let through the moment the decision is over. `change` and `focusout`
+  // are when a selection is put back or a field is emptied; the swap after a submitted
+  // decision brings the fresh list with it, so nothing is held across it.
+  // ⚠ On a tick, not inline: during `focusout` the focus has LEFT and not yet ARRIVED, so
+  // `document.activeElement` is the body — a human tabbing from the severity select to the
+  // publish button would read as idle for exactly that instant, and the list would swap out
+  // from under the button they were reaching for.
+  const retry = () => {
+    if (!held) return;
+    window.setTimeout(() => {
+      if (!held) return;
+      const queue = queueSection();
+      if (queue && !midDecision(queue)) deliver();
+    }, 0);
+  };
+  document.addEventListener("focusout", retry);
+  document.addEventListener("change", retry);
+
   // ------------------------------------------------------------------ bytes
 
   function toB64(buffer) {
