@@ -196,8 +196,15 @@ fn finding_iri(id: &str) -> String {
 /// Whether this capability may decide — the token `urn:iki:finding:{id}`'s Sink declares.
 ///
 /// Presentation only: the Sink enforces it whatever this page shows, and
-/// [`Decide`] declares it too, so the kernel refuses before dispatch. What this decides is
-/// whether a form is drawn at all.
+/// [`Decide`] declares it too, so the kernel refuses before dispatch. A wrong answer here
+/// costs a misdrawn page, never an unauthorized decision.
+///
+/// It is still worth asking, and for two things rather than one: whether a decision form is
+/// drawn on a card at all, and — when it is not — whether the list carries the `read-only`
+/// posture that NAMES the grant a caller is missing. Without the second, a reader holding
+/// only a read grant gets a queue of findings, no buttons, and nothing on the page saying
+/// why; the layers that actually enforce this refuse at submit time, which is too late to
+/// be an explanation.
 fn can_decide(inv: &Invocation<'_>) -> bool {
     inv.capability.allows(ikigai_browse::CAP_ANNOTATE)
 }
