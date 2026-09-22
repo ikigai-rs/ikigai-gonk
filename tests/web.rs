@@ -65,6 +65,7 @@ impl Server {
             browse_roots: Vec::new(),
             passkeys: Arc::clone(&passkeys),
             rules: rules.into(),
+            queue: ikigai_gonk::config::QueuePolicy::default(),
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         let cap = doors::http_cap(doors::HttpDoor {

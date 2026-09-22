@@ -318,6 +318,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         browse_roots: Vec::new(),
         passkeys,
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        queue: ikigai_gonk::config::QueuePolicy::default(),
     });
     doors::http_kernel(hub, ikigai_gonk::web::space(face))
 }

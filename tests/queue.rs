@@ -16,6 +16,11 @@
 //!   fourth here would be the one that goes stale silently.
 //! - [`the_intray_depth_tells_absent_empty_and_unreadable_apart`] — #446's shape on the one
 //!   page whose job is to show process state.
+//! - [`the_queue_asks_only_about_the_serious_and_lists_the_rest_on_request`] — ledger #496:
+//!   minting keeps every severity, triage asks about the serious set, and the rows left out
+//!   are counted and named rather than silently absent. With
+//!   [`an_unrated_finding_is_never_hidden`], [`the_badge_carries_the_serious_count_and_the_other_count`]
+//!   and [`a_serious_word_the_contract_does_not_declare_is_refused_at_start`].
 //!
 //! Every store here is `in_memory_shared_declaring`, so these run beside a live gonk holding
 //! `~/.ikigai/store`.
@@ -25,6 +30,7 @@ use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Representation, Request, Verb};
+use ikigai_gonk::config::QueuePolicy;
 use ikigai_gonk::grants::{browse_graph_grants, grants_for_all, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::queue;
@@ -82,7 +88,7 @@ fn door_watching(
         .expect("a shared in-memory store that declares where its sharer writes");
     let wired = browse::wire(roots(dir), handle, &[], None, &graph);
     let trigger_spaces = match &review {
-        Some(t) => ikigai_gonk::trigger::space(t, activity, armed),
+        Some(t) => ikigai_gonk::trigger::space(t, activity, armed, QueuePolicy::default()),
         None => Vec::new(),
     };
     let hub = Arc::new(compose_with(
@@ -102,6 +108,9 @@ fn door_watching(
             1060,
         )),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        // ★ The DEFAULT policy, as `main` runs it with no `gonk.queue.serious` line — so the
+        // gate every test here sees is the one the shipped binary applies.
+        queue: QueuePolicy::default(),
     });
     (doors::http_kernel(hub, web::space(face)), config)
 }
@@ -496,11 +505,27 @@ const FINDING: &str = "aaaabbbbccccddddeeee0001";
 /// directly". So this is a fixture written the way a holder of that grant would write it, not
 /// a back door around one.
 fn plant_pending_finding(door: &Kernel, cap: &Capability) {
+    plant_finding(
+        door,
+        cap,
+        FINDING,
+        Some(SEVERITY),
+        "The bound truncates instead of refusing.",
+    );
+}
+
+/// The same, for any id, any body, and any severity — or none, which is a finding the model
+/// left unrated (no `sh:resultSeverity` at all, the shape browse reads back as `null`).
+fn plant_finding(door: &Kernel, cap: &Capability, id: &str, severity: Option<&str>, body: &str) {
     let graph = browse::Graph::chosen()
         .named()
         .expect("this server writes browse's quads in a NAMED graph")
         .as_str()
         .to_string();
+    let rated = match severity {
+        Some(word) => format!("    sh:resultSeverity <urn:iki:severity:{word}> ;\n"),
+        None => String::new(),
+    };
     let update = format!(
         r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX oa: <http://www.w3.org/ns/oa#>
@@ -510,21 +535,20 @@ PREFIX sh: <http://www.w3.org/ns/shacl#>
 PREFIX ik: <https://ikigai-rs.dev/ns#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 INSERT DATA {{ GRAPH <{graph}> {{
-  <urn:iki:finding:{FINDING}> a prov:Entity ;
-    dcterms:description "The bound truncates instead of refusing." ;
+  <urn:iki:finding:{id}> a prov:Entity ;
+    dcterms:description "{body}" ;
     dcterms:creator "a-test-reviewer" ;
     dcterms:created "2026-09-19T12:00:00Z"^^xsd:dateTime ;
     prov:wasGeneratedBy <urn:ikigai:browse:review:demo:src/lib.rs> ;
-    sh:resultSeverity <urn:iki:severity:{SEVERITY}> ;
-    ik:annotates <urn:repo:{ROOT}:file:src/lib.rs> ;
+{rated}    ik:annotates <urn:repo:{ROOT}:file:src/lib.rs> ;
     ik:repo "{ROOT}" ;
     ik:path "src/lib.rs" ;
     ik:contentHash "sha256:planted" ;
-    oa:hasSelector <urn:iki:finding:{FINDING}:selector:quote> ,
-                   <urn:iki:finding:{FINDING}:selector:position> .
-  <urn:iki:finding:{FINDING}:selector:quote> a oa:TextQuoteSelector ;
+    oa:hasSelector <urn:iki:finding:{id}:selector:quote> ,
+                   <urn:iki:finding:{id}:selector:position> .
+  <urn:iki:finding:{id}:selector:quote> a oa:TextQuoteSelector ;
     oa:exact "first version" .
-  <urn:iki:finding:{FINDING}:selector:position> a oa:TextPositionSelector ;
+  <urn:iki:finding:{id}:selector:position> a oa:TextPositionSelector ;
     oa:start "4"^^xsd:nonNegativeInteger ;
     oa:end "17"^^xsd:nonNegativeInteger .
 }} }}"#
@@ -753,9 +777,16 @@ fn the_header_badge_renders_the_depth_and_polls_for_it() {
     )
     .expect("the badge renders");
     let badge = String::from_utf8(answer.bytes).expect("utf-8");
+    // ★ Since ledger #496 the NUMBERS are findings waiting for a human (none planted here),
+    // and the request depth — the seven tuples — rides in the tooltip's sentence with the
+    // rest of the liveness half. The colour still says a backlog exists.
     assert!(
-        badge.contains(">7<"),
-        "the number a person came to see: {badge}"
+        badge.contains("class='serious'>0<") && badge.contains("class='other'>+0<"),
+        "the two numbers a person came to see: {badge}"
+    );
+    assert!(
+        badge.contains("7 review requests are waiting"),
+        "the request depth is in the sentence: {badge}"
     );
     // ⚠ Not empty, and not stuck: unarmed, nothing is supposed to be draining, so seven
     // waiting is correct rather than alarming.
@@ -1006,4 +1037,305 @@ fn the_findings_list_listens_for_the_badges_news() {
         script.contains("data-rev"),
         "…and compares the revision the badge carries"
     );
+}
+
+// ---------------------------------------------- the serious gate: ledger #496
+
+/// The declared set split by the DEFAULT policy: one word the page asks about and one it
+/// only counts — both read off the contract, neither spelled here.
+fn a_serious_and_an_other_word(door: &Kernel) -> (String, String) {
+    let declared = queue::one_of(
+        door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        "severity",
+    )
+    .expect("the finding Sink declares its severity set");
+    let policy = QueuePolicy::default();
+    let serious = declared
+        .iter()
+        .find(|w| policy.is_serious(w))
+        .expect("the shipped default names a declared word")
+        .clone();
+    let other = declared
+        .iter()
+        .find(|w| !policy.is_serious(w))
+        .expect("the contract declares a word outside the default set")
+        .clone();
+    (serious, other)
+}
+
+/// ★★ **The gate: by default the page asks about the serious rows and SAYS what it left
+/// out; `severity=all` lists everything; and a scope the page does not know is refused
+/// naming both.**
+///
+/// Brian, 2026-09-21: *"the preference is to highlight issues that need addressing, so
+/// narrowing the squishy stuff is the priority"* — and *"positive signal is still signal"*.
+/// Minting keeps every severity; triage asks about the serious ones. Both are asserted:
+/// the suggestion rows are absent from the default page AND present under `all`, and the
+/// default page counts them rather than pretending they do not exist.
+#[test]
+fn the_queue_asks_only_about_the_serious_and_lists_the_rest_on_request() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let reviewer = reviewer();
+    let (serious, other) = a_serious_and_an_other_word(&door);
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0001",
+        Some(&serious),
+        "A serious one.",
+    );
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0002",
+        Some(&other),
+        "A suggestion.",
+    );
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0003",
+        Some(&other),
+        "Another suggestion.",
+    );
+
+    let narrowed = page(&door, &[], &reviewer);
+    assert!(narrowed.contains("A serious one."), "{narrowed}");
+    assert!(
+        !narrowed.contains("A suggestion.") && !narrowed.contains("Another suggestion."),
+        "a row below the serious set is not offered for a decision:\n{narrowed}"
+    );
+    assert!(
+        narrowed.contains("1 serious pending finding in demo"),
+        "the count sentence says which scope it counted:\n{narrowed}"
+    );
+    // ★ The rows left out are SAID: how many, which words, and the link that lists them.
+    assert!(
+        narrowed.contains("2 other pending findings") && narrowed.contains(&other),
+        "the hidden rows are counted and their words named:\n{narrowed}"
+    );
+    assert!(
+        narrowed.contains(&format!(
+            "hx-get='{}?state=pending&amp;{}={}'",
+            queue::ROWS_PATH,
+            queue::SCOPE_ARG,
+            queue::SCOPE_ALL
+        )) && narrowed.contains("list all severities"),
+        "…and the way to them is a link, not a hint:\n{narrowed}"
+    );
+    // The scope nav spells the configured set, from the configuration and not this file.
+    assert!(
+        narrowed.contains(&format!(
+            "serious: {}",
+            QueuePolicy::default().serious.join(", ")
+        )),
+        "{narrowed}"
+    );
+    // ⚠ And the default URL carries NO scope: the narrowed page is the plain one, so every
+    // existing link and every bookmark lands on the gate rather than around it.
+    assert!(
+        narrowed.contains(&format!("hx-get='{}?state=pending'", queue::ROWS_PATH)),
+        "{narrowed}"
+    );
+
+    let all = page(&door, &[(queue::SCOPE_ARG, queue::SCOPE_ALL)], &reviewer);
+    assert!(
+        all.contains("A serious one.")
+            && all.contains("A suggestion.")
+            && all.contains("Another suggestion."),
+        "`{}={}` lists everything:\n{all}",
+        queue::SCOPE_ARG,
+        queue::SCOPE_ALL
+    );
+    assert!(all.contains("3 pending findings in demo"), "{all}");
+    assert!(
+        !all.contains("other pending findings"),
+        "nothing is hidden under `all`, so nothing is said to be:\n{all}"
+    );
+
+    // A scope the page does not know — a severity WORD, say, which is the natural mistake —
+    // is refused naming the two it does.
+    let refused = issue(
+        &door,
+        Verb::Source,
+        queue::QUEUE_IRI,
+        &[(queue::SCOPE_ARG, other.as_str())],
+        &reviewer,
+    );
+    match refused {
+        Err(ikigai_core::Error::InvalidArgument { name, detail }) => {
+            assert_eq!(name, queue::SCOPE_ARG);
+            assert!(
+                detail.contains(queue::SCOPE_SERIOUS) && detail.contains(queue::SCOPE_ALL),
+                "{detail}"
+            );
+        }
+        other => panic!("an unknown scope must be refused naming the set: {other:?}"),
+    }
+
+    // Deciding the one serious row leaves a serious queue that is affirmatively empty AND
+    // still says the others exist — three statements, not two (ledger #446's shape).
+    issue(
+        &door,
+        Verb::Sink,
+        queue::DECIDE_IRI,
+        &[(
+            "content",
+            &format!("id=aaaabbbbccccddddeeee0001&decision=decline&severity={serious}"),
+        )],
+        &reviewer,
+    )
+    .expect("a holder of urn:cap:annotate declines");
+    let after = page(&door, &[], &reviewer);
+    assert!(
+        after.contains("No serious pending findings in demo"),
+        "{after}"
+    );
+    assert!(
+        after.contains(
+            "Nothing is waiting for a decision; 2 other findings are minted and not queued"
+        ),
+        "{after}"
+    );
+}
+
+/// ★ **An unrated finding is never hidden.** The gate is on a word; a row with no word has
+/// not been classed as a suggestion by anyone, and hiding it would be a finding nobody is
+/// ever asked about.
+#[test]
+fn an_unrated_finding_is_never_hidden() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let reviewer = reviewer();
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0004",
+        None,
+        "Nobody rated this.",
+    );
+    let narrowed = page(&door, &[], &reviewer);
+    assert!(narrowed.contains("Nobody rated this."), "{narrowed}");
+    assert!(narrowed.contains("model: unrated"), "{narrowed}");
+    assert!(
+        !narrowed.contains("other pending finding"),
+        "an unrated row is asked about, not counted as hidden:\n{narrowed}"
+    );
+}
+
+/// ★★ **The badge carries TWO numbers**: what is waiting for a human in the serious set, and
+/// the rest — and both are facts about the STORE, so a finding minted by anyone moves the
+/// revision the list refreshes on. The liveness half (colour, spark, the depth's own
+/// sentence) is untouched, which the tooltip's first sentence shows.
+#[test]
+fn the_badge_carries_the_serious_count_and_the_other_count() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    let (door, _config) = door(&dir, Some(trigger));
+    let reviewer = reviewer();
+    let (serious, other) = a_serious_and_an_other_word(&door);
+
+    let rev = |markup: &str| {
+        let at = markup
+            .find("data-rev=")
+            .expect("the badge carries a revision");
+        let rest = &markup[at + "data-rev=".len() + 1..];
+        rest[..rest.find('\'').expect("a closed attribute")].to_string()
+    };
+
+    let before = badge(&door);
+    assert!(
+        before.contains("class='serious'>0<") && before.contains("class='other'>+0<"),
+        "{before}"
+    );
+    assert!(before.contains("badge-depth empty"), "{before}");
+    let first = rev(&before);
+
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0005",
+        Some(&serious),
+        "One.",
+    );
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0006",
+        Some(&other),
+        "Two.",
+    );
+    plant_finding(
+        &door,
+        &reviewer,
+        "aaaabbbbccccddddeeee0007",
+        Some(&other),
+        "Three.",
+    );
+
+    let after = badge(&door);
+    assert!(
+        after.contains("class='serious'>1<") && after.contains("class='other'>+2<"),
+        "the two numbers: {after}"
+    );
+    assert!(
+        after.contains("1 serious finding waiting for a decision, 2 others minted and not queued"),
+        "the split is readable, not only visible: {after}"
+    );
+    // A serious finding waiting for someone is not `empty`, whatever the request queue says.
+    assert!(after.contains("badge-depth count"), "{after}");
+    // The liveness half is the depth's own sentence, first and unchanged.
+    assert!(after.contains("The review queue is empty"), "{after}");
+    // ★ Minted by "another process" (the store's own door here, not a pass this server
+    // counted), and the revision still moved — the gap the old revision had.
+    assert_ne!(
+        first,
+        rev(&after),
+        "a finding minted by anyone is news the list should refresh on"
+    );
+}
+
+/// ★ **A serious word the contract does not declare stops the server at start, naming both
+/// lists** — and the shipped default passes the same check, so a browse release that renames
+/// a severity is a refusal here rather than a queue that silently asks about nothing.
+#[test]
+fn a_serious_word_the_contract_does_not_declare_is_refused_at_start() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+
+    let declared = queue::check_serious(&door, &QueuePolicy::default())
+        .expect("the shipped default names words the contract declares");
+    assert!(declared.len() > 1, "{declared:?}");
+
+    let stale = QueuePolicy {
+        serious: vec![declared[0].clone(), "whenever".to_string()],
+        configured: true,
+    };
+    let err = queue::check_serious(&door, &stale).unwrap_err();
+    assert!(err.contains("`whenever`"), "{err}");
+    for word in &declared {
+        assert!(
+            err.contains(word.as_str()),
+            "the refusal names the set: {err}"
+        );
+    }
+
+    // The complement is the declared set less the policy — what the banner prints and what
+    // the browse arc's `proposals=` argument will take.
+    let others = queue::other_severities(&declared, &QueuePolicy::default());
+    assert_eq!(
+        others.len(),
+        declared.len() - QueuePolicy::default().serious.len()
+    );
+    assert!(others.iter().all(|w| !QueuePolicy::default().is_serious(w)));
 }

@@ -2192,6 +2192,7 @@ impl HttpDoorHarness {
             browse_roots: vec!["demo".to_string()],
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+            queue: ikigai_gonk::config::QueuePolicy::default(),
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         // ★ The anonymous grant this server ships: the configured ledgers, read and write.
@@ -2452,6 +2453,7 @@ fn the_pass_requires_exactly_what_the_real_review_requires() {
             &queue,
             Arc::new(ikigai_gonk::trigger::Activity::default()),
             false,
+            ikigai_gonk::config::QueuePolicy::default(),
         ),
         None,
     );

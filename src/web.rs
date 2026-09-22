@@ -121,6 +121,10 @@ pub struct Web {
     /// text is what `urn:iki:gonk:render-rules` serves and what the renderer resolves back.
     /// [`crate::rules::DEFAULT_RULES`] unless this deployment named its own file.
     pub rules: Arc<str>,
+    /// Which severities the Queue page asks a human about (`gonk.queue.serious`), and what
+    /// the header badge counts as serious. Ledger
+    /// [#496](http://localhost:1060/l/default/item/496).
+    pub queue: crate::config::QueuePolicy,
 }
 
 /// Bind the face.

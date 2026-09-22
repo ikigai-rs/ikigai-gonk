@@ -355,6 +355,12 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 /// ⚠ Only `Mount::graph` is set, never `ExplainConfig::graph`. browse resolves the two into
 /// ONE archive and panics at mount time if they disagree — so the way to keep them agreeing
 /// is to have one of them, not to set both carefully.
+///
+/// ⚠ Nothing here configures which PENDING findings the file page draws: browse 0.6.1's file
+/// face renders published annotations only, and the argument a browse arc is adding for that
+/// (`proposals=`, the complement of `gonk.queue.serious`) is a per-request argument, not a
+/// mount setting. The seam is where gonk forwards a file-page command —
+/// [`crate::k::KAdapter`]'s `source`, ledger [#496](http://localhost:1060/l/default/item/496).
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
     store: Arc<Store>,

@@ -35,6 +35,7 @@ use ikigai_core::{
     ArgRef, Capability, Description, Endpoint, EndpointSpace, Error, Exact, Fallback, Invocation,
     Iri, Kernel, ReprType, Representation, Request, Result, Space, Verb,
 };
+use ikigai_gonk::config::QueuePolicy;
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::trigger::{self, Trigger, Tuple};
 
@@ -142,6 +143,7 @@ fn kernel_with_recorder(trigger_queue: &Trigger, review_iri: &str) -> (Kernel, S
         // Unarmed: these tests drive the pass directly, which is what a person piping a
         // tuple does. `armed` changes only what `urn:iki:gonk:review:depth` SAYS.
         false,
+        QueuePolicy::default(),
     );
     spaces.push(Arc::new(recorder) as Arc<dyn Space>);
     (Kernel::new(Arc::new(Fallback::new(spaces))), seen)
@@ -752,6 +754,7 @@ fn a_configured_trigger_adds_exactly_the_queue_the_pass_and_the_depth() {
         &q,
         Arc::new(trigger::Activity::default()),
         false,
+        QueuePolicy::default(),
     ))));
     let mut ids: Vec<String> = kernel
         .entries()
@@ -1053,6 +1056,7 @@ fn the_depth_tells_a_slow_queue_from_a_stuck_one() {
         trigger: Some(Arc::new(q.clone())),
         activity: Arc::clone(&activity),
         armed: true,
+        policy: QueuePolicy::default(),
     };
 
     // Armed, three waiting, nothing running: stuck.
@@ -1077,6 +1081,7 @@ fn the_depth_tells_a_slow_queue_from_a_stuck_one() {
         trigger: Some(Arc::new(q)),
         activity,
         armed: false,
+        policy: QueuePolicy::default(),
     };
     let status = unarmed.status();
     assert!(!status.stuck(), "{status:?}");
@@ -1089,6 +1094,7 @@ fn the_depth_tells_a_slow_queue_from_a_stuck_one() {
         trigger: None,
         activity: Arc::new(trigger::Activity::default()),
         armed: false,
+        policy: QueuePolicy::default(),
     };
     let sentence = absent.status().sentence(0);
     assert!(
@@ -1144,4 +1150,87 @@ fn the_depth_has_its_own_floor_and_answers_both_faces() {
     // ★ The sentence rides WITH the numbers, so the badge, the page and the socket cannot
     // disagree about what the queue is doing.
     assert!(v["sentence"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
+}
+
+// ------------------------------------------- 5. the serious share: ledger #496
+
+/// ★ **The serious share is a number this host reports, because the Queue page now filters
+/// on a label the model wrote.** Ledger [#449](http://localhost:1060/l/default/item/449)
+/// measured a prompt moving that share 27% → 62% by re-labelling; a gate on the word makes
+/// the word load-bearing, and this is the tripwire.
+///
+/// Three things pinned: the labels are read off the pass's OWN answer and only a derived one
+/// (an archive hit replays old labels and counts nothing); the depth turns them into a share
+/// against the configured set; and the JSON face carries the histogram beside it, for the
+/// daily scan that watches it.
+#[test]
+fn the_depth_reports_the_serious_share_of_what_this_run_minted() {
+    let policy = QueuePolicy::default();
+    let serious = policy.serious[0].clone();
+    let derived = format!(
+        r#"{{"derived":true,"minted":["a","b","c"],"annotations":[{{"severity":"{serious}"}},{{"severity":"zzz"}},{{"severity":null}}]}}"#
+    );
+    assert_eq!(
+        trigger::minted_labels(derived.as_bytes()),
+        vec![
+            serious.clone(),
+            "zzz".to_string(),
+            trigger::UNRATED.to_string()
+        ]
+    );
+    let hit = derived.replace(r#""derived":true"#, r#""derived":false"#);
+    assert!(
+        trigger::minted_labels(hit.as_bytes()).is_empty(),
+        "an archive hit replays labels an earlier pass chose"
+    );
+    assert!(trigger::minted_labels(b"not json").is_empty());
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    let activity = Arc::new(trigger::Activity::default());
+    let kernel = Kernel::new(Arc::new(Fallback::new(trigger::space(
+        &q,
+        Arc::clone(&activity),
+        true,
+        policy.clone(),
+    ))));
+    let reader = Capability::scoped([ikigai_browse::CAP_WILDCARD]);
+    let depth = |as_json: bool| {
+        let mut request = Request::new(Verb::Source, Iri::parse(trigger::DEPTH).unwrap());
+        if as_json {
+            request = request.with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+        }
+        String::from_utf8(issue(&kernel, request, &reader).expect("the depth").bytes).unwrap()
+    };
+
+    // Nothing minted yet: no share, and no sentence about one — "0 of 0" is not a number.
+    let idle: serde_json::Value = serde_json::from_str(&depth(true)).expect("json");
+    assert_eq!(idle["findings_this_run"], 0);
+    assert!(idle["serious_share_percent"].is_null(), "{idle}");
+    assert!(!depth(false).contains("minted this run"));
+
+    activity
+        .begin(1_000)
+        .expect("a pass")
+        .succeeded_with(&trigger::minted_labels(derived.as_bytes()));
+    let after: serde_json::Value = serde_json::from_str(&depth(true)).expect("json");
+    assert_eq!(after["findings_this_run"], 3);
+    assert_eq!(after["serious_this_run"], 1);
+    assert_eq!(after["serious_share_percent"], 33);
+    assert_eq!(after["findings_by_severity"][&serious], 1);
+    assert_eq!(after["findings_by_severity"]["zzz"], 1);
+    assert_eq!(after["findings_by_severity"][trigger::UNRATED], 1);
+    // The set the share was read against rides with it, so a reader of the number knows
+    // what "serious" meant on this server.
+    assert_eq!(
+        after["serious"],
+        serde_json::json!(policy.serious),
+        "{after}"
+    );
+    let sentence = depth(false);
+    assert!(
+        sentence.contains("3 findings minted this run, 1 serious (33%)"),
+        "{sentence}"
+    );
 }
