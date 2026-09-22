@@ -1095,9 +1095,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-ipc"
-version = "0.1.24"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eb43371a0da70b82f511bc87317d64466d9cb46f5b1cf95328354ccf749f60c"
+checksum = "f6e53db71df1a1b66964706d7b434c2025f6a7e46a4509042b1921671fd491ab"
 dependencies = [
  "ikigai-core",
  "ikigai-resolve",
@@ -1161,9 +1161,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-resolve"
-version = "0.1.24"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3dae68824f3216843e8ea45360c4942308cfcd8fe307cc4c827ff6b2c98962ff"
+checksum = "4c112dda8de6c4183f32469d3cfa362ddc53b3f3395ea749878b1073e684a8d2"
 dependencies = [
  "async-trait",
  "futures",
@@ -1221,9 +1221,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-wire"
-version = "0.1.24"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8add29df0236d3ff62b3b62c318b41428eb0c3831353ada4dbcdf50b7ebe74f"
+checksum = "146407fe1ad476c7be7feba8111cbcf871a21d26bfb8c2df83a4e2891da75390"
 dependencies = [
  "ikigai-core",
  "ikigai-resolve",

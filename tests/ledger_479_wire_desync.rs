@@ -1,8 +1,22 @@
-//! ★ **A CHARACTERIZATION TEST OF A DEFECT THAT IS NOT THIS CRATE'S.** It is green
-//! because the defect is present, and the day it goes RED is the day someone fixed
-//! `ikigai-ipc` — at which point invert these assertions and move the file there.
+//! ★ **THE FLOOR TEST FOR THIS CRATE'S `ikigai-ipc` PIN.** It is green because the pinned
+//! `ikigai-ipc` carries the fix for ledger #479, and it goes RED on 0.1.24 — which is the
+//! point: the pin's reasoning lives in a manifest comment, and a comment cannot fail.
 //!
-//! # What it reproduces: ledger #479
+//! # History: this file was born as the opposite test
+//!
+//! Through `ikigai-ipc` 0.1.24 the two connection tests below asserted the DEFECT — a
+//! characterization test of something that was not this crate's to fix, kept green so the
+//! day it went red would be the day someone fixed the wire. That day was ikigai-cli #353
+//! (ledger #487), shipped in 0.1.25: a missed deadline now SPENDS the connection instead
+//! of keeping it, so the next call redials and gets its own answer. The fix brought its
+//! own positive test into `ikigai-ipc` (`a_missed_deadline_does_not_poison_the_connection`
+//! in its `lib.rs`), so the "move it there" half of the original instruction was done for
+//! us; what stays HERE is the consumer's half — proof that THIS binary's dependency graph
+//! actually delivers the fixed behaviour, through this crate's own resolved `ikigai-ipc`,
+//! with this crate's own describe bound. The mechanism below is kept as written because
+//! it is still the accurate account of what 0.1.24 did and why gonk was the host it hurt.
+//!
+//! # What it reproduced: ledger #479
 //!
 //! `source urn:repo:ikigai-gonk:findings state=published as=application/json` came back
 //! with NINE `ikigai-core` findings — a complete, well-formed, internally consistent
@@ -135,13 +149,15 @@ fn read(client: &ikigai_ipc::IpcResolver, name: &str) -> Result<String, String> 
         .map_err(|e| format!("{e:?}"))
 }
 
-/// ★ Ledger #479's exact shape: A is fine, B misses its deadline, and then the read of C
-/// comes back with **B's** complete answer — and the shift never goes away.
+/// ★ Ledger #479's exact shape, inverted: A is fine, B misses its deadline, and then the
+/// read of C comes back with **C's** answer — on a fresh connection, because the miss
+/// spent the old one — and a further clean call proves there is no shift to go away.
+/// Through 0.1.24 these two assertions read `Ok("b")` and `Ok("c")`.
 ///
 /// The preconditions are checked rather than assumed: if a loaded runner made the first
 /// call slow or the second call fast, this says so and stops instead of flaking.
 #[test]
-fn a_timed_out_ipc_call_poisons_the_connection() {
+fn a_timed_out_ipc_call_no_longer_poisons_the_connection() {
     let path = socket("a");
     let _ = std::fs::remove_file(&path);
     let serving = path.clone();
@@ -172,23 +188,26 @@ fn a_timed_out_ipc_call_poisons_the_connection() {
     }
     assert_eq!(
         third.as_deref(),
-        Ok("b"),
-        "a Source of urn:test:c should have come back with the PREVIOUS call's answer"
+        Ok("c"),
+        "a Source of urn:test:c after a deadline miss must answer for urn:test:c — \
+         the previous call's answer means the connection was KEPT (ikigai-ipc < 0.1.25)"
     );
     assert_eq!(
         fourth.as_deref(),
-        Ok("c"),
-        "and the shift should still be there one call later"
+        Ok("a"),
+        "and the call after that must be unshifted too"
     );
 }
 
-/// The same defect reached through the SELF-DESCRIPTION deadline, which is the bound that
-/// actually fires in this fleet (30s by default, against a peer that federates). Here the
-/// next Source comes back with the endpoint's Turtle CONTRACT as if it were the resource's
-/// content — the one-shot `ikigai -c` version of the failure, and the reason a one-shot
-/// cannot be how #479 happened.
+/// The same fix reached through the SELF-DESCRIPTION deadline, which is the bound that
+/// actually fires in this fleet (30s by default, against a peer that federates). Through
+/// 0.1.24 the next Source came back with the endpoint's Turtle CONTRACT as if it were the
+/// resource's content — the one-shot `ikigai -c` version of the failure. Now it must come
+/// back with the resource. ⚠ This is the half worth keeping a consumer-side test for: the
+/// describe bound is a different read path from a Source deadline, and it is the one gonk
+/// configures.
 #[test]
-fn a_timed_out_describe_poisons_the_connection_too() {
+fn a_timed_out_describe_no_longer_poisons_the_connection() {
     let path = socket("m");
     let _ = std::fs::remove_file(&path);
     let serving = path.clone();
@@ -225,11 +244,14 @@ fn a_timed_out_describe_poisons_the_connection_too() {
         println!("the describe did not miss its deadline on this runner; nothing was measured");
         return;
     }
-    let after = after.expect("the poisoned read still answers — that is the whole problem");
+    let after =
+        after.expect("the read after a missed describe deadline answers, on a fresh connection");
     assert!(
-        after.contains("urn:ikigai:endpoint:e-b"),
-        "a Source of urn:test:a should have come back with the abandoned CONTRACT, got: {after}"
+        !after.contains("urn:ikigai:endpoint:e-b"),
+        "a Source of urn:test:a came back with the abandoned CONTRACT — the describe bound \
+         kept the connection (ikigai-ipc < 0.1.25): {after}"
     );
+    assert_eq!(after, "a", "and it must be the resource that was asked for");
 }
 
 /// The incident's own payload, kept because it is the only copy: it was saved to a session
