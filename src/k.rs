@@ -227,6 +227,24 @@ impl KAdapter {
         for (name, value) in command.args {
             request = request.with_arg(name, ArgRef::Inline(value.into_bytes()));
         }
+        // ★ SEAM — pending findings drawn on the FILE page (ledger
+        // [#496](http://localhost:1060/l/default/item/496)). Brian asked for everything
+        // below the serious set to be shown as annotations on the file page instead of
+        // queued. That page is `ikigai-browse`'s face (`file_html` renders PUBLISHED
+        // annotations only; a pending finding never reaches it), and a parallel browse arc
+        // is adding an opt-in argument to it — `proposals=<severity words>` — that draws
+        // pending findings of the named severities as proposal marks. The words gonk would
+        // send are the COMPLEMENT of `gonk.queue.serious` against the finding contract's own
+        // set: `crate::queue::other_severities(&declared, &self.web.queue)`, with `declared`
+        // from `crate::queue::check_serious` — never a list held here.
+        //
+        // When browse publishes it, this is where gonk adds that argument to a
+        // `source urn:repo:{root}:file:{path} as=text/html` command from a caller who may read
+        // findings (`urn:cap:browse:read:*`), and nowhere else: the page is the one place a
+        // person reads suggestions, beside the code they are about, and the queue stays the
+        // place for decisions. ⚠ Not wired against 0.6.1, which does not declare it — and
+        // `check_declared` above is what makes wiring it early SAFE rather than silent: an
+        // argument the bound browse does not declare is refused here by name, never dropped.
         inv.issue(request).await
     }
 

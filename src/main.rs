@@ -11,7 +11,7 @@ use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
-use ikigai_gonk::{browse, compose_with, doors, mount, quic, trigger, watch, web};
+use ikigai_gonk::{browse, compose_with, doors, mount, queue, quic, trigger, watch, web};
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
 use ikigai_store::{DurableStore, StoreConfig};
@@ -205,7 +205,12 @@ fn serve(flags: &config::Flags) -> ! {
     let trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
-            trigger::space(t, Arc::clone(&activity), reviewer.is_some())
+            trigger::space(
+                t,
+                Arc::clone(&activity),
+                reviewer.is_some(),
+                settings.queue.clone(),
+            )
         }
         None => Vec::new(),
     };
@@ -219,6 +224,24 @@ fn serve(flags: &config::Flags) -> ! {
             jobs: jobs.clone(),
         }),
     ));
+
+    // ★ The Queue's serious set, checked against the finding contract THIS kernel binds
+    // (ledger #496): a word the contract does not declare stops this server naming both
+    // lists, rather than serving a queue that asks about nothing. The same shape as
+    // `gonk.review.arm` without a space — a line for a queue this server does not serve is
+    // a refusal, not a no-op.
+    let queue_line = if settings.browse_roots.is_empty() {
+        if settings.queue.configured {
+            fail(
+                "gonk.queue.serious is set and no gonk.browse.root is configured: there is no \
+                 finding contract to check it against and no queue for it to narrow",
+            );
+        }
+        "no gonk.browse.root, so no findings and no Queue page".to_string()
+    } else {
+        let declared = queue::check_serious(&hub, &settings.queue).unwrap_or_else(|e| fail(&e));
+        queue_line(&settings, &declared)
+    };
 
     // ★★ ARMING, and it is deliberately the last thing before the doors: the reviewer's
     // grant is checked against the CONTRACT of the review this kernel actually binds, and a
@@ -330,6 +353,7 @@ fn serve(flags: &config::Flags) -> ! {
                 .collect(),
             passkeys: Arc::clone(&passkeys),
             rules: Arc::clone(&render_rules),
+            queue: settings.queue.clone(),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         eprintln!(
@@ -349,6 +373,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
         eprintln!("  review  {review_line}");
+        eprintln!("  queue   {queue_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
         eprintln!(
@@ -875,6 +900,34 @@ fn armed_line(queue: &trigger::Trigger, scopes: usize, host: &str) -> String {
         queue.grant.as_deref().unwrap_or("?"),
         trigger::pending(queue),
         trigger::DEPTH,
+    )
+}
+
+/// The banner's queue line — which severities the Queue page asks a human about, and which
+/// it only counts, from the contract this kernel binds (ledger #496).
+///
+/// ⚠ It names the words so an operator can see the gate they are running under; it is a
+/// banner, and a banner is not something a review pass can read. Nothing in this crate puts
+/// the gate where a pass could see it.
+fn queue_line(settings: &config::Settings, declared: &[String]) -> String {
+    let others = queue::other_severities(declared, &settings.queue);
+    format!(
+        "asks a human about {} ({}gonk.queue.serious) and any unrated finding; {} minted, \
+         counted in the badge, listed under {}?{}={} — not queued",
+        settings.queue.serious.join(", "),
+        if settings.queue.configured {
+            ""
+        } else {
+            "the default; "
+        },
+        if others.is_empty() {
+            "nothing else is".to_string()
+        } else {
+            format!("{} are", others.join(", "))
+        },
+        queue::QUEUE_PATH,
+        queue::SCOPE_ARG,
+        queue::SCOPE_ALL,
     )
 }
 

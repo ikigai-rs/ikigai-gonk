@@ -287,6 +287,29 @@ complete and deliberately unable to publish anything.
 ⚠ **A queue is not a gate.** Nothing in it blocks a commit, a push or a merge. The word reads
 like a gate to anyone who has used one, so the page says so in as many words.
 
+★ **The page asks a human only about the SERIOUS findings** (ledger
+[#496](http://localhost:1060/l/default/item/496)). Brian, 2026-09-21: *"the preference is to
+highlight issues that need addressing, so narrowing the squishy stuff is the priority"* — and,
+the same day, on praise: *"positive signal is still signal and tells us something about the
+code."* Both hold, about different places: **minting** keeps every severity, **triage** asks
+about `gonk.queue.serious` (default `critical,major`) plus any unrated finding. Everything else
+is still minted, anchored and counted — the page says how many it left out and which words they
+carry, `?severity=all` lists them, and the header badge shows both numbers (`134 +185`: waiting
+for a decision, and minted-not-queued). A decided row is listed whatever its word: it asks
+nothing. The words are validated at start against the finding contract's own `severity` set,
+so a `gonk.queue.serious` the contract does not declare stops the server naming both lists.
+On 2026-09-21 the default hid 185 of 319 pending rows.
+
+⚠ **Severity is self-reported by the model**, and a gate on the word makes the word
+load-bearing: [#449](http://localhost:1060/l/default/item/449) measured a prompt asking for
+"major or worse" moving the serious share 27% → 62% by re-labelling. Two defences. Nothing gonk
+renders or sends reaches a pass — the prompt is browse's, and no hint, banner or form copy here
+can tell a model that only serious words get read. And `urn:iki:gonk:review:depth` reports the
+**serious share of what this run has minted** (`serious_share_percent`, with the histogram
+`findings_by_severity`), counting derived passes only: it was 27–33% on the incumbent model and
+42% on q8 ([#491](http://localhost:1060/l/default/item/491)), and a jump with no model or prompt
+change is the label inflating — re-examine the gate, do not celebrate the number.
+
 **The header carries a `Queue` link** only when the caller may read at least one root **and**
 holds `urn:cap:annotate` — a link to a page of things you cannot decide is worse than no link.
 For the same reason the decision form is drawn only for a caller who could submit it: an offer
@@ -588,6 +611,8 @@ gonk.review.space = "reviews"        # bind the queue at urn:space:reviews
 # gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
 # gonk.review.arm = true             # ⚠ ARM it: review on every drop. See below
 # gonk.review.root = "~/.ikigai/spaces"
+# gonk.queue.serious = "critical,major"   # what the Queue asks a human about (the default);
+                                          # the rest are minted and counted, not queued
 ```
 
 ```text
@@ -1060,6 +1085,7 @@ gonk.backup.every = "24h"             # the cadence; "off" (or --no-backup) take
 # gonk.review.grant = "reviewer"      # the grant a pass runs under; naming it arms nothing
 # gonk.review.arm = true              # ⚠ and the word that arms it; needs the grant above
 # gonk.review.root = "~/.ikigai/spaces"
+# gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.

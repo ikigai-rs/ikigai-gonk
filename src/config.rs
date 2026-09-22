@@ -20,6 +20,8 @@
 //! # gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
 //! # gonk.review.arm = true             # ⚠ ARM it: watch the queue and review on every drop
 //! # gonk.review.root = "~/.ikigai/spaces"   # the spaces tree (this IS the default)
+//! # gonk.queue.serious = "critical,major"   # the severities the Queue page asks a human about
+//!                                       # (this IS the default); the rest are minted, not queued
 //! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
@@ -66,8 +68,19 @@ pub const DEFAULT_BACKUP_KEEP: usize = 5;
 /// The rotation directory's name under the data home.
 pub const BACKUP_DIR_NAME: &str = "backups";
 
+/// The severities the Queue page asks a human about when no `gonk.queue.serious` line says
+/// otherwise — `ikigai-browse`'s own `SERIOUS_SEVERITIES` prefix of its severity list, spelled
+/// here because that constant is `pub(crate)` there.
+///
+/// ★ **This is the ONLY place this crate spells a severity word**, and it is checked rather
+/// than trusted: `main` validates every word against the finding contract's own `one_of`
+/// before a door opens ([`crate::queue::check_serious`]), so a browse release that renames a
+/// severity stops this server at start, naming both lists, instead of serving an empty queue.
+pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
+
 /// Every key this server reads.
-const KEYS: [&str; 23] = [
+const KEYS: [&str; 24] = [
+    "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
     "gonk.socket",
@@ -259,6 +272,103 @@ pub struct Settings {
     ///
     /// ⚠ Configuring it binds the QUEUE; it does not arm anything. See [`crate::trigger`].
     pub review: Option<crate::trigger::Trigger>,
+    /// Which severities the Queue page asks a human about (`gonk.queue.serious`).
+    pub queue: QueuePolicy,
+}
+
+/// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
+///
+/// Ledger [#496](http://localhost:1060/l/default/item/496). Brian, 2026-09-21: *"the preference
+/// is to highlight issues that need addressing, so narrowing the squishy stuff is the
+/// priority"* — and, the same day, on praise: *"positive signal is still signal and tells us
+/// something about the code."* Both hold, about different places. **Minting** keeps every
+/// severity; **triage** asks a human only about these. Everything else is still minted,
+/// stored, anchored, counted in the badge and listed under `severity=all` — it just does not
+/// ask for a decision.
+///
+/// ⚠ The words are parsed here and VALIDATED in `main`, against the finding contract's own
+/// `severity` `one_of` ([`crate::queue::check_serious`]): a word the contract does not declare
+/// is a refusal at start, named, never a silent empty queue. This type does not hold the
+/// contract, so it cannot check; it only refuses the shapes that are wrong on their face.
+///
+/// ★ **An unrated finding is never hidden.** The gate is on a word, and a row with no word has
+/// not been classed as a suggestion by anyone — the model proposed nothing. Hiding it would be
+/// a finding nobody is ever asked about, which is the worse failure. See [`QueuePolicy::queues`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuePolicy {
+    /// The serious severities, in the order the line spelled them.
+    pub serious: Vec<String>,
+    /// Whether a `gonk.queue.serious` line was written, or the default is in effect. `main`
+    /// uses it the way `gonk.review.arm` is used: a line that names a policy for a queue this
+    /// server does not serve is a refusal, not a no-op.
+    pub configured: bool,
+}
+
+impl Default for QueuePolicy {
+    fn default() -> QueuePolicy {
+        QueuePolicy {
+            serious: split_words(DEFAULT_QUEUE_SERIOUS),
+            configured: false,
+        }
+    }
+}
+
+impl QueuePolicy {
+    /// Whether a severity WORD is in the serious set — the classification the serious-share
+    /// number rests on ([`crate::trigger::Status`]). An unrated finding has no word and is
+    /// not serious by this test; see [`QueuePolicy::queues`] for what the page shows.
+    pub fn is_serious(&self, severity: &str) -> bool {
+        self.serious.iter().any(|s| s == severity)
+    }
+
+    /// Whether the Queue page asks a human about a finding rated `severity` by default:
+    /// serious, or unrated (`None`). ⚠ Callers pass `effective_severity` falling back to
+    /// `severity`, so a human override — none exists today; 0 of 371 pending rows differed on
+    /// 2026-09-21 — is what decides once one is set.
+    pub fn queues(&self, severity: Option<&str>) -> bool {
+        match severity {
+            Some(word) => self.is_serious(word),
+            None => true,
+        }
+    }
+}
+
+/// `gonk.queue.serious`, or the default. Refuses an empty list and a repeated word; the
+/// contract check is `main`'s, once there is a kernel to ask.
+fn queue_policy(text: &str) -> Result<QueuePolicy, String> {
+    let Some(spelled) = value_for(text, "gonk.queue.serious") else {
+        return Ok(QueuePolicy::default());
+    };
+    let serious = split_words(&spelled);
+    if serious.is_empty() {
+        return Err(format!(
+            "gonk.queue.serious = `{spelled}` names no severity. It is a comma-separated list \
+             of the severities the Queue page asks a human about (the default is \
+             `{DEFAULT_QUEUE_SERIOUS}`); an empty list would be a queue that asks about \
+             nothing, so it is refused rather than served"
+        ));
+    }
+    for (i, word) in serious.iter().enumerate() {
+        if serious[..i].contains(word) {
+            return Err(format!(
+                "gonk.queue.serious = `{spelled}` names `{word}` twice"
+            ));
+        }
+    }
+    Ok(QueuePolicy {
+        serious,
+        configured: true,
+    })
+}
+
+/// A comma-separated list, trimmed, empties dropped.
+fn split_words(spelled: &str) -> Vec<String> {
+    spelled
+        .split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The backup rotation's settings, as configured — [`crate::backup::Settings`] is this
@@ -693,6 +803,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         explain,
         backup,
         review,
+        queue: queue_policy(text)?,
     })
 }
 
@@ -1048,6 +1159,50 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    /// Ledger #496: absent, the line means exactly `DEFAULT_QUEUE_SERIOUS`; present, it is
+    /// the words as written; and the two shapes that are wrong on their face are refused
+    /// here, before there is a contract to check the words against.
+    #[test]
+    fn the_serious_set_defaults_and_is_parsed_and_the_face_wrong_shapes_are_refused() {
+        let absent = settings(&Flags::default(), "", &homes()).unwrap();
+        assert_eq!(absent.queue, QueuePolicy::default());
+        assert!(!absent.queue.configured);
+        assert_eq!(
+            absent.queue.serious.join(","),
+            DEFAULT_QUEUE_SERIOUS,
+            "the default is the documented line, verbatim"
+        );
+        // ★ Unrated is queued under every policy; a word is queued only when it is serious.
+        assert!(absent.queue.queues(None));
+        let first = absent.queue.serious[0].clone();
+        assert!(absent.queue.queues(Some(&first)));
+        assert!(absent.queue.is_serious(&first));
+        assert!(!absent.queue.queues(Some("whatever")));
+        assert!(!absent.queue.is_serious("whatever"));
+
+        let one = settings(
+            &Flags::default(),
+            "gonk.queue.serious = \" alpha , beta \"",
+            &homes(),
+        )
+        .unwrap();
+        assert_eq!(one.queue.serious, ["alpha", "beta"]);
+        assert!(one.queue.configured);
+
+        let empty =
+            settings(&Flags::default(), "gonk.queue.serious = \",\"", &homes()).unwrap_err();
+        assert!(empty.contains("names no severity"), "{empty}");
+        assert!(empty.contains(DEFAULT_QUEUE_SERIOUS), "{empty}");
+
+        let twice = settings(
+            &Flags::default(),
+            "gonk.queue.serious = \"alpha,alpha\"",
+            &homes(),
+        )
+        .unwrap_err();
+        assert!(twice.contains("names `alpha` twice"), "{twice}");
     }
 
     /// ★ The requirement as Brian stated it, as a test: every 24 hours, keep the last five,

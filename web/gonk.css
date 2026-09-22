@@ -250,6 +250,12 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .badge-depth.empty { opacity: 0.55; }
 .badge-depth.count, .badge-depth.working, .badge-depth.recent { color: var(--accent); border-color: var(--accent); }
 .badge-depth.stuck, .badge-depth.error { color: var(--danger); border-color: var(--danger); font-weight: 600; }
+/* The second number (ledger #496): findings minted and counted, not queued. Quieter than the
+   first, which is what is waiting for a person. */
+.badge-depth .other { margin-left: 0.2em; opacity: 0.6; font-size: 0.85em; }
+.filters.scope { margin-top: 0.35rem; font-size: 0.9em; }
+.hidden-rows { opacity: 0.85; }
+.hidden-rows a { margin-left: 0.4em; }
 
 /* The activity spark (ledger #469): a pass running now, or one that ended within the window
  * the server measures against its own poll interval. ⚠ It is a DOT FIRST and an animation

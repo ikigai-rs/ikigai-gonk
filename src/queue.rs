@@ -49,6 +49,29 @@
 //! list. A page that invents a menu when the manifold is silent is the failure this whole
 //! approach exists to prevent, one layer up.
 //!
+//! # ★ What the page asks about, and what it only counts
+//!
+//! Ledger [#496](http://localhost:1060/l/default/item/496). Brian, 2026-09-21: *"the preference
+//! is to highlight issues that need addressing, so narrowing the squishy stuff is the
+//! priority"* — and, the same day, on the kind words a review leaves: *"positive signal is
+//! still signal and tells us something about the code."* Both hold; they are about different
+//! places. **Minting** keeps
+//! every severity. **Triage** asks a human only about the SERIOUS set — `gonk.queue.serious`
+//! ([`crate::config::QueuePolicy`]), validated at start against the finding contract's own
+//! `severity` set ([`check_serious`]), never spelled in this file. Everything else is still
+//! minted, stored, anchored, counted in the badge's second number and listed under
+//! `?severity=all` ([`SCOPE_ARG`]); it just does not ask for a decision. On 2026-09-21 the
+//! default hid 185 of 319 pending rows and asked about 134 (133 serious, 1 unrated).
+//!
+//! ⚠ **The trap.** Severity is self-reported by the model, and
+//! [#449](http://localhost:1060/l/default/item/449) measured a prompt asking only for the
+//! serious tier moving the serious share 27% → 62% by RE-LABELLING. Gating on the word makes the
+//! word load-bearing. Two defences: nothing this page renders or sends reaches a pass (the
+//! prompt is browse's, and this crate adds no hint, banner or form copy a pass could see), and
+//! `urn:iki:gonk:review:depth` reports the serious share of what this run has minted
+//! ([`crate::trigger::Status::serious_share_percent`]) so a jump with no model or prompt
+//! change is a number a person sees.
+//!
 //! # The asymmetry the page has to make legible
 //!
 //! A decision is **final**: an identical repeat is a no-op, and anything that would change
@@ -141,6 +164,80 @@ const ROWS: usize = 50;
 
 /// The ceiling `?limit=all` means. Past this the bound REFUSES rather than truncating.
 const MAX_ROWS: usize = 500;
+
+/// The argument that widens the page: `?severity=all`. ⚠ Its VALUES are not severity words
+/// — they name a scope — so the contract's own set is never retyped here.
+pub const SCOPE_ARG: &str = "severity";
+/// The default scope: the rows whose word is in `gonk.queue.serious`, plus the unrated.
+pub const SCOPE_SERIOUS: &str = "serious";
+/// Every row, whatever its word.
+pub const SCOPE_ALL: &str = "all";
+
+/// An id to read the finding family's CONTRACT through. The id is a position hash in
+/// `ikigai-browse` and the description is the template's, identical for every id, so this
+/// names no finding and reads nothing from the store — the same trick
+/// [`crate::trigger::review_probe_iri`] uses on the review.
+const PROBE_ID: &str = "000000000000000000000000";
+
+/// The finding contract's severity set, with every word of the policy checked against it.
+///
+/// ★ Run by `main` before a door opens, so a `gonk.queue.serious` word the contract does not
+/// declare — or a DEFAULT that a browse release has quietly outgrown — is a refusal at start
+/// that names both lists, never a queue that silently asks about nothing. The words are never
+/// retyped in this crate: `ikigai-browse` owns them, the config default is the one place gonk
+/// spells them, and this check is what keeps that spelling honest.
+///
+/// # Errors
+///
+/// When the contract cannot be read (this server composes browse itself, so that is a bug or
+/// a changed contract), or a word is not in it.
+pub fn check_serious(
+    hub: &Kernel,
+    policy: &crate::config::QueuePolicy,
+) -> std::result::Result<Vec<String>, String> {
+    let iri = finding_iri(PROBE_ID);
+    let Some(declared) = one_of(hub, &iri, Verb::Sink, "severity") else {
+        return Err(format!(
+            "`{iri}` does not declare a closed `severity` set for Sink, so gonk.queue.serious \
+             (`{}`) cannot be checked against it and the Queue page could render no decision \
+             form. This server composes ikigai-browse itself, so this is a changed contract \
+             or a bug, not a configuration to fix",
+            policy.serious.join(",")
+        ));
+    };
+    for word in &policy.serious {
+        if !declared.contains(word) {
+            return Err(format!(
+                "gonk.queue.serious names `{word}`, which the finding contract does not \
+                 declare: its severities are {}. The set lives in ikigai-browse and is read \
+                 from the contract{}",
+                declared.join(", "),
+                if policy.configured {
+                    "; spell one of those".to_string()
+                } else {
+                    format!(
+                        ". No line is written, so the DEFAULT this build ships \
+                         (`{}`) is what has gone stale — report it, and set the line to \
+                         run meanwhile",
+                        crate::config::DEFAULT_QUEUE_SERIOUS
+                    )
+                }
+            ));
+        }
+    }
+    Ok(declared)
+}
+
+/// The declared severities the policy leaves out — what the gate does not ask about, and the
+/// complement the browse arc's file-page `proposals=` argument will take (see
+/// [`crate::k`]'s seam).
+pub fn other_severities(declared: &[String], policy: &crate::config::QueuePolicy) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|word| !policy.is_serious(word))
+        .cloned()
+        .collect()
+}
 
 // ------------------------------------------------------------------ the contract
 
@@ -245,6 +342,8 @@ struct Params {
     repo: Option<String>,
     /// How many rows to draw.
     limit: Option<String>,
+    /// [`SCOPE_SERIOUS`] (the default) or [`SCOPE_ALL`] — the `severity` argument.
+    scope: Option<String>,
 }
 
 impl Params {
@@ -255,7 +354,24 @@ impl Params {
             state: arg("state"),
             repo: arg("repo"),
             limit: arg("limit"),
+            scope: arg(SCOPE_ARG),
         }
+    }
+}
+
+/// Which rows the page asks about: `?severity=serious` (the default, the configured set) or
+/// `?severity=all`.
+fn scope_wanted(asked: Option<&str>) -> Result<&'static str> {
+    match asked.map(str::trim) {
+        None | Some("") | Some(SCOPE_SERIOUS) => Ok(SCOPE_SERIOUS),
+        Some(SCOPE_ALL) => Ok(SCOPE_ALL),
+        Some(other) => Err(Error::InvalidArgument {
+            name: SCOPE_ARG.to_string(),
+            detail: format!(
+                "`{other}`: `{SCOPE_SERIOUS}` (the set `gonk.queue.serious` names — what the \
+                 page asks a human about) or `{SCOPE_ALL}` (every severity)"
+            ),
+        }),
     }
 }
 
@@ -276,33 +392,117 @@ fn rows_wanted(limit: Option<&str>) -> Result<usize> {
     }
 }
 
-impl QueuePage {
-    /// Read one root's findings at `state`, under the CALLER's capability.
-    async fn read(&self, inv: &Invocation<'_>, root: &str, state: &str) -> Rows {
-        let iri = findings_iri(root);
-        let Ok(target) = Iri::parse(&iri) else {
-            return Rows::Failed(format!("`{iri}` is not an IRI"));
-        };
-        let request = Request::new(Verb::Source, target)
-            .with_arg("as", ArgRef::Inline(b"application/json".to_vec()))
-            .with_arg("state", ArgRef::Inline(state.as_bytes().to_vec()));
-        match inv.issue(request).await {
-            Err(e) => Rows::Failed(format!("{e}")),
-            Ok(answer) => match serde_json::from_slice::<Value>(&answer.bytes) {
-                Ok(Value::Array(rows)) => Rows::Got(rows),
-                Ok(_) | Err(_) => Rows::Failed(format!(
-                    "`{iri}` answered something that is not a JSON array of findings"
-                )),
-            },
+/// Read one root's findings at `state`, under the CALLER's capability — the page's rows and
+/// the badge's counts come from this one read.
+async fn read_findings(inv: &Invocation<'_>, root: &str, state: &str) -> Rows {
+    let iri = findings_iri(root);
+    let Ok(target) = Iri::parse(&iri) else {
+        return Rows::Failed(format!("`{iri}` is not an IRI"));
+    };
+    let request = Request::new(Verb::Source, target)
+        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()))
+        .with_arg("state", ArgRef::Inline(state.as_bytes().to_vec()));
+    match inv.issue(request).await {
+        Err(e) => Rows::Failed(format!("{e}")),
+        Ok(answer) => match serde_json::from_slice::<Value>(&answer.bytes) {
+            Ok(Value::Array(rows)) => Rows::Got(rows),
+            Ok(_) | Err(_) => Rows::Failed(format!(
+                "`{iri}` answered something that is not a JSON array of findings"
+            )),
+        },
+    }
+}
+
+/// Whether a human has already answered this row — a published or declined finding carries
+/// its decision, and the gate does not apply to it.
+fn decided(row: &Value) -> bool {
+    row.get("decision").is_some_and(|d| !d.is_null())
+}
+
+/// The severity word the gate reads for one row: the human's override when a decision set
+/// one, else the model's proposal, else nothing.
+///
+/// ⚠ `effective_severity` already falls back to `severity` on browse's side, so the second
+/// arm is belt-and-braces for a row that omits the derived field — and the comment is the
+/// point: the gate reads the EFFECTIVE word, so a human re-rating is what decides once one
+/// exists. Today none does (0 of 371 pending rows differed on 2026-09-21).
+fn rated(row: &Value) -> Option<&str> {
+    row.get("effective_severity")
+        .and_then(Value::as_str)
+        .or_else(|| row.get("severity").and_then(Value::as_str))
+}
+
+/// What is waiting for a human across the readable roots, split the way the page splits it.
+struct Counts {
+    /// Rows the default page asks about: serious, or unrated.
+    serious: usize,
+    /// Rows it only counts.
+    other: usize,
+    /// Roots whose findings could not be read under this caller.
+    refused: usize,
+}
+
+impl Counts {
+    /// The badge's half of the tooltip.
+    fn sentence(&self) -> String {
+        let mut out = format!(
+            "{} serious finding{} waiting for a decision, {} other{} minted and not queued.",
+            self.serious,
+            if self.serious == 1 { "" } else { "s" },
+            self.other,
+            if self.other == 1 { "" } else { "s" },
+        );
+        if self.refused > 0 {
+            out.push_str(&format!(
+                " ({} repositor{} could not be read.)",
+                self.refused,
+                if self.refused == 1 { "y" } else { "ies" }
+            ));
+        }
+        out
+    }
+}
+
+/// Count the pending findings this caller may read, under the configured policy.
+async fn pending_counts(web: &Web, inv: &Invocation<'_>) -> Counts {
+    let mut counts = Counts {
+        serious: 0,
+        other: 0,
+        refused: 0,
+    };
+    for root in crate::k::readable_roots(web, inv) {
+        match read_findings(inv, &root, "pending").await {
+            Rows::Got(rows) => {
+                for row in &rows {
+                    if web.queue.queues(rated(row)) {
+                        counts.serious += 1;
+                    } else {
+                        counts.other += 1;
+                    }
+                }
+            }
+            Rows::Failed(_) => counts.refused += 1,
         }
     }
+    counts
+}
 
+/// `a`, `a or b`, `a, b or c`.
+fn join_or(words: &[String]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} or {last}", init.join(", ")),
+    }
+}
+
+impl QueuePage {
     /// The whole body: the state nav, the intray line, the rows, and the refusals.
     ///
     /// ⚠ `params` is passed rather than read from `inv`, because [`Decide`] renders this same
     /// section after a write and its invocation carries the FORM, not a query string — and
     /// `Invocation` has no reborrow that swaps the request (only `with_bindings`). Threading
-    /// the three values is what keeps one renderer serving both entrances.
+    /// the values is what keeps one renderer serving both entrances.
     async fn body(
         &self,
         inv: &Invocation<'_>,
@@ -311,6 +511,7 @@ impl QueuePage {
     ) -> Result<Representation> {
         let roots = crate::k::readable_roots(&self.web, inv);
         let wanted = rows_wanted(params.limit.as_deref())?;
+        let scope = scope_wanted(params.scope.as_deref())?;
         let only = params
             .repo
             .as_deref()
@@ -353,9 +554,54 @@ impl QueuePage {
 
         let mut read: Vec<(String, Rows)> = Vec::new();
         for root in &chosen {
-            let rows = self.read(inv, root, &state).await;
+            let rows = read_findings(inv, root, &state).await;
             read.push((root.clone(), rows));
         }
+
+        // ★★ THE GATE (ledger #496): by default the page asks a human only about the SERIOUS
+        // rows. Every other row was still minted, stored and anchored, and it is still
+        // counted here — it is simply not offered for a decision, and `severity=all` lists
+        // it. The word the gate reads is the human's override when there is one and the
+        // model's proposal otherwise (`effective_severity`, falling back to `severity`, see
+        // [`rated`]); an unrated row is never hidden ([`crate::config::QueuePolicy::queues`]).
+        //
+        // ★ It gates UNDECIDED rows only. A published or declined row asks nothing of anyone
+        // — it is the record of an answer — so it is listed whatever its word, under every
+        // state filter. (A human who publishes a finding as the mildest word the contract
+        // offers must still find it on the published tab.)
+        //
+        // ⚠ Nothing about this gate is visible to a review pass — no argument, no banner, no
+        // form copy reaches the prompt — and that is a defence, not an omission: severity is
+        // self-reported, and a model that learned only serious words get read would rate
+        // everything serious. The tripwire for that is the depth's serious share.
+        let policy = &self.web.queue;
+        let mut hidden = 0usize;
+        let mut undecided = 0usize;
+        for (_, rows) in &mut read {
+            if let Rows::Got(rows) = rows {
+                undecided += rows.iter().filter(|row| !decided(row)).count();
+                if scope == SCOPE_SERIOUS {
+                    let before = rows.len();
+                    rows.retain(|row| decided(row) || policy.queues(rated(row)));
+                    hidden += before - rows.len();
+                }
+            }
+        }
+        // Where the sentences point: the one root asked for, or how many were read.
+        let where_ = match chosen.as_slice() {
+            [one] => one.clone(),
+            many => format!("{} repositories", many.len()),
+        };
+        // The words the gate leaves out, from the CONTRACT rather than a list: the finding
+        // Sink's own severity set less the configured serious words. `None` when the contract
+        // cannot be read, in which case the sentence says "other" and names nothing.
+        let others = one_of(
+            &self.web.hub,
+            &finding_iri(PROBE_ID),
+            Verb::Sink,
+            "severity",
+        )
+        .map(|declared| other_severities(&declared, policy));
 
         let matched: usize = read
             .iter()
@@ -381,9 +627,34 @@ impl QueuePage {
                     "state",
                     &[
                         ("name", name),
-                        ("href", &page_url(&state_query(name, only.as_deref()))),
-                        ("rows-url", &rows_url(&state_query(name, only.as_deref()))),
+                        ("href", &page_url(&query(name, only.as_deref(), scope))),
+                        ("rows-url", &rows_url(&query(name, only.as_deref(), scope))),
                         ("current", flag(name == &state)),
+                    ],
+                    "",
+                ));
+            }
+            // The scope nav beside it: the serious set, spelled from the configuration so a
+            // reader sees which words the page is asking about, and everything. Only where
+            // the gate can apply — the pending tab, or any listing that has an undecided row
+            // in it; on a tab of records it would be a control that does nothing.
+            let serious_label = format!("serious: {}", policy.serious.join(", "));
+            let gate_applies = state == "pending" || undecided > 0;
+            for (name, label) in [
+                (SCOPE_SERIOUS, serious_label.as_str()),
+                (SCOPE_ALL, "all severities"),
+            ] {
+                if !gate_applies {
+                    break;
+                }
+                children.push_str(&element(
+                    "scope",
+                    &[
+                        ("name", name),
+                        ("label", label),
+                        ("href", &page_url(&query(&state, only.as_deref(), name))),
+                        ("rows-url", &rows_url(&query(&state, only.as_deref(), name))),
+                        ("current", flag(name == scope)),
                     ],
                     "",
                 ));
@@ -393,6 +664,36 @@ impl QueuePage {
             if let Rows::Failed(why) = rows {
                 children.push_str(&element("denied", &[("repo", root)], why));
             }
+        }
+        if hidden > 0 {
+            // ★ The rows the gate left out are SAID, with their words and a way to them: a
+            // page that quietly showed fewer findings than exist would read as a smaller
+            // corpus, not a narrower question.
+            let rated = match &others {
+                Some(words) if !words.is_empty() => format!(" — rated {} —", join_or(words)),
+                _ => String::new(),
+            };
+            children.push_str(&element(
+                "hidden",
+                &[
+                    ("count", &hidden.to_string()),
+                    (
+                        "href",
+                        &page_url(&query(&state, only.as_deref(), SCOPE_ALL)),
+                    ),
+                    (
+                        "rows-url",
+                        &rows_url(&query(&state, only.as_deref(), SCOPE_ALL)),
+                    ),
+                    ("label", "list all severities"),
+                ],
+                &format!(
+                    "{hidden} other {state} finding{}{rated} {} minted, anchored and counted, \
+                     not queued: nothing there asks for a decision.",
+                    if hidden == 1 { "" } else { "s" },
+                    if hidden == 1 { "is" } else { "are" },
+                ),
+            ));
         }
 
         // The rows, each repository's in the order its resource returned them — which is
@@ -413,6 +714,7 @@ impl QueuePage {
                     decide,
                     &state,
                     only.as_deref(),
+                    scope,
                 ));
                 drawn += 1;
             }
@@ -423,8 +725,9 @@ impl QueuePage {
             ("full", flag(!self.fragment).to_string()),
             ("title", "Queue".to_string()),
             ("state", state.clone()),
-            ("page-url", page_url(&state_query(&state, only.as_deref()))),
-            ("rows-url", rows_url(&state_query(&state, only.as_deref()))),
+            ("scope", scope.to_string()),
+            ("page-url", page_url(&query(&state, only.as_deref(), scope))),
+            ("rows-url", rows_url(&query(&state, only.as_deref(), scope))),
             // ★ How this section re-fetches ITSELF when the header's poll brings news
             // ([#469](http://localhost:1060/l/default/item/469)). It is the rows URL with
             // this request's own `limit` kept, because a human who asked to see all 300
@@ -435,6 +738,7 @@ impl QueuePage {
                 rows_url(&refresh_query(
                     &state,
                     only.as_deref(),
+                    scope,
                     params.limit.as_deref(),
                 )),
             ),
@@ -478,22 +782,25 @@ impl QueuePage {
         } else if matched == 0 && refused.is_empty() {
             // ⚠ The affirmative sentence, and it is the point of writing it out: "no pending
             // findings" is a DIFFERENT statement from a page that failed to load, and the two
-            // must not look alike (ledger #446).
+            // must not look alike (ledger #446). And "no serious findings, N others minted" is
+            // a third statement, different again from "no findings at all".
             attributes.push(("empty", "true".to_string()));
             attributes.push((
                 "empty-text",
-                format!(
-                    "No {state} findings in {}. Nothing is waiting for a decision.",
-                    match &only {
-                        Some(repo) => repo.clone(),
-                        None => format!("{} repositories", chosen.len()),
-                    }
-                ),
+                if hidden > 0 {
+                    format!(
+                        "No serious {state} findings in {where_}. Nothing is waiting for a \
+                         decision; {hidden} other finding{} minted and not queued.",
+                        if hidden == 1 { " is" } else { "s are" }
+                    )
+                } else {
+                    format!("No {state} findings in {where_}. Nothing is waiting for a decision.")
+                },
             ));
         } else if matched > 0 {
             attributes.push((
                 "count-text",
-                count_sentence(matched, drawn, &state, &chosen),
+                count_sentence(matched, drawn, &state, &chosen, scope),
             ));
             if drawn < matched {
                 attributes.push(("more", "true".to_string()));
@@ -501,14 +808,14 @@ impl QueuePage {
                     "more-url",
                     page_url(&format!(
                         "{}&limit=all",
-                        state_query(&state, only.as_deref())
+                        query(&state, only.as_deref(), scope)
                     )),
                 ));
                 attributes.push((
                     "more-rows-url",
                     rows_url(&format!(
                         "{}&limit=all",
-                        state_query(&state, only.as_deref())
+                        query(&state, only.as_deref(), scope)
                     )),
                 ));
                 attributes.push(("more-label", format!("show all {matched}")));
@@ -580,6 +887,7 @@ impl QueuePage {
         decide: bool,
         state: &str,
         only: Option<&str>,
+        scope: &str,
     ) -> String {
         let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
         let yes = |key: &str| row.get(key).and_then(Value::as_bool).unwrap_or(false);
@@ -642,7 +950,7 @@ impl QueuePage {
         if let Some(decision) = row.get("decision").filter(|d| !d.is_null()) {
             children.push_str(&decision_element(decision));
         } else if decide {
-            children.push_str(&self.decide_element(id, proposal, state, only));
+            children.push_str(&self.decide_element(id, proposal, state, only, scope));
         }
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -660,6 +968,7 @@ impl QueuePage {
         proposal: Option<&str>,
         state: &str,
         only: Option<&str>,
+        scope: &str,
     ) -> String {
         let iri = finding_iri(id);
         let (Some(severities), Some(decisions)) = (
@@ -728,7 +1037,8 @@ impl QueuePage {
                 ("id", id),
                 ("state", state),
                 ("repo", only.unwrap_or("")),
-                ("rows-url", &rows_url(&state_query(state, only))),
+                ("scope", scope),
+                ("rows-url", &rows_url(&query(state, only, scope))),
                 ("required", flag(proposal.is_none())),
             ],
             &options,
@@ -972,15 +1282,10 @@ impl Endpoint for Badge {
                 inv.request.verb
             )));
         }
-        let (kind, text, count, activity, rev) = match read_depth(inv).await {
+        let (kind, mut title, activity, rev) = match read_depth(inv).await {
             Ok(status) => (
                 depth_kind(&status),
                 depth_sentence(&status).to_string(),
-                status
-                    .get("waiting")
-                    .and_then(Value::as_u64)
-                    .map(|n| n.to_string())
-                    .unwrap_or_default(),
                 depth_activity(&status),
                 depth_rev(&status),
             ),
@@ -994,19 +1299,45 @@ impl Endpoint for Badge {
             // findings list has changed, so the list is left alone. A stale list beside a red
             // badge is honest; a list that re-fetches every ten seconds because the badge is
             // broken is a second failure on top of the first.
-            Err(e) => (
-                "error",
-                format!("{e}"),
-                "!".to_string(),
-                None,
-                String::new(),
-            ),
+            Err(e) => ("error", format!("{e}"), None, String::new()),
         };
+
+        // ★★ THE TWO NUMBERS (ledger #496): how many findings are waiting for a HUMAN, split
+        // the way the Queue page splits them — the serious ones it asks about, and the rest
+        // it only counts. The request depth (tuples waiting for a PASS) stays in the sentence
+        // and in the colour; it is the liveness half and it is unchanged.
+        //
+        // ⚠ The cost, stated: one findings read per readable root per poll, on top of the
+        // depth read. Measured 2026-09-21 over the socket at 40ms for the largest root (156
+        // pending rows), so seven roots are well inside a ten-second cadence; a root count
+        // an order of magnitude larger is when this wants a count face on the findings
+        // resource rather than a row read, which is browse's to offer.
+        let counts = pending_counts(&self.web, inv).await;
+        // An idle, empty request queue with serious findings waiting is not `empty`: the
+        // dim style says "nothing for anyone", and there is something for someone.
+        let kind = if kind == "empty" && counts.serious > 0 {
+            "count"
+        } else {
+            kind
+        };
+        title.push(' ');
+        title.push_str(&counts.sentence());
+        // ★ The two counts join the revision, and that closes a gap the old one had: a
+        // finding minted by ANOTHER process, or decided from another tab, moved nothing in
+        // this server's own counters and so never refreshed the list. A pending count is a
+        // fact about the store, whoever wrote it.
+        let rev = if rev.is_empty() {
+            rev
+        } else {
+            format!("{rev}.{}.{}", counts.serious, counts.other)
+        };
+        let (count, other) = (counts.serious.to_string(), counts.other.to_string());
         let mut attributes = vec![
             ("view", "queue-badge"),
             ("kind", kind),
             ("count", count.as_str()),
-            ("title", text.as_str()),
+            ("other", other.as_str()),
+            ("title", title.as_str()),
         ];
         if let Some(activity) = activity {
             attributes.push(("activity", activity));
@@ -1028,14 +1359,17 @@ impl Endpoint for Badge {
         Description::new("gonk-queue-badge")
             .title("The review queue's depth, for the header")
             .summary(
-                "One number, one state word and one revision, polled by the Queue link in \
-                 the header. It renders `urn:iki:gonk:review:depth` and adds nothing to it \
-                 but a colour — and it is a LIVENESS signal rather than a count: a queue \
-                 that is armed and not empty with nothing in flight is a dead watcher, and a \
-                 pass shorter than the poll interval still reports itself, because the \
-                 window the activity is measured over is the interval itself. The revision \
-                 is what the Queue page's findings list refreshes on, so there is one \
-                 cadence on this server and not two.",
+                "Two numbers, one state word and one revision, polled by the Queue link in \
+                 the header. The numbers are what is waiting for a HUMAN: findings in the \
+                 serious set `gonk.queue.serious` names (plus any unrated), and the rest — \
+                 minted and counted, not queued. The colour, the spark and the tooltip's \
+                 first sentence render `urn:iki:gonk:review:depth` unchanged, and that half \
+                 is a LIVENESS signal rather than a count: a queue that is armed and not \
+                 empty with nothing in flight is a dead watcher, and a pass shorter than \
+                 the poll interval still reports itself, because the window the activity is \
+                 measured over is the interval itself. The revision is what the Queue \
+                 page's findings list refreshes on, so there is one cadence on this server \
+                 and not two.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -1046,16 +1380,29 @@ impl Endpoint for Badge {
 }
 
 /// What the filter MATCHED and what the page DREW, which are different numbers.
-fn count_sentence(matched: usize, drawn: usize, state: &str, chosen: &[String]) -> String {
-    let scope = match chosen {
+fn count_sentence(
+    matched: usize,
+    drawn: usize,
+    state: &str,
+    chosen: &[String],
+    scope: &str,
+) -> String {
+    let where_ = match chosen {
         [one] => one.clone(),
         many => format!("{} repositories", many.len()),
     };
+    // ⚠ "serious" is the SCOPE's name on the count, not a claim about every row in it: an
+    // unrated row and a decided row of any word are listed under it too.
+    let serious = if scope == SCOPE_SERIOUS {
+        "serious "
+    } else {
+        ""
+    };
     if drawn < matched {
-        format!("showing the first {drawn} of {matched} {state} findings in {scope}")
+        format!("showing the first {drawn} of {matched} {serious}{state} findings in {where_}")
     } else {
         format!(
-            "{matched} {state} finding{} in {scope}",
+            "{matched} {serious}{state} finding{} in {where_}",
             if matched == 1 { "" } else { "s" }
         )
     }
@@ -1069,12 +1416,18 @@ fn flag(yes: bool) -> &'static str {
     }
 }
 
-/// `state=pending` or `state=pending&repo=x` — the query both URLs carry.
-fn state_query(state: &str, repo: Option<&str>) -> String {
-    match repo {
-        Some(repo) if !repo.is_empty() => format!("state={state}&repo={repo}"),
-        _ => format!("state={state}"),
+/// `state=pending`, `state=pending&repo=x`, `state=pending&severity=all` — the query both
+/// URLs carry. The default scope is left OUT, so a URL narrowed to the serious set is the
+/// plain one and only the widened page says so.
+fn query(state: &str, repo: Option<&str>, scope: &str) -> String {
+    let mut out = format!("state={state}");
+    if let Some(repo) = repo.filter(|r| !r.is_empty()) {
+        out.push_str(&format!("&repo={repo}"));
     }
+    if scope != SCOPE_SERIOUS {
+        out.push_str(&format!("&{SCOPE_ARG}={scope}"));
+    }
+    out
 }
 
 fn page_url(query: &str) -> String {
@@ -1087,10 +1440,10 @@ fn rows_url(query: &str) -> String {
 
 /// The query a self-refresh repeats: the filter AND the row bound this request was made
 /// with, so a refresh shows what the human is already looking at rather than the default.
-fn refresh_query(state: &str, repo: Option<&str>, limit: Option<&str>) -> String {
+fn refresh_query(state: &str, repo: Option<&str>, scope: &str, limit: Option<&str>) -> String {
     match limit.map(str::trim).filter(|l| !l.is_empty()) {
-        Some(limit) => format!("{}&limit={limit}", state_query(state, repo)),
-        None => state_query(state, repo),
+        Some(limit) => format!("{}&limit={limit}", query(state, repo, scope)),
+        None => query(state, repo, scope),
     }
 }
 
@@ -1166,6 +1519,19 @@ impl Endpoint for QueuePage {
                          (default {ROWS})"
                     )),
             )
+            .input(
+                ArgSpec::new(SCOPE_ARG)
+                    .optional()
+                    .class(XSD_STRING)
+                    .one_of([SCOPE_SERIOUS, SCOPE_ALL])
+                    .default_value(SCOPE_SERIOUS)
+                    .summary(
+                        "which rows ask for a decision: `serious` — the set \
+                         `gonk.queue.serious` names, plus any unrated row — or `all`. The \
+                         rest are minted, anchored and counted either way; they are just not \
+                         queued.",
+                    ),
+            )
             .input(web::as_html_arg())
             .output("text/html")
     }
@@ -1201,6 +1567,7 @@ impl Endpoint for Decide {
         })?;
         let state = take("_state").unwrap_or_else(|| "pending".to_string());
         let repo = take("_repo");
+        let scope = take("_severity");
         let target = finding_iri(&id);
         let target_iri = Iri::parse(&target).map_err(|e| Error::InvalidArgument {
             name: "id".to_string(),
@@ -1268,6 +1635,7 @@ impl Endpoint for Decide {
             state: Some(state),
             repo,
             limit: None,
+            scope,
         };
         rows.body(inv, &params, Some((flash.0, flash.1.as_str())))
             .await

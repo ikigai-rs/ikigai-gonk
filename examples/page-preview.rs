@@ -123,6 +123,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         browse_roots: roots.iter().map(|(name, _)| name.clone()).collect(),
         passkeys: Arc::new(Passkeys::new(quic::Layout::in_config_home(&config), 1060)),
         rules: rules::DEFAULT_RULES.into(),
+        queue: ikigai_gonk::config::QueuePolicy::default(),
     });
     // ⚠ The watcher is dropped with this function, so the previewed pages are a SNAPSHOT.
     // That is what a file on disk is anyway.

@@ -121,6 +121,7 @@
 //! commits to one file while the queue waits collapse to one pass over the final state,
 //! which is exactly what a person clicking `review` would get.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -584,7 +585,24 @@ pub struct Passes {
     pub last_end_ms: Option<u64>,
     /// How long it took.
     pub last_ms: Option<u64>,
+    /// How many findings the DERIVED passes of this run minted, by the severity word the
+    /// model wrote (an unrated finding counts under [`UNRATED`]). Archive hits are left out:
+    /// they replay labels an earlier pass chose, and the number this feeds exists to watch
+    /// the labels a model is choosing NOW ([`Status::serious_share_percent`]).
+    pub by_severity: BTreeMap<String, u64>,
 }
+
+impl Passes {
+    /// Every finding minted by a derived pass this run.
+    pub fn findings(&self) -> u64 {
+        self.by_severity.values().sum()
+    }
+}
+
+/// The key an unrated finding is tallied under — a finding whose `severity` the model left
+/// null. Not a severity word, and never one the contract could declare (it is not in the
+/// menu), so it cannot collide with a real label.
+pub const UNRATED: &str = "unrated";
 
 #[derive(Debug, Default)]
 struct Record {
@@ -594,6 +612,7 @@ struct Record {
     failed: u64,
     last_end_ms: Option<u64>,
     last_ms: Option<u64>,
+    by_severity: BTreeMap<String, u64>,
 }
 
 impl Activity {
@@ -634,10 +653,11 @@ impl Activity {
             failed: record.failed,
             last_end_ms: record.last_end_ms,
             last_ms: record.last_ms,
+            by_severity: record.by_severity.clone(),
         }
     }
 
-    fn settle(&self, began_ms: u64, ok: bool) {
+    fn settle(&self, began_ms: u64, ok: bool, labels: &[String]) {
         let mut record = self.record.lock().unwrap_or_else(|e| e.into_inner());
         record.in_flight_since_ms = None;
         let end = now_ms();
@@ -647,6 +667,9 @@ impl Activity {
             record.succeeded += 1;
         } else {
             record.failed += 1;
+        }
+        for label in labels {
+            *record.by_severity.entry(label.clone()).or_insert(0) += 1;
         }
     }
 }
@@ -665,18 +688,58 @@ pub struct Pass {
 
 impl Pass {
     /// Record an answer. Anything else — including a panic-free early return — is a failure.
-    pub fn succeeded(mut self) {
+    pub fn succeeded(self) {
+        self.succeeded_with(&[]);
+    }
+
+    /// Record an answer AND the severity words of the findings it minted, one entry per
+    /// finding ([`UNRATED`] for a finding the model left unrated). What
+    /// [`Status::serious_share_percent`] is computed from.
+    pub fn succeeded_with(mut self, labels: &[String]) {
         self.settled = true;
-        self.activity.settle(self.began_ms, true);
+        self.activity.settle(self.began_ms, true, labels);
     }
 }
 
 impl Drop for Pass {
     fn drop(&mut self) {
         if !self.settled {
-            self.activity.settle(self.began_ms, false);
+            self.activity.settle(self.began_ms, false, &[]);
         }
     }
+}
+
+/// The severity words of the findings a pass's JSON answer says it minted — one per row of
+/// `annotations` (browse's `included_for_ids` over the pass's own `minted` set), [`UNRATED`]
+/// where the model wrote none. Empty for an archive HIT (`derived: false`): those rows were
+/// labelled by an earlier pass, possibly an earlier run, and counting them again would let a
+/// replayed file move a number that exists to watch what the model is labelling now.
+///
+/// ⚠ Read from the answer this pass already holds, never from a second query: the pass
+/// declares browse read and net and nothing else, and it must not grow a read it would then
+/// have to declare. An answer that is not JSON in this shape tallies nothing — the pass still
+/// succeeded; only this count is silent, and `passes_succeeded` beside a `findings_this_run`
+/// that never moves is how that would show.
+pub fn minted_labels(answer: &[u8]) -> Vec<String> {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(answer) else {
+        return Vec::new();
+    };
+    if json.get("derived").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    json.get("annotations")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(
+                    |row| match row.get("severity").and_then(serde_json::Value::as_str) {
+                        Some(word) if !word.trim().is_empty() => word.trim().to_string(),
+                        _ => UNRATED.to_string(),
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Wall clock in milliseconds since the epoch.
@@ -775,9 +838,11 @@ impl Endpoint for PassEndpoint {
         let tuple = parse_tuple(bytes)?;
         let request = review_request(&tuple.repo, &tuple.path)?;
         // ★ THE ONE CALL. Nothing before it builds a prompt; nothing after it touches a
-        // finding. The review's own answer is the answer, whole.
+        // finding. The review's own answer is the answer, whole — and the severity words in
+        // it are tallied for the depth's serious share (ledger #496), read off the answer
+        // rather than asked for again.
         let answer = inv.issue(request).await?;
-        pass.succeeded();
+        pass.succeeded_with(&minted_labels(&answer.bytes));
         Ok(answer)
     }
 
@@ -846,7 +911,16 @@ impl Endpoint for PassEndpoint {
 /// owner-only socket, which is the door a person drains it through. [`DEPTH`] is the one
 /// reading of this tree that a network caller can get, and it is deliberately a different
 /// authority: see [`DepthEndpoint`].
-pub fn space(trigger: &Trigger, activity: Arc<Activity>, armed: bool) -> Vec<Arc<dyn Space>> {
+///
+/// `policy` is what the depth reads the serious share against — the same
+/// `gonk.queue.serious` the Queue page narrows to, so "serious" means one thing on this
+/// server ([`crate::config::QueuePolicy`]).
+pub fn space(
+    trigger: &Trigger,
+    activity: Arc<Activity>,
+    armed: bool,
+    policy: crate::config::QueuePolicy,
+) -> Vec<Arc<dyn Space>> {
     let queue = Arc::new(trigger.clone());
     vec![
         Arc::new(
@@ -863,6 +937,7 @@ pub fn space(trigger: &Trigger, activity: Arc<Activity>, armed: bool) -> Vec<Arc
                         trigger: Some(queue),
                         activity,
                         armed,
+                        policy,
                     },
                 ),
         ) as Arc<dyn Space>,
@@ -1260,9 +1335,40 @@ pub struct Status {
     pub armed: bool,
     /// What this process has spent on passes.
     pub passes: Passes,
+    /// The serious set (`gonk.queue.serious`) the share below is read against.
+    pub policy: crate::config::QueuePolicy,
 }
 
 impl Status {
+    /// Findings minted by derived passes this run that carry a serious word.
+    pub fn serious(&self) -> u64 {
+        self.passes
+            .by_severity
+            .iter()
+            .filter(|(word, _)| self.policy.is_serious(word))
+            .map(|(_, n)| n)
+            .sum()
+    }
+
+    /// The serious share of this run's minted findings, as a whole percentage — `None` until
+    /// a derived pass has minted anything.
+    ///
+    /// # ★ Why a queue that filters on a label reports this number
+    ///
+    /// Severity is SELF-REPORTED by the model, and ledger
+    /// [#449](http://localhost:1060/l/default/item/449) measured that a prompt asking for
+    /// "major or worse" moved the serious share 27% → 62% by RE-LABELLING, not by finding
+    /// more. Gating the Queue page on the word ([#496](http://localhost:1060/l/default/item/496))
+    /// makes the word load-bearing, so the share becomes the tripwire: it was 27–33% on the
+    /// incumbent model and 42% on q8 ([#491](http://localhost:1060/l/default/item/491)), and a
+    /// jump with no model or prompt change is the label inflating — re-examine the gate, do
+    /// not celebrate the number. The other defence is negative and lives nowhere in this crate
+    /// on purpose: nothing gonk renders or sends can tell a pass that only serious findings get
+    /// read.
+    pub fn serious_share_percent(&self) -> Option<u64> {
+        let all = self.passes.findings();
+        (all > 0).then(|| self.serious() * 100 / all)
+    }
     /// One sentence, and it is the sentence a human reads to tell a SLOW queue from a STUCK
     /// one.
     ///
@@ -1334,6 +1440,16 @@ impl Status {
                  watcher thread is gone, and only a restart of this server brings it back.",
             );
         }
+        // The serious share, only once there is one: "0 of 0" is not a number a person can
+        // read anything into, and the sentence is already long.
+        if let Some(percent) = self.serious_share_percent() {
+            let all = self.passes.findings();
+            out.push_str(&format!(
+                " {all} finding{} minted this run, {} serious ({percent}%).",
+                if all == 1 { "" } else { "s" },
+                self.serious()
+            ));
+        }
         out
     }
 
@@ -1374,6 +1490,13 @@ impl Status {
                 .map(|end| now_ms.saturating_sub(end)),
             "last_pass_ms": self.passes.last_ms,
             "stuck": self.stuck(),
+            // ★ The serious share (ledger #496): the tripwire for a label that inflates
+            // under a gate that reads it. See `serious_share_percent`.
+            "findings_this_run": self.passes.findings(),
+            "serious_this_run": self.serious(),
+            "serious_share_percent": self.serious_share_percent(),
+            "findings_by_severity": self.passes.by_severity,
+            "serious": self.policy.serious,
         })
         .to_string()
     }
@@ -1435,6 +1558,8 @@ pub struct DepthEndpoint {
     pub activity: Arc<Activity>,
     /// Whether [`arm`] ran in this process.
     pub armed: bool,
+    /// The serious set the share is read against (`gonk.queue.serious`).
+    pub policy: crate::config::QueuePolicy,
 }
 
 impl DepthEndpoint {
@@ -1444,6 +1569,7 @@ impl DepthEndpoint {
             depth: depth(self.trigger.as_deref()),
             armed: self.armed,
             passes: self.activity.snapshot(),
+            policy: self.policy.clone(),
         }
     }
 }

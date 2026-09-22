@@ -156,7 +156,14 @@
           <xsl:attribute name="class">spark <xsl:value-of select="@activity"/></xsl:attribute>
         </span>
       </xsl:if>
-      <xsl:value-of select="@count"/>
+      <!-- Two numbers (ledger #496): findings waiting for a human in the serious set, and
+           the rest — minted and counted, not queued. Both computed in src/queue.rs; the
+           tooltip's sentence says which is which, so the split is readable and not only
+           visible. -->
+      <span class="serious"><xsl:value-of select="@count"/></span>
+      <xsl:if test="@other">
+        <span class="other"><xsl:text>+</xsl:text><xsl:value-of select="@other"/></span>
+      </xsl:if>
     </span>
   </xsl:template>
 
@@ -284,6 +291,14 @@
         <nav class="filters" aria-label="Pipeline state">
           <xsl:apply-templates select="view:state"/>
         </nav>
+        <!-- The scope (ledger #496): the serious set the page asks about, or everything. The
+             serious words in the label are the CONFIGURATION's, passed through from Rust —
+             this file still spells no severity. -->
+        <xsl:if test="view:scope">
+          <nav class="filters scope" aria-label="Severity">
+            <xsl:apply-templates select="view:scope"/>
+          </nav>
+        </xsl:if>
       </header>
       <xsl:apply-templates select="view:intray"/>
       <xsl:apply-templates select="view:flash"/>
@@ -291,6 +306,7 @@
         <p class="note posture"><xsl:value-of select="@posture-text"/></p>
       </xsl:if>
       <xsl:apply-templates select="view:denied"/>
+      <xsl:apply-templates select="view:hidden"/>
       <xsl:if test="@empty = 'true'">
         <p class="empty"><xsl:value-of select="@empty-text"/></p>
       </xsl:if>
@@ -327,6 +343,32 @@
       <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
       <xsl:value-of select="@name"/>
     </a>
+  </xsl:template>
+
+  <xsl:template match="view:scope">
+    <a hx-target="#queue" hx-swap="outerHTML">
+      <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@rows-url"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:attribute name="data-scope"><xsl:value-of select="@name"/></xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+      <xsl:value-of select="@label"/>
+    </a>
+  </xsl:template>
+
+  <!-- The rows the serious gate left out, SAID rather than silently absent (ledger #496):
+       how many, which words, and the one link that lists them. -->
+  <xsl:template match="view:hidden">
+    <p class="note hidden-rows">
+      <xsl:value-of select="."/>
+      <xsl:text> </xsl:text>
+      <a hx-target="#queue" hx-swap="outerHTML">
+        <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:attribute name="hx-get"><xsl:value-of select="@rows-url"/></xsl:attribute>
+        <xsl:attribute name="hx-push-url"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:value-of select="@label"/>
+      </a>
+    </p>
   </xsl:template>
 
   <!-- The trigger's intray depth, which no other face has. ⚠ Four kinds, and three of
@@ -420,6 +462,9 @@
       <input type="hidden" name="id"><xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute></input>
       <input type="hidden" name="_state"><xsl:attribute name="value"><xsl:value-of select="@state"/></xsl:attribute></input>
       <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
+      <!-- The scope the human was looking at, so the re-render after a decision keeps it
+           (ledger #496). `_severity` is the page argument; `severity` below is the rating. -->
+      <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
       <label class="decide-severity">
         <xsl:text>Severity</xsl:text>
         <select name="severity">
