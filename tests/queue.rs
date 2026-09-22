@@ -563,6 +563,87 @@ INSERT DATA {{ GRAPH <{graph}> {{
     .expect("the browse graph's write token plants the finding");
 }
 
+/// ★ Ledger #496's other half, through this server's own adapter: a file page asked for as
+/// HTML carries `proposals=` = the contract's severity set less the serious words, so a
+/// pending finding BELOW the gate is drawn beside its line as a proposal and one AT the gate
+/// is not — it is the queue's. Both findings are planted; neither is published; the words are
+/// read from the contract, never spelled here.
+#[test]
+fn the_file_page_through_the_adapter_draws_the_other_severities_as_proposals() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let policy = QueuePolicy::default();
+    let declared = queue::check_serious(&door, &policy).expect("the contract's words");
+    let others = queue::other_severities(&declared, &policy);
+    let (serious, other) = (policy.serious[0].as_str(), others[0].as_str());
+    plant_finding(
+        &door,
+        &reviewer(),
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        Some(serious),
+        "for the queue",
+    );
+    plant_finding(
+        &door,
+        &reviewer(),
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(other),
+        "for the page",
+    );
+
+    let read = |command: &str| {
+        let answer = issue(
+            &door,
+            Verb::Source,
+            ikigai_gonk::k::K_IRI,
+            &[("c", command)],
+            &onlooker(),
+        )
+        .unwrap_or_else(|e| panic!("`{command}`: {e}"));
+        String::from_utf8(answer.bytes).expect("utf-8")
+    };
+
+    // The HTML face: the other severity is a proposal, the serious one is not on this page.
+    let html = read("source urn:repo:demo:file:src/lib.rs as=text/html");
+    assert!(
+        html.contains("browse-proposals"),
+        "no proposals panel: {html}"
+    );
+    assert!(
+        html.contains(&format!("browse-proposal-{other}")),
+        "{other} not drawn: {html}"
+    );
+    assert!(
+        html.contains("proposal-bbbbbbbbbbbbbbbbbbbbbbbb"),
+        "the planted {other} finding is missing"
+    );
+    assert!(
+        !html.contains("proposal-aaaaaaaaaaaaaaaaaaaaaaaa"),
+        "a {serious} finding was drawn as a proposal — that is the queue's"
+    );
+    assert!(
+        !html.contains("browse-annotation-marker-proposal") || !html.contains("decision="),
+        "no decision form on the file page"
+    );
+
+    // The caller's own choice wins over gonk's complement.
+    let chosen = read(&format!(
+        "source urn:repo:demo:file:src/lib.rs as=text/html proposals={serious}"
+    ));
+    assert!(
+        chosen.contains("proposal-aaaaaaaaaaaaaaaaaaaaaaaa"),
+        "an explicit proposals= was overridden"
+    );
+    assert!(!chosen.contains("proposal-bbbbbbbbbbbbbbbbbbbbbbbb"));
+
+    // The default face is untouched: no argument is added to anything but an HTML file page.
+    let plain = read("source urn:repo:demo:file:src/lib.rs");
+    assert!(
+        !plain.contains("proposals ("),
+        "the text face grew a proposals section unasked: {plain}"
+    );
+}
+
 /// The severity this fixture proposes. ⚠ Not a member of a list held here: it is read back
 /// out of the contract by [`a_planted_finding_renders_the_contracts_menu_and_publishes`]
 /// before it is used, so this constant cannot disagree with the closed set.

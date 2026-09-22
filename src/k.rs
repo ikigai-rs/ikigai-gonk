@@ -223,29 +223,61 @@ impl KAdapter {
     /// representation the resource produced (its media type, its bytes, its golden threads).
     async fn source(&self, inv: &Invocation<'_>, command: Command) -> Result<Representation> {
         self.check_declared(&command, Verb::Source)?;
+        // ★ Pending findings drawn on the FILE page (ledger
+        // [#496](http://localhost:1060/l/default/item/496)). Brian: "Show everything other
+        // than critical and major as annotations on the file page" — and, the same day,
+        // "auto-publish nothing, keep it as proposals." So on the ONE command that asks
+        // browse for a file page as HTML, gonk adds `proposals=<words>`: the finding
+        // contract's severity set less `gonk.queue.serious`, read from the contract at call
+        // time ([`crate::queue::proposal_words`]) — never a list held here. browse 0.7.0
+        // draws those pending findings beside their lines as proposal marks, labelled
+        // proposal and never annotation; the queue stays the place for decisions.
+        //
+        // Three guards, each a refusal to guess. The caller's own `proposals=` wins (a
+        // person asking for a specific set gets it). The argument is added only when the
+        // bound browse DECLARES it — `check_declared` above refuses a caller's undeclared
+        // argument by name, and gonk holds itself to the same rule rather than sending an
+        // input a 0.6.x mount would drop in silence. And a contract that cannot be read
+        // sends nothing: a page with no proposals panel is honest, a page drawn from a
+        // guessed list is not.
+        let is_file_page_as_html = {
+            let t = command.target.as_str();
+            t.starts_with("urn:repo:")
+                && t.contains(":file:")
+                && command
+                    .args
+                    .iter()
+                    .any(|(k, v)| k == "as" && v == "text/html")
+        };
+        let caller_chose = command.args.iter().any(|(k, _)| k == "proposals");
+        let proposals = if is_file_page_as_html
+            && !caller_chose
+            && self.declares_input(&command.target, Verb::Source, "proposals")
+        {
+            crate::queue::proposal_words(&self.web.hub, &self.web.queue)
+                .filter(|words| !words.is_empty())
+                .map(|words| words.join(","))
+        } else {
+            None
+        };
         let mut request = Request::new(Verb::Source, command.target);
         for (name, value) in command.args {
             request = request.with_arg(name, ArgRef::Inline(value.into_bytes()));
         }
-        // ★ SEAM — pending findings drawn on the FILE page (ledger
-        // [#496](http://localhost:1060/l/default/item/496)). Brian asked for everything
-        // below the serious set to be shown as annotations on the file page instead of
-        // queued. That page is `ikigai-browse`'s face (`file_html` renders PUBLISHED
-        // annotations only; a pending finding never reaches it), and a parallel browse arc
-        // is adding an opt-in argument to it — `proposals=<severity words>` — that draws
-        // pending findings of the named severities as proposal marks. The words gonk would
-        // send are the COMPLEMENT of `gonk.queue.serious` against the finding contract's own
-        // set: `crate::queue::other_severities(&declared, &self.web.queue)`, with `declared`
-        // from `crate::queue::check_serious` — never a list held here.
-        //
-        // When browse publishes it, this is where gonk adds that argument to a
-        // `source urn:repo:{root}:file:{path} as=text/html` command from a caller who may read
-        // findings (`urn:cap:browse:read:*`), and nowhere else: the page is the one place a
-        // person reads suggestions, beside the code they are about, and the queue stays the
-        // place for decisions. ⚠ Not wired against 0.6.1, which does not declare it — and
-        // `check_declared` above is what makes wiring it early SAFE rather than silent: an
-        // argument the bound browse does not declare is refused here by name, never dropped.
+        if let Some(words) = proposals {
+            request = request.with_arg("proposals", ArgRef::Inline(words.into_bytes()));
+        }
         inv.issue(request).await
+    }
+
+    /// Whether the target's own contract declares `name` as an input of `verb` — the
+    /// question [`Self::check_declared`] asks of a caller's arguments, asked of gonk's own.
+    fn declares_input(&self, target: &Iri, verb: Verb, name: &str) -> bool {
+        self.web
+            .hub
+            .describe(target)
+            .and_then(|d| d.action_specs().into_iter().find(|spec| spec.verb == verb))
+            .is_some_and(|spec| spec.inputs.iter().any(|input| input.name == name))
     }
 
     /// `sink <iri> [k=v …]` — the annotation family only.
