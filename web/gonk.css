@@ -294,6 +294,11 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .decision.published { border-left-color: var(--ok); }
 .decision-line { margin: 0; font-weight: 600; }
 .decision-note { margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The prior-decision mark (ledger #475): quiet, but not a note — it changes what the form
+ * beside it means, so it keeps the text colour and a left rule rather than the muted tone. */
+.prior-decision { margin: 0.4rem 0 0; padding: 0.2rem 0.75rem; border-left: 4px solid var(--accent); font-size: 0.95em; }
+.prior-note { white-space: pre-wrap; overflow-wrap: anywhere; }
+.prior-twin { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; opacity: 0.7; }
 .minted { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8em; overflow-wrap: anywhere; }
 .decide { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: flex-end; margin: 0.5rem 0 0; }
 .decide label { display: flex; flex-direction: column; gap: 0.2rem; }

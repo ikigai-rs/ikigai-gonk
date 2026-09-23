@@ -423,10 +423,25 @@
         <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
       </xsl:if>
       <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
+      <xsl:apply-templates select="view:prior"/>
       <xsl:apply-templates select="view:decision"/>
       <xsl:apply-templates select="view:decide"/>
       <xsl:apply-templates select="view:no-form"/>
     </li>
+  </xsl:template>
+
+  <!-- A like claim on this line was already declined (ledger #475). The mark is information
+       beside the same form: the second decision is one click, and a DIFFERENT claim on a
+       declined line is visibly different, which withholding could never show. The reason
+       is optional because most declines carry none. -->
+  <xsl:template match="view:prior">
+    <p class="prior-decision">
+      <xsl:text>a like claim on this line was </xsl:text><xsl:value-of select="@outcome"/>
+      <xsl:text> as </xsl:text><xsl:value-of select="@severity"/>
+      <xsl:text> · </xsl:text><xsl:value-of select="@at"/>
+      <xsl:if test="view:note"><xsl:text>: </xsl:text><span class="prior-note"><xsl:value-of select="view:note"/></span></xsl:if>
+      <xsl:text> · </xsl:text><span class="prior-twin"><xsl:value-of select="@twin-id"/></span>
+    </p>
   </xsl:template>
 
   <!-- A decision already taken. ★ It is final: the form is gone, and the line says what
