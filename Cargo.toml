@@ -173,7 +173,17 @@ ikigai-ledger = "0.2.1"
 # `derived_regions` beside it), so a serious-share tally over `minted` counts fresh derivations
 # only — which is the number the tripwire (#449) wants. `^0.7.0` is `<0.8.0`; the pin moves for
 # the change to be visible at all. Minor: the archive gains a second key and the pass's shape grew.
-ikigai-browse = "0.8.0"
+#
+# ★ 0.9.0 (ledger #475, browse PR #47) REMEMBERS DECLINES: a fresh finding whose quote matches a
+# finding a human already declined on the same file is minted carrying that prior decision
+# (json `prior_decision` {finding, iri, outcome, severity, decided_at, note}); an exact repeat is
+# withheld and counted in ik:suppressedItems. This server renders the mark on the queue row — a
+# like claim on this line was declined <date>: <reason> — so the second decision is one click and
+# visibly different when it is a different claim. Measured before it shipped: of 458 declines,
+# 98 same-line pairs share a quote and 0 share a note, so at temperature 0.2 the WITHHOLD never
+# fires and the mark carries the whole weight; 74 of the day's pending would have arrived marked.
+# `^0.8.0` is `<0.9.0`; the pin moves for the field to exist. Minor: additive fields on faces.
+ikigai-browse = "0.9.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

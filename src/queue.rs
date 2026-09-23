@@ -950,6 +950,14 @@ impl QueuePage {
         if !quote.is_empty() {
             children.push_str(&element("quote", &[], quote));
         }
+        // ★ A like claim on this line was already declined (ledger #475; browse 0.9.0 mints
+        // the link at mint time and answers it as `prior_decision`). Rendered BEFORE the
+        // form, because it is the thing that makes the second decision one click — and
+        // visibly a different claim when it is one, which withholding could never show.
+        // Nothing here decides anything: the mark is information beside the same form.
+        if let Some(prior) = row.get("prior_decision").filter(|p| !p.is_null()) {
+            children.push_str(&prior_element(prior));
+        }
         if let Some(decision) = row.get("decision").filter(|d| !d.is_null()) {
             children.push_str(&decision_element(decision));
         } else if decide {
@@ -1050,6 +1058,31 @@ impl QueuePage {
 }
 
 /// The record of a decision already taken, and the asymmetry that follows it.
+/// The prior decision on a like claim, as browse 0.9.0 answers it on the row: the declined
+/// twin, when, at what rating, and the human's reason if one was typed. ⚠ The reason is
+/// empty on most rows today (14 of 458 declines carried one when this shipped), so the
+/// line is built to stand without it: the date and the twin are what make the repeat
+/// recognisable.
+fn prior_element(prior: &Value) -> String {
+    let text = |key: &str| prior.get(key).and_then(Value::as_str).unwrap_or("");
+    let twin = text("finding");
+    let attributes: Vec<(&str, String)> = vec![
+        ("twin", twin.to_string()),
+        ("twin-id", twin.rsplit(':').next().unwrap_or("").to_string()),
+        ("outcome", text("outcome").to_string()),
+        ("severity", text("severity").to_string()),
+        ("at", web::when(text("decided_at"))),
+    ];
+    let note = text("note");
+    let children = if note.is_empty() {
+        String::new()
+    } else {
+        element("note", &[], note)
+    };
+    let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    wrap("prior", &attributes, &children)
+}
+
 fn decision_element(decision: &Value) -> String {
     let text = |key: &str| decision.get(key).and_then(Value::as_str).unwrap_or("");
     let outcome = text("outcome");

@@ -644,6 +644,75 @@ fn the_file_page_through_the_adapter_draws_the_other_severities_as_proposals() {
     );
 }
 
+/// ★ Ledger #475 on the page: a pending finding that browse 0.9.0 minted as a like claim to
+/// one a human already declined renders the prior decision on its row — outcome, rating,
+/// date, and the twin — beside the same form. The twin's decision is made through the real
+/// Sink so its node has the shape browse reads back; the link is the triple browse mints.
+#[test]
+fn a_like_claim_to_a_declined_finding_arrives_marked_on_the_queue_row() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let declared = queue::check_serious(&door, &QueuePolicy::default()).expect("words");
+    let word = declared[0].as_str();
+    let twin = "cccccccccccccccccccccccc";
+    let fresh = "dddddddddddddddddddddddd";
+    plant_finding(
+        &door,
+        &reviewer(),
+        twin,
+        Some(word),
+        "the first time this was raised",
+    );
+    issue(
+        &door,
+        Verb::Sink,
+        &format!("urn:iki:finding:{twin}"),
+        &[("decision", "decline"), ("severity", word)],
+        &reviewer(),
+    )
+    .expect("a human declines the twin");
+    plant_finding(
+        &door,
+        &reviewer(),
+        fresh,
+        Some(word),
+        "the same claim, raised again",
+    );
+    let graph = browse::Graph::chosen()
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+    let link = format!(
+        "PREFIX prov: <http://www.w3.org/ns/prov#>\nINSERT DATA {{ GRAPH <{graph}> {{ \
+         <urn:iki:finding:{fresh}> prov:wasInfluencedBy <urn:iki:finding:{twin}:decision> . }} }}"
+    );
+    issue(
+        &door,
+        Verb::Sink,
+        "urn:iki:store:graph-update",
+        &[("graph", &graph), ("content", &link)],
+        &reviewer(),
+    )
+    .expect("the link browse mints at mint time");
+
+    let html = page(&door, &[("state", "pending")], &reviewer());
+    assert!(
+        html.contains("a like claim on this line was declined"),
+        "the prior decision is not on the row: {html}"
+    );
+    assert!(html.contains(twin), "the twin is not named: {html}");
+    assert!(
+        html.contains("prior-decision") && html.contains("class='decide'"),
+        "the mark must sit BESIDE the form, not replace it: {html}"
+    );
+    let declined = page(&door, &[("state", "declined")], &reviewer());
+    assert!(
+        !declined.contains("a like claim on this line"),
+        "the twin itself carries no prior: {declined}"
+    );
+}
+
 /// The severity this fixture proposes. ⚠ Not a member of a list held here: it is read back
 /// out of the contract by [`a_planted_finding_renders_the_contracts_menu_and_publishes`]
 /// before it is used, so this constant cannot disagree with the closed set.
