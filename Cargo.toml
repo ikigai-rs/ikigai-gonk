@@ -163,7 +163,17 @@ ikigai-ledger = "0.2.1"
 # ⚠ `^0.6.0` is `<0.7.0`, so the pin had to move for the change to be visible at all — rule 5's
 # second half, the same as 0.5.0 -> 0.6.0 above. Minor because it is a new argument on a public
 # face; nothing stored, named or gated moved.
-ikigai-browse = "0.7.0"
+#
+# ★ 0.8.0 (ledger #481, browse PR #46) is the REGION MEMO: a pass re-derives only the regions of a
+# file whose bytes moved and CARRIES the existing finding records on the rest — same ids, same
+# pending/declined state, re-anchored — so a doc-comment commit to a 180 KB file queues the findings
+# of one region, not twelve (measured on the ledger's own case: 61 -> 15). This server is where
+# that number is felt: the queue grew by 141 and then 134 from single commits on 2026-09-21. ⚠ The
+# json face's `minted` now means what THIS pass minted (`carried`, `memo_regions`,
+# `derived_regions` beside it), so a serious-share tally over `minted` counts fresh derivations
+# only — which is the number the tripwire (#449) wants. `^0.7.0` is `<0.8.0`; the pin moves for
+# the change to be visible at all. Minor: the archive gains a second key and the pass's shape grew.
+ikigai-browse = "0.8.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
