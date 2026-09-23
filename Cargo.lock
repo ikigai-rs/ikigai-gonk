@@ -536,7 +536,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -992,9 +992,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-browse"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba9ee5aa954a7937b62cca246339038462223d93923c8355e417ac28b0992877"
+checksum = "aa0da2b737133fbb0e972edbe805b8de64e914d869805925923b3d0dd3df7960"
 dependencies = [
  "async-trait",
  "ikigai-a11y",
@@ -1533,7 +1533,6 @@ dependencies = [
  "oxrdfio",
  "oxrocksdb-sys",
  "oxsdatatypes",
- "rand 0.8.8",
  "rand 0.9.5",
  "rustc-hash",
  "siphasher",
@@ -1581,7 +1580,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxsdatatypes",
- "rand 0.8.8",
+ "rand 0.9.5",
  "sha2 0.11.0",
  "thiserror",
 ]
@@ -1937,7 +1936,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2173,7 +2172,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2434,7 +2433,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "oxsdatatypes",
- "rand 0.8.8",
+ "rand 0.9.5",
  "regex",
  "rustc-hash",
  "sha1",
@@ -2455,7 +2454,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "peg",
- "rand 0.8.8",
+ "rand 0.9.5",
  "thiserror",
 ]
 
@@ -2466,7 +2465,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "973ee503ab3d6c3de66b4b459233cd5b22b44dad0fb7b8d0931daf73d2ede935"
 dependencies = [
  "oxrdf",
- "rand 0.8.8",
+ "rand 0.9.5",
  "spargebra",
 ]
 
@@ -2599,7 +2598,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2942,7 +2941,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

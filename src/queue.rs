@@ -239,6 +239,15 @@ pub fn other_severities(declared: &[String], policy: &crate::config::QueuePolicy
         .collect()
 }
 
+/// The words gonk sends browse as `proposals=`: the contract's own severity set less the
+/// configured serious words — read from the contract at call time, so a browse release that
+/// renames a word changes what is sent without anything here being edited. `None` when the
+/// contract cannot be read, and the caller sends nothing rather than a guess (ledger #496).
+pub fn proposal_words(hub: &Kernel, policy: &crate::config::QueuePolicy) -> Option<Vec<String>> {
+    one_of(hub, &finding_iri(PROBE_ID), Verb::Sink, "severity")
+        .map(|declared| other_severities(&declared, policy))
+}
+
 // ------------------------------------------------------------------ the contract
 
 /// The closed set a resource's own contract declares for one argument of one verb — the
@@ -595,13 +604,7 @@ impl QueuePage {
         // The words the gate leaves out, from the CONTRACT rather than a list: the finding
         // Sink's own severity set less the configured serious words. `None` when the contract
         // cannot be read, in which case the sentence says "other" and names nothing.
-        let others = one_of(
-            &self.web.hub,
-            &finding_iri(PROBE_ID),
-            Verb::Sink,
-            "severity",
-        )
-        .map(|declared| other_severities(&declared, policy));
+        let others = proposal_words(&self.web.hub, policy);
 
         let matched: usize = read
             .iter()

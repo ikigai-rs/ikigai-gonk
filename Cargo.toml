@@ -151,7 +151,19 @@ ikigai-ledger = "0.2.1"
 # other host served browse's markup unstyled (ledger #441) and this door rendered a tree as a
 # cascade of gonk-chrome chips. `crate::k` links it beside `urn:repo:style`; without 0.4.2 that
 # link is a 404, which makes this the one pin here that a page would visibly miss.
-ikigai-browse = "0.6.0"
+#
+# ★ 0.7.0 (ledger #496, browse PR #45) is the release whose file face takes `proposals=<severity
+# words>` and draws PENDING findings of those severities beside their lines as proposal marks —
+# labelled proposal, never annotation, nothing published. It is the other half of this server's
+# serious-only queue (PR #34): the queue asks a human about critical and major, and the rest are
+# shown where the code is. `crate::k` sends the complement of `gonk.queue.serious` against the
+# finding contract on the one command that asks for a file page as HTML, and only when the bound
+# browse declares the argument — so this pin is the floor for that whole behaviour: on 0.6.x the
+# argument is undeclared, gonk sends nothing, and the page simply has no proposals panel.
+# ⚠ `^0.6.0` is `<0.7.0`, so the pin had to move for the change to be visible at all — rule 5's
+# second half, the same as 0.5.0 -> 0.6.0 above. Minor because it is a new argument on a public
+# face; nothing stored, named or gated moved.
+ikigai-browse = "0.7.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
