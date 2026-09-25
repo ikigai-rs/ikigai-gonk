@@ -299,6 +299,14 @@
             <xsl:apply-templates select="view:scope"/>
           </nav>
         </xsl:if>
+        <!-- The batch view (ledger #506): one entry per group kind, the words the findings
+             contract's own `group` set declares, in its order — this file spells none. -->
+        <xsl:if test="view:kind">
+          <nav class="filters kinds" aria-label="Decide in batches">
+            <span class="filters-label">decide in batches:</span>
+            <xsl:apply-templates select="view:kind"/>
+          </nav>
+        </xsl:if>
       </header>
       <xsl:apply-templates select="view:intray"/>
       <xsl:apply-templates select="view:flash"/>
@@ -307,6 +315,7 @@
       </xsl:if>
       <xsl:apply-templates select="view:denied"/>
       <xsl:apply-templates select="view:hidden"/>
+      <xsl:apply-templates select="view:folded"/>
       <xsl:if test="@empty = 'true'">
         <p class="empty"><xsl:value-of select="@empty-text"/></p>
       </xsl:if>
@@ -332,7 +341,155 @@
       <ol class="findings">
         <xsl:apply-templates select="view:finding"/>
       </ol>
+      <xsl:apply-templates select="view:no-form"/>
+      <xsl:apply-templates select="view:batch"/>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:kind">
+    <a hx-target="#queue" hx-swap="outerHTML">
+      <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@rows-url"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+      <xsl:value-of select="@name"/>
+    </a>
+  </xsl:template>
+
+  <!-- A group that repeated a later kind's proposal, said rather than silently dropped. -->
+  <xsl:template match="view:folded">
+    <p class="note folded"><xsl:value-of select="."/></p>
+  </xsl:template>
+
+  <!-- ★ One batch: a form over one proposed group — or, in the twin-carrying view, over every
+       group at once, each member with its own twin's word. The members are SHOWN and each
+       carries its own box; nothing is decided until the button, and only ticked boxes are
+       sent. ⚠ There is no publish here, and no decision field at all: the adapter declines,
+       and refuses any other decision by name. -->
+  <xsl:template match="view:batch">
+    <form class="batch" method="post">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:attribute name="data-key"><xsl:value-of select="@key"/></xsl:attribute>
+      <input type="hidden" name="_group"><xsl:attribute name="value"><xsl:value-of select="@group"/></xsl:attribute></input>
+      <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
+      <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
+      <xsl:apply-templates select="view:group"/>
+      <xsl:if test="@decide = 'true'">
+        <div class="batch-decide">
+          <xsl:if test="view:reason-option">
+            <label class="batch-word">
+              <xsl:text>Reason, for every ticked finding</xsl:text>
+              <select name="reason" required="required">
+                <xsl:apply-templates select="view:reason-option"/>
+              </select>
+            </label>
+          </xsl:if>
+          <button type="submit" hx-target="#queue" hx-swap="outerHTML" hx-include="closest form">
+            <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+            <xsl:attribute name="class"><xsl:value-of select="@button-class"/></xsl:attribute>
+            <xsl:value-of select="@button-label"/>
+          </button>
+        </div>
+      </xsl:if>
+    </form>
+  </xsl:template>
+
+  <xsl:template match="view:group">
+    <section class="group">
+      <h2 class="group-label">
+        <xsl:choose>
+          <xsl:when test="@browse-href">
+            <a><xsl:attribute name="href"><xsl:value-of select="@browse-href"/></xsl:attribute><xsl:value-of select="@label"/></a>
+          </xsl:when>
+          <xsl:otherwise><xsl:value-of select="@label"/></xsl:otherwise>
+        </xsl:choose>
+      </h2>
+      <xsl:apply-templates select="view:twin"/>
+      <ol class="findings group-members">
+        <xsl:apply-templates select="view:kept"/>
+        <xsl:apply-templates select="view:member"/>
+      </ol>
+    </section>
+  </xsl:template>
+
+  <!-- The declined twin's decision line: what a human already said about this claim. -->
+  <xsl:template match="view:twin">
+    <p class="prior-decision twin">
+      <xsl:text>the like claim on this line was </xsl:text><xsl:value-of select="@outcome"/>
+      <xsl:if test="@reason"><xsl:text> (</xsl:text><span class="reason-word"><xsl:value-of select="@reason"/></span><xsl:text>)</xsl:text></xsl:if>
+      <xsl:text> as </xsl:text><xsl:value-of select="@severity"/>
+      <xsl:text> · </xsl:text><xsl:value-of select="@at"/>
+      <xsl:if test="view:note"><xsl:text>: </xsl:text><span class="prior-note"><xsl:value-of select="view:note"/></span></xsl:if>
+      <xsl:text> · </xsl:text><span class="prior-twin"><xsl:value-of select="@twin-id"/></span>
+    </p>
+  </xsl:template>
+
+  <!-- The row a group proposes to KEEP (the oldest of reworded repeats on one line): shown
+       above the members, unticked and locked, so the person sees what survives the batch. -->
+  <xsl:template match="view:kept">
+    <li class="finding member kept">
+      <label class="member-tick">
+        <input type="checkbox" disabled="disabled"/>
+        <span class="badge final">kept</span>
+      </label>
+      <xsl:call-template name="member-card"/>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:member">
+    <li class="finding member">
+      <label class="member-tick">
+        <input type="checkbox" name="member">
+          <xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute>
+          <xsl:choose>
+            <xsl:when test="@tickable = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:when>
+            <xsl:otherwise><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:otherwise>
+          </xsl:choose>
+          <xsl:attribute name="aria-label">include <xsl:value-of select="@where"/> in this batch</xsl:attribute>
+        </input>
+      </label>
+      <xsl:call-template name="member-card"/>
+      <xsl:if test="@untickable">
+        <p class="note warn"><xsl:value-of select="@untickable"/></p>
+      </xsl:if>
+      <!-- The member's OWN word, in the twin-carrying view: its twin's, pre-selected. An
+           empty first option means the twin had none, and the batch is refused until one is
+           picked or this box is unticked. -->
+      <xsl:if test="@reason-name">
+        <label class="batch-word member-word">
+          <xsl:text>Reason</xsl:text>
+          <select>
+            <xsl:attribute name="name"><xsl:value-of select="@reason-name"/></xsl:attribute>
+            <xsl:apply-templates select="view:reason-option"/>
+          </select>
+        </label>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <xsl:template name="member-card">
+    <div class="finding-head">
+      <span>
+        <xsl:attribute name="class">badge sev <xsl:value-of select="@severity"/></xsl:attribute>
+        <xsl:value-of select="@severity-label"/>
+      </span>
+      <xsl:if test="@orphaned = 'true'"><span class="badge warn">orphaned</span></xsl:if>
+      <xsl:choose>
+        <xsl:when test="@browse-href">
+          <a class="finding-where">
+            <xsl:attribute name="href"><xsl:value-of select="@browse-href"/></xsl:attribute>
+            <xsl:value-of select="@where"/>
+          </a>
+        </xsl:when>
+        <xsl:otherwise><span class="finding-where"><xsl:value-of select="@where"/></span></xsl:otherwise>
+      </xsl:choose>
+    </div>
+    <p class="finding-body"><xsl:value-of select="view:body"/></p>
+    <xsl:if test="view:quote">
+      <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
+    </xsl:if>
+    <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
+    <xsl:apply-templates select="view:prior"/>
   </xsl:template>
 
   <xsl:template match="view:state">
@@ -544,6 +701,11 @@
     <option>
       <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
       <xsl:if test="@title != ''"><xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute></xsl:if>
+      <!-- The batch pickers (ledger #506) pre-select the group's suggested word, or an empty
+           placeholder that cannot be submitted when there is none. The single-finding picker
+           carries neither attribute. -->
+      <xsl:if test="@selected = 'true'"><xsl:attribute name="selected">selected</xsl:attribute></xsl:if>
+      <xsl:if test="@placeholder = 'true'"><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:if>
       <xsl:value-of select="@label"/>
     </option>
   </xsl:template>

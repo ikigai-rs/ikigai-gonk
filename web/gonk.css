@@ -313,7 +313,27 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .decide-why-word { min-width: 8rem; }
 .reason-word { font-weight: 600; }
 
+/* The batch view (ledger #506). The kind nav sits under the scope nav; each proposed group is
+ * a bordered block whose members carry a box in the gutter, and the one button sits under
+ * them with its word. No new token here either. */
+.filters.kinds { margin-top: 0.35rem; font-size: 0.9em; }
+.filters-label { opacity: 0.8; margin-right: 0.2rem; }
+.folded { opacity: 0.85; }
+.batch { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+.group + .group { margin-top: var(--gap); }
+.group-label { font-size: 1rem; margin: 0 0 0.4rem; overflow-wrap: anywhere; }
+.member { display: grid; grid-template-columns: auto 1fr; column-gap: 0.6rem; }
+.member > :not(.member-tick) { grid-column: 2; }
+.member-tick { grid-row: 1 / span 6; display: flex; flex-direction: column; align-items: center; gap: 0.25rem; padding-top: 0.15rem; }
+.member-tick input { width: 1.15rem; height: 1.15rem; }
+.member.kept { opacity: 0.85; }
+.batch-decide { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: flex-end; margin: 0.6rem 0 0.2rem; }
+.batch-word { display: flex; flex-direction: column; gap: 0.2rem; }
+.batch-word select { min-width: 10rem; }
+.member-word { margin: 0.4rem 0 0; }
+
 @media (max-width: 40rem) {
   .decide { flex-direction: column; align-items: stretch; }
   .decide-reason { flex: 1 1 auto; }
+  .batch-decide { flex-direction: column; align-items: stretch; }
 }

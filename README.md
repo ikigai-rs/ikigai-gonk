@@ -191,6 +191,7 @@ run it (`web::CROSS_GRAPH`).
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, or one annotation |
 | `/queue` · `/queue/rows` | `urn:iki:gonk:page:queue` · `…:fragment:queue` | the review queue, and the section it swaps |
 | `POST /queue/decide` | `urn:iki:gonk:queue:decide` | one human decision on one finding |
+| `POST /queue/batch` | `urn:iki:gonk:queue:batch` | one batch decline, one decision per ticked finding |
 | `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
@@ -275,6 +276,7 @@ and prefetches nothing; the rest is the resource's economics, not the door's.
 ```sh
 open http://127.0.0.1:1060/queue                      # what is pending, in triage order
 open 'http://127.0.0.1:1060/queue?state=published'    # what was published, and who rated it what
+open 'http://127.0.0.1:1060/queue?group=file'         # decide in batches — a kind the contract declares
 ```
 
 Since `ikigai-browse` 0.5.0 a review pass no longer mints annotations. It produces **pending
@@ -332,6 +334,22 @@ and the stylesheet to it, with the contract as the oracle. ⚠ When a contract c
 rides on the decision node. That is what makes *"is this reviewer calibrated?"* a query rather
 than an impression, and it is why `published` and `declined` are states on this page rather
 than clutter swept off it.
+
+★ **Decide in batches** (ledger [#506](http://localhost:1060/l/default/item/506), `ikigai-browse`
+0.12.0). The machine PROPOSES groups of pending findings — the kinds are the findings face's own
+`group` set, read from the contract like every other menu here — and the page shows one kind at
+a time, each group's members listed and ticked, each box one click to untick. Nothing is decided
+until the button: a batch is one ordinary `Sink urn:iki:finding:{id} decision=decline
+reason=<word>` per ticked member, under the caller's own capability, reported as "Declined N of
+M" with each failure named. **A batch decline needs a reason word**; the group's suggestion is
+pre-selected, never applied unpressed, and a batch with no word is refused whole before anything
+is written. The kind whose groups carry a declined TWIN is the exception (Brian, 2026-09-25):
+every one of its groups sits in one form and each member is pre-set to its own twin's word — a
+twin with no word leaves that member's picker empty and the batch refused until it is picked.
+Members are filtered to the serious set under the default scope and the counts are gonk's; a
+doc file's comment-shaped and whole-file groups are the same proposal and are shown once.
+**Publish is not batchable** — a bulk publish is the one act that would write to what other
+readers see.
 
 ⚠ **A decision is final, and the page says what undoing one would be.** An identical repeat is
 a no-op; anything that would change the record is refused naming what is on file. There is

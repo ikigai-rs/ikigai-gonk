@@ -140,6 +140,12 @@
       return sel.value !== initial;
     };
     if (Array.prototype.some.call(queue.querySelectorAll("select"), changed)) return true;
+    // A box the person has unticked (or ticked) in a batch (ledger #506) is a decision in
+    // progress too: a refresh would put every box back the way the server drew it.
+    const flipped = (box) => box.checked !== box.defaultChecked;
+    if (Array.prototype.some.call(queue.querySelectorAll("input[type=checkbox]"), flipped)) {
+      return true;
+    }
     return Array.prototype.some.call(queue.querySelectorAll("textarea"), (t) => t.value !== "");
   }
 

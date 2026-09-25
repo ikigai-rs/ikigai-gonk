@@ -242,6 +242,14 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
                 web: Arc::clone(&web),
             },
         )
+        // The batch decline (ledger #506) — see [`crate::batch`]. The same shape as the single
+        // decision: a form adapter over the finding Sink, under the caller's capability.
+        .bind(
+            Exact::new(crate::batch::BATCH_IRI),
+            crate::batch::Batch {
+                web: Arc::clone(&web),
+            },
+        )
         // The header's live depth badge — see [`crate::queue::Badge`].
         .bind(
             Exact::new(crate::queue::BADGE_IRI),
@@ -1027,6 +1035,12 @@ fn bad_form(detail: String) -> Error {
 
 /// `application/x-www-form-urlencoded` → ordered pairs. A repeated name keeps its LAST value.
 pub(crate) fn form(body: &str) -> BTreeMap<String, String> {
+    form_pairs(body).into_iter().collect()
+}
+
+/// The same body as EVERY pair, in order, repeats kept — for a form whose checkboxes share
+/// one name (`member=a&member=b`), which [`form`]'s map would collapse to the last box ticked.
+pub(crate) fn form_pairs(body: &str) -> Vec<(String, String)> {
     let decode = |s: &str| {
         let bytes = s.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());

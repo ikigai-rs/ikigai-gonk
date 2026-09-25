@@ -198,7 +198,16 @@ ikigai-ledger = "0.2.1"
 # pending tracks the CODE instead of the commit history. `superseded` joins the findings face's
 # `state` one_of, which this server reads for its state tabs — no other change here. It does not
 # feed the recurrence mark (a superseded twin is not a decision). `^0.10.0` is `<0.11.0`.
-ikigai-browse = "0.11.0"
+# ★ 0.12.0 (ledger #506, browse PR #50) PROPOSES GROUPS: `urn:repo:{repo}:findings group=<kind>`
+# answers the pending set as groups a human decides once — the kinds are the argument's `one_of`,
+# each group carries a suggested reason word, the recurrence group its declined twin, the
+# near-duplicate group the row proposed to keep. It decides nothing and adds no Sink: the Queue's
+# batch view (`crate::queue::Batch`) fans a batch out to the existing finding Sink, one ordinary
+# decision per member. On 0.11.x the argument is undeclared, the kind menu reads `None`, and the
+# page renders no batch view at all — which is why this is the floor. `^0.11.0` is `<0.12.0`; the
+# pin moves for the argument to exist. Minor: an additive optional input and a new json shape
+# under it.
+ikigai-browse = "0.12.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

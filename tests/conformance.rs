@@ -286,13 +286,14 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 18] = [
+const WEB_IDS: [&str; 19] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
     "gonk-page-queue",
     "gonk-fragment-queue",
     "gonk-queue-decide",
+    "gonk-queue-batch",
     "gonk-queue-badge",
     "gonk-page-home",
     "gonk-page-ledger",
@@ -441,6 +442,22 @@ fn the_http_door_conforms() {
              the kernel refuse it under no grants before the target was ever consulted. The \
              face a successful decision serves is exercised where a browse root exists, by \
              `tests/queue.rs::a_planted_finding_renders_the_contracts_menu_and_publishes`",
+        )
+        // The batch decline (ledger #506), on the same terms as the single decision above: no
+        // browse family is bound here, so its target is absent; what IS observable is that the
+        // action declares `urn:cap:annotate`, and ENFORCED sees the kernel refuse it first.
+        .fixture(
+            Fixture::new("gonk-queue-batch", Verb::Sink)
+                .arg("content", "member=0123456789abcdef01234567&reason=whenever"),
+        )
+        .opt_out_check(
+            "gonk-queue-batch",
+            Check::Outputs,
+            "every call this adapter makes is `Sink urn:iki:finding:{id}`, and this composition \
+             binds NO browse family, so the minimal resolution is a typed NotFound rather than \
+             a face. Its action declares `urn:cap:annotate` and the browse wildcard, so ENFORCED \
+             saw the kernel refuse it under no grants. The face a batch serves is exercised \
+             where a browse root exists, by `tests/queue.rs`'s batch tests",
         )
         .fixture(Fixture::new("gonk-page-item", Verb::Source).binding("id", &a))
         .fixture(Fixture::new("gonk-fragment-item", Verb::Source).binding("id", &a))

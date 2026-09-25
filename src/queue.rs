@@ -6,6 +6,9 @@
 //! /queue/decide   urn:iki:gonk:queue:decide    Sink    one human decision
 //! ```
 //!
+//! `?group=<kind>` on either Source is the BATCH view instead of the rows — see
+//! [`crate::batch`] (ledger [#506](http://localhost:1060/l/default/item/506)).
+//!
 //! Ledger [#444](http://localhost:1060/l/default/item/444). `ikigai-browse` 0.5.0 stopped a
 //! review pass from minting annotations: a pass produces **pending findings**, and
 //! `Sink urn:iki:finding:{id} decision=publish` is the only path into the
@@ -160,7 +163,7 @@ pub const NEWS_EVENT: &str = "gonk:news";
 
 /// The finding family's own name — the Sink a decision reaches, and the description the
 /// menu is rendered from. Taken one id at a time (`{prefix}{id}`), never guessed.
-const FINDING_PREFIX: &str = "urn:iki:finding:";
+pub(crate) const FINDING_PREFIX: &str = "urn:iki:finding:";
 
 /// The finding Sink's one-word decline reason (browse 0.10.0). Its WORDS are the contract's
 /// ([`one_of_with_meanings`]); only the argument's name is ours.
@@ -171,13 +174,13 @@ pub const REASON_ARG: &str = "reason";
 /// rule in the `reason` summary ("only with decision=decline") and REFUSES a word beside any
 /// other decision, so this is what the adapter checks before forwarding one and what the form
 /// hangs the picker beside.
-const REASONED_DECISION: &str = "decline";
+pub(crate) const REASONED_DECISION: &str = "decline";
 
 /// The picker's empty first option: "no reason", which browse reads as omitted.
 const NO_REASON_LABEL: &str = "why? (optional)";
 
 /// The machine face this module asks every resource it reads for.
-const JSON: &str = "application/json";
+pub(crate) const JSON: &str = "application/json";
 
 /// How many rows a page draws before it stops and says so.
 ///
@@ -201,7 +204,7 @@ pub const SCOPE_ALL: &str = "all";
 /// `ikigai-browse` and the description is the template's, identical for every id, so this
 /// names no finding and reads nothing from the store — the same trick
 /// [`crate::trigger::review_probe_iri`] uses on the review.
-const PROBE_ID: &str = "000000000000000000000000";
+pub(crate) const PROBE_ID: &str = "000000000000000000000000";
 
 /// The finding contract's severity set, with every word of the policy checked against it.
 ///
@@ -355,12 +358,12 @@ fn meaning(summary: &str, word: &str) -> Option<String> {
 }
 
 /// The findings resource for one root.
-fn findings_iri(root: &str) -> String {
+pub(crate) fn findings_iri(root: &str) -> String {
     format!("urn:repo:{root}:findings")
 }
 
 /// One finding's own resource.
-fn finding_iri(id: &str) -> String {
+pub(crate) fn finding_iri(id: &str) -> String {
     format!("{FINDING_PREFIX}{id}")
 }
 
@@ -376,7 +379,7 @@ fn finding_iri(id: &str) -> String {
 /// only a read grant gets a queue of findings, no buttons, and nothing on the page saying
 /// why; the layers that actually enforce this refuse at submit time, which is too late to
 /// be an explanation.
-fn can_decide(inv: &Invocation<'_>) -> bool {
+pub(crate) fn can_decide(inv: &Invocation<'_>) -> bool {
     inv.capability.allows(ikigai_browse::CAP_ANNOTATE)
 }
 
@@ -409,15 +412,18 @@ enum Rows {
 
 /// What narrows a rendering: the three values both entrances agree on.
 #[derive(Default)]
-struct Params {
+pub(crate) struct Params {
     /// Which part of the pipeline — validated against the findings contract, not here.
-    state: Option<String>,
+    pub(crate) state: Option<String>,
     /// One configured root, or every readable one.
-    repo: Option<String>,
+    pub(crate) repo: Option<String>,
     /// How many rows to draw.
-    limit: Option<String>,
+    pub(crate) limit: Option<String>,
     /// [`SCOPE_SERIOUS`] (the default) or [`SCOPE_ALL`] — the `severity` argument.
-    scope: Option<String>,
+    pub(crate) scope: Option<String>,
+    /// A group kind (ledger #506): the batch view instead of the rows — validated against
+    /// the findings contract's own `group` set, never against a list here.
+    pub(crate) group: Option<String>,
 }
 
 impl Params {
@@ -429,13 +435,14 @@ impl Params {
             repo: arg("repo"),
             limit: arg("limit"),
             scope: arg(SCOPE_ARG),
+            group: arg(crate::batch::GROUP_ARG),
         }
     }
 }
 
 /// Which rows the page asks about: `?severity=serious` (the default, the configured set) or
 /// `?severity=all`.
-fn scope_wanted(asked: Option<&str>) -> Result<&'static str> {
+pub(crate) fn scope_wanted(asked: Option<&str>) -> Result<&'static str> {
     match asked.map(str::trim) {
         None | Some("") | Some(SCOPE_SERIOUS) => Ok(SCOPE_SERIOUS),
         Some(SCOPE_ALL) => Ok(SCOPE_ALL),
@@ -489,7 +496,7 @@ async fn read_findings(inv: &Invocation<'_>, root: &str, state: &str) -> Rows {
 
 /// Whether a human has already answered this row — a published or declined finding carries
 /// its decision, and the gate does not apply to it.
-fn decided(row: &Value) -> bool {
+pub(crate) fn decided(row: &Value) -> bool {
     row.get("decision").is_some_and(|d| !d.is_null())
 }
 
@@ -500,7 +507,7 @@ fn decided(row: &Value) -> bool {
 /// arm is belt-and-braces for a row that omits the derived field — and the comment is the
 /// point: the gate reads the EFFECTIVE word, so a human re-rating is what decides once one
 /// exists. Today none does (0 of 371 pending rows differed on 2026-09-21).
-fn rated(row: &Value) -> Option<&str> {
+pub(crate) fn rated(row: &Value) -> Option<&str> {
     row.get("effective_severity")
         .and_then(Value::as_str)
         .or_else(|| row.get("severity").and_then(Value::as_str))
@@ -562,7 +569,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>) -> Counts {
 }
 
 /// `a`, `a or b`, `a, b or c`.
-fn join_or(words: &[String]) -> String {
+pub(crate) fn join_or(words: &[String]) -> String {
     match words {
         [] => String::new(),
         [one] => one.clone(),
@@ -577,7 +584,7 @@ impl QueuePage {
     /// section after a write and its invocation carries the FORM, not a query string — and
     /// `Invocation` has no reborrow that swaps the request (only `with_bindings`). Threading
     /// the values is what keeps one renderer serving both entrances.
-    async fn body(
+    pub(crate) async fn body(
         &self,
         inv: &Invocation<'_>,
         params: &Params,
@@ -625,6 +632,37 @@ impl QueuePage {
                 _ => asked.to_string(),
             },
         };
+
+        // ★ The batch view (ledger #506): the same page, one group kind at a time, instead of
+        // the rows. The kinds are the findings resource's own `group` set, read from its
+        // contract like the states above — this crate spells none of them.
+        let kinds = roots.first().and_then(|root| {
+            one_of(
+                &self.web.hub,
+                &findings_iri(root),
+                Verb::Source,
+                crate::batch::GROUP_ARG,
+            )
+        });
+        if let Some(kind) =
+            crate::batch::kind_wanted(params.group.as_deref(), kinds.as_deref(), &state)?
+        {
+            return crate::batch::section(
+                self,
+                inv,
+                crate::batch::Frame {
+                    kind: &kind,
+                    kinds: kinds.as_deref().unwrap_or_default(),
+                    states: states.as_deref(),
+                    only: only.as_deref(),
+                    scope,
+                    chosen: &chosen,
+                    no_roots: roots.is_empty(),
+                    flash,
+                },
+            )
+            .await;
+        }
 
         let mut read: Vec<(String, Rows)> = Vec::new();
         for root in &chosen {
@@ -727,6 +765,9 @@ impl QueuePage {
                     "",
                 ));
             }
+        }
+        if let Some(kinds) = &kinds {
+            children.push_str(&crate::batch::kind_nav(kinds, None, only.as_deref(), scope));
         }
         for (root, rows) in &read {
             if let Rows::Failed(why) = rows {
@@ -916,7 +957,7 @@ impl QueuePage {
     /// watcher. Both render as "12 waiting" if only the number is printed, and exactly one
     /// of them needs a person. So the trigger's own [`crate::trigger::Status`] writes the
     /// sentence and this only chooses the word the stylesheet colours it by.
-    async fn intray_element(&self, inv: &Invocation<'_>) -> String {
+    pub(crate) async fn intray_element(&self, inv: &Invocation<'_>) -> String {
         match read_depth(inv).await {
             Ok(status) => element(
                 "intray",
@@ -1153,7 +1194,7 @@ impl QueuePage {
 /// one was typed. ⚠ Both are empty on most rows today (14 of 458 declines carried a note when
 /// 0.9.0 shipped, and none can carry a word from before 0.10.0), so the line is built to stand
 /// without them: the date and the twin are what make the repeat recognisable.
-fn prior_element(prior: &Value) -> String {
+pub(crate) fn prior_element(prior: &Value) -> String {
     let text = |key: &str| prior.get(key).and_then(Value::as_str).unwrap_or("");
     let twin = text("finding");
     let mut attributes: Vec<(&str, String)> = vec![
@@ -1227,7 +1268,7 @@ fn decision_label(value: &str) -> &str {
 }
 
 /// Where a finding came from, in one line.
-fn provenance(row: &Value) -> String {
+pub(crate) fn provenance(row: &Value) -> String {
     let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
     let mut parts: Vec<String> = Vec::new();
     match text("creator") {
@@ -1544,7 +1585,7 @@ fn count_sentence(
     }
 }
 
-fn flag(yes: bool) -> &'static str {
+pub(crate) fn flag(yes: bool) -> &'static str {
     if yes {
         "true"
     } else {
@@ -1555,7 +1596,7 @@ fn flag(yes: bool) -> &'static str {
 /// `state=pending`, `state=pending&repo=x`, `state=pending&severity=all` — the query both
 /// URLs carry. The default scope is left OUT, so a URL narrowed to the serious set is the
 /// plain one and only the widened page says so.
-fn query(state: &str, repo: Option<&str>, scope: &str) -> String {
+pub(crate) fn query(state: &str, repo: Option<&str>, scope: &str) -> String {
     let mut out = format!("state={state}");
     if let Some(repo) = repo.filter(|r| !r.is_empty()) {
         out.push_str(&format!("&repo={repo}"));
@@ -1566,11 +1607,11 @@ fn query(state: &str, repo: Option<&str>, scope: &str) -> String {
     out
 }
 
-fn page_url(query: &str) -> String {
+pub(crate) fn page_url(query: &str) -> String {
     format!("{QUEUE_PATH}?{query}")
 }
 
-fn rows_url(query: &str) -> String {
+pub(crate) fn rows_url(query: &str) -> String {
     format!("{ROWS_PATH}?{query}")
 }
 
@@ -1584,7 +1625,7 @@ fn refresh_query(state: &str, repo: Option<&str>, scope: &str, limit: Option<&st
 }
 
 /// A `urn:*` resource's page in gonk's own browse shell.
-fn browse_url(iri: &str) -> String {
+pub(crate) fn browse_url(iri: &str) -> String {
     format!("{}/{iri}", crate::k::ROOTS_PATH)
 }
 
@@ -1781,6 +1822,7 @@ impl Endpoint for Decide {
             repo,
             limit: None,
             scope,
+            group: None,
         };
         rows.body(inv, &params, Some((flash.0, flash.1.as_str())))
             .await
