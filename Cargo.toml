@@ -192,7 +192,13 @@ ikigai-ledger = "0.2.1"
 # undeclared, so the adapter would refuse the picker's field as undeclared — which is why this is
 # the floor and not merely the latest. `^0.9.0` is `<0.10.0`; the pin moves for the input to
 # exist at all. Minor: an additive optional input and additive read-back fields.
-ikigai-browse = "0.10.0"
+# ★ 0.11.0 (ledger #504, browse PR #49) BOUNDS THE QUEUE: an undecided finding is `superseded`
+# when its file's current review neither minted nor carried it. Computed on read, stored nowhere,
+# so the ~570 findings a re-review had replaced leave `state=pending` the moment this runs, and
+# pending tracks the CODE instead of the commit history. `superseded` joins the findings face's
+# `state` one_of, which this server reads for its state tabs — no other change here. It does not
+# feed the recurrence mark (a superseded twin is not a decision). `^0.10.0` is `<0.11.0`.
+ikigai-browse = "0.11.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
