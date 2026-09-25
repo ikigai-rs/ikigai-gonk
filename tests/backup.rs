@@ -244,10 +244,11 @@ fn the_backup_composition_serves_the_store_the_ledger_the_family_and_compress() 
 }
 
 /// ⚠ **`urn:time:*` is NOT in the catalog, and that is the point of the check.**
-/// `ikigai-time` is linked and the backup job runs in one of its registries, but
-/// `urn:time:schedule` fires an ARBITRARY target under the registry's own capability. Bound
-/// behind these doors it would be a way to have this server issue any request as itself, so
-/// the target set is fixed at startup by `main` instead.
+/// `ikigai-time` is linked and the backup job runs in one of its registries, but nothing here
+/// needs a caller to schedule: the target set is fixed at startup by `main`. Through
+/// ikigai-time 0.3.0 a bound `urn:time:schedule` would also have fired any target at the
+/// registry's own capability (ledger #79); 0.4.0 closes that in the crate, and this server
+/// still binds none of the control plane, because every bound endpoint is surface.
 #[test]
 fn the_timer_control_plane_is_not_served() {
     let dir = tempfile::tempdir().expect("tempdir");
