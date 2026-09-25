@@ -45,6 +45,16 @@
 //! gets "Decline"; a value this table does not know renders under its own word rather than
 //! being dropped, so a new outcome is offered the day it exists.
 //!
+//! ★ **The decline reason is the same kind of menu** (browse 0.10.0): a `reason` picker beside
+//! the Decline button, its words the finding Sink's own `one_of` in contract order, each
+//! word's meaning read out of the input's summary as the option's `title`, and an empty first
+//! option for "no reason". None of the words is written here —
+//! `tests/queue.rs::no_reason_word_is_written_down_in_this_crate` holds this file, the
+//! stylesheet and the script to that, again with the contract as the oracle. The one decision
+//! word the picker hangs off is the wording table's, and [`Decide`] forwards a word ONLY with
+//! that decision: browse refuses a reason beside a publish, and one form with two buttons is
+//! exactly how a person picks a word and then presses Publish.
+//!
 //! ⚠ **And when the contract cannot be read, no form is rendered at all** — not a fallback
 //! list. A page that invents a menu when the manifold is silent is the failure this whole
 //! approach exists to prevent, one layer up.
@@ -151,6 +161,20 @@ pub const NEWS_EVENT: &str = "gonk:news";
 /// The finding family's own name — the Sink a decision reaches, and the description the
 /// menu is rendered from. Taken one id at a time (`{prefix}{id}`), never guessed.
 const FINDING_PREFIX: &str = "urn:iki:finding:";
+
+/// The finding Sink's one-word decline reason (browse 0.10.0). Its WORDS are the contract's
+/// ([`one_of_with_meanings`]); only the argument's name is ours.
+pub const REASON_ARG: &str = "reason";
+
+/// The one decision a reason word travels with. ⚠ A decision WORD, like the two in
+/// [`decision_label`] — the wording table's, not a copy of a set: `ikigai-browse` states the
+/// rule in the `reason` summary ("only with decision=decline") and REFUSES a word beside any
+/// other decision, so this is what the adapter checks before forwarding one and what the form
+/// hangs the picker beside.
+const REASONED_DECISION: &str = "decline";
+
+/// The picker's empty first option: "no reason", which browse reads as omitted.
+const NO_REASON_LABEL: &str = "why? (optional)";
 
 /// The machine face this module asks every resource it reads for.
 const JSON: &str = "application/json";
@@ -275,18 +299,59 @@ pub fn proposal_words(hub: &Kernel, policy: &crate::config::QueuePolicy) -> Opti
 ///    decision, not an omission, and the reason this collapses to `None` with the rest is
 ///    that an open-valued input has no menu to draw either.
 pub fn one_of(hub: &Kernel, iri: &str, verb: Verb, argument: &str) -> Option<Vec<String>> {
+    let values = input_spec(hub, iri, verb, argument)?.one_of;
+    (!values.is_empty()).then_some(values)
+}
+
+/// One declared input of one verb, whole — [`one_of`]'s first four `None`s, and the
+/// summary beside the set for a caller that wants what the words MEAN.
+fn input_spec(hub: &Kernel, iri: &str, verb: Verb, argument: &str) -> Option<ArgSpec> {
     let target = Iri::parse(iri).ok()?;
-    let values = hub
-        .describe(&target)?
+    hub.describe(&target)?
         .action_specs()
         .into_iter()
         .find(|spec| spec.verb == verb)?
         .inputs
-        .iter()
-        .find(|input| input.name == argument)?
+        .into_iter()
+        .find(|input| input.name == argument)
+}
+
+/// The contract's closed set for `argument`, each word paired with what the input's own
+/// summary says it means — `None` exactly when [`one_of`] is.
+///
+/// ★ The meanings are READ, not held: `ikigai-browse` builds the `reason` summary as
+/// `…. word: meaning; word: meaning; ….` from the same constant as the set, so a word it adds
+/// arrives here with its definition. A summary that does not follow that shape costs only the
+/// hint — each word keeps its place in the menu with no meaning attached (`meaning`).
+pub fn one_of_with_meanings(
+    hub: &Kernel,
+    iri: &str,
+    verb: Verb,
+    argument: &str,
+) -> Option<Vec<(String, Option<String>)>> {
+    let spec = input_spec(hub, iri, verb, argument)?;
+    let words: Vec<(String, Option<String>)> = spec
         .one_of
-        .clone();
-    (!values.is_empty()).then_some(values)
+        .iter()
+        .map(|word| (word.clone(), meaning(&spec.summary, word)))
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
+/// What `summary` says `word` means, when it says so as `word: meaning` ended by `; ` or by
+/// the summary's own end. ⚠ The word must start a token (the start, or after a space), so a
+/// word that ends another — or the prose before the list — is not read as a definition.
+fn meaning(summary: &str, word: &str) -> Option<String> {
+    let marker = format!("{word}: ");
+    let (at, _) = summary
+        .match_indices(&marker)
+        .find(|(at, _)| *at == 0 || summary[..*at].ends_with(' '))?;
+    let rest = &summary[at + marker.len()..];
+    let text = rest[..rest.find("; ").unwrap_or(rest.len())]
+        .trim()
+        .trim_end_matches('.')
+        .trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// The findings resource for one root.
@@ -1024,8 +1089,33 @@ impl QueuePage {
                 "",
             ));
         }
+        // ★ The decline reason picker (browse 0.10.0): the contract's words, in its order,
+        // after an EMPTY option that means "no reason" — browse reads an empty `reason=` as
+        // omitted. It hangs off the Decline button, not the form, because a word is Decline's
+        // alone; the adapter drops it from any other decision ([`Decide`]). An older browse
+        // that declares no `reason` simply gets no picker — the form still decides.
+        let reasons = one_of_with_meanings(&self.web.hub, &iri, Verb::Sink, REASON_ARG);
         for value in &decisions {
-            options.push_str(&element(
+            let mut picker = String::new();
+            if let (Some(reasons), REASONED_DECISION) = (&reasons, value.as_str()) {
+                picker.push_str(&element(
+                    "reason-option",
+                    &[("value", ""), ("label", NO_REASON_LABEL), ("title", "")],
+                    "",
+                ));
+                for (word, meaning) in reasons {
+                    picker.push_str(&element(
+                        "reason-option",
+                        &[
+                            ("value", word),
+                            ("label", word),
+                            ("title", meaning.as_deref().unwrap_or("")),
+                        ],
+                        "",
+                    ));
+                }
+            }
+            options.push_str(&wrap(
                 "decision-option",
                 &[
                     ("value", value),
@@ -1038,7 +1128,7 @@ impl QueuePage {
                     // scripting-off path, so both entrances send one decision.
                     ("vals", &format!(r#"{{"decision":"{value}"}}"#)),
                 ],
-                "",
+                &picker,
             ));
         }
         wrap(
@@ -1059,20 +1149,26 @@ impl QueuePage {
 
 /// The record of a decision already taken, and the asymmetry that follows it.
 /// The prior decision on a like claim, as browse 0.9.0 answers it on the row: the declined
-/// twin, when, at what rating, and the human's reason if one was typed. ⚠ The reason is
-/// empty on most rows today (14 of 458 declines carried one when this shipped), so the
-/// line is built to stand without it: the date and the twin are what make the repeat
-/// recognisable.
+/// twin, when, at what rating, the one-word reason (browse 0.10.0) and the human's note if
+/// one was typed. ⚠ Both are empty on most rows today (14 of 458 declines carried a note when
+/// 0.9.0 shipped, and none can carry a word from before 0.10.0), so the line is built to stand
+/// without them: the date and the twin are what make the repeat recognisable.
 fn prior_element(prior: &Value) -> String {
     let text = |key: &str| prior.get(key).and_then(Value::as_str).unwrap_or("");
     let twin = text("finding");
-    let attributes: Vec<(&str, String)> = vec![
+    let mut attributes: Vec<(&str, String)> = vec![
         ("twin", twin.to_string()),
         ("twin-id", twin.rsplit(':').next().unwrap_or("").to_string()),
         ("outcome", text("outcome").to_string()),
         ("severity", text("severity").to_string()),
         ("at", web::when(text("decided_at"))),
     ];
+    // The one-word reason (browse 0.10.0), when the twin's decline stated one — `null` on
+    // every decline made before the word existed, so the line is built to stand without it.
+    let reason = text(REASON_ARG);
+    if !reason.is_empty() {
+        attributes.push((REASON_ARG, reason.to_string()));
+    }
     let note = text("note");
     let children = if note.is_empty() {
         String::new()
@@ -1107,6 +1203,10 @@ fn decision_element(decision: &Value) -> String {
             },
         ),
     ];
+    let reason = text(REASON_ARG);
+    if !reason.is_empty() {
+        attributes.push((REASON_ARG, reason.to_string()));
+    }
     if !minted.is_empty() {
         attributes.push(("minted", minted.to_string()));
         attributes.push(("minted-href", browse_url(minted)));
@@ -1121,7 +1221,7 @@ fn decision_element(decision: &Value) -> String {
 fn decision_label(value: &str) -> &str {
     match value {
         "publish" => "Publish to Gonk",
-        "decline" => "Decline",
+        REASONED_DECISION => "Decline",
         other => other,
     }
 }
@@ -1604,6 +1704,15 @@ impl Endpoint for Decide {
         let state = take("_state").unwrap_or_else(|| "pending".to_string());
         let repo = take("_repo");
         let scope = take("_severity");
+        // ⚠ **A reason word travels only with a decline.** The form is ONE form with one
+        // picker and two buttons, so a person can pick a word and then press Publish — and
+        // browse REFUSES a word beside a publish (a publish reason has no consumer). The word
+        // was chosen for the other button; dropping it here is reading the form the way the
+        // person used it, where refusing would punish a pick they had already abandoned.
+        // An empty `reason=` (the "no reason" option) is dropped by the loop below either way.
+        if fields.get("decision").map(|d| d.trim()) != Some(REASONED_DECISION) {
+            fields.remove(REASON_ARG);
+        }
         let target = finding_iri(&id);
         let target_iri = Iri::parse(&target).map_err(|e| Error::InvalidArgument {
             name: "id".to_string(),
@@ -1686,7 +1795,9 @@ impl Endpoint for Decide {
             .title("Publish or decline one finding")
             .summary(
                 "The Queue page's form adapter: an urlencoded body naming `id`, `decision` \
-                 and optionally `severity` and `content` (the human's reason), forwarded to \
+                 and optionally `severity`, `reason` (one word from the finding's own \
+                 `one_of`, forwarded ONLY with decision=decline and dropped from any other) and \
+                 `content` (the human's free-text note), forwarded to \
                  `urn:iki:finding:{id}`'s Sink under the caller's own capability and answered \
                  with the queue section re-rendered. ⚠ A refusal — a capability denial, or a \
                  second decision that would CHANGE a recorded one — is rendered into that \
@@ -1700,11 +1811,43 @@ impl Endpoint for Decide {
                     .summary("forward one decision and re-render the queue")
                     .requires(ikigai_browse::CAP_ANNOTATE)
                     .input(ArgSpec::new("content").class(XSD_STRING).summary(
-                        "the form: `id`, `decision`, optional `severity` and `content`, \
-                                 plus `_state` and `_repo` for the re-render",
+                        "the form: `id`, `decision`, optional `severity`, `reason` (decline \
+                                 only) and `content`, plus `_state` and `_repo` for the re-render",
                     ))
                     .output("text/html"),
             )
             .verb(Verb::Meta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::meaning;
+
+    /// The summary shape `ikigai-browse` builds: prose, then `word: meaning; …` to the end.
+    /// ⚠ Made-up words: the real ones are never spelled in this file.
+    const SUMMARY: &str = "why, in one word — only with one decision. Omitted = none. \
+                           alpha: the first — with a comma, and \"quotes\"; beta-gamma: a \
+                           hyphenated word; delta: the last one.";
+
+    #[test]
+    fn a_meaning_is_read_from_word_colon_to_the_next_separator() {
+        assert_eq!(
+            meaning(SUMMARY, "alpha").as_deref(),
+            Some("the first — with a comma, and \"quotes\"")
+        );
+        assert_eq!(
+            meaning(SUMMARY, "beta-gamma").as_deref(),
+            Some("a hyphenated word")
+        );
+        assert_eq!(meaning(SUMMARY, "delta").as_deref(), Some("the last one"));
+    }
+
+    #[test]
+    fn a_word_the_summary_does_not_define_has_no_meaning() {
+        assert_eq!(meaning(SUMMARY, "epsilon"), None);
+        // `gamma` ends a defined word; it is not itself defined.
+        assert_eq!(meaning(SUMMARY, "gamma"), None);
+        assert_eq!(meaning("", "alpha"), None);
     }
 }

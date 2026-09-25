@@ -399,6 +399,357 @@ fn contains_token(text: &str, word: &str) -> bool {
         .any(|token| token == word)
 }
 
+// ------------------------------------------------------------------ the decline reason
+
+/// The finding contract's decline reason words (browse 0.10.0), in contract order — the
+/// ONLY place these tests get them, so no word is spelled in this file either.
+fn reason_words(door: &Kernel) -> Vec<String> {
+    queue::one_of(
+        door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        queue::REASON_ARG,
+    )
+    .expect("the finding Sink declares its reason set")
+}
+
+/// ★ The severity guard's sibling, for the five decline reason words: the set lives in
+/// `ikigai-browse`'s own constant and reaches the page through the contract, so a copy here
+/// is the one that goes stale silently.
+///
+/// ⚠ **Two differences from the severity guard, both deliberate.**
+/// - The words carry HYPHENS, and [`contains_token`] splits on them — it would read a
+///   hyphenated word as two harmless halves and never find it. So a token here is a run of
+///   alphanumerics AND hyphens ([`contains_word`]).
+/// - The stylesheet is checked over its REVIEW-QUEUE SECTION only. The ledger item's "Close
+///   as" menu, further down the same file, is a different closed set — `ikigai-ledger`'s
+///   close reasons — and one of its words is also a decline reason. That menu is a
+///   hard-coded copy of ANOTHER crate's contract (a drift of its own, reported rather than
+///   fixed here); counting it against this set would make the guard fail for a word this
+///   arc never wrote.
+#[test]
+fn no_reason_word_is_written_down_in_this_crate() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let declared = reason_words(&door);
+    assert!(
+        declared.len() > 1,
+        "a closed set of more than one: {declared:?}"
+    );
+
+    let xsl = include_str!("../web/gonk.xsl");
+    let start = xsl
+        .find("the review queue -->")
+        .expect("the stylesheet's review-queue section marker");
+    let end = start
+        + xsl[start..]
+            .find("a ledger -->")
+            .expect("the section after the queue");
+    for (what, source) in [
+        ("src/queue.rs", include_str!("../src/queue.rs")),
+        ("web/gonk.xsl (the review queue)", &xsl[start..end]),
+        ("web/gonk.js", include_str!("../web/gonk.js")),
+    ] {
+        for word in &declared {
+            assert!(
+                !contains_word(source, word),
+                "`{what}` names the decline reason `{word}`. The set lives in ONE place \
+                 (`ikigai-browse`'s own constant, read through the contract)."
+            );
+        }
+    }
+}
+
+/// Whether `text` contains `word` as a whole token of alphanumerics and hyphens.
+fn contains_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .any(|token| token == word)
+}
+
+/// The `<select … name='reason'>` of a rendered page, whole. ⚠ The serializer writes
+/// attributes in its own order, not the stylesheet's, so the name is found first and the
+/// element's start is walked back to.
+fn reason_picker(html: &str) -> &str {
+    let named = html
+        .find(" name='reason'")
+        .unwrap_or_else(|| panic!("no reason picker on the page:\n{html}"));
+    let start = html[..named]
+        .rfind("<select")
+        .expect("the picker is a select");
+    let end = start + html[start..].find("</select>").expect("the picker closes");
+    &html[start..end]
+}
+
+/// The `value`s of a picker's options, in document order.
+fn option_values(picker: &str) -> Vec<String> {
+    picker
+        .split("<option")
+        .skip(1)
+        .map(|option| {
+            let at = option.find("value='").expect("an option carries a value") + 7;
+            option[at..at + option[at..].find('\'').expect("the value closes")].to_string()
+        })
+        .collect()
+}
+
+/// A finding's own row, as the findings resource's JSON face answers it in `state`.
+fn row(door: &Kernel, state: &str, id: &str) -> serde_json::Value {
+    let answer = issue(
+        door,
+        Verb::Source,
+        &format!("urn:repo:{ROOT}:findings"),
+        &[("as", "application/json"), ("state", state)],
+        &reviewer(),
+    )
+    .expect("the findings read");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&answer.bytes).expect("json rows");
+    rows.into_iter()
+        .find(|row| row["id"] == id)
+        .unwrap_or_else(|| panic!("no `{id}` among the {state} rows"))
+}
+
+/// One decision through gonk's own form adapter, answered with the re-rendered section.
+fn decide_by_form(door: &Kernel, body: &str) -> String {
+    let answer = issue(
+        door,
+        Verb::Sink,
+        queue::DECIDE_IRI,
+        &[("content", body)],
+        &reviewer(),
+    )
+    .expect("the adapter renders rather than returning a status");
+    String::from_utf8(answer.bytes).expect("utf-8")
+}
+
+/// ★★ **The picker IS the contract's reason menu**: an empty "no reason" option, then every
+/// declared word in contract order, each carrying its meaning from the input's summary —
+/// grouped with the Decline button and with nothing else.
+#[test]
+fn the_decline_picker_offers_the_contracts_reasons_in_order() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let reviewer = reviewer();
+    plant_pending_finding(&door, &reviewer);
+    let declared = reason_words(&door);
+
+    let html = page(&door, &[], &reviewer);
+    let picker = reason_picker(&html);
+    let mut expected = vec![String::new()];
+    expected.extend(declared.iter().cloned());
+    assert_eq!(
+        option_values(picker),
+        expected,
+        "the picker is the empty option then the contract's words, in order:\n{picker}"
+    );
+    assert!(
+        picker.contains(">why? (optional)</option>"),
+        "the empty option reads as no reason:\n{picker}"
+    );
+    // Each word's `title` is its meaning, read from the contract's own summary.
+    let summary = queue::one_of_with_meanings(
+        &door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        queue::REASON_ARG,
+    )
+    .expect("the reason set, with meanings");
+    for (word, meaning) in &summary {
+        let meaning = meaning
+            .as_deref()
+            .unwrap_or_else(|| panic!("browse 0.10.0 defines `{word}` in its summary"));
+        assert!(
+            !meaning.contains("; ") && !meaning.is_empty(),
+            "one definition per word, not the rest of the list: `{word}` = {meaning:?}"
+        );
+        let option = picker
+            .split("<option")
+            .find(|o| o.contains(&format!("value='{word}'")))
+            .expect("the word's option");
+        assert!(
+            option.contains("title="),
+            "`{word}` carries its meaning as a title:\n{option}"
+        );
+    }
+
+    // Visibly Decline's: the picker sits inside the group that holds the Decline button,
+    // and the Publish button is outside it.
+    let group_at = html.find("class='decide-why'").expect("the decline group");
+    let group = &html[group_at..group_at + html[group_at..].find("</span>").expect("closes")];
+    assert!(
+        group.contains("value='decline'") && group.contains("name='reason'"),
+        "the picker is grouped with the Decline button:\n{group}"
+    );
+    assert!(
+        !group.contains("value='publish'"),
+        "…and not with Publish:\n{group}"
+    );
+    // The free-text note stays, on both outcomes.
+    assert!(
+        html.contains("name='content'") && html.contains("kept on both outcomes"),
+        "the note is kept beside the word:\n{html}"
+    );
+}
+
+/// A decline with a word: browse stores it, the row reads it back, and the decision line
+/// renders it.
+#[test]
+fn a_decline_with_a_reason_word_reads_back_and_renders() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    plant_pending_finding(&door, &reviewer());
+    let word = reason_words(&door)[1].clone();
+
+    let answer = decide_by_form(
+        &door,
+        &format!("id={FINDING}&decision=decline&severity={SEVERITY}&reason={word}&content=a+note"),
+    );
+    assert!(
+        !answer.contains("flash error"),
+        "a declined word is accepted:\n{answer}"
+    );
+    let declined = row(&door, "declined", FINDING);
+    assert_eq!(
+        declined["decision"]["reason"], word,
+        "the word is read back: {declined}"
+    );
+    assert_eq!(declined["decision"]["note"], "a note", "{declined}");
+
+    let html = page(&door, &[("state", "declined")], &reviewer());
+    assert!(
+        html.contains(&format!(
+            "(<span class='reason-word'>{word}</span>) as {SEVERITY}"
+        )),
+        "the decision line carries the word:\n{html}"
+    );
+}
+
+/// ★ **The path a person will actually hit**: a word picked, then Publish pressed. The
+/// adapter drops the word — browse would refuse it beside a publish — and the finding
+/// publishes with no reason on file.
+#[test]
+fn a_word_picked_then_publish_still_publishes_without_it() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    plant_pending_finding(&door, &reviewer());
+    let word = reason_words(&door)[0].clone();
+
+    let answer = decide_by_form(
+        &door,
+        &format!("id={FINDING}&decision=publish&severity={SEVERITY}&reason={word}"),
+    );
+    assert!(
+        !answer.contains("flash error"),
+        "a stray pick must not turn Publish into a refusal:\n{answer}"
+    );
+    let published = row(&door, "published", FINDING);
+    assert_eq!(published["decision"]["outcome"], "published", "{published}");
+    assert!(
+        published["decision"]["reason"].is_null(),
+        "no reason travels with a publish: {published}"
+    );
+
+    // ⚠ And the drop is the ADAPTER's: the same word straight at the finding is refused, so
+    // this test would catch the adapter forwarding it.
+    plant_finding(
+        &door,
+        &reviewer(),
+        "eeeeeeeeeeeeeeeeeeeeeeee",
+        Some(SEVERITY),
+        "another claim",
+    );
+    let direct = issue(
+        &door,
+        Verb::Sink,
+        "urn:iki:finding:eeeeeeeeeeeeeeeeeeeeeeee",
+        &[
+            ("decision", "publish"),
+            ("severity", SEVERITY),
+            (queue::REASON_ARG, &word),
+        ],
+        &reviewer(),
+    );
+    assert!(
+        matches!(&direct, Err(ikigai_core::Error::InvalidArgument { name, .. }) if name == queue::REASON_ARG),
+        "browse refuses a word beside a publish: {direct:?}"
+    );
+}
+
+/// The "no reason" option: an empty `reason=` declines with nothing on file.
+#[test]
+fn a_decline_with_the_empty_option_has_no_reason() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    plant_pending_finding(&door, &reviewer());
+
+    let answer = decide_by_form(
+        &door,
+        &format!("id={FINDING}&decision=decline&severity={SEVERITY}&reason="),
+    );
+    assert!(!answer.contains("flash error"), "{answer}");
+    let declined = row(&door, "declined", FINDING);
+    assert_eq!(declined["decision"]["outcome"], "declined", "{declined}");
+    assert!(
+        declined["decision"]["reason"].is_null(),
+        "no word, no reason: {declined}"
+    );
+    let html = page(&door, &[("state", "declined")], &reviewer());
+    assert!(
+        !html.contains("reason-word"),
+        "a decline with no word renders none:\n{html}"
+    );
+}
+
+/// A like claim to a twin declined WITH a word: the mark on the fresh row names the word.
+#[test]
+fn the_prior_decision_mark_names_the_twins_reason() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let declared = queue::check_serious(&door, &QueuePolicy::default()).expect("words");
+    let severity = declared[0].as_str();
+    let word = reason_words(&door).last().expect("a reason").clone();
+    let twin = "ffffffffffffffffffffffff";
+    let fresh = "abababababababababababab";
+    plant_finding(&door, &reviewer(), twin, Some(severity), "raised once");
+    issue(
+        &door,
+        Verb::Sink,
+        &format!("urn:iki:finding:{twin}"),
+        &[
+            ("decision", "decline"),
+            ("severity", severity),
+            (queue::REASON_ARG, &word),
+        ],
+        &reviewer(),
+    )
+    .expect("a human declines the twin, with a word");
+    plant_finding(&door, &reviewer(), fresh, Some(severity), "raised again");
+    let graph = browse::Graph::chosen()
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+    let link = format!(
+        "PREFIX prov: <http://www.w3.org/ns/prov#>\nINSERT DATA {{ GRAPH <{graph}> {{ \
+         <urn:iki:finding:{fresh}> prov:wasInfluencedBy <urn:iki:finding:{twin}:decision> . }} }}"
+    );
+    issue(
+        &door,
+        Verb::Sink,
+        "urn:iki:store:graph-update",
+        &[("graph", &graph), ("content", &link)],
+        &reviewer(),
+    )
+    .expect("the link browse mints at mint time");
+
+    let html = page(&door, &[("state", "pending")], &reviewer());
+    assert!(
+        html.contains(&format!(
+            "a like claim on this line was declined (<span class='reason-word'>{word}</span>) as {severity}"
+        )),
+        "the mark names the twin's reason:\n{html}"
+    );
+}
+
 // --------------------------------------------------------------------- the intray
 
 /// ⚠ **Three answers, and two of them are not a number.** "No queue configured", "the queue

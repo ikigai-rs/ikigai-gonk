@@ -183,7 +183,16 @@ ikigai-ledger = "0.2.1"
 # 98 same-line pairs share a quote and 0 share a note, so at temperature 0.2 the WITHHOLD never
 # fires and the mark carries the whole weight; 74 of the day's pending would have arrived marked.
 # `^0.8.0` is `<0.9.0`; the pin moves for the field to exist. Minor: additive fields on faces.
-ikigai-browse = "0.9.0"
+#
+# ★ 0.10.0 (browse PR #48) gives a decline a REASON WORD: the finding Sink declares an optional
+# `reason` whose `one_of` is five words (and whose summary carries what each means), stored as a
+# term, read back as `decision.reason` / `prior_decision.reason`. The Queue's decide form draws
+# that menu from the contract beside the Decline button, and the adapter forwards `reason` only
+# with a decline, because browse REFUSES a word beside a publish. On 0.9.x the input is
+# undeclared, so the adapter would refuse the picker's field as undeclared — which is why this is
+# the floor and not merely the latest. `^0.9.0` is `<0.10.0`; the pin moves for the input to
+# exist at all. Minor: an additive optional input and additive read-back fields.
+ikigai-browse = "0.10.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

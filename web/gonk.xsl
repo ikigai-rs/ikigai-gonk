@@ -437,6 +437,7 @@
   <xsl:template match="view:prior">
     <p class="prior-decision">
       <xsl:text>a like claim on this line was </xsl:text><xsl:value-of select="@outcome"/>
+      <xsl:if test="@reason"><xsl:text> (</xsl:text><span class="reason-word"><xsl:value-of select="@reason"/></span><xsl:text>)</xsl:text></xsl:if>
       <xsl:text> as </xsl:text><xsl:value-of select="@severity"/>
       <xsl:text> · </xsl:text><xsl:value-of select="@at"/>
       <xsl:if test="view:note"><xsl:text>: </xsl:text><span class="prior-note"><xsl:value-of select="view:note"/></span></xsl:if>
@@ -451,7 +452,9 @@
     <div>
       <xsl:attribute name="class">decision <xsl:value-of select="@outcome"/></xsl:attribute>
       <p class="decision-line">
-        <xsl:value-of select="@outcome"/><xsl:text> as </xsl:text><xsl:value-of select="@severity"/><xsl:text> · </xsl:text><xsl:value-of select="@at"/>
+        <xsl:value-of select="@outcome"/>
+        <xsl:if test="@reason"><xsl:text> (</xsl:text><span class="reason-word"><xsl:value-of select="@reason"/></span><xsl:text>)</xsl:text></xsl:if>
+        <xsl:text> as </xsl:text><xsl:value-of select="@severity"/><xsl:text> · </xsl:text><xsl:value-of select="@at"/>
       </p>
       <xsl:if test="view:note">
         <p class="decision-note"><xsl:value-of select="view:note"/></p>
@@ -487,8 +490,10 @@
           <xsl:apply-templates select="view:severity-option"/>
         </select>
       </label>
+      <!-- The free-text NOTE (`content`), kept on both outcomes: the word beside Decline is
+           the category, this is anything a word cannot say. -->
       <label class="decide-reason">
-        <xsl:text>Reason — kept on both outcomes</xsl:text>
+        <xsl:text>Note — kept on both outcomes</xsl:text>
         <textarea name="content" rows="2"></textarea>
       </label>
       <div class="decide-buttons">
@@ -506,7 +511,26 @@
     </option>
   </xsl:template>
 
+  <!-- A decision button — and, for the one decision that takes a reason word, the picker
+       grouped WITH it, so the word visibly belongs to Decline and not to the form. The
+       words, their order and their meanings (`title`) arrive from src/queue.rs, which reads
+       them from the finding contract; this file spells none of them. The adapter drops a
+       word sent with any other decision, so a pick followed by Publish still publishes. -->
   <xsl:template match="view:decision-option">
+    <xsl:choose>
+      <xsl:when test="view:reason-option">
+        <span class="decide-why">
+          <xsl:call-template name="decide-button"/>
+          <select name="reason" class="decide-why-word" aria-label="reason word, optional">
+            <xsl:apply-templates select="view:reason-option"/>
+          </select>
+        </span>
+      </xsl:when>
+      <xsl:otherwise><xsl:call-template name="decide-button"/></xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template name="decide-button">
     <button type="submit" name="decision" hx-target="#queue" hx-swap="outerHTML" hx-include="closest form">
       <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
       <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
@@ -514,6 +538,14 @@
       <xsl:attribute name="class">decide-button <xsl:value-of select="@value"/></xsl:attribute>
       <xsl:value-of select="@label"/>
     </button>
+  </xsl:template>
+
+  <xsl:template match="view:reason-option">
+    <option>
+      <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
+      <xsl:if test="@title != ''"><xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute></xsl:if>
+      <xsl:value-of select="@label"/>
+    </option>
   </xsl:template>
 
   <!-- ⚠ The manifold went quiet: the finding resource did not describe its menus, so this

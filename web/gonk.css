@@ -307,6 +307,11 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 /* ★ Declining is not destructive and must not wear the danger colour: it is a RECORD that a
  * human looked and said no, and the finding is kept. Publishing is the consequential act. */
 .decide-button.decline { background: transparent; color: var(--accent); }
+/* The decline reason word, grouped with its button so it reads as Decline's and nothing
+ * else's: one outline around both, the picker the same height as the button. */
+.decide-why { display: inline-flex; align-items: stretch; gap: 0.25rem; padding: 0.15rem; border: 1px solid var(--line); border-radius: var(--radius); }
+.decide-why-word { min-width: 8rem; }
+.reason-word { font-weight: 600; }
 
 @media (max-width: 40rem) {
   .decide { flex-direction: column; align-items: stretch; }
