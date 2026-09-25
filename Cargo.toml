@@ -304,11 +304,18 @@ ikigai-compress = "0.1.0"
 # `last_success`, `since_last_success` and `failures_in_a_row` there, which is exactly the
 # difference between "overdue" and "failing" that a 24-hour cadence needs —
 # `urn:iki:gonk:backup:status` reports them.
-# ⚠ Only `JobRegistry` + `ThreadTimer` are used. The `urn:time:*` CONTROL PLANE is
-# deliberately NOT bound: `urn:time:schedule` fires an arbitrary target under the
-# registry's own capability, so binding it behind three doors would be a way to have this
-# server issue requests as itself. See `crate::backup` for the argument.
-ikigai-time = "0.3.0"
+# ★ 0.4.0 is the floor now, and for a SECURITY reason (ledger #79, ikigai-cli PR #356): through
+# 0.3.0 every job fired under the REGISTRY's capability, which defaults to root — a caller who
+# could reach `urn:time:schedule` fired any request at full authority. 0.4.0 records the
+# capability that SCHEDULED each job and fires every tick under `ceiling.clamp(recorded)`, and
+# `schedule` takes that capability as a required argument. 0.3.0 is YANKED (2026-09-24), so
+# `^0.3.0` no longer resolves fresh at all; this pin had to move. gonk was never exposed — it
+# scopes the registry to `backup::JOB_SCOPES` and binds no control plane — and now names the
+# same scopes on the job itself.
+# ⚠ Only `JobRegistry` + `ThreadTimer` are used. The `urn:time:*` CONTROL PLANE is still
+# deliberately NOT bound: the backup's target set is fixed at startup by `main`, nothing here
+# needs a caller to schedule, and every bound endpoint is surface. See `crate::backup`.
+ikigai-time = "0.4.0"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
 # The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic).

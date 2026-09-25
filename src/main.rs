@@ -181,10 +181,13 @@ fn serve(flags: &config::Flags) -> ! {
         every: settings.backup.every,
         store_path: store_path.clone(),
     });
-    // ★ The registry fires under exactly `backup::JOB_SCOPES` and nothing else, so a
-    // scheduled backup has the authority to read every graph and write the rotation — and
-    // no authority to write a single quad. `Capability::root()` is the registry's default
-    // and would have been silently broader than anything this server hands any caller.
+    // ★ The backup fires under exactly `backup::JOB_SCOPES` and nothing else, so a scheduled
+    // backup has the authority to read every graph and write the rotation — and no authority
+    // to write a single quad. Since ikigai-time 0.4.0 (ledger #79) the registry's capability
+    // is a CEILING and each job records its own; a tick fires under `ceiling.clamp(job)`.
+    // Both are `JOB_SCOPES` here, so the clamp is exactly `JOB_SCOPES`. `Capability::root()`
+    // is still the registry's default ceiling and would be silently broader than anything this
+    // server hands any caller, which is why the ceiling is set as well as the job's own.
     let jobs = settings.backup.every.map(|_| {
         JobRegistry::new(Arc::new(ThreadTimer), Arc::new(ikigai_core::SystemClock))
             .with_capability(ikigai_core::Capability::scoped(backup::JOB_SCOPES))
@@ -429,6 +432,7 @@ fn start_backups(
         ikigai_core::Verb::Source,
         Schedule::Every(every),
         true,
+        ikigai_core::Capability::scoped(backup::JOB_SCOPES),
     ) {
         // Not fatal: the ledger is served either way, and refusing to start would take the
         // system of record offline over its backup. Loud, because a server that says it is
@@ -443,6 +447,7 @@ fn start_backups(
             ikigai_core::Verb::Source,
             Schedule::Every(CATCH_UP),
             false,
+            ikigai_core::Capability::scoped(backup::JOB_SCOPES),
         ) {
             Ok(_) => ", one due now (catching up in 1m)",
             Err(_) => "",
