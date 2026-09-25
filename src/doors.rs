@@ -362,6 +362,9 @@ pub fn edge_config() -> EdgeConfig {
                 route("/queue", crate::queue::QUEUE_IRI),
                 route("/queue/rows", crate::queue::ROWS_IRI),
                 route("/queue/decide", crate::queue::DECIDE_IRI),
+                // Ledger #506: one batch decline, fanned out to the same Sink per member — no
+                // per-route `cap`, for the same reason as `/queue/decide`.
+                route(crate::batch::BATCH_PATH, crate::batch::BATCH_IRI),
                 // The header's depth badge, polled every `queue::BADGE_EVERY`. It is a GET
                 // of a fragment like `/queue/rows`, and it is the trigger's only liveness
                 // signal — see `queue::Badge`.

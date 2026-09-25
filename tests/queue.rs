@@ -379,6 +379,7 @@ fn no_severity_word_is_written_down_in_this_crate() {
 
     for (what, source) in [
         ("src/queue.rs", include_str!("../src/queue.rs")),
+        ("src/batch.rs", include_str!("../src/batch.rs")),
         ("web/gonk.xsl", include_str!("../web/gonk.xsl")),
     ] {
         for word in &declared {
@@ -447,6 +448,7 @@ fn no_reason_word_is_written_down_in_this_crate() {
             .expect("the section after the queue");
     for (what, source) in [
         ("src/queue.rs", include_str!("../src/queue.rs")),
+        ("src/batch.rs", include_str!("../src/batch.rs")),
         ("web/gonk.xsl (the review queue)", &xsl[start..end]),
         ("web/gonk.js", include_str!("../web/gonk.js")),
     ] {
@@ -1839,4 +1841,693 @@ fn a_serious_word_the_contract_does_not_declare_is_refused_at_start() {
         declared.len() - QueuePolicy::default().serious.len()
     );
     assert!(others.iter().all(|w| !QueuePolicy::default().is_serious(w)));
+}
+
+// ------------------------------------------------------------ the batch view (ledger #506)
+
+/// The file the batch fixtures quote from: a comment line and three code lines, so a
+/// comment-shaped quote and a code quote sit in one file.
+const LIB: &str = "// Frobs the widget.\nfn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+/// A doc file: every line of it is "a comment or doc line" to browse's heuristic.
+const NOTES: &str = "# Notes\nThe queue is not a gate.\n";
+
+/// A scratch root carrying [`LIB`] and [`NOTES`].
+fn batch_root() -> TempDir {
+    let dir = scratch_root();
+    std::fs::write(dir.path().join("src/lib.rs"), LIB).expect("lib.rs");
+    std::fs::write(dir.path().join("NOTES.md"), NOTES).expect("NOTES.md");
+    dir
+}
+
+/// One planted finding, placed by its quote in the file's real text so browse reconciles it
+/// to a line — the same quads as [`plant_finding`], with the anchor and the mint time free.
+struct Plant<'a> {
+    id: &'a str,
+    severity: &'a str,
+    body: &'a str,
+    path: &'a str,
+    exact: &'a str,
+    created: &'a str,
+}
+
+fn plant(door: &Kernel, p: Plant<'_>) {
+    let text = if p.path == "NOTES.md" { NOTES } else { LIB };
+    let start = text
+        .find(p.exact)
+        .unwrap_or_else(|| panic!("`{}` is not in {}", p.exact, p.path));
+    let end = start + p.exact.len();
+    let graph = browse::Graph::chosen()
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+    let (id, path, body, created, severity, exact) =
+        (p.id, p.path, p.body, p.created, p.severity, p.exact);
+    let update = format!(
+        r#"PREFIX oa: <http://www.w3.org/ns/oa#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX sh: <http://www.w3.org/ns/shacl#>
+PREFIX ik: <https://ikigai-rs.dev/ns#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+INSERT DATA {{ GRAPH <{graph}> {{
+  <urn:iki:finding:{id}> a prov:Entity ;
+    dcterms:description "{body}" ;
+    dcterms:creator "a-test-reviewer" ;
+    dcterms:created "{created}"^^xsd:dateTime ;
+    prov:wasGeneratedBy <urn:ikigai:browse:review:demo:{path}> ;
+    sh:resultSeverity <urn:iki:severity:{severity}> ;
+    ik:annotates <urn:repo:{ROOT}:file:{path}> ;
+    ik:repo "{ROOT}" ;
+    ik:path "{path}" ;
+    ik:contentHash "sha256:planted" ;
+    oa:hasSelector <urn:iki:finding:{id}:selector:quote> ,
+                   <urn:iki:finding:{id}:selector:position> .
+  <urn:iki:finding:{id}:selector:quote> a oa:TextQuoteSelector ;
+    oa:exact "{exact}" .
+  <urn:iki:finding:{id}:selector:position> a oa:TextPositionSelector ;
+    oa:start "{start}"^^xsd:nonNegativeInteger ;
+    oa:end "{end}"^^xsd:nonNegativeInteger .
+}} }}"#
+    );
+    issue(
+        door,
+        Verb::Sink,
+        "urn:iki:store:graph-update",
+        &[("graph", &graph), ("content", &update)],
+        &reviewer(),
+    )
+    .expect("the browse graph's write token plants the finding");
+}
+
+/// The findings contract's group kinds, in contract order — the ONLY place these tests get
+/// them, so no kind word is spelled in this file either.
+fn group_kinds(door: &Kernel) -> Vec<String> {
+    queue::one_of(
+        door,
+        &format!("urn:repo:{ROOT}:findings"),
+        Verb::Source,
+        ikigai_gonk::batch::GROUP_ARG,
+    )
+    .expect("the findings face declares its group kinds (browse 0.12.0)")
+}
+
+/// Browse's own groups of one kind — the oracle the page is checked against.
+fn raw_groups(door: &Kernel, kind: &str) -> Vec<serde_json::Value> {
+    let answer = issue(
+        door,
+        Verb::Source,
+        &format!("urn:repo:{ROOT}:findings"),
+        &[("as", "application/json"), ("group", kind)],
+        &reviewer(),
+    )
+    .expect("the grouped read");
+    let body: serde_json::Value = serde_json::from_slice(&answer.bytes).expect("json");
+    body["groups"].as_array().expect("a groups array").clone()
+}
+
+fn member_ids(group: &serde_json::Value) -> Vec<String> {
+    group["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|m| m["id"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+/// The kind whose groups carry a declined twin — found by the DATA, as the page finds it.
+fn twin_kind(door: &Kernel) -> String {
+    group_kinds(door)
+        .into_iter()
+        .find(|kind| raw_groups(door, kind).iter().any(|g| !g["twin"].is_null()))
+        .expect("a kind whose groups carry a declined twin")
+}
+
+/// A kind with a twin-less group holding every id in `ids` — somewhere to post a batch from.
+fn a_kind_holding(door: &Kernel, ids: &[&str]) -> String {
+    group_kinds(door)
+        .into_iter()
+        .find(|kind| {
+            raw_groups(door, kind).iter().any(|g| {
+                let members = member_ids(g);
+                g["twin"].is_null() && ids.iter().all(|id| members.iter().any(|m| m == id))
+            })
+        })
+        .unwrap_or_else(|| panic!("no kind groups {ids:?} together"))
+}
+
+/// One batch through gonk's own adapter, answered with the re-rendered section.
+fn batch_by_form(door: &Kernel, body: &str) -> String {
+    let answer = issue(
+        door,
+        Verb::Sink,
+        ikigai_gonk::batch::BATCH_IRI,
+        &[("content", body)],
+        &reviewer(),
+    )
+    .expect("the batch adapter renders rather than returning a status");
+    String::from_utf8(answer.bytes).expect("utf-8")
+}
+
+/// A finding's state as the findings face reads it back.
+fn state_of(door: &Kernel, id: &str) -> String {
+    let answer = issue(
+        door,
+        Verb::Source,
+        &format!("urn:repo:{ROOT}:findings"),
+        &[("as", "application/json"), ("state", "all")],
+        &reviewer(),
+    )
+    .expect("the findings read");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&answer.bytes).expect("json rows");
+    rows.into_iter()
+        .find(|row| row["id"] == id)
+        .map(|row| row["state"].as_str().unwrap_or("").to_string())
+        .unwrap_or_else(|| panic!("no `{id}` at all"))
+}
+
+/// The value of the option a rendered `<select name='{name}'>` has selected, if any.
+fn selected_in(html: &str, name: &str) -> Option<String> {
+    let named = html
+        .find(&format!(" name='{name}'"))
+        .unwrap_or_else(|| panic!("no select named {name}:\n{html}"));
+    let start = html[..named].rfind("<select").expect("a select");
+    let end = start + html[start..].find("</select>").expect("closes");
+    html[start..end]
+        .split("<option")
+        .skip(1)
+        .find(|option| option.contains("selected"))
+        .map(|option| {
+            let at = option.find("value='").expect("a value") + 7;
+            option[at..at + option[at..].find('\'').expect("closes")].to_string()
+        })
+}
+
+/// Four findings on one file: two serious near-duplicates on one line, one serious comment
+/// quote, and one below the gate. Returns (serious, other) — both read off the contract.
+fn plant_the_mix(door: &Kernel) -> (String, String) {
+    let (serious, other) = a_serious_and_an_other_word(door);
+    for (id, severity, body, exact, created) in [
+        (
+            "a1a1a1a1a1a1a1a1a1a1a1a1",
+            &serious,
+            "alpha leaks",
+            "fn alpha() {}",
+            "2026-09-19T12:00:00Z",
+        ),
+        (
+            "a2a2a2a2a2a2a2a2a2a2a2a2",
+            &serious,
+            "alpha leaks, reworded",
+            "fn alpha() {}",
+            "2026-09-19T12:05:00Z",
+        ),
+        (
+            "c1c1c1c1c1c1c1c1c1c1c1c1",
+            &serious,
+            "the comment restates",
+            "// Frobs the widget.",
+            "2026-09-19T12:00:00Z",
+        ),
+        (
+            "b1b1b1b1b1b1b1b1b1b1b1b1",
+            &other,
+            "beta could be nicer",
+            "fn beta() {}",
+            "2026-09-19T12:00:00Z",
+        ),
+    ] {
+        plant(
+            door,
+            Plant {
+                id,
+                severity,
+                body,
+                path: "src/lib.rs",
+                exact,
+                created,
+            },
+        );
+    }
+    (serious, other)
+}
+
+/// ★★ **Each kind's view is the contract's groups, filtered to the serious set, with GONK's
+/// counts.** The oracle is browse's own grouped read, filtered here the way the Queue filters
+/// rows; every kind the contract declares is walked, none is named.
+#[test]
+fn each_kind_lists_the_contracts_groups_filtered_to_the_serious_set() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let (_, other) = plant_the_mix(&door);
+    let policy = QueuePolicy::default();
+    let kinds = group_kinds(&door);
+    assert!(kinds.len() > 1, "{kinds:?}");
+
+    // The kind nav is on the ordinary rows page, every word in contract order.
+    let rows = page(&door, &[], &reviewer());
+    let mut at = 0;
+    for kind in &kinds {
+        let found = rows[at..]
+            .find(&format!(">{kind}</a>"))
+            .unwrap_or_else(|| panic!("the kind nav lacks `{kind}` (or is out of order):\n{rows}"));
+        at += found;
+    }
+
+    let mut hid_somewhere = false;
+    for kind in &kinds {
+        let groups = raw_groups(&door, kind);
+        let mut expected_groups = 0;
+        let mut expected_members = 0;
+        let html = page(&door, &[("group", kind)], &reviewer());
+        for group in &groups {
+            let mut shown = 0;
+            for member in group["members"].as_array().expect("members") {
+                let id = member["id"].as_str().expect("id");
+                if policy.queues(member["severity"].as_str()) {
+                    shown += 1;
+                    assert!(
+                        html.contains(&format!("value='{id}'")),
+                        "`{kind}` must offer the serious member {id}:\n{html}"
+                    );
+                } else {
+                    hid_somewhere = true;
+                    assert!(
+                        !html.contains(&format!("value='{id}'")),
+                        "`{kind}` offers {id}, rated below the gate:\n{html}"
+                    );
+                }
+            }
+            if shown > 0 {
+                expected_groups += 1;
+                expected_members += shown;
+            }
+        }
+        if expected_groups == 0 {
+            assert!(
+                html.contains(&format!(
+                    "No {kind} groups among the serious pending findings"
+                )),
+                "an empty kind says so affirmatively:\n{html}"
+            );
+            continue;
+        }
+        let count = format!(
+            "{expected_groups} {kind} group{} holding {expected_members} serious pending finding{}",
+            if expected_groups == 1 { "" } else { "s" },
+            if expected_members == 1 { "" } else { "s" },
+        );
+        assert!(html.contains(&count), "gonk's own count `{count}`:\n{html}");
+
+        // `severity=all` lists the member the gate left out, wherever browse grouped it.
+        let all = page(&door, &[("group", kind), ("severity", "all")], &reviewer());
+        for group in &groups {
+            for id in member_ids(group) {
+                assert!(
+                    all.contains(&format!("value='{id}'")),
+                    "`{kind}` under severity=all lists {id}:\n{all}"
+                );
+            }
+        }
+    }
+    assert!(
+        hid_somewhere,
+        "the fixture plants a `{other}` finding, so some kind must have left it out"
+    );
+
+    // A kind the contract does not declare, and a group beside a non-pending state, refuse.
+    for args in [
+        vec![("group", "whenever")],
+        vec![("group", kinds[0].as_str()), ("state", "declined")],
+    ] {
+        match issue(&door, Verb::Source, queue::QUEUE_IRI, &args, &reviewer()) {
+            Err(ikigai_core::Error::InvalidArgument { .. }) => {}
+            other => panic!("{args:?} must be refused: {other:?}"),
+        }
+    }
+}
+
+/// ★ **Nothing is pre-decided**: an unticked member is not decided, and a batch decline with
+/// no word — or a word the contract does not declare — is refused WHOLE before any member is
+/// touched.
+#[test]
+fn an_unticked_member_is_not_decided_and_a_wordless_batch_is_refused() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    plant_the_mix(&door);
+    let (first, second) = ("a1a1a1a1a1a1a1a1a1a1a1a1", "c1c1c1c1c1c1c1c1c1c1c1c1");
+    let kind = a_kind_holding(&door, &[first, second]);
+    let word = reason_words(&door)[0].clone();
+
+    // No word: refused, and nothing moved.
+    let refused = batch_by_form(
+        &door,
+        &format!("_group={kind}&member={first}&member={second}"),
+    );
+    assert!(
+        refused.contains("Nothing was declined") && refused.contains("reason word"),
+        "{refused}"
+    );
+    assert_eq!(state_of(&door, first), "pending");
+    assert_eq!(state_of(&door, second), "pending");
+
+    // A word the contract does not declare: refused the same way.
+    let refused = batch_by_form(
+        &door,
+        &format!("_group={kind}&member={first}&reason=whenever"),
+    );
+    assert!(
+        refused.contains("`whenever` is not a reason word"),
+        "{refused}"
+    );
+    assert_eq!(state_of(&door, first), "pending");
+
+    // Nothing ticked: refused.
+    let refused = batch_by_form(&door, &format!("_group={kind}&reason={word}"));
+    assert!(refused.contains("no finding was ticked"), "{refused}");
+
+    // One ticked, one not: exactly the ticked one is declined, with the batch's word.
+    let done = batch_by_form(
+        &door,
+        &format!("_group={kind}&member={first}&reason={word}"),
+    );
+    assert!(done.contains("Declined 1 of 1."), "{done}");
+    assert_eq!(state_of(&door, first), "declined");
+    assert_eq!(
+        state_of(&door, second),
+        "pending",
+        "an unticked member is not decided"
+    );
+    assert_eq!(
+        row(&door, "declined", first)["decision"]["reason"],
+        word.as_str()
+    );
+}
+
+/// ★★ **The twin-carrying view** (Brian, 2026-09-25): every group at once, in ONE form, each
+/// member pre-set to its OWN twin's word; a twin with no word leaves its member's picker
+/// empty and the batch refused until a word is picked or the member unticked.
+#[test]
+fn a_recurrence_batch_declines_each_member_with_its_own_twins_word() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let (serious, _) = a_serious_and_an_other_word(&door);
+    let words = reason_words(&door);
+    let (w1, w2) = (words[0].clone(), words[1].clone());
+    let twins = [
+        (
+            "1111111111111111111111a1",
+            "fn alpha() {}",
+            Some(w1.as_str()),
+        ),
+        (
+            "1111111111111111111111b1",
+            "fn beta() {}",
+            Some(w2.as_str()),
+        ),
+        ("1111111111111111111111c1", "fn gamma() {}", None),
+    ];
+    for (id, exact, word) in twins {
+        plant(
+            &door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised once",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-18T12:00:00Z",
+            },
+        );
+        let mut args = vec![("decision", "decline")];
+        if let Some(word) = word {
+            args.push((queue::REASON_ARG, word));
+        }
+        issue(
+            &door,
+            Verb::Sink,
+            &format!("urn:iki:finding:{id}"),
+            &args,
+            &reviewer(),
+        )
+        .expect("a human declines the twin");
+    }
+    let fresh = [
+        ("2222222222222222222222a2", "fn alpha() {}"),
+        ("2222222222222222222222b2", "fn beta() {}"),
+        ("2222222222222222222222c2", "fn gamma() {}"),
+    ];
+    for (id, exact) in fresh {
+        plant(
+            &door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised again",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-19T12:00:00Z",
+            },
+        );
+    }
+    let kind = twin_kind(&door);
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    assert_eq!(
+        html.matches("class='batch'").count(),
+        1,
+        "every twin-carrying group sits in ONE form:\n{html}"
+    );
+    let (f1, f2, f3) = (fresh[0].0, fresh[1].0, fresh[2].0);
+    assert_eq!(
+        selected_in(&html, &format!("reason:{f1}")).as_deref(),
+        Some(w1.as_str())
+    );
+    assert_eq!(
+        selected_in(&html, &format!("reason:{f2}")).as_deref(),
+        Some(w2.as_str())
+    );
+    assert_eq!(
+        selected_in(&html, &format!("reason:{f3}")).as_deref(),
+        Some(""),
+        "a twin with no word leaves its member's picker on the empty choice:\n{html}"
+    );
+    // Each member is shown beside its twin's decision line, word and all.
+    assert!(
+        html.contains(&format!(
+            "the like claim on this line was declined (<span class='reason-word'>{w1}</span>)"
+        )),
+        "{html}"
+    );
+
+    // As the page would post it: the empty choice is not submitted, so f3 has no word.
+    let refused = batch_by_form(
+        &door,
+        &format!(
+            "_group={kind}&member={f1}&member={f2}&member={f3}&reason:{f1}={w1}&reason:{f2}={w2}"
+        ),
+    );
+    assert!(
+        refused.contains("Nothing was declined") && refused.contains(f3),
+        "the wordless member blocks the batch, by name:\n{refused}"
+    );
+    for id in [f1, f2, f3] {
+        assert_eq!(state_of(&door, id), "pending");
+    }
+
+    // Unticked, it no longer blocks; each declined member carries ITS twin's word.
+    let done = batch_by_form(
+        &door,
+        &format!(
+            "_group={kind}&member={f1}&member={f2}&reason:{f1}={w1}&reason:{f2}={w2}&reason:{f3}="
+        ),
+    );
+    assert!(done.contains("Declined 2 of 2."), "{done}");
+    assert_eq!(
+        row(&door, "declined", f1)["decision"]["reason"],
+        w1.as_str()
+    );
+    assert_eq!(
+        row(&door, "declined", f2)["decision"]["reason"],
+        w2.as_str()
+    );
+    assert_eq!(state_of(&door, f3), "pending");
+}
+
+/// ★ **A batch decline IS an ordinary decision**: one decision node per member, read back
+/// through the finding face like any other, and a later like claim is grouped under it — and
+/// marked by it — exactly as it would be after a single decline.
+#[test]
+fn a_batch_decline_is_an_ordinary_decision_the_recurrence_mark_reads() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let (serious, _) = plant_the_mix(&door);
+    let word = reason_words(&door).last().expect("a word").clone();
+    let (first, second) = ("a1a1a1a1a1a1a1a1a1a1a1a1", "c1c1c1c1c1c1c1c1c1c1c1c1");
+    let kind = a_kind_holding(&door, &[first, second]);
+    let done = batch_by_form(
+        &door,
+        &format!("_group={kind}&member={first}&member={second}&reason={word}"),
+    );
+    assert!(done.contains("Declined 2 of 2."), "{done}");
+    for id in [first, second] {
+        let decided = row(&door, "declined", id);
+        assert_eq!(decided["decision"]["reason"], word.as_str());
+        assert_eq!(
+            decided["decision"]["severity"],
+            serious.as_str(),
+            "the proposal, accepted"
+        );
+    }
+    // The re-render is from the source: the declined members are gone from the view.
+    assert!(!done.contains(&format!("value='{first}'")), "{done}");
+
+    // A later like claim on the comment line: the twin-carrying kind groups it under the
+    // batch-declined finding, suggesting that finding's word, as it would after one decline.
+    let later = "3333333333333333333333c3";
+    plant(
+        &door,
+        Plant {
+            id: later,
+            severity: &serious,
+            body: "the comment still restates",
+            path: "src/lib.rs",
+            exact: "// Frobs the widget.",
+            created: "2026-09-20T12:00:00Z",
+        },
+    );
+    let kind = twin_kind(&door);
+    let group = raw_groups(&door, &kind)
+        .into_iter()
+        .find(|g| member_ids(g).iter().any(|m| m == later))
+        .expect("the later claim is grouped under a declined twin");
+    assert_eq!(group["twin"]["id"], second);
+    assert_eq!(group["reason"], word.as_str());
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    assert_eq!(
+        selected_in(&html, &format!("reason:{later}")).as_deref(),
+        Some(word.as_str())
+    );
+}
+
+/// **Publish is not batchable**, and **a doc file's one proposal is shown once.**
+#[test]
+fn publish_is_not_offered_in_a_batch_and_a_doc_file_shows_one_group() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let (serious, _) = plant_the_mix(&door);
+    let docs = ["d1d1d1d1d1d1d1d1d1d1d1d1", "d2d2d2d2d2d2d2d2d2d2d2d2"];
+    for (id, exact) in docs.iter().zip(["# Notes", "The queue is not a gate."]) {
+        plant(
+            &door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "the doc restates",
+                path: "NOTES.md",
+                exact,
+                created: "2026-09-19T12:00:00Z",
+            },
+        );
+    }
+    let decisions = queue::one_of(
+        &door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        "decision",
+    )
+    .expect("the decision set");
+    let kinds = group_kinds(&door);
+
+    // Browse proposes the doc file under two kinds with the same members…
+    let proposing: Vec<&String> = kinds
+        .iter()
+        .filter(|kind| {
+            raw_groups(&door, kind)
+                .iter()
+                .any(|g| member_ids(g).iter().any(|m| m == docs[0]))
+        })
+        .collect();
+    assert!(
+        proposing.len() >= 2,
+        "browse proposes the doc twice: {proposing:?}"
+    );
+    // …and the batch views show it once.
+    let mut showing = 0;
+    for kind in &kinds {
+        let html = page(&door, &[("group", kind)], &reviewer());
+        if html.contains(&format!("value='{}'", docs[0])) {
+            showing += 1;
+        }
+        for word in &decisions {
+            assert!(
+                !html.contains(&format!("value='{word}'")),
+                "the `{kind}` batch view offers the decision `{word}` — a batch only declines:\n{html}"
+            );
+        }
+        assert!(
+            !html.contains("class='decide'"),
+            "no single-row form in a batch view"
+        );
+    }
+    assert_eq!(showing, 1, "the doc file's one proposal is shown once");
+
+    // And a batch that asks to publish is refused by name, deciding nothing.
+    let publish = decisions
+        .iter()
+        .find(|d| d.as_str() != "decline")
+        .expect("a decision other than decline");
+    let refused = batch_by_form(
+        &door,
+        &format!(
+            "member={}&reason={}&decision={publish}",
+            docs[0],
+            reason_words(&door)[0]
+        ),
+    );
+    assert!(refused.contains("a batch only declines"), "{refused}");
+    assert_eq!(state_of(&door, docs[0]), "pending");
+}
+
+/// ★ The anti-drift guard's third sibling: no group KIND word is spelled in this crate's page
+/// code — the kinds reach the page through the findings contract's `group` set.
+///
+/// ⚠ Two of the words are ordinary English ("file", and the one that also names 0.9.0's
+/// recurrence mark in half this crate's comments), so a whole-token scan would fail on prose.
+/// What drifts is a word the CODE spells, so the check is for the word as a quoted literal or
+/// a query value; the hyphenated kinds, which prose never uses, are also checked as tokens.
+#[test]
+fn no_group_kind_word_is_written_down_in_this_crate() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let kinds = group_kinds(&door);
+    assert!(kinds.len() > 1, "a closed set of more than one: {kinds:?}");
+    let xsl = include_str!("../web/gonk.xsl");
+    let start = xsl.find("the review queue -->").expect("the queue section");
+    let end = start + xsl[start..].find("a ledger -->").expect("the next section");
+    for (what, source) in [
+        ("src/queue.rs", include_str!("../src/queue.rs")),
+        ("src/batch.rs", include_str!("../src/batch.rs")),
+        ("web/gonk.xsl (the review queue)", &xsl[start..end]),
+        ("web/gonk.js", include_str!("../web/gonk.js")),
+    ] {
+        for kind in &kinds {
+            for spelled in [
+                format!("\"{kind}\""),
+                format!("'{kind}'"),
+                format!("={kind}"),
+            ] {
+                assert!(
+                    !source.contains(&spelled),
+                    "`{what}` spells the group kind `{kind}` as {spelled}. The set lives in \
+                     ikigai-browse and is read through the contract."
+                );
+            }
+            if kind.contains('-') {
+                assert!(
+                    !contains_word(source, kind),
+                    "`{what}` names the group kind `{kind}`."
+                );
+            }
+        }
+    }
 }
