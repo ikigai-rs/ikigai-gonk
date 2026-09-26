@@ -256,13 +256,9 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         passkeys: Some(passkeys),
     };
     let cap = doors::http_cap(door.clone());
+    let edge = doors::edge_config(door.clone());
     std::thread::spawn(move || {
-        runtime.block_on(ikigai_web::serve_with_listener(
-            kernel,
-            cap,
-            listener,
-            doors::edge_config(),
-        ))
+        runtime.block_on(ikigai_web::serve_with_listener(kernel, cap, listener, edge))
     });
 
     let (status, response) = http(addr, "POST", "/iki/ledger/append", "Filed over http");
@@ -282,6 +278,33 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         "",
     );
     assert_eq!(status, 403, "{response}");
+
+    // The principal is a function of the cookie alone, and a cookie that names no live
+    // session is nobody: no `Cookie`, a forged token, and a door without passkeys all
+    // stamp nothing — the transport then attaches no `principal` at all.
+    let with_cookie = |cookie: Option<&str>| ikigai_web::HttpRequest {
+        method: "POST".into(),
+        path: "/iki/ledger/append".into(),
+        query: Vec::new(),
+        headers: cookie
+            .map(|c| vec![("cookie".to_string(), format!("gonk_session={c}"))])
+            .unwrap_or_default(),
+        body: Vec::new(),
+        peer: Some("127.0.0.1".parse::<IpAddr>().unwrap()),
+    };
+    assert_eq!(doors::http_principal_of(&door, &with_cookie(None), 0), None);
+    assert_eq!(
+        doors::http_principal_of(&door, &with_cookie(Some("not-a-session")), 0),
+        None
+    );
+    let no_passkeys = doors::HttpDoor {
+        passkeys: None,
+        ..door.clone()
+    };
+    assert_eq!(
+        doors::http_principal_of(&no_passkeys, &with_cookie(Some("anything")), 0),
+        None
+    );
 
     // The capability is a function of the peer: a non-loopback one gets nothing.
     let at = |peer: &str| {
@@ -380,9 +403,9 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(
             kernel,
-            doors::http_cap(door),
+            doors::http_cap(door.clone()),
             listener,
-            doors::edge_config(),
+            doors::edge_config(door),
         ))
     });
 

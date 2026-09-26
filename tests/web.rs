@@ -15,6 +15,9 @@
 //! - [`the_cross_graph_example_is_shown_and_never_loadable`]
 //! - [`a_ledger_iri_reads_as_its_local_name_only_in_the_html_face`]
 //! - [`a_passkey_identity_adds_its_grant_and_only_its_grant`]
+//! - [`a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label`]
+//! - [`an_anonymous_form_write_has_no_author_and_a_form_may_not_name_one`]
+//! - [`the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it`]
 //! - [`the_palette_clears_the_contrast_floor`]
 //! - [`a_result_column_is_never_narrower_than_its_own_word`]
 //! - [`a_sample_button_is_a_toggle_the_server_renders_unpressed`]
@@ -68,17 +71,17 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
-        let cap = doors::http_cap(doors::HttpDoor {
+        let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).unwrap(),
             port: addr.port(),
             passkeys: Some(passkeys),
-        });
+        };
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
                 http,
-                cap,
+                doors::http_cap(door.clone()),
                 listener,
-                doors::edge_config(),
+                doors::edge_config(door),
             ))
         });
         Server {
@@ -1410,5 +1413,244 @@ fn the_active_sample_is_cleared_by_typing_in_the_editor() {
     assert!(
         body.contains("aria-pressed"),
         "the state the stylesheet dresses is the state this function writes"
+    );
+}
+
+/// Enrol [`Authenticator::new`] under `grant` holding `scopes`, sign it in, and return the
+/// session token and the passkey's stable IRI — the `principal` the door stamps on a write.
+fn sign_in(server: &Server, grant: &str, scopes: &[String]) -> (String, String) {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let authenticator = Authenticator::new();
+    let invite = identity::invite(
+        &server.layout,
+        grant,
+        scopes,
+        false,
+        30,
+        identity::now_seconds(),
+    )
+    .unwrap();
+    let c = challenge(server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &authenticator.register_body(&c, &invite, &server.origin()),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let c = challenge(server, "login-options");
+    let login = server.json(
+        "/auth/login",
+        &authenticator.login_body(&c, &server.origin(), 1),
+    );
+    assert_eq!(login.status, 200, "{login:?}");
+    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
+    let token = v["session"].as_str().unwrap().to_string();
+    let iri = identity::passkey_iri(&URL_SAFE_NO_PAD.encode(&authenticator.id));
+    (token, iri)
+}
+
+/// The item and its comments as the STORE holds them — the ledger's Turtle face over the
+/// mechanical route, where a display label has no business appearing.
+fn turtle(server: &Server, id: &str) -> String {
+    let got = server.raw(
+        "GET",
+        &format!("/iki/ledger/item/{id}"),
+        &[("Accept", "text/turtle".to_string())],
+        "",
+    );
+    assert_eq!(got.status, 200, "{got:?}");
+    got.body
+}
+
+/// A comment through the form, as the caller `cookie` names (or nobody).
+fn comment_as(server: &Server, iri: &str, id: &str, text: &str, cookie: Option<&str>) -> Response {
+    server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", id),
+            ("_then", "card"),
+            ("item", iri),
+            ("content", text),
+        ],
+        cookie,
+    )
+}
+
+/// ★ Ledger #76: a write from a signed-in browser carries its author. The door already knew
+/// who the session was (it minted the capability from that knowledge) and told nobody, so a
+/// decision comment typed while signed in landed "(unattributed)". Now the transport stamps
+/// the write with `principal` — the passkey's STABLE IRI — the form adapter forwards it as
+/// the ledger's `author`, and the face renders it as the passkey's CURRENT label.
+#[test]
+fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
+    let server = Server::start();
+    let (token, who) = sign_in(
+        &server,
+        "brian",
+        &grants_for("default", Authority::Write).unwrap(),
+    );
+    assert!(who.starts_with("urn:iki:gonk:passkey:"), "{who}");
+    let credential = who.rsplit(':').next().unwrap().to_string();
+
+    let filed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "append"),
+            ("_then", "items"),
+            ("content", "Attributed item"),
+        ],
+        Some(&token),
+    );
+    assert_eq!(filed.status, 200, "{filed:?}");
+    let (iri, id) = first_item(&filed.body);
+    let commented = comment_as(&server, &iri, &id, "Decided.", Some(&token));
+    assert_eq!(commented.status, 200, "{commented:?}");
+
+    // The store holds the IRI — the credential, never the label. A relabelled passkey keeps
+    // its history, and two passkeys named alike stay distinct.
+    let graph = turtle(&server, &id);
+    assert_eq!(
+        graph.matches(&format!("\"{who}\"")).count(),
+        2,
+        "the item and its comment are both attributed to the passkey IRI: {graph}"
+    );
+    assert!(
+        !graph.contains("software"),
+        "the label is never written to the store: {graph}"
+    );
+
+    // The face translates: the item's `Filed … by` and the comment's meta line both show
+    // the label, and the IRI appears nowhere on the page — for an anonymous reader too.
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.body.contains("by software"), "{page:?}");
+    assert!(
+        page.body.contains("<p class='comment-meta'>")
+            && page.body.matches("software").count() >= 2,
+        "{page:?}"
+    );
+    assert!(
+        !page.body.contains("urn:iki:gonk:passkey:") && !page.body.contains("unattributed"),
+        "{page:?}"
+    );
+
+    // ★ The CURRENT label: relabel the passkey in clients.json and the page follows on the
+    // next request, with nothing rewritten in the store. (⚠ Not "Touch ID": the enrol
+    // panel's placeholder says that on every page, so a negative check on it is void.)
+    let clients = server.layout.clients_json();
+    let text = std::fs::read_to_string(&clients).unwrap();
+    assert!(text.contains("\"label\": \"software\""), "{text}");
+    std::fs::write(
+        &clients,
+        text.replace("\"label\": \"software\"", "\"label\": \"desk key\""),
+    )
+    .unwrap();
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert!(
+        page.body.contains("by desk key") && !page.body.contains("software"),
+        "{page:?}"
+    );
+    assert_eq!(
+        turtle(&server, &id),
+        graph,
+        "a relabel touches the store not at all"
+    );
+
+    // A passkey since deleted still names its writes: the IRI's tail, never "unattributed".
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&clients).unwrap()).unwrap();
+    assert!(doc["passkeys"]
+        .as_object_mut()
+        .unwrap()
+        .remove(&credential)
+        .is_some());
+    std::fs::write(&clients, doc.to_string()).unwrap();
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert!(
+        page.body.contains(&format!("by {credential}")) && !page.body.contains("desk key"),
+        "{page:?}"
+    );
+}
+
+/// The other side of the same rule: nobody signed in means no author — exactly as before —
+/// and a form field named `author` is refused whether or not anyone is signed in, because
+/// the door names the author and a submitter may not.
+#[test]
+fn an_anonymous_form_write_has_no_author_and_a_form_may_not_name_one() {
+    let server = Server::start();
+    let (iri, id) = file(&server, "Anonymous item");
+    let commented = comment_as(&server, &iri, &id, "Looked at it.", None);
+    assert_eq!(commented.status, 200, "{commented:?}");
+    let graph = turtle(&server, &id);
+    assert!(
+        !graph.contains("author"),
+        "an anonymous loopback caller is nobody, and nobody is written: {graph}"
+    );
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert!(page.body.contains("unattributed"), "{page:?}");
+
+    let (token, _) = sign_in(
+        &server,
+        "brian",
+        &grants_for("default", Authority::Write).unwrap(),
+    );
+    for cookie in [None, Some(token.as_str())] {
+        let forged = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "comment"),
+                ("_id", &id),
+                ("_then", "card"),
+                ("item", &iri),
+                ("content", "Forged."),
+                ("author", "mallory"),
+            ],
+            cookie,
+        );
+        assert_eq!(
+            forged.status,
+            400,
+            "signed in: {}: {forged:?}",
+            cookie.is_some()
+        );
+        assert!(
+            forged
+                .body
+                .contains("the door names the author; a form may not"),
+            "{forged:?}"
+        );
+    }
+    let graph = turtle(&server, &id);
+    assert!(
+        !graph.contains("Forged.") && !graph.contains("mallory"),
+        "a refused form writes nothing: {graph}"
+    );
+}
+
+/// The mechanical route (`POST /iki/ledger/append`, what `curl` and the cli's HTTP mount
+/// use) is unchanged: the transport stamps `principal` on it too, and the ledger — which
+/// declares `author` and not `principal` — ignores it. Reading `principal` as an `author`
+/// fallback would be `ikigai-ledger`'s own decision, not this server's.
+#[test]
+fn the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it() {
+    let server = Server::start();
+    let (token, who) = sign_in(
+        &server,
+        "brian",
+        &grants_for("default", Authority::Write).unwrap(),
+    );
+    let appended = server.raw(
+        "POST",
+        "/iki/ledger/append",
+        &[("Cookie", format!("{}={token}", identity::SESSION_COOKIE))],
+        "Filed over http, signed in",
+    );
+    assert_eq!(appended.status, 200, "{appended:?}");
+    let (_, id) = first_item(&appended.body);
+    let graph = turtle(&server, &id);
+    assert!(
+        !graph.contains(&who) && !graph.contains("author"),
+        "the ledger declares no `principal`, so the mechanical route is exactly as it was: {graph}"
     );
 }

@@ -383,15 +383,18 @@ fn serve(flags: &config::Flags) -> ! {
             "  mount   mount = \"prefer urn:iki:ledger:={}\"  (and the same for urn:iki:store:)",
             settings.socket.display()
         );
+        // One door for both seams: the capability (`http_cap`) and the principal (inside
+        // `edge_config`) are computed from the same cookie by the same `HttpDoor`.
+        let door = doors::HttpDoor {
+            anonymous: http_grants,
+            port,
+            passkeys: Some(passkeys),
+        };
         let error = ikigai_web::serve_with_listener(
             http,
-            doors::http_cap(doors::HttpDoor {
-                anonymous: http_grants,
-                port,
-                passkeys: Some(passkeys),
-            }),
+            doors::http_cap(door.clone()),
             listener,
-            doors::edge_config(),
+            doors::edge_config(door),
         )
         .await;
         fail(&format!("the http door stopped: {error:?}"))

@@ -916,7 +916,7 @@
     </header>
     <xsl:if test="ledger:body"><div class="body"><xsl:value-of select="ledger:body"/></div></xsl:if>
     <dl class="meta">
-      <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="ledger:author"> by <xsl:value-of select="ledger:author"/></xsl:if></dd>
+      <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/></xsl:if></dd>
       <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
       <xsl:if test="view:kind"><dt>Level</dt><dd><code><xsl:value-of select="view:kind"/></code></dd></xsl:if>
       <xsl:if test="ledger:revision"><dt>Revision</dt><dd><code><xsl:value-of select="ledger:revision"/></code></dd></xsl:if>
@@ -956,7 +956,7 @@
         <xsl:value-of select="view:created"/>
         <xsl:text> · </xsl:text>
         <xsl:choose>
-          <xsl:when test="ledger:author"><xsl:value-of select="ledger:author"/></xsl:when>
+          <xsl:when test="view:author"><xsl:value-of select="view:author"/></xsl:when>
           <xsl:otherwise>unattributed</xsl:otherwise>
         </xsl:choose>
       </p>

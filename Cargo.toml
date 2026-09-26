@@ -297,7 +297,19 @@ ikigai-ipc = "0.1.25"
 ikigai-quic = "0.1.24"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
-ikigai-web = "0.1.16"
+# ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
+# IDENTITY twin of the `CapFn` seam (ikigai-cli PR #358, ledger #76). The door already knew
+# who a signed-in browser was — the session cookie resolves to an enrolled passkey — and used
+# it only to mint the capability, so a comment typed into the page while signed in landed
+# "(unattributed)". With the seam, the transport stamps every WRITE with a `principal`
+# argument the door computed (`crate::doors::http_principal`: the passkey's stable IRI), a
+# read carries none (an argument is part of the cache key, and a per-principal key on every
+# GET would partition the cache by identity), and `?principal=…` in a query string is
+# dropped — a submitter cannot name their own. `crate::web::Act` forwards that argument as
+# the ledger's `author` and refuses a form field of that name.
+# ⚠ It is a FLOOR and a CEILING both (`^0.1.27` is `<0.2.0`), and the crate ships from the
+# cli's workspace on a shared version, so this line moves when that workspace releases.
+ikigai-web = "0.1.27"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a

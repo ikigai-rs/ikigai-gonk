@@ -134,6 +134,16 @@ good until it expires.
   revoke it, with no restart.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
   grant plus its own, and `passkey invite` refuses a grant that adds nothing.
+- **A signed-in write carries its author.** The door stamps every write with the session's
+  `principal` — the passkey's stable IRI `urn:iki:gonk:passkey:<credential id>`, never the
+  label — and the form adapter forwards it as the ledger's `author` wherever the action
+  declares one (file, comment, close, reopen, delete, purge). The page renders that IRI as the
+  passkey's *current* label from `clients.json`, or its credential id once the passkey is
+  gone; the store holds only the IRI, so a relabel rewrites nothing. A form field named
+  `author` is refused: the door names the author, a submitter may not. An anonymous caller
+  is nobody and its writes stay unattributed, as before. The mechanical route
+  (`POST /iki/ledger/append`) is unchanged — it carries the `principal` too, and the ledger,
+  which declares `author` and not `principal`, ignores it.
 - **The invite is the registration's trust anchor.** No attestation is parsed. The question
   that matters is whether this person was invited, and a single-use, expiring code answers it.
   The server stores only the code's SHA-256.

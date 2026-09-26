@@ -2197,17 +2197,17 @@ impl HttpDoorHarness {
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         // ★ The anonymous grant this server ships: the configured ledgers, read and write.
         // It does NOT include the browse graph, which is the whole of assertion 1.
-        let cap = doors::http_cap(doors::HttpDoor {
+        let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).expect("the ledger's tokens"),
             port: addr.port(),
             passkeys: Some(passkeys),
-        });
+        };
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
                 http,
-                cap,
+                doors::http_cap(door.clone()),
                 listener,
-                doors::edge_config(),
+                doors::edge_config(door),
             ))
         });
         HttpDoorHarness {

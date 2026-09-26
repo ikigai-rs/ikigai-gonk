@@ -80,6 +80,29 @@ pub const INVITE_MINUTES: u64 = 30;
 /// that names nothing, and anonymous callers can mint challenges.
 pub const MAX_PENDING: usize = 256;
 
+/// The IRI prefix a signed-in passkey is NAMED by when the door stamps a write — the
+/// `principal` the HTTP transport attaches (see [`crate::doors::http_principal`]), and the
+/// `author` the form adapter forwards to the ledger.
+///
+/// ★ The tail is the CREDENTIAL ID, not the label. A label is a display name an operator
+/// may change (`"Touch ID"`), and two passkeys can share one; the credential id is what the
+/// authenticator minted and what `clients.json` is keyed by, so a relabelled passkey keeps
+/// its history and two passkeys named alike stay distinct. The IRI is what the store holds;
+/// only the face translates it back to a label ([`Passkeys::labels`]).
+pub const PASSKEY_IRI_PREFIX: &str = "urn:iki:gonk:passkey:";
+
+/// The stable IRI of the passkey enrolled under `credential_id` (base64url, so the tail
+/// needs no escaping).
+pub fn passkey_iri(credential_id: &str) -> String {
+    format!("{PASSKEY_IRI_PREFIX}{credential_id}")
+}
+
+/// The credential id a [`passkey_iri`] names, or `None` for any other text — a plain-name
+/// author written by hand, or by the cli.
+pub fn passkey_credential(author: &str) -> Option<&str> {
+    author.strip_prefix(PASSKEY_IRI_PREFIX)
+}
+
 /// One enrolled passkey, as `clients.json` holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Enrolled {
@@ -277,6 +300,16 @@ impl Passkeys {
     /// here; every use that matters re-reads and fails loud.
     pub fn enrolled_count(&self) -> usize {
         read_passkeys(&self.layout).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Every enrolled passkey's CURRENT label, by credential id — what a page renders a
+    /// [`passkey_iri`] author as. Re-read from `clients.json` on every call, like every
+    /// other use of that file, so a relabel shows on the next request; an unreadable file
+    /// is an empty map here, and a caller falls back to the IRI's tail.
+    pub fn labels(&self) -> BTreeMap<String, String> {
+        read_passkeys(&self.layout)
+            .map(|m| m.into_iter().map(|(id, e)| (id, e.label)).collect())
+            .unwrap_or_default()
     }
 
     /// A fresh single-use challenge, base64url.
