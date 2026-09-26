@@ -376,10 +376,15 @@
       <xsl:apply-templates select="view:group"/>
       <xsl:if test="@decide = 'true'">
         <div class="batch-decide">
+          <!-- The batch's one word: REQUIRED on a group form, where it is every ticked
+               member's reason; OPTIONAL in the twin-carrying form, where it is the fallback
+               for a member whose twin had no word (ledger #508) and a member's own picker
+               wins. The label, with the count, is the server's. -->
           <xsl:if test="view:reason-option">
             <label class="batch-word">
-              <xsl:text>Reason, for every ticked finding</xsl:text>
-              <select name="reason" required="required">
+              <xsl:value-of select="@word-label"/>
+              <select name="reason">
+                <xsl:if test="@word-required = 'true'"><xsl:attribute name="required">required</xsl:attribute></xsl:if>
                 <xsl:apply-templates select="view:reason-option"/>
               </select>
             </label>
@@ -404,6 +409,17 @@
           <xsl:otherwise><xsl:value-of select="@label"/></xsl:otherwise>
         </xsl:choose>
       </h2>
+      <!-- A target-only group's suggested word (ledger #508): SHOWN here, never pre-selected
+           in the picker below — its members start unticked, and the person ticks what they
+           have read. -->
+      <xsl:if test="@suggested-label">
+        <p class="note suggested-word"><xsl:value-of select="@suggested-label"/></p>
+      </xsl:if>
+      <!-- The label above is browse's and counts every severity; this is what the serious
+           scope left out of THIS group, so the two numbers agree. -->
+      <xsl:if test="@left-out">
+        <p class="note left-out"><xsl:value-of select="@left-out"/></p>
+      </xsl:if>
       <xsl:apply-templates select="view:twin"/>
       <ol class="findings group-members">
         <xsl:apply-templates select="view:kept"/>
@@ -439,18 +455,25 @@
   <xsl:template match="view:member">
     <li class="finding member">
       <label class="member-tick">
+        <!-- Ticked at first only beside EVIDENCE (a twin or a kept row — ledger #508); a
+             box the Sink would refuse (an unrated finding) is locked. Both are the server's
+             call: `ticked` and `tickable` arrive on the element. -->
         <input type="checkbox" name="member">
           <xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute>
-          <xsl:choose>
-            <xsl:when test="@tickable = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:when>
-            <xsl:otherwise><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:otherwise>
-          </xsl:choose>
+          <xsl:if test="@ticked = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if>
+          <xsl:if test="@tickable != 'true'"><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:if>
           <xsl:attribute name="aria-label">include <xsl:value-of select="@where"/> in this batch</xsl:attribute>
         </input>
       </label>
       <xsl:call-template name="member-card"/>
       <xsl:if test="@untickable">
-        <p class="note warn"><xsl:value-of select="@untickable"/></p>
+        <p class="note warn">
+          <xsl:value-of select="@untickable"/>
+          <xsl:if test="@untickable-link">
+            <xsl:text> </xsl:text>
+            <a class="finding-link"><xsl:attribute name="href"><xsl:value-of select="@finding-href"/></xsl:attribute><xsl:value-of select="@untickable-link"/></a>
+          </xsl:if>
+        </p>
       </xsl:if>
       <!-- The member's OWN word, in the twin-carrying view: its twin's, pre-selected. An
            empty first option means the twin had none, and the batch is refused until one is
@@ -701,11 +724,13 @@
     <option>
       <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
       <xsl:if test="@title != ''"><xsl:attribute name="title"><xsl:value-of select="@title"/></xsl:attribute></xsl:if>
-      <!-- The batch pickers (ledger #506) pre-select the group's suggested word, or an empty
-           placeholder that cannot be submitted when there is none. The single-finding picker
-           carries neither attribute. -->
+      <!-- The batch pickers (ledger #506) pre-select a word where there is one to pre-select,
+           else an empty placeholder: LOCKED where a word must be chosen (it cannot be
+           submitted), choosable where the word is optional (ledger #508: the batch-wide
+           fallback, and a member's own picker under it). The single-finding picker carries
+           none of these attributes. -->
       <xsl:if test="@selected = 'true'"><xsl:attribute name="selected">selected</xsl:attribute></xsl:if>
-      <xsl:if test="@placeholder = 'true'"><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:if>
+      <xsl:if test="@locked = 'true'"><xsl:attribute name="disabled">disabled</xsl:attribute></xsl:if>
       <xsl:value-of select="@label"/>
     </option>
   </xsl:template>

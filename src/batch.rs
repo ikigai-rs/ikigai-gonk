@@ -16,29 +16,53 @@
 //!
 //! # ★ The rules, each one a decision already made
 //!
-//! - **Members are SHOWN before deciding, and each can be unticked.** Nothing is pre-decided:
-//!   a box ticked on the page is an offer, and nothing reaches the store until the button.
+//! - **Members are SHOWN before deciding, and each can be ticked or unticked.** Nothing is
+//!   pre-decided: a box ticked on the page is an offer, and nothing reaches the store until
+//!   the button.
+//! - ★ **A member starts TICKED only when its group carries INDIVIDUAL evidence** (Brian,
+//!   2026-09-25, ledger [#508](http://localhost:1060/l/default/item/508)): a `twin` — this
+//!   claim was already declined on this line — or a `kept` row — this is a reworded repeat of
+//!   that one. A group proposed by target alone (`by_target_only`) starts with every member
+//!   UNTICKED, its suggested word SHOWN beside the group and NOT selected, and the person
+//!   ticks what they have read. A 2026-09-24 sample of such a group was MIXED — restated
+//!   comments beside a plausibly real claim — and a mixed group must not be one click from a
+//!   whole-file decline. ⚠ The rule is over the data (`twin`, `kept`), never a kind's name,
+//!   which is why it needs no field from browse and holds for any kind that carries no
+//!   evidence per member.
 //! - **A batch DECLINE requires a reason word** — the finding Sink's own `reason` `one_of`.
-//!   The group's suggested word is PRE-SELECTED in the picker, never applied without the
-//!   press. A batch with no word is refused whole, before any member is touched: a bulk
-//!   judgment without content is exactly what ledger #506 exists to prevent.
+//!   Where the group carries evidence its suggested word is PRE-SELECTED in the picker,
+//!   never applied without the press. A batch with no word is refused whole, before any
+//!   member is touched: a bulk judgment without content is exactly what ledger #506 exists
+//!   to prevent.
 //! - ★ **The twin-carrying kind is the one exception** (Brian, 2026-09-25). Its groups are
 //!   almost all singletons — one re-raise per declined twin — so "decide once for many" only
 //!   works as ALL of its groups in one form, each member declined with ITS OWN twin's word.
 //!   Every member still gets a reason, and it is the human's own earlier word for the same
-//!   claim on the same line. A twin with no word leaves that member's picker empty, and the
-//!   batch is refused until one is picked or the member is unticked. ⚠ The mode is chosen by
-//!   the DATA — a view whose groups carry a `twin` — never by the kind's name, which this
-//!   crate does not spell.
+//!   claim on the same line. ⚠ The mode is chosen by the DATA — a view whose groups carry a
+//!   `twin` — never by the kind's name, which this crate does not spell.
+//! - ★ **A twin with no word takes the BATCH word** (Brian, 2026-09-25, ledger #508). Every
+//!   decline made before reason words existed has `decision.reason == null`, so on the live
+//!   store every such twin was wordless and the form asked for one word per member — which
+//!   defeats the batch. The twin-carrying form carries one OPTIONAL batch-wide picker, "a
+//!   word for every ticked finding whose twin had none", and says how many members will take
+//!   it. A member's own picker OVERRIDES it. The word is recorded on each new decision as the
+//!   human's stated reason for THAT claim: a recurrence decline says "the same claim as one I
+//!   already rejected", and the word describes the claim, not the twin's history. A batch is
+//!   still refused when any ticked member ends up with no word from either source.
 //! - **Severity** (Brian, 2026-09-25): under the default `severity=serious` scope the members
 //!   are filtered to `gonk.queue.serious` exactly as the rows are (`crate::queue::rated`,
 //!   [`crate::config::QueuePolicy::queues`]), and the counts shown are GONK's — browse's
 //!   `kinds` counts span every severity and would not match what the page lists. What the
 //!   filter left out is said, with the link that lists it (`severity=all`).
-//! - **One proposal is shown once.** For a doc file browse's comment-shaped group and its
-//!   whole-file group hold the same members, because every line of a doc is "a comment". A
-//!   twin-less, keep-less group whose members equal a LATER kind's group on the same target
-//!   is shown under that later kind only (`fold_repeats`) — the rule stated over the data,
+//! - **One proposal is shown once, under the kind that carries a word.** For a doc file
+//!   browse's comment-shaped group and its whole-file group hold the same members, because
+//!   every line of a doc is "a comment" — and so do the two groups on a CODE file whose
+//!   pending findings all quote comments. A twin-less, keep-less group whose target and
+//!   members equal another kind's group is shown once (`fold_repeats`): under the one whose
+//!   `reason` is a word when only one of them carries one, else under the later kind. ⚠ The
+//!   first version folded toward the later kind unconditionally, which folded a worded group
+//!   into a wordless one and lost the suggestion (ledger #508). Two groups carrying two
+//!   DIFFERENT words are two proposals and both are shown. The rule is stated over the data,
 //!   so no kind word and no extension list is written here.
 //! - **Publish is not batchable.** A publish mints an annotation on each line, and a bulk
 //!   publish is the one act here that writes to what other readers see. The view offers
@@ -83,9 +107,16 @@ pub const BATCH_PATH: &str = "/queue/batch";
 const MEMBER_FIELD: &str = "member";
 /// A member's OWN reason word, in the twin-carrying view: `reason:<id>=<word>`.
 const MEMBER_REASON_PREFIX: &str = "reason:";
+/// GONK's own field on a group, set while gating: how many members the serious scope left
+/// out of it. Browse's JSON never carries it.
+const LEFT_OUT: &str = "gonk_left_out";
 
 /// The picker's empty option when a word must still be chosen — selected, not submittable.
 const CHOOSE_REASON_LABEL: &str = "choose a reason";
+/// The batch-wide fallback picker's empty option: choosable, and submits nothing.
+const NO_BATCH_WORD_LABEL: &str = "no batch word";
+/// A member's own picker's empty option in the twin-carrying view: the batch word applies.
+const TAKE_BATCH_WORD_LABEL: &str = "the batch word";
 
 /// The `group=` a request asked for, checked against the contract's own set — `None` for the
 /// ordinary rows view.
@@ -219,7 +250,30 @@ fn by_target_only(group: &Value) -> bool {
 }
 
 /// The identity of a proposal: its target and the ids of its members.
-fn proposal(group: &Value) -> (String, BTreeSet<String>) {
+type Proposal = (String, BTreeSet<String>);
+
+/// Every target-only proposal of the given kinds on one root, each with its suggested word —
+/// one grouped read per kind; a kind that cannot be read proposes nothing here.
+async fn target_only_proposals(
+    inv: &Invocation<'_>,
+    root: &str,
+    kinds: &[String],
+) -> Vec<(Proposal, Option<String>)> {
+    let mut found = Vec::new();
+    for kind in kinds {
+        if let Ok(theirs) = read_groups(inv, root, kind).await {
+            found.extend(
+                theirs
+                    .iter()
+                    .filter(|g| by_target_only(g))
+                    .map(|g| (proposal(g), suggested(g).map(str::to_string))),
+            );
+        }
+    }
+    found
+}
+
+fn proposal(group: &Value) -> Proposal {
     let target = group
         .get("annotates")
         .and_then(Value::as_str)
@@ -241,32 +295,65 @@ fn members(group: &Value) -> &[Value] {
         .unwrap_or_default()
 }
 
-/// ★ **One proposal, shown once.** For a doc file every quote is "a comment or doc line", so
-/// browse's comment-shaped group on it holds exactly the members of its whole-file group, and
-/// showing both asks the same question twice. The rule, over the data rather than a name: a
-/// group proposed by target alone ([`by_target_only`]) whose target and members equal those
-/// of a group of a LATER kind in the contract's order is dropped here and shown there. Returns
+/// The group's suggested word, when the JSON carries one.
+fn suggested(group: &Value) -> Option<&str> {
+    group.get("reason").and_then(Value::as_str)
+}
+
+/// ★ **One proposal, shown once — under the kind that carries a word.** For a doc file every
+/// quote is "a comment or doc line", so browse's comment-shaped group on it holds exactly the
+/// members of its whole-file group, and showing both asks the same question twice. The rule,
+/// over the data rather than a name: a group proposed by target alone ([`by_target_only`])
+/// whose target and members equal those of another kind's target-only group is dropped here
+/// and shown there when
+///
+/// - that other group carries a suggested `reason` and this one does not (a suggestion is
+///   information, and folding toward the wordless group lost it — ledger #508), or
+/// - the two carry the same `reason` (or none) and the other kind is LATER in the contract's
+///   order.
+///
+/// Two groups carrying two different words are two proposals, and both are shown. Returns
 /// how many were folded, so the page can say so.
 ///
-/// ⚠ It reads the later kinds only when there is something to fold, so a view whose groups
-/// all carry a twin or a kept row pays nothing.
+/// ⚠ The reads are paid only where they can matter: the later kinds only when some group
+/// here is target-only at all, the earlier kinds only when some target-only group here has
+/// no word (the one case an earlier group can win). A view whose groups all carry a twin or
+/// a kept row pays nothing.
 async fn fold_repeats(
     inv: &Invocation<'_>,
     root: &str,
+    earlier: &[String],
     later: &[String],
     groups: &mut Vec<Value>,
 ) -> usize {
-    if later.is_empty() || !groups.iter().any(by_target_only) {
+    if !groups.iter().any(by_target_only) {
         return 0;
     }
-    let mut elsewhere: BTreeSet<(String, BTreeSet<String>)> = BTreeSet::new();
-    for kind in later {
-        if let Ok(theirs) = read_groups(inv, root, kind).await {
-            elsewhere.extend(theirs.iter().filter(|g| by_target_only(g)).map(proposal));
-        }
-    }
+    let elsewhere_later = target_only_proposals(inv, root, later).await;
+    let elsewhere_earlier = if groups
+        .iter()
+        .any(|g| by_target_only(g) && suggested(g).is_none())
+    {
+        target_only_proposals(inv, root, earlier).await
+    } else {
+        Vec::new()
+    };
     let before = groups.len();
-    groups.retain(|g| !(by_target_only(g) && elsewhere.contains(&proposal(g))));
+    groups.retain(|g| {
+        if !by_target_only(g) {
+            return true;
+        }
+        let mine = proposal(g);
+        let word = suggested(g);
+        let later_wins = elsewhere_later
+            .iter()
+            .any(|(theirs, w)| *theirs == mine && (w.as_deref() == word || word.is_none()));
+        let earlier_wins = word.is_none()
+            && elsewhere_earlier
+                .iter()
+                .any(|(theirs, w)| *theirs == mine && w.is_some());
+        !(later_wins || earlier_wins)
+    });
     before - groups.len()
 }
 
@@ -294,6 +381,11 @@ pub(crate) async fn section(
         no_roots,
         flash,
     } = frame;
+    let earlier: Vec<String> = kinds
+        .iter()
+        .take_while(|k| k.as_str() != kind)
+        .cloned()
+        .collect();
     let later: Vec<String> = kinds
         .iter()
         .skip_while(|k| k.as_str() != kind)
@@ -301,13 +393,13 @@ pub(crate) async fn section(
         .cloned()
         .collect();
 
-    // The reads, one grouped read per chosen root (and the later kinds' only to fold).
+    // The reads, one grouped read per chosen root (and the other kinds' only to fold).
     let mut read: Vec<(String, std::result::Result<Vec<Value>, String>)> = Vec::new();
     let mut folded = 0usize;
     for root in chosen {
         let mut answer = read_groups(inv, root, kind).await;
         if let Ok(groups) = &mut answer {
-            folded += fold_repeats(inv, root, &later, groups).await;
+            folded += fold_repeats(inv, root, &earlier, &later, groups).await;
         }
         read.push((root.clone(), answer));
     }
@@ -321,10 +413,17 @@ pub(crate) async fn section(
                 if scope != SCOPE_SERIOUS {
                     continue;
                 }
+                let mut left_out = 0usize;
                 if let Some(Value::Array(members)) = group.get_mut("members") {
                     let before = members.len();
                     members.retain(|row| policy.queues(queue::rated(row)));
-                    hidden += before - members.len();
+                    left_out = before - members.len();
+                }
+                hidden += left_out;
+                // Browse's label counts every severity ("22 findings on …"); the group
+                // says on itself how many the gate left out, so the two numbers agree.
+                if let (true, Some(object)) = (left_out > 0, group.as_object_mut()) {
+                    object.insert(LEFT_OUT.to_string(), Value::from(left_out));
                 }
             }
             groups.retain(|group| !members(group).is_empty());
@@ -427,8 +526,9 @@ pub(crate) async fn section(
             "folded",
             &[],
             &format!(
-                "{} held exactly the members of a later kind's group on the same file, so {} \
-                 shown there, once.",
+                "{} held exactly the members of another kind's group on the same file, so {} \
+                 shown there, once — under the kind whose group carries a suggested word, or \
+                 else the later one.",
                 plural(folded, &format!("{kind} group"), &format!("{kind} groups")),
                 if folded == 1 { "it is" } else { "they are" },
             ),
@@ -452,14 +552,42 @@ pub(crate) async fn section(
     };
     if per_twin {
         let mut inner = String::new();
+        let mut ticked = 0usize;
+        let mut wordless = 0usize;
         for group in &groups {
             inner.push_str(&group_element(group, decide, reasons.as_deref(), true));
+            let word = twin_word(group).is_some();
+            for member in members(group) {
+                if decide && rated(member) {
+                    ticked += 1;
+                    if !word {
+                        wordless += 1;
+                    }
+                }
+            }
         }
         let mut attributes = form_attributes(kind);
         attributes.push((
             "button-label",
             "Decline the ticked findings, each with its twin's word".to_string(),
         ));
+        // ★ The batch-wide FALLBACK word (ledger #508): offered only when some ticked member's
+        // twin had none, optional, and overridden by a member's own picker.
+        if let (Some(reasons), true) = (&reasons, wordless > 0) {
+            attributes.push(("word-required", "false".to_string()));
+            attributes.push((
+                "word-label",
+                format!(
+                    "A word for every ticked finding whose twin had none — {wordless} of \
+                     {ticked} will take it; a finding's own word wins"
+                ),
+            ));
+            inner.push_str(&reason_options(
+                reasons,
+                None,
+                Placeholder::Optional(NO_BATCH_WORD_LABEL),
+            ));
+        }
         if !groups.is_empty() {
             children.push_str(&wrap("batch", &borrowed(&attributes), &inner));
         }
@@ -467,12 +595,20 @@ pub(crate) async fn section(
         for group in &groups {
             let key = group.get("key").and_then(Value::as_str).unwrap_or("");
             let mut inner = group_element(group, decide, reasons.as_deref(), false);
-            let suggested = group.get("reason").and_then(Value::as_str);
-            if let Some(reasons) = &reasons {
-                inner.push_str(&reason_options(reasons, suggested));
-            }
+            // ★ Pre-selected only beside evidence: a target-only group's word is shown on the
+            // group (`suggested`, in `group_element`) and the picker waits for the person.
+            let preselected = if by_target_only(group) {
+                None
+            } else {
+                suggested(group)
+            };
             let mut attributes = form_attributes(key);
             attributes.push(("button-label", "Decline the ticked findings".to_string()));
+            attributes.push(("word-required", "true".to_string()));
+            attributes.push(("word-label", "Reason, for every ticked finding".to_string()));
+            if let Some(reasons) = &reasons {
+                inner.push_str(&reason_options(reasons, preselected, Placeholder::Required));
+            }
             children.push_str(&wrap("batch", &borrowed(&attributes), &inner));
         }
     }
@@ -575,21 +711,41 @@ fn borrowed<'a>(attributes: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> 
     attributes.iter().map(|(k, v)| (*k, v.as_str())).collect()
 }
 
-/// The contract's reason words as picker options, the suggestion PRE-SELECTED. With no
-/// suggestion — or a suggestion the contract no longer declares — an empty first option is
-/// selected, and the batch is refused until a word is picked.
-fn reason_options(reasons: &[(String, Option<String>)], suggested: Option<&str>) -> String {
-    let suggested = suggested.filter(|s| reasons.iter().any(|(w, _)| w == s));
+/// What a picker's empty first option means, when nothing is pre-selected.
+#[derive(Clone, Copy)]
+enum Placeholder {
+    /// A word MUST be chosen: the empty option is locked, so the browser cannot submit it.
+    Required,
+    /// The word may be left out — a fallback covers it, or it IS the fallback: the empty
+    /// option stays choosable under this label, and submitting it sends nothing.
+    Optional(&'static str),
+}
+
+/// The contract's reason words as picker options, `preselected` selected when given. With
+/// none — or a word the contract no longer declares — an empty first option is selected: a
+/// [`Placeholder::Required`] one is locked and the batch is refused until a word is picked;
+/// a [`Placeholder::Optional`] one can be chosen back and submits nothing.
+fn reason_options(
+    reasons: &[(String, Option<String>)],
+    preselected: Option<&str>,
+    placeholder: Placeholder,
+) -> String {
+    let suggested = preselected.filter(|s| reasons.iter().any(|(w, _)| w == s));
     let mut out = String::new();
     if suggested.is_none() {
+        let (label, locked) = match placeholder {
+            Placeholder::Required => (CHOOSE_REASON_LABEL, "true"),
+            Placeholder::Optional(label) => (label, "false"),
+        };
         out.push_str(&element(
             "reason-option",
             &[
                 ("value", ""),
-                ("label", CHOOSE_REASON_LABEL),
+                ("label", label),
                 ("title", ""),
                 ("selected", "true"),
                 ("placeholder", "true"),
+                ("locked", locked),
             ],
             "",
         ));
@@ -603,6 +759,7 @@ fn reason_options(reasons: &[(String, Option<String>)], suggested: Option<&str>)
                 ("title", meaning.as_deref().unwrap_or("")),
                 ("selected", flag(suggested == Some(word.as_str()))),
                 ("placeholder", "false"),
+                ("locked", "false"),
             ],
             "",
         ));
@@ -610,7 +767,27 @@ fn reason_options(reasons: &[(String, Option<String>)], suggested: Option<&str>)
     out
 }
 
+/// Whether a member row carries the model's rating — without one the finding Sink refuses a
+/// decline, and a batch states no rating of its own.
+fn rated(member: &Value) -> bool {
+    member.get("severity").and_then(Value::as_str).is_some()
+}
+
+/// The word the group's declined twin was declined with, when it has one.
+fn twin_word(group: &Value) -> Option<&str> {
+    group
+        .get("twin")
+        .filter(|t| !t.is_null())
+        .and_then(|t| t.get("decision"))
+        .and_then(|d| d.get(REASON_ARG))
+        .and_then(Value::as_str)
+}
+
 /// One proposed group: its label, the declined twin or the kept row, and its members.
+///
+/// ★ A member starts TICKED only where the group carries evidence about it — a `twin` or a
+/// `kept` row (the module docs). A target-only group's members start unticked, and its
+/// suggested word is carried on the group (`suggested`) for the page to show beside it.
 fn group_element(
     group: &Value,
     decide: bool,
@@ -626,31 +803,40 @@ fn group_element(
     if let Some(kept) = group.get("kept").filter(|k| !k.is_null()) {
         children.push_str(&row_element("kept", kept, &[]));
     }
+    let evidence = !by_target_only(group);
     // A member's own word, in the twin-carrying view: the twin's, when it has one.
-    let twin_word = twin
-        .and_then(|t| t.get("decision"))
-        .and_then(|d| d.get(REASON_ARG))
-        .and_then(Value::as_str);
+    let twin_word = twin_word(group);
     for member in members(group) {
         let id = member.get("id").and_then(Value::as_str).unwrap_or("");
         // ⚠ An UNRATED finding cannot be declined without a rating the human states, and a
         // batch states none — so it is shown, and not offered, rather than offered and then
-        // refused by the Sink.
-        let rated = member.get("severity").and_then(Value::as_str).is_some();
+        // refused by the Sink. The row says so, and links the finding's own page, where a
+        // single decision can carry the rating.
+        let rated = rated(member);
         let tickable = decide && rated;
-        let mut extra: Vec<(&str, String)> = vec![("tickable", flag(tickable).to_string())];
+        let mut extra: Vec<(&str, String)> = vec![
+            ("tickable", flag(tickable).to_string()),
+            ("ticked", flag(tickable && evidence).to_string()),
+            ("finding-href", browse_url(&finding_iri(id))),
+        ];
         if decide && !rated {
             extra.push((
                 "untickable",
-                "unrated: a decline must carry a rating, so decide this one on its own row"
+                "unrated: a batch states no rating and a decline needs one, so decide this \
+                 one singly —"
                     .to_string(),
             ));
+            extra.push(("untickable-link", "open the finding".to_string()));
         }
         let mut inner = String::new();
         if per_twin && tickable {
             if let Some(reasons) = reasons {
                 extra.push(("reason-name", format!("{MEMBER_REASON_PREFIX}{id}")));
-                inner = reason_options(reasons, twin_word);
+                inner = reason_options(
+                    reasons,
+                    twin_word,
+                    Placeholder::Optional(TAKE_BATCH_WORD_LABEL),
+                );
             }
         }
         children.push_str(&row_element_with("member", member, &extra, &inner));
@@ -662,6 +848,23 @@ fn group_element(
     ];
     if !text("annotates").is_empty() {
         attributes.push(("browse-href", browse_url(text("annotates"))));
+    }
+    if let Some(left_out) = group.get(LEFT_OUT).and_then(Value::as_u64) {
+        attributes.push((
+            "left-out",
+            format!(
+                "{} in this group {} rated below the serious set and left out",
+                plural(left_out as usize, "other finding", "other findings"),
+                if left_out == 1 { "is" } else { "are" },
+            ),
+        ));
+    }
+    if let (false, Some(word)) = (evidence, suggested(group)) {
+        attributes.push(("suggested", word.to_string()));
+        attributes.push((
+            "suggested-label",
+            format!("suggested word: {word} — not selected; tick what you have read"),
+        ));
     }
     wrap("group", &borrowed(&attributes), &children)
 }
@@ -941,8 +1144,10 @@ impl Endpoint for Batch {
             .title("Decline a proposed group of findings, once")
             .summary(
                 "The Queue's batch form adapter (ledger #506): an urlencoded body naming every \
-                 ticked `member=<id>`, one `reason` word for the batch, or `reason:<id>` per \
-                 member where each is declined with its own declined twin's word. The whole \
+                 ticked `member=<id>`, one `reason` word for the batch, and/or `reason:<id>` \
+                 per member — a member's own word wins, and `reason` is the fallback for a \
+                 member without one (ledger #508: a declined twin from before reason words \
+                 existed has none). The whole \
                  batch is checked first — nothing ticked, a member with no word, or a word the \
                  finding contract does not declare refuses it before anything is written. Then \
                  ONE `Sink urn:iki:finding:{id} decision=decline reason=<word>` per member, \
@@ -958,8 +1163,9 @@ impl Endpoint for Batch {
                     .requires(ikigai_browse::CAP_ANNOTATE)
                     .requires(ikigai_browse::CAP_WILDCARD)
                     .input(ArgSpec::new("content").class(XSD_STRING).summary(
-                        "the form: `member` (repeated), `reason` or `reason:<id>`, plus \
-                         `_group`, `_repo` and `_severity` for the re-render",
+                        "the form: `member` (repeated), `reason:<id>` per member and/or \
+                         `reason` as the fallback for members without one, plus `_group`, \
+                         `_repo` and `_severity` for the re-render",
                     ))
                     .output("text/html"),
             )
