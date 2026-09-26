@@ -551,6 +551,39 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
     }
 }
 
+/// `view:author` for every item and comment that carries `ledger:author`, in place.
+///
+/// An author that is a passkey IRI ([`identity::passkey_iri`] — what the door stamps on a
+/// signed-in write, forwarded by [`Act`]) renders as that passkey's CURRENT label, read
+/// from `clients.json` the way the header's "Signed in as" is; a passkey since deleted
+/// renders as the IRI's tail, so the attribution never vanishes. Any other author — a plain
+/// name typed at the cli — renders as itself. ★ The IRI stays in the store; only the face
+/// translates, so a relabelled passkey keeps its history and the store never learns a
+/// display name. The file is read at most once per render, and not at all when no author
+/// on the page is a passkey.
+fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
+    let author = format!("{LEDGER_NS}author");
+    let mut attributed: Vec<(String, String)> = Vec::new();
+    for class in ["Item", "Comment"] {
+        for subject in graph.subjects_of_type(&format!("{LEDGER_NS}{class}")) {
+            if let Some(who) = graph.value(&subject, &author) {
+                attributed.push((subject, who));
+            }
+        }
+    }
+    let labels = attributed
+        .iter()
+        .any(|(_, who)| identity::passkey_credential(who).is_some())
+        .then(|| passkeys.labels());
+    for (subject, who) in attributed {
+        let shown = match (identity::passkey_credential(&who), &labels) {
+            (Some(id), Some(labels)) => labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
+            _ => who,
+        };
+        graph.view(&subject, "author", shown);
+    }
+}
+
 /// Issue `request` and return its bytes.
 async fn fetch(inv: &Invocation<'_>, request: Request) -> Result<Vec<u8>> {
     Ok(inv.issue(request).await?.bytes)
@@ -630,6 +663,7 @@ async fn ledger_listing(
     let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
     let count = newest_rows(&mut graph, rows);
     enrich_items(&mut graph, ledger, inv, status);
+    enrich_authors(&mut graph, &web.passkeys);
     let ledgers = readable_ledgers(web, inv);
     let mut children = nav(web, inv, &ledgers, Some(ledger.name()));
     if let Some((kind, message)) = flash {
@@ -942,6 +976,7 @@ async fn item_card(
     );
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, "open");
+    enrich_authors(&mut graph, &web.passkeys);
     let title = graph
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
         .first()
@@ -1141,7 +1176,28 @@ impl Endpoint for Act {
                 name: "_verb".to_string(),
                 detail: format!("`{target}` does not declare {verb:?}"),
             })?;
+        // ★ The door names the author; a form may not. The transport stamps every write
+        // with `principal` — the signed-in passkey's IRI, computed by
+        // `doors::http_principal` from the session cookie and never from a body or a query
+        // string — and this adapter forwards it as the ledger's `author` wherever the target
+        // declares one. A form field of that name is refused outright, before the contract
+        // is even consulted: the ledger declares `author` as an ordinary optional string,
+        // so without this line a browser could attribute a comment to anyone, and the same
+        // rule the transport applies to `client` and `principal` applies here.
+        if fields.remove("author").is_some() {
+            return Err(Error::InvalidArgument {
+                name: "author".to_string(),
+                detail: "the door names the author; a form may not".to_string(),
+            });
+        }
+        let declares_author = spec
+            .inputs
+            .iter()
+            .any(|input| input.name == "author" && input.source != InputSource::Binding);
         let mut request = Request::new(verb, target_iri);
+        if let (true, Ok(principal)) = (declares_author, inv.inline_str("principal")) {
+            request = with(request, "author", principal);
+        }
         for (name, value) in fields {
             if name.starts_with('_') || value.trim().is_empty() {
                 continue;
@@ -1214,7 +1270,9 @@ impl Endpoint for Act {
                  becomes ONE request to that ledger resource, carrying only the inputs its \
                  contract declares, under the caller's capability — then re-renders the view \
                  named by `_then` (items, card, gone). It holds no authority of its own: the \
-                 ledger resource it reaches enforces its own grant.",
+                 ledger resource it reaches enforces its own grant. The write's `author` is \
+                 the door's `principal` (a signed-in passkey's IRI) wherever the target \
+                 declares one; a form field named `author` is refused.",
             )
             .verb(Verb::Sink)
             .verb(Verb::Meta)

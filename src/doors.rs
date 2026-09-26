@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write. And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none |
 //!
@@ -41,7 +41,7 @@ use ikigai_core::{
     Space, SpaceEntry, SystemClock, Verb,
 };
 use ikigai_vocab::TurtleRenderer;
-use ikigai_web::{CapFn, EdgeConfig, HttpRequest, Route, RouteTable};
+use ikigai_web::{CapFn, EdgeConfig, HttpRequest, PrincipalFn, Route, RouteTable};
 
 use crate::identity::{self, Passkeys};
 
@@ -251,6 +251,36 @@ pub fn http_cap(door: HttpDoor) -> CapFn {
     })
 }
 
+/// The HTTP door's principal: WHO a request is from, as a function of the same cookie
+/// [`http_cap`] reads — the identity twin of the capability, wired through
+/// [`EdgeConfig::principal_fn`] by [`edge_config`].
+///
+/// A live passkey session names its passkey's stable IRI ([`identity::passkey_iri`] — the
+/// credential id, never the label, so a relabel keeps its history). An anonymous loopback
+/// caller is nobody, exactly as before: `None`, and the transport stamps nothing. The
+/// transport attaches it to WRITES only, as the argument `principal`, and drops a
+/// `?principal=…` a submitter sends — so a value that reaches an endpoint under that name
+/// was computed here or not at all.
+///
+/// ★ It is never authority. What a request may do is [`http_cap`]'s decision alone; this
+/// only says who asked, and a resource that declares no argument for it (every ledger
+/// action declares `author`, none declares `principal`) ignores it. The form adapter in
+/// [`crate::web`] (`Act`) is what turns the one into the other, and only where the target's
+/// contract declares `author`.
+pub fn http_principal(door: HttpDoor) -> PrincipalFn {
+    Arc::new(move |request: &HttpRequest| {
+        http_principal_of(&door, request, identity::now_seconds())
+    })
+}
+
+/// [`http_principal`], with the clock as an argument.
+pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<String> {
+    let passkeys = door.passkeys.as_ref()?;
+    let token = session_token(request)?;
+    let identity = passkeys.identity(&token, now)?;
+    Some(identity::passkey_iri(&identity.enrolled.credential_id))
+}
+
 /// [`http_cap`]'s scope list, with the clock as an argument.
 pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<String> {
     if !host_is_ours(request.header("host"), door.port) {
@@ -310,7 +340,10 @@ fn session_token(request: &HttpRequest) -> Option<String> {
     })
 }
 
-/// The HTTP door's edge policy: `ikigai-web`'s strict defaults, and an explicit route table.
+/// The HTTP door's edge policy: `ikigai-web`'s strict defaults, an explicit route table, and
+/// the door's principal ([`http_principal`] over the same `door` its capability is computed
+/// from — the two seams read one cookie, so a request's name and its authority cannot come
+/// from different sessions).
 ///
 /// The page routes are rows here, each onto one of gonk's own resources ([`crate::web`]);
 /// every other path takes the mechanical mapping (`POST /iki/ledger/append` → `Sink
@@ -325,7 +358,7 @@ fn session_token(request: &HttpRequest) -> Option<String> {
 /// per-route `cap`, deliberately — a route ceiling would REPLACE the per-request capability
 /// [`http_cap`] computes, and with it the `Host` and cross-site checks that make a POST to
 /// `/k` safe on a machine with a browser open.
-pub fn edge_config() -> EdgeConfig {
+pub fn edge_config(door: HttpDoor) -> EdgeConfig {
     let route = |pattern: &str, iri_template: &str| Route {
         pattern: pattern.to_string(),
         iri_template: iri_template.to_string(),
@@ -380,6 +413,7 @@ pub fn edge_config() -> EdgeConfig {
             .collect(),
         ),
         routes_only: false,
+        principal_fn: Some(http_principal(door)),
         ..EdgeConfig::default()
     }
 }

@@ -1208,9 +1208,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-web"
-version = "0.1.21"
+version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d03f6fedbd9719e75d6c51b2463ac2c1defe478ea0f08581a2bfd67e811e2ec2"
+checksum = "d06469a47a9396c0e22540f5395e0db59f770f3643eb7e1db7f34ba7a080d64f"
 dependencies = [
  "blake3",
  "chrono",
