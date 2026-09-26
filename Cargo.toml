@@ -207,7 +207,16 @@ ikigai-ledger = "0.2.1"
 # page renders no batch view at all — which is why this is the floor. `^0.11.0` is `<0.12.0`; the
 # pin moves for the argument to exist. Minor: an additive optional input and a new json shape
 # under it.
-ikigai-browse = "0.12.0"
+# ★ 0.13.0 (ledger #455/#456, browse PR #52) puts a LENS in the archive key: `lens=intent` on
+# `urn:repo:{repo}:review:{path}` (the argument's `one_of` names the shipped lenses), the pass
+# tagged `review-v5+intent@{model}` beside the general pass's unchanged tag, and the json face
+# carrying `lens` (null for the general pass). Nothing here arms a lens yet — the experiment's
+# verdict was keep-but-select (it re-labels rather than narrows), so a lensed pass is for
+# authority-bearing files a person asks for, never the trigger. The pin moves so the queue can
+# READ a lensed pass's rows and tag when one exists, and so the manifold this host publishes
+# declares the argument. `^0.12.0` is `<0.13.0`. Minor: an additive optional input, a new tag
+# shape, a new json field.
+ikigai-browse = "0.13.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
