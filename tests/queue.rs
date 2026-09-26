@@ -1881,8 +1881,13 @@ fn plant(door: &Kernel, p: Plant<'_>) {
         .expect("a named browse graph")
         .as_str()
         .to_string();
-    let (id, path, body, created, severity, exact) =
-        (p.id, p.path, p.body, p.created, p.severity, p.exact);
+    let (id, path, body, created, exact) = (p.id, p.path, p.body, p.created, p.exact);
+    // An empty severity plants an UNRATED finding: no proposal at all, as a reviewer that
+    // rated nothing leaves it.
+    let severity = match p.severity {
+        "" => String::new(),
+        word => format!("sh:resultSeverity <urn:iki:severity:{word}> ;"),
+    };
     let update = format!(
         r#"PREFIX oa: <http://www.w3.org/ns/oa#>
 PREFIX prov: <http://www.w3.org/ns/prov#>
@@ -1896,7 +1901,7 @@ INSERT DATA {{ GRAPH <{graph}> {{
     dcterms:creator "a-test-reviewer" ;
     dcterms:created "{created}"^^xsd:dateTime ;
     prov:wasGeneratedBy <urn:ikigai:browse:review:demo:{path}> ;
-    sh:resultSeverity <urn:iki:severity:{severity}> ;
+    {severity}
     ik:annotates <urn:repo:{ROOT}:file:{path}> ;
     ik:repo "{ROOT}" ;
     ik:path "{path}" ;
@@ -2102,6 +2107,7 @@ fn each_kind_lists_the_contracts_groups_filtered_to_the_serious_set() {
         let html = page(&door, &[("group", kind)], &reviewer());
         for group in &groups {
             let mut shown = 0;
+            let all = group["members"].as_array().expect("members").len();
             for member in group["members"].as_array().expect("members") {
                 let id = member["id"].as_str().expect("id");
                 if policy.queues(member["severity"].as_str()) {
@@ -2121,6 +2127,19 @@ fn each_kind_lists_the_contracts_groups_filtered_to_the_serious_set() {
             if shown > 0 {
                 expected_groups += 1;
                 expected_members += shown;
+                // Browse's label counts every severity; the group says what was left out.
+                let left_out = all - shown;
+                let note = format!(
+                    "{left_out} other finding{} in this group {} rated below the serious set",
+                    if left_out == 1 { "" } else { "s" },
+                    if left_out == 1 { "is" } else { "are" },
+                );
+                if left_out > 0 {
+                    assert!(
+                        html.contains(&note),
+                        "the group's own left-out note `{note}`:\n{html}"
+                    );
+                }
             }
         }
         if expected_groups == 0 {
@@ -2486,6 +2505,414 @@ fn publish_is_not_offered_in_a_batch_and_a_doc_file_shows_one_group() {
     );
     assert!(refused.contains("a batch only declines"), "{refused}");
     assert_eq!(state_of(&door, docs[0]), "pending");
+}
+
+// ------------------------------------------------ the batch view's second pass (ledger #508)
+
+/// The rendered `<input … value='{id}' …>` of one member's box, whole — the serializer
+/// orders attributes its own way, so the value is found first and the element walked to.
+fn member_input(html: &str, id: &str) -> String {
+    let at = html
+        .find(&format!("value='{id}'"))
+        .unwrap_or_else(|| panic!("no member box for {id}:\n{html}"));
+    let start = html[..at].rfind("<input").expect("an input");
+    let end = start + html[start..].find('>').expect("closes");
+    html[start..=end].to_string()
+}
+
+/// A kind whose target-only group (no twin, no kept row) holds every id in `ids` and
+/// carries a suggested word — found by the DATA, as the page decides it.
+fn a_worded_target_only_kind(door: &Kernel, ids: &[&str]) -> (String, serde_json::Value) {
+    for kind in group_kinds(door) {
+        if let Some(group) = raw_groups(door, &kind).into_iter().find(|g| {
+            let members = member_ids(g);
+            g["twin"].is_null()
+                && g["kept"].is_null()
+                && g["reason"].is_string()
+                && ids.iter().all(|id| members.iter().any(|m| m == id))
+        }) {
+            return (kind, group);
+        }
+    }
+    panic!("no worded target-only group holds {ids:?}");
+}
+
+/// Plant `n` serious findings on the one comment line of [`LIB`], so a CODE file's pending
+/// findings all quote a comment: two kinds propose the same members, one with a word.
+fn plant_comment_quotes(door: &Kernel, n: usize) -> Vec<String> {
+    let (serious, _) = a_serious_and_an_other_word(door);
+    (0..n)
+        .map(|i| {
+            let id = format!("cc{i}cc{i}cc{i}cc{i}cc{i}cc{i}cc{i}cc{i}");
+            plant(
+                door,
+                Plant {
+                    id: &id,
+                    severity: &serious,
+                    body: &format!("the comment restates, take {i}"),
+                    path: "src/lib.rs",
+                    exact: "// Frobs the widget.",
+                    created: &format!("2026-09-19T12:0{i}:00Z"),
+                },
+            );
+            id
+        })
+        .collect()
+}
+
+/// ★★ **A twin with no word takes the BATCH word** (Brian, 2026-09-25, ledger #508). The
+/// twin-carrying form carries one optional batch-wide picker, unselected, and says how many
+/// ticked members will take it; a member's own word — its twin's, or one the person picked —
+/// wins over it; and a wordless member with no batch word still refuses the batch.
+#[test]
+fn a_batch_word_falls_back_for_members_whose_twin_had_none() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let (serious, _) = a_serious_and_an_other_word(&door);
+    let words = reason_words(&door);
+    assert!(words.len() >= 3, "{words:?}");
+    let (w1, w2, batch_word) = (
+        words[0].clone(),
+        words[1].clone(),
+        words.last().expect("a word").clone(),
+    );
+    assert!(batch_word != w1 && batch_word != w2);
+    // Four declined twins: two with a word, two from before words existed.
+    let twins = [
+        (
+            "1111111111111111111111a1",
+            "fn alpha() {}",
+            Some(w1.as_str()),
+        ),
+        (
+            "1111111111111111111111b1",
+            "fn beta() {}",
+            Some(w2.as_str()),
+        ),
+        ("1111111111111111111111c1", "fn gamma() {}", None),
+        ("1111111111111111111111d1", "// Frobs the widget.", None),
+    ];
+    for (id, exact, word) in twins {
+        plant(
+            &door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised once",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-18T12:00:00Z",
+            },
+        );
+        let mut args = vec![("decision", "decline")];
+        if let Some(word) = word {
+            args.push((queue::REASON_ARG, word));
+        }
+        issue(
+            &door,
+            Verb::Sink,
+            &format!("urn:iki:finding:{id}"),
+            &args,
+            &reviewer(),
+        )
+        .expect("a human declines the twin");
+    }
+    let fresh = [
+        ("2222222222222222222222a2", "fn alpha() {}"),
+        ("2222222222222222222222b2", "fn beta() {}"),
+        ("2222222222222222222222c2", "fn gamma() {}"),
+        ("2222222222222222222222d2", "// Frobs the widget."),
+    ];
+    for (id, exact) in fresh {
+        plant(
+            &door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised again",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-19T12:00:00Z",
+            },
+        );
+    }
+    let (f1, f2, f3, f4) = (fresh[0].0, fresh[1].0, fresh[2].0, fresh[3].0);
+    let kind = twin_kind(&door);
+    let html = page(&door, &[("group", &kind)], &reviewer());
+
+    // The batch-wide picker: present, on its empty choice, and choosable (not locked); the
+    // form says how many will take it. Every member with a twin starts ticked.
+    assert_eq!(
+        selected_in(&html, "reason").as_deref(),
+        Some(""),
+        "the batch word starts unselected:\n{html}"
+    );
+    let batch_picker = reason_picker(&html);
+    assert!(
+        !batch_picker.contains("required"),
+        "the fallback is optional:\n{batch_picker}"
+    );
+    assert!(
+        !batch_picker
+            .split("<option")
+            .nth(1)
+            .expect("an option")
+            .contains("disabled"),
+        "the empty choice can be chosen back:\n{batch_picker}"
+    );
+    assert!(
+        html.contains("2 of 4 will take it"),
+        "the count of wordless twins among the ticked:\n{html}"
+    );
+    for id in [f1, f2, f3, f4] {
+        assert!(
+            member_input(&html, id).contains("checked"),
+            "a member with a twin starts ticked: {id}\n{html}"
+        );
+    }
+    assert_eq!(
+        selected_in(&html, &format!("reason:{f3}")).as_deref(),
+        Some("")
+    );
+
+    // A wordless member with no batch word still refuses the batch, by name.
+    let refused = batch_by_form(&door, &format!("_group={kind}&member={f3}&reason:{f3}="));
+    assert!(
+        refused.contains("Nothing was declined") && refused.contains(f3),
+        "{refused}"
+    );
+    assert_eq!(state_of(&door, f3), "pending");
+
+    // A member's OWN pick wins over the batch word.
+    let done = batch_by_form(
+        &door,
+        &format!("_group={kind}&member={f4}&reason:{f4}={w2}&reason={batch_word}"),
+    );
+    assert!(done.contains("Declined 1 of 1."), "{done}");
+    assert_eq!(
+        row(&door, "declined", f4)["decision"]["reason"],
+        w2.as_str(),
+        "the member's own word, not the batch's"
+    );
+    assert!(
+        done.contains("1 of 3 will take it"),
+        "the re-render counts what is left:\n{done}"
+    );
+
+    // As the page posts it: the batch word lands on the wordless member only, and a member
+    // left unticked (f2) is not decided.
+    let done = batch_by_form(
+        &door,
+        &format!(
+            "_group={kind}&member={f1}&member={f3}&reason:{f1}={w1}&reason:{f2}={w2}&reason:{f3}=&reason={batch_word}"
+        ),
+    );
+    assert!(done.contains("Declined 2 of 2."), "{done}");
+    assert_eq!(
+        row(&door, "declined", f1)["decision"]["reason"],
+        w1.as_str(),
+        "the twin's word, not the batch's"
+    );
+    assert_eq!(
+        row(&door, "declined", f3)["decision"]["reason"],
+        batch_word.as_str(),
+        "the twin had no word, so the batch word is this member's stated reason"
+    );
+    assert_eq!(state_of(&door, f2), "pending");
+    // What is left (f2) has a worded twin: no fallback picker is offered, and the member
+    // still carries its own.
+    assert!(
+        member_input(&done, f2).contains("checked") && !done.contains(" name='reason'"),
+        "no member would take a batch word now, so none is offered:\n{done}"
+    );
+    assert_eq!(
+        selected_in(&done, &format!("reason:{f2}")).as_deref(),
+        Some(w2.as_str())
+    );
+}
+
+/// ★★ **A target-only group starts UNTICKED, its word shown and not selected** (Brian,
+/// 2026-09-25, ledger #508) — and **a code file whose findings all quote comments keeps its
+/// worded group**: the fold sends the wordless twin of the proposal to it, not the reverse.
+#[test]
+fn a_target_only_group_starts_unticked_with_its_word_shown_and_not_selected() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let ids = plant_comment_quotes(&door, 5);
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (kind, group) = a_worded_target_only_kind(&door, &ids);
+    let word = group["reason"]
+        .as_str()
+        .expect("a suggested word")
+        .to_string();
+
+    // Another kind proposes the same members on the same file with NO word…
+    let wordless: Vec<String> = group_kinds(&door)
+        .into_iter()
+        .filter(|k| {
+            *k != kind
+                && raw_groups(&door, k).iter().any(|g| {
+                    g["twin"].is_null()
+                        && g["kept"].is_null()
+                        && g["reason"].is_null()
+                        && member_ids(g) == ids
+                })
+        })
+        .collect();
+    assert_eq!(
+        wordless.len(),
+        1,
+        "one wordless twin of the proposal: {wordless:?}"
+    );
+
+    // …and the proposal is shown ONCE, under the kind that carries the word.
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    for id in &ids {
+        let input = member_input(&html, id);
+        assert!(
+            !input.contains("checked") && !input.contains("disabled"),
+            "a target-only member starts unticked and tickable: {input}"
+        );
+    }
+    assert!(
+        html.contains(&format!("suggested word: {word}")),
+        "the word is shown beside the group:\n{html}"
+    );
+    assert_eq!(
+        selected_in(&html, "reason").as_deref(),
+        Some(""),
+        "and not selected:\n{html}"
+    );
+    let picker = reason_picker(&html);
+    assert!(
+        picker.contains("required"),
+        "a group's word is required:\n{picker}"
+    );
+    assert!(
+        picker
+            .split("<option")
+            .nth(1)
+            .expect("an option")
+            .contains("disabled"),
+        "the empty choice cannot be submitted:\n{picker}"
+    );
+    assert!(
+        picker.contains(&format!("value='{word}'")),
+        "the suggested word is among the choices:\n{picker}"
+    );
+    let other = page(&door, &[("group", &wordless[0])], &reviewer());
+    for id in &ids {
+        assert!(
+            !other.contains(&format!("value='{id}'")),
+            "`{}` shows the worded kind's proposal again:\n{other}",
+            wordless[0]
+        );
+    }
+    assert!(other.contains("shown there, once"), "{other}");
+
+    // Nothing ticked is refused; two of five ticked declines exactly two.
+    let refused = batch_by_form(&door, &format!("_group={kind}&reason={word}"));
+    assert!(refused.contains("no finding was ticked"), "{refused}");
+    let done = batch_by_form(
+        &door,
+        &format!(
+            "_group={kind}&member={}&member={}&reason={word}",
+            ids[1], ids[3]
+        ),
+    );
+    assert!(done.contains("Declined 2 of 2."), "{done}");
+    for (i, id) in ids.iter().enumerate() {
+        let expected = if i == 1 || i == 3 {
+            "declined"
+        } else {
+            "pending"
+        };
+        assert_eq!(state_of(&door, id), expected, "{id}");
+    }
+}
+
+/// ★ **The rule is evidence, not kind**: a group that proposes a row to KEEP carries evidence
+/// about each member, so its members start ticked and its word pre-selected; the kept row
+/// is shown locked and unticked.
+#[test]
+fn a_group_with_a_kept_row_keeps_its_members_pre_ticked() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    plant_the_mix(&door);
+    let (kind, group) = group_kinds(&door)
+        .into_iter()
+        .find_map(|kind| {
+            raw_groups(&door, &kind)
+                .into_iter()
+                .find(|g| !g["kept"].is_null())
+                .map(|g| (kind, g))
+        })
+        .expect("a kind whose group proposes a row to keep");
+    let kept = group["kept"]["id"].as_str().expect("the kept id");
+    let members = member_ids(&group);
+    assert!(!members.is_empty());
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    for id in &members {
+        let input = member_input(&html, id);
+        assert!(
+            input.contains("checked") && !input.contains("disabled"),
+            "a member beside a kept row starts ticked: {input}"
+        );
+    }
+    assert!(
+        !html.contains(&format!("value='{kept}'")),
+        "the kept row carries no box of its own:\n{html}"
+    );
+    assert!(html.contains("class='badge final'>kept<"), "{html}");
+    assert_eq!(
+        selected_in(&html, "reason").as_deref(),
+        group["reason"].as_str(),
+        "the word is pre-selected beside evidence:\n{html}"
+    );
+    assert!(!html.contains("suggested word:"), "{html}");
+}
+
+/// **An unrated member is shown, locked, and told where to go**: a batch states no rating
+/// and a decline needs one, so the row says so and links the finding's own page.
+#[test]
+fn an_unrated_member_is_shown_locked_with_its_own_page_linked() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let (serious, _) = a_serious_and_an_other_word(&door);
+    let (rated, unrated) = ("e1e1e1e1e1e1e1e1e1e1e1e1", "e0e0e0e0e0e0e0e0e0e0e0e0");
+    for (id, severity, exact) in [
+        (rated, serious.as_str(), "fn gamma() {}"),
+        (unrated, "", "fn beta() {}"),
+    ] {
+        plant(
+            &door,
+            Plant {
+                id,
+                severity,
+                body: "something about a function",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-19T12:00:00Z",
+            },
+        );
+    }
+    let kind = a_kind_holding(&door, &[rated, unrated]);
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    let locked = member_input(&html, unrated);
+    assert!(
+        locked.contains("disabled") && !locked.contains("checked"),
+        "{locked}"
+    );
+    assert!(
+        html.contains("decide this one singly"),
+        "the row says why there is no tick:\n{html}"
+    );
+    assert!(
+        html.contains(&format!("href='/browse/urn:iki:finding:{unrated}'")),
+        "and links the finding's own page:\n{html}"
+    );
+    let offered = member_input(&html, rated);
+    assert!(!offered.contains("disabled"), "{offered}");
 }
 
 /// ★ The anti-drift guard's third sibling: no group KIND word is spelled in this crate's page
