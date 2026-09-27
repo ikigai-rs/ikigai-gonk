@@ -728,7 +728,7 @@ async fn ledger_listing(
         &children,
     );
     let shell = render::render(&doc, full).map_err(render_err)?;
-    let items = render::render_chunks(&chunks).map_err(render_err)?;
+    let items = render::rendered_chunks(inv, &chunks).await?;
     Ok(html(
         render::splice(shell, &[(ITEMS_SLOT.to_string(), items)]).map_err(render_err)?,
     ))

@@ -53,11 +53,16 @@ name, and a browser refuses an IP address as one.
   filter matched, not the count the page drew — "showing the 50 most recently updated of 411
   open items", with a link for the rest. `?limit=<n>` or `?limit=all` asks for more, up to
   500 in one render. ⚠ The bound is latency, and the number is measured: the server-side
-  XSLT costs about 6 ms per row at fifty rows and about 16 ms at four hundred, so a page of
-  410 items cost **6.5 seconds** — slow enough to read as a hung server rather than a slow
-  page. Reading the ledger is not the expensive part (0.09 s for the whole set), which is why
-  the page still counts everything and bounds only what it draws.
+  XSLT costs about 6 ms per row at fifty rows and about 16 ms at four hundred in ONE
+  document, so a page of 410 items cost **6.5 seconds** — slow enough to read as a hung
+  server rather than a slow page. Reading the ledger is not the expensive part (0.09 s for
+  the whole set), which is why the page still counts everything and bounds only what it draws.
   `cargo run --release --example render-cost -- <items.ttl> [rows|all]` takes the numbers again.
+  Since ledger #519 the rows are rendered in **chunks of ten** apart from the page's shell
+  and spliced in (`src/render.rs`), which is the linear cost — 500 items 8.5 s → 1.9 s — and
+  each chunk is a cached resource (`urn:iki:gonk:render`, keyed on the chunk's own bytes), so
+  the same page again is 0.1 s. `examples/snapshot-cost.rs` times every expensive page over a
+  backup archive, read-only.
 - **File, edit, work.** A form on the ledger page files an item (first line the title, a blank
   line, then the body). An item page comments, edits the title, body and priority, closes with
   a reason or reopens, claims or releases, defers or resumes, labels and links.
@@ -205,7 +210,11 @@ run it (`web::CROSS_GRAPH`).
 | `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
-the ledger, as before, and `tests/conformance.rs` pins both catalogs.
+the ledger, as before, plus one resource of gonk's own — `urn:iki:gonk:render`, the page
+renderer's chunk transform (one `<view:page view="chunk">` document in, its HTML out; a pure
+function of its input, cached by the hub on the content-addressed request, which is what
+makes a poll of the Queue a cache hit and a decision a one-chunk miss). It is bound in the
+hub because the hub holds the process's one cache. `tests/conformance.rs` pins both catalogs.
 
 **Every form issues an action the ledger already declares.** `/act` builds the target from
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a

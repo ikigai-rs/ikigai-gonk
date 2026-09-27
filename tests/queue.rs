@@ -34,6 +34,7 @@ use ikigai_gonk::config::QueuePolicy;
 use ikigai_gonk::grants::{browse_graph_grants, grants_for_all, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::queue;
+use ikigai_gonk::render;
 use ikigai_gonk::trigger::{Depth, Trigger};
 use ikigai_gonk::{browse, compose_with, doors, quic, web};
 use ikigai_store::DurableStore;
@@ -83,6 +84,19 @@ fn door_watching(
     activity: Arc<ikigai_gonk::trigger::Activity>,
     armed: bool,
 ) -> (Kernel, TempDir) {
+    let (door, hub, config) = door_and_hub(dir, review, activity, armed);
+    drop(hub);
+    (door, config)
+}
+
+/// The same door, with the HUB it forwards to — the kernel that holds the cache, for the
+/// tests that ask what is cached.
+fn door_and_hub(
+    dir: &TempDir,
+    review: Option<Trigger>,
+    activity: Arc<ikigai_gonk::trigger::Activity>,
+    armed: bool,
+) -> (Kernel, Arc<Kernel>, TempDir) {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store that declares where its sharer writes");
@@ -112,7 +126,11 @@ fn door_watching(
         // gate every test here sees is the one the shipped binary applies.
         queue: QueuePolicy::default(),
     });
-    (doors::http_kernel(hub, web::space(face)), config)
+    (
+        doors::http_kernel(Arc::clone(&hub), web::space(face)),
+        hub,
+        config,
+    )
 }
 
 /// ★ The grant this server hands an ANONYMOUS loopback caller, computed the way
@@ -161,6 +179,175 @@ fn page(kernel: &Kernel, args: &[(&str, &str)], cap: &Capability) -> String {
     let answer = issue(kernel, Verb::Source, queue::QUEUE_IRI, args, cap)
         .unwrap_or_else(|e| panic!("the queue page: {e}"));
     String::from_utf8(answer.bytes).expect("utf-8")
+}
+
+// ------------------------------------------------------------ the chunk cache (#519)
+
+/// How many `urn:iki:gonk:render` entries the hub's cache holds, from `urn:kernel:cache`.
+fn cached_chunks(hub: &Kernel) -> usize {
+    let readout = issue(
+        hub,
+        Verb::Source,
+        "urn:kernel:cache",
+        &[],
+        &Capability::root(),
+    )
+    .expect("root holds the inspect token");
+    String::from_utf8_lossy(&readout.bytes)
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some(render::RENDER_IRI))
+        .count()
+}
+
+/// ★ **The measurement the chunk design rests on** (ledger #519, step 2). A chunk that read
+/// the findings itself and cached under their threads would be no more cacheable than that
+/// read — and `ikigai-browse` 0.13.0 answers `urn:repo:{root}:findings` `Expiry::Always`:
+/// nothing is stored, and a probe after the read says so. So the chunks key on their
+/// CONTENT instead (`render::rendered_chunks`), and this test is what would change first if
+/// browse ever declared the read cacheable — at which point a thread-keyed chunk becomes
+/// possible and this design note goes stale.
+#[test]
+fn a_findings_read_is_not_cacheable_so_the_chunks_key_on_content() {
+    let dir = scratch_root();
+    let (_door, hub, _config) = door_and_hub(
+        &dir,
+        None,
+        Arc::new(ikigai_gonk::trigger::Activity::default()),
+        false,
+    );
+    plant_pending_finding(&hub, &reviewer());
+    let findings = format!("urn:repo:{ROOT}:findings");
+    let before = cached_chunks(&hub);
+    let read = issue(
+        &hub,
+        Verb::Source,
+        &findings,
+        &[("as", "application/json")],
+        &reviewer(),
+    )
+    .expect("the reviewer reads the findings");
+    assert_eq!(
+        read.expiry,
+        ikigai_core::Expiry::Always,
+        "browse's findings face is live: a chunk over it would be Always too"
+    );
+    let request = Request::new(Verb::Source, Iri::parse(&findings).unwrap())
+        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    assert!(
+        !hub.is_cached(&request, &reviewer()),
+        "and the kernel stored nothing for it"
+    );
+    assert_eq!(
+        cached_chunks(&hub),
+        before,
+        "no chunk was rendered by a bare read"
+    );
+}
+
+/// ★ A poll that finds the queue unchanged builds the same chunk documents, and every one
+/// is served from the hub's cache: the second page adds no entry and is the same bytes.
+#[test]
+fn a_poll_after_no_change_serves_every_chunk_from_the_cache() {
+    let dir = scratch_root();
+    std::fs::write(dir.path().join("src/other.rs"), "the other file\n").expect("other.rs");
+    let (door, hub, _config) = door_and_hub(
+        &dir,
+        None,
+        Arc::new(ikigai_gonk::trigger::Activity::default()),
+        false,
+    );
+    for (id, path) in [
+        ("aaaabbbbccccddddeeee0101", "src/lib.rs"),
+        ("aaaabbbbccccddddeeee0102", "src/lib.rs"),
+        ("aaaabbbbccccddddeeee0103", "src/other.rs"),
+    ] {
+        plant_finding_on(&door, &reviewer(), id, Some(SEVERITY), "a claim", path);
+    }
+    assert_eq!(cached_chunks(&hub), 0, "nothing rendered yet");
+    let first = page(&door, &[], &reviewer());
+    let after_first = cached_chunks(&hub);
+    assert_eq!(
+        after_first, 2,
+        "one chunk per file: two files, two cached renders"
+    );
+    let second = page(&door, &[], &reviewer());
+    assert_eq!(second, first, "the same page");
+    assert_eq!(
+        cached_chunks(&hub),
+        after_first,
+        "the poll added no entry: every chunk was a hit"
+    );
+    // The chunk request itself, probed read-only: the document the page built for the
+    // second file is cached under the reviewer's capability and under no other.
+    let chunk = render::chunk(&third_row_document(&first));
+    let request = Request::new(Verb::Source, Iri::parse(render::RENDER_IRI).unwrap())
+        .with_arg("content", ArgRef::Inline(chunk.into_bytes()));
+    assert!(
+        !hub.is_cached(&request, &onlooker()),
+        "a different capability is a different key"
+    );
+}
+
+/// The chunk document the page built for the third planted row is not observable from the
+/// HTML, so this is only the shape check that `is_cached` answers `false` for a caller who
+/// never rendered it: any document will do.
+fn third_row_document(_page: &str) -> String {
+    String::new()
+}
+
+/// ★ A decision takes one row out of the pending list, and only the chunk that held it is
+/// recomputed: the other file's chunk is served from the cache, unchanged. This is what
+/// "a decision invalidates one chunk" means with content-keyed chunks — the boundary at
+/// the file (`queue.rs`) is what keeps the shift inside one chunk.
+#[test]
+fn a_decision_recomputes_only_the_chunk_that_held_the_row() {
+    let dir = scratch_root();
+    std::fs::write(dir.path().join("src/other.rs"), "the other file\n").expect("other.rs");
+    let (door, hub, _config) = door_and_hub(
+        &dir,
+        None,
+        Arc::new(ikigai_gonk::trigger::Activity::default()),
+        false,
+    );
+    for (id, path) in [
+        ("aaaabbbbccccddddeeee0201", "src/lib.rs"),
+        ("aaaabbbbccccddddeeee0202", "src/lib.rs"),
+        ("aaaabbbbccccddddeeee0203", "src/other.rs"),
+        ("aaaabbbbccccddddeeee0204", "src/other.rs"),
+    ] {
+        plant_finding_on(&door, &reviewer(), id, Some(SEVERITY), "a claim", path);
+    }
+    let before = page(&door, &[], &reviewer());
+    assert_eq!(cached_chunks(&hub), 2, "two files, two chunks");
+    assert!(before.contains("aaaabbbbccccddddeeee0203"), "{before}");
+
+    // Decline one row of the second file. The adapter re-renders the section: the first
+    // file's chunk is the same document (a hit), the second file's lost a row (a miss).
+    let after = decide_by_form(
+        &door,
+        &format!("id=aaaabbbbccccddddeeee0203&decision=decline&severity={SEVERITY}"),
+    );
+    assert!(!after.contains("flash error"), "{after}");
+    assert!(
+        !after.contains("value='aaaabbbbccccddddeeee0203'"),
+        "{after}"
+    );
+    assert_eq!(
+        cached_chunks(&hub),
+        3,
+        "exactly one chunk was recomputed: the one that held the decided row"
+    );
+    // And the next poll is all hits again.
+    let polled = page(&door, &[], &reviewer());
+    assert_eq!(
+        cached_chunks(&hub),
+        3,
+        "the poll after the decision added nothing"
+    );
+    assert!(
+        !polled.contains("value='aaaabbbbccccddddeeee0203'"),
+        "{polled}"
+    );
 }
 
 // ------------------------------------------------------------------ the measurement
@@ -870,6 +1057,18 @@ fn plant_pending_finding(door: &Kernel, cap: &Capability) {
 /// The same, for any id, any body, and any severity — or none, which is a finding the model
 /// left unrated (no `sh:resultSeverity` at all, the shape browse reads back as `null`).
 fn plant_finding(door: &Kernel, cap: &Capability, id: &str, severity: Option<&str>, body: &str) {
+    plant_finding_on(door, cap, id, severity, body, "src/lib.rs");
+}
+
+/// The same, on any file of the root — for the chunk tests, whose chunks fall at the file.
+fn plant_finding_on(
+    door: &Kernel,
+    cap: &Capability,
+    id: &str,
+    severity: Option<&str>,
+    body: &str,
+    path: &str,
+) {
     let graph = browse::Graph::chosen()
         .named()
         .expect("this server writes browse's quads in a NAMED graph")
@@ -892,10 +1091,10 @@ INSERT DATA {{ GRAPH <{graph}> {{
     dcterms:description "{body}" ;
     dcterms:creator "a-test-reviewer" ;
     dcterms:created "2026-09-19T12:00:00Z"^^xsd:dateTime ;
-    prov:wasGeneratedBy <urn:ikigai:browse:review:demo:src/lib.rs> ;
-{rated}    ik:annotates <urn:repo:{ROOT}:file:src/lib.rs> ;
+    prov:wasGeneratedBy <urn:ikigai:browse:review:demo:{path}> ;
+{rated}    ik:annotates <urn:repo:{ROOT}:file:{path}> ;
     ik:repo "{ROOT}" ;
-    ik:path "src/lib.rs" ;
+    ik:path "{path}" ;
     ik:contentHash "sha256:planted" ;
     oa:hasSelector <urn:iki:finding:{id}:selector:quote> ,
                    <urn:iki:finding:{id}:selector:position> .

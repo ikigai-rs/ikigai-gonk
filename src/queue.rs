@@ -819,30 +819,45 @@ impl QueuePage {
         // and nothing else, and the HTML is spliced together — byte for byte what one
         // transform of the whole produced, at the linear cost instead of the superlinear
         // one (`render::chunk` has the numbers).
+        //
+        // ★ A chunk boundary falls wherever the FILE changes, and every `CHUNK_ROWS` rows
+        // inside one file. The chunks are cached by content (`render::rendered_chunks`),
+        // and a decision takes a row out of the pending list: with boundaries by count
+        // alone every chunk after it would shift by one row and miss, while a boundary at
+        // the file keeps the shift inside the one file the decision was about. Triage
+        // order already groups a file's rows together, so this costs no re-ordering.
         let mut drawn = 0usize;
-        let mut rows_xml: Vec<String> = Vec::new();
+        let mut chunks: Vec<String> = Vec::new();
+        let mut open: Vec<String> = Vec::new();
+        let mut open_file: Option<(String, String)> = None;
         for (root, rows) in &read {
             let Rows::Got(rows) = rows else { continue };
             for row in rows {
                 if drawn == wanted {
                     break;
                 }
-                rows_xml.push(self.finding_element(
-                    row,
-                    root,
-                    decide,
-                    &state,
-                    only.as_deref(),
-                    scope,
-                ));
+                let file = (
+                    root.clone(),
+                    row.get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                );
+                if !open.is_empty()
+                    && (open.len() == render::CHUNK_ROWS || open_file.as_ref() != Some(&file))
+                {
+                    chunks.push(render::chunk(&open.concat()));
+                    open.clear();
+                }
+                open_file = Some(file);
+                open.push(self.finding_element(row, root, decide, &state, only.as_deref(), scope));
                 drawn += 1;
             }
         }
+        if !open.is_empty() {
+            chunks.push(render::chunk(&open.concat()));
+        }
         children.push_str(&render::slot(ROWS_SLOT));
-        let chunks: Vec<String> = rows_xml
-            .chunks(render::CHUNK_ROWS)
-            .map(|window| render::chunk(&window.concat()))
-            .collect();
 
         let mut attributes: Vec<(&str, String)> = vec![
             ("view", "queue".to_string()),
@@ -960,7 +975,7 @@ impl QueuePage {
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let doc = envelope("page", &attributes, &children);
         let shell = render::render(&doc, !self.fragment).map_err(web::render_err)?;
-        let rows = render::render_chunks(&chunks).map_err(web::render_err)?;
+        let rows = render::rendered_chunks(inv, &chunks).await?;
         Ok(web::html(
             render::splice(shell, &[(ROWS_SLOT.to_string(), rows)]).map_err(web::render_err)?,
         ))

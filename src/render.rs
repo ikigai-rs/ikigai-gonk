@@ -36,6 +36,11 @@
 //! open/close pair. Text and attribute values arrive escaped (`&lt;`, `&apos;`, `&quot;`),
 //! which is what makes a `<` in a title safe to serve.
 
+use async_trait::async_trait;
+use ikigai_core::{
+    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
+    Representation, Request, Verb,
+};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 
@@ -332,13 +337,117 @@ pub fn chunk(rows: &str) -> String {
     envelope("page", &[("view", CHUNK_VIEW)], rows)
 }
 
-/// Render each of `documents` (see [`chunk`]) and concatenate the HTML.
-pub fn render_chunks(documents: &[String]) -> Result<String, String> {
+/// `urn:iki:gonk:render` — one chunk document, rendered through [`STYLESHEET`].
+pub const RENDER_IRI: &str = "urn:iki:gonk:render";
+
+/// The most a chunk document may be. A chunk of [`CHUNK_ROWS`] queue rows is ~20 KB and
+/// the largest batch group on the 2026-09-25 snapshot ~70 KB; anything near this is not a
+/// chunk this crate built, and the bound REFUSES rather than spending a minute of xrust on
+/// it (the resource is reachable by any caller with a door).
+pub const MAX_CHUNK_BYTES: usize = 1 << 20;
+
+/// Render each of `documents` (see [`chunk`]) through the kernel and concatenate the HTML.
+///
+/// # ★ Why through the kernel (ledger #519, step 2)
+///
+/// Each chunk is resolved as `urn:iki:gonk:render content=<document>` under the caller's
+/// capability, and [`Render`] answers `.cacheable()` with **no golden thread**: the HTML is
+/// a pure function of the document, so the cache key — the content-addressed request,
+/// which hashes the inline argument — IS the invalidation. A poll that finds the queue
+/// unchanged builds the same documents and every chunk is a hit; a decision changes one
+/// row, so one document changes and one chunk is recomputed. Nothing has to cut anything.
+///
+/// This is deliberately not a chunk that READS the findings itself and caches under their
+/// threads: `ikigai-browse` 0.13.0 answers `urn:repo:{root}:findings` `Expiry::Always`
+/// (`tests/queue.rs::a_findings_read_is_not_cacheable_so_the_chunks_key_on_content`), and
+/// expiry propagates, so such a chunk would be `Always` too and cache nothing. The reads
+/// stay in the page, uncached and cheap; the render — the expensive half — is what is keyed.
+///
+/// The door kernels store nothing (`crate::doors::NoCache`), so the resource is bound in
+/// the HUB ([`space`]), where the one cache in the process is.
+pub async fn rendered_chunks(
+    inv: &Invocation<'_>,
+    documents: &[String],
+) -> ikigai_core::Result<String> {
     let mut out = String::new();
     for document in documents {
-        out.push_str(&render(document, false)?);
+        let request = Request::new(
+            Verb::Source,
+            ikigai_core::Iri::parse(RENDER_IRI).map_err(|e| Error::Endpoint(e.to_string()))?,
+        )
+        .with_arg("content", ArgRef::Inline(document.as_bytes().to_vec()));
+        let html = inv.issue(request).await?;
+        out.push_str(&String::from_utf8_lossy(&html.bytes));
     }
     Ok(out)
+}
+
+/// The endpoint behind [`RENDER_IRI`]: a chunk document in, its HTML out, cacheable and
+/// pure. Bound in the hub by [`space`]; see [`rendered_chunks`] for why.
+pub struct Render;
+
+/// The space that binds [`Render`] — composed into the hub by `crate::compose_with`.
+pub fn space() -> EndpointSpace {
+    EndpointSpace::new().bind(Exact::new(RENDER_IRI), Render)
+}
+
+#[async_trait]
+impl Endpoint for Render {
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(format!(
+                "`{RENDER_IRI}` answers Source only"
+            )));
+        }
+        let document = inv.inline_str("content")?;
+        if document.len() > MAX_CHUNK_BYTES {
+            return Err(Error::InvalidArgument {
+                name: "content".to_string(),
+                detail: format!(
+                    "{} bytes is more than the {MAX_CHUNK_BYTES} a chunk document may be",
+                    document.len()
+                ),
+            });
+        }
+        if !document.trim_start().starts_with("<view:page") {
+            return Err(Error::InvalidArgument {
+                name: "content".to_string(),
+                detail: "not a chunk document: it does not start with `<view:page`".to_string(),
+            });
+        }
+        let html = render(document, false).map_err(Error::Endpoint)?;
+        Ok(Representation::new(
+            ReprType::new("text/html").with_param("charset", "utf-8"),
+            html.into_bytes(),
+        )
+        .cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "gonk-render"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-render")
+            .title("Render one chunk of a gonk page")
+            .summary(
+                "One chunk document — a `<view:page view=\"chunk\">` envelope holding queue \
+                 rows, batch groups or ledger items and nothing else — through gonk's one \
+                 stylesheet, as HTML. A pure function of its input and cacheable with no \
+                 golden thread: the content-addressed request is the key, so a page that \
+                 builds the same chunk again is served from the cache and a page whose rows \
+                 changed recomputes exactly the chunks that hold them. Refuses a document \
+                 over 1 MiB or one that is not a view:page envelope.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ArgSpec::new("content")
+                    .summary("the chunk document (see `render::chunk`); a pipe fills it")
+                    .class("http://www.w3.org/2001/XMLSchema#string"),
+            )
+            .output("text/html")
+    }
 }
 
 /// Put rendered rows into a rendered shell: each `(name, html)` replaces the marker its
