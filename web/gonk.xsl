@@ -182,6 +182,13 @@
     </p>
   </xsl:template>
 
+  <!-- Where a shell's rows go: a comment src/render.rs::splice replaces with the rows it
+       rendered in chunks. A comment because it is the one node that can stand inside any
+       element without being markup, and because xrust writes xsl:comment verbatim. -->
+  <xsl:template match="view:slot">
+    <xsl:comment>gonk-slot:<xsl:value-of select="@name"/></xsl:comment>
+  </xsl:template>
+
   <xsl:template name="body">
     <xsl:choose>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
@@ -193,6 +200,16 @@
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
       <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
+      <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
+           holds their slot and spliced in by src/render.rs. Every row template below reads
+           only its own element, which is what makes a chunk's rows render as the page's. -->
+      <xsl:when test="@view = 'chunk'">
+        <xsl:apply-templates select="view:finding"/>
+        <xsl:apply-templates select="view:group"/>
+        <xsl:apply-templates select="rdf:RDF/ledger:Item">
+          <xsl:sort select="dcterms:modified" order="descending"/>
+        </xsl:apply-templates>
+      </xsl:when>
       <xsl:otherwise>
         <section class="panel empty-state">
           <h1><xsl:value-of select="@title"/></h1>
@@ -340,6 +357,7 @@
       </xsl:if>
       <ol class="findings">
         <xsl:apply-templates select="view:finding"/>
+        <xsl:apply-templates select="view:slot"/>
       </ol>
       <xsl:apply-templates select="view:no-form"/>
       <xsl:apply-templates select="view:batch"/>
@@ -374,6 +392,7 @@
       <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
       <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
       <xsl:apply-templates select="view:group"/>
+      <xsl:apply-templates select="view:slot"/>
       <xsl:if test="@decide = 'true'">
         <div class="batch-decide">
           <!-- The batch's one word: REQUIRED on a group form, where it is every ticked
@@ -793,14 +812,17 @@
           <button type="submit">File</button>
         </form>
       </xsl:if>
-      <xsl:if test="count(rdf:RDF/ledger:Item) = 0">
+      <!-- ⚠ `@has-rows`, not `count(rdf:RDF/ledger:Item)`: the rows are rendered in chunks
+           apart from this shell (ledger #519), so the shell holds none of them and the
+           count is the Rust side's (`web::Count`), evaluated once. -->
+      <xsl:if test="@has-rows = 'false'">
         <p class="empty">No items match.</p>
       </xsl:if>
       <!-- ⚠ What this page rendered and what the filter MATCHED are different numbers, and
            the page says both: a listing that reports its own length as the total is the
            defect in #419, one surface over. The sentence and the link are built in Rust
            (`web::Count`) because the engine has no variables to build them with. -->
-      <xsl:if test="count(rdf:RDF/ledger:Item) &gt; 0">
+      <xsl:if test="@has-rows = 'true'">
         <p class="count">
           <span class="how-many"><xsl:value-of select="@count"/></span>
           <xsl:if test="@more = 'true'">
@@ -816,6 +838,7 @@
           <xsl:apply-templates select="rdf:RDF/ledger:Item">
             <xsl:sort select="dcterms:modified" order="descending"/>
           </xsl:apply-templates>
+          <xsl:apply-templates select="view:slot"/>
         </ol>
       </xsl:if>
     </section>

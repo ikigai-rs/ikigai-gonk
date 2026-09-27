@@ -93,6 +93,9 @@ const MAX_ROWS: usize = 500;
 /// cap is reported as a floor (`411+`), never as a total.
 const COUNT_CAP: usize = 2000;
 
+/// The listing shell's slot for its rows — see [`render::chunk`].
+const ITEMS_SLOT: &str = "items";
+
 /// What the HTML face is built from.
 pub struct Web {
     /// The hub — for `describe()` in `Act`. Every REQUEST goes through the invocation.
@@ -661,7 +664,7 @@ async fn ledger_listing(
         items = with(items, "text", text);
     }
     let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
-    let count = newest_rows(&mut graph, rows);
+    let (count, order) = newest_rows(&mut graph, rows);
     enrich_items(&mut graph, ledger, inv, status);
     enrich_authors(&mut graph, &web.passkeys);
     let ledgers = readable_ledgers(web, inv);
@@ -669,7 +672,15 @@ async fn ledger_listing(
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
-    children.push_str(&graph.rdfxml().map_err(render_err)?);
+    // ★ The rows go into the shell's slot in chunks of `render::CHUNK_ROWS` items (ledger
+    // #443, #519): each window is its own RDF/XML document in the listing's order, so the
+    // stylesheet's per-chunk `xsl:sort` and this order agree, and the spliced page is the
+    // one a single transform produced. `render::chunk` has the numbers.
+    children.push_str(&render::slot(ITEMS_SLOT));
+    let mut chunks: Vec<String> = Vec::new();
+    for window in graph.windows(&order, render::CHUNK_ROWS) {
+        chunks.push(render::chunk(&window.rdfxml().map_err(render_err)?));
+    }
     let title = if ledger.is_default() {
         "Ledger".to_string()
     } else {
@@ -710,10 +721,17 @@ async fn ledger_listing(
                 "can-write",
                 flag(inv.capability.allows(&ledger.cap_write())),
             ),
+            // ⚠ The shell holds no rows, so it cannot count them: this is what decides
+            // "No items match." against the list, evaluated once here.
+            ("has-rows", flag(count.shown > 0)),
         ],
         &children,
     );
-    Ok(html(render::render(&doc, full).map_err(render_err)?))
+    let shell = render::render(&doc, full).map_err(render_err)?;
+    let items = render::render_chunks(&chunks).map_err(render_err)?;
+    Ok(html(
+        render::splice(shell, &[(ITEMS_SLOT.to_string(), items)]).map_err(render_err)?,
+    ))
 }
 
 /// How many rows the caller asked to see: [`ROWS`] by default, `all` for as many as one
@@ -814,7 +832,7 @@ fn percent_encode(value: &str) -> String {
 ///
 /// It also drops every subject that is not a kept item: a listing renders rows, and a
 /// comment or a link node is input the row templates never look at.
-fn newest_rows(graph: &mut Graph, rows: usize) -> Count {
+fn newest_rows(graph: &mut Graph, rows: usize) -> (Count, Vec<String>) {
     let mut items: Vec<(String, String)> = graph
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
         .into_iter()
@@ -826,17 +844,23 @@ fn newest_rows(graph: &mut Graph, rows: usize) -> Count {
         })
         .collect();
     let total = items.len();
-    items.sort_by(|a, b| b.cmp(a));
-    let keep: HashSet<String> = items.into_iter().take(rows).map(|(_, iri)| iri).collect();
+    // Newest first; a tie keeps the RDF/XML's own order (subject ascending), which is what
+    // the stylesheet's stable sort kept when one document held every row.
+    items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let order: Vec<String> = items.into_iter().take(rows).map(|(_, iri)| iri).collect();
+    let keep: HashSet<&str> = order.iter().map(String::as_str).collect();
     let shown = keep.len();
     graph.retain(
         |t| matches!(&t.subject, NamedOrBlankNode::NamedNode(s) if keep.contains(s.as_str())),
     );
-    Count {
-        shown,
-        total,
-        capped: total >= COUNT_CAP,
-    }
+    (
+        Count {
+            shown,
+            total,
+            capped: total >= COUNT_CAP,
+        },
+        order,
+    )
 }
 
 #[async_trait]

@@ -108,6 +108,10 @@ fn main() {
         ("more-url", "/l/default?status=open&limit=500"),
         ("more-items-url", "/l/default/items?status=open&limit=500"),
         ("can-write", "true"),
+        // Since ledger #519 the shell decides "No items match." by this attribute rather
+        // than by counting rows it no longer holds; this example still renders the whole
+        // page in ONE transform, which is the cost it exists to measure.
+        ("has-rows", "true"),
     ];
     let t = Instant::now();
     let chrome = render::render(&envelope("page", &attrs, ""), true).expect("the stylesheet");
