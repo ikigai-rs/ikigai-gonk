@@ -465,6 +465,13 @@ own resources do not serve. Opening `/iki/ledger/items` in a browser therefore a
 
 A path nothing serves answers `404` with a sentence naming where to start.
 
+⚠ **There is no `urn:iki:ledger:comments`**, so `/iki/ledger/comments` is one of those paths.
+Comments are read inside the item they belong to — `GET /iki/ledger/item/244` (`Source
+urn:iki:ledger:item:244`) carries them, in Turtle too — and written through the one comment
+resource the ledger binds, `Sink urn:iki:ledger:comment`. A listing face across items would be
+[`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger)'s to add; this server binds the
+ledger's resources and hand-writes none of its own over them, so it does not paper over the gap.
+
 ## From another ikigai process on this machine
 
 Gonk holds the dataset, so nothing else opens it. Every other ikigai process — the REPL, a
@@ -927,6 +934,21 @@ every door forwards to it under a cache that stores nothing. The HTTP door's ker
 pages in front and a not-found catch-all behind, and its pages never cache; every ledger read
 a page makes is a hub read.
 
+**And that arrangement is itself a resource.** `Source urn:kernel:topology` (core 0.1.78) under
+`urn:cap:kernel:inspect` renders the chain a door resolves in, as Turtle, with every space
+named: the hub is `urn:iki:gonk:space:hub`, an `ik:Fallback` whose ordered `ik:layers` are the
+store, the ledger, the render transform and — when configured — the browse family
+(`urn:iki:gonk:space:browse`, browse's own patterns with gonk's cache overlay invisible in front
+of it), the facades and the backups. The socket and QUIC doors render **exactly the hub's
+graph**: the forwarding space claims the hub's identity rather than one of its own, because it
+holds exactly the hub's doors. The HTTP door renders `urn:iki:gonk:space:door:http`, three
+layers — `urn:iki:gonk:space:pages`, the hub, `urn:iki:gonk:space:not-found` — and the last is
+an `ik:Limit` over the empty family: a catch-all that refuses every name is, to resolution, a
+hole over everything, and reporting it as one is what lets the paper's §12.5 reachability check
+run over this graph as a path query. The one `ik:OpaqueSpace` this server can render is a
+`gonk.mount`: a remote whose arrangement lives in another process, which `ikigai-resolve` does
+not yet forward. `tests/topology.rs` sources the resource through every door and walks it.
+
 ## Remote access, later — what it will take
 
 The HTTP door refuses a non-loopback bind, and that refusal stays until all of these exist:
@@ -1192,6 +1214,9 @@ browse composition's twenty more, in the hub and through a door, pins the five t
 pins the backup composition's eight more — gonk's four and compress's four — asserts that
 `urn:time:schedule`, `urn:time:cancel` and `urn:time:jobs` are bound by nothing, and restores
 a real archive, comparing the graph set and the per-graph counts rather than a total.
+`tests/topology.rs` sources `urn:kernel:topology` through the hub and both door shapes, pins the
+named nodes and their order, asserts nothing of this crate's is opaque, and runs the §12.5
+reachability walk over the result.
 
 ### One dataset, and what it costs
 

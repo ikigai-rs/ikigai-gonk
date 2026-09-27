@@ -56,6 +56,52 @@ use ikigai_core::{Fallback, Kernel, Space, SystemClock};
 use ikigai_store::DurableStore;
 use ikigai_vocab::TurtleRenderer;
 
+/// The identities gonk's own spaces claim — what `urn:kernel:topology` names their nodes by
+/// and what a hit through one reports as `Resolved::answered_by` (core 0.1.78, ledger
+/// [#546](http://localhost:1060/l/default/item/546)).
+///
+/// ★ **A name is a claim: same name ⇒ same doors.** Core partitions its cache on the
+/// answering space's identity, so two spaces named alike must hold the same doors, and one
+/// space named consistently shares one entry however often the process rebuilds it. Every
+/// name here is claimed by exactly one composition site, and each holds the doors its
+/// module binds and no others — which is why the IRIs live in one place rather than beside
+/// each `EndpointSpace::new()`: a second site reusing one by hand would be making the claim
+/// for a different set of doors.
+///
+/// The IRIs follow the process's own convention (`urn:iki:gonk:…`, as `urn:iki:gonk:render`
+/// and `urn:iki:gonk:backup` do) under a `space:` segment, so a node in the topology cannot
+/// be mistaken for a resource: `urn:iki:gonk:space:hub` is the arrangement,
+/// `urn:iki:gonk:render` is a door in it.
+pub mod spaces {
+    use ikigai_core::Iri;
+
+    /// The hub — the [`Fallback`](ikigai_core::Fallback) [`compose_with`](super::compose_with)
+    /// builds, and therefore what every door forwards to. The socket and QUIC doors' kernels
+    /// have this as their root (through [`doors::HubSpace`](crate::doors::HubSpace), which
+    /// forwards the name rather than claiming one of its own); the HTTP door has it as the
+    /// middle layer of [`HTTP_DOOR`].
+    pub const HUB: &str = "urn:iki:gonk:space:hub";
+    /// The HTTP door's root: `Fallback([PAGES, HUB, NOT_FOUND])`.
+    pub const HTTP_DOOR: &str = "urn:iki:gonk:space:door:http";
+    /// gonk's HTML face ([`web::space`](crate::web::space)) — bound only in the HTTP door.
+    pub const PAGES: &str = "urn:iki:gonk:space:pages";
+    /// The HTTP door's floor ([`doors::NotFound`](crate::doors::NotFound)): a hole over
+    /// every name, rendered as a 404.
+    pub const NOT_FOUND: &str = "urn:iki:gonk:space:not-found";
+    /// The page renderer's chunk transform ([`render::space`](crate::render::space)).
+    pub const RENDER: &str = "urn:iki:gonk:space:render";
+    /// The backup family ([`backup::space`](crate::backup::space)).
+    pub const BACKUP: &str = "urn:iki:gonk:space:backup";
+    /// The repository browse family AS GONK COMPOSES IT — `ikigai-browse`'s doors with
+    /// this server's cacheable overlay in front ([`browse::cached_reads`](crate::browse::cached_reads)).
+    pub const BROWSE: &str = "urn:iki:gonk:space:browse";
+
+    /// One of the constants above as an [`Iri`].
+    pub fn iri(name: &str) -> Iri {
+        Iri::parse(name).expect("a constant space IRI")
+    }
+}
+
 /// The kernel this process serves — the **hub**, and the only kernel with a cache.
 ///
 /// Store first, ledger second, behind a [`Fallback`]: the order `ikigai-ledger`'s own tests
@@ -161,6 +207,10 @@ pub fn compose_with(
         spaces.push(Arc::new(backup::space(backups)));
         spaces.push(Arc::new(ikigai_compress::space()));
     }
-    Kernel::with_meta_renderer(Arc::new(Fallback::new(spaces)), Arc::new(TurtleRenderer))
+    // Named, so `urn:kernel:topology` renders the hub as `urn:iki:gonk:space:hub` from every
+    // door (the door kernels forward this name) and a hit reports it as `answered_by` when
+    // no space inside claims one — today none of the linked crates' spaces do.
+    let hub = Fallback::new(spaces).named(self::spaces::iri(self::spaces::HUB));
+    Kernel::with_meta_renderer(Arc::new(hub), Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock))
 }

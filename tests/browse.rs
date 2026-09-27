@@ -2516,3 +2516,74 @@ fn the_pass_requires_exactly_what_the_real_review_requires() {
     ikigai_gonk::trigger::check_reviewer(&hub, &review, "127.0.0.1", &shape)
         .expect("the derived shape is the one that arms");
 }
+
+// ------------------------------------------------------- the arrangement as a resource
+
+/// `Source urn:kernel:topology` under the one capability it declares, as Turtle text.
+fn topology_turtle(hub: &Kernel) -> String {
+    let inspect = Capability::scoped(["urn:cap:kernel:inspect"]);
+    let repr = block_on(hub.issue(request(Verb::Source, "urn:kernel:topology", &[]), &inspect))
+        .expect("the topology renders");
+    assert_eq!(repr.repr_type.media_type, "text/turtle");
+    String::from_utf8(repr.bytes.to_vec()).expect("Turtle is UTF-8")
+}
+
+/// ★ With a browse face composed, `urn:kernel:topology` names the browse family as ONE
+/// space — `urn:iki:gonk:space:browse`, an `ik:EndpointSpace` carrying browse's own
+/// patterns — and gonk's cacheable overlay in front of it is invisible: it adds no door and
+/// changes no name, so it reports the structure it encloses rather than a node of its own
+/// (ledger [#546](http://localhost:1060/l/default/item/546)). Nothing in this composition is
+/// opaque; `ikigai-repo`'s facades beside it are a plain `ik:EndpointSpace` too.
+#[test]
+fn the_browse_family_is_one_named_space_and_the_cache_overlay_is_invisible() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let turtle = topology_turtle(&hub);
+
+    let browse_node = "<urn:iki:gonk:space:browse> a ik:EndpointSpace";
+    let start = turtle
+        .find(browse_node)
+        .unwrap_or_else(|| panic!("no named browse space in\n{turtle}"));
+    let block = &turtle[start..turtle[start..].find(" .\n").expect("a block end") + start];
+    assert!(
+        block.contains("ik:pattern \"urn:repo:"),
+        "the browse space carries browse's patterns:\n{block}"
+    );
+    assert!(
+        turtle.contains("<urn:iki:gonk:space:hub> a ik:Fallback"),
+        "the hub is named:\n{turtle}"
+    );
+    assert!(
+        !turtle.contains("ik:OpaqueSpace"),
+        "an overlay of this crate is reporting nothing:\n{turtle}"
+    );
+}
+
+/// ⚠ The one opaque node this server can still render, stated so it is not mistaken for
+/// gonk's: a `gonk.mount` is `ikigai-resolve`'s `MountedRemote`, which (through 0.1.28)
+/// claims no identity and reports no structure — so it renders as an anonymous
+/// `ik:OpaqueSpace`, skolemized, as the hub's FIRST layer (a mount is composed in front of
+/// everything local). That is the honest answer for a remote whose arrangement lives in
+/// another process; forwarding the peer's own `urn:kernel:topology` is that crate's share
+/// of ledger [#546](http://localhost:1060/l/default/item/546), not this one's.
+#[test]
+fn a_mount_is_the_one_opaque_node_and_it_is_the_hubs_first_layer() {
+    let dir = scratch_root();
+    let (hub, _watch) = served_explaining(&dir);
+    let turtle = topology_turtle(&hub);
+
+    assert_eq!(
+        turtle.matches("ik:OpaqueSpace").count(),
+        1,
+        "exactly the mount is opaque:\n{turtle}"
+    );
+    // Pre-order skolems, and the two named nodes ahead of it take none: the mount is `_:1`.
+    assert!(
+        turtle.contains("<urn:iki:gonk:space:hub:layer:1> rdf:first <urn:ikigai:space:_:1>"),
+        "the mount is the hub's first layer:\n{turtle}"
+    );
+    assert!(
+        turtle.contains("<urn:ikigai:space:_:1> a ik:OpaqueSpace ."),
+        "and it is the opaque one:\n{turtle}"
+    );
+}

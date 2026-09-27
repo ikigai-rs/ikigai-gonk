@@ -34,9 +34,17 @@ path = "src/main.rs"
 #
 # 0.1.70: `Kernel::with_cache_policy` and the `CachePolicy` trait arrive here, and
 # `doors::NoCache` is how the socket and QUIC doors keep ONE cache (the hub's) for the
-# whole process. Nothing lower can even be typed. ⚠ `"0.1.70"` is also a ceiling
-# (`<0.2.0`); when core reaches 0.2 this line must move.
-ikigai-core = "0.1.70"
+# whole process. Nothing lower can even be typed.
+# ★ 0.1.78 is the floor now (ledger #515/#546): spaces have identity and the arrangement is
+# a resource. This binary uses all of it — `Space::id`/`Space::topology` and the
+# `Topology`/`SpaceKind` builders on its three hand-written spaces (`doors::HubSpace`,
+# `doors::NotFound`, `browse::CachedReads`), `.named(..)` on the hub's `Fallback` and every
+# `EndpointSpace` it builds (`crate::spaces`), `Resolved::with_answered_by` on a forwarded
+# hit, and `Kernel::topology` to read the hub's root off the arrangement (a kernel hands out
+# no root space). `tests/topology.rs` sources `urn:kernel:topology` through every door and
+# is the floor test: nothing below 0.1.78 has the trait methods.
+# ⚠ `"0.1.78"` is also a ceiling (`<0.2.0`); when core reaches 0.2 this line must move.
+ikigai-core = "0.1.78"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
