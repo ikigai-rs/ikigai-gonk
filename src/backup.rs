@@ -208,6 +208,7 @@ pub fn space(backups: Backups) -> EndpointSpace {
             },
         )
         .bind(Exact::new(RESTORE), Restore { backups })
+        .named(crate::spaces::iri(crate::spaces::BACKUP))
 }
 
 // ---------------------------------------------------------------- the dump

@@ -260,6 +260,7 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
                 web: Arc::clone(&web),
             },
         )
+        .named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
 // ------------------------------------------------------------------------------ shared

@@ -37,25 +37,57 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ikigai_core::{
     Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Error,
-    Fallback, Invocation, Kernel, Representation, Request, Resolution, Resolved, Result, Scope,
-    Space, SpaceEntry, SystemClock, Verb,
+    Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result,
+    Scope, Space, SpaceEntry, SpaceKind, SystemClock, Topology, Verb,
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{CapFn, EdgeConfig, HttpRequest, PrincipalFn, Route, RouteTable};
 
 use crate::identity::{self, Passkeys};
+use crate::spaces;
 
 /// A space whose every binding is the hub's: it resolves what the hub binds, describes it
 /// with the hub's own description, enumerates the hub's catalog, and forwards invocation to
 /// the hub under the caller's capability.
+///
+/// # Identity and structure: the hub's, forwarded
+///
+/// This space claims no name of its own. It holds exactly the doors the hub's root space
+/// holds — that is its whole definition — so under core's rule (*same name ⇒ same doors*)
+/// the honest identity is the root's ([`crate::spaces::HUB`]), and the honest structure is
+/// the root's tree: `urn:kernel:topology` from the socket or QUIC door renders the same
+/// `ik:Fallback` under the same IRI the hub renders for itself, rather than an
+/// `ik:OpaqueSpace` standing where the arrangement actually continues. An overlay that
+/// encloses one space forwards, as [`Arc<dyn Space>`] does; the kernel boundary this space
+/// crosses changes which cache answers and which capability check runs first, and neither
+/// is structure.
+///
+/// ⚠ A [`Kernel`] hands out no root space, so both are read off the arrangement resource
+/// ([`Kernel::topology`]): for the empty chain that is one `ik:Chain` node whose single
+/// layer is the root (`hub_root`). The identity is read ONCE, at construction — a space's
+/// structure is fixed once composed, and `id` is consulted on every hit.
 pub struct HubSpace {
     hub: Arc<Kernel>,
+    /// The hub's root space's own identity, read once.
+    id: Option<Iri>,
 }
 
 impl HubSpace {
     /// Forward to `hub`.
     pub fn new(hub: Arc<Kernel>) -> Self {
-        HubSpace { hub }
+        let id = hub_root(&hub).id;
+        HubSpace { hub, id }
+    }
+}
+
+/// The hub's ROOT space's topology: what [`Kernel::topology`] answers, with the chain
+/// unwrapped. The empty chain has exactly one layer, the root; any other shape is not one
+/// this function is asked about, and it says nothing rather than guess.
+fn hub_root(hub: &Kernel) -> Topology {
+    let mut layers = hub.topology().children.into_iter();
+    match (layers.next(), layers.next()) {
+        (Some(root), None) => root,
+        _ => Topology::opaque(None),
     }
 }
 
@@ -68,13 +100,21 @@ impl Space for HubSpace {
             // `canonical`, 0.1.78 adds `answered_by`), and a literal is E0063 at each one.
             // Nothing is rewritten here — no `.with_canonical` — because the hub
             // canonicalizes, caches and cuts under its own names.
-            Some(description) => Resolution::Hit(Resolved::new(
-                Arc::new(Forward {
-                    hub: Arc::clone(&self.hub),
-                    description,
-                }),
-                Bindings::new(),
-            )),
+            Some(description) => {
+                let resolved = Resolved::new(
+                    Arc::new(Forward {
+                        hub: Arc::clone(&self.hub),
+                        description,
+                    }),
+                    Bindings::new(),
+                );
+                // Answered by the hub, under the hub's name: which space INSIDE the hub
+                // answers is decided on the hub's own issue path, out of sight of this one.
+                Resolution::Hit(match &self.id {
+                    Some(id) => resolved.with_answered_by(id.clone()),
+                    None => resolved,
+                })
+            }
             None => Resolution::Miss,
         }
     }
@@ -88,6 +128,17 @@ impl Space for HubSpace {
                 .filter(|entry| !entry.pattern.starts_with("urn:kernel:"))
                 .collect()
         })
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+
+    fn topology(&self) -> Topology {
+        // The root's tree, not a node enclosing it — see the type's doc. It already omits
+        // `urn:kernel:*`, as `entries` does: the kernel's operations are composed in front of
+        // the root for description only, and are no part of the root's structure.
+        hub_root(&self.hub)
     }
 }
 
@@ -145,7 +196,8 @@ pub fn http_kernel(hub: Arc<Kernel>, pages: EndpointSpace) -> Kernel {
         Arc::new(pages) as Arc<dyn Space>,
         Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
         Arc::new(NotFound) as Arc<dyn Space>,
-    ]);
+    ])
+    .named(spaces::iri(spaces::HTTP_DOOR));
     Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock))
         .with_cache_policy(Arc::new(NoCache))
@@ -163,15 +215,47 @@ pub fn http_kernel(hub: Arc<Kernel>, pages: EndpointSpace) -> Kernel {
 ///
 /// It enumerates nothing, so it adds no entry to the catalog and cannot be walked or
 /// offered as an action.
+///
+/// # In the topology: a hole over every name
+///
+/// Named [`crate::spaces::NOT_FOUND`] and reported as `ik:Limit` with the empty family —
+/// the prefix of every identifier — because that is what it is for resolution: not a door
+/// (it lists none, offers none, and every name it "resolves" is refused) but the floor of
+/// the door's chain, past which nothing is reached. Core's `Limit` is the same shape with
+/// one difference of rendering: a limiter answers the kernel's ⊥, which `ikigai-web` would
+/// map to a 500, and this answers a typed `NotFound`, which it maps to a 404 — the whole
+/// reason the type exists. The §12.5 reachability walk over the graph treats the two alike:
+/// a family with no door ahead of this layer is unreachable, and a family with one is
+/// reached before the walk gets here.
 pub struct NotFound;
+
+impl NotFound {
+    fn identity() -> Iri {
+        spaces::iri(spaces::NOT_FOUND)
+    }
+}
 
 impl Space for NotFound {
     fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
-        Resolution::Hit(Resolved::new(Arc::new(NotFoundEndpoint), Bindings::new()))
+        Resolution::Hit(
+            Resolved::new(Arc::new(NotFoundEndpoint), Bindings::new())
+                .with_answered_by(Self::identity()),
+        )
     }
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         Some(Vec::new())
+    }
+
+    fn id(&self) -> Option<Iri> {
+        Some(Self::identity())
+    }
+
+    fn topology(&self) -> Topology {
+        Topology::new(SpaceKind::Limit {
+            family: String::new(),
+        })
+        .with_id(self.id())
     }
 }
 

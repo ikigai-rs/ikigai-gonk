@@ -409,7 +409,9 @@ pub struct Render;
 
 /// The space that binds [`Render`] — composed into the hub by `crate::compose_with`.
 pub fn space() -> EndpointSpace {
-    EndpointSpace::new().bind(Exact::new(RENDER_IRI), Render)
+    EndpointSpace::new()
+        .bind(Exact::new(RENDER_IRI), Render)
+        .named(crate::spaces::iri(crate::spaces::RENDER))
 }
 
 #[async_trait]

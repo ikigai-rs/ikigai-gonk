@@ -90,8 +90,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ikigai_browse::{ExplainConfig, Mount, StyleWatch};
 use ikigai_core::{
-    Description, Endpoint, EndpointSpace, Invocation, Representation, Request, Resolution, Result,
-    Scope, Space, SpaceEntry, Verb,
+    Description, Endpoint, EndpointSpace, Invocation, Iri, Representation, Request, Resolution,
+    Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 use ikigai_store::{SharerWrites, Store};
 use oxigraph::model::{GraphName, NamedNode};
@@ -457,12 +457,30 @@ pub struct Wired {
 /// issues both reads through a real kernel and looks at what the cache holds.
 pub fn cached_reads(inner: EndpointSpace, watched: &[Watched]) -> CachedReads {
     CachedReads {
-        inner,
+        // ★ The NAME goes on browse's own space, not on this overlay — see the type's doc.
+        // `ikigai-browse` (0.13.0) claims none for it; if a later release does, this line
+        // would overwrite it, and the right move then is to stop naming here and forward
+        // whatever it claims.
+        inner: inner.named(crate::spaces::iri(crate::spaces::BROWSE)),
         roots: watched.iter().map(|root| root.name.clone()).collect(),
     }
 }
 
 /// The space [`cached_reads`] builds.
+///
+/// # In the topology: transparent
+///
+/// This overlay forwards [`Space::id`] and [`Space::topology`] to the space it encloses,
+/// as [`Arc<dyn Space>`] does, rather than reporting a node of its own around it. Two
+/// reasons. No [`ikigai_core::SpaceKind`] describes what it does — it adds no door, rewrites
+/// no name, admits no prefix and limits no family; what it changes is the *representation*
+/// (cacheable, under a thread), and the topology is the structure of resolution, not of
+/// caching. And the identity claim (*same name ⇒ same doors*) holds exactly of the inner
+/// space, which is why [`cached_reads`] names THAT — `urn:iki:gonk:space:browse` is the
+/// browse family as gonk composes it, and a hit through this overlay reports it as
+/// `answered_by` because [`Resolution::map_endpoint`] keeps everything but the endpoint.
+///
+/// Should core grow a kind for an interception overlay, this is the one place to report it.
 pub struct CachedReads {
     inner: EndpointSpace,
     roots: Vec<String>,
@@ -485,6 +503,14 @@ impl Space for CachedReads {
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         // The catalog is browse's, unchanged.
         self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
     }
 }
 
