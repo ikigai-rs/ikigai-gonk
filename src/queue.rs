@@ -182,6 +182,9 @@ const NO_REASON_LABEL: &str = "why? (optional)";
 /// The machine face this module asks every resource it reads for.
 pub(crate) const JSON: &str = "application/json";
 
+/// The shell's slot for the rows — see [`render::chunk`].
+const ROWS_SLOT: &str = "rows";
+
 /// How many rows a page draws before it stops and says so.
 ///
 /// The ledger listing's bound and its reason (`README`, ledger #419): the server-side XSLT
@@ -810,14 +813,21 @@ impl QueuePage {
         // re-sorted across repositories: that ordering is `ikigai-browse`'s, computed from a
         // severity rank this crate does not have and must not re-derive, so the page groups
         // rather than claiming a global order it did not compute.
+        //
+        // ★ Rendered in CHUNKS of `render::CHUNK_ROWS`, apart from the shell (ledger #519):
+        // the shell carries a slot where the list goes, each chunk document holds ten rows
+        // and nothing else, and the HTML is spliced together — byte for byte what one
+        // transform of the whole produced, at the linear cost instead of the superlinear
+        // one (`render::chunk` has the numbers).
         let mut drawn = 0usize;
+        let mut rows_xml: Vec<String> = Vec::new();
         for (root, rows) in &read {
             let Rows::Got(rows) = rows else { continue };
             for row in rows {
                 if drawn == wanted {
                     break;
                 }
-                children.push_str(&self.finding_element(
+                rows_xml.push(self.finding_element(
                     row,
                     root,
                     decide,
@@ -828,6 +838,11 @@ impl QueuePage {
                 drawn += 1;
             }
         }
+        children.push_str(&render::slot(ROWS_SLOT));
+        let chunks: Vec<String> = rows_xml
+            .chunks(render::CHUNK_ROWS)
+            .map(|window| render::chunk(&window.concat()))
+            .collect();
 
         let mut attributes: Vec<(&str, String)> = vec![
             ("view", "queue".to_string()),
@@ -944,8 +959,10 @@ impl QueuePage {
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let doc = envelope("page", &attributes, &children);
+        let shell = render::render(&doc, !self.fragment).map_err(web::render_err)?;
+        let rows = render::render_chunks(&chunks).map_err(web::render_err)?;
         Ok(web::html(
-            render::render(&doc, !self.fragment).map_err(web::render_err)?,
+            render::splice(shell, &[(ROWS_SLOT.to_string(), rows)]).map_err(web::render_err)?,
         ))
     }
 

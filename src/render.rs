@@ -126,6 +126,27 @@ impl Graph {
         self.values(subject, predicate).into_iter().next()
     }
 
+    /// Split this graph into windows of `size` subjects, in the order `subjects` gives —
+    /// one graph per window, each holding exactly the triples whose subject is in it.
+    /// A triple whose subject is in no window is in no output graph (a listing renders
+    /// rows, and a node the row templates never read is input xrust would still pay for).
+    pub fn windows(&self, subjects: &[String], size: usize) -> Vec<Graph> {
+        subjects
+            .chunks(size.max(1))
+            .map(|window| Graph {
+                triples: self
+                    .triples
+                    .iter()
+                    .filter(|t| {
+                        matches!(&t.subject, NamedOrBlankNode::NamedNode(s)
+                            if window.iter().any(|w| w == s.as_str()))
+                    })
+                    .cloned()
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Add `subject view:{local} "value"`.
     pub fn view(&mut self, subject: &str, local: &str, value: impl Into<String>) {
         if let (Ok(s), Ok(p)) = (
@@ -264,6 +285,84 @@ pub fn element(name: &str, attributes: &[(&str, &str)], text: &str) -> String {
     out.push_str(&escape(text));
     out.push_str(&format!("</view:{name}>"));
     out
+}
+
+/// How many rows one chunk document carries — see [`chunk`].
+///
+/// ★ Measured, not chosen (`examples/xslbench.rs`, 2026-09-26, release build, 400 synthetic
+/// queue rows through this stylesheet): one document 23.6 s; as documents of 1 row 13.7 s,
+/// 2 rows 10.7 s, 5 rows 9.1 s, **10 rows 8.7 s**, 20 rows 8.7 s, 25 rows 8.9 s, 50 rows
+/// 9.9 s, 100 rows 11.9 s. The curve is flat between 10 and 25 and rises both ways — below
+/// it the per-document overhead shows, above it the superlinear term does. Ten is the low
+/// end of the flat part, which is also the finer cache grain (`crate::queue`).
+pub const CHUNK_ROWS: usize = 10;
+
+/// The view value of a chunk document: `<view:page view="chunk">` holding rows and nothing
+/// else, whose body template applies the row templates and no shell.
+pub const CHUNK_VIEW: &str = "chunk";
+
+/// A slot in a shell document: `<view:slot name="…"/>`, which the stylesheet renders as
+/// the marker [`splice`] replaces with the rows rendered separately.
+pub fn slot(name: &str) -> String {
+    element("slot", &[("name", name)], "")
+}
+
+/// The marker the stylesheet writes for [`slot`] — an HTML comment, because xrust emits
+/// `xsl:comment` verbatim (measured 2026-09-26) and a comment is the one node that can sit
+/// inside any element without being markup of its own.
+fn marker(name: &str) -> String {
+    format!("<!--gonk-slot:{}-->", escape(name))
+}
+
+/// A chunk document: the page envelope around `rows` and nothing else.
+///
+/// # ★ Why a page is rendered in pieces (ledger #519)
+///
+/// xrust's cost per KB of input is not flat: measured on 2026-09-26, 10 queue rows cost
+/// 11.6 ms/KB and 400 rows 33.7 ms/KB in one document — a superlinear term on top of the
+/// ~12 ms/KB floor. The row templates (`view:finding`, `view:group`, `ledger:Item`) read
+/// nothing outside their own element, so a document of ten rows renders each row exactly as
+/// the whole page would; the shell (header, nav, filters, sentences) is rendered once with a
+/// [`slot`] where the rows go, and [`splice`] joins the pieces. The HTML is byte-for-byte what
+/// one transform produced — `tests/queue.rs` and `tests/web.rs` assert the markup and did not
+/// change — and 400 rows cost 8.7 s instead of 23.6 s. ⚠ A row template that started reading
+/// an ancestor or a sibling would break this silently; the shell carries every page-level
+/// fact as an attribute (`@has-rows` on the ledger page, for one) so none needs to.
+pub fn chunk(rows: &str) -> String {
+    envelope("page", &[("view", CHUNK_VIEW)], rows)
+}
+
+/// Render each of `documents` (see [`chunk`]) and concatenate the HTML.
+pub fn render_chunks(documents: &[String]) -> Result<String, String> {
+    let mut out = String::new();
+    for document in documents {
+        out.push_str(&render(document, false)?);
+    }
+    Ok(out)
+}
+
+/// Put rendered rows into a rendered shell: each `(name, html)` replaces the marker its
+/// [`slot`] left. A slot the shell did not render is an error, never a page missing its
+/// rows — the stylesheet forgot to apply `view:slot` where that view puts it. ⚠ Except
+/// when there is nothing to put there: a shell with no rows may leave the list out
+/// altogether (the ledger page says "No items match." instead), and an empty slot then has
+/// nowhere to go and nothing to lose.
+pub fn splice(shell: String, slots: &[(String, String)]) -> Result<String, String> {
+    let mut page = shell;
+    for (name, html) in slots {
+        let marker = marker(name);
+        match page.find(&marker) {
+            Some(at) => page.replace_range(at..at + marker.len(), html),
+            None if html.is_empty() => {}
+            None => {
+                return Err(format!(
+                    "the shell rendered no slot `{name}` for the rows to go into (the \
+                     stylesheet does not apply view:slot in this view)"
+                ))
+            }
+        }
+    }
+    Ok(page)
 }
 
 /// Transform an envelope through [`STYLESHEET`] and serialize the result as HTML. A full
