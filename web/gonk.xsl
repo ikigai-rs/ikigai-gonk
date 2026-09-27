@@ -184,7 +184,9 @@
 
   <!-- Where a shell's rows go: a comment src/render.rs::splice replaces with the rows it
        rendered in chunks. A comment because it is the one node that can stand inside any
-       element without being markup, and because xrust writes xsl:comment verbatim. -->
+       element without being markup, and because xrust writes xsl:comment verbatim. Each
+       view applies the slot by NAME (`view:slot[@name = '…']`, a filter xrust honours —
+       measured 2026-09-26), so a page carries exactly one marker for each slot it cut. -->
   <xsl:template match="view:slot">
     <xsl:comment>gonk-slot:<xsl:value-of select="@name"/></xsl:comment>
   </xsl:template>
@@ -206,6 +208,7 @@
       <xsl:when test="@view = 'chunk'">
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
+        <xsl:apply-templates select="view:batch"/>
         <xsl:apply-templates select="rdf:RDF/ledger:Item">
           <xsl:sort select="dcterms:modified" order="descending"/>
         </xsl:apply-templates>
@@ -357,10 +360,11 @@
       </xsl:if>
       <ol class="findings">
         <xsl:apply-templates select="view:finding"/>
-        <xsl:apply-templates select="view:slot"/>
+        <xsl:apply-templates select="view:slot[@name = 'rows']"/>
       </ol>
       <xsl:apply-templates select="view:no-form"/>
       <xsl:apply-templates select="view:batch"/>
+      <xsl:apply-templates select="view:slot[@name = 'batches']"/>
     </section>
   </xsl:template>
 
@@ -392,7 +396,7 @@
       <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
       <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
       <xsl:apply-templates select="view:group"/>
-      <xsl:apply-templates select="view:slot"/>
+      <xsl:apply-templates select="view:slot[@name = 'groups']"/>
       <xsl:if test="@decide = 'true'">
         <div class="batch-decide">
           <!-- The batch's one word: REQUIRED on a group form, where it is every ticked
@@ -838,7 +842,7 @@
           <xsl:apply-templates select="rdf:RDF/ledger:Item">
             <xsl:sort select="dcterms:modified" order="descending"/>
           </xsl:apply-templates>
-          <xsl:apply-templates select="view:slot"/>
+          <xsl:apply-templates select="view:slot[@name = 'items']"/>
         </ol>
       </xsl:if>
     </section>

@@ -64,6 +64,10 @@ const LEDGER_IDS: [&str; 14] = [
     "ledger-reopen",
 ];
 
+/// gonk's own hub resource: the page renderer's chunk transform, in every composition
+/// (`tests/conformance.rs` walks and pins it; here it is only counted).
+const HUB_IDS: [&str; 1] = ["gonk-render"];
+
 const BACKUP_IDS: [&str; 4] = [
     "gonk-backup",
     "gonk-backup-status",
@@ -230,6 +234,7 @@ fn the_backup_composition_serves_the_store_the_ledger_the_family_and_compress() 
     let expected: std::collections::BTreeSet<String> = STORE_IDS
         .iter()
         .chain(LEDGER_IDS.iter())
+        .chain(HUB_IDS.iter())
         .chain(BACKUP_IDS.iter())
         .chain(COMPRESS_IDS.iter())
         .map(|id| id.to_string())
@@ -324,6 +329,14 @@ fn the_backup_composition_conforms() {
             "no fixture can express this input: a gzip/zlib stream is not UTF-8 and \
              Fixture::arg takes a String. Walked end to end by the round-trip tests below, \
              which decompress a real archive.",
+        );
+    }
+    for id in HUB_IDS {
+        suite = suite.opt_out(
+            id,
+            None,
+            "walked with a chunk document, and declared pure, by tests/conformance.rs over \
+             this same composition; this file walks the backup family",
         );
     }
     let suite = suite

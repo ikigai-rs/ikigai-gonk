@@ -12,7 +12,9 @@
 //! measured is run: the default rows view, the comment-shape and file tabs, the ledger list.
 //! `GONK_SNAPSHOT_OUT=<dir>` writes each page's HTML into that directory (one file per page),
 //! which is how "the output is the same HTML" is checked across a change: run it on both
-//! trees and `diff` the directories.
+//! trees and `diff` the directories. Each page is rendered twice: the second is the POLL,
+//! and the `chunks`/`hits` columns say how many chunk renders the first put in the hub's
+//! cache and whether the second was served entirely from them.
 //!
 //! The browse roots come from `gonk.browse.root` lines in `~/.config/ikigai/config.toml`, or
 //! from `--root name=path` arguments, whichever is given; the findings face reads the files
@@ -125,7 +127,37 @@ fn main() {
     if let Some(dir) = &out_dir {
         std::fs::create_dir_all(dir).expect("a writable output directory");
     }
-    println!("{:<40} {:>9} {:>10}", "page", "ms", "bytes");
+    // Where the rest of a page's time goes: the findings reads, per root, uncached
+    // (`Expiry::Always` from browse) — the rows read and the file-group read.
+    println!("{:<40} {:>9}", "read (per root, uncached)", "ms");
+    for (root, _) in &roots {
+        for (label, args) in [
+            ("findings", vec![("as", "application/json")]),
+            (
+                "findings group=file",
+                vec![("as", "application/json"), ("group", "file")],
+            ),
+        ] {
+            let args: Vec<(&str, &[u8])> = args.iter().map(|(k, v)| (*k, v.as_bytes())).collect();
+            let t = Instant::now();
+            let _ = issue(
+                &door,
+                Verb::Source,
+                &format!("urn:repo:{root}:findings"),
+                &args,
+                &reviewer,
+            );
+            println!(
+                "{:<40} {:>9.0}",
+                format!("{root}: {label}"),
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+    println!(
+        "{:<40} {:>9} {:>10} {:>9} {:>7} {:>7}",
+        "page", "first ms", "bytes", "poll ms", "chunks", "hits"
+    );
     for page in &pages {
         let (iri, query) = match page.split_once('?') {
             Some((name, query)) => (name, query),
@@ -148,13 +180,26 @@ fn main() {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_bytes()))
             .collect();
+        let before = cached_chunks(&hub);
         let t = Instant::now();
         let html = issue(&door, Verb::Source, &iri, &args, &reviewer);
         let elapsed = t.elapsed();
+        let chunks = cached_chunks(&hub) - before;
+        // The poll: the same page again, nothing changed. Every chunk should be a hit,
+        // so the cache holds exactly as many render entries as before.
+        let t = Instant::now();
+        let again = issue(&door, Verb::Source, &iri, &args, &reviewer);
+        let poll = t.elapsed();
+        let hits = if cached_chunks(&hub) - before == chunks && again == html {
+            "all"
+        } else {
+            "SOME MISSED"
+        };
         println!(
-            "{page:<40} {:>9.0} {:>10}",
+            "{page:<40} {:>9.0} {:>10} {:>9.0} {chunks:>7} {hits:>7}",
             elapsed.as_secs_f64() * 1000.0,
-            html.len()
+            html.len(),
+            poll.as_secs_f64() * 1000.0,
         );
         if let Some(dir) = &out_dir {
             let name: String = page
@@ -164,6 +209,20 @@ fn main() {
             std::fs::write(dir.join(format!("{name}.html")), &html).expect("write the page");
         }
     }
+}
+
+/// How many `urn:iki:gonk:render` entries the hub's cache holds (`urn:kernel:cache`).
+fn cached_chunks(hub: &Kernel) -> usize {
+    issue(
+        hub,
+        Verb::Source,
+        "urn:kernel:cache",
+        &[],
+        &Capability::root(),
+    )
+    .lines()
+    .filter(|line| line.split_whitespace().next() == Some(ikigai_gonk::render::RENDER_IRI))
+    .count()
 }
 
 fn issue(

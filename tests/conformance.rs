@@ -69,6 +69,12 @@ const LEDGER_IDS: [&str; 14] = [
     "ledger-reopen",
 ];
 
+/// gonk's own resources in the HUB — behind every door, socket and QUIC included. One:
+/// the page renderer's chunk transform, bound where the process's one cache is
+/// (`ikigai_gonk::render::rendered_chunks` says why). It reads nothing and is gated by
+/// nothing; a caller renders its own bytes.
+const HUB_IDS: [&str; 1] = ["gonk-render"];
+
 fn hub() -> Arc<Kernel> {
     Arc::new(compose(
         DurableStore::in_memory().expect("an in-memory store"),
@@ -133,6 +139,11 @@ fn fixtures(a: &str, b: &str, c: &str) -> Suite {
             )
         })
         .namespace("https://ikigai-rs.dev/ns/ledger#")
+        // The chunk renderer wants a chunk document, which no ArgSpec can shape.
+        .fixture(
+            Fixture::new("gonk-render", Verb::Source)
+                .arg("content", ikigai_gonk::render::chunk("")),
+        )
         .fixture(Fixture::new("ledger-item", Verb::Source).binding("id", a))
         .fixture(Fixture::new("ledger-item", Verb::Exists).binding("id", a))
         .fixture(
@@ -188,6 +199,9 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item")
         .cacheable("ledger-next")
         .pure("ledger-policy")
+        // A chunk's HTML is a function of the document alone; the content-addressed
+        // request is the cache key and nothing needs a thread to cut.
+        .pure("gonk-render")
 }
 
 /// Every non-kernel entry's description id.
@@ -223,6 +237,7 @@ fn the_served_catalog_is_exactly_the_store_and_the_ledger() {
     let expected: BTreeSet<String> = STORE_IDS
         .iter()
         .chain(LEDGER_IDS.iter())
+        .chain(HUB_IDS.iter())
         .map(|id| id.to_string())
         .collect();
     let hub = hub();
@@ -250,13 +265,15 @@ fn the_hub_conforms() {
     assert_eq!(walked_ledger_ids(&report), LEDGER_IDS, "{report}");
 }
 
-/// The reads whose representations are cacheable — cached by the HUB.
-const CACHED_READS: [&str; 5] = [
+/// The reads whose representations are cacheable — cached by the HUB. The chunk renderer
+/// is one: a pure function of its document, keyed by the content-addressed request.
+const CACHED_READS: [&str; 6] = [
     "ledger-ledgers",
     "ledger-policy",
     "ledger-items",
     "ledger-item",
     "ledger-next",
+    "gonk-render",
 ];
 
 /// The same walk through a door. Every check runs except `CACHEABLE` on the five reads,
@@ -333,6 +350,7 @@ fn the_http_door_adds_exactly_its_pages() {
     let expected: BTreeSet<String> = STORE_IDS
         .iter()
         .chain(LEDGER_IDS.iter())
+        .chain(HUB_IDS.iter())
         .chain(WEB_IDS.iter())
         .map(|id| id.to_string())
         .collect();
@@ -340,11 +358,10 @@ fn the_http_door_adds_exactly_its_pages() {
         served_ids(&http_door(Arc::clone(&hub), config.path())),
         expected
     );
+    let socket = served_ids(&doors::door_kernel(hub));
     assert!(
-        served_ids(&doors::door_kernel(hub))
-            .iter()
-            .all(|id| !id.starts_with("gonk-")),
-        "the pages are the HTTP door's alone"
+        WEB_IDS.iter().all(|id| !socket.contains(*id)),
+        "the pages are the HTTP door's alone: {socket:?}"
     );
 }
 
@@ -493,7 +510,12 @@ fn the_http_door_conforms() {
         .map(String::as_str)
         .filter(|id| id.starts_with("gonk-"))
         .collect();
-    assert_eq!(walked, WEB_IDS.iter().copied().collect(), "{report}");
+    // The pages, and the hub's own chunk renderer behind them.
+    assert_eq!(
+        walked,
+        WEB_IDS.iter().chain(HUB_IDS.iter()).copied().collect(),
+        "{report}"
+    );
 }
 
 #[test]

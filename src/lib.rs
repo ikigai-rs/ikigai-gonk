@@ -145,6 +145,13 @@ pub fn compose_with(
     let mut spaces: Vec<Arc<dyn Space>> = mounted;
     spaces.push(store);
     spaces.push(Arc::new(ikigai_ledger::space()));
+    // ★ The page renderer's chunk resource (`urn:iki:gonk:render`, ledger #519) lives HERE
+    // and not in the HTTP door's page space, because the hub holds the one cache in the
+    // process (`crate::doors`): a chunk is a pure, cacheable function of its document, and
+    // a cache the door kernels do not have would make it a transform that recomputes every
+    // poll. It is the one `gonk-` id the socket and QUIC doors serve — a render of the
+    // caller's own bytes, gated by nothing because it reads nothing.
+    spaces.push(Arc::new(render::space()));
     if let Some(browse) = browse {
         spaces.push(browse);
         spaces.push(Arc::new(ikigai_repo::space()));

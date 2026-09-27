@@ -118,9 +118,10 @@ const NO_BATCH_WORD_LABEL: &str = "no batch word";
 /// A member's own picker's empty option in the twin-carrying view: the batch word applies.
 const TAKE_BATCH_WORD_LABEL: &str = "the batch word";
 
-/// The slot a batch form leaves for its groups — see [`render::chunk`]. The per-group
-/// forms number theirs (`groups:0`, `groups:1`, …), one per form.
+/// The slot the twin-carrying form leaves for its groups — see [`render::chunk`].
 const GROUPS_SLOT: &str = "groups";
+/// The slot the section leaves for the per-group forms, each a chunk of its own.
+const BATCHES_SLOT: &str = "batches";
 
 /// The `group=` a request asked for, checked against the contract's own set — `None` for the
 /// ordinary rows view.
@@ -555,10 +556,13 @@ pub(crate) async fn section(
         ]
     };
     // ★ Each group is rendered as its own chunk document, apart from the shell (ledger
-    // #519): the form carries a slot where its groups go, and `render::splice` joins the
-    // pieces into exactly the HTML one transform produced. `render::chunk` has the numbers.
+    // #519), and `render::splice` joins the pieces into exactly the HTML one transform
+    // produced (`render::chunk` has the numbers). The chunk is the whole FORM where there is
+    // one form per group — the shell then holds one slot, not forty-nine forms of pickers
+    // it would transform on every poll — and one group where the twin-carrying view puts
+    // every group in one form, whose slot sits ahead of the batch-wide picker.
     let mut chunks: Vec<String> = Vec::new();
-    let mut slots: Vec<(String, String)> = Vec::new();
+    let mut slot: Option<&str> = None;
     if per_twin {
         let mut inner = String::new();
         let mut ticked = 0usize;
@@ -603,26 +607,14 @@ pub(crate) async fn section(
             ));
         }
         if !groups.is_empty() {
-            // One slot for every group, in their order, ahead of the batch-wide picker.
-            let slot = GROUPS_SLOT.to_string();
-            inner.insert_str(0, &render::slot(&slot));
-            slots.push((slot, String::new()));
+            inner.insert_str(0, &render::slot(GROUPS_SLOT));
+            slot = Some(GROUPS_SLOT);
             children.push_str(&wrap("batch", &borrowed(&attributes), &inner));
         }
     } else {
-        for (n, group) in groups.iter().enumerate() {
+        for group in &groups {
             let key = group.get("key").and_then(Value::as_str).unwrap_or("");
-            // One form per group, so one slot per form: the group's own chunk goes into
-            // its own form, and the forms stay as many as the groups.
-            let slot = format!("{GROUPS_SLOT}:{n}");
-            let mut inner = render::slot(&slot);
-            slots.push((slot, String::new()));
-            chunks.push(render::chunk(&group_element(
-                group,
-                decide,
-                reasons.as_deref(),
-                false,
-            )));
+            let mut inner = group_element(group, decide, reasons.as_deref(), false);
             // ★ Pre-selected only beside evidence: a target-only group's word is shown on the
             // group (`suggested`, in `group_element`) and the picker waits for the person.
             let preselected = if by_target_only(group) {
@@ -637,7 +629,15 @@ pub(crate) async fn section(
             if let Some(reasons) = &reasons {
                 inner.push_str(&reason_options(reasons, preselected, Placeholder::Required));
             }
-            children.push_str(&wrap("batch", &borrowed(&attributes), &inner));
+            chunks.push(render::chunk(&wrap(
+                "batch",
+                &borrowed(&attributes),
+                &inner,
+            )));
+        }
+        if !groups.is_empty() {
+            children.push_str(&render::slot(BATCHES_SLOT));
+            slot = Some(BATCHES_SLOT);
         }
     }
 
@@ -731,17 +731,13 @@ pub(crate) async fn section(
     }
     let doc = envelope("page", &borrowed(&attributes), &children);
     let shell = render::render(&doc, !page.fragment).map_err(web::render_err)?;
-    // The twin-carrying form holds every group in its one slot; the per-group forms hold
-    // one chunk each, in the order the slots were cut.
-    if per_twin {
-        if let Some((_, html)) = slots.first_mut() {
-            *html = render::render_chunks(&chunks).map_err(web::render_err)?;
-        }
-    } else {
-        for ((_, html), chunk) in slots.iter_mut().zip(&chunks) {
-            *html = render::render_chunks(std::slice::from_ref(chunk)).map_err(web::render_err)?;
-        }
-    }
+    let slots = match slot {
+        Some(name) => vec![(
+            name.to_string(),
+            render::rendered_chunks(inv, &chunks).await?,
+        )],
+        None => Vec::new(),
+    };
     Ok(web::html(
         render::splice(shell, &slots).map_err(web::render_err)?,
     ))
