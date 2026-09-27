@@ -23,6 +23,27 @@
 //! (`tests/web.rs::a_ledger_iri_reads_as_its_local_name_only_in_the_html_face` renders the
 //! `title` it emits). `xsl:sort` is the exception there, not the rule.
 //!
+//! Also works, measured 2026-09-26: `xsl:comment` (emitted verbatim — [`slot`] rests on it)
+//! and a `[@name = '…']` filter on a `select` path.
+//!
+//! # ★ And the cost: QUADRATIC in the nodes one transform creates (xrust 2.2.0)
+//!
+//! Ledger #519, step 3, bisected with `examples/xslbench.rs` and then profiled (`sample`,
+//! release build with debug info): a document of 400 queue rows costs 59 ms per row where
+//! 10 rows cost 23 — and rows of attributes alone barely grow (7.2 → 7.8 ms/row), rows with
+//! a 2 KB body grow no more than that (bytes are free; NODES are not), rows with the decide
+//! form and its option lists — some 125 result nodes each — triple. 54% of the samples sit
+//! in two functions of xrust's `trees/smite.rs`: `unattached` (`u.borrow().iter().any(..)`
+//! before every push onto a document's unattached-node list) and `detach`
+//! (`iter().position(..)` then `Vec::remove` on the same list). That list is never
+//! emptied: after 200 full rows the result document's holds 47,818 nodes and the parsed
+//! source's 7,207 (~240 and ~36 per row; `ItemNode::unattached()` counts them), so every
+//! node created pays a scan of every node created before it. Σ over a transform is
+//! O(nodes²) — an engine internal, not a stylesheet construct; nothing authored here can
+//! avoid it except making each transform small, which is what [`chunk`] does (the same
+//! 400 rows as 40 documents of 10 cost 8.7 s instead of 23.6 s). Reported to the hub for
+//! the upstream issue; the table is in `examples/xslbench.rs`.
+//!
 //! So everything a stylesheet would normally COMPUTE — an item's href from its IRI, `#12`,
 //! whether this caller may close it — is computed here and handed over as a literal on the
 //! subject it describes (`urn:iki:gonk:view#…`). They are presentation triples: they exist

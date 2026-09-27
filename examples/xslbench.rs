@@ -12,7 +12,11 @@ fn esc(s: &str) -> String {
 /// A synthetic queue page: `n` finding rows under one root, shaped like the rows
 /// `src/queue.rs` builds (attributes the `view:finding` template reads, a body, a quote,
 /// a decide form with its option lists).
-fn page(n: usize, container: &str) -> String {
+/// `shape` (the second argument) is the bisection of ledger #519's step 3 — what a row
+/// holds: `attrs` (the finding element and its attributes, one template dispatch per row),
+/// `bigbody` (attrs plus a ~2 KB body: many bytes, few nodes), `nodecide` (attrs, body and
+/// quote), `full` (the decide form and its option lists too: ~20 dispatches per row).
+fn page(n: usize, container: &str, shape: &str) -> String {
     let mut s = String::new();
     s.push_str(r#"<view:page xmlns:view="urn:iki:gonk:view#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:ledger="https://ikigai-rs.dev/ns/ledger#" view="queue" full="true" title="Queue" page-url="/queue">"#);
     s.push_str(r#"<view:ledger name="default" href="/l/default" current="true"/>"#);
@@ -28,12 +32,29 @@ fn page(n: usize, container: &str) -> String {
             r#"<view:finding id="f{i:06}" state="pending" severity="major" severity-label="major" repo="ikigai-cli" where="crates/ikigai-embedded/src/lib.rs:{line}" browse-href="/browse/urn:repo:ikigai-cli:file:crates/ikigai-embedded/src/lib.rs" provenance="minted by review-v5@coder · 2026-09-25 18:04 UTC · pass 01m3cvtjzmyby3f6" reanchored="false" orphaned="false">"#,
             line = 100 + i * 7
         );
-        let _ = write!(s, "<view:body>{}</view:body>", esc("The comment above documents a hazard that the code below does not guard against: a caller holding no authority reaches the write path when the host name is unset, and nothing in this branch refuses it. Consider checking the origin before the capability is minted, or say in the doc comment why the ordering is safe."));
+        let body = "The comment above documents a hazard that the code below does not guard against: a caller holding no authority reaches the write path when the host name is unset, and nothing in this branch refuses it. Consider checking the origin before the capability is minted, or say in the doc comment why the ordering is safe.";
+        if shape == "attrs" {
+            s.push_str("</view:finding>");
+            continue;
+        }
+        if shape == "bigbody" {
+            let _ = write!(
+                s,
+                "<view:body>{}</view:body></view:finding>",
+                esc(&body.repeat(6))
+            );
+            continue;
+        }
+        let _ = write!(s, "<view:body>{}</view:body>", esc(body));
         let _ = write!(
             s,
             "<view:quote>{}</view:quote>",
             esc("    if !host_is_ours(request.header(\"host\"), door.port) {")
         );
+        if shape == "nodecide" {
+            s.push_str("</view:finding>");
+            continue;
+        }
         let _ = write!(
             s,
             r#"<view:decide action="/queue/decide" id="f{i:06}" state="pending" repo="ikigai-cli" severity="major" scope="serious">"#
@@ -72,30 +93,42 @@ fn page(n: usize, container: &str) -> String {
 }
 
 fn main() {
+    // ⚠ `none`: the rows are direct children of the page, as src/queue.rs builds them. Under
+    // `root` (any container) the queue template applies nothing and the output is the
+    // shell alone — 2 KB — which is a measurement of nothing.
     let container = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "root".to_string());
+        .unwrap_or_else(|| "none".to_string());
+    let shape = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "full".to_string());
     // warm the stylesheet compile cache
-    let _ = ikigai_xslt::transform_xml(&page(1, &container), STYLESHEET, false).expect("render");
+    let _ = ikigai_xslt::transform_xml(&page(1, &container, &shape), STYLESHEET, false)
+        .expect("render");
+    println!("shape: {shape}");
     println!(
-        "{:>5} {:>8} {:>9} {:>9} {:>8}",
-        "rows", "in KB", "out KB", "ms", "ms/KB"
+        "{:>5} {:>8} {:>9} {:>9} {:>8} {:>8}",
+        "rows", "in KB", "out KB", "ms", "ms/KB", "ms/row"
     );
     for n in [10usize, 25, 50, 100, 200, 400] {
-        let doc = page(n, &container);
+        let doc = page(n, &container, &shape);
         let t = Instant::now();
         let out = ikigai_xslt::transform_xml(&doc, STYLESHEET, false).expect("render");
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         let kb = doc.len() as f64 / 1024.0;
         println!(
-            "{n:>5} {kb:>8.1} {:>9.1} {ms:>9.0} {:>8.1}",
+            "{n:>5} {kb:>8.1} {:>9.1} {ms:>9.0} {:>8.1} {:>8.2}",
             out.len() as f64 / 1024.0,
-            ms / kb
+            ms / kb,
+            ms / n as f64
         );
+    }
+    if shape != "full" {
+        return;
     }
     // The same 400 rows as documents of `k` rows each: which chunk size sits on the floor.
     for k in [1usize, 2, 5, 10, 20, 25, 50, 100] {
-        let doc = page(k, &container);
+        let doc = page(k, &container, &shape);
         let t = Instant::now();
         let mut total = 0usize;
         for _ in 0..(400 / k) {
