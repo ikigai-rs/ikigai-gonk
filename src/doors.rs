@@ -64,16 +64,17 @@ impl Space for HubSpace {
         // A miss when the hub binds nothing here, so the door reports the kernel's own
         // "no endpoint" rather than a forwarding endpoint that fails on invoke.
         match self.hub.describe(&request.target) {
-            Some(description) => Resolution::Hit(Resolved {
-                endpoint: Arc::new(Forward {
+            // The constructor, not a literal: `Resolved` gains public fields (0.1.64 added
+            // `canonical`, 0.1.78 adds `answered_by`), and a literal is E0063 at each one.
+            // Nothing is rewritten here — no `.with_canonical` — because the hub
+            // canonicalizes, caches and cuts under its own names.
+            Some(description) => Resolution::Hit(Resolved::new(
+                Arc::new(Forward {
                     hub: Arc::clone(&self.hub),
                     description,
                 }),
-                bindings: Bindings::new(),
-                // Nothing is rewritten here: the hub canonicalizes, caches and cuts under
-                // its own names.
-                canonical: None,
-            }),
+                Bindings::new(),
+            )),
             None => Resolution::Miss,
         }
     }
@@ -166,11 +167,7 @@ pub struct NotFound;
 
 impl Space for NotFound {
     fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
-        Resolution::Hit(Resolved {
-            endpoint: Arc::new(NotFoundEndpoint),
-            bindings: Bindings::new(),
-            canonical: None,
-        })
+        Resolution::Hit(Resolved::new(Arc::new(NotFoundEndpoint), Bindings::new()))
     }
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
