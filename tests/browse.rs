@@ -1816,6 +1816,18 @@ fn the_browse_door_serves_the_faces_and_their_own_affordances() {
         )),
         "the start IRI keeps its slashes across the route: {deep}"
     );
+    // ★ …and an ENCODED slash reaches the same IRI (ikigai-web 0.1.30). A `%2F` is data inside
+    // its segment now, so this path is ONE segment and takes the depth-1 route, where the
+    // decoded `/` joins the capture instead of splitting it — the same start IRI either way.
+    // Through 0.1.29 the decoder split on it and the two spellings met by accident.
+    let (status, encoded) = door.get_html("/browse/urn:repo:demo:file:src%2Flib.rs", Some(&token));
+    assert_eq!(status, 200, "{encoded}");
+    assert!(
+        encoded.contains(&urlencode(
+            "source urn:repo:demo:file:src/lib.rs as=text/html"
+        )),
+        "an encoded slash is lossless across the route: {encoded}"
+    );
 
     // 3. The face itself, through the adapter — and its affordances, verbatim.
     let (status, face) = door.get_html(&k("source urn:repo:demo:tree as=text/html"), Some(&token));
