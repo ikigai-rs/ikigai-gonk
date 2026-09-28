@@ -11,14 +11,13 @@
 //!   door's space forwards the hub's identity and structure rather than standing in front
 //!   of it as an `ik:OpaqueSpace`;
 //! - the **HTTP door** ([`doors::http_kernel`]) — `urn:iki:gonk:space:door:http`, whose
-//!   layers are the pages, the hub and the floor, in that order.
+//!   layers are the pages and the hub, in that order.
 //!
 //! The last test is the paper's §12.5 check ported from core's `tests/topology.rs` and
 //! walked over gonk's arrangement. gonk composes **no limited family** — nothing here is a
 //! `Limit` over a prefix — so the walk cannot show the NO-with-a-limiter half; what it
-//! shows is that every family this server serves is reachable from the entry, and that the
-//! HTTP door's floor (`ik:Limit` over the empty family) is what makes an unserved family
-//! unreachable rather than merely unbound.
+//! shows is that every family this server serves is reachable from the entry, and that an
+//! unserved family is unreachable through every door — by absence, the end of the chain.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -228,19 +227,18 @@ fn a_door_kernel_renders_the_hubs_arrangement_under_the_hubs_name() {
 }
 
 /// ★ The HTTP door is its own named `ik:Fallback`: the pages, then the hub (one node, the
-/// same IRI as everywhere else), then the floor — an `ik:Limit` over the empty family,
-/// which is what a catch-all that refuses every name IS to resolution.
+/// same IRI as everywhere else), and nothing after it. It used to end in a floor — a
+/// catch-all rendered as an `ik:Limit` over the empty family — that existed only because
+/// `ikigai-web` once answered `Unresolved` with a 500; that library maps it to a 404 now, so
+/// the catch-all is gone (see `doors::http_kernel`), and this pins that it stays gone.
 #[test]
-fn the_http_door_is_pages_then_the_hub_then_the_floor() {
+fn the_http_door_is_pages_then_the_hub() {
     let config = tempfile::tempdir().expect("a scratch config home");
     let g = topology(&http_door(hub(), config.path()));
 
     assert_eq!(g.layers(ENTRY), [spaces::HTTP_DOOR]);
     assert_eq!(g.kind(spaces::HTTP_DOOR), "Fallback");
-    assert_eq!(
-        g.layers(spaces::HTTP_DOOR),
-        [spaces::PAGES, spaces::HUB, spaces::NOT_FOUND]
-    );
+    assert_eq!(g.layers(spaces::HTTP_DOOR), [spaces::PAGES, spaces::HUB]);
 
     assert_eq!(g.kind(spaces::PAGES), "EndpointSpace");
     let pages = g.strs(spaces::PAGES, &format!("{IK}pattern"));
@@ -259,8 +257,11 @@ fn the_http_door_is_pages_then_the_hub_then_the_floor() {
     assert_eq!(g.kind(spaces::HUB), "Fallback");
     assert_eq!(g.layers(spaces::HUB).len(), 3);
 
-    assert_eq!(g.kind(spaces::NOT_FOUND), "Limit");
-    assert_eq!(g.strs(spaces::NOT_FOUND, &format!("{IK}family")), [""]);
+    assert!(
+        g.of_kind("Limit").is_empty(),
+        "no floor: a name nothing binds is the library's 404 — {:?}",
+        g.of_kind("Limit")
+    );
 
     assert!(
         g.of_kind("OpaqueSpace").is_empty(),
@@ -330,11 +331,10 @@ fn reach(g: &Graph, node: &str, family: &str) -> Reach {
 
 /// The §12.5 walk over gonk's arrangement. gonk composes no limited family, so there is no
 /// "NO with the limiter" case to show and none is invented; what the walk establishes is
-/// that every family this server serves is reachable from each door's entry, and that the
-/// HTTP door's floor closes every family it does not serve — `Unreachable` by a hole,
-/// where the socket door's answer for the same family is `Unreachable` by absence.
+/// that every family this server serves is reachable from each door's entry, and that
+/// every family it does not serve is `Unreachable` through both doors, by absence.
 #[test]
-fn the_12_5_walk_reaches_every_served_family_and_the_http_floor_closes_the_rest() {
+fn the_12_5_walk_reaches_every_served_family_and_closes_the_rest() {
     let hub = hub();
     let config = tempfile::tempdir().expect("a scratch config home");
     let socket = topology(&doors::door_kernel(Arc::clone(&hub)));
@@ -354,13 +354,10 @@ fn the_12_5_walk_reaches_every_served_family_and_the_http_floor_closes_the_rest(
     // arrangement is opaque.
     assert_eq!(reach(&http, ENTRY, "urn:personal:"), Reach::Unreachable);
     assert_eq!(reach(&socket, ENTRY, "urn:personal:"), Reach::Unreachable);
-    // The floor is what closes it on the HTTP door: with the floor's layer removed from
-    // the walk the answer is the same, which is the point — a floor changes what an
-    // unbound name ANSWERS (404, not 500), never what is reachable.
-    let layers = http.layers(spaces::HTTP_DOOR);
-    assert_eq!(layers.last().map(String::as_str), Some(spaces::NOT_FOUND));
-    assert_eq!(
-        reach(&http, spaces::NOT_FOUND, "urn:personal:"),
-        Reach::Unreachable
-    );
+    // The HTTP door once ended in a catch-all floor, and removing it changed nothing here —
+    // which is what the old version of this test said a floor was: a change to what an
+    // unbound name ANSWERS (404, not 500), never to what is reachable. The library answers
+    // that 404 itself now; `tests/web.rs::a_browser_gets_html_pages_and_a_readable_404`
+    // is where the status is pinned.
+    assert_eq!(http.layers(spaces::HTTP_DOOR), [spaces::PAGES, spaces::HUB]);
 }

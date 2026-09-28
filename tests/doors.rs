@@ -8,6 +8,8 @@
 //!   certificate under a one-ledger grant, and a trusted-but-unenrolled one.
 //! - [`the_http_door_grants_its_ledgers_to_loopback_and_nothing_more`] — raw HTTP against
 //!   the served door, and the capability function on a non-loopback peer.
+//! - [`the_http_door_takes_the_librarys_edge_bounds`] — `ikigai-web` 0.1.30's time and
+//!   connection bounds, taken as they are, and why.
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
@@ -460,4 +462,48 @@ fn a_grant_naming_the_backup_tokens_is_refused() {
         assert!(refusal.contains(token), "{refusal}");
         assert!(refusal.contains("owner-only socket"), "{refusal}");
     }
+}
+
+/// ★ **The HTTP door takes `ikigai-web`'s edge bounds as they are, on purpose.**
+///
+/// 0.1.30 gave `EdgeConfig` four finite bounds (ledger #80, #591): the request line and headers
+/// within 10 s, the declared body within 30 s (both answered `408`), the response written
+/// within 30 s, and 256 connections at once (one more is answered `503` with `Retry-After`).
+/// `doors::edge_config` spreads `..EdgeConfig::default()` and names none of them, and that is a
+/// decision rather than an omission, for this door's traffic:
+///
+/// - it binds loopback only, and its callers are a browser or two, `curl`, and scripts — a
+///   handful, one request per connection, so a connection lives as long as one request;
+/// - its bodies are forms and JSON posts (a comment, a passkey assertion), far inside the
+///   1 MiB default body at 35 KB/s;
+/// - the deadlines bound the CLIENT, never the handler: an Explain or a Review through `/k` is
+///   a model call (a whole-file review pass is ~34 s over a large file) that runs between
+///   reading the request and writing the answer, and no bound here covers that span, so none
+///   of them can cut a slow answer short;
+/// - the one thing that multiplies connections is the Queue badge, one poll every
+///   `queue::BADGE_EVERY` per open tab — nowhere near 256.
+///
+/// So the defaults fit, and a later override has to change this test and say why.
+#[test]
+fn the_http_door_takes_the_librarys_edge_bounds() {
+    let config = doors::edge_config(doors::HttpDoor {
+        anonymous: grants_for("default", Authority::Write).unwrap(),
+        port: 1060,
+        passkeys: None,
+    });
+    assert_eq!(config.header_timeout, ikigai_web::DEFAULT_HEADER_TIMEOUT);
+    assert_eq!(config.body_timeout, ikigai_web::DEFAULT_BODY_TIMEOUT);
+    assert_eq!(config.write_timeout, ikigai_web::DEFAULT_WRITE_TIMEOUT);
+    assert_eq!(config.max_connections, ikigai_web::DEFAULT_MAX_CONNECTIONS);
+    assert_eq!(config.max_body_bytes, ikigai_web::DEFAULT_MAX_BODY_BYTES);
+    // The values those names carry today, so a library that moves them is noticed here too.
+    assert_eq!(config.header_timeout, Duration::from_secs(10));
+    assert_eq!(config.body_timeout, Duration::from_secs(30));
+    assert_eq!(config.write_timeout, Duration::from_secs(30));
+    assert_eq!(config.max_connections, 256);
+    assert_eq!(
+        ikigai_gonk::queue::BADGE_EVERY,
+        "10s",
+        "the badge poll is the reasoning above"
+    );
 }

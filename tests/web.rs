@@ -1,11 +1,13 @@
 //! The HTML face, driven over real HTTP the way a browser drives it.
 //!
 //! ⚠ **Every browser-shaped request here sends Chrome's `Accept` header**, never curl's
-//! `*/*`. `ikigai-web` turns the FIRST type in `Accept` into `as=`, so a page that served
-//! only plain text would answer a browser `400` while every `*/*` test passed.
+//! `*/*`. `ikigai-web` negotiates `Accept` against the faces a resource declares (since
+//! ikigai-cli PR #333), and Chrome's header prefers `text/html`, so a page whose HTML face went
+//! missing would be answered in another face — or `406` — while every `*/*` test passed.
 //!
 //! - [`a_listing_renders_a_bounded_number_of_rows_and_says_what_it_left_out`]
 //! - [`a_browser_gets_html_pages_and_a_readable_404`]
+//! - [`a_hostile_ledger_link_reaches_the_page_and_is_refused_there`]
 //! - [`a_person_files_edits_comments_and_closes_through_forms`]
 //! - [`a_form_can_send_only_what_the_ledger_declares`]
 //! - [`a_cross_site_write_and_a_rebound_host_get_nothing`]
@@ -340,14 +342,98 @@ fn a_browser_gets_html_pages_and_a_readable_404() {
         assert_eq!(got.status, 200, "{asset}: {got:?}");
     }
 
-    // ★ The hub's finding: an unrouted path was a 500 echoing the resolver. Now a 404.
-    for path in ["/favicon.ico", "/no/such/page"] {
+    // ★ The hub's finding: an unrouted path was a 500 echoing the resolver. It is a 404, and
+    // since ledger #3 it is the LIBRARY's 404 — gonk's own catch-all is gone, so this is the
+    // pin that `ikigai-web` still maps the kernel's `Unresolved` to 404 and not to 500. The
+    // body is the kernel's sentence, naming the IRI the path became.
+    for (path, iri) in [
+        ("/favicon.ico", "urn:favicon.ico"),
+        ("/no/such/page", "urn:no:such:page"),
+    ] {
         let missing = server.page(path, None);
         assert_eq!(missing.status, 404, "{path}: {missing:?}");
-        assert!(missing.body.contains("nothing is served at"), "{missing:?}");
+        assert!(
+            missing
+                .body
+                .contains(&format!("no endpoint resolved for {iri}")),
+            "{missing:?}"
+        );
+    }
+    // Every verb, not only a read: a write or a delete to a name nothing binds is a 404 too,
+    // never a 500 and never a `204` from the DELETE tombstone path (which answers only a
+    // bound endpoint's `NotFound`).
+    for method in ["POST", "DELETE"] {
+        let missing = server.raw(method, "/no/such/page", &[], "");
+        assert_eq!(missing.status, 404, "{method}: {missing:?}");
     }
     let missing_item = server.page("/l/default/item/0000000000zzzzzz", None);
     assert_eq!(missing_item.status, 404, "{missing_item:?}");
+}
+
+/// ★ **The hostile link `rules::percent` builds now REACHES a page, and the page refuses it.**
+///
+/// `rules::percent` escapes a ledger name before it goes into a link, so a hostile name
+/// `../../etc` becomes `/l/..%2F..%2Fetc/item/244` (pinned in `rules`'s own unit test). Through
+/// ikigai-web 0.1.29 the decoder turned `%2F` back into a separator, the path had six segments,
+/// no route matched, and the mechanical mapping answered. From 0.1.30 an encoded slash is data
+/// inside its segment (RFC 3986 §2.2), so the path has FOUR segments and matches
+/// `/l/{ledger}/item/{id}` with the ledger `../../etc` — the router no longer stands between
+/// that name and the page. What refuses it now is `Ledger::parse`, which admits only
+/// lowercase letters, digits, `-` and `_`; this pins that the refusal happens, on every page
+/// shape that takes a `{ledger}`, and that it is a 400 naming the rule rather than a read.
+///
+/// A `:` is pinned beside the slash because it is the character that could re-split the page
+/// IRI, `urn:iki:gonk:page:item:{ledger}:{id}`. It is NOT refused by name: the template binds
+/// `{ledger}` to the colon-free run before the first `:`, so `default:item:1` reads as the
+/// ledger `default` with the item id `item:1:1`, which the ledger answers `404`. That is not
+/// new with 0.1.30 (a `%3A` decoded to `:` before it too), and it cannot reach another ledger:
+/// the ledger that is read is the one spelled to the left of the colon, under the same read
+/// check as a plain link to it. The assertion is that it stays so.
+#[test]
+fn a_hostile_ledger_link_reaches_the_page_and_is_refused_there() {
+    let server = Server::start();
+    let item = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "append"),
+            ("content", "the one real item"),
+        ],
+        None,
+    );
+    assert_eq!(item.status, 200, "{item:?}");
+
+    // What the renderer emits for a hostile ledger name — the exact href `rules` pins.
+    let hostile = ikigai_gonk::rules::percent("../../etc");
+    assert_eq!(hostile, "..%2F..%2Fetc");
+    for name in [hostile.as_str(), "Default", "default%2F"] {
+        for path in [
+            format!("/l/{name}"),
+            format!("/l/{name}/items"),
+            format!("/l/{name}/item/1"),
+            format!("/l/{name}/item/1/card"),
+        ] {
+            let got = server.page(&path, None);
+            assert_eq!(got.status, 400, "{path}: {got:?}");
+            assert!(got.body.contains("is not a ledger name"), "{path}: {got:?}");
+            assert!(!got.body.contains("the one real item"), "{path}: {got:?}");
+        }
+    }
+
+    let colon = ikigai_gonk::rules::percent("default:item:1");
+    assert_eq!(colon, "default%3Aitem%3A1");
+    let got = server.page(&format!("/l/{colon}/item/1"), None);
+    assert_eq!(got.status, 404, "{got:?}");
+    assert!(
+        got.body
+            .contains("no ledger item at `urn:iki:ledger:default:item:item:1:1`"),
+        "the ledger read is the one left of the colon, and the rest is an item id: {got:?}"
+    );
+
+    // …and the edge refuses a malformed escape before gonk sees the request at all.
+    for path in ["/l/%zz/item/1", "/l/default/item/%", "/l/%E9/item/1"] {
+        let got = server.page(path, None);
+        assert_eq!(got.status, 400, "{path}: {got:?}");
+    }
 }
 
 #[test]

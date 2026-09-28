@@ -79,15 +79,13 @@ pub mod spaces {
     /// builds, and therefore what every door forwards to. The socket and QUIC doors' kernels
     /// have this as their root (through [`doors::HubSpace`](crate::doors::HubSpace), which
     /// forwards the name rather than claiming one of its own); the HTTP door has it as the
-    /// middle layer of [`HTTP_DOOR`].
+    /// second layer of [`HTTP_DOOR`].
     pub const HUB: &str = "urn:iki:gonk:space:hub";
-    /// The HTTP door's root: `Fallback([PAGES, HUB, NOT_FOUND])`.
+    /// The HTTP door's root: `Fallback([PAGES, HUB])`. A name neither binds is the kernel's
+    /// own `Unresolved`, which `ikigai-web` answers `404` (see [`doors::http_kernel`](crate::doors::http_kernel)).
     pub const HTTP_DOOR: &str = "urn:iki:gonk:space:door:http";
     /// gonk's HTML face ([`web::space`](crate::web::space)) — bound only in the HTTP door.
     pub const PAGES: &str = "urn:iki:gonk:space:pages";
-    /// The HTTP door's floor ([`doors::NotFound`](crate::doors::NotFound)): a hole over
-    /// every name, rendered as a 404.
-    pub const NOT_FOUND: &str = "urn:iki:gonk:space:not-found";
     /// The page renderer's chunk transform ([`render::space`](crate::render::space)).
     pub const RENDER: &str = "urn:iki:gonk:space:render";
     /// The backup family ([`backup::space`](crate::backup::space)).

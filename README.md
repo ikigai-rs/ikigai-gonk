@@ -458,12 +458,13 @@ curl -X POST 'http://127.0.0.1:1060/iki/ledger/close?item=1'
 | `GET` | `/iki/ledger/acme/next` | `Source urn:iki:ledger:acme:next` |
 | `DELETE` | `/iki/ledger/item/01m2h…` | needs the delete grant — anonymous callers are refused |
 
-⚠ These resource paths are for programs, not browsers. `ikigai-web` turns the **first** type in
-`Accept` into the requested face, and a browser's first type is `text/html`, which the ledger's
-own resources do not serve. Opening `/iki/ledger/items` in a browser therefore answers
-`400 … text/html is not a face this resource serves`. The pages above are the browser's way in.
+⚠ These resource paths are for programs, not browsers. `ikigai-web` negotiates `Accept`
+against the faces a resource declares, and the ledger's own resources serve no `text/html`, so
+opening `/iki/ledger/items` in a browser shows the plain-text listing (a browser's `Accept` ends
+in `*/*`); an `Accept` that names only faces the resource does not serve is answered `406`. The
+pages above are the browser's way in.
 
-A path nothing serves answers `404` with a sentence naming where to start.
+A path nothing serves answers `404` (`no endpoint resolved for urn:…`, the IRI the path became).
 
 ⚠ **There is no `urn:iki:ledger:comments`**, so `/iki/ledger/comments` is one of those paths.
 Comments are read inside the item they belong to — `GET /iki/ledger/item/244` (`Source
@@ -931,7 +932,7 @@ mounts all of it.
 transport takes one by value; separate kernels over one store would let a write through one
 door leave another serving the read it cached before. So there is one kernel, the hub, and
 every door forwards to it under a cache that stores nothing. The HTTP door's kernel adds the
-pages in front and a not-found catch-all behind, and its pages never cache; every ledger read
+pages in front, and its pages never cache; every ledger read
 a page makes is a hub read.
 
 **And that arrangement is itself a resource.** `Source urn:kernel:topology` (core 0.1.78) under
@@ -941,11 +942,12 @@ store, the ledger, the render transform and — when configured — the browse f
 (`urn:iki:gonk:space:browse`, browse's own patterns with gonk's cache overlay invisible in front
 of it), the facades and the backups. The socket and QUIC doors render **exactly the hub's
 graph**: the forwarding space claims the hub's identity rather than one of its own, because it
-holds exactly the hub's doors. The HTTP door renders `urn:iki:gonk:space:door:http`, three
-layers — `urn:iki:gonk:space:pages`, the hub, `urn:iki:gonk:space:not-found` — and the last is
-an `ik:Limit` over the empty family: a catch-all that refuses every name is, to resolution, a
-hole over everything, and reporting it as one is what lets the paper's §12.5 reachability check
-run over this graph as a path query. The one `ik:OpaqueSpace` this server can render is a
+holds exactly the hub's doors. The HTTP door renders `urn:iki:gonk:space:door:http`, two
+layers — `urn:iki:gonk:space:pages`, then the hub — and a name neither binds is the end of the
+chain, which the paper's §12.5 reachability check reads as unreachable when it runs over this
+graph as a path query. (It used to end in a third, a not-found catch-all rendered as an
+`ik:Limit` over the empty family; that existed only because `ikigai-web` once answered an
+unbound name with a 500, and it is gone now that the library answers 404.) The one `ik:OpaqueSpace` this server can render is a
 `gonk.mount`: a remote whose arrangement lives in another process, which `ikigai-resolve` does
 not yet forward. `tests/topology.rs` sources the resource through every door and walks it.
 

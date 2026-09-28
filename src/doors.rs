@@ -19,10 +19,10 @@
 //! admits nothing ([`NoCache`]). Every read and every write passes through the hub's cache
 //! and the hub's threads, whichever door it came in by.
 //!
-//! The HTTP door's kernel ([`http_kernel`]) is the same shape with two more spaces around the
-//! hub: gonk's own pages in front ([`crate::web`]), and a catch-all behind ([`NotFound`]). Its
-//! pages never cache — they are cheap to render and a cached page is exactly the second
-//! cache this design exists to avoid — and every ledger read a page makes is a hub read.
+//! The HTTP door's kernel ([`http_kernel`]) is the same shape with one more space in front of
+//! the hub: gonk's own pages ([`crate::web`]). Its pages never cache — they are cheap to
+//! render and a cached page is exactly the second cache this design exists to avoid — and
+//! every ledger read a page makes is a hub read.
 //!
 //! ⚠ **Why not `ikigai_resolve::RemoteSpace` over the hub**, which is the mount machinery
 //! and would have been the obvious reuse: its forwarding endpoint calls the synchronous
@@ -36,9 +36,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Error,
-    Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result,
-    Scope, Space, SpaceEntry, SpaceKind, SystemClock, Topology, Verb,
+    Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Fallback,
+    Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result, Scope, Space,
+    SpaceEntry, SystemClock, Topology,
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{CapFn, EdgeConfig, HttpRequest, PrincipalFn, Route, RouteTable};
@@ -189,102 +189,36 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
         .with_cache_policy(Arc::new(NoCache))
 }
 
-/// The HTTP door's kernel: gonk's pages ([`crate::web::space`]) in front of the hub, and
-/// [`NotFound`] behind it — still storing nothing, still one cache in the process.
+/// The HTTP door's kernel: gonk's pages ([`crate::web::space`]) in front of the hub — still
+/// storing nothing, still one cache in the process.
+///
+/// # A name nothing binds is the library's 404
+///
+/// This chain used to end in a third space, `doors::NotFound`, that "resolved" every name to an
+/// endpoint answering a typed `NotFound`. It existed only to route around `ikigai-web`'s status
+/// mapping, which answered the kernel's `Unresolved` with `500` — so `GET /favicon.ico` read
+/// `500 no endpoint resolved for urn:favicon.ico`. `ikigai-web` has mapped `Unresolved` to
+/// `404` since ikigai-cli PR #333 (0.1.22), so the catch-all was a workaround for a defect this
+/// binary no longer links, and it is gone (ledger
+/// [#3](http://localhost:1060/l/default/item/3)). What it bought and cost, both stated:
+///
+/// - the status is the same `404`, now the LIBRARY's decision, and
+///   `tests/web.rs::a_browser_gets_html_pages_and_a_readable_404` pins that it stays one;
+/// - the body is the kernel's own sentence (`no endpoint resolved for urn:…`) rather than a
+///   gonk-written pointer to `/` and `/iki/ledger/items` — both are plain text, because the
+///   library writes every error response as plain text;
+/// - the arrangement at `urn:kernel:topology` is two layers, not three. The catch-all
+///   rendered as an `ik:Limit` over the empty family, which is what the end of a `Fallback`
+///   already is to resolution: a name no layer binds is refused.
 pub fn http_kernel(hub: Arc<Kernel>, pages: EndpointSpace) -> Kernel {
     let space = Fallback::new(vec![
         Arc::new(pages) as Arc<dyn Space>,
         Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
-        Arc::new(NotFound) as Arc<dyn Space>,
     ])
     .named(spaces::iri(spaces::HTTP_DOOR));
     Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock))
         .with_cache_policy(Arc::new(NoCache))
-}
-
-/// The HTTP door's last space: anything nothing else binds is a typed `NotFound`.
-///
-/// ⚠ **This exists to route around `ikigai-web`'s status mapping**, and it is worth saying
-/// where the defect is. A path that resolves to no endpoint surfaces from the kernel as
-/// `Error::Unresolved`, and `ikigai-web` maps every error it does not name to `500` — so
-/// `GET /favicon.ico` (or a typo) answered `500 no endpoint resolved for urn:favicon.ico`.
-/// Here it resolves, to an endpoint that answers `NotFound`, which the library maps to `404`.
-/// The body is still `text/plain`: that library writes every error response as plain text,
-/// so a 404 cannot be an HTML page from this side of it.
-///
-/// It enumerates nothing, so it adds no entry to the catalog and cannot be walked or
-/// offered as an action.
-///
-/// # In the topology: a hole over every name
-///
-/// Named [`crate::spaces::NOT_FOUND`] and reported as `ik:Limit` with the empty family —
-/// the prefix of every identifier — because that is what it is for resolution: not a door
-/// (it lists none, offers none, and every name it "resolves" is refused) but the floor of
-/// the door's chain, past which nothing is reached. Core's `Limit` is the same shape with
-/// one difference of rendering: a limiter answers the kernel's ⊥, which `ikigai-web` would
-/// map to a 500, and this answers a typed `NotFound`, which it maps to a 404 — the whole
-/// reason the type exists. The §12.5 reachability walk over the graph treats the two alike:
-/// a family with no door ahead of this layer is unreachable, and a family with one is
-/// reached before the walk gets here.
-pub struct NotFound;
-
-impl NotFound {
-    fn identity() -> Iri {
-        spaces::iri(spaces::NOT_FOUND)
-    }
-}
-
-impl Space for NotFound {
-    fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
-        Resolution::Hit(
-            Resolved::new(Arc::new(NotFoundEndpoint), Bindings::new())
-                .with_answered_by(Self::identity()),
-        )
-    }
-
-    fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        Some(Vec::new())
-    }
-
-    fn id(&self) -> Option<Iri> {
-        Some(Self::identity())
-    }
-
-    fn topology(&self) -> Topology {
-        Topology::new(SpaceKind::Limit {
-            family: String::new(),
-        })
-        .with_id(self.id())
-    }
-}
-
-struct NotFoundEndpoint;
-
-#[async_trait]
-impl Endpoint for NotFoundEndpoint {
-    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        Err(Error::NotFound(format!(
-            "nothing is served at `{}`. The ledger's pages start at / , the SPARQL page is \
-             /sparql, and the ledger's own resources are under /iki/ledger/ (for example \
-             /iki/ledger/items).",
-            inv.request.target
-        )))
-    }
-
-    fn name(&self) -> &str {
-        "gonk-not-found"
-    }
-
-    fn describe(&self) -> Description {
-        Description::new("gonk-not-found")
-            .title("Nothing here")
-            .summary("Answers NotFound for every name nothing else binds.")
-            .verb(Verb::Source)
-            .verb(Verb::Sink)
-            .verb(Verb::Delete)
-            .verb(Verb::Exists)
-    }
 }
 
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —
@@ -511,6 +445,12 @@ pub const BROWSE_DEPTH: usize = 16;
 /// template rejoins the captures with `/`, which is lossless: an IRI has no spaces, so
 /// unlike the `/k/` command (which is why [`crate::k`] carries its command as an argument)
 /// it survives the trip through a decoded path.
+///
+/// Since `ikigai-web` 0.1.30 an ENCODED slash (`%2F`) is data inside its segment rather than a
+/// separator, so `/browse/urn:repo:x:file:src%2Flib.rs` is one segment and takes the depth-1
+/// route — and reaches the same start IRI as the unencoded spelling, because the capture
+/// carries the decoded `/`. A link that encodes a file path whole therefore never counts
+/// against [`BROWSE_DEPTH`]. (`tests/browse.rs` pins the two spellings meet.)
 ///
 /// Past [`BROWSE_DEPTH`] no route matches, the path takes the library's mechanical mapping
 /// and the answer is a 404 — the bound REFUSES rather than serving a truncated name. Sixteen
