@@ -365,9 +365,15 @@ ikigai-quic = "0.1.30"
 # fall through to the mechanical mapping; it now MATCHES `/l/{ledger}/item/{id}` with the
 # ledger `../../etc`, and has to be refused by the page rather than by the router.
 # `tests/web.rs::a_hostile_ledger_link_reaches_the_page_and_is_refused_there` pins that.
-# ⚠ It is a FLOOR and a CEILING both (`^0.1.30` is `<0.2.0`), and the crate ships from the
+# 0.1.31 is the reason for the current floor: HONEST CACHE HEADERS (ledger #604). Before it, a
+# kernel answer with `Expiry::Never` went out as `public, max-age=31536000, immutable`, so a
+# browser kept gonk's `/iki/ledger/items` listing for a YEAR and never revalidated. Now `Never`
+# is `no-cache` with the strong ETag (a cheap 304 while unchanged), a read shaped by a session
+# cookie is `private`, and one `Vary` names `Accept`, `Authorization, Cookie` and `Origin`.
+# gonk's own HTML pages already sent `no-store`, so only the mechanical `/iki/*` faces change.
+# ⚠ It is a FLOOR and a CEILING both (`^0.1.31` is `<0.2.0`), and the crate ships from the
 # cli's workspace on a shared version, so this line moves when that workspace releases.
-ikigai-web = "0.1.30"
+ikigai-web = "0.1.31"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
