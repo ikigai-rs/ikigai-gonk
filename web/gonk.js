@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does five things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does six things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -12,7 +12,8 @@
 // question about the DOM that only the browser can answer (ledger #469). (5) a batch
 // finding's word picker is required exactly while its box is ticked and no batch word stands
 // behind it — a condition over three controls, which no static attribute can state (ledger
-// #657).
+// #657). (6) a line selected by its number in a browse file view fills that view's annotate
+// quote — browse ships no scripts, and the selection is browse's own  (ledger #658).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -246,6 +247,91 @@
   });
   // Every swap that can bring a batch form in: the list's own refresh, a decision, a refusal.
   document.addEventListener("htmx:afterSettle", checkAllWords);
+
+  // ------------------------------------ a selected line fills the annotate quote (ledger #658)
+  //
+  // Brian, 2026-10-01: "Right now there is a way to select a line from the line number. I
+  // think a little hook attached to that would be suitable." ikigai-browse's file view gives
+  // every line `id="L{n}"` and a gutter self-link `href="#L{n}"`, so clicking a number selects
+  // the line (`#L42` in the URL), and its annotate form asks for a quote typed by hand. browse
+  // ships no scripts, so the hook lives here: when the selected line changes, the form's
+  // `exact` gets that line's text — and `prefix`/`suffix` from the neighboring text, if a
+  // browse release ever offers those fields. No new selection mechanism: the gutter link and
+  // the hash are browse's, and with scripting off they work exactly as before.
+  //
+  // ⚠ It never overwrites a quote the person TYPED: a fill is remembered on the field, and a
+  // value that is neither empty nor the last fill is theirs.
+  const LINE_HASH = /^#L(\d+)$/;
+  const QUOTE_EDGE = 32;
+
+  // The line's own text: the span less its gutter number and its markers, less its newline.
+  function lineText(span) {
+    const copy = span.cloneNode(true);
+    for (const a of copy.querySelectorAll(
+      "a.browse-ln, a.browse-annotation-marker, a.browse-proposal-marker"
+    )) {
+      a.remove();
+    }
+    return copy.textContent.replace(/\r?\n$/, "");
+  }
+
+  // Set a field the hook owns, unless the person has typed into it since the last fill.
+  function fillField(field, value) {
+    if (!field) return false;
+    if (field.value !== "" && field.value !== field.dataset.gonkFilled) return false;
+    field.value = value;
+    field.dataset.gonkFilled = value;
+    return true;
+  }
+
+  function fillQuote(n) {
+    const span = document.getElementById("L" + n);
+    if (!span || !span.matches(".browse-line") || !span.closest("#browse")) return;
+    // The form of the view this line is in: the nearest ancestor that holds one.
+    let scope = span.parentElement;
+    while (scope && !scope.querySelector("form.browse-annotate")) scope = scope.parentElement;
+    const form = scope && scope.querySelector("form.browse-annotate");
+    if (!form) return;
+    const raw = lineText(span);
+    const quote = raw.trim();
+    if (!quote) return; // a blank line anchors nothing
+    if (!fillField(form.querySelector('input[name="exact"]'), quote)) return;
+    const at = raw.indexOf(quote);
+    const before = document.getElementById("L" + (Number(n) - 1));
+    const after = document.getElementById("L" + (Number(n) + 1));
+    const prefix = (before ? lineText(before) + "\n" : "") + raw.slice(0, at);
+    const suffix = raw.slice(at + quote.length) + (after ? "\n" + lineText(after) : "");
+    fillField(form.querySelector('input[name="prefix"]'), prefix.slice(-QUOTE_EDGE));
+    fillField(form.querySelector('input[name="suffix"]'), suffix.slice(0, QUOTE_EDGE));
+    flash("The annotate quote is now line " + n + ".", "ok");
+  }
+
+  function fillFromHash() {
+    const m = location.hash.match(LINE_HASH);
+    if (m) fillQuote(m[1]);
+  }
+
+  // The gutter click covers a line clicked twice, which moves no hash; `hashchange` covers
+  // every other way the selection moves (back, forward, a typed URL).
+  document.addEventListener("click", (e) => {
+    const ln = e.target && e.target.closest && e.target.closest("#browse a.browse-ln");
+    const m = ln && (ln.getAttribute("href") || "").match(LINE_HASH);
+    if (m) fillQuote(m[1]);
+  });
+  window.addEventListener("hashchange", fillFromHash);
+  // A deep link into a view already on the page when this script runs (a deferred script
+  // runs after parsing, so the lines are there if the server drew them inline).
+  fillFromHash();
+  // A deep link (`…#L42`) names a line before the file view has arrived: fill once it has.
+  // ⚠ Only for the swap that brought that line in — the header badge settles a swap every
+  // ten seconds on every page, and must not re-fill a field the person has just emptied.
+  document.addEventListener("htmx:afterSettle", (e) => {
+    const m = location.hash.match(LINE_HASH);
+    const target = e.detail && e.detail.target;
+    if (m && target && target.querySelector && target.querySelector("#L" + m[1])) {
+      fillQuote(m[1]);
+    }
+  });
 
   // ------------------------------------------------------------------ bytes
 

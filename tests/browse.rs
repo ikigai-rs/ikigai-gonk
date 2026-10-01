@@ -1896,6 +1896,55 @@ fn the_browse_page_links_the_layout_stylesheet_and_it_resolves() {
     );
 }
 
+/// ★ **The line hook's contract with browse's file view** (ledger #658). `web/gonk.js` fills
+/// the annotate form's quote from a line selected by its gutter number — so it leans on four
+/// things `ikigai-browse` emits and gonk does not: the line wrapper (`browse-line`, `id="L{n}"`),
+/// the gutter self-link (`browse-ln`, `href="#L{n}"`), the markers it strips from a line's
+/// text, and the form (`form.browse-annotate`, `input[name=exact]`). A browse release that renamed
+/// any of them would leave the hook silently doing nothing, so the face is read through this
+/// door and the script is held to the same names. ⚠ The markers are only checked on the
+/// script's side — this fixture anchors nothing — and the behavior itself (fill, never
+/// overwrite a typed quote, the deep link with scripting off) was verified in a real browser
+/// against a probe page of this face, not here: nothing in this crate runs JavaScript.
+#[test]
+fn the_line_hook_names_what_the_file_view_emits() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    let (status, file) = door.get_html(
+        &k("source urn:repo:demo:file:src/lib.rs as=text/html"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{file}");
+    for emitted in [
+        "<span class=\"browse-line\" id=\"L1\">",
+        "<a class=\"browse-ln\" href=\"#L1\">1</a>",
+        "<form class=\"browse-annotate\"",
+        "<input name=\"exact\"",
+    ] {
+        assert!(
+            file.contains(emitted),
+            "browse's file view emits `{emitted}`: {file}"
+        );
+    }
+    let script = include_str!("../web/gonk.js");
+    for named in [
+        "form.browse-annotate",
+        "input[name=\"exact\"]",
+        "a.browse-ln",
+        ".browse-line",
+        "a.browse-annotation-marker",
+        "a.browse-proposal-marker",
+        "^#L(\\d+)$",
+    ] {
+        assert!(
+            script.contains(named),
+            "web/gonk.js's line hook names `{named}`, which the file view must carry"
+        );
+    }
+}
+
 /// The posture the door states, and the two ways it can be wrong.
 ///
 /// ⚠ Presentation only — `urn:iki:annotation`'s Sink requires `urn:cap:annotate` whatever
