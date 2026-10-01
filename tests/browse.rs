@@ -1900,7 +1900,8 @@ fn the_browse_page_links_the_layout_stylesheet_and_it_resolves() {
 /// the annotate form's quote from a line selected by its gutter number — so it leans on four
 /// things `ikigai-browse` emits and gonk does not: the line wrapper (`browse-line`, `id="L{n}"`),
 /// the gutter self-link (`browse-ln`, `href="#L{n}"`), the markers it strips from a line's
-/// text, and the form (`form.browse-annotate`, `input[name=exact]`). A browse release that renamed
+/// text, and the form (`form.browse-annotate`, `input[name=exact]`, and since browse 0.15.0 the
+/// hidden `prefix`/`suffix` it fills from the neighboring lines). A browse release that renamed
 /// any of them would leave the hook silently doing nothing, so the face is read through this
 /// door and the script is held to the same names. ⚠ The markers are only checked on the
 /// script's side — this fixture anchors nothing — and the behavior itself (fill, never
@@ -1922,6 +1923,10 @@ fn the_line_hook_names_what_the_file_view_emits() {
         "<a class=\"browse-ln\" href=\"#L1\">1</a>",
         "<form class=\"browse-annotate\"",
         "<input name=\"exact\"",
+        // browse 0.15.0: the context fields the hook fills, so a repeated quote anchors on
+        // the line that was selected.
+        "<input type=\"hidden\" name=\"prefix\"",
+        "<input type=\"hidden\" name=\"suffix\"",
     ] {
         assert!(
             file.contains(emitted),
@@ -1932,6 +1937,8 @@ fn the_line_hook_names_what_the_file_view_emits() {
     for named in [
         "form.browse-annotate",
         "input[name=\"exact\"]",
+        "input[name=\"prefix\"]",
+        "input[name=\"suffix\"]",
         "a.browse-ln",
         ".browse-line",
         "a.browse-annotation-marker",
@@ -1943,6 +1950,145 @@ fn the_line_hook_names_what_the_file_view_emits() {
             "web/gonk.js's line hook names `{named}`, which the file view must carry"
         );
     }
+}
+
+/// ★ **An annotate from the file view lands back on the file view** (ledger #658, browse
+/// 0.15.0), walked through this door the way a browser walks it: the form browse serves, posted
+/// as htmx posts it, then the GET its acknowledgement asks for.
+///
+/// Four things gonk could get wrong, each an assertion: the adapter must pass the form's
+/// `as=text/html` through to the Sink (or the acknowledgement is the bare IRI that stranded
+/// people); the `focus` the acknowledgement asks for must pass `check_declared` (or the return
+/// trip is a 400 and the reader is stranded one step later); the hidden `prefix`/`suffix` the
+/// line hook fills must reach the Sink (or a quote that occurs twice anchors on its first
+/// occurrence, whichever line was selected); and a refused annotate must be a 4xx that mints
+/// nothing (htmx swaps nothing on a 4xx, which is what keeps what was typed).
+#[test]
+fn an_annotate_from_the_file_view_returns_to_it_with_the_new_card_focused() {
+    let dir = scratch_root();
+    // The same line twice, so only the context can say which one was selected.
+    std::fs::write(
+        dir.path().join("src/twice.rs"),
+        "fn a() {}\nlet x = 1;\nfn b() {}\nlet x = 1;\nfn c() {}\n",
+    )
+    .expect("twice.rs");
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    let target = "urn:repo:demo:file:src/twice.rs";
+    let view = format!("source {target} as=text/html");
+
+    // 1. The form the file view carries: the HTML face asked for, and the two context fields.
+    let (status, file) = door.get_html(&k(&view), Some(&token));
+    assert_eq!(status, 200, "{file}");
+    for field in [
+        "<input type=\"hidden\" name=\"as\" value=\"text/html\">",
+        "<input type=\"hidden\" name=\"prefix\" value=\"\">",
+        "<input type=\"hidden\" name=\"suffix\" value=\"\">",
+    ] {
+        assert!(
+            file.contains(field),
+            "the annotate form carries `{field}`: {file}"
+        );
+    }
+
+    // 2. Post it the way the line hook leaves it after a click on gutter 4: the quote, and the
+    //    neighboring lines as context.
+    let form = format!(
+        "target={}&as={}&exact={}&prefix={}&suffix={}&body={}",
+        urlencode(target),
+        urlencode("text/html"),
+        urlencode("let x = 1;"),
+        urlencode("fn b() {}\n"),
+        urlencode("\nfn c() {}"),
+        urlencode("the second binding, not the first"),
+    );
+    let (status, ack) = door.post_form(&k("sink urn:iki:annotation"), &form, Some(&token));
+    assert_eq!(status, 200, "{ack}");
+    assert!(
+        ack.contains("class=\"browse-annotated\"") && ack.contains("hx-trigger=\"load\""),
+        "an HTML caller is answered with the fragment that goes back, not a bare IRI: {ack}"
+    );
+    let back = format!("hx-get=\"/k/source {target} as=text/html focus=");
+    let at = ack
+        .find(&back)
+        .unwrap_or_else(|| panic!("the fragment GETs this file's own view: {ack}"));
+    let id: String = ack[at + back.len()..]
+        .chars()
+        .take_while(|c| *c != '"')
+        .collect();
+    assert!(
+        !id.is_empty(),
+        "the fragment names the new annotation: {ack}"
+    );
+
+    // 3. The GET it asks for, through this door's query spelling (what gonk.js folds it to):
+    //    `focus` passes `check_declared`, and the new card is marked and focused.
+    let (status, returned) = door.get_html(&k(&format!("{view} focus={id}")), Some(&token));
+    assert_eq!(
+        status, 200,
+        "`focus` is a declared input of the file face: {returned}"
+    );
+    assert!(
+        returned.contains("id=\"L4\"><a class=\"browse-ln\" href=\"#L4\">4</a>"),
+        "the reader is back on the file: {returned}"
+    );
+    assert!(
+        returned.contains(&format!("id=\"annotation-{id}\" tabindex=\"-1\" autofocus")),
+        "…with the new card focused: {returned}"
+    );
+    assert!(
+        returned.contains("the second binding, not the first"),
+        "{returned}"
+    );
+    // …and `check_declared` is live, so the 200 above is not a door that checks nothing.
+    let (status, refused) = door.get_html(&k(&format!("{view} bogus={id}")), Some(&token));
+    assert_eq!(
+        status, 400,
+        "an undeclared input is still refused: {refused}"
+    );
+
+    // 4. The context reached the Sink: the quote anchored where it was SELECTED (line 4), not
+    //    at its first occurrence (line 2).
+    let listed: serde_json::Value = serde_json::from_str(&text(
+        &hub,
+        Verb::Source,
+        "urn:repo:demo:annotations:src/twice.rs",
+        &[("as", "application/json")],
+    ))
+    .expect("the listing is JSON");
+    let ours = listed
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == id.as_str()))
+        .unwrap_or_else(|| panic!("the new annotation is listed: {listed}"));
+    assert_eq!(
+        ours["line"], 4,
+        "prefix/suffix picked the selected line: {ours}"
+    );
+
+    // 5. A refusal is a 4xx and mints nothing — htmx swaps nothing, so the typed note stays.
+    let missing = format!(
+        "target={}&as={}&exact={}&body={}",
+        urlencode(target),
+        urlencode("text/html"),
+        urlencode("a quote this file does not contain"),
+        urlencode("a note that must not be lost"),
+    );
+    let (status, body) = door.post_form(&k("sink urn:iki:annotation"), &missing, Some(&token));
+    assert!(
+        (400..500).contains(&status),
+        "a quote that is not in the file is refused: {status} {body}"
+    );
+    let after = text(
+        &hub,
+        Verb::Source,
+        "urn:repo:demo:annotations:src/twice.rs",
+        &[("as", "application/json")],
+    );
+    assert!(
+        !after.contains("a note that must not be lost"),
+        "…and nothing reached the store: {after}"
+    );
 }
 
 /// The posture the door states, and the two ways it can be wrong.
