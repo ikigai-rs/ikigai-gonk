@@ -255,9 +255,11 @@
   // every line `id="L{n}"` and a gutter self-link `href="#L{n}"`, so clicking a number selects
   // the line (`#L42` in the URL), and its annotate form asks for a quote typed by hand. browse
   // ships no scripts, so the hook lives here: when the selected line changes, the form's
-  // `exact` gets that line's text — and `prefix`/`suffix` from the neighboring text, if a
-  // browse release ever offers those fields. No new selection mechanism: the gutter link and
-  // the hash are browse's, and with scripting off they work exactly as before.
+  // `exact` gets that line's text — and `prefix`/`suffix` from the neighboring text, which
+  // browse 0.15.0's form carries as hidden fields, so a quote that occurs twice anchors on the
+  // line that was selected (a form without them still gets its quote). No new selection
+  // mechanism: the gutter link and the hash are browse's, and with scripting off they work
+  // exactly as before.
   //
   // ⚠ It never overwrites a quote the person TYPED: a fill is remembered on the field, and a
   // value that is neither empty nor the last fill is theirs.

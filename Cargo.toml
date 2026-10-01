@@ -240,7 +240,17 @@ ikigai-ledger = "0.2.1"
 # On 0.13.x `made`/`revises` are undeclared and the adapters would refuse them, which is why this
 # is the floor. `^0.13.0` is `<0.14.0`. Minor: additive inputs, one added `one_of` word, additive
 # json fields and a new `summary` word.
-ikigai-browse = "0.14.0"
+# ★ 0.15.0 (ledger #658, browse PR #56; ledger #659, browse PR #57) RETURNS AN ANNOTATE TO THE
+# FILE: the annotate form sends `as=text/html`, and the annotation Sink answers that face with a
+# fragment that GETs `/k/source <file or PR IRI> as=text/html focus=<id>` into `#browse`, so the
+# file view comes back with the new card marked and focused instead of a bare annotation IRI. The
+# file and PR faces declare `focus`, which is why it passes `crate::k`'s `check_declared`. The
+# form also carries hidden `prefix`/`suffix` fields, which `web/gonk.js`'s line hook fills from
+# the lines around the selected one. And an exact repeat of a finding is withheld only when its
+# twin's current decision is a CONFIRMED decline. On 0.14.x `focus` is undeclared (the `/k` door
+# refuses it) and the form has no `prefix`/`suffix` to fill, which is why this is the floor.
+# `^0.14.0` is `<0.15.0`. Minor: an additive input, an additive face, two additive form fields.
+ikigai-browse = "0.15.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
