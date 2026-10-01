@@ -97,7 +97,9 @@ use ikigai_store::{SharerWrites, Store};
 use oxigraph::model::{GraphName, NamedNode};
 
 use crate::config::ExplainTiers;
-use crate::watch::{root_thread, Watched};
+use crate::watch::{
+    in_build_output, root_thread, wide_thread, Epochs, RootIgnore, RootWatch, Seen, Watched,
+};
 
 /// **Where the browse family's quads live — ONE value, read by both the people who must agree
 /// about it.**
@@ -340,8 +342,9 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 
 /// Wire the family: the space to compose, and the watch that keeps `urn:repo:style` fresh.
 ///
-/// `watched` is what [`crate::watch::RootWatch::start`] actually got — the reads of those
-/// roots, and only those, are made cacheable ([`cached_reads`]).
+/// `watch` is the [`RootWatch`] `main` started, when there is one: the reads of the roots it
+/// actually got, and only those, are made cacheable ([`cached_reads`]), and every write to the
+/// family touches its [`Epochs`] so the header badge knows to recount.
 ///
 /// `explain` is `Some` when a peer serves `urn:llm:*` — see the module docs for why that is
 /// the switch. The tiers ride in as [`crate::config::ExplainTiers`] rather than as an
@@ -364,7 +367,7 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
     store: Arc<Store>,
-    watched: &[Watched],
+    watch: Option<&RootWatch>,
     explain: Option<&ExplainTiers>,
     graph: &Graph,
 ) -> Wired {
@@ -380,7 +383,11 @@ pub fn wire(
     };
     let (space, style) = mount.space_watched();
     Wired {
-        space: cached_reads(space, watched),
+        space: match watch {
+            Some(watch) => cached_reads(space, watch.watched(), Some(watch.epochs())),
+            None => cached_reads(space, &[], None),
+        }
+        .writing_to(graph),
         style,
     }
 }
@@ -428,7 +435,9 @@ pub struct Wired {
 ///
 /// | read | cached? | why |
 /// |---|---|---|
-/// | `Source urn:repo:{root}:{tree,file,hash,state}`, **no arguments**, watched root | yes | a pure function of bytes under the root, and the watcher sees every change to those |
+/// | `Source urn:repo:{root}:{tree,file}`, **no arguments**, watched root | yes, under [`root_thread`] | a pure function of bytes under the root, and the watcher cuts for every change a listing or a file can show |
+/// | `Source urn:repo:{root}:{hash,state}`, **no arguments**, watched root | yes, under [`wide_thread`] | each can see a file a `.gitignore` hides (`hash` walks it, `git status` reports a tracked one), so they hang from the thread only build output does not cut |
+/// | any of those whose path is IN build output (`target/`, `.git/`), or a `tree`/`file` of a path the watch does not cut for ([`Seen`]) | no | the watch ignores changes there (ledger #667), so a cache entry would be a promise nothing keeps |
 /// | the same with any argument (`as=text/html`, `annotations=include`, `version=`, …) | no | those faces read the annotation overlay out of the store — and `ikigai-browse` REWRITES an annotation during a Source when the file it anchors to has drifted, so the answer depends on state this thread does not track |
 /// | `urn:repo:{root}:prs`, `:pr:{n}` | no | they resolve `urn:repo:pr:*` through the kernel, which runs `gh`: the input is GitHub, not the disk, and a filesystem thread would hold a stale PR list until someone touched a file |
 /// | `urn:repo:{root}:annotations[:{path}]`, `urn:iki:annotation:{id}` | no | store-derived, and the same drift rewrite applies |
@@ -455,14 +464,32 @@ pub struct Wired {
 /// The obligation is therefore *checked* rather than *paid* here:
 /// `tests/browse.rs::the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_still_are`
 /// issues both reads through a real kernel and looks at what the cache holds.
-pub fn cached_reads(inner: EndpointSpace, watched: &[Watched]) -> CachedReads {
+///
+/// # ★ And the writes: the badge's epochs
+///
+/// With `epochs`, every request through the family that can change a pending-findings count
+/// is wrapped so that, AFTER it has run, it touches the root it names: a Sink or
+/// Delete anywhere in the family, and a `review` Source (a pass mints findings). A write that
+/// names no root — a decision posts `urn:iki:finding:{id}` — touches the id's root when the
+/// badge has seen it, and every root when not. After, never before: a poll that reads in
+/// between stamps its count with the earlier epoch, so the next poll recounts.
+pub fn cached_reads(
+    inner: EndpointSpace,
+    watched: &[Watched],
+    epochs: Option<Arc<Epochs>>,
+) -> CachedReads {
     CachedReads {
         // ★ The NAME goes on browse's own space, not on this overlay — see the type's doc.
         // `ikigai-browse` (0.13.0) claims none for it; if a later release does, this line
         // would overwrite it, and the right move then is to stop naming here and forward
         // whatever it claims.
         inner: inner.named(crate::spaces::iri(crate::spaces::BROWSE)),
-        roots: watched.iter().map(|root| root.name.clone()).collect(),
+        roots: watched
+            .iter()
+            .map(|root| (root.name.clone(), Arc::clone(&root.ignore)))
+            .collect(),
+        epochs,
+        graph: None,
     }
 }
 
@@ -483,12 +510,116 @@ pub fn cached_reads(inner: EndpointSpace, watched: &[Watched]) -> CachedReads {
 /// Should core grow a kind for an interception overlay, this is the one place to report it.
 pub struct CachedReads {
     inner: EndpointSpace,
-    roots: Vec<String>,
+    roots: std::collections::BTreeMap<String, Arc<RootIgnore>>,
+    epochs: Option<Arc<Epochs>>,
+    /// The graph browse writes (`None`: the default graph) — what a store-door write must
+    /// name to move a pending count ([`Self::observe_store_writes`]).
+    graph: Option<String>,
+}
+
+impl CachedReads {
+    /// Say which graph browse writes, for [`Self::observe_store_writes`].
+    #[must_use]
+    pub fn writing_to(mut self, graph: &Graph) -> Self {
+        self.graph = graph.named().map(|g| g.as_str().to_string());
+        self
+    }
+
+    /// The badge's epochs, when the roots are watched.
+    pub fn epochs(&self) -> Option<Arc<Epochs>> {
+        self.epochs.clone()
+    }
+
+    /// `store`, with every WRITE through it that could reach browse's graph touching every
+    /// root's epoch once it has run — and every read, and every write naming another graph
+    /// (the ledger's), passed through untouched. `store` itself when nothing is watched.
+    ///
+    /// ★ Why the store needs this at all: a pending finding can be written without the
+    /// browse family. `urn:iki:store:graph-update` under the browse graph's write token is a
+    /// real authority an operator mints (`passkey invite … --browse-graph write`), and the
+    /// badge's promise — "a pending count is a fact about the store, whoever wrote it" —
+    /// covers it. ⚠ It changes NO answer and declares nothing fresh: the store still answers
+    /// freshness itself, from the promise `main` made ([`crate::compose_with`]'s note).
+    pub fn observe_store_writes(&self, store: Arc<dyn Space>) -> Arc<dyn Space> {
+        match &self.epochs {
+            Some(epochs) => Arc::new(StoreWrites {
+                inner: store,
+                epochs: Arc::clone(epochs),
+                graph: self.graph.clone(),
+            }),
+            None => store,
+        }
+    }
+}
+
+/// The store, observed for writes that can move a pending count — see
+/// [`CachedReads::observe_store_writes`]. Transparent in the topology, for the reason
+/// [`CachedReads`] is.
+struct StoreWrites {
+    inner: Arc<dyn Space>,
+    epochs: Arc<Epochs>,
+    graph: Option<String>,
+}
+
+impl StoreWrites {
+    /// Whether a request through the store can write browse's graph: a mutating verb whose
+    /// `graph` argument is absent (an unscoped update or load can write anything) or names
+    /// browse's graph.
+    fn can_write_browse(&self, request: &Request) -> bool {
+        if matches!(request.verb, Verb::Source | Verb::Exists | Verb::Meta) {
+            return false;
+        }
+        match request.args.get("graph") {
+            Some(ikigai_core::ArgRef::Inline(bytes)) => {
+                std::str::from_utf8(bytes).ok() == self.graph.as_deref()
+            }
+            _ => true,
+        }
+    }
+}
+
+impl Space for StoreWrites {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        if !self.can_write_browse(request) {
+            return resolution;
+        }
+        let epochs = Arc::clone(&self.epochs);
+        resolution.map_endpoint(move |endpoint| {
+            Arc::new(Touching {
+                inner: endpoint,
+                epochs: Arc::clone(&epochs),
+                touch: Touch::All,
+            }) as Arc<dyn Endpoint>
+        })
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
+    }
 }
 
 impl Space for CachedReads {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         let resolution = self.inner.resolve(request, scope);
+        if let (Some(epochs), Some(touch)) = (&self.epochs, touch_for(request)) {
+            let epochs = Arc::clone(epochs);
+            return resolution.map_endpoint(move |endpoint| {
+                Arc::new(Touching {
+                    inner: endpoint,
+                    epochs: Arc::clone(&epochs),
+                    touch: touch.clone(),
+                }) as Arc<dyn Endpoint>
+            });
+        }
         match self.thread_for(request) {
             Some(thread) => resolution.map_endpoint(move |endpoint| {
                 Arc::new(Cached {
@@ -522,14 +653,124 @@ impl CachedReads {
             return None;
         }
         let (root, rest) = split_repo_iri(request.target.as_str())?;
-        if !self.roots.iter().any(|watched| watched == root) {
-            return None;
+        let ignore = self.roots.get(root)?;
+        match rest {
+            "tree" => return Some(root_thread(root)),
+            "hash" | "state" => return Some(wide_thread(root)),
+            _ => {}
         }
-        let filesystem = matches!(rest, "tree" | "hash" | "state")
-            || rest.starts_with("tree:")
-            || rest.starts_with("hash:")
-            || rest.starts_with("file:");
-        filesystem.then(|| root_thread(root))
+        let (family, encoded) = rest.split_once(':')?;
+        let rel = decode_rel(encoded)?;
+        match family {
+            // A listing's entries are the directory's children: cached only when a change to
+            // any of them cuts, which is when the directory itself is not ignored.
+            "tree" => (!in_build_output(&rel) && ignore.classify(&rel, true) == Seen::Visible)
+                .then(|| root_thread(root)),
+            // A file's own change must cut: visible, or an ignored entry in a visible
+            // directory.
+            "file" => matches!(ignore.classify(&rel, false), Seen::Visible | Seen::Edge)
+                .then(|| root_thread(root)),
+            // A hash sees everything below the path but build output, which the wide thread
+            // cuts for — unless the path is IN build output.
+            "hash" => (!in_build_output(&rel)).then(|| wide_thread(root)),
+            _ => None,
+        }
+    }
+}
+
+/// A `{path}` segment of a browse IRI decoded back to a root-relative path, the inverse of
+/// `ikigai-browse`'s percent-encoding. `None` — and so no cache — for anything that is not a
+/// plain relative path once decoded: a malformed escape, non-UTF-8, `..`, or a leading `/`.
+fn decode_rel(encoded: &str) -> Option<PathBuf> {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let rel = PathBuf::from(String::from_utf8(out).ok()?);
+    rel.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .then_some(rel)
+}
+
+/// Which roots' pending counts a request through the family may move — see
+/// [`cached_reads`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Touch {
+    /// One root, named by the request.
+    Root(String),
+    /// One finding, whose root the badge may have seen.
+    Finding(String),
+    /// Somewhere; every root.
+    All,
+}
+
+/// The [`Touch`] a request makes, or `None` for a read that changes nothing.
+fn touch_for(request: &Request) -> Option<Touch> {
+    let target = request.target.as_str();
+    let root = || split_repo_iri(target).map(|(root, _)| Touch::Root(root.to_string()));
+    match request.verb {
+        Verb::Exists | Verb::Meta => None,
+        // A review pass mints findings during a READ.
+        Verb::Source => split_repo_iri(target)
+            .filter(|(_, rest)| rest.starts_with("review"))
+            .and_then(|_| root()),
+        _ => {
+            if let Some(id) = target.strip_prefix(crate::queue::FINDING_PREFIX) {
+                if !id.is_empty() && !id.contains(':') {
+                    return Some(Touch::Finding(id.to_string()));
+                }
+            }
+            // An annotation's own `target` argument names its file, and so its root.
+            let annotated = request.args.get("target").and_then(|arg| match arg {
+                ikigai_core::ArgRef::Inline(bytes) => std::str::from_utf8(bytes).ok(),
+                _ => None,
+            });
+            Some(
+                annotated
+                    .and_then(split_repo_iri)
+                    .map(|(root, _)| Touch::Root(root.to_string()))
+                    .or_else(root)
+                    .unwrap_or(Touch::All),
+            )
+        }
+    }
+}
+
+/// One write through the family, touching the badge's epochs once it has run.
+struct Touching {
+    inner: Arc<dyn Endpoint>,
+    epochs: Arc<Epochs>,
+    touch: Touch,
+}
+
+#[async_trait]
+impl Endpoint for Touching {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let answer = self.inner.invoke(inv).await;
+        // Success or not: a refused write may still have written part of what it meant to.
+        match &self.touch {
+            Touch::Root(root) => self.epochs.touch(root),
+            Touch::Finding(id) => self.epochs.touch_finding(id),
+            Touch::All => self.epochs.touch_all(),
+        }
+        answer
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
     }
 }
 
@@ -573,18 +814,17 @@ mod tests {
     use super::*;
     use ikigai_core::{ArgRef, Iri};
 
-    fn watched(names: &[&str]) -> Vec<Watched> {
-        names
-            .iter()
-            .map(|name| Watched {
-                name: (*name).to_string(),
-                dir: PathBuf::from("/tmp").join(name),
-            })
-            .collect()
-    }
-
-    fn space() -> CachedReads {
-        cached_reads(EndpointSpace::new(), &watched(&["core"]))
+    /// A root named `core` over a scratch directory whose `.gitignore` hides `book/`.
+    fn space() -> (CachedReads, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a scratch root");
+        std::fs::write(dir.path().join(".gitignore"), "/book\n*.log\n").expect(".gitignore");
+        let dir_path = dir.path().canonicalize().expect("canonical");
+        let watched = vec![Watched {
+            name: "core".to_string(),
+            ignore: Arc::new(RootIgnore::load(&dir_path)),
+            dir: dir_path,
+        }];
+        (cached_reads(EndpointSpace::new(), &watched, None), dir)
     }
 
     fn request(verb: Verb, iri: &str) -> Request {
@@ -593,26 +833,110 @@ mod tests {
 
     #[test]
     fn the_filesystem_reads_of_a_watched_root_are_cached() {
-        let space = space();
-        for iri in [
-            "urn:repo:core:tree",
-            "urn:repo:core:tree:src",
-            "urn:repo:core:file:src/lib.rs",
-            "urn:repo:core:hash",
-            "urn:repo:core:hash:src",
-            "urn:repo:core:state",
+        let (space, _dir) = space();
+        for (iri, thread) in [
+            ("urn:repo:core:tree", "urn:iki:gonk:browse:root:core"),
+            ("urn:repo:core:tree:src", "urn:iki:gonk:browse:root:core"),
+            (
+                "urn:repo:core:file:src/lib.rs",
+                "urn:iki:gonk:browse:root:core",
+            ),
+            (
+                "urn:repo:core:file:src%20dir/a%2Bb.rs",
+                "urn:iki:gonk:browse:root:core",
+            ),
+            // An ignored file in a listed directory: its change still cuts (an `Edge`).
+            (
+                "urn:repo:core:file:src/debug.log",
+                "urn:iki:gonk:browse:root:core",
+            ),
+            // The two that can see what a `.gitignore` hides hang from the wide thread.
+            ("urn:repo:core:hash", "urn:iki:gonk:browse:root:core:wide"),
+            (
+                "urn:repo:core:hash:src",
+                "urn:iki:gonk:browse:root:core:wide",
+            ),
+            (
+                "urn:repo:core:hash:book",
+                "urn:iki:gonk:browse:root:core:wide",
+            ),
+            ("urn:repo:core:state", "urn:iki:gonk:browse:root:core:wide"),
         ] {
             assert_eq!(
                 space.thread_for(&request(Verb::Source, iri)).as_deref(),
-                Some("urn:iki:gonk:browse:root:core"),
+                Some(thread),
                 "{iri}"
             );
         }
     }
 
+    /// ★ The other half of ledger #667: what the watch ignores, no cached read may see.
+    #[test]
+    fn a_read_of_what_the_watch_ignores_is_not_cached() {
+        let (space, _dir) = space();
+        for iri in [
+            // Build output: no change under it cuts anything.
+            "urn:repo:core:tree:target",
+            "urn:repo:core:tree:target/debug",
+            "urn:repo:core:file:target/debug/build.log",
+            "urn:repo:core:hash:target",
+            "urn:repo:core:hash:crates/a/target",
+            "urn:repo:core:file:.git/HEAD",
+            "urn:repo:core:tree:.git",
+            // Inside a directory the `.gitignore` hides: only the wide thread is cut there.
+            "urn:repo:core:tree:book",
+            "urn:repo:core:file:book/index.html",
+            // Not a plain relative path once decoded.
+            "urn:repo:core:file:../outside",
+            "urn:repo:core:file:%2Fetc/passwd",
+        ] {
+            assert_eq!(space.thread_for(&request(Verb::Source, iri)), None, "{iri}");
+        }
+    }
+
+    /// Which roots a request through the family touches for the badge.
+    #[test]
+    fn a_write_touches_the_root_it_names_and_a_read_touches_nothing() {
+        let touch = |verb: Verb, iri: &str, target: Option<&str>| {
+            let mut request = request(verb, iri);
+            if let Some(target) = target {
+                request = request.with_arg("target", ArgRef::Inline(target.as_bytes().to_vec()));
+            }
+            touch_for(&request)
+        };
+        let root = |r: &str| Some(Touch::Root(r.to_string()));
+        assert_eq!(touch(Verb::Source, "urn:repo:core:file:a.rs", None), None);
+        assert_eq!(touch(Verb::Source, "urn:repo:core:findings", None), None);
+        assert_eq!(touch(Verb::Meta, "urn:iki:finding:f1", None), None);
+        assert_eq!(
+            touch(Verb::Source, "urn:repo:core:review:a.rs", None),
+            root("core")
+        );
+        assert_eq!(
+            touch(Verb::Sink, "urn:iki:finding:f1", None),
+            Some(Touch::Finding("f1".to_string()))
+        );
+        assert_eq!(
+            touch(
+                Verb::Sink,
+                "urn:iki:annotation",
+                Some("urn:repo:core:file:a.rs")
+            ),
+            root("core")
+        );
+        assert_eq!(
+            touch(Verb::Delete, "urn:iki:annotation:a1", None),
+            Some(Touch::All)
+        );
+        assert_eq!(
+            touch(Verb::Sink, "urn:repo:core:anything", None),
+            root("core")
+        );
+    }
+
     #[test]
     fn nothing_else_is() {
-        let space = space();
+        let (space, _dir) = space();
         for iri in [
             // Another root's name — unwatched, so uncached: the fail-closed half.
             "urn:repo:other:tree",
@@ -643,7 +967,7 @@ mod tests {
     /// `annotations=include` faces read the annotation overlay, which a Source can rewrite.
     #[test]
     fn a_read_with_any_argument_is_not_cached() {
-        let space = space();
+        let (space, _dir) = space();
         let html = request(Verb::Source, "urn:repo:core:file:src/lib.rs")
             .with_arg("as", ArgRef::Inline(b"text/html".to_vec()));
         assert_eq!(space.thread_for(&html), None);
@@ -651,7 +975,7 @@ mod tests {
 
     #[test]
     fn a_meta_or_a_write_is_not_cached() {
-        let space = space();
+        let (space, _dir) = space();
         for verb in [Verb::Meta, Verb::Sink, Verb::Delete, Verb::Exists] {
             assert_eq!(
                 space.thread_for(&request(verb, "urn:repo:core:file:a.txt")),

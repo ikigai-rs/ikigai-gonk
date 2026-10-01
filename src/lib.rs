@@ -138,7 +138,9 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// resolve, and therefore what the explanation families derive through; a gonk with no mount
 /// binds none of them ([`crate::config::Settings::explains`]).
 ///
-/// ★ **The store space is never wrapped, whichever way the store was opened.** A shared
+/// ★ **The store space is never wrapped FOR FRESHNESS, whichever way the store was opened.**
+/// (One overlay observes its writes for the header badge and changes no answer — see the
+/// body.) A shared
 /// store used to make every `ikigai-store` read `Expiry::Always` — which propagates into
 /// every ledger read — and this server recovered the scoped reads from outside, in a
 /// `freshness` module that re-declared four IRIs it had transcribed by hand. `ikigai-store`
@@ -147,6 +149,7 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// ONE place that says what is fresh. Two would be the hazard, not the belt and braces: the
 /// day this server gives browse a named graph of its own ([`crate::browse::Graph`]), a
 /// wrapper here would go on declaring a graph the sharer writes as cacheable, silently.
+///
 /// `backups` is [`crate::backup::space`]'s family — `urn:iki:gonk:backup`, its status, its
 /// archives and `urn:iki:gonk:restore` — together with the compression module they reach
 /// gzip through. Bound TOGETHER, and only together, because `urn:compress:*` is linked for
@@ -177,12 +180,19 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// [#466](http://localhost:1060/l/default/item/466).
 pub fn compose_with(
     store: DurableStore,
-    browse: Option<Arc<dyn Space>>,
+    browse: Option<Arc<crate::browse::CachedReads>>,
     mounted: Vec<Arc<dyn Space>>,
     trigger: Vec<Arc<dyn Space>>,
     backups: Option<crate::backup::Backups>,
 ) -> Kernel {
     let store: Arc<dyn Space> = Arc::new(ikigai_store::space(store));
+    // ★ Observed, not wrapped for freshness: a write through the store that can reach
+    // browse's graph touches the header badge's epochs after it runs (ledger #667,
+    // [`crate::browse::CachedReads::observe_store_writes`]). Every answer is the store's own.
+    let store = match &browse {
+        Some(browse) => browse.observe_store_writes(store),
+        None => store,
+    };
     // The mounts go FIRST — an override forwards its prefix unchanged, and precedence is
     // half of what makes it an override. Nothing local is shadowed by that today (this
     // server binds nothing under `urn:llm:`), and `crate::mount` is where the prefix a
@@ -198,7 +208,7 @@ pub fn compose_with(
     // caller's own bytes, gated by nothing because it reads nothing.
     spaces.push(Arc::new(render::space()));
     if let Some(browse) = browse {
-        spaces.push(browse);
+        spaces.push(browse as Arc<dyn Space>);
         spaces.push(Arc::new(ikigai_repo::space()));
     }
     spaces.extend(trigger);

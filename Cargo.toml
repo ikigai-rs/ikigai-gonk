@@ -487,6 +487,16 @@ sha2 = "0.10"
 # something. Same major as `ikigai-browse`'s own (its `StyleWatch`) and `ikigai-cli`'s, so one
 # platform watcher implementation is in the graph.
 notify = "6.1"
+# What the watch IGNORES (`crate::watch::RootIgnore`, ledger #667): git's own ignore rules —
+# every `.gitignore` under a root, `.git/info/exclude` and the global excludes file — matched
+# by the ripgrep implementation rather than a parser of our own, because a pattern read
+# differently from git is a change that cuts nothing under a read that is cached. Its walker
+# is what finds the `.gitignore` files without entering what they ignore. 0.4.33 is what is
+# built and tested; `Gitignore::matched_path_or_any_parents` and `WalkBuilder::filter_entry`
+# are far older, and it was not re-resolved from scratch at an older floor. It adds four
+# packages to the graph (`globset`, `bstr`, `crossbeam-deque`, `crossbeam-epoch`); `regex`,
+# `walkdir` and the rest it needs were already here.
+ignore = "0.4.33"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a

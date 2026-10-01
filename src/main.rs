@@ -151,7 +151,7 @@ fn serve(flags: &config::Flags) -> ! {
         browse::wire(
             settings.browse_roots.clone(),
             handle,
-            root_watch.watched(),
+            Some(&root_watch),
             explains.then_some(&settings.explain),
             // The SAME value the declaration above was derived from — not a second
             // `Graph::chosen()`, which would be a second decision.
@@ -160,10 +160,7 @@ fn serve(flags: &config::Flags) -> ! {
     });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched(), &browse_graph);
     let (browse_space, style) = match browse {
-        Some(wired) => (
-            Some(Arc::new(wired.space) as Arc<dyn ikigai_core::Space>),
-            Some(wired.style),
-        ),
+        Some(wired) => (Some(Arc::new(wired.space)), Some(wired.style)),
         None => (None, None),
     };
     // The mounts are built before the kernel and dialled by neither: `crate::mount` dials on
@@ -289,6 +286,9 @@ fn serve(flags: &config::Flags) -> ! {
             eprintln!("ikigai-gonk: urn:repo:style will not follow a11y.toml edits: {e}");
         }
     }
+    // The badge's epochs, taken before the watch moves onto its thread: the watch bumps a
+    // root's when it cuts it, the browse overlay when a write names it (ledger #667).
+    let epochs = root_watch.epochs();
     root_watch.spawn(Arc::clone(&hub));
 
     // The socket door. Bound only after the store is held, so it can never replace the
@@ -357,6 +357,7 @@ fn serve(flags: &config::Flags) -> ! {
             passkeys: Arc::clone(&passkeys),
             rules: Arc::clone(&render_rules),
             queue: settings.queue.clone(),
+            epochs: Some(Arc::clone(&epochs)),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         eprintln!(

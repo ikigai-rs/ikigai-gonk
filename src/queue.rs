@@ -100,7 +100,8 @@
 //! meant is confirmed, withdrawn or reversed. Every decision this module forwards is stamped
 //! `made=single` at the door, and a form that names `made` or `batch` is refused.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -696,21 +697,84 @@ impl Counts {
     }
 }
 
+/// One root's pending count, as one capability read it, and the epoch it was read at.
+#[derive(Debug, Clone, Copy)]
+struct Counted {
+    epoch: u64,
+    serious: usize,
+    other: usize,
+}
+
+/// The badge's memo: `(root, capability)` → what that read counted.
+///
+/// ★ Keyed on the capability's SCOPES as well as the root, as the kernel's own cache is keyed
+/// on its fingerprint: a root one caller may read and another may not must never answer the
+/// second from the first's read. Unbounded in principle, bounded in practice by the grants
+/// this server mints (one entry per root per distinct grant that polls).
+type Memo = Mutex<HashMap<(String, String), Counted>>;
+
+/// The capability as a memo key: its scopes in order, or `*` for an unscoped one.
+fn scopes_key(inv: &Invocation<'_>) -> String {
+    match inv.capability.scopes() {
+        Some(scopes) => scopes.iter().cloned().collect::<Vec<_>>().join("\n"),
+        None => "*".to_string(),
+    }
+}
+
 /// Count the pending findings this caller may read, under the configured policy.
-async fn pending_counts(web: &Web, inv: &Invocation<'_>) -> Counts {
+///
+/// With a memo and the watch's [`crate::watch::Epochs`], a root whose epoch has not moved
+/// since this caller last counted it is answered from the memo — a poll after no change reads
+/// nothing — and a root that has moved is re-read alone (ledger
+/// [#667](http://localhost:1060/l/default/item/667)). The epoch is taken BEFORE the read, so a
+/// write that lands during it leaves the count stamped stale and the next poll recounts. A
+/// refused read is never memoized: refusal is a fact about the caller, and it is cheap.
+async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) -> Counts {
     let mut counts = Counts {
         serious: 0,
         other: 0,
         refused: 0,
     };
+    let epochs = web.epochs.as_deref();
+    let memo = memo.filter(|_| epochs.is_some());
+    let key = memo.map(|_| scopes_key(inv));
     for root in crate::k::readable_roots(web, inv) {
+        let stamp = epochs.and_then(|e| e.stamp(&root));
+        let slot = key.as_ref().map(|key| (root.clone(), key.clone()));
+        if let (Some(stamp), Some(memo), Some(slot)) = (stamp, memo, slot.as_ref()) {
+            let hit = memo.lock().ok().and_then(|m| m.get(slot).copied());
+            if let Some(hit) = hit.filter(|hit| hit.epoch == stamp) {
+                counts.serious += hit.serious;
+                counts.other += hit.other;
+                continue;
+            }
+        }
         match read_findings(inv, &root, "pending").await {
             Rows::Got(rows) => {
-                for row in &rows {
-                    if web.queue.queues(rated(row)) {
-                        counts.serious += 1;
-                    } else {
-                        counts.other += 1;
+                let serious = rows
+                    .iter()
+                    .filter(|row| web.queue.queues(rated(row)))
+                    .count();
+                let other = rows.len() - serious;
+                counts.serious += serious;
+                counts.other += other;
+                if let (Some(epoch), Some(memo), Some(slot), Some(epochs)) =
+                    (stamp, memo, slot, epochs)
+                {
+                    epochs.learn(
+                        &root,
+                        rows.iter()
+                            .filter_map(|row| row.get("id").and_then(Value::as_str)),
+                    );
+                    if let Ok(mut memo) = memo.lock() {
+                        memo.insert(
+                            slot,
+                            Counted {
+                                epoch,
+                                serious,
+                                other,
+                            },
+                        );
                     }
                 }
             }
@@ -1754,6 +1818,19 @@ fn depth_rev(status: &Value) -> String {
 /// every ten seconds regardless.
 pub struct Badge {
     pub web: Arc<Web>,
+    /// Per root and capability, the last count and the epoch it was read at — see
+    /// [`pending_counts`].
+    memo: Memo,
+}
+
+impl Badge {
+    /// The badge over `web`, with an empty memo.
+    pub fn new(web: Arc<Web>) -> Badge {
+        Badge {
+            web,
+            memo: Memo::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -1790,12 +1867,14 @@ impl Endpoint for Badge {
         // it only counts. The request depth (tuples waiting for a PASS) stays in the sentence
         // and in the colour; it is the liveness half and it is unchanged.
         //
-        // ⚠ The cost, stated: one findings read per readable root per poll, on top of the
-        // depth read. Measured 2026-09-21 over the socket at 40ms for the largest root (156
-        // pending rows), so seven roots are well inside a ten-second cadence; a root count
-        // an order of magnitude larger is when this wants a count face on the findings
-        // resource rather than a row read, which is browse's to offer.
-        let counts = pending_counts(&self.web, inv).await;
+        // ⚠ The cost, stated: one findings read per readable root per poll was ~40ms a root
+        // (measured 2026-09-21), fine at seven roots and ~1.9 s a poll at 47 (ledger #667,
+        // measured 2026-10-01: one core held near 100% by a page polling every two seconds).
+        // So a root is re-read only when its epoch has moved — a file change the watch cut,
+        // or a write through the browse family — and a poll after no change reads nothing.
+        // A count face on the findings resource would still be cheaper per miss; that is
+        // browse's to offer.
+        let counts = pending_counts(&self.web, inv, Some(&self.memo)).await;
         // An idle, empty request queue with serious findings waiting is not `empty`: the
         // dim style says "nothing for anyone", and there is something for someone.
         let kind = if kind == "empty" && counts.serious > 0 {

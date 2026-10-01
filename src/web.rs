@@ -128,6 +128,12 @@ pub struct Web {
     /// the header badge counts as serious. Ledger
     /// [#496](http://localhost:1060/l/default/item/496).
     pub queue: crate::config::QueuePolicy,
+    /// What tells the header badge a root's pending count may have moved
+    /// ([`crate::watch::Epochs`], ledger [#667](http://localhost:1060/l/default/item/667)):
+    /// the [`crate::watch::RootWatch`]'s, when the roots are watched. `None` and the badge
+    /// re-reads every root's findings on every poll, as it did before — which is the only
+    /// honest thing to do when nothing would say a count had changed.
+    pub epochs: Option<Arc<crate::watch::Epochs>>,
 }
 
 /// Bind the face.
@@ -256,9 +262,7 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         // The header's live depth badge — see [`crate::queue::Badge`].
         .bind(
             Exact::new(crate::queue::BADGE_IRI),
-            crate::queue::Badge {
-                web: Arc::clone(&web),
-            },
+            crate::queue::Badge::new(Arc::clone(&web)),
         )
         .named(crate::spaces::iri(crate::spaces::PAGES))
 }

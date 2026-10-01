@@ -330,6 +330,14 @@ nothing. The words are validated at start against the finding contract's own `se
 so a `gonk.queue.serious` the contract does not declare stops the server naming both lists.
 On 2026-09-21 the default hid 185 of 319 pending rows.
 
+★ **The badge counts each root once per change, not once per poll** (ledger #667). It keeps
+the last count per root and per caller's grant, and re-reads a root only when that root has
+moved since: the watch cut its narrow thread (a file changed), a write through the browse family
+named it (a review pass, an annotation), a decision named one of its findings, or a write through
+the store's door could have reached the browse graph (that one moves every root). A poll after
+no change reads no findings at all. At 47 roots the old badge took ~1.9 s a poll and held a core
+near 100% for one page polling every two seconds.
+
 ⚠ **Severity is self-reported by the model**, and a gate on the word makes the word
 load-bearing: [#449](http://localhost:1060/l/default/item/449) measured a prompt asking for
 "major or worse" moving the serious share 27% → 62% by re-labelling. Two defences. Nothing gonk
@@ -1517,9 +1525,21 @@ query at all: `urn:iki:gonk:backup:status` prints per-graph counts, so a backup 
 `ikigai-browse` declares its `tree`, `file`, `hash` and `state` reads live and uncacheable,
 which is the only honest declaration a *library* can make: caching is a promise that something
 will notice when the file changes, and a library cannot know whether its host is watching. A
-server can. gonk watches every configured root (FSEvents/inotify, recursively, `.git`
-included — `state` is `git` output, so the refs are its input) and cuts one golden thread per
-root, `urn:iki:gonk:browse:root:{name}`, on any change beneath it.
+server can. gonk watches every configured root (FSEvents/inotify, recursively) and cuts two
+golden threads per root: `urn:iki:gonk:browse:root:{name}`, which the `tree` and `file` reads
+hang from, and `urn:iki:gonk:browse:root:{name}:wide`, which `hash` and `state` hang from
+because each can see a file a `.gitignore` hides.
+
+★ **The watch ignores what git ignores** (ledger #667): every `.gitignore` under the root,
+`.git/info/exclude` and the global excludes file, plus — always — anything inside a `target/`
+directory and anything inside `.git/` except the files `git status` reads (`HEAD`, `index`,
+`packed-refs`, `config`, `info/exclude`, `refs/…`). A change inside `target/` or `.git/`
+cuts nothing; a change inside a directory a `.gitignore` hides cuts only the wide thread; an
+ignored entry directly in a listed directory (`Cargo.lock` in a library, `target` itself)
+still cuts both, because a cached listing shows it. And because an ignored change cuts
+nothing, no read of an ignored path is cached: `tree:target`, `file:book/index.html` and
+`hash:target` are served live. Before this, with every ikigai repository a root, one cargo
+build cut its root 28,467 times in 90 seconds.
 
 Only a **watched** root's reads are declared cacheable, and only for a plain `Source` with no
 arguments: the HTML and `annotations=include` faces read the annotation overlay, which browse

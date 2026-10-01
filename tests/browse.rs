@@ -138,7 +138,7 @@ fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Serve
     let wired = browse::wire(
         roots(dir),
         handle,
-        watch.watched(),
+        Some(&watch),
         mount.is_some().then_some(&tiers),
         &graph,
     );
@@ -176,7 +176,7 @@ fn naive(dir: &TempDir) -> Arc<Kernel> {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // No watcher either: a host that accepts the blanket has no reason to run one, and
     // `ikigai-browse`'s reads are live and uncacheable exactly as it declares them.
-    let wired = browse::wire(roots(dir), handle, &[], None, &browse::Graph::chosen());
+    let wired = browse::wire(roots(dir), handle, None, None, &browse::Graph::chosen());
     let space = Fallback::new(vec![
         Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
@@ -1615,6 +1615,104 @@ fn a_watched_file_read_recomputes_after_the_file_changes_on_disk() {
     );
 }
 
+/// ★ **Build output cuts nothing; a tracked file still does** (ledger
+/// [#667](http://localhost:1060/l/default/item/667)). With every repository a root, each file a
+/// cargo build wrote under any `target/` cut its root — 28,467 cuts in 90 s of one build,
+/// measured. Driven through the platform's own notifications, against a scratch root with a
+/// `.gitignore`: writes under `target/` and inside the ignored `book/` cut no narrow thread
+/// (the second cuts only the wide one, which `hash` and `state` hang from), the cached file
+/// read survives them, and an edit to a tracked file cuts and recomputes as before.
+///
+/// ⚠ "Cuts nothing" is asserted over every notification that arrives before the platform goes
+/// quiet for three seconds, which is as close as a test of the ABSENCE of an event can get.
+/// The deterministic half — the same paths through `RootWatch::apply` — is
+/// `src/watch.rs`'s `every_kind_of_path_is_sorted_as_the_table_says` and the synthetic events
+/// below.
+#[test]
+fn build_output_and_what_git_ignores_cut_no_cached_read() {
+    let dir = scratch_root();
+    std::fs::write(dir.path().join(".gitignore"), "/target\n/book\n").expect(".gitignore");
+    // Made BEFORE the watch starts, so creating them is not a change it sees: a new entry in
+    // the root's listing is a cut, correctly.
+    std::fs::create_dir_all(dir.path().join("target/debug")).expect("target/");
+    std::fs::create_dir_all(dir.path().join("book")).expect("book/");
+    let (hub, watch) = served(&dir);
+    let file = "urn:repo:demo:file:src/lib.rs";
+    let narrow = ikigai_gonk::watch::root_thread("demo");
+    let wide = ikigai_gonk::watch::wide_thread("demo");
+    assert_eq!(text(&hub, Verb::Source, file, &[]), "the first version\n");
+
+    // The deterministic half: the same kinds of path, as the platform would name them.
+    let canonical = dir.path().canonicalize().expect("canonical");
+    let event = |rel: &str| {
+        Ok(
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                .add_path(canonical.join(rel)),
+        )
+    };
+    assert!(watch.apply(&hub, event("target/debug/gonk")).is_empty());
+    assert!(watch.apply(&hub, event(".git/objects/ab/cd")).is_empty());
+    assert_eq!(
+        watch.apply(&hub, event("book/index.html")),
+        std::slice::from_ref(&wide)
+    );
+
+    // The platform's half: real writes, every notification applied until it goes quiet.
+    std::fs::write(dir.path().join("target/debug/gonk"), "a build artifact").expect("artifact");
+    std::fs::write(dir.path().join("target/debug/gonk.d"), "deps").expect("artifact");
+    std::fs::write(dir.path().join("book/index.html"), "<html/>").expect("ignored output");
+    std::fs::write(dir.path().join("src/lib.rs"), "the second version\n").expect("the edit");
+    let mut cut_before_edit: Vec<String> = Vec::new();
+    let mut narrow_cut = false;
+    for _ in 0..256 {
+        match watch.apply_next(&hub, Duration::from_secs(3)) {
+            Some(threads) if threads.contains(&narrow) => {
+                narrow_cut = true;
+                break;
+            }
+            Some(threads) => cut_before_edit.extend(threads),
+            None => break,
+        }
+    }
+    assert!(
+        narrow_cut,
+        "the edit to a tracked file never cut {narrow} within the deadline"
+    );
+    assert!(
+        cut_before_edit.iter().all(|t| *t == wide),
+        "nothing but the ignored `book/` write may cut, and only the wide thread: \
+         {cut_before_edit:?}"
+    );
+    assert_eq!(
+        text(&hub, Verb::Source, file, &[]),
+        "the second version\n",
+        "the tracked edit cut, so the read recomputed"
+    );
+
+    // And with the tracked edit applied, build output alone leaves the read cached.
+    std::fs::write(dir.path().join("src/lib.rs"), "the third version\n").expect("an edit");
+    std::fs::write(dir.path().join("target/debug/gonk"), "rebuilt").expect("artifact");
+    // Drain the edit's own notifications, then show the file read is cached again: the
+    // build-output write that follows them cuts nothing.
+    let mut cut = false;
+    for _ in 0..256 {
+        match watch.apply_next(&hub, Duration::from_secs(3)) {
+            Some(threads) if threads.contains(&narrow) => cut = true,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(cut, "the second edit cut too");
+    assert_eq!(text(&hub, Verb::Source, file, &[]), "the third version\n");
+    std::fs::write(dir.path().join("target/debug/gonk"), "rebuilt again").expect("artifact");
+    while let Some(threads) = watch.apply_next(&hub, Duration::from_secs(3)) {
+        assert!(
+            !threads.contains(&narrow),
+            "a build-output write cut the narrow thread: {threads:?}"
+        );
+    }
+}
+
 /// The fail-closed half: a root nobody is watching is served live and uncached, so there is
 /// no composition in which a stale file read can be served at all.
 #[test]
@@ -1625,7 +1723,7 @@ fn an_unwatched_roots_reads_are_not_cached() {
         .expect("a shared in-memory store");
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
-    let wired = browse::wire(roots(&dir), handle, &[], None, &graph);
+    let wired = browse::wire(roots(&dir), handle, None, None, &graph);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
@@ -2400,6 +2498,7 @@ impl HttpDoorHarness {
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
+            epochs: None,
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         // ★ The anonymous grant this server ships: the configured ledgers, read and write.
@@ -2643,7 +2742,7 @@ fn the_pass_requires_exactly_what_the_real_review_requires() {
     let (watch, refused) = RootWatch::start(&roots(&dir));
     assert!(refused.is_empty(), "{refused:?}");
     let tiers = ExplainTiers::default();
-    let wired = browse::wire(roots(&dir), handle, watch.watched(), Some(&tiers), &graph);
+    let wired = browse::wire(roots(&dir), handle, Some(&watch), Some(&tiers), &graph);
     let spaces = tempfile::tempdir().expect("a spaces tree");
     let queue = ikigai_gonk::trigger::Trigger {
         space: "reviews".to_string(),

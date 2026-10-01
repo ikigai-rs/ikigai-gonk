@@ -71,6 +71,7 @@ impl Server {
             passkeys: Arc::clone(&passkeys),
             rules: rules.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
+            epochs: None,
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         let door = doors::HttpDoor {
