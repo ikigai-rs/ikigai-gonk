@@ -257,6 +257,14 @@ curl 'http://127.0.0.1:1060/k?c=source%20urn:repo:ikigai-core:file:README.md%20a
 standalone `ikigai-web` server parses the raw request-target itself, which is why the same
 affordances work there untouched.)
 
+★ **A line selected by its number fills the annotate quote** (ledger
+[#658](http://localhost:1060/l/default/item/658)). A file view gives every line `id="L{n}"` and a
+gutter self-link `href="#L{n}"`; clicking the number selects the line (`#L42` in the URL), and
+`web/gonk.js` puts that line's text into the view's `form.browse-annotate input[name=exact]`, on the
+gutter click, on `hashchange` and when a deep-linked view arrives. A quote the person has TYPED is
+never overwritten. It is a hook on browse's own selection, not a new one: with scripting off the
+`#L{n}` deep link and the gutter links work exactly as before, and the quote is typed by hand.
+
 **What a browser may do here is entirely its grant.** `/k` runs every request under the
 per-request capability above — so a cross-site `POST` mints nothing, a rebound `Host` reads
 nothing, and the anonymous loopback caller, which holds ledger tokens only, cannot read a
