@@ -413,6 +413,33 @@ enum Rows {
     Failed(String),
 }
 
+/// ★ **What a refused form carried, drawn back into the page** (ledger
+/// [#657](http://localhost:1060/l/default/item/657)). A refusal re-renders the section, and a
+/// section re-rendered from the source alone replaces the form the person was filling in —
+/// every choice made on it, gone, with nothing stored to bring it back. So the refusing
+/// adapter hands its submission to the render, which draws it into the one form it came
+/// from. `Nothing` on every read and on every write that was applied: those render from the
+/// source, so the page never shows a decision the store did not record.
+#[derive(Clone, Copy, Default)]
+pub(crate) enum Echo<'a> {
+    #[default]
+    Nothing,
+    /// A refused batch ([`crate::batch::Submitted`]).
+    Batch(&'a crate::batch::Submitted),
+    /// A refused single decision ([`Kept`]).
+    Decide(&'a Kept),
+}
+
+/// What a refused single decision carried — the finding's form drawn back with it.
+pub(crate) struct Kept {
+    id: String,
+    severity: Option<String>,
+    reason: Option<String>,
+    note: Option<String>,
+    /// The refusal, marked on the finding's own row as well as in the flash.
+    problem: String,
+}
+
 /// What narrows a rendering: the three values both entrances agree on.
 #[derive(Default)]
 pub(crate) struct Params {
@@ -592,6 +619,7 @@ impl QueuePage {
         inv: &Invocation<'_>,
         params: &Params,
         flash: Option<(&str, &str)>,
+        echo: Echo<'_>,
     ) -> Result<Representation> {
         let roots = crate::k::readable_roots(&self.web, inv);
         let wanted = rows_wanted(params.limit.as_deref())?;
@@ -662,6 +690,10 @@ impl QueuePage {
                     chosen: &chosen,
                     no_roots: roots.is_empty(),
                     flash,
+                    submitted: match echo {
+                        Echo::Batch(submitted) => Some(submitted),
+                        _ => None,
+                    },
                 },
             )
             .await;
@@ -850,7 +882,21 @@ impl QueuePage {
                     open.clear();
                 }
                 open_file = Some(file);
-                open.push(self.finding_element(row, root, decide, &state, only.as_deref(), scope));
+                let kept = match echo {
+                    Echo::Decide(kept)
+                        if row.get("id").and_then(Value::as_str) == Some(kept.id.as_str()) =>
+                    {
+                        Some(kept)
+                    }
+                    _ => None,
+                };
+                open.push(self.finding_element(
+                    row,
+                    root,
+                    decide,
+                    (&state, only.as_deref(), scope),
+                    kept,
+                ));
                 drawn += 1;
             }
         }
@@ -1026,9 +1072,8 @@ impl QueuePage {
         row: &Value,
         root: &str,
         decide: bool,
-        state: &str,
-        only: Option<&str>,
-        scope: &str,
+        (state, only, scope): (&str, Option<&str>, &str),
+        kept: Option<&Kept>,
     ) -> String {
         let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
         let yes = |key: &str| row.get(key).and_then(Value::as_bool).unwrap_or(false);
@@ -1098,8 +1143,17 @@ impl QueuePage {
         }
         if let Some(decision) = row.get("decision").filter(|d| !d.is_null()) {
             children.push_str(&decision_element(decision));
+            // ★ Decided meanwhile, so there is no form to draw a refused note back into — the
+            // note is still the person's, and it is SHOWN rather than dropped (ledger #657).
+            if let Some(note) = kept.and_then(|k| k.note.as_deref()) {
+                children.push_str(&element(
+                    "unsaved",
+                    &[("label", "Your note was not recorded:")],
+                    note,
+                ));
+            }
         } else if decide {
-            children.push_str(&self.decide_element(id, proposal, state, only, scope));
+            children.push_str(&self.decide_element(id, proposal, (state, only, scope), kept));
         }
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -1111,13 +1165,16 @@ impl QueuePage {
     /// ⚠ When either menu is missing from the description, no form is rendered and the card
     /// says why. A hard-coded fallback here would be the fourth copy of the severity set and
     /// would go on offering words the resource had stopped accepting.
+    ///
+    /// ★ With `kept` — this finding's own refused decision (ledger #657) — the form comes back
+    /// as it was sent: the rating, the word and the note the person chose, the refusal marked
+    /// on the row, and the focus on its first control.
     fn decide_element(
         &self,
         id: &str,
         proposal: Option<&str>,
-        state: &str,
-        only: Option<&str>,
-        scope: &str,
+        (state, only, scope): (&str, Option<&str>, &str),
+        kept: Option<&Kept>,
     ) -> String {
         let iri = finding_iri(id);
         let (Some(severities), Some(decisions)) = (
@@ -1134,6 +1191,12 @@ impl QueuePage {
             );
         };
         let mut options = String::new();
+        // The rating a refused form sent wins over the model's proposal — when the contract
+        // still declares it.
+        let chosen = kept
+            .and_then(|k| k.severity.as_deref())
+            .filter(|word| severities.iter().any(|s| s == word))
+            .or(proposal);
         // ⚠ The model may have proposed NOTHING, and the contract says so: `severity` omitted
         // means "accept the proposal", which is an error when there is none. So an unrated
         // finding gets a placeholder that is selected and not submittable — the human must
@@ -1144,7 +1207,7 @@ impl QueuePage {
                 &[
                     ("value", ""),
                     ("label", "choose a rating"),
-                    ("selected", "true"),
+                    ("selected", flag(chosen.is_none())),
                     ("placeholder", "true"),
                 ],
                 "",
@@ -1156,7 +1219,7 @@ impl QueuePage {
                 &[
                     ("value", value),
                     ("label", value),
-                    ("selected", flag(proposal == Some(value.as_str()))),
+                    ("selected", flag(chosen == Some(value.as_str()))),
                     ("placeholder", "false"),
                 ],
                 "",
@@ -1171,6 +1234,7 @@ impl QueuePage {
         for value in &decisions {
             let mut picker = String::new();
             if let (Some(reasons), REASONED_DECISION) = (&reasons, value.as_str()) {
+                let picked = kept.and_then(|k| k.reason.as_deref());
                 picker.push_str(&element(
                     "reason-option",
                     &[("value", ""), ("label", NO_REASON_LABEL), ("title", "")],
@@ -1183,6 +1247,7 @@ impl QueuePage {
                             ("value", word),
                             ("label", word),
                             ("title", meaning.as_deref().unwrap_or("")),
+                            ("selected", flag(picked == Some(word.as_str()))),
                         ],
                         "",
                     ));
@@ -1194,29 +1259,32 @@ impl QueuePage {
                     ("value", value),
                     ("label", decision_label(value)),
                     ("action", DECIDE_PATH),
-                    // ⚠ The htmx payload is built HERE because a curly brace cannot appear in
-                    // a literal attribute value in the stylesheet's engine at all (they are
-                    // attribute-value-template delimiters), and JSON is nothing but curly
-                    // braces. The button's own `name`/`value` carries the same word for the
-                    // scripting-off path, so both entrances send one decision.
-                    ("vals", &format!(r#"{{"decision":"{value}"}}"#)),
                 ],
                 &picker,
             ));
         }
-        wrap(
-            "decide",
-            &[
-                ("action", DECIDE_PATH),
-                ("id", id),
-                ("state", state),
-                ("repo", only.unwrap_or("")),
-                ("scope", scope),
-                ("rows-url", &rows_url(&query(state, only, scope))),
-                ("required", flag(proposal.is_none())),
-            ],
-            &options,
-        )
+        // ★ The FORM carries the htmx post (ledger #657), so the browser's own constraint
+        // check — the rating `required` on an unrated finding — runs before anything is
+        // sent; a post on the button skipped it. The pressed button's `name`/`value` is the
+        // decision on both entrances: htmx sends the button that submitted the form.
+        if let Some(note) = kept.and_then(|k| k.note.as_deref()) {
+            options.push_str(&element("note", &[], note));
+        }
+        let rows_url = rows_url(&query(state, only, scope));
+        let mut attributes: Vec<(&str, &str)> = vec![
+            ("action", DECIDE_PATH),
+            ("id", id),
+            ("state", state),
+            ("repo", only.unwrap_or("")),
+            ("scope", scope),
+            ("rows-url", &rows_url),
+            ("required", flag(proposal.is_none())),
+        ];
+        if let Some(kept) = kept {
+            attributes.push(("refused", "true"));
+            attributes.push(("problem", &kept.problem));
+        }
+        wrap("decide", &attributes, &options)
     }
 }
 
@@ -1670,7 +1738,8 @@ impl Endpoint for QueuePage {
             ));
         }
         web::html_only(inv)?;
-        self.body(inv, &Params::from(inv), None).await
+        self.body(inv, &Params::from(inv), None, Echo::Nothing)
+            .await
     }
 
     fn name(&self) -> &str {
@@ -1777,6 +1846,9 @@ impl Endpoint for Decide {
         let state = take("_state").unwrap_or_else(|| "pending".to_string());
         let repo = take("_repo");
         let scope = take("_severity");
+        // What the person chose, kept aside in case the decision is refused (ledger #657).
+        let chose = |name: &str| fields.get(name).filter(|v| !v.trim().is_empty()).cloned();
+        let (severity, reason, note) = (chose("severity"), chose(REASON_ARG), chose("content"));
         // ⚠ **A reason word travels only with a decline.** The form is ONE form with one
         // picker and two buttons, so a person can pick a word and then press Publish — and
         // browse REFUSES a word beside a publish (a publish reason has no consumer). The word
@@ -1838,12 +1910,28 @@ impl Endpoint for Decide {
         // returning one would make the page silently ignore the most informative answer the
         // system can give. The capability layer has already refused; this decides how the
         // refusal is read.
+        // ★ And rendered WITH WHAT WAS SENT (ledger #657): the finding's form comes back as
+        // the person left it, so a refusal costs them nothing but the read.
+        let mut kept = None;
         let flash = match inv.issue(request).await {
             Ok(answer) => (
                 "ok",
                 String::from_utf8_lossy(&answer.bytes).trim().to_string(),
             ),
-            Err(e) => ("error", format!("{e}")),
+            Err(e) => {
+                let text = format!("{e}");
+                kept = Some(Kept {
+                    id: id.clone(),
+                    severity,
+                    reason,
+                    note,
+                    problem: format!(
+                        "Not decided — your rating, word and note are kept here. The \
+                         refusal: {text}"
+                    ),
+                });
+                ("error", text)
+            }
         };
         let rows = QueuePage {
             web: Arc::clone(&self.web),
@@ -1856,7 +1944,11 @@ impl Endpoint for Decide {
             scope,
             group: None,
         };
-        rows.body(inv, &params, Some((flash.0, flash.1.as_str())))
+        let echo = match &kept {
+            Some(kept) => Echo::Decide(kept),
+            None => Echo::Nothing,
+        };
+        rows.body(inv, &params, Some((flash.0, flash.1.as_str())), echo)
             .await
     }
 

@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does four things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does five things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -9,7 +9,10 @@
 // a resource — so the command is folded into a query value here, one line, grammar-level.
 // (4) one fragment tells another there is news, because gonk cannot send an `HX-Trigger`
 // response header — and it holds that news back while a human is mid-decision, which is a
-// question about the DOM that only the browser can answer (ledger #469).
+// question about the DOM that only the browser can answer (ledger #469). (5) a batch
+// finding's word picker is required exactly while its box is ticked and no batch word stands
+// behind it — a condition over three controls, which no static attribute can state (ledger
+// #657).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -130,6 +133,10 @@
   // Is a human in the middle of deciding? Focus is the obvious half; the other half is a
   // control they have already changed and not yet submitted, which survives losing focus.
   function midDecision(queue) {
+    // ★ A form drawn back after a refusal (ledger #657) IS a decision in progress, though
+    // nothing on it differs from what the server drew: what the server drew was the person's
+    // own submission. A refresh would put the source's defaults back over it.
+    if (queue.querySelector("form[data-refused]")) return true;
     const active = document.activeElement;
     if (active && queue.contains(active) && active.matches("select, textarea, input, button")) {
       return true;
@@ -199,6 +206,46 @@
   };
   document.addEventListener("focusout", retry);
   document.addEventListener("change", retry);
+
+  // ------------------------------------------- a ticked finding needs a word (ledger #657)
+  //
+  // ★ A batch with one ticked finding and no word for it is refused whole — rightly: a
+  // refusal must never leave a batch half-applied — so the page stops that submit before
+  // the round trip. Whether a finding is missing its word depends on two OTHER controls (its
+  // own box, and the batch-wide word standing behind it), and no HTML attribute can say
+  // that: `required` is static, and htmx has no conditional form of it. So this keeps each
+  // finding's picker `required` exactly while its box is ticked and no batch word is chosen,
+  // with the server's own sentence (`data-missing`) as the message. The browser's constraint
+  // check then refuses the submit, names the finding and focuses its picker — it runs because
+  // the FORM carries the htmx post. With scripting off none of this runs, and the server's
+  // refusal does the same job: the form comes back as it was sent, every such finding marked.
+  //
+  // ⚠ It never blocks a finding the batch word covers, and an unticked one is never required.
+  function checkWords(form) {
+    const batchWord = form.querySelector('select[name="reason"]');
+    const fallback = !!(batchWord && batchWord.value);
+    const boxes = form.querySelectorAll('input[name="member"]');
+    for (const picker of form.querySelectorAll("select[data-member]")) {
+      const id = picker.getAttribute("data-member");
+      const box = Array.prototype.find.call(boxes, (b) => b.value === id);
+      const needs = !!(box && box.checked && !box.disabled) && !fallback;
+      picker.required = needs;
+      picker.setCustomValidity(
+        needs && !picker.value ? picker.getAttribute("data-missing") || "" : ""
+      );
+    }
+  }
+
+  function checkAllWords() {
+    for (const form of document.querySelectorAll("form.batch")) checkWords(form);
+  }
+
+  document.addEventListener("change", (e) => {
+    const form = e.target && e.target.closest && e.target.closest("form.batch");
+    if (form) checkWords(form);
+  });
+  // Every swap that can bring a batch form in: the list's own refresh, a decision, a refusal.
+  document.addEventListener("htmx:afterSettle", checkAllWords);
 
   // ------------------------------------------------------------------ bytes
 
@@ -388,6 +435,7 @@
 
   async function init() {
     wireSamples();
+    checkAllWords();
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page
     if (location.hostname !== "localhost") {

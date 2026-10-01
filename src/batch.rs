@@ -34,6 +34,14 @@
 //!   never applied without the press. A batch with no word is refused whole, before any
 //!   member is touched: a bulk judgment without content is exactly what ledger #506 exists
 //!   to prevent.
+//! - ★★ **A refusal never loses what the person entered** (ledger
+//!   [#657](http://localhost:1060/l/default/item/657), P0). The refused form comes back
+//!   exactly as it was sent — every tick and untick, every word — with EVERY offending member
+//!   marked in words and the first one focused; only an applied batch re-renders from the
+//!   source. And the page stops the round trip where it can: the form itself carries the
+//!   htmx post, so the browser's own constraint check runs before anything is sent, and
+//!   `web/gonk.js` makes a ticked member's picker required exactly while it has no word and
+//!   no batch word stands behind it.
 //! - ★ **The twin-carrying kind is the one exception** (Brian, 2026-09-25). Its groups are
 //!   almost all singletons — one re-raise per declined twin — so "decide once for many" only
 //!   works as ALL of its groups in one form, each member declined with ITS OWN twin's word.
@@ -216,6 +224,11 @@ pub(crate) struct Frame<'a> {
     pub(crate) chosen: &'a [String],
     pub(crate) no_roots: bool,
     pub(crate) flash: Option<(&'a str, &'a str)>,
+    /// What a REFUSED batch form carried (ledger #657): rendered back into that form, every
+    /// tick and word as sent and every offending row marked, so a refusal loses nothing.
+    /// `None` on a read, and on every batch that was applied — those re-render from the
+    /// source, so the page never shows a decision the store did not record.
+    pub(crate) submitted: Option<&'a Submitted>,
 }
 
 /// One root's groups of one kind, as the findings face's JSON answers them — `groups` only;
@@ -385,6 +398,7 @@ pub(crate) async fn section(
         chosen,
         no_roots,
         flash,
+        submitted,
     } = frame;
     let earlier: Vec<String> = kinds
         .iter()
@@ -555,6 +569,12 @@ pub(crate) async fn section(
             ("button-class", format!("decide-button {REASONED_DECISION}")),
         ]
     };
+    // ★ A refusal gives back what was typed (ledger #657): the refused submission is drawn
+    // into the ONE form it came from, every other form from the source as usual. The form
+    // carrying it says so (`refused`), which is what keeps the news refresh from wiping it.
+    let echo_for = |key: &str, holds: &dyn Fn(&str) -> bool| -> Option<&Submitted> {
+        submitted.filter(|s| s.belongs_to(key, holds))
+    };
     // ★ Each group is rendered as its own chunk document, apart from the shell (ledger
     // #519), and `render::splice` joins the pieces into exactly the HTML one transform
     // produced (`render::chunk` has the numbers). The chunk is the whole FORM where there is
@@ -564,6 +584,16 @@ pub(crate) async fn section(
     let mut chunks: Vec<String> = Vec::new();
     let mut slot: Option<&str> = None;
     if per_twin {
+        let holds = |id: &str| {
+            groups.iter().any(|g| {
+                members(g)
+                    .iter()
+                    .any(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            })
+        };
+        let echo = echo_for(kind, &holds);
+        // The first offending row's own picker takes the focus; `true` until one has.
+        let mut focus = echo.is_some_and(|e| !e.offending.is_empty());
         let mut inner = String::new();
         let mut ticked = 0usize;
         let mut wordless = 0usize;
@@ -573,12 +603,24 @@ pub(crate) async fn section(
                 decide,
                 reasons.as_deref(),
                 true,
+                echo,
+                &mut focus,
             )));
-            let word = twin_word(group).is_some();
+            let word = twin_word(group);
             for member in members(group) {
-                if decide && rated(member) {
+                if !(decide && rated(member)) {
+                    continue;
+                }
+                let id = member.get("id").and_then(Value::as_str).unwrap_or("");
+                // As drawn: ticked and worded as SENT when this form was refused, else
+                // ticked (a twin is evidence) with its twin's word.
+                let (is_ticked, own) = match echo {
+                    Some(e) => (e.members.contains(id), e.words.get(id).map(String::as_str)),
+                    None => (true, word),
+                };
+                if is_ticked {
                     ticked += 1;
-                    if !word {
+                    if own.is_none() {
                         wordless += 1;
                     }
                 }
@@ -589,9 +631,14 @@ pub(crate) async fn section(
             "button-label",
             "Decline the ticked findings, each with its twin's word".to_string(),
         ));
-        // ★ The batch-wide FALLBACK word (ledger #508): offered only when some ticked member's
-        // twin had none, optional, and overridden by a member's own picker.
-        if let (Some(reasons), true) = (&reasons, wordless > 0) {
+        if echo.is_some() {
+            attributes.push(("refused", "true".to_string()));
+        }
+        // ★ The batch-wide FALLBACK word (ledger #508): offered only when some ticked member
+        // has no word of its own — or when the refused form carried one — optional, and
+        // overridden by a member's own picker.
+        let batch_word = echo.and_then(|e| e.word.as_deref());
+        if let (Some(reasons), true) = (&reasons, wordless > 0 || batch_word.is_some()) {
             attributes.push(("word-required", "false".to_string()));
             attributes.push((
                 "word-label",
@@ -600,9 +647,14 @@ pub(crate) async fn section(
                      {ticked} will take it; a finding's own word wins"
                 ),
             ));
+            // No offending row could take the focus (each was decided meanwhile): the batch
+            // word is then the control that would have fixed it.
+            if focus {
+                attributes.push(("word-autofocus", "true".to_string()));
+            }
             inner.push_str(&reason_options(
                 reasons,
-                None,
+                batch_word,
                 Placeholder::Optional(NO_BATCH_WORD_LABEL),
             ));
         }
@@ -612,20 +664,45 @@ pub(crate) async fn section(
             children.push_str(&wrap("batch", &borrowed(&attributes), &inner));
         }
     } else {
+        let mut focus_taken = false;
         for group in &groups {
             let key = group.get("key").and_then(Value::as_str).unwrap_or("");
-            let mut inner = group_element(group, decide, reasons.as_deref(), false);
+            let holds = |id: &str| {
+                members(group)
+                    .iter()
+                    .any(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            };
+            let echo = echo_for(key, &holds);
+            // A group form's members carry no word of their own, so no ROW takes the focus:
+            // the batch word is every member's, and it is the control that fixes them all.
+            let mut rows_focus = false;
+            let mut inner = group_element(
+                group,
+                decide,
+                reasons.as_deref(),
+                false,
+                echo,
+                &mut rows_focus,
+            );
             // ★ Pre-selected only beside evidence: a target-only group's word is shown on the
-            // group (`suggested`, in `group_element`) and the picker waits for the person.
-            let preselected = if by_target_only(group) {
-                None
-            } else {
-                suggested(group)
+            // group (`suggested`, in `group_element`) and the picker waits for the person. A
+            // refused form shows the word it SENT, or none.
+            let preselected = match echo {
+                Some(e) => e.word.as_deref(),
+                None if by_target_only(group) => None,
+                None => suggested(group),
             };
             let mut attributes = form_attributes(key);
             attributes.push(("button-label", "Decline the ticked findings".to_string()));
             attributes.push(("word-required", "true".to_string()));
             attributes.push(("word-label", "Reason, for every ticked finding".to_string()));
+            if let Some(echo) = echo {
+                attributes.push(("refused", "true".to_string()));
+                if !echo.offending.is_empty() && !focus_taken {
+                    attributes.push(("word-autofocus", "true".to_string()));
+                    focus_taken = true;
+                }
+            }
             if let Some(reasons) = &reasons {
                 inner.push_str(&reason_options(reasons, preselected, Placeholder::Required));
             }
@@ -824,11 +901,18 @@ fn twin_word(group: &Value) -> Option<&str> {
 /// ★ A member starts TICKED only where the group carries evidence about it — a `twin` or a
 /// `kept` row (the module docs). A target-only group's members start unticked, and its
 /// suggested word is carried on the group (`suggested`) for the page to show beside it.
+///
+/// ★ With `echo` — this form's own refused submission (ledger #657) — every member is drawn
+/// as it was SENT: ticked exactly when its box was, its own picker on the word it carried,
+/// and a member the refusal named marked with why, in words. `focus` hands the browser's
+/// focus to the first marked member's picker, once.
 fn group_element(
     group: &Value,
     decide: bool,
     reasons: Option<&[(String, Option<String>)]>,
     per_twin: bool,
+    echo: Option<&Submitted>,
+    focus: &mut bool,
 ) -> String {
     let text = |key: &str| group.get(key).and_then(Value::as_str).unwrap_or("");
     let mut children = String::new();
@@ -850,9 +934,13 @@ fn group_element(
         // single decision can carry the rating.
         let rated = rated(member);
         let tickable = decide && rated;
+        let ticked = match echo {
+            Some(echo) => tickable && echo.members.contains(id),
+            None => tickable && evidence,
+        };
         let mut extra: Vec<(&str, String)> = vec![
             ("tickable", flag(tickable).to_string()),
-            ("ticked", flag(tickable && evidence).to_string()),
+            ("ticked", flag(ticked).to_string()),
             ("finding-href", browse_url(&finding_iri(id))),
         ];
         if decide && !rated {
@@ -865,14 +953,35 @@ fn group_element(
             extra.push(("untickable-link", "open the finding".to_string()));
         }
         let mut inner = String::new();
+        let mut picker = false;
         if per_twin && tickable {
             if let Some(reasons) = reasons {
+                let where_ = where_of(member);
                 extra.push(("reason-name", format!("{MEMBER_REASON_PREFIX}{id}")));
-                inner = reason_options(
-                    reasons,
-                    twin_word,
-                    Placeholder::Optional(TAKE_BATCH_WORD_LABEL),
-                );
+                extra.push(("reason-label", format!("reason for {where_}")));
+                // What the page says, before any round trip, when this box is ticked with no
+                // word of its own and no batch word is chosen — `web/gonk.js` makes the
+                // picker required exactly then, and the browser shows this sentence.
+                extra.push((
+                    "reason-missing",
+                    format!(
+                        "{where_} is ticked with no word: pick one for it, choose a batch \
+                         word, or untick it."
+                    ),
+                ));
+                let own = match echo {
+                    Some(echo) => echo.words.get(id).map(String::as_str),
+                    None => twin_word,
+                };
+                inner = reason_options(reasons, own, Placeholder::Optional(TAKE_BATCH_WORD_LABEL));
+                picker = true;
+            }
+        }
+        if let Some(problem) = echo.and_then(|echo| echo.offending.get(id)) {
+            extra.push(("problem", problem.sentence(per_twin && picker)));
+            if picker && *focus {
+                extra.push(("autofocus", "true".to_string()));
+                *focus = false;
             }
         }
         children.push_str(&row_element_with("member", member, &extra, &inner));
@@ -935,18 +1044,22 @@ fn row_element(name: &str, row: &Value, extra: &[(&str, String)]) -> String {
     row_element_with(name, row, extra, "")
 }
 
+/// `path:line`, or the path alone — how a row is named to a person.
+fn where_of(row: &Value) -> String {
+    let path = row.get("path").and_then(Value::as_str).unwrap_or("");
+    match row.get("line").and_then(Value::as_u64) {
+        Some(line) => format!("{path}:{line}"),
+        None => path.to_string(),
+    }
+}
+
 /// One finding in a group — the fields a person needs to judge it before unticking it.
 fn row_element_with(name: &str, row: &Value, extra: &[(&str, String)], inner: &str) -> String {
     let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
-    let path = text("path");
-    let where_ = match row.get("line").and_then(Value::as_u64) {
-        Some(line) => format!("{path}:{line}"),
-        None => path.to_string(),
-    };
     let proposal = row.get("severity").and_then(Value::as_str);
     let mut attributes: Vec<(&str, String)> = vec![
         ("id", text("id").to_string()),
-        ("where", where_),
+        ("where", where_of(row)),
         ("severity", proposal.unwrap_or("unrated").to_string()),
         (
             "severity-label",
@@ -986,13 +1099,18 @@ fn row_element_with(name: &str, row: &Value, extra: &[(&str, String)], inner: &s
 /// ⚠ **The whole batch is checked before any member is tried**: nothing ticked, a member with
 /// no word, a word the contract does not declare, or a decision other than decline refuses
 /// the batch outright. A refusal that arrived half-way through would leave some members
-/// decided and the person unsure which.
+/// decided and the person unsure which. ★ That refusal re-renders the form AS SENT, not from
+/// the source (`Submitted`, ledger #657): all-or-nothing is about the store, never about
+/// what the person typed.
 pub struct Batch {
     pub web: Arc<Web>,
 }
 
 /// What a batch form carried.
 struct Form {
+    /// `_key`: which form on the page this was — the group's key, or the kind for the
+    /// twin-carrying view's one form. Only a refusal's re-render reads it.
+    key: Option<String>,
     members: Vec<String>,
     word: Option<String>,
     words: BTreeMap<String, String>,
@@ -1004,6 +1122,7 @@ struct Form {
 
 fn read_form(body: &str) -> Result<Form> {
     let mut form = Form {
+        key: None,
         members: Vec::new(),
         word: None,
         words: BTreeMap::new(),
@@ -1025,6 +1144,7 @@ fn read_form(body: &str) -> Result<Form> {
             REASON_ARG => form.word = kept(value),
             "decision" => form.decision = kept(value),
             "_group" => form.kind = kept(value),
+            "_key" => form.key = kept(value),
             "_repo" => form.repo = kept(value),
             "_severity" => form.scope = kept(value),
             other => match other.strip_prefix(MEMBER_REASON_PREFIX) {
@@ -1049,18 +1169,93 @@ fn read_form(body: &str) -> Result<Form> {
     Ok(form)
 }
 
+/// Why the refusal named one member.
+pub(crate) enum Problem {
+    /// Ticked, with no word of its own and no batch word to fall back on.
+    NoWord,
+    /// Its word is not one the finding contract declares.
+    Undeclared(String),
+}
+
+impl Problem {
+    /// The mark on the member's row, in words — never color alone. `own_picker` is whether
+    /// the row carries a picker of its own (the twin-carrying view) or takes the form's word.
+    fn sentence(&self, own_picker: bool) -> String {
+        match (self, own_picker) {
+            (Problem::NoWord, true) => "Not declined — this finding has no word: pick one \
+                                        here, choose a batch word, or untick it."
+                .to_string(),
+            (Problem::NoWord, false) => "Not declined — this finding has no word: choose \
+                                         the reason below, or untick it."
+                .to_string(),
+            (Problem::Undeclared(word), _) => format!(
+                "Not declined — `{word}` is not a reason word the finding contract declares: \
+                 pick another."
+            ),
+        }
+    }
+}
+
+/// ★ **What a REFUSED batch form carried, handed back to the page** (ledger #657).
+///
+/// The refusal itself stays whole — nothing is written when any member fails the checks,
+/// which is what keeps a batch from ever landing half-applied. What used to be lost was the
+/// FORM: the section was re-rendered from the source, so every tick, untick and word the
+/// person had set was replaced by the page's defaults, and nothing about them was stored.
+/// Brian lost a whole recurrence batch to one missing word that way (2026-10-01). So a
+/// refusal now re-renders that one form exactly as it was sent, every offending member
+/// marked and the first one focused. A batch that WAS applied still re-renders from the
+/// source: the page never shows a decision the store did not record.
+pub(crate) struct Submitted {
+    key: Option<String>,
+    members: BTreeSet<String>,
+    words: BTreeMap<String, String>,
+    word: Option<String>,
+    offending: BTreeMap<String, Problem>,
+}
+
+impl Submitted {
+    /// Whether this submission came from the form keyed `key`. A page drawn before `_key`
+    /// was sent (an open tab across a deploy) is matched by its members instead.
+    fn belongs_to(&self, key: &str, holds: &dyn Fn(&str) -> bool) -> bool {
+        match &self.key {
+            Some(sent) => sent == key,
+            None => self.members.iter().any(|id| holds(id)),
+        }
+    }
+}
+
+/// A batch the checks refused: the sentence, and the members it names.
+struct Refusal {
+    text: String,
+    offending: BTreeMap<String, Problem>,
+}
+
+impl From<String> for Refusal {
+    fn from(text: String) -> Refusal {
+        Refusal {
+            text,
+            offending: BTreeMap::new(),
+        }
+    }
+}
+
 impl Batch {
-    /// The whole batch's checks, and the word each member will carry — or the sentence that
-    /// refuses it, before anything is written.
-    fn plan(&self, form: &Form) -> std::result::Result<Vec<(String, String)>, String> {
+    /// The whole batch's checks, and the word each member will carry — or the refusal, before
+    /// anything is written. ⚠ Every offending member is named, not the first: a person fixing
+    /// one row at a time, one round trip each, is the failure this answer exists to prevent.
+    fn plan(&self, form: &Form) -> std::result::Result<Vec<(String, String)>, Refusal> {
         if let Some(other) = form.decision.as_deref().filter(|d| *d != REASONED_DECISION) {
             return Err(format!(
                 "Nothing was decided: a batch only declines, and this form asked for `{other}`. \
                  Publishing mints an annotation on each line, so it is one finding at a time."
-            ));
+            )
+            .into());
         }
         if form.members.is_empty() {
-            return Err("Nothing was declined: no finding was ticked.".to_string());
+            return Err("Nothing was declined: no finding was ticked."
+                .to_string()
+                .into());
         }
         let declared = one_of(
             &self.web.hub,
@@ -1069,36 +1264,71 @@ impl Batch {
             REASON_ARG,
         )
         .ok_or_else(|| {
-            "Nothing was declined: the finding contract does not declare its reason words, and \
-             a batch decline needs one."
-                .to_string()
+            Refusal::from(
+                "Nothing was declined: the finding contract does not declare its reason \
+                 words, and a batch decline needs one."
+                    .to_string(),
+            )
         })?;
         let mut plan = Vec::new();
-        let mut wordless = Vec::new();
+        let mut offending = BTreeMap::new();
+        let mut wordless: Vec<&str> = Vec::new();
+        let mut undeclared: Vec<&str> = Vec::new();
         for id in &form.members {
             match form.words.get(id).or(form.word.as_ref()) {
                 Some(word) if declared.contains(word) => plan.push((id.clone(), word.clone())),
                 Some(word) => {
-                    return Err(format!(
-                        "Nothing was declined: `{word}` is not a reason word the finding \
-                         contract declares ({}).",
-                        declared.join(", ")
-                    ))
+                    if !undeclared.contains(&word.as_str()) {
+                        undeclared.push(word);
+                    }
+                    offending.insert(id.clone(), Problem::Undeclared(word.clone()));
                 }
-                None => wordless.push(id.as_str()),
+                None => {
+                    wordless.push(id);
+                    offending.insert(id.clone(), Problem::NoWord);
+                }
             }
         }
+        if offending.is_empty() {
+            return Ok(plan);
+        }
+        let mut why = Vec::new();
+        if !undeclared.is_empty() {
+            let quoted: Vec<String> = undeclared.iter().map(|w| format!("`{w}`")).collect();
+            why.push(format!(
+                "{} {} the finding contract declares ({}).",
+                quoted.join(", "),
+                if undeclared.len() == 1 {
+                    "is not a reason word"
+                } else {
+                    "are not reason words"
+                },
+                declared.join(", ")
+            ));
+        }
         if !wordless.is_empty() {
-            return Err(format!(
-                "Nothing was declined: a batch decline needs a reason word for every finding, \
-                 and {} {} none — {}. Pick a word, or untick {}.",
+            why.push(format!(
+                "a batch decline needs a reason word for every finding, and {} {} none — {}. \
+                 Pick a word, or untick {}.",
                 plural(wordless.len(), "ticked finding", "ticked findings"),
                 if wordless.len() == 1 { "has" } else { "have" },
                 wordless.join(", "),
                 if wordless.len() == 1 { "it" } else { "them" },
             ));
         }
-        Ok(plan)
+        Err(Refusal {
+            text: format!(
+                "Nothing was declined: {} Every tick and word you set is kept below, and {} \
+                 marked.",
+                why.join(" "),
+                if offending.len() == 1 {
+                    "the finding that needs one is"
+                } else {
+                    "each finding that needs one is"
+                }
+            ),
+            offending,
+        })
     }
 }
 
@@ -1121,9 +1351,20 @@ impl Endpoint for Batch {
         }
 
         // ⚠ A refusal is RENDERED, as on the single decision: htmx does not swap a non-2xx
-        // response, and the refusal is the most informative answer the page can give.
+        // response, and the refusal is the most informative answer the page can give. ★ And
+        // it is rendered WITH WHAT WAS SENT (ledger #657), so it costs the person nothing.
+        let mut submitted = None;
         let flash = match self.plan(&form) {
-            Err(refusal) => ("error", refusal),
+            Err(refusal) => {
+                submitted = Some(Submitted {
+                    key: form.key.clone(),
+                    members: form.members.iter().cloned().collect(),
+                    words: form.words.clone(),
+                    word: form.word.clone(),
+                    offending: refusal.offending,
+                });
+                ("error", refusal.text)
+            }
             Ok(plan) => {
                 let total = plan.len();
                 let mut failed: Vec<String> = Vec::new();
@@ -1167,7 +1408,11 @@ impl Endpoint for Batch {
             scope: form.scope,
             group: form.kind,
         };
-        rows.body(inv, &params, Some((flash.0, flash.1.as_str())))
+        let echo = match &submitted {
+            Some(submitted) => queue::Echo::Batch(submitted),
+            None => queue::Echo::Nothing,
+        };
+        rows.body(inv, &params, Some((flash.0, flash.1.as_str())), echo)
             .await
     }
 
@@ -1189,7 +1434,9 @@ impl Endpoint for Batch {
                  ONE `Sink urn:iki:finding:{id} decision=decline reason=<word>` per member, \
                  under the caller's own capability, so each gets an ordinary decision node; a \
                  member that fails is named with its error and does not stop the others. \
-                 Answered with the queue section re-rendered from the source. ⚠ Decline only: \
+                 Answered with the queue section re-rendered from the source — or, when the \
+                 checks refused the batch, with the submitted form drawn back as it was sent \
+                 and every offending member marked (ledger #657). ⚠ Decline only: \
                  publishing mints an annotation on each line and is one finding at a time.",
             )
             .action(
@@ -1201,7 +1448,7 @@ impl Endpoint for Batch {
                     .input(ArgSpec::new("content").class(XSD_STRING).summary(
                         "the form: `member` (repeated), `reason:<id>` per member and/or \
                          `reason` as the fallback for members without one, plus `_group`, \
-                         `_repo` and `_severity` for the re-render",
+                         `_key`, `_repo` and `_severity` for the re-render",
                     ))
                     .output("text/html"),
             )

@@ -21,6 +21,12 @@
 //!   are counted and named rather than silently absent. With
 //!   [`an_unrated_finding_is_never_hidden`], [`the_badge_carries_the_serious_count_and_the_other_count`]
 //!   and [`a_serious_word_the_contract_does_not_declare_is_refused_at_start`].
+//! - [`a_refused_batch_comes_back_exactly_as_it_was_sent`] — ledger #657 (P0): a refusal is
+//!   all-or-nothing for the STORE and never for the person's input. With
+//!   [`two_wordless_findings_are_both_marked`], [`a_finding_the_batch_word_covers_is_not_marked`],
+//!   [`a_refused_group_form_keeps_its_ticks_and_focuses_its_word`],
+//!   [`an_applied_batch_still_re_renders_from_the_source`],
+//!   [`the_forms_validate_before_they_post`] and [`a_refused_decision_keeps_its_word_and_note`].
 //!
 //! Every store here is `in_memory_shared_declaring`, so these run beside a live gonk holding
 //! `~/.ikigai/store`.
@@ -3156,4 +3162,482 @@ fn no_group_kind_word_is_written_down_in_this_crate() {
             }
         }
     }
+}
+
+// ------------------------------------------ a refusal never loses input (ledger #657, P0)
+
+/// Four declined twins — two with a word, two from before words existed — and a fresh
+/// re-raise of each, so the twin-carrying view holds four members, all pre-ticked. Returns
+/// the four fresh ids, in that order: worded, worded, wordless, wordless.
+fn plant_recurrence(door: &Kernel, w1: &str, w2: &str) -> [&'static str; 4] {
+    let (serious, _) = a_serious_and_an_other_word(door);
+    let twins = [
+        ("1111111111111111111111a1", "fn alpha() {}", Some(w1)),
+        ("1111111111111111111111b1", "fn beta() {}", Some(w2)),
+        ("1111111111111111111111c1", "fn gamma() {}", None),
+        ("1111111111111111111111d1", "// Frobs the widget.", None),
+    ];
+    for (id, exact, word) in twins {
+        plant(
+            door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised once",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-18T12:00:00Z",
+            },
+        );
+        let mut args = vec![("decision", "decline")];
+        if let Some(word) = word {
+            args.push((queue::REASON_ARG, word));
+        }
+        issue(
+            door,
+            Verb::Sink,
+            &format!("urn:iki:finding:{id}"),
+            &args,
+            &reviewer(),
+        )
+        .expect("a human declines the twin");
+    }
+    let fresh = [
+        ("2222222222222222222222a2", "fn alpha() {}"),
+        ("2222222222222222222222b2", "fn beta() {}"),
+        ("2222222222222222222222c2", "fn gamma() {}"),
+        ("2222222222222222222222d2", "// Frobs the widget."),
+    ];
+    for (id, exact) in fresh {
+        plant(
+            door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised again",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-19T12:00:00Z",
+            },
+        );
+    }
+    [fresh[0].0, fresh[1].0, fresh[2].0, fresh[3].0]
+}
+
+/// The whole start tag of the element carrying `needle` (an attribute, as serialized).
+fn tag_with<'a>(html: &'a str, needle: &str) -> &'a str {
+    let at = html
+        .find(needle)
+        .unwrap_or_else(|| panic!("nothing carries {needle}:\n{html}"));
+    let start = html[..at].rfind('<').expect("a start tag");
+    let end = at + html[at..].find('>').expect("closes");
+    &html[start..=end]
+}
+
+/// The `<select>` start tag of a member's own picker.
+fn member_picker(html: &str, id: &str) -> String {
+    tag_with(html, &format!("name='reason:{id}'")).to_string()
+}
+
+/// Whether the member `id` carries the refusal's mark — its text, by id.
+fn marked(html: &str, id: &str) -> bool {
+    html.contains(&format!("id='problem-{id}'"))
+}
+
+/// ★★ **The P0 itself** (Brian, 2026-10-01): a recurrence batch with ONE ticked finding left
+/// without a word is refused whole — and the answer carries every tick, every untick and
+/// every word exactly as sent, marks that finding, and focuses its picker. Before this, the
+/// refusal re-rendered from the source and every choice on the form was gone.
+#[test]
+fn a_refused_batch_comes_back_exactly_as_it_was_sent() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let words = reason_words(&door);
+    let (w1, w2) = (words[0].clone(), words[1].clone());
+    let [f1, f2, f3, f4] = plant_recurrence(&door, &w1, &w2);
+    let kind = twin_kind(&door);
+
+    // What the person did: kept f1 but CHANGED its word from its twin's (w1) to w2, unticked
+    // f2 (which the source pre-ticks), gave the wordless f3 a word of their own, and missed
+    // f4. No batch word.
+    let refused = batch_by_form(
+        &door,
+        &format!(
+            "_key={kind}&_group={kind}&member={f1}&reason:{f1}={w2}&reason:{f2}={w2}\
+             &member={f3}&reason:{f3}={w1}&member={f4}&reason:{f4}=&reason="
+        ),
+    );
+
+    // Refused whole: nothing moved.
+    assert!(
+        refused.contains("Nothing was declined") && refused.contains(f4),
+        "the refusal names the finding:\n{refused}"
+    );
+    for id in [f1, f2, f3, f4] {
+        assert_eq!(state_of(&door, id), "pending", "{id} was not decided");
+    }
+
+    // Every tick and untick, as sent — f2's untick is the proof, because the source ticks it.
+    for id in [f1, f3, f4] {
+        assert!(
+            member_input(&refused, id).contains("checked"),
+            "{id} was sent ticked:\n{refused}"
+        );
+    }
+    assert!(
+        !member_input(&refused, f2).contains("checked"),
+        "f2 was sent UNticked, and the source would tick it:\n{refused}"
+    );
+    // Every word, as sent — f1's is the proof, because the source would select its twin's.
+    assert_eq!(
+        selected_in(&refused, &format!("reason:{f1}")).as_deref(),
+        Some(w2.as_str()),
+        "f1 carries the word the person picked, not its twin's"
+    );
+    assert_eq!(
+        selected_in(&refused, &format!("reason:{f2}")).as_deref(),
+        Some(w2.as_str())
+    );
+    assert_eq!(
+        selected_in(&refused, &format!("reason:{f3}")).as_deref(),
+        Some(w1.as_str())
+    );
+    assert_eq!(
+        selected_in(&refused, &format!("reason:{f4}")).as_deref(),
+        Some("")
+    );
+    assert_eq!(selected_in(&refused, "reason").as_deref(), Some(""));
+
+    // Exactly f4 is marked, in words, and its picker points at the mark and takes the focus.
+    assert!(
+        marked(&refused, f4),
+        "the wordless finding is marked:\n{refused}"
+    );
+    for id in [f1, f2, f3] {
+        assert!(!marked(&refused, id), "{id} is not at fault:\n{refused}");
+    }
+    let mark = tag_with(&refused, &format!("id='problem-{f4}'"));
+    assert!(
+        mark.starts_with("<p"),
+        "the mark is a paragraph of text: {mark}"
+    );
+    assert!(
+        refused.contains("this finding has no word"),
+        "the mark says what is wrong, not just a color:\n{refused}"
+    );
+    let picker = member_picker(&refused, f4);
+    assert!(
+        picker.contains("autofocus")
+            && picker.contains("aria-invalid='true'")
+            && picker.contains(&format!("aria-describedby='problem-{f4}'")),
+        "the first offending picker takes the focus and points at its mark: {picker}"
+    );
+    assert_eq!(
+        refused.matches("autofocus='autofocus'").count(),
+        1,
+        "one control takes the focus:\n{refused}"
+    );
+
+    // The form says it is a refusal drawn back, so a news refresh will not replace it.
+    assert!(
+        tag_with(&refused, "class='batch'").contains("data-refused"),
+        "{refused}"
+    );
+    // And the sentence reaches the page's live region, out of band.
+    let oob = tag_with(&refused, "hx-swap-oob");
+    assert!(
+        oob.contains("id='flash'") && oob.contains("innerHTML"),
+        "the refusal is announced through #flash: {oob}"
+    );
+    let announced = &refused[refused.find("hx-swap-oob").expect("oob")..];
+    assert!(
+        announced[..announced.find("</div>").expect("closes")].contains("role='alert'"),
+        "{refused}"
+    );
+
+    // Fixing only what was marked now succeeds, with the words the person had set.
+    let done = batch_by_form(
+        &door,
+        &format!(
+            "_key={kind}&_group={kind}&member={f1}&reason:{f1}={w2}&reason:{f2}={w2}\
+             &member={f3}&reason:{f3}={w1}&member={f4}&reason:{f4}={w1}&reason="
+        ),
+    );
+    assert!(done.contains("Declined 3 of 3."), "{done}");
+    assert_eq!(
+        row(&door, "declined", f1)["decision"]["reason"],
+        w2.as_str()
+    );
+    assert_eq!(state_of(&door, f2), "pending");
+}
+
+/// ★ **Every offending finding is marked, not the first** — and the focus goes to the first.
+#[test]
+fn two_wordless_findings_are_both_marked() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let words = reason_words(&door);
+    let [f1, _, f3, f4] = plant_recurrence(&door, &words[0], &words[1]);
+    let kind = twin_kind(&door);
+
+    let refused = batch_by_form(
+        &door,
+        &format!(
+            "_key={kind}&_group={kind}&member={f1}&reason:{f1}={}&member={f3}&reason:{f3}=\
+             &member={f4}&reason:{f4}=&reason=",
+            words[0]
+        ),
+    );
+    assert!(
+        refused.contains("2 ticked findings have none")
+            && refused.contains(f3)
+            && refused.contains(f4),
+        "the message names both:\n{refused}"
+    );
+    assert!(marked(&refused, f3) && marked(&refused, f4), "{refused}");
+    assert!(!marked(&refused, f1), "f1 carried its word:\n{refused}");
+    assert_eq!(
+        refused.matches("autofocus='autofocus'").count(),
+        1,
+        "{refused}"
+    );
+}
+
+/// ★ **A finding the batch word covers is not at fault** — the mark goes only where the
+/// refusal's reason is. Here the batch is refused for a word the contract does not declare
+/// on ANOTHER finding, and the batch word the person chose is drawn back with the rest.
+#[test]
+fn a_finding_the_batch_word_covers_is_not_marked() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let words = reason_words(&door);
+    let batch_word = words.last().expect("a word").clone();
+    let [_, _, f3, f4] = plant_recurrence(&door, &words[0], &words[1]);
+    let kind = twin_kind(&door);
+
+    let refused = batch_by_form(
+        &door,
+        &format!(
+            "_key={kind}&_group={kind}&member={f3}&reason:{f3}=\
+             &member={f4}&reason:{f4}=whenever&reason={batch_word}"
+        ),
+    );
+    assert!(
+        refused.contains("`whenever` is not a reason word"),
+        "{refused}"
+    );
+    assert_eq!(state_of(&door, f3), "pending");
+    assert!(
+        !marked(&refused, f3),
+        "f3 takes the batch word, so nothing is wrong with it:\n{refused}"
+    );
+    assert!(marked(&refused, f4), "{refused}");
+    assert_eq!(
+        selected_in(&refused, "reason").as_deref(),
+        Some(batch_word.as_str()),
+        "the batch word comes back selected"
+    );
+    assert!(
+        member_input(&refused, f3).contains("checked")
+            && member_input(&refused, f4).contains("checked"),
+        "{refused}"
+    );
+}
+
+/// ★ **A group form's refusal comes back the same way**: a target-only group starts
+/// UNTICKED, so ticks that survive the refusal can only be the person's. With no word of
+/// their own, every ticked member is marked and the form's word picker takes the focus.
+#[test]
+fn a_refused_group_form_keeps_its_ticks_and_focuses_its_word() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let ids = plant_comment_quotes(&door, 3);
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (kind, group) = a_worded_target_only_kind(&door, &ids);
+    let key = group["key"].as_str().expect("a group key");
+
+    let refused = batch_by_form(
+        &door,
+        &format!(
+            "_key={key}&_group={kind}&member={}&member={}",
+            ids[0], ids[1]
+        ),
+    );
+    assert!(refused.contains("Nothing was declined"), "{refused}");
+    for id in &ids {
+        assert_eq!(state_of(&door, id), "pending");
+    }
+    assert!(
+        member_input(&refused, ids[0]).contains("checked"),
+        "{refused}"
+    );
+    assert!(
+        member_input(&refused, ids[1]).contains("checked"),
+        "{refused}"
+    );
+    assert!(
+        !member_input(&refused, ids[2]).contains("checked"),
+        "{refused}"
+    );
+    assert!(
+        marked(&refused, ids[0]) && marked(&refused, ids[1]),
+        "{refused}"
+    );
+    assert!(
+        !marked(&refused, ids[2]),
+        "an unticked member is never at fault"
+    );
+    let picker = reason_picker(&refused);
+    assert!(
+        picker.contains("autofocus") && picker.contains("required"),
+        "the form's word is what fixes every member: {picker}"
+    );
+}
+
+/// ★ **The applied path is unchanged**: a batch that was carried out re-renders from the
+/// SOURCE, so the page never shows a decision the store did not record. f2 was posted
+/// unticked; after the batch it is drawn the way the source draws it — ticked, beside its
+/// twin — and nothing on the page says "refused".
+#[test]
+fn an_applied_batch_still_re_renders_from_the_source() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let words = reason_words(&door);
+    let [f1, f2, _, _] = plant_recurrence(&door, &words[0], &words[1]);
+    let kind = twin_kind(&door);
+
+    let done = batch_by_form(
+        &door,
+        &format!(
+            "_key={kind}&_group={kind}&member={f1}&reason:{f1}={}&reason:{f2}={}",
+            words[0], words[1]
+        ),
+    );
+    assert!(done.contains("Declined 1 of 1."), "{done}");
+    assert!(member_input(&done, f2).contains("checked"), "{done}");
+    assert!(
+        !done.contains("data-refused") && !done.contains("problem-"),
+        "{done}"
+    );
+    assert!(!done.contains("autofocus="), "{done}");
+}
+
+/// ★ **The page stops the round trip where it can.** The FORM carries the htmx post — a post
+/// on the button is never validated by htmx, which is why the batch word's `required` was
+/// decorative — and a member's picker carries what web/gonk.js needs to make it required
+/// exactly while it is ticked with no word: its member, and the server's sentence naming it.
+#[test]
+fn the_forms_validate_before_they_post() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let words = reason_words(&door);
+    let [_, _, f3, _] = plant_recurrence(&door, &words[0], &words[1]);
+    plant(
+        &door,
+        Plant {
+            id: "eeeeeeeeeeeeeeeeeeeeeee1",
+            severity: "",
+            body: "unrated",
+            path: "src/lib.rs",
+            exact: "fn beta() {}",
+            created: "2026-09-19T12:00:00Z",
+        },
+    );
+    let kind = twin_kind(&door);
+    let html = page(&door, &[("group", &kind)], &reviewer());
+
+    let form = tag_with(&html, "class='batch'");
+    assert!(form.contains("hx-post='/queue/batch'"), "{form}");
+    let button = &html[html.find("<button").expect("a button")..];
+    let button = &button[..=button.find('>').expect("closes")];
+    assert!(
+        !button.contains("hx-post"),
+        "the button only submits: {button}"
+    );
+    assert!(
+        tag_with(&html, "name='_key'").contains(&format!("value='{kind}'")),
+        "the form says which one it is: {html}"
+    );
+
+    let picker = member_picker(&html, f3);
+    assert!(
+        picker.contains(&format!("data-member='{f3}'"))
+            && picker.contains("data-missing='src/lib.rs:4 is ticked with no word")
+            && picker.contains("aria-label='reason for src/lib.rs:4'"),
+        "{picker}"
+    );
+    assert!(
+        !picker.contains("required"),
+        "never statically required: a batch word or an untick makes it fine: {picker}"
+    );
+
+    // The single decision form too: an unrated finding's rating is required, and now the
+    // browser checks it, because the FORM posts.
+    let rows = page(&door, &[], &reviewer());
+    let form = tag_with(&rows, "class='decide'");
+    assert!(form.contains("hx-post='/queue/decide'"), "{form}");
+    assert!(
+        !rows.contains("hx-vals"),
+        "the pressed button's own name and value carry the decision:\n{rows}"
+    );
+}
+
+/// ★ **The single decision keeps its input too** (ledger #657, item 3). An unrated finding
+/// declined without a rating is refused by the finding Sink; the answer draws its form back
+/// with the word and the note the person chose, marks the row with the refusal, and focuses
+/// the rating. A finding decided meanwhile has no form to draw back into, so its unrecorded
+/// note is shown instead of dropped.
+#[test]
+fn a_refused_decision_keeps_its_word_and_note() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let id = "eeeeeeeeeeeeeeeeeeeeeee1";
+    plant(
+        &door,
+        Plant {
+            id,
+            severity: "",
+            body: "unrated",
+            path: "src/lib.rs",
+            exact: "fn beta() {}",
+            created: "2026-09-19T12:00:00Z",
+        },
+    );
+    let word = reason_words(&door)[1].clone();
+    let refused = decide_by_form(
+        &door,
+        &format!("id={id}&decision=decline&reason={word}&content=kept+for+later"),
+    );
+    assert!(refused.contains("flash error"), "refused:\n{refused}");
+    assert_eq!(state_of(&door, id), "pending");
+    assert_eq!(
+        selected_in(&refused, "reason").as_deref(),
+        Some(word.as_str())
+    );
+    assert!(
+        refused.contains(">kept for later</textarea>"),
+        "the note is drawn back:\n{refused}"
+    );
+    assert!(marked(&refused, id), "{refused}");
+    assert!(
+        tag_with(&refused, "name='severity'").contains("autofocus"),
+        "{refused}"
+    );
+    assert!(tag_with(&refused, "class='decide'").contains("data-refused"));
+
+    // Decided meanwhile: the refused note is shown, not lost.
+    let (serious, _) = a_serious_and_an_other_word(&door);
+    decide_by_form(
+        &door,
+        &format!("id={id}&decision=decline&severity={serious}"),
+    );
+    let again = decide_by_form(
+        &door,
+        &format!("_state=all&id={id}&decision=publish&severity={serious}&content=a+second+thought"),
+    );
+    assert!(again.contains("flash error"), "{again}");
+    assert!(
+        again.contains("Your note was not recorded:") && again.contains("a second thought"),
+        "{again}"
+    );
 }
