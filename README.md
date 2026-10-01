@@ -203,7 +203,7 @@ run it (`web::CROSS_GRAPH`).
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
-| `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, or one annotation |
+| `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, one annotation, or one finding decision (stamped `made=single`) |
 | `/queue` · `/queue/rows` | `urn:iki:gonk:page:queue` · `…:fragment:queue` | the review queue, and the section it swaps |
 | `POST /queue/decide` | `urn:iki:gonk:queue:decide` | one human decision on one finding |
 | `POST /queue/batch` | `urn:iki:gonk:queue:batch` | one batch decline, one decision per ticked finding |
@@ -296,6 +296,7 @@ and prefetches nothing; the rest is the resource's economics, not the door's.
 open http://127.0.0.1:1060/queue                      # what is pending, in triage order
 open 'http://127.0.0.1:1060/queue?state=published'    # what was published, and who rated it what
 open 'http://127.0.0.1:1060/queue?group=file'         # decide in batches — a kind the contract declares
+open 'http://127.0.0.1:1060/queue?summary=unconfirmed' # the walk: declines nobody evidently meant
 ```
 
 Since `ikigai-browse` 0.5.0 a review pass no longer mints annotations. It produces **pending
@@ -370,11 +371,37 @@ doc file's comment-shaped and whole-file groups are the same proposal and are sh
 **Publish is not batchable** — a bulk publish is the one act that would write to what other
 readers see.
 
-⚠ **A decision is final, and the page says what undoing one would be.** An identical repeat is
-a no-op; anything that would change the record is refused naming what is on file. There is
-**no Delete on a finding** — declining is how a human removes one, and the decline is the
-record. Undoing a *publication* is `delete urn:iki:annotation:{id}`, a separate visible act
-under the same capability.
+⚠ **A decision is kept, and the page says what changing one would be.** An identical repeat is
+a no-op; anything that would change the record without naming it is refused, naming what is on
+file. There is **no Delete on a finding** — declining is how a human removes one, and the
+decline is the record. Undoing a *publication* is `delete urn:iki:annotation:{id}`, a separate
+visible act under the same capability.
+
+★ **A decision can be revised, and a decline nobody evidently meant stops steering** (ledger
+[#653](http://localhost:1060/l/default/item/653), `ikigai-browse` 0.14.0). Measured 2026-10-01:
+the 43 declines that pending recurrences pointed at carried no reason word, and 39 were made in
+same-second bursts — yet each marked its repeats and pre-ticked them in a recurrence batch. Now:
+
+- **The door stamps how a decision was made.** `POST /queue/decide` and `/k`'s finding Sink
+  forward `made=single`; `POST /queue/batch` forwards `made=batch batch=<the member's group key>`.
+  A form naming `made` or `batch` is refused — the browser never chooses its own provenance, as
+  it never chooses the author.
+- **Pre-tick on CONFIRMED evidence only** (Brian, 2026-10-01, amending the 2026-09-25 rule).
+  browse computes `confirmed` on every decision: a wordless decline made in a batch, or inside a
+  burst of declines with no provenance on record, reads `false`. A repeat whose twin is
+  unconfirmed starts unticked, and its row says why in words.
+- **The mark says so.** A recurrence mark, a twin line and a decision line carry "unconfirmed: no
+  word, made in …" in text, with a link to the walk.
+- **The walk** (`?summary=unconfirmed`, offered when the findings contract declares it) lists the
+  unconfirmed declines that still steer a pending finding, grouped by the burst or batch they
+  were made in, oldest first — browse's answer, per readable root. Each carries two small forms
+  posting to `/queue/decide` with `revises=<its decision>`: confirm or reverse (with a rating, a
+  word and a note), and withdraw (a note only — the Sink refuses a rating beside it). Every
+  revision is a new decision, made singly, and the old one is kept; a revised decline leaves the
+  list.
+- **The pending form offers only the words that can START an answer.** The contract's
+  `decision` set gained a withdrawal word that is refused on an undecided finding; which words
+  those are is read from the input's own summary, never from a list here.
 
 **The intray depth is on this page and nowhere else.** `ikigai-browse` does not expose it and
 deliberately did not add it: that number belongs to the trigger above, which lives in this
