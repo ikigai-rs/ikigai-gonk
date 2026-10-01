@@ -182,6 +182,18 @@
     </p>
   </xsl:template>
 
+  <!-- The flash as web/gonk.js writes one into #flash: a refusal is an alert. -->
+  <xsl:template match="view:flash" mode="announce">
+    <p>
+      <xsl:attribute name="class">flash <xsl:value-of select="@kind"/></xsl:attribute>
+      <xsl:choose>
+        <xsl:when test="@kind = 'error'"><xsl:attribute name="role">alert</xsl:attribute></xsl:when>
+        <xsl:otherwise><xsl:attribute name="role">status</xsl:attribute></xsl:otherwise>
+      </xsl:choose>
+      <xsl:value-of select="."/>
+    </p>
+  </xsl:template>
+
   <!-- Where a shell's rows go: a comment src/render.rs::splice replaces with the rows it
        rendered in chunks. A comment because it is the one node that can stand inside any
        element without being markup, and because xrust writes xsl:comment verbatim. Each
@@ -330,6 +342,16 @@
       </header>
       <xsl:apply-templates select="view:intray"/>
       <xsl:apply-templates select="view:flash"/>
+      <!-- ★ The same sentence, ANNOUNCED (ledger #657): a swapped-in paragraph is seen and
+           not heard, so a fragment also carries it out of band into #flash, the polite live
+           region every page already has. `innerHTML` keeps that region the element the
+           screen reader is already watching. The wrapper is hidden so that, with scripting
+           off and nothing to move it, the sentence is not shown twice. -->
+      <xsl:if test="view:flash and @full = 'false'">
+        <div id="flash" hx-swap-oob="innerHTML" hidden="hidden">
+          <xsl:apply-templates select="view:flash" mode="announce"/>
+        </div>
+      </xsl:if>
       <xsl:if test="@posture-text">
         <p class="note posture"><xsl:value-of select="@posture-text"/></p>
       </xsl:if>
@@ -388,10 +410,19 @@
        carries its own box; nothing is decided until the button, and only ticked boxes are
        sent. ⚠ There is no publish here, and no decision field at all: the adapter declines,
        and refuses any other decision by name. -->
+  <!-- ★ The FORM carries the htmx post (ledger #657), not the button: htmx validates only a
+       request whose element is a form, so a post on the button skipped every `required`
+       here, and the browser's own check — which names the control and focuses it — never
+       ran. `_key` says which form this was, so a refusal is drawn back into this one, and
+       `data-refused` marks a form drawn back that way: it is a decision in progress, which
+       web/gonk.js will not let a news refresh replace. -->
   <xsl:template match="view:batch">
-    <form class="batch" method="post">
+    <form class="batch" method="post" hx-target="#queue" hx-swap="outerHTML">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:attribute name="data-key"><xsl:value-of select="@key"/></xsl:attribute>
+      <xsl:if test="@refused = 'true'"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
+      <input type="hidden" name="_key"><xsl:attribute name="value"><xsl:value-of select="@key"/></xsl:attribute></input>
       <input type="hidden" name="_group"><xsl:attribute name="value"><xsl:value-of select="@group"/></xsl:attribute></input>
       <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
       <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
@@ -408,12 +439,17 @@
               <xsl:value-of select="@word-label"/>
               <select name="reason">
                 <xsl:if test="@word-required = 'true'"><xsl:attribute name="required">required</xsl:attribute></xsl:if>
+                <!-- A refused form whose members take THIS word: the control that fixes
+                     them, so it takes the focus and says it is the problem. -->
+                <xsl:if test="@word-autofocus = 'true'">
+                  <xsl:attribute name="autofocus">autofocus</xsl:attribute>
+                  <xsl:attribute name="aria-invalid">true</xsl:attribute>
+                </xsl:if>
                 <xsl:apply-templates select="view:reason-option"/>
               </select>
             </label>
           </xsl:if>
-          <button type="submit" hx-target="#queue" hx-swap="outerHTML" hx-include="closest form">
-            <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+          <button type="submit">
             <xsl:attribute name="class"><xsl:value-of select="@button-class"/></xsl:attribute>
             <xsl:value-of select="@button-label"/>
           </button>
@@ -476,7 +512,8 @@
   </xsl:template>
 
   <xsl:template match="view:member">
-    <li class="finding member">
+    <li>
+      <xsl:attribute name="class">finding member<xsl:if test="@problem"> offending</xsl:if></xsl:attribute>
       <label class="member-tick">
         <!-- Ticked at first only beside EVIDENCE (a twin or a kept row — ledger #508); a
              box the Sink would refuse (an unrated finding) is locked. Both are the server's
@@ -498,14 +535,32 @@
           </xsl:if>
         </p>
       </xsl:if>
+      <!-- ★ What a refused batch said about THIS finding (ledger #657), in words: the
+           mark is text, never color alone, and the picker below points at it. -->
+      <xsl:if test="@problem">
+        <p class="problem">
+          <xsl:attribute name="id">problem-<xsl:value-of select="@id"/></xsl:attribute>
+          <xsl:value-of select="@problem"/>
+        </p>
+      </xsl:if>
       <!-- The member's OWN word, in the twin-carrying view: its twin's, pre-selected. An
            empty first option means the twin had none, and the batch is refused until one is
-           picked or this box is unticked. -->
+           picked, a batch word is chosen, or this box is unticked. `data-member` and
+           `data-missing` are for web/gonk.js, which makes this picker required exactly while
+           its box is ticked with no word behind it; the sentence is the server's. -->
       <xsl:if test="@reason-name">
         <label class="batch-word member-word">
           <xsl:text>Reason</xsl:text>
           <select>
             <xsl:attribute name="name"><xsl:value-of select="@reason-name"/></xsl:attribute>
+            <xsl:attribute name="aria-label"><xsl:value-of select="@reason-label"/></xsl:attribute>
+            <xsl:attribute name="data-member"><xsl:value-of select="@id"/></xsl:attribute>
+            <xsl:attribute name="data-missing"><xsl:value-of select="@reason-missing"/></xsl:attribute>
+            <xsl:if test="@problem">
+              <xsl:attribute name="aria-invalid">true</xsl:attribute>
+              <xsl:attribute name="aria-describedby">problem-<xsl:value-of select="@id"/></xsl:attribute>
+            </xsl:if>
+            <xsl:if test="@autofocus = 'true'"><xsl:attribute name="autofocus">autofocus</xsl:attribute></xsl:if>
             <xsl:apply-templates select="view:reason-option"/>
           </select>
         </label>
@@ -628,6 +683,7 @@
       <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
       <xsl:apply-templates select="view:prior"/>
       <xsl:apply-templates select="view:decision"/>
+      <xsl:apply-templates select="view:unsaved"/>
       <xsl:apply-templates select="view:decide"/>
       <xsl:apply-templates select="view:no-form"/>
     </li>
@@ -672,14 +728,31 @@
     </div>
   </xsl:template>
 
+  <!-- A refused decision's note, when the finding was decided meanwhile and there is no
+       form left to draw it back into (ledger #657): shown, never silently dropped. -->
+  <xsl:template match="view:unsaved">
+    <p class="problem unsaved">
+      <xsl:value-of select="@label"/><xsl:text> </xsl:text><span class="prior-note"><xsl:value-of select="."/></span>
+    </p>
+  </xsl:template>
+
   <!-- The human's answer. The `action` is a plain form post as well as an htmx one, so the
-       page works with scripting off; the buttons carry `hx-vals` built in Rust rather than
-       a JSON literal here, because a literal attribute value in this engine may not contain
-       a curly brace at all (they are attribute-value-template delimiters), and JSON is
-       nothing but curly braces. -->
+       page works with scripting off. ★ The FORM carries the htmx post (ledger #657), so the
+       browser's own check of the `required` rating runs before anything is sent; htmx sends
+       the pressed button's `name`/`value`, which is the decision on both entrances. A form
+       drawn back after a refusal carries the refusal on the row and the focus on its
+       first control. -->
   <xsl:template match="view:decide">
-    <form class="decide" method="post">
+    <xsl:if test="@problem">
+      <p class="problem">
+        <xsl:attribute name="id">problem-<xsl:value-of select="@id"/></xsl:attribute>
+        <xsl:value-of select="@problem"/>
+      </p>
+    </xsl:if>
+    <form class="decide" method="post" hx-target="#queue" hx-swap="outerHTML">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:if test="@refused = 'true'"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
       <input type="hidden" name="id"><xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute></input>
       <input type="hidden" name="_state"><xsl:attribute name="value"><xsl:value-of select="@state"/></xsl:attribute></input>
       <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
@@ -690,6 +763,10 @@
         <xsl:text>Severity</xsl:text>
         <select name="severity">
           <xsl:if test="@required = 'true'"><xsl:attribute name="required">required</xsl:attribute></xsl:if>
+          <xsl:if test="@problem">
+            <xsl:attribute name="autofocus">autofocus</xsl:attribute>
+            <xsl:attribute name="aria-describedby">problem-<xsl:value-of select="@id"/></xsl:attribute>
+          </xsl:if>
           <xsl:apply-templates select="view:severity-option"/>
         </select>
       </label>
@@ -697,7 +774,7 @@
            the category, this is anything a word cannot say. -->
       <label class="decide-reason">
         <xsl:text>Note — kept on both outcomes</xsl:text>
-        <textarea name="content" rows="2"></textarea>
+        <textarea name="content" rows="2"><xsl:value-of select="view:note"/></textarea>
       </label>
       <div class="decide-buttons">
         <xsl:apply-templates select="view:decision-option"/>
@@ -734,10 +811,8 @@
   </xsl:template>
 
   <xsl:template name="decide-button">
-    <button type="submit" name="decision" hx-target="#queue" hx-swap="outerHTML" hx-include="closest form">
+    <button type="submit" name="decision">
       <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
-      <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
-      <xsl:attribute name="hx-vals"><xsl:value-of select="@vals"/></xsl:attribute>
       <xsl:attribute name="class">decide-button <xsl:value-of select="@value"/></xsl:attribute>
       <xsl:value-of select="@label"/>
     </button>

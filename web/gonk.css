@@ -333,6 +333,10 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .member-word { margin: 0.4rem 0 0; }
 /* A target-only group's suggested word, shown and not selected (ledger #508). */
 .suggested-word { margin: 0 0 0.4rem; font-style: italic; }
+/* What a refused form said about one finding (ledger #657). The WORDS are the mark; the
+ * color and the outline repeat it for a glance down a long batch, and are never all of it. */
+.problem { color: var(--danger); font-weight: 600; margin: 0.3rem 0; }
+.member.offending { outline: 2px solid var(--danger); outline-offset: 0.2rem; border-radius: var(--radius); }
 
 @media (max-width: 40rem) {
   .decide { flex-direction: column; align-items: stretch; }
