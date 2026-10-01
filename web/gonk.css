@@ -337,6 +337,18 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * color and the outline repeat it for a glance down a long batch, and are never all of it. */
 .problem { color: var(--danger); font-weight: 600; margin: 0.3rem 0; }
 .member.offending { outline: 2px solid var(--danger); outline-offset: 0.2rem; border-radius: var(--radius); }
+/* An UNCONFIRMED decline (ledger #653). The WORDS carry it ("unconfirmed: no word, made in
+ * …"); the dashed rule and the italic repeat it for a glance and are never all of it. */
+.unconfirmed { font-style: italic; }
+.prior-decision:has(.unconfirmed) { border-left-style: dashed; }
+.unticked-why { margin: 0.3rem 0 0; }
+/* The walk: the same group blocks as the batch view, one per burst or batch, and two small
+ * forms per decline — the answers with a rating, and the withdrawal with only a note. */
+.filters.walk { margin-top: 0.35rem; font-size: 0.9em; }
+.walk-group { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+.steers { margin: 0.3rem 0; overflow-wrap: anywhere; }
+.decide.withdraw { border-top: 1px dashed var(--line); padding-top: 0.4rem; }
+.decide.withdraw > .note { flex: 1 1 100%; margin: 0; }
 
 @media (max-width: 40rem) {
   .decide { flex-direction: column; align-items: stretch; }

@@ -221,6 +221,7 @@
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
+        <xsl:apply-templates select="view:walk-group"/>
         <xsl:apply-templates select="rdf:RDF/ledger:Item">
           <xsl:sort select="dcterms:modified" order="descending"/>
         </xsl:apply-templates>
@@ -339,6 +340,14 @@
             <xsl:apply-templates select="view:kind"/>
           </nav>
         </xsl:if>
+        <!-- The walk (ledger #653): the unconfirmed declines that still steer, offered when
+             the findings contract declares it. -->
+        <xsl:if test="view:walk">
+          <nav class="filters walk" aria-label="Revisit declines">
+            <span class="filters-label">revisit:</span>
+            <xsl:apply-templates select="view:walk"/>
+          </nav>
+        </xsl:if>
       </header>
       <xsl:apply-templates select="view:intray"/>
       <xsl:apply-templates select="view:flash"/>
@@ -387,7 +396,159 @@
       <xsl:apply-templates select="view:no-form"/>
       <xsl:apply-templates select="view:batch"/>
       <xsl:apply-templates select="view:slot[@name = 'batches']"/>
+      <xsl:apply-templates select="view:slot[@name = 'walk']"/>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:walk">
+    <a hx-target="#queue" hx-swap="outerHTML">
+      <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@rows-url"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+      <xsl:value-of select="@label"/>
+    </a>
+  </xsl:template>
+
+  <!-- ★ The walk (ledger #653): one burst or batch of unconfirmed declines, oldest first. The
+       grouping, the order and which declines are here are ikigai-browse's answer
+       (`summary=unconfirmed`); src/walk.rs only joins one burst seen from two roots. -->
+  <xsl:template match="view:walk-group">
+    <section class="group walk-group">
+      <h2 class="group-label"><xsl:value-of select="@label"/></h2>
+      <p class="note"><xsl:value-of select="@count-text"/></p>
+      <ol class="findings">
+        <xsl:apply-templates select="view:decline"/>
+      </ol>
+    </section>
+  </xsl:template>
+
+  <!-- One unconfirmed decline: the finding, the decision on record (which says it is
+       unconfirmed, in words), what it still marks, and the revise forms. -->
+  <xsl:template match="view:decline">
+    <li class="finding declined">
+      <xsl:attribute name="id">decline-<xsl:value-of select="@id"/></xsl:attribute>
+      <div class="finding-head">
+        <span>
+          <xsl:attribute name="class">badge sev <xsl:value-of select="@severity"/></xsl:attribute>
+          <xsl:value-of select="@severity-label"/>
+        </span>
+        <xsl:choose>
+          <xsl:when test="@browse-href">
+            <a class="finding-where">
+              <xsl:attribute name="href"><xsl:value-of select="@browse-href"/></xsl:attribute>
+              <xsl:value-of select="@repo"/><xsl:text>/</xsl:text><xsl:value-of select="@where"/>
+            </a>
+          </xsl:when>
+          <xsl:otherwise>
+            <span class="finding-where"><xsl:value-of select="@repo"/><xsl:text>/</xsl:text><xsl:value-of select="@where"/></span>
+          </xsl:otherwise>
+        </xsl:choose>
+        <a class="finding-link">
+          <xsl:attribute name="href"><xsl:value-of select="@finding-href"/></xsl:attribute>
+          <xsl:text>the finding</xsl:text>
+        </a>
+      </div>
+      <p class="finding-body"><xsl:value-of select="view:body"/></p>
+      <xsl:if test="view:quote">
+        <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
+      </xsl:if>
+      <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
+      <xsl:apply-templates select="view:decision"/>
+      <xsl:apply-templates select="view:steers"/>
+      <xsl:apply-templates select="view:revise"/>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:steers">
+    <p class="note steers">
+      <xsl:value-of select="@label"/>
+      <xsl:for-each select="view:pending">
+        <xsl:text> </xsl:text>
+        <a class="finding-link"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="."/></a>
+      </xsl:for-each>
+    </p>
+  </xsl:template>
+
+  <!-- ★ Revising a decline: TWO forms, because the Sink refuses a rating beside a withdrawal
+       and a severity menu always submits a value. The first carries the answers (confirm,
+       reverse) with a rating, a word and a note; the second the revision-only words with a
+       note. Both name the decision they revise (`revises`) and post to the Queue's own
+       adapter, which stamps `made=single`; `_summary` keeps the re-render on the walk. The
+       words and their order arrive from src/walk.rs, which reads them from the contract. -->
+  <xsl:template match="view:revise">
+    <xsl:if test="@problem">
+      <p class="problem">
+        <xsl:attribute name="id">problem-<xsl:value-of select="@id"/></xsl:attribute>
+        <xsl:value-of select="@problem"/>
+      </p>
+    </xsl:if>
+    <form class="decide revise" method="post" hx-target="#queue" hx-swap="outerHTML">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:if test="@refused = 'true'"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
+      <xsl:call-template name="revise-hidden"/>
+      <label class="decide-severity">
+        <xsl:text>Severity</xsl:text>
+        <select name="severity">
+          <xsl:if test="@required = 'true'"><xsl:attribute name="required">required</xsl:attribute></xsl:if>
+          <xsl:if test="@problem">
+            <xsl:attribute name="autofocus">autofocus</xsl:attribute>
+            <xsl:attribute name="aria-describedby">problem-<xsl:value-of select="@id"/></xsl:attribute>
+          </xsl:if>
+          <xsl:apply-templates select="view:severity-option"/>
+        </select>
+      </label>
+      <xsl:if test="view:reason-option">
+        <label class="decide-severity">
+          <xsl:text>Reason word</xsl:text>
+          <select name="reason">
+            <xsl:apply-templates select="view:reason-option"/>
+          </select>
+        </label>
+      </xsl:if>
+      <label class="decide-reason">
+        <xsl:text>Note — kept with the revision</xsl:text>
+        <textarea name="content" rows="2"><xsl:value-of select="view:note"/></textarea>
+      </label>
+      <div class="decide-buttons">
+        <xsl:for-each select="view:answer-option">
+          <button type="submit" name="decision">
+            <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
+            <xsl:attribute name="class">decide-button <xsl:value-of select="@value"/></xsl:attribute>
+            <xsl:value-of select="@label"/>
+          </button>
+        </xsl:for-each>
+      </div>
+    </form>
+    <xsl:if test="view:withdraw-option">
+      <form class="decide withdraw" method="post" hx-target="#queue" hx-swap="outerHTML">
+        <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+        <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+        <xsl:call-template name="revise-hidden"/>
+        <p class="note"><xsl:value-of select="@withdraw-text"/></p>
+        <label class="decide-reason">
+          <xsl:text>Note — why withdraw it (optional)</xsl:text>
+          <textarea name="content" rows="1"></textarea>
+        </label>
+        <div class="decide-buttons">
+          <xsl:for-each select="view:withdraw-option">
+            <button type="submit" name="decision">
+              <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
+              <xsl:attribute name="class">decide-button <xsl:value-of select="@value"/></xsl:attribute>
+              <xsl:value-of select="@label"/>
+            </button>
+          </xsl:for-each>
+        </div>
+      </form>
+    </xsl:if>
+  </xsl:template>
+
+  <xsl:template name="revise-hidden">
+    <input type="hidden" name="id"><xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute></input>
+    <input type="hidden" name="revises"><xsl:attribute name="value"><xsl:value-of select="@revises"/></xsl:attribute></input>
+    <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
+    <input type="hidden" name="_summary"><xsl:attribute name="value"><xsl:value-of select="@summary"/></xsl:attribute></input>
   </xsl:template>
 
   <xsl:template match="view:kind">
@@ -496,7 +657,21 @@
       <xsl:text> · </xsl:text><xsl:value-of select="@at"/>
       <xsl:if test="view:note"><xsl:text>: </xsl:text><span class="prior-note"><xsl:value-of select="view:note"/></span></xsl:if>
       <xsl:text> · </xsl:text><span class="prior-twin"><xsl:value-of select="@twin-id"/></span>
+      <xsl:call-template name="unconfirmed"/>
     </p>
+  </xsl:template>
+
+  <!-- ★ An UNCONFIRMED decline (ledger #653), said in words — never by a color alone — with
+       the link to the walk where it can be confirmed, withdrawn or reversed. -->
+  <xsl:template name="unconfirmed">
+    <xsl:if test="@unconfirmed">
+      <xsl:text> · </xsl:text>
+      <span class="unconfirmed"><xsl:value-of select="@unconfirmed"/></span>
+      <xsl:if test="@walk-href">
+        <xsl:text> — </xsl:text>
+        <a class="walk-link"><xsl:attribute name="href"><xsl:value-of select="@walk-href"/></xsl:attribute><xsl:value-of select="@walk-label"/></a>
+      </xsl:if>
+    </xsl:if>
   </xsl:template>
 
   <!-- The row a group proposes to KEEP (the oldest of reworded repeats on one line): shown
@@ -525,7 +700,26 @@
           <xsl:attribute name="aria-label">include <xsl:value-of select="@where"/> in this batch</xsl:attribute>
         </input>
       </label>
+      <!-- The group this member was proposed in, for the door's `batch=` stamp (ledger #653):
+           a twin-carrying form holds many groups, so the form's own key cannot say it. -->
+      <xsl:if test="@tickable = 'true' and @group-key != ''">
+        <input type="hidden">
+          <xsl:attribute name="name">key:<xsl:value-of select="@id"/></xsl:attribute>
+          <xsl:attribute name="value"><xsl:value-of select="@group-key"/></xsl:attribute>
+        </input>
+      </xsl:if>
       <xsl:call-template name="member-card"/>
+      <!-- ★ Why a member with a twin starts UNTICKED (ledger #653): the decline it repeats is
+           unconfirmed, so it is no evidence. Said in words, with the way to revisit it. -->
+      <xsl:if test="@unticked-why">
+        <p class="note unticked-why">
+          <xsl:value-of select="@unticked-why"/>
+          <xsl:if test="@walk-href">
+            <xsl:text> </xsl:text>
+            <a class="walk-link"><xsl:attribute name="href"><xsl:value-of select="@walk-href"/></xsl:attribute><xsl:value-of select="@walk-label"/></a>
+          </xsl:if>
+        </p>
+      </xsl:if>
       <xsl:if test="@untickable">
         <p class="note warn">
           <xsl:value-of select="@untickable"/>
@@ -701,6 +895,7 @@
       <xsl:text> · </xsl:text><xsl:value-of select="@at"/>
       <xsl:if test="view:note"><xsl:text>: </xsl:text><span class="prior-note"><xsl:value-of select="view:note"/></span></xsl:if>
       <xsl:text> · </xsl:text><span class="prior-twin"><xsl:value-of select="@twin-id"/></span>
+      <xsl:call-template name="unconfirmed"/>
     </p>
   </xsl:template>
 
@@ -714,6 +909,7 @@
         <xsl:value-of select="@outcome"/>
         <xsl:if test="@reason"><xsl:text> (</xsl:text><span class="reason-word"><xsl:value-of select="@reason"/></span><xsl:text>)</xsl:text></xsl:if>
         <xsl:text> as </xsl:text><xsl:value-of select="@severity"/><xsl:text> · </xsl:text><xsl:value-of select="@at"/>
+        <xsl:call-template name="unconfirmed"/>
       </p>
       <xsl:if test="view:note">
         <p class="decision-note"><xsl:value-of select="view:note"/></p>

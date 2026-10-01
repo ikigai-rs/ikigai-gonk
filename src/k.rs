@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! /k?c=source {iri} [k=v …]   urn:iki:gonk:k                    Source  one read, the caller's cap
-//! /k?c=sink {iri} [k=v …]     urn:iki:gonk:k                    Sink    the annotation family only
+//! /k?c=sink {iri} [k=v …]     urn:iki:gonk:k                    Sink    the annotation and finding families
 //! /browse/{iri}               urn:iki:gonk:page:browse:{iri}    Source  the page those faces live in
 //! /browse                     urn:iki:gonk:page:browse          Source  the roots this caller may read
 //! ```
@@ -66,11 +66,18 @@
 //!   goes through the same [`crate::doors::http_scopes`] check that closed the first arc's
 //!   hole: a foreign `Origin`/`Sec-Fetch-Site` (or a foreign `Host`, on any method) computes
 //!   an EMPTY capability, and `urn:iki:annotation`'s Sink requires `urn:cap:annotate`;
-//! - **a Sink reaches the annotation family and nothing else.** The same bound
-//!   `ikigai-web`'s adapter draws, and the same one [`crate::web`]'s `Act` draws around the
-//!   ledger: the adapter never widens a door's write surface. gonk serves only the
-//!   `urn:iki:annotation` spelling — the manifest installs no alias for the older
-//!   `urn:annotation` one, so neither does this.
+//! - **a Sink reaches the annotation family and the finding family, and nothing else.** The
+//!   bound `ikigai-web`'s adapter draws, and the one [`crate::web`]'s `Act` draws around the
+//!   ledger: the adapter never widens a door's write surface beyond what browse's own faces
+//!   post. gonk serves only the `urn:iki:annotation` spelling — the manifest installs no alias
+//!   for the older `urn:annotation` one, so neither does this.
+//! - ★ **The finding family joined in ikigai-browse 0.14.0** (ledger #653): a declined card in
+//!   browse's own faces carries a REVISE form (`hx-post="/k/sink urn:iki:finding:{id}"` with
+//!   `revises=`), and so does every pending card. Its Sink requires `urn:cap:annotate` — the
+//!   same authority the annotation family's does — so admitting it widens no grant. browse
+//!   stamps no `made=` on those forms, by design ("how a decision was made is the host's to say
+//!   at its door"): this door stamps `made=single` on every finding Sink, and refuses a
+//!   command or form that names `made` or `batch` itself.
 //!
 //! # The answer is the target's answer, whole
 //!
@@ -128,7 +135,7 @@ pub const ROOTS_IRI: &str = "urn:iki:gonk:page:browse";
 /// Where that page is served, for the header link (`crate::web`'s `nav`).
 pub const ROOTS_PATH: &str = "/browse";
 
-/// The one family a `sink` command may reach.
+/// The annotation family — one of the two a `sink` command may reach.
 const ANNOTATION_ROOT: &str = "urn:iki:annotation";
 
 /// The command argument's name.
@@ -280,7 +287,7 @@ impl KAdapter {
             .is_some_and(|spec| spec.inputs.iter().any(|input| input.name == name))
     }
 
-    /// `sink <iri> [k=v …]` — the annotation family only.
+    /// `sink <iri> [k=v …]` — the annotation family, and one finding at a time.
     ///
     /// The body follows the rule both entrances to `ikigai-web`'s one write route follow:
     /// a form-encoded body becomes invocation arguments (htmx's shape, and what browse's
@@ -289,10 +296,17 @@ impl KAdapter {
     /// on a collision.
     async fn sink(&self, inv: &Invocation<'_>, command: Command) -> Result<Representation> {
         let uri = command.target.as_str();
-        if uri != ANNOTATION_ROOT && !uri.starts_with(&format!("{ANNOTATION_ROOT}:")) {
+        let annotation = uri == ANNOTATION_ROOT || uri.starts_with(&format!("{ANNOTATION_ROOT}:"));
+        // One finding: `urn:iki:finding:{id}`, with an id and nothing after it — a decision
+        // node (`…:decision`) is not a Sink target.
+        let finding = uri
+            .strip_prefix(crate::queue::FINDING_PREFIX)
+            .is_some_and(|id| !id.is_empty() && !id.contains(':'));
+        if !annotation && !finding {
             return Err(Error::Denied(format!(
-                "`{uri}`: this adapter sinks the annotation family only \
-                 (`{ANNOTATION_ROOT}`, or `{ANNOTATION_ROOT}:{{id}}`)"
+                "`{uri}`: this adapter sinks the annotation family (`{ANNOTATION_ROOT}`, or \
+                 `{ANNOTATION_ROOT}:{{id}}`) and one finding (`{}{{id}}`), nothing else",
+                crate::queue::FINDING_PREFIX
             )));
         }
         let content_type = inv.inline_str("content-type").unwrap_or_default();
@@ -315,6 +329,22 @@ impl KAdapter {
             args.insert("content".to_string(), body);
             if !content_type.is_empty() {
                 args.insert("content-type".to_string(), content_type.to_string());
+            }
+        }
+        // ★ The door says how a decision was made (ledger #653), as it names an author: a
+        // command or form that says it is refused by name, and a finding decision posted here
+        // — one finding, one press — is stamped `made=single` when its contract declares it.
+        if finding {
+            for name in [crate::queue::MADE_ARG, crate::queue::BATCH_ARG] {
+                if args.contains_key(name) {
+                    return Err(crate::queue::provenance_refused(name));
+                }
+            }
+            if let (true, Some(word)) = (
+                self.declares_input(&command.target, Verb::Sink, crate::queue::MADE_ARG),
+                crate::queue::made_word(&self.web.hub, crate::queue::MADE_SINGLE),
+            ) {
+                args.insert(crate::queue::MADE_ARG.to_string(), word.to_string());
             }
         }
         let command = Command {
@@ -380,8 +410,9 @@ impl Endpoint for KAdapter {
                  resource's own IRI — the shape the browse family's HTML faces emit. It runs \
                  under the CALLER's capability and declares none of its own: what may be \
                  read, and whether a click may spend inference, is the target resource's own \
-                 `requires`, one hop in. A sink reaches the annotation family and nothing \
-                 else.",
+                 `requires`, one hop in. A sink reaches the annotation family and one \
+                 finding (`urn:iki:finding:{id}`, whose decisions this door stamps \
+                 `made=single`), nothing else.",
             )
             .action(
                 ActionSpec::new(Verb::Source)
@@ -400,7 +431,10 @@ impl Endpoint for KAdapter {
             )
             .action(
                 ActionSpec::new(Verb::Sink)
-                    .summary("mint or update one annotation from a form-encoded body")
+                    .summary(
+                        "mint or update one annotation, or decide one finding, from a \
+                         form-encoded body",
+                    )
                     .input(command("sink"))
                     .input(
                         ArgSpec::new("content")

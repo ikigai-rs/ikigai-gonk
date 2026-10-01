@@ -573,6 +573,7 @@ fn no_severity_word_is_written_down_in_this_crate() {
     for (what, source) in [
         ("src/queue.rs", include_str!("../src/queue.rs")),
         ("src/batch.rs", include_str!("../src/batch.rs")),
+        ("src/walk.rs", include_str!("../src/walk.rs")),
         ("web/gonk.xsl", include_str!("../web/gonk.xsl")),
     ] {
         for word in &declared {
@@ -642,6 +643,7 @@ fn no_reason_word_is_written_down_in_this_crate() {
     for (what, source) in [
         ("src/queue.rs", include_str!("../src/queue.rs")),
         ("src/batch.rs", include_str!("../src/batch.rs")),
+        ("src/walk.rs", include_str!("../src/walk.rs")),
         ("web/gonk.xsl (the review queue)", &xsl[start..end]),
         ("web/gonk.js", include_str!("../web/gonk.js")),
     ] {
@@ -2483,7 +2485,13 @@ fn a_recurrence_batch_declines_each_member_with_its_own_twins_word() {
                 created: "2026-09-18T12:00:00Z",
             },
         );
-        let mut args = vec![("decision", "decline")];
+        // `made=single`: a decline a person made singly reads CONFIRMED even without a word
+        // (ledger #653), so its repeats still pre-tick — deterministically, where a legacy
+        // decline's reading would depend on whether these three land inside one second.
+        let mut args = vec![
+            ("decision", "decline"),
+            (queue::MADE_ARG, queue::MADE_SINGLE),
+        ];
         if let Some(word) = word {
             args.push((queue::REASON_ARG, word));
         }
@@ -2809,7 +2817,13 @@ fn a_batch_word_falls_back_for_members_whose_twin_had_none() {
                 created: "2026-09-18T12:00:00Z",
             },
         );
-        let mut args = vec![("decision", "decline")];
+        // `made=single`: a decline a person made singly reads CONFIRMED even without a word
+        // (ledger #653), so its repeats still pre-tick — deterministically, where a legacy
+        // decline's reading would depend on whether these three land inside one second.
+        let mut args = vec![
+            ("decision", "decline"),
+            (queue::MADE_ARG, queue::MADE_SINGLE),
+        ];
         if let Some(word) = word {
             args.push((queue::REASON_ARG, word));
         }
@@ -3139,6 +3153,7 @@ fn no_group_kind_word_is_written_down_in_this_crate() {
     for (what, source) in [
         ("src/queue.rs", include_str!("../src/queue.rs")),
         ("src/batch.rs", include_str!("../src/batch.rs")),
+        ("src/walk.rs", include_str!("../src/walk.rs")),
         ("web/gonk.xsl (the review queue)", &xsl[start..end]),
         ("web/gonk.js", include_str!("../web/gonk.js")),
     ] {
@@ -3189,7 +3204,13 @@ fn plant_recurrence(door: &Kernel, w1: &str, w2: &str) -> [&'static str; 4] {
                 created: "2026-09-18T12:00:00Z",
             },
         );
-        let mut args = vec![("decision", "decline")];
+        // `made=single`: a decline a person made singly reads CONFIRMED even without a word
+        // (ledger #653), so its repeats still pre-tick — deterministically, where a legacy
+        // decline's reading would depend on whether these three land inside one second.
+        let mut args = vec![
+            ("decision", "decline"),
+            (queue::MADE_ARG, queue::MADE_SINGLE),
+        ];
         if let Some(word) = word {
             args.push((queue::REASON_ARG, word));
         }
@@ -3640,4 +3661,492 @@ fn a_refused_decision_keeps_its_word_and_note() {
         again.contains("Your note was not recorded:") && again.contains("a second thought"),
         "{again}"
     );
+}
+
+// ------------------------------------------- a decision can be revised (ledger #653)
+
+/// The finding contract's decision words, in contract order — the oracle for the filter.
+fn decision_words(door: &Kernel) -> Vec<String> {
+    queue::one_of(
+        door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        "decision",
+    )
+    .expect("the finding Sink declares its decision set")
+}
+
+/// The `value` of every `name='decision'` button inside `html`, in document order.
+fn decision_buttons(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(at) = rest.find("name='decision'") {
+        let start = rest[..at].rfind('<').expect("a start tag");
+        let end = at + rest[at..].find('>').expect("closes");
+        let tag = &rest[start..=end];
+        if let Some(v) = tag.find("value='") {
+            let v = v + 7;
+            out.push(tag[v..v + tag[v..].find('\'').expect("closes")].to_string());
+        }
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// Decline `id` directly at its Sink, as a person did before this arc, under an explicit
+/// provenance — `made=batch batch=<key>` with no word is the UNCONFIRMED case, read the same
+/// way on every run (a legacy decline's reading depends on the clock: three inside a second).
+fn decline_in_batch(door: &Kernel, id: &str, key: &str) {
+    issue(
+        door,
+        Verb::Sink,
+        &format!("urn:iki:finding:{id}"),
+        &[
+            ("decision", "decline"),
+            (queue::MADE_ARG, queue::MADE_BATCH),
+            (queue::BATCH_ARG, key),
+        ],
+        &reviewer(),
+    )
+    .expect("a wordless batch decline");
+}
+
+/// One finding's row from the `all` listing, whatever its state.
+fn any_row(door: &Kernel, id: &str) -> serde_json::Value {
+    row(door, "all", id)
+}
+
+/// ★★ **The pending form draws only the words that can START an answer** (ledger #653).
+/// browse 0.14.0's `decision` set gained a word that only withdraws a decision on record and is
+/// refused on an undecided finding. The filter is read from the contract, so this test names no
+/// word either: it takes the contract's set, the buttons the page drew, and proves every word
+/// left out is one the Sink refuses on this undecided finding.
+#[test]
+fn the_pending_form_offers_only_the_words_that_can_start_an_answer() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    plant_pending_finding(&door, &reviewer());
+    let declared = decision_words(&door);
+    let html = page(&door, &[], &reviewer());
+    let drawn = decision_buttons(&html);
+    assert!(!drawn.is_empty(), "a decision form is drawn:\n{html}");
+    for word in &drawn {
+        assert!(
+            declared.contains(word),
+            "`{word}` is not the contract's: {declared:?}"
+        );
+    }
+    let withheld: Vec<&String> = declared.iter().filter(|w| !drawn.contains(w)).collect();
+    assert!(
+        !withheld.is_empty(),
+        "browse 0.14.0 declares a revision-only word, and the pending form must not draw it: \
+         declared {declared:?}, drawn {drawn:?}"
+    );
+    for word in withheld {
+        let refused = issue(
+            &door,
+            Verb::Sink,
+            &format!("urn:iki:finding:{FINDING}"),
+            &[("decision", word)],
+            &reviewer(),
+        );
+        assert!(
+            refused.is_err(),
+            "`{word}` was withheld, so the Sink must refuse it on an undecided finding"
+        );
+    }
+    assert_eq!(state_of(&door, FINDING), "pending");
+}
+
+/// ★ **The single decide is stamped `made=single` at the door, and a form may not say it.**
+/// A wordless decline made singly reads CONFIRMED — the point of recording it.
+#[test]
+fn the_single_decide_stamps_made_single_and_refuses_a_form_that_names_it() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    plant_pending_finding(&door, &reviewer());
+    let second = "aaaabbbbccccddddeeee0002";
+    plant_finding(&door, &reviewer(), second, Some(SEVERITY), "another claim");
+
+    decide_by_form(
+        &door,
+        &format!("id={FINDING}&decision=decline&severity={SEVERITY}"),
+    );
+    let decision = &row(&door, "declined", FINDING)["decision"];
+    assert_eq!(decision["made"], queue::MADE_SINGLE, "{decision}");
+    assert_eq!(decision["batch"], serde_json::Value::Null);
+    assert_eq!(decision["confirmed"], true, "{decision}");
+
+    for forged in [
+        format!("id={second}&decision=decline&severity={SEVERITY}&made=batch&batch=x"),
+        format!("id={second}&decision=decline&severity={SEVERITY}&batch=x"),
+    ] {
+        let refused = issue(
+            &door,
+            Verb::Sink,
+            queue::DECIDE_IRI,
+            &[("content", &forged)],
+            &reviewer(),
+        );
+        match refused {
+            Err(ikigai_core::Error::InvalidArgument { name, detail }) => {
+                assert!(
+                    [queue::MADE_ARG, queue::BATCH_ARG].contains(&name.as_str()),
+                    "{name}: {detail}"
+                );
+                assert!(detail.contains("door"), "{detail}");
+            }
+            other => panic!("a form naming its own provenance must be refused: {other:?}"),
+        }
+    }
+    assert_eq!(state_of(&door, second), "pending");
+}
+
+/// ★ **A batch decline is stamped `made=batch batch=<its group's key>`** — per member, in the
+/// twin-carrying form whose one submission spans many groups — and the page carries each
+/// member's key so the browser need not know it. A form that names the provenance is refused.
+#[test]
+fn a_batch_decline_is_stamped_with_each_members_group_key() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let words = reason_words(&door);
+    let [f1, f2, _, _] = plant_recurrence(&door, &words[0], &words[1]);
+    let kind = twin_kind(&door);
+    let key_of = |id: &str| -> String {
+        raw_groups(&door, &kind)
+            .into_iter()
+            .find(|g| member_ids(g).iter().any(|m| m == id))
+            .and_then(|g| g["key"].as_str().map(str::to_string))
+            .expect("the member's group carries a key")
+    };
+    let (k1, k2) = (key_of(f1), key_of(f2));
+    assert_ne!(k1, k2, "two twins, two groups");
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    for (id, key) in [(f1, &k1), (f2, &k2)] {
+        let hidden = tag_with(&html, &format!("name='key:{id}'"));
+        assert!(hidden.contains(&format!("value='{key}'")), "{hidden}");
+    }
+
+    let forged = issue(
+        &door,
+        Verb::Sink,
+        ikigai_gonk::batch::BATCH_IRI,
+        &[(
+            "content",
+            &format!(
+                "_group={kind}&member={f1}&reason:{f1}={}&made=single",
+                words[0]
+            ),
+        )],
+        &reviewer(),
+    );
+    assert!(
+        matches!(forged, Err(ikigai_core::Error::InvalidArgument { ref name, .. }) if name == queue::MADE_ARG),
+        "{forged:?}"
+    );
+    assert_eq!(state_of(&door, f1), "pending");
+
+    // As the page posts it: one form, `_key` the kind, each member its own key.
+    let done = batch_by_form(
+        &door,
+        &format!(
+            "_group={kind}&_key={kind}&member={f1}&member={f2}&reason:{f1}={}&reason:{f2}={}\
+             &key:{f1}={k1}&key:{f2}={k2}",
+            words[0], words[1]
+        ),
+    );
+    assert!(done.contains("Declined 2 of 2."), "{done}");
+    for (id, key) in [(f1, &k1), (f2, &k2)] {
+        let decision = &row(&door, "declined", id)["decision"];
+        assert_eq!(decision["made"], queue::MADE_BATCH, "{decision}");
+        assert_eq!(decision["batch"], key.as_str(), "{decision}");
+        assert_eq!(
+            decision["confirmed"], true,
+            "worded, so confirmed: {decision}"
+        );
+    }
+}
+
+/// Two twins declined WORDLESS in a batch (unconfirmed) and one declined singly (confirmed),
+/// and a fresh re-raise of each. Returns (unconfirmed twins, their re-raises, the confirmed
+/// twin's re-raise).
+fn plant_unconfirmed(door: &Kernel) -> ([&'static str; 2], [&'static str; 2], &'static str) {
+    let (serious, _) = a_serious_and_an_other_word(door);
+    let twins = [
+        ("1111111111111111111111a1", "fn alpha() {}"),
+        ("1111111111111111111111b1", "fn beta() {}"),
+        ("1111111111111111111111c1", "fn gamma() {}"),
+    ];
+    for (id, exact) in twins {
+        plant(
+            door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised once",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-18T12:00:00Z",
+            },
+        );
+    }
+    decline_in_batch(door, twins[0].0, "an-old-batch");
+    decline_in_batch(door, twins[1].0, "an-old-batch");
+    issue(
+        door,
+        Verb::Sink,
+        &format!("urn:iki:finding:{}", twins[2].0),
+        &[
+            ("decision", "decline"),
+            (queue::MADE_ARG, queue::MADE_SINGLE),
+        ],
+        &reviewer(),
+    )
+    .expect("a wordless single decline");
+    let fresh = [
+        ("2222222222222222222222a2", "fn alpha() {}"),
+        ("2222222222222222222222b2", "fn beta() {}"),
+        ("2222222222222222222222c2", "fn gamma() {}"),
+    ];
+    let graph = browse::Graph::chosen()
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+    for ((id, exact), (twin, _)) in fresh.into_iter().zip(twins) {
+        plant(
+            door,
+            Plant {
+                id,
+                severity: &serious,
+                body: "raised again",
+                path: "src/lib.rs",
+                exact,
+                created: "2026-09-19T12:00:00Z",
+            },
+        );
+        // The mark browse mints at mint time (`prior_decision`), as the ledger #475 test plants it.
+        let link = format!(
+            "PREFIX prov: <http://www.w3.org/ns/prov#>\nINSERT DATA {{ GRAPH <{graph}> {{ \
+             <urn:iki:finding:{id}> prov:wasInfluencedBy <urn:iki:finding:{twin}:decision> . }} }}"
+        );
+        issue(
+            door,
+            Verb::Sink,
+            "urn:iki:store:graph-update",
+            &[("graph", &graph), ("content", &link)],
+            &reviewer(),
+        )
+        .expect("the link browse mints at mint time");
+    }
+    (
+        [twins[0].0, twins[1].0],
+        [fresh[0].0, fresh[1].0],
+        fresh[2].0,
+    )
+}
+
+/// ★★ **Pre-tick on CONFIRMED evidence only** (Brian, 2026-10-01, amending the 2026-09-25
+/// rule). A recurrence whose twin's decline is unconfirmed starts UNTICKED and says why in
+/// words; one whose twin was declined singly (wordless, but confirmed) still starts ticked.
+/// The recurrence mark on the rows says "unconfirmed" in words and links the walk.
+#[test]
+fn an_unconfirmed_twin_is_no_evidence_and_the_page_says_so() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let ([t1, _], [f1, f2], f3) = plant_unconfirmed(&door);
+    // The premise, read off browse rather than assumed.
+    assert_eq!(any_row(&door, t1)["decision"]["confirmed"], false);
+    assert_eq!(any_row(&door, f1)["prior_decision"]["confirmed"], false);
+    assert_eq!(any_row(&door, f3)["prior_decision"]["confirmed"], true);
+
+    let kind = twin_kind(&door);
+    let html = page(&door, &[("group", &kind)], &reviewer());
+    for id in [f1, f2] {
+        assert!(
+            !member_input(&html, id).contains("checked"),
+            "an unconfirmed twin is no evidence: {id} starts unticked\n{html}"
+        );
+    }
+    assert!(
+        member_input(&html, f3).contains("checked"),
+        "a confirmed twin is evidence: {f3} starts ticked\n{html}"
+    );
+    assert!(
+        html.contains(
+            "Not pre-ticked: the decline it repeats is unconfirmed: no word, made in \
+                       batch an-old-batch"
+        ),
+        "the row says why, in words:\n{html}"
+    );
+    assert!(
+        html.contains("summary=unconfirmed"),
+        "and links the walk:\n{html}"
+    );
+    // Still tickable: the person may decide it after reading it.
+    assert!(!member_input(&html, f1).contains("disabled"), "{html}");
+
+    let rows = page(&door, &[], &reviewer());
+    assert!(
+        rows.contains("<span class='unconfirmed'>unconfirmed: no word, made in batch an-old-batch"),
+        "the recurrence mark says it in words:\n{rows}"
+    );
+    assert!(rows.contains(">revisit it</a>"), "{rows}");
+}
+
+/// ★★ **The walk** (ledger #653): the unconfirmed declines that still steer, oldest first, each
+/// with its revise forms; a revision posted from it is stamped `made=single`, keeps the old
+/// decision, and leaves the list; a withdrawal leaves the finding undecided and its repeat
+/// unmarked; a refused revision comes back with what was typed.
+#[test]
+fn the_walk_lists_unconfirmed_declines_and_each_revision_leaves_it() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let ([t1, t2], [f1, f2], _) = plant_unconfirmed(&door);
+    let (serious, _) = a_serious_and_an_other_word(&door);
+    let word = reason_words(&door)[0].clone();
+    let declared = decision_words(&door);
+
+    // The nav offers it on the ordinary page.
+    let rows = page(&door, &[], &reviewer());
+    assert!(rows.contains(">unconfirmed declines</a>"), "{rows}");
+
+    let walk = page(&door, &[("summary", "unconfirmed")], &reviewer());
+    assert!(
+        walk.contains("2 unconfirmed declines still steer 2 pending findings"),
+        "{walk}"
+    );
+    assert!(
+        walk.contains("batch an-old-batch"),
+        "the group, by its batch:\n{walk}"
+    );
+    for (twin, fresh) in [(t1, f1), (t2, f2)] {
+        assert!(walk.contains(&format!("id='decline-{twin}'")), "{walk}");
+        assert!(
+            walk.contains(&format!(
+                "name='revises' type='hidden' value='urn:iki:finding:{twin}:decision'"
+            )),
+            "each form names the decision it revises:\n{walk}"
+        );
+        assert!(walk.contains(fresh), "what it still marks:\n{walk}");
+    }
+    // Every contract word is offered somewhere on a decided finding — the revision-only ones
+    // too, in a form of their own with no rating.
+    let drawn = decision_buttons(&walk);
+    for word in &declared {
+        assert!(
+            drawn.contains(word),
+            "`{word}` is offered in the walk: {drawn:?}"
+        );
+    }
+    let withdraw = tag_with(&walk, "class='decide withdraw'");
+    assert!(!withdraw.is_empty());
+
+    // A refused revision (naming a decision that is not current) keeps what was typed.
+    let refused = decide_by_form(
+        &door,
+        &format!(
+            "_summary=unconfirmed&id={t1}&revises=urn:iki:finding:{t2}:decision\
+             &decision=decline&severity={serious}&reason={word}&content=kept+for+later"
+        ),
+    );
+    assert!(refused.contains("flash error"), "{refused}");
+    assert!(refused.contains(">kept for later</textarea>"), "{refused}");
+    assert!(tag_with(&refused, "class='decide revise'").contains("data-refused"));
+    assert_eq!(any_row(&door, t1)["decisions"].as_array().unwrap().len(), 1);
+
+    // Confirm t1 with a word: a NEW decision, made singly, revising the first — both kept.
+    let after = decide_by_form(
+        &door,
+        &format!(
+            "_summary=unconfirmed&id={t1}&revises=urn:iki:finding:{t1}:decision\
+             &decision=decline&severity={serious}&reason={word}"
+        ),
+    );
+    assert!(!after.contains("flash error"), "{after}");
+    let decided = any_row(&door, t1);
+    let chain = decided["decisions"].as_array().expect("decisions");
+    assert_eq!(chain.len(), 2, "both answers are kept: {decided}");
+    assert_eq!(
+        decided["decision"]["revises"],
+        format!("urn:iki:finding:{t1}:decision").as_str()
+    );
+    assert_eq!(decided["decision"]["made"], queue::MADE_SINGLE);
+    assert_eq!(decided["decision"]["confirmed"], true);
+    assert!(
+        after.contains("1 unconfirmed decline still steers 1 pending finding"),
+        "the confirmed one left the walk:\n{after}"
+    );
+    assert!(!after.contains(&format!("id='decline-{t1}'")), "{after}");
+
+    // Withdraw t2 with the contract's revision-only word, read off the walk's withdraw form.
+    let withdraw_word = declared
+        .iter()
+        .find(|w| !decision_buttons(&rows).contains(w))
+        .expect("a revision-only word")
+        .clone();
+    let after = decide_by_form(
+        &door,
+        &format!(
+            "_summary=unconfirmed&id={t2}&revises=urn:iki:finding:{t2}:decision\
+             &decision={withdraw_word}"
+        ),
+    );
+    assert!(!after.contains("flash error"), "{after}");
+    assert!(
+        after.contains("No unconfirmed decline steers a pending finding"),
+        "{after}"
+    );
+    assert_eq!(state_of(&door, t2), "pending", "undecided again");
+    assert!(
+        any_row(&door, f2)["prior_decision"].is_null(),
+        "a withdrawn decline marks nothing"
+    );
+}
+
+/// ★ **browse's own cards reach the finding Sink through `/k`, stamped at the door** — the
+/// revise form a declined card carries posts `/k/sink urn:iki:finding:{id}`, and the door
+/// stamps `made=single` on it, refusing a command that names the provenance. A decision node
+/// is not a Sink target.
+#[test]
+fn the_k_door_decides_one_finding_and_stamps_it_made_single() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    plant_pending_finding(&door, &reviewer());
+    let sink = |command: &str, body: &str| {
+        issue(
+            &door,
+            Verb::Sink,
+            ikigai_gonk::k::K_IRI,
+            &[
+                ("c", command),
+                ("content", body),
+                ("content-type", "application/x-www-form-urlencoded"),
+            ],
+            &reviewer(),
+        )
+    };
+    let finding = format!("urn:iki:finding:{FINDING}");
+    let forged = sink(
+        &format!("sink {finding}"),
+        &format!("decision=decline&severity={SEVERITY}&made=batch&batch=x"),
+    );
+    assert!(
+        matches!(forged, Err(ikigai_core::Error::InvalidArgument { .. })),
+        "{forged:?}"
+    );
+    let node = sink(&format!("sink {finding}:decision"), "decision=decline");
+    assert!(
+        matches!(node, Err(ikigai_core::Error::Denied(_))),
+        "{node:?}"
+    );
+    assert_eq!(state_of(&door, FINDING), "pending");
+
+    sink(
+        &format!("sink {finding}"),
+        &format!("decision=decline&severity={SEVERITY}"),
+    )
+    .expect("a reviewer declines through the door");
+    let decision = &row(&door, "declined", FINDING)["decision"];
+    assert_eq!(decision["made"], queue::MADE_SINGLE, "{decision}");
 }

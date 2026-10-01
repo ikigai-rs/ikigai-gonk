@@ -230,7 +230,17 @@ ikigai-ledger = "0.2.1"
 # READ a lensed pass's rows and tag when one exists, and so the manifold this host publishes
 # declares the argument. `^0.12.0` is `<0.13.0`. Minor: an additive optional input, a new tag
 # shape, a new json field.
-ikigai-browse = "0.13.0"
+# ★ 0.14.0 (ledger #653, browse PR #53) makes a decision REVISABLE and says whether a decline was
+# MEANT: the finding Sink takes `revises=<current decision IRI>` (both answers kept), its
+# `decision` one_of gains a withdrawal word that is refused on an undecided finding (so the
+# Queue's pending form must filter it — `crate::queue::first_decision_words`), and `made=single|
+# batch` + `batch=<group key>`, which this server's doors stamp and a form may not send. Every
+# decision and `prior_decision` carries a computed `confirmed`; the batch view pre-ticks only on
+# CONFIRMED evidence, and the Queue's `summary=unconfirmed` walk lists the declines to revisit.
+# On 0.13.x `made`/`revises` are undeclared and the adapters would refuse them, which is why this
+# is the floor. `^0.13.0` is `<0.14.0`. Minor: additive inputs, one added `one_of` word, additive
+# json fields and a new `summary` word.
+ikigai-browse = "0.14.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

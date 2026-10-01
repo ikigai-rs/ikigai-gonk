@@ -87,11 +87,18 @@
 //!
 //! # The asymmetry the page has to make legible
 //!
-//! A decision is **final**: an identical repeat is a no-op, and anything that would change
-//! the record is refused naming what is on file. There is **no Delete on a finding** —
-//! declining is how a human removes one, and the decline is the record. Undoing a
+//! A decision is **kept**: an identical repeat is a no-op, and anything that would change
+//! the record without naming it is refused naming what is on file. There is **no Delete on a
+//! finding** — declining is how a human removes one, and the decline is the record. Undoing a
 //! publication is `delete urn:iki:annotation:{id}`, a separate visible act under the same
 //! capability, reached through the annotation itself in the browse face. The cards say so.
+//!
+//! ★ **Since browse 0.14.0 a decision can be REVISED** (ledger
+//! [#653](http://localhost:1060/l/default/item/653)): a later decision names the current one
+//! with `revises=` and both are kept. The pending form draws only the words that can START an
+//! answer (`decision_words`); the walk ([`crate::walk`]) is where a decline nobody evidently
+//! meant is confirmed, withdrawn or reversed. Every decision this module forwards is stamped
+//! `made=single` at the door, and a form that names `made` or `batch` is refused.
 
 use std::sync::Arc;
 
@@ -178,6 +185,117 @@ pub(crate) const REASONED_DECISION: &str = "decline";
 
 /// The picker's empty first option: "no reason", which browse reads as omitted.
 const NO_REASON_LABEL: &str = "why? (optional)";
+
+/// The finding Sink's revision argument (browse 0.14.0, ledger
+/// [#653](http://localhost:1060/l/default/item/653)): the IRI of the CURRENT decision a new one
+/// revises. An argument NAME, like [`REASON_ARG`]; its value is always read off the row's own
+/// `decision.iri`, never built here.
+pub const REVISES_ARG: &str = "revises";
+
+/// The finding Sink's provenance argument: how a decision was made. ★ **A door stamps it and
+/// a form may not send it** — the rule that already governs the ledger's `author`: the single
+/// decide stamps [`MADE_SINGLE`], the batch fan-out [`MADE_BATCH`] with the group's key, and
+/// `crate::k`'s Sink stamps [`MADE_SINGLE`] on a revision posted from browse's own cards.
+pub const MADE_ARG: &str = "made";
+/// The batch's group key, beside `made=batch` — the other half of the stamp.
+pub const BATCH_ARG: &str = "batch";
+/// One finding, one decision. ⚠ Stamped only when the contract's own `made` set declares it
+/// (`made_word`): a browse that renamed the word gets NO stamp — a decision whose provenance
+/// is not recorded — rather than a word the Sink refuses.
+pub const MADE_SINGLE: &str = "single";
+/// One of many decided together, under the same rule as [`MADE_SINGLE`].
+pub const MADE_BATCH: &str = "batch";
+
+/// `word`, when the finding contract's `made` set declares it — the guard on every stamp.
+pub(crate) fn made_word(hub: &Kernel, word: &'static str) -> Option<&'static str> {
+    one_of(hub, &finding_iri(PROBE_ID), Verb::Sink, MADE_ARG)
+        .filter(|declared| declared.iter().any(|w| w == word))
+        .map(|_| word)
+}
+
+/// The refusal a form or command gets for naming the provenance itself.
+pub(crate) fn provenance_refused(name: &str) -> Error {
+    Error::InvalidArgument {
+        name: name.to_string(),
+        detail: "the door says how a decision was made; a form may not".to_string(),
+    }
+}
+
+/// ★ **The contract's decision words, split by whether they can START an answer.**
+///
+/// browse 0.14.0's `decision` set holds the answers a person gives an undecided finding and a
+/// word that only WITHDRAWS an answer already on record, refused on an undecided finding. A
+/// pending row's form draws one button per word, so offering the second there is offering a
+/// click the Sink will refuse. Which word is which is read from the contract — the input's
+/// summary defines every word as `word: meaning`, and a word whose meaning names the revision
+/// argument (`revises=`) is a revision-only word — never from a list here, so no decision word
+/// beyond the wording table's two is spelled in this crate.
+///
+/// ⚠ When the summary defines no word that way, every word is an answer: the pre-0.14 shape,
+/// where a wrong guess costs one refused click (rendered, with the form kept — ledger #657)
+/// while a word wrongly withheld would be an answer nobody could give from this page.
+pub(crate) struct DecisionWords {
+    /// The words a first decision may carry, in contract order.
+    pub(crate) answers: Vec<String>,
+    /// The words that only revise a decision on record, in contract order.
+    pub(crate) revision_only: Vec<String>,
+}
+
+/// [`DecisionWords`] for one finding's Sink — `None` exactly when the `decision` menu is.
+pub(crate) fn decision_words(hub: &Kernel, iri: &str) -> Option<DecisionWords> {
+    let spec = input_spec(hub, iri, Verb::Sink, "decision")?;
+    if spec.one_of.is_empty() {
+        return None;
+    }
+    Some(split_decision_words(&spec.summary, &spec.one_of))
+}
+
+/// The split itself, over a summary and its set — see [`DecisionWords`].
+fn split_decision_words(summary: &str, words: &[String]) -> DecisionWords {
+    let needs_revision = format!("{REVISES_ARG}=");
+    let mut split = DecisionWords {
+        answers: Vec::new(),
+        revision_only: Vec::new(),
+    };
+    for (word, meaning) in words.iter().zip(meanings_by_marker(summary, words)) {
+        match meaning {
+            Some(text) if text.contains(&needs_revision) => split.revision_only.push(word.clone()),
+            _ => split.answers.push(word.clone()),
+        }
+    }
+    split
+}
+
+/// What `summary` says each of `words` means, when it defines them as `word: meaning` — the
+/// meaning running to the next word's marker, so a summary written as sentences (`a: …. b: …`)
+/// reads as well as one separated by `; ` ([`meaning`]'s shape). ⚠ A marker must start a token
+/// (the summary's start, or after a space), as in [`meaning`].
+fn meanings_by_marker(summary: &str, words: &[String]) -> Vec<Option<String>> {
+    let at: Vec<Option<(usize, usize)>> = words
+        .iter()
+        .map(|word| {
+            let marker = format!("{word}: ");
+            summary
+                .match_indices(&marker)
+                .find(|(at, _)| *at == 0 || summary[..*at].ends_with(' '))
+                .map(|(at, _)| (at, at + marker.len()))
+        })
+        .collect();
+    at.iter()
+        .map(|found| {
+            let (_, body) = (*found)?;
+            let end = at
+                .iter()
+                .flatten()
+                .map(|(start, _)| *start)
+                .filter(|start| *start >= body)
+                .min()
+                .unwrap_or(summary.len());
+            let text = summary[body..end].trim();
+            (!text.is_empty()).then(|| text.to_string())
+        })
+        .collect()
+}
 
 /// The machine face this module asks every resource it reads for.
 pub(crate) const JSON: &str = "application/json";
@@ -432,12 +550,12 @@ pub(crate) enum Echo<'a> {
 
 /// What a refused single decision carried — the finding's form drawn back with it.
 pub(crate) struct Kept {
-    id: String,
-    severity: Option<String>,
-    reason: Option<String>,
-    note: Option<String>,
+    pub(crate) id: String,
+    pub(crate) severity: Option<String>,
+    pub(crate) reason: Option<String>,
+    pub(crate) note: Option<String>,
     /// The refusal, marked on the finding's own row as well as in the flash.
-    problem: String,
+    pub(crate) problem: String,
 }
 
 /// What narrows a rendering: the three values both entrances agree on.
@@ -454,6 +572,9 @@ pub(crate) struct Params {
     /// A group kind (ledger #506): the batch view instead of the rows — validated against
     /// the findings contract's own `group` set, never against a list here.
     pub(crate) group: Option<String>,
+    /// [`crate::walk::WALK`] (ledger #653): the walk over unconfirmed declines instead of the
+    /// rows — validated against the findings contract's own `summary` set.
+    pub(crate) summary: Option<String>,
 }
 
 impl Params {
@@ -466,6 +587,7 @@ impl Params {
             limit: arg("limit"),
             scope: arg(SCOPE_ARG),
             group: arg(crate::batch::GROUP_ARG),
+            summary: arg(crate::walk::SUMMARY_ARG),
         }
     }
 }
@@ -675,6 +797,32 @@ impl QueuePage {
                 crate::batch::GROUP_ARG,
             )
         });
+        // ★ The walk (ledger #653): the unconfirmed declines that still steer, oldest first —
+        // the same page again, in place of the rows. The word is checked against the findings
+        // contract's own `summary` set, like the kinds above.
+        let walk = roots
+            .first()
+            .is_some_and(|root| crate::walk::offered(&self.web.hub, &findings_iri(root)));
+        if crate::walk::wanted(params.summary.as_deref(), walk, params.group.as_deref())? {
+            return crate::walk::section(
+                self,
+                inv,
+                crate::walk::Frame {
+                    kinds: kinds.as_deref(),
+                    states: states.as_deref(),
+                    only: only.as_deref(),
+                    scope,
+                    chosen: &chosen,
+                    no_roots: roots.is_empty(),
+                    flash,
+                    kept: match echo {
+                        Echo::Decide(kept) => Some(kept),
+                        _ => None,
+                    },
+                },
+            )
+            .await;
+        }
         if let Some(kind) =
             crate::batch::kind_wanted(params.group.as_deref(), kinds.as_deref(), &state)?
         {
@@ -689,6 +837,7 @@ impl QueuePage {
                     scope,
                     chosen: &chosen,
                     no_roots: roots.is_empty(),
+                    walk,
                     flash,
                     submitted: match echo {
                         Echo::Batch(submitted) => Some(submitted),
@@ -803,6 +952,9 @@ impl QueuePage {
         }
         if let Some(kinds) = &kinds {
             children.push_str(&crate::batch::kind_nav(kinds, None, only.as_deref(), scope));
+        }
+        if walk {
+            children.push_str(&crate::walk::nav(only.as_deref(), false));
         }
         for (root, rows) in &read {
             if let Rows::Failed(why) = rows {
@@ -1177,9 +1329,12 @@ impl QueuePage {
         kept: Option<&Kept>,
     ) -> String {
         let iri = finding_iri(id);
+        // ★ Only the words that can START an answer (ledger #653): this row is undecided, and
+        // a revision-only word is refused on it — so it is not drawn, rather than drawn and
+        // refused at the click. Which words those are is the contract's ([`decision_words`]).
         let (Some(severities), Some(decisions)) = (
             one_of(&self.web.hub, &iri, Verb::Sink, "severity"),
-            one_of(&self.web.hub, &iri, Verb::Sink, "decision"),
+            decision_words(&self.web.hub, &iri).map(|words| words.answers),
         ) else {
             return element(
                 "no-form",
@@ -1310,6 +1465,13 @@ pub(crate) fn prior_element(prior: &Value) -> String {
     if !reason.is_empty() {
         attributes.push((REASON_ARG, reason.to_string()));
     }
+    // ★ An UNCONFIRMED decline (browse 0.14.0, ledger #653) is SAID, in words — never by a
+    // color alone — with the way to the walk where it can be confirmed, retracted or reversed.
+    if let Some(why) = unconfirmed_sentence(prior) {
+        attributes.push(("unconfirmed", why));
+        attributes.push(("walk-href", crate::walk::href(None)));
+        attributes.push(("walk-label", crate::walk::REVISIT_LABEL.to_string()));
+    }
     let note = text("note");
     let children = if note.is_empty() {
         String::new()
@@ -1320,7 +1482,41 @@ pub(crate) fn prior_element(prior: &Value) -> String {
     wrap("prior", &attributes, &children)
 }
 
-fn decision_element(decision: &Value) -> String {
+/// ★ **Whether a decision counts as EVIDENCE** (Brian, 2026-10-01, amending the 2026-09-25
+/// rule): browse 0.14.0's computed `confirmed`, read strictly — only an explicit `true`. A
+/// wordless decline made in a batch or a burst reads `false`, and is information to show,
+/// never a reason to pre-tick anything.
+pub(crate) fn confirmed(decision: &Value) -> bool {
+    decision.get("confirmed").and_then(Value::as_bool) == Some(true)
+}
+
+/// The words for an UNCONFIRMED decision — `None` for any other. How it was made, when the
+/// record says (a batch, by its key), else the burst it fell in, by its first instant.
+pub(crate) fn unconfirmed_sentence(decision: &Value) -> Option<String> {
+    if decision.get("confirmed").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let text = |key: &str| decision.get(key).and_then(Value::as_str).unwrap_or("");
+    let made = match (text(BATCH_ARG), text("burst")) {
+        (key, _) if !key.is_empty() => format!("made in batch {key}"),
+        (_, burst) if !burst.is_empty() => format!(
+            "made in a burst of declines at {} (several inside one second)",
+            web::when(burst)
+        ),
+        _ => "made in a batch or a burst".to_string(),
+    };
+    Some(format!(
+        "unconfirmed: no word, {made}, so it counts as no evidence"
+    ))
+}
+
+pub(crate) fn decision_element(decision: &Value) -> String {
+    decision_element_linking(decision, true)
+}
+
+/// [`decision_element`], with the walk link only when `walk_link` — the walk itself draws its
+/// declines without a link back to the page they are already on.
+pub(crate) fn decision_element_linking(decision: &Value, walk_link: bool) -> String {
     let text = |key: &str| decision.get(key).and_then(Value::as_str).unwrap_or("");
     let outcome = text("outcome");
     let minted = text("minted");
@@ -1332,14 +1528,17 @@ fn decision_element(decision: &Value) -> String {
             "undo",
             // ★ The asymmetry, said rather than hidden: a publication is undone by deleting
             // the annotation it minted (a separate, visible act under the same capability);
-            // a decline is not undone at all, because the decline IS the record.
+            // a decline is REVISED (browse 0.14.0, ledger #653) — a later decision that names
+            // it, with both kept, because the decline is the record.
             match outcome {
                 "published" => format!(
                     "Published. Undoing this is a separate act: `delete {minted}` — the \
                      annotation, not the finding."
                 ),
                 _ => "Declined. The decline is the record: a finding is never deleted, and a \
-                      re-run knows a person looked and said no."
+                      re-run knows a person looked and said no. It can be revised — \
+                      confirmed with a word, withdrawn, or reversed — by a later decision \
+                      that names it, and both are kept."
                     .to_string(),
             },
         ),
@@ -1347,6 +1546,13 @@ fn decision_element(decision: &Value) -> String {
     let reason = text(REASON_ARG);
     if !reason.is_empty() {
         attributes.push((REASON_ARG, reason.to_string()));
+    }
+    if let Some(why) = unconfirmed_sentence(decision) {
+        attributes.push(("unconfirmed", why));
+        if walk_link {
+            attributes.push(("walk-href", crate::walk::href(None)));
+            attributes.push(("walk-label", crate::walk::REVISIT_LABEL.to_string()));
+        }
     }
     if !minted.is_empty() {
         attributes.push(("minted", minted.to_string()));
@@ -1359,7 +1565,7 @@ fn decision_element(decision: &Value) -> String {
 
 /// The wording for one decision value. ⚠ The SET is the contract's; only these words are
 /// ours, and a value this table does not know keeps its own word rather than disappearing.
-fn decision_label(value: &str) -> &str {
+pub(crate) fn decision_label(value: &str) -> &str {
     match value {
         "publish" => "Publish to Gonk",
         REASONED_DECISION => "Decline",
@@ -1810,6 +2016,19 @@ impl Endpoint for QueuePage {
                          queued.",
                     ),
             )
+            .input(
+                ArgSpec::new(crate::walk::SUMMARY_ARG)
+                    .optional()
+                    .class(XSD_STRING)
+                    .one_of([crate::walk::WALK])
+                    .summary(
+                        "`unconfirmed`: the WALK instead of the rows (ledger #653) — every \
+                         unconfirmed decline that still steers a pending finding, grouped by \
+                         the burst or batch it was made in, oldest first, each with the forms \
+                         that confirm it with a word, withdraw it, or reverse it. Offered when \
+                         `urn:repo:{repo}:findings` declares the same `summary` word.",
+                    ),
+            )
             .input(web::as_html_arg())
             .output("text/html")
     }
@@ -1846,6 +2065,15 @@ impl Endpoint for Decide {
         let state = take("_state").unwrap_or_else(|| "pending".to_string());
         let repo = take("_repo");
         let scope = take("_severity");
+        // The walk a revision was posted from (ledger #653), so the re-render stays on it.
+        let summary = take("_summary");
+        // ★ The door says how a decision was made (ledger #653), as it names the author: a
+        // form that tries to say it is refused, not quietly overruled.
+        for name in [MADE_ARG, BATCH_ARG] {
+            if fields.contains_key(name) {
+                return Err(provenance_refused(name));
+            }
+        }
         // What the person chose, kept aside in case the decision is refused (ledger #657).
         let chose = |name: &str| fields.get(name).filter(|v| !v.trim().is_empty()).cloned();
         let (severity, reason, note) = (chose("severity"), chose(REASON_ARG), chose("content"));
@@ -1903,6 +2131,16 @@ impl Endpoint for Decide {
                 ArgRef::Inline(value.replace("\r\n", "\n").into_bytes()),
             );
         }
+        // ★ Stamped at the door: this adapter decides ONE finding per post, so every decision
+        // it forwards was made singly — a first answer and a revision from the walk alike.
+        // Only when the contract declares the input and the word (see [`made_word`]).
+        let declares_made = spec
+            .inputs
+            .iter()
+            .any(|input| input.name == MADE_ARG && input.source != InputSource::Binding);
+        if let (true, Some(word)) = (declares_made, made_word(&self.web.hub, MADE_SINGLE)) {
+            request = request.with_arg(MADE_ARG, ArgRef::Inline(word.as_bytes().to_vec()));
+        }
 
         // ⚠ A refusal is RENDERED, not returned as a status. The two refusals this resource
         // makes are the interesting ones — "a decision is not overwritten, here is what is on
@@ -1943,6 +2181,7 @@ impl Endpoint for Decide {
             limit: None,
             scope,
             group: None,
+            summary,
         };
         let echo = match &kept {
             Some(kept) => Echo::Decide(kept),
@@ -1962,10 +2201,13 @@ impl Endpoint for Decide {
             .summary(
                 "The Queue page's form adapter: an urlencoded body naming `id`, `decision` \
                  and optionally `severity`, `reason` (one word from the finding's own \
-                 `one_of`, forwarded ONLY with decision=decline and dropped from any other) and \
+                 `one_of`, forwarded ONLY with decision=decline and dropped from any other), \
+                 `revises` (the current decision's IRI, from the walk's revise forms) and \
                  `content` (the human's free-text note), forwarded to \
                  `urn:iki:finding:{id}`'s Sink under the caller's own capability and answered \
-                 with the queue section re-rendered. ⚠ A refusal — a capability denial, or a \
+                 with the queue section re-rendered. The door stamps `made=single` on every \
+                 decision it forwards (ledger #653); a form naming `made` or `batch` is \
+                 refused. ⚠ A refusal — a capability denial, or a \
                  second decision that would CHANGE a recorded one — is rendered into that \
                  section rather than returned as a status, because the refusal is the most \
                  informative answer here and a page that drops it teaches people to ignore \
@@ -1978,7 +2220,8 @@ impl Endpoint for Decide {
                     .requires(ikigai_browse::CAP_ANNOTATE)
                     .input(ArgSpec::new("content").class(XSD_STRING).summary(
                         "the form: `id`, `decision`, optional `severity`, `reason` (decline \
-                                 only) and `content`, plus `_state` and `_repo` for the re-render",
+                                 only), `revises` and `content`, plus `_state`, `_repo`, \
+                                 `_severity` and `_summary` for the re-render",
                     ))
                     .output("text/html"),
             )
@@ -1988,7 +2231,37 @@ impl Endpoint for Decide {
 
 #[cfg(test)]
 mod tests {
-    use super::meaning;
+    use super::{meaning, split_decision_words};
+
+    /// ★ The decision split, over the summary SHAPE browse 0.14.0 writes — sentences, each
+    /// `word: meaning.`, the revision-only one naming `revises=` inside its own meaning. Made-up
+    /// words: the real ones are the contract's.
+    #[test]
+    fn a_word_whose_meaning_needs_revises_is_revision_only() {
+        let words: Vec<String> = ["ayes", "nays", "unsay"].map(String::from).to_vec();
+        let summary = "ayes: mint it (urn:cap:x). nays: record a no — kept, so a re-run \
+                       knows. unsay: withdraw the current answer (with revises=, or a repeat) — \
+                       undecided again.";
+        let split = split_decision_words(summary, &words);
+        assert_eq!(split.answers, ["ayes", "nays"]);
+        assert_eq!(split.revision_only, ["unsay"]);
+
+        // ⚠ A word that merely ENDS another (`say` in `unsay`) is not a marker, and a meaning
+        // stops at the next word's marker, so `revises=` in a LATER meaning is not this one's.
+        let words: Vec<String> = ["say", "unsay"].map(String::from).to_vec();
+        let split = split_decision_words("say: answer. unsay: needs revises=.", &words);
+        assert_eq!(split.answers, ["say"]);
+        assert_eq!(split.revision_only, ["unsay"]);
+    }
+
+    /// A summary that defines no word reads as the pre-0.14 contract: every word an answer.
+    #[test]
+    fn a_summary_that_defines_no_word_makes_every_word_an_answer() {
+        let words: Vec<String> = ["ayes", "nays"].map(String::from).to_vec();
+        let split = split_decision_words("the human's answer; revises= exists", &words);
+        assert_eq!(split.answers, ["ayes", "nays"]);
+        assert!(split.revision_only.is_empty());
+    }
 
     /// The summary shape `ikigai-browse` builds: prose, then `word: meaning; …` to the end.
     /// ⚠ Made-up words: the real ones are never spelled in this file.

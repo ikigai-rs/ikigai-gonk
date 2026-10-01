@@ -29,6 +29,19 @@
 //!   whole-file decline. ⚠ The rule is over the data (`twin`, `kept`), never a kind's name,
 //!   which is why it needs no field from browse and holds for any kind that carries no
 //!   evidence per member.
+//! - ★★ **And evidence must be CONFIRMED** (Brian, 2026-10-01, amending the rule above —
+//!   ledger [#653](http://localhost:1060/l/default/item/653)). browse 0.14.0 computes
+//!   `confirmed` on every decision: a decline with no word made in a batch or inside a burst of
+//!   declines reads `false`. A twin whose current decision is unconfirmed, or a member whose own
+//!   `prior_decision` is, is NOT evidence: the member starts unticked, and its row says why in
+//!   words and links the walk ([`crate::walk`]) where that decline can be revisited. Measured
+//!   the day the rule changed: 39 of the 43 declines recurrences pointed at were burst-made and
+//!   wordless, and each was pre-ticking its repeats.
+//! - ★ **The door stamps how each decline was made** (ledger #653): `made=batch` and
+//!   `batch=<the group key it was proposed in>`, per member — the twin-carrying form holds many
+//!   groups, so each member's box carries its own key (`key:<id>`). A form naming `made` or
+//!   `batch` itself is refused: the browser never chooses its own provenance, the rule that
+//!   already governs the ledger's `author`.
 //! - **A batch DECLINE requires a reason word** — the finding Sink's own `reason` `one_of`.
 //!   Where the group carries evidence its suggested word is PRE-SELECTED in the picker,
 //!   never applied without the press. A batch with no word is refused whole, before any
@@ -115,6 +128,10 @@ pub const BATCH_PATH: &str = "/queue/batch";
 const MEMBER_FIELD: &str = "member";
 /// A member's OWN reason word, in the twin-carrying view: `reason:<id>=<word>`.
 const MEMBER_REASON_PREFIX: &str = "reason:";
+/// The group a member was proposed in: `key:<id>=<group key>` — what its decline's `batch=` is
+/// stamped with (ledger #653). The twin-carrying form holds many groups, so the form's own
+/// `_key` cannot say it; a group form's `_key` IS the group's, and is the fallback.
+const MEMBER_KEY_PREFIX: &str = "key:";
 /// GONK's own field on a group, set while gating: how many members the serious scope left
 /// out of it. Browse's JSON never carries it.
 const LEFT_OUT: &str = "gonk_left_out";
@@ -223,6 +240,9 @@ pub(crate) struct Frame<'a> {
     pub(crate) scope: &'static str,
     pub(crate) chosen: &'a [String],
     pub(crate) no_roots: bool,
+    /// Whether the findings contract offers the walk over unconfirmed declines
+    /// ([`crate::walk`]), so the nav carries its link.
+    pub(crate) walk: bool,
     pub(crate) flash: Option<(&'a str, &'a str)>,
     /// What a REFUSED batch form carried (ledger #657): rendered back into that form, every
     /// tick and word as sent and every offending row marked, so a refusal loses nothing.
@@ -397,6 +417,7 @@ pub(crate) async fn section(
         scope,
         chosen,
         no_roots,
+        walk,
         flash,
         submitted,
     } = frame;
@@ -507,6 +528,9 @@ pub(crate) async fn section(
         ));
     }
     children.push_str(&kind_nav(kinds, Some(kind), only, scope));
+    if walk {
+        children.push_str(&crate::walk::nav(only, false));
+    }
     for (root, answer) in &read {
         if let Err(why) = answer {
             children.push_str(&element("denied", &[("repo", root)], why));
@@ -597,6 +621,9 @@ pub(crate) async fn section(
         let mut inner = String::new();
         let mut ticked = 0usize;
         let mut wordless = 0usize;
+        // Wordless members the person could still tick — an unconfirmed twin's repeats start
+        // unticked (ledger #653), and ticking one must still find a batch word to fall back on.
+        let mut wordless_tickable = 0usize;
         for group in &groups {
             chunks.push(render::chunk(&group_element(
                 group,
@@ -613,11 +640,14 @@ pub(crate) async fn section(
                 }
                 let id = member.get("id").and_then(Value::as_str).unwrap_or("");
                 // As drawn: ticked and worded as SENT when this form was refused, else
-                // ticked (a twin is evidence) with its twin's word.
+                // ticked where the twin is CONFIRMED evidence, with its twin's word.
                 let (is_ticked, own) = match echo {
                     Some(e) => (e.members.contains(id), e.words.get(id).map(String::as_str)),
-                    None => (true, word),
+                    None => (unconfirmed_evidence(group, member).is_none(), word),
                 };
+                if own.is_none() {
+                    wordless_tickable += 1;
+                }
                 if is_ticked {
                     ticked += 1;
                     if own.is_none() {
@@ -638,7 +668,7 @@ pub(crate) async fn section(
         // has no word of its own — or when the refused form carried one — optional, and
         // overridden by a member's own picker.
         let batch_word = echo.and_then(|e| e.word.as_deref());
-        if let (Some(reasons), true) = (&reasons, wordless > 0 || batch_word.is_some()) {
+        if let (Some(reasons), true) = (&reasons, wordless_tickable > 0 || batch_word.is_some()) {
             attributes.push(("word-required", "false".to_string()));
             attributes.push((
                 "word-label",
@@ -896,6 +926,32 @@ fn twin_word(group: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+/// ★ **Why a member's evidence does not count, when it does not** (Brian, 2026-10-01, amending
+/// the 2026-09-25 rule — ledger #653): a group's `twin` is evidence only when the twin's
+/// CURRENT decision is `confirmed` (browse 0.14.0), and so is a member's own `prior_decision`
+/// when it carries one. A wordless decline made in a batch or a burst says nothing a person
+/// evidently meant, and pre-ticking its repeats is how one mis-click propagated. The member is
+/// still shown and still tickable; it only starts unticked, and the row says why, in words.
+///
+/// `None` = the evidence stands; `Some(sentence)` = the unconfirmed decision's description.
+fn unconfirmed_evidence(group: &Value, member: &Value) -> Option<String> {
+    let twin = group
+        .get("twin")
+        .filter(|t| !t.is_null())
+        .and_then(|t| t.get("decision"))
+        .filter(|d| !d.is_null());
+    let prior = member.get("prior_decision").filter(|p| !p.is_null());
+    for decision in [twin, prior].into_iter().flatten() {
+        if !queue::confirmed(decision) {
+            return Some(
+                queue::unconfirmed_sentence(decision)
+                    .unwrap_or_else(|| "not marked confirmed".to_string()),
+            );
+        }
+    }
+    None
+}
+
 /// One proposed group: its label, the declined twin or the kept row, and its members.
 ///
 /// ★ A member starts TICKED only where the group carries evidence about it — a `twin` or a
@@ -934,15 +990,39 @@ fn group_element(
         // single decision can carry the rating.
         let rated = rated(member);
         let tickable = decide && rated;
+        // ★ Evidence must be CONFIRMED to pre-tick (ledger #653): see [`unconfirmed_evidence`].
+        let unconfirmed = evidence
+            .then(|| unconfirmed_evidence(group, member))
+            .flatten();
         let ticked = match echo {
             Some(echo) => tickable && echo.members.contains(id),
-            None => tickable && evidence,
+            None => tickable && evidence && unconfirmed.is_none(),
         };
         let mut extra: Vec<(&str, String)> = vec![
             ("tickable", flag(tickable).to_string()),
             ("ticked", flag(ticked).to_string()),
             ("finding-href", browse_url(&finding_iri(id))),
+            // The group this member was proposed in — the `batch=` its decline is stamped
+            // with when this form fans out (ledger #653).
+            (
+                "group-key",
+                group
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            ),
         ];
+        if let (true, Some(why)) = (tickable && echo.is_none(), &unconfirmed) {
+            extra.push((
+                "unticked-why",
+                format!(
+                    "Not pre-ticked: the decline it repeats is {why}. Read it, then tick it —                      or revisit that decline first."
+                ),
+            ));
+            extra.push(("walk-href", crate::walk::href(None)));
+            extra.push(("walk-label", crate::walk::REVISIT_LABEL.to_string()));
+        }
         if decide && !rated {
             extra.push((
                 "untickable",
@@ -1033,6 +1113,12 @@ fn twin_element(twin: &Value) -> String {
     if !text(REASON_ARG).is_empty() {
         attributes.push((REASON_ARG, text(REASON_ARG).to_string()));
     }
+    // ★ An unconfirmed twin is SAID, in words (ledger #653), with the way to the walk.
+    if let Some(why) = decision.and_then(queue::unconfirmed_sentence) {
+        attributes.push(("unconfirmed", why));
+        attributes.push(("walk-href", crate::walk::href(None)));
+        attributes.push(("walk-label", crate::walk::REVISIT_LABEL.to_string()));
+    }
     let children = match text("note") {
         "" => String::new(),
         note => element("note", &[], note),
@@ -1114,6 +1200,8 @@ struct Form {
     members: Vec<String>,
     word: Option<String>,
     words: BTreeMap<String, String>,
+    /// `key:<id>` — each member's group key, for the provenance stamp.
+    keys: BTreeMap<String, String>,
     kind: Option<String>,
     repo: Option<String>,
     scope: Option<String>,
@@ -1126,6 +1214,7 @@ fn read_form(body: &str) -> Result<Form> {
         members: Vec::new(),
         word: None,
         words: BTreeMap::new(),
+        keys: BTreeMap::new(),
         kind: None,
         repo: None,
         scope: None,
@@ -1147,10 +1236,19 @@ fn read_form(body: &str) -> Result<Form> {
             "_key" => form.key = kept(value),
             "_repo" => form.repo = kept(value),
             "_severity" => form.scope = kept(value),
+            // ★ The door says how a decision was made (ledger #653): a form naming the
+            // provenance itself is refused by name, as the single decide refuses it.
+            queue::MADE_ARG | queue::BATCH_ARG => return Err(queue::provenance_refused(&name)),
             other => match other.strip_prefix(MEMBER_REASON_PREFIX) {
                 Some(id) => {
                     if let Some(word) = kept(value) {
                         form.words.insert(id.to_string(), word);
+                    }
+                }
+                None if other.starts_with(MEMBER_KEY_PREFIX) => {
+                    if let Some(key) = kept(value) {
+                        form.keys
+                            .insert(other[MEMBER_KEY_PREFIX.len()..].to_string(), key);
                     }
                 }
                 None if other.starts_with('_') => {}
@@ -1368,17 +1466,37 @@ impl Endpoint for Batch {
             Ok(plan) => {
                 let total = plan.len();
                 let mut failed: Vec<String> = Vec::new();
+                // ★ Stamped at the door (ledger #653): every decline this adapter forwards was
+                // made in a batch, under the group it was proposed in — when the contract
+                // declares the word ([`queue::made_word`]) and the form says which group.
+                let made = queue::made_word(&self.web.hub, queue::MADE_BATCH);
                 for (id, word) in &plan {
                     let target = finding_iri(id);
+                    let key = form
+                        .keys
+                        .get(id)
+                        .or(form.key.as_ref())
+                        .or(form.kind.as_ref());
                     let outcome = match Iri::parse(&target) {
                         Err(e) => Err(format!("`{target}`: {e}")),
                         Ok(target) => {
-                            let request = Request::new(Verb::Sink, target)
+                            let mut request = Request::new(Verb::Sink, target)
                                 .with_arg(
                                     "decision",
                                     ArgRef::Inline(REASONED_DECISION.as_bytes().to_vec()),
                                 )
                                 .with_arg(REASON_ARG, ArgRef::Inline(word.as_bytes().to_vec()));
+                            if let (Some(made), Some(key)) = (made, key) {
+                                request = request
+                                    .with_arg(
+                                        queue::MADE_ARG,
+                                        ArgRef::Inline(made.as_bytes().to_vec()),
+                                    )
+                                    .with_arg(
+                                        queue::BATCH_ARG,
+                                        ArgRef::Inline(key.as_bytes().to_vec()),
+                                    );
+                            }
                             inv.issue(request)
                                 .await
                                 .map(|_| ())
@@ -1407,6 +1525,7 @@ impl Endpoint for Batch {
             limit: None,
             scope: form.scope,
             group: form.kind,
+            summary: None,
         };
         let echo = match &submitted {
             Some(submitted) => queue::Echo::Batch(submitted),
@@ -1432,7 +1551,9 @@ impl Endpoint for Batch {
                  batch is checked first — nothing ticked, a member with no word, or a word the \
                  finding contract does not declare refuses it before anything is written. Then \
                  ONE `Sink urn:iki:finding:{id} decision=decline reason=<word>` per member, \
-                 under the caller's own capability, so each gets an ordinary decision node; a \
+                 under the caller's own capability, so each gets an ordinary decision node, \
+                 stamped by the door `made=batch batch=<the member's group key>` (ledger #653; \
+                 a form naming `made` or `batch` is refused); a \
                  member that fails is named with its error and does not stop the others. \
                  Answered with the queue section re-rendered from the source — or, when the \
                  checks refused the batch, with the submitted form drawn back as it was sent \
@@ -1447,7 +1568,8 @@ impl Endpoint for Batch {
                     .requires(ikigai_browse::CAP_WILDCARD)
                     .input(ArgSpec::new("content").class(XSD_STRING).summary(
                         "the form: `member` (repeated), `reason:<id>` per member and/or \
-                         `reason` as the fallback for members without one, plus `_group`, \
+                         `reason` as the fallback for members without one, `key:<id>` per \
+                         member (its group key, for the provenance stamp), plus `_group`, \
                          `_key`, `_repo` and `_severity` for the re-render",
                     ))
                     .output("text/html"),
