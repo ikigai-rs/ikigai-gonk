@@ -108,7 +108,7 @@ fn door(root: &str, path: &Path) -> Kernel {
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let (watch, _refused) = watch::RootWatch::start(&roots);
-    let wired = browse::wire(roots.clone(), handle, watch.watched(), None, &graph);
+    let wired = browse::wire(roots.clone(), handle, Some(&watch), None, &graph);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
@@ -124,6 +124,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         passkeys: Arc::new(Passkeys::new(quic::Layout::in_config_home(&config), 1060)),
         rules: rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
+        epochs: None,
     });
     // ⚠ The watcher is dropped with this function, so the previewed pages are a SNAPSHOT.
     // That is what a file on disk is anyway.

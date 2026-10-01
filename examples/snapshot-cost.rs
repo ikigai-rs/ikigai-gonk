@@ -79,7 +79,7 @@ fn main() {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
-    let wired = browse::wire(roots.clone(), handle, &[], None, &graph);
+    let wired = browse::wire(roots.clone(), handle, None, None, &graph);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
@@ -111,6 +111,7 @@ fn main() {
         )),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
+        epochs: None,
     });
     let door = doors::http_kernel(Arc::clone(&hub), web::space(face));
 

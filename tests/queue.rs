@@ -106,7 +106,7 @@ fn door_and_hub(
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store that declares where its sharer writes");
-    let wired = browse::wire(roots(dir), handle, &[], None, &graph);
+    let wired = browse::wire(roots(dir), handle, None, None, &graph);
     let trigger_spaces = match &review {
         Some(t) => ikigai_gonk::trigger::space(t, activity, armed, QueuePolicy::default()),
         None => Vec::new(),
@@ -131,6 +131,7 @@ fn door_and_hub(
         // ★ The DEFAULT policy, as `main` runs it with no `gonk.queue.serious` line — so the
         // gate every test here sees is the one the shipped binary applies.
         queue: QueuePolicy::default(),
+        epochs: None,
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),
@@ -2013,6 +2014,179 @@ fn the_badge_carries_the_serious_count_and_the_other_count() {
         rev(&after),
         "a finding minted by anyone is news the list should refresh on"
     );
+}
+
+/// The composition `main` builds when the roots are WATCHED: the browse overlay over the
+/// watch's roots, the store observed for writes, and the badge holding the watch's epochs —
+/// plus a second kernel over the SAME dataset that is none of this server's doors, for a
+/// write nothing here sees (the shape of `ikigai-browse` writing through its own handle).
+struct Counting {
+    door: Kernel,
+    elsewhere: Kernel,
+    watch: ikigai_gonk::watch::RootWatch,
+    hub: Arc<Kernel>,
+    _config: TempDir,
+}
+
+fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
+    let graph = browse::Graph::chosen();
+    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+        .expect("a shared in-memory store that declares where its sharer writes");
+    let elsewhere = Kernel::new(Arc::new(ikigai_store::space(store.clone())));
+    let (watch, refused) = ikigai_gonk::watch::RootWatch::start(&roots(dir));
+    assert!(refused.is_empty(), "{refused:?}");
+    let wired = browse::wire(roots(dir), handle, Some(&watch), None, &graph);
+    let hub = Arc::new(compose_with(
+        store,
+        Some(Arc::new(wired.space)),
+        Vec::new(),
+        ikigai_gonk::trigger::space(
+            &review,
+            Arc::new(ikigai_gonk::trigger::Activity::default()),
+            false,
+            QueuePolicy::default(),
+        ),
+        None,
+    ));
+    let config = tempfile::tempdir().expect("a config home");
+    let face = Arc::new(web::Web {
+        hub: Arc::clone(&hub),
+        ledgers: vec!["default".to_string()],
+        browse_roots: vec![ROOT.to_string()],
+        passkeys: Arc::new(Passkeys::new(
+            quic::Layout::in_config_home(config.path()),
+            1060,
+        )),
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        queue: QueuePolicy::default(),
+        epochs: Some(watch.epochs()),
+    });
+    Counting {
+        door: doors::http_kernel(Arc::clone(&hub), web::space(face)),
+        elsewhere,
+        watch,
+        hub,
+        _config: config,
+    }
+}
+
+/// The badge's serious count, as drawn.
+fn serious_count(markup: &str) -> usize {
+    let at = markup.find("class='serious'>").expect("the serious count") + 16;
+    markup[at..]
+        .split('<')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("a number: {markup}"))
+}
+
+/// ★★ **A poll after no change reads no findings; a change re-reads the root it touched**
+/// (ledger [#667](http://localhost:1060/l/default/item/667)).
+///
+/// With 47 roots one findings read per root per poll cost ~1.9 s a poll, so the badge keeps
+/// a count per root and re-reads a root only when its epoch moved. Proving the HIT needs a
+/// write the epochs cannot see — the second kernel over the same dataset — so the stale
+/// answer IS the evidence that nothing was read. Then each signal that must move the count,
+/// one at a time: a decision through gonk's own form, a write through the store's door, and
+/// a file change the watch reports.
+#[test]
+fn the_badge_rereads_a_root_only_when_something_says_it_moved() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    let counting = door_counting(&dir, trigger);
+    let (door, reviewer) = (&counting.door, reviewer());
+    let (serious, _) = a_serious_and_an_other_word(door);
+    let id = |n: u32| format!("aaaabbbbccccddddeeee{n:04}");
+
+    // Through the store's door, which is observed: counted.
+    plant_finding(door, &reviewer, &id(1), Some(&serious), "One.");
+    assert_eq!(serious_count(&badge(door)), 1);
+
+    // Behind every door: the epochs do not move, and the poll is answered from the memo.
+    plant_finding(
+        &counting.elsewhere,
+        &reviewer,
+        &id(2),
+        Some(&serious),
+        "Two.",
+    );
+    plant_finding(
+        &counting.elsewhere,
+        &reviewer,
+        &id(3),
+        Some(&serious),
+        "Three.",
+    );
+    assert_eq!(
+        serious_count(&badge(door)),
+        1,
+        "nothing said the root moved, so the poll read nothing — the stale count is the proof"
+    );
+
+    // A decision through gonk's own form names finding 1, whose root the badge learned.
+    decide_by_form(door, &format!("id={}&decision=decline", id(1)));
+    assert_eq!(
+        serious_count(&badge(door)),
+        2,
+        "the decision touched the root: two pending, the decided one gone"
+    );
+
+    // The store's own door, again: observed.
+    plant_finding(
+        &counting.elsewhere,
+        &reviewer,
+        &id(4),
+        Some(&serious),
+        "Four.",
+    );
+    assert_eq!(serious_count(&badge(door)), 2, "unseen, still");
+    plant_finding(door, &reviewer, &id(5), Some(&serious), "Five.");
+    assert_eq!(
+        serious_count(&badge(door)),
+        4,
+        "a store-door write touches every root: four and five are both counted"
+    );
+
+    // A file change the watch reports re-reads the root too.
+    plant_finding(
+        &counting.elsewhere,
+        &reviewer,
+        &id(6),
+        Some(&serious),
+        "Six.",
+    );
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "the first version\nand more\n",
+    )
+    .expect("the edit");
+    let thread = ikigai_gonk::watch::root_thread(ROOT);
+    let mut cut = false;
+    for _ in 0..64 {
+        match counting
+            .watch
+            .apply_next(&counting.hub, std::time::Duration::from_secs(10))
+        {
+            Some(threads) if threads.contains(&thread) => {
+                cut = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(
+        cut,
+        "the watcher never reported {thread} within its deadline"
+    );
+    assert_eq!(serious_count(&badge(door)), 5, "the cut re-read the root");
 }
 
 /// ★ **A serious word the contract does not declare stops the server at start, naming both
