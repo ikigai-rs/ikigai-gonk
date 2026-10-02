@@ -366,6 +366,7 @@
       </xsl:if>
       <xsl:apply-templates select="view:denied"/>
       <xsl:apply-templates select="view:hidden"/>
+      <xsl:apply-templates select="view:order"/>
       <xsl:apply-templates select="view:folded"/>
       <xsl:if test="@empty = 'true'">
         <p class="empty"><xsl:value-of select="@empty-text"/></p>
@@ -762,7 +763,25 @@
     </li>
   </xsl:template>
 
+  <!-- A member's card — folded, like a row, when the judge refuted it (ledger #696). The tick
+       and the member's own picker sit OUTSIDE the fold, so a folded member is decided with the
+       rest of the batch exactly as an open one is. -->
   <xsl:template name="member-card">
+    <xsl:choose>
+      <xsl:when test="@fold = 'true'">
+        <details class="verdict-fold">
+          <summary>
+            <xsl:value-of select="@verdict-label"/><xsl:text> — </xsl:text><xsl:value-of select="@where"/>
+            <xsl:text> (folded; open it to read what the judge answered)</xsl:text>
+          </summary>
+          <xsl:call-template name="member-card-body"/>
+        </details>
+      </xsl:when>
+      <xsl:otherwise><xsl:call-template name="member-card-body"/></xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template name="member-card-body">
     <div class="finding-head">
       <span>
         <xsl:attribute name="class">badge sev <xsl:value-of select="@severity"/></xsl:attribute>
@@ -784,6 +803,7 @@
       <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
     </xsl:if>
     <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
+    <xsl:call-template name="verdict-line"/>
     <xsl:apply-templates select="view:prior"/>
   </xsl:template>
 
@@ -841,9 +861,31 @@
     </p>
   </xsl:template>
 
+  <!-- ★ One row, and the judge's standing on it (ledger #696): said in WORDS with the judge's
+       tag on every row (`@verdict-label`), never by position or color alone. A refuted row
+       still waiting for a decision is FOLDED (`@fold`): a closed <details> whose summary says
+       what it is and where, with the whole card — the judge's answers and the decision form
+       included — one click inside. Ordered last, never hidden. -->
   <xsl:template match="view:finding">
     <li>
-      <xsl:attribute name="class">finding <xsl:value-of select="@state"/></xsl:attribute>
+      <xsl:attribute name="class">finding <xsl:value-of select="@state"/> verdict <xsl:value-of select="@verdict"/></xsl:attribute>
+      <xsl:choose>
+        <xsl:when test="@fold = 'true'">
+          <details class="verdict-fold">
+            <summary>
+              <xsl:value-of select="@verdict-label"/><xsl:text> — </xsl:text>
+              <xsl:value-of select="@repo"/><xsl:text>/</xsl:text><xsl:value-of select="@where"/>
+              <xsl:text> (folded; open it to read what the judge answered, and decide)</xsl:text>
+            </summary>
+            <xsl:call-template name="finding-card"/>
+          </details>
+        </xsl:when>
+        <xsl:otherwise><xsl:call-template name="finding-card"/></xsl:otherwise>
+      </xsl:choose>
+    </li>
+  </xsl:template>
+
+  <xsl:template name="finding-card">
       <div class="finding-head">
         <span>
           <xsl:attribute name="class">badge sev <xsl:value-of select="@severity"/></xsl:attribute>
@@ -875,12 +917,46 @@
         <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
       </xsl:if>
       <p class="note finding-prov"><xsl:value-of select="@provenance"/></p>
+      <xsl:call-template name="verdict-line"/>
       <xsl:apply-templates select="view:prior"/>
       <xsl:apply-templates select="view:decision"/>
       <xsl:apply-templates select="view:unsaved"/>
       <xsl:apply-templates select="view:decide"/>
       <xsl:apply-templates select="view:no-form"/>
-    </li>
+  </xsl:template>
+
+  <!-- The judge's standing in words, and — when a judge has looked — its four answers, each
+       with its reason, one click away. The question names and the answer words are the
+       verdict's own (src/verdict.rs reads them off the row); this file spells none. -->
+  <xsl:template name="verdict-line">
+    <p>
+      <xsl:attribute name="class">verdict-line <xsl:value-of select="@verdict"/></xsl:attribute>
+      <xsl:value-of select="@verdict-label"/>
+    </p>
+    <xsl:apply-templates select="view:judge"/>
+  </xsl:template>
+
+  <xsl:template match="view:judge">
+    <details class="judge-answers">
+      <xsl:if test="@open = 'true'"><xsl:attribute name="open">open</xsl:attribute></xsl:if>
+      <summary>
+        <xsl:text>what the judge answered · </xsl:text><xsl:value-of select="@at"/>
+        <xsl:if test="@test-code = 'true'"><xsl:text> · told the site is test code</xsl:text></xsl:if>
+      </summary>
+      <dl class="judge-answer-list">
+        <xsl:apply-templates select="view:answer"/>
+      </dl>
+    </details>
+  </xsl:template>
+
+  <xsl:template match="view:answer">
+    <dt><xsl:value-of select="@question"/><xsl:text>: </xsl:text><xsl:value-of select="@answer"/></dt>
+    <dd><xsl:value-of select="."/></dd>
+  </xsl:template>
+
+  <!-- The sentence that says the list is ORDERED, and by what (ledger #696). -->
+  <xsl:template match="view:order">
+    <p class="note judge-order"><xsl:value-of select="."/></p>
   </xsl:template>
 
   <!-- A like claim on this line was already declined (ledger #475). The mark is information

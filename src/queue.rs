@@ -1057,10 +1057,17 @@ impl QueuePage {
         }
 
         // The rows, each repository's in the order its resource returned them — which is
-        // already triage order (severity rank, then path, then position). ⚠ They are NOT
-        // re-sorted across repositories: that ordering is `ikigai-browse`'s, computed from a
-        // severity rank this crate does not have and must not re-derive, so the page groups
-        // rather than claiming a global order it did not compute.
+        // already triage order (severity rank, then path, then position). ⚠ That order is NOT
+        // re-derived across repositories: it is `ikigai-browse`'s, computed from a severity
+        // rank this crate does not have and must not re-derive.
+        //
+        // ★★ ONE key goes in FRONT of it: the judge's verdict (ledger #696, Brian 2026-10-02 —
+        // order, never hide). Confirmed first, then unjudged, then unsure, then could-not-judge,
+        // then refuted, folded last and still decidable ([`crate::verdict`]). The sort is
+        // STABLE over the repositories in reading order, so within one standing each
+        // repository's rows keep browse's order and the repositories keep theirs: a verdict is
+        // a fact this crate does have, so ordering by it across repositories claims nothing it
+        // did not compute.
         //
         // ★ Rendered in CHUNKS of `render::CHUNK_ROWS`, apart from the shell (ledger #519):
         // the shell carries a slot where the list goes, each chunk document holds ten rows
@@ -1074,47 +1081,64 @@ impl QueuePage {
         // alone every chunk after it would shift by one row and miss, while a boundary at
         // the file keeps the shift inside the one file the decision was about. Triage
         // order already groups a file's rows together, so this costs no re-ordering.
+        // What a judge was asked about and could not judge — nothing yet: no verdict records
+        // a refusal, so only a run that asked can say (the backfill, ledger #696).
+        let cannot = |_: &str| -> Option<String> { None };
+        let mut ordered: Vec<(&String, &Value)> = read
+            .iter()
+            .filter_map(|(root, rows)| match rows {
+                Rows::Got(rows) => Some(rows.iter().map(move |row| (root, row))),
+                Rows::Failed(_) => None,
+            })
+            .flatten()
+            .collect();
+        crate::verdict::order(&mut ordered, |(_, row)| row, &cannot);
+        let standings: Vec<crate::verdict::Standing> = ordered
+            .iter()
+            .map(|(_, row)| crate::verdict::Standing::of(row, &cannot))
+            .collect();
+        if let Some(sentence) = crate::verdict::order_sentence(&standings) {
+            children.push_str(&element("order", &[], &sentence));
+        }
         let mut drawn = 0usize;
         let mut chunks: Vec<String> = Vec::new();
         let mut open: Vec<String> = Vec::new();
         let mut open_file: Option<(String, String)> = None;
-        for (root, rows) in &read {
-            let Rows::Got(rows) = rows else { continue };
-            for row in rows {
-                if drawn == wanted {
-                    break;
-                }
-                let file = (
-                    root.clone(),
-                    row.get("path")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                );
-                if !open.is_empty()
-                    && (open.len() == render::CHUNK_ROWS || open_file.as_ref() != Some(&file))
-                {
-                    chunks.push(render::chunk(&open.concat()));
-                    open.clear();
-                }
-                open_file = Some(file);
-                let kept = match echo {
-                    Echo::Decide(kept)
-                        if row.get("id").and_then(Value::as_str) == Some(kept.id.as_str()) =>
-                    {
-                        Some(kept)
-                    }
-                    _ => None,
-                };
-                open.push(self.finding_element(
-                    row,
-                    root,
-                    decide,
-                    (&state, only.as_deref(), scope),
-                    kept,
-                ));
-                drawn += 1;
+        for ((root, row), standing) in ordered.iter().zip(&standings) {
+            if drawn == wanted {
+                break;
             }
+            let file = (
+                (*root).clone(),
+                row.get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            if !open.is_empty()
+                && (open.len() == render::CHUNK_ROWS || open_file.as_ref() != Some(&file))
+            {
+                chunks.push(render::chunk(&open.concat()));
+                open.clear();
+            }
+            open_file = Some(file);
+            let kept = match echo {
+                Echo::Decide(kept)
+                    if row.get("id").and_then(Value::as_str) == Some(kept.id.as_str()) =>
+                {
+                    Some(kept)
+                }
+                _ => None,
+            };
+            open.push(self.finding_element(
+                row,
+                root,
+                decide,
+                (&state, only.as_deref(), scope),
+                kept,
+                standing,
+            ));
+            drawn += 1;
         }
         if !open.is_empty() {
             chunks.push(render::chunk(&open.concat()));
@@ -1290,6 +1314,7 @@ impl QueuePage {
         decide: bool,
         (state, only, scope): (&str, Option<&str>, &str),
         kept: Option<&Kept>,
+        standing: &crate::verdict::Standing,
     ) -> String {
         let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
         let yes = |key: &str| row.get(key).and_then(Value::as_bool).unwrap_or(false);
@@ -1329,6 +1354,12 @@ impl QueuePage {
             ("orphaned", flag(yes("orphaned")).to_string()),
             ("reanchored", flag(yes("reanchored")).to_string()),
             ("provenance", provenance(row)),
+            // ★ The judge's standing, in WORDS with its tag (ledger #696) — the order is never
+            // said by position or color alone. A refuted row still waiting for a decision is
+            // drawn folded, its answers inside, its form intact.
+            ("verdict-label", standing.label()),
+            ("verdict", standing.class().to_string()),
+            ("fold", flag(standing.folds(decided(row))).to_string()),
         ];
         if !annotates.is_empty() {
             attributes.push(("browse-href", browse_url(annotates)));
@@ -1349,6 +1380,10 @@ impl QueuePage {
         if !quote.is_empty() {
             children.push_str(&element("quote", &[], quote));
         }
+        children.push_str(&crate::verdict::answers_element(
+            row,
+            standing.folds(decided(row)),
+        ));
         // ★ A like claim on this line was already declined (ledger #475; browse 0.9.0 mints
         // the link at mint time and answers it as `prior_decision`). Rendered BEFORE the
         // form, because it is the thing that makes the second decision one click — and

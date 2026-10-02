@@ -1050,9 +1050,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-browse"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4053164439ac3ba45fdf1fc72f29962d7e5b54eb0bf468581659adb0f29c1d3b"
+checksum = "ac446e89a41d71ec1b85b019b320cef038f3bd564a714b266901ae2cbbfeb13a"
 dependencies = [
  "async-trait",
  "ikigai-a11y",
