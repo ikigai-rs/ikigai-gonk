@@ -13,13 +13,21 @@
 //! the shape browse documents, not the model.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use futures::executor::block_on;
-use ikigai_core::{ArgRef, Capability, Iri, Kernel, Representation, Request, Verb};
+use ikigai_core::{
+    ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace, Exact, Invocation, Iri,
+    Kernel, ReprType, Representation, Request, Space, Verb,
+};
+use ikigai_gonk::backfill::{self, Backfill};
 use ikigai_gonk::config::{ExplainTiers, QueuePolicy};
 use ikigai_gonk::grants::{browse_graph_grants, grants_for_all, Authority};
 use ikigai_gonk::identity::Passkeys;
+use ikigai_gonk::trigger::Activity;
 use ikigai_gonk::{browse, compose_with, doors, queue, quic, verdict, web};
 use ikigai_store::DurableStore;
 use tempfile::TempDir;
@@ -40,16 +48,27 @@ fn scratch_root() -> TempDir {
 /// bound (so the judge's contract is there to read) — and no model behind them: nothing here
 /// derives, so nothing here dials one.
 fn door(dir: &TempDir) -> (Kernel, Arc<Kernel>, TempDir) {
+    door_with(dir, &ExplainTiers::default(), Vec::new(), Vec::new())
+}
+
+/// The same, with the tiers, the mounted spaces (a fake `urn:llm:`) and extra spaces (the
+/// backfill) a test chooses.
+fn door_with(
+    dir: &TempDir,
+    tiers: &ExplainTiers,
+    mounted: Vec<Arc<dyn Space>>,
+    extra: Vec<Arc<dyn Space>>,
+) -> (Kernel, Arc<Kernel>, TempDir) {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let roots: Vec<(String, PathBuf)> = vec![(ROOT.to_string(), dir.path().to_path_buf())];
-    let wired = browse::wire(roots, handle, None, Some(&ExplainTiers::default()), &graph);
+    let wired = browse::wire(roots, handle, None, Some(tiers), &graph);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
-        Vec::new(),
-        Vec::new(),
+        mounted,
+        extra,
         None,
     ));
     let config = tempfile::tempdir().expect("a config home");
@@ -140,7 +159,26 @@ fn serious_word(door: &Kernel) -> String {
 /// One pending serious finding on `src/lib.rs`, anchored at `exact` — the quads browse's own
 /// `store_annotation` writes for a finding.
 fn plant_finding(door: &Kernel, id: &str, exact: &str, body: &str) {
-    let severity = serious_word(door);
+    plant_finding_from(
+        door,
+        id,
+        exact,
+        body,
+        "urn:ikigai:browse:review:demo:src/lib.rs",
+        &serious_word(door),
+    );
+}
+
+/// The same, minted by a named pass and rated any word — a pass IRI that names a content hash
+/// neither the file nor any commit has is a finding judge-finding answers `cannot` for.
+fn plant_finding_from(
+    door: &Kernel,
+    id: &str,
+    exact: &str,
+    body: &str,
+    pass: &str,
+    severity: &str,
+) {
     let start = LIB.find(exact).expect("the quote is in the file");
     let end = start + exact.len();
     update(
@@ -157,7 +195,7 @@ INSERT DATA {{ GRAPH <{graph}> {{
     dcterms:description "{body}" ;
     dcterms:creator "a-test-reviewer" ;
     dcterms:created "2026-10-01T12:00:00Z"^^xsd:dateTime ;
-    prov:wasGeneratedBy <urn:ikigai:browse:review:demo:src/lib.rs> ;
+    prov:wasGeneratedBy <{pass}> ;
     sh:resultSeverity <urn:iki:severity:{severity}> ;
     ik:annotates <urn:repo:{ROOT}:file:src/lib.rs> ;
     ik:repo "{ROOT}" ;
@@ -182,7 +220,19 @@ const TAG: &str = "judge-v1@a-test-judge";
 /// One verdict on one finding, as browse's `judge::store_verdict` writes it: the verdict node
 /// keyed `{finding}:judge:{tag}`, its four answers as parts, each with a reason.
 fn plant_verdict(door: &Kernel, id: &str, word: &str, answers: [(&str, &str); 4]) {
-    let v = format!("urn:iki:finding:{id}:judge:judge-v1-a-test-judge");
+    plant_verdict_tagged(door, id, word, answers, TAG);
+}
+
+/// The same under any judge's tag — keyed exactly as browse keys it, so judge-finding's
+/// Exists finds it.
+fn plant_verdict_tagged(
+    door: &Kernel,
+    id: &str,
+    word: &str,
+    answers: [(&str, &str); 4],
+    tag: &str,
+) {
+    let v = format!("urn:iki:finding:{id}:judge:{tag}");
     let questions = ["code", "disclosed", "occurs", "test"];
     let mut parts = String::new();
     for (question, (answer, reason)) in questions.iter().zip(answers) {
@@ -204,7 +254,7 @@ INSERT DATA {{ GRAPH <{graph}> {{
   <{v}> a prov:Activity ;
     prov:used <urn:iki:finding:{id}> ;
     dcterms:type <urn:iki:judge:verdict:{word}> ;
-    ik:versionTag "{TAG}" ;
+    ik:versionTag "{tag}" ;
     dcterms:creator "a-test-judge" ;
     dcterms:subject <urn:iki:judge:site:code> ;
     dcterms:description "planted" ;
@@ -471,4 +521,423 @@ fn no_verdict_word_is_written_down_in_this_crate() {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ the backfill (PR B)
+
+/// The judge provider the backfill tests configure, served by [`FakeJudge`].
+const FAKE: &str = "urn:llm:fake:ask";
+/// What `urn:llm:fake:model` answers, so the judge's tag is `judge-v1@fake-model`.
+const FAKE_MODEL: &str = "fake-model";
+
+/// A judge that answers every claim "confirmed" by the four answers, counts its calls, and —
+/// when armed with a backfill — asks that backfill to stop on its first call, so a test can
+/// end a run part-way through without a clock.
+struct FakeJudge {
+    calls: Arc<AtomicUsize>,
+    stop_on_first: Arc<Mutex<Option<Arc<Backfill>>>>,
+}
+
+#[async_trait]
+impl Endpoint for FakeJudge {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        if let Some(backfill) = self.stop_on_first.lock().expect("lock").take() {
+            backfill.stop();
+        }
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"CODE: yes - it does\nDISCLOSED: no - nothing says so\nOCCURS: yes - it would\nTEST: no - not a test\n"
+                .to_vec(),
+        ))
+    }
+    fn name(&self) -> &str {
+        "fake-judge"
+    }
+    fn describe(&self) -> Description {
+        let optional = |name: &str| ArgSpec::new(name).optional();
+        Description::new("fake-judge")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(optional("prompt"))
+            .input(optional("system"))
+            .input(optional("temperature"))
+            .input(optional("max_tokens"))
+    }
+}
+
+struct FakeModel;
+
+#[async_trait]
+impl Endpoint for FakeModel {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            FAKE_MODEL.as_bytes().to_vec(),
+        ))
+    }
+    fn name(&self) -> &str {
+        "fake-model"
+    }
+    fn describe(&self) -> Description {
+        Description::new("fake-model")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+    }
+}
+
+/// A served gonk with the fake judge mounted and the backfill bound.
+struct Backfilled {
+    door: Kernel,
+    hub: Arc<Kernel>,
+    backfill: Arc<Backfill>,
+    calls: Arc<AtomicUsize>,
+    stop_on_first: Arc<Mutex<Option<Arc<Backfill>>>>,
+    activity: Arc<Activity>,
+    _config: TempDir,
+}
+
+fn backfilled(dir: &TempDir, judge: Option<&str>) -> Backfilled {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stop_on_first = Arc::new(Mutex::new(None));
+    let llm: Arc<dyn Space> = Arc::new(
+        EndpointSpace::new()
+            .bind(
+                Exact::new(FAKE),
+                FakeJudge {
+                    calls: Arc::clone(&calls),
+                    stop_on_first: Arc::clone(&stop_on_first),
+                },
+            )
+            .bind(Exact::new("urn:llm:fake:model"), FakeModel),
+    );
+    let tiers = ExplainTiers {
+        judge: judge.map(str::to_string),
+        ..ExplainTiers::default()
+    };
+    let activity = Arc::new(Activity::default());
+    let backfill = Arc::new(
+        Backfill::new(
+            vec![ROOT.to_string()],
+            QueuePolicy::default(),
+            judge.map(str::to_string),
+            vec![
+                ikigai_browse::CAP_WILDCARD.to_string(),
+                "urn:cap:net:localhost".to_string(),
+            ],
+            Arc::clone(&activity),
+            None,
+        )
+        .with_pause(Duration::from_millis(20)),
+    );
+    let (door, hub, config) = door_with(dir, &tiers, vec![llm], vec![backfill.space()]);
+    backfill.attach(&hub, false);
+    Backfilled {
+        door,
+        hub,
+        backfill,
+        calls,
+        stop_on_first,
+        activity,
+        _config: config,
+    }
+}
+
+/// The backfill's status as JSON, through the kernel under root (the socket door's grant).
+fn backfill_status(kernel: &Kernel) -> serde_json::Value {
+    let answer = issue(
+        kernel,
+        Verb::Source,
+        backfill::BACKFILL,
+        &[("as", "application/json")],
+        &Capability::root(),
+    )
+    .expect("the backfill status");
+    serde_json::from_slice(&answer.bytes).expect("json")
+}
+
+fn sink_backfill(kernel: &Kernel, word: &str) -> ikigai_core::Result<Representation> {
+    issue(
+        kernel,
+        Verb::Sink,
+        backfill::BACKFILL,
+        &[("content", word)],
+        &Capability::root(),
+    )
+}
+
+/// Wait for the run to leave its live phases, or fail after ten seconds.
+fn settled(kernel: &Kernel) -> serde_json::Value {
+    let began = Instant::now();
+    loop {
+        let status = backfill_status(kernel);
+        if !matches!(
+            status["phase"].as_str(),
+            Some("listing" | "running" | "yielding" | "stopping")
+        ) {
+            return status;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "the run never settled: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+const JUDGED_TAG: &str = "judge-v1@fake-model";
+const FRESH_1: &str = "bbbbbbbbbbbbbbbbbbbb0001";
+const FRESH_2: &str = "bbbbbbbbbbbbbbbbbbbb0002";
+const ALREADY: &str = "bbbbbbbbbbbbbbbbbbbb0003";
+const LOST: &str = "bbbbbbbbbbbbbbbbbbbb0004";
+const MILD: &str = "bbbbbbbbbbbbbbbbbbbb0005";
+
+/// Two serious findings with no verdict, one already judged under the configured judge's tag,
+/// one whose reviewed version is lost (its pass names a hash nothing has), and one rated below
+/// the serious set.
+fn plant_backfill(door: &Kernel) {
+    plant_finding(door, FRESH_1, "fn alpha() {}", "alpha is wrong");
+    plant_finding(door, FRESH_2, "fn beta() {}", "beta is wrong");
+    plant_finding(door, ALREADY, "fn gamma() {}", "gamma is wrong");
+    plant_verdict_tagged(
+        door,
+        ALREADY,
+        verdict::triage()[0],
+        [("yes", "a"), ("no", "b"), ("yes", "c"), ("no", "d")],
+        JUDGED_TAG,
+    );
+    let lost_pass = format!(
+        "urn:ikigai:browse:review:{ROOT}:sha256:{}:review-v5@x:src/lib.rs",
+        "0".repeat(64)
+    );
+    plant_finding_from(
+        door,
+        LOST,
+        "fn delta() {}",
+        "delta is wrong",
+        &lost_pass,
+        &serious_word(door),
+    );
+    let declared = queue::one_of(
+        door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        "severity",
+    )
+    .expect("severities");
+    let mild = declared
+        .into_iter()
+        .find(|w| !QueuePolicy::default().is_serious(w))
+        .expect("a word below the serious set");
+    plant_finding_from(
+        door,
+        MILD,
+        "fn omega() {}",
+        "omega is wrong",
+        "urn:ikigai:browse:review:demo:src/lib.rs",
+        &mild,
+    );
+}
+
+/// ★ **A run judges each unjudged serious finding ONCE, skips the judged, counts the lost.**
+/// The finding already judged under the configured judge's tag costs no call (Exists first);
+/// the one whose reviewed version is gone is counted as `cannot` with browse's reason, and the
+/// Queue says so on its row; the finding below the serious set is not walked at all. A second
+/// run makes no model call: every verdict it would ask for is archived, and the lost one is
+/// asked once more and counted again — never looped on.
+#[test]
+fn a_backfill_judges_each_unjudged_finding_once_and_skips_the_judged() {
+    let dir = scratch_root();
+    let b = backfilled(&dir, Some(FAKE));
+    plant_backfill(&b.door);
+    let idle = backfill_status(&b.door);
+    assert_eq!(idle["phase"], "idle", "never started on its own: {idle}");
+
+    sink_backfill(&b.door, backfill::START).expect("an operator starts it");
+    let first = settled(&b.door);
+    assert_eq!(first["phase"], "done", "{first}");
+    assert_eq!(
+        first["total"], 4,
+        "four serious findings, the mild one not walked: {first}"
+    );
+    assert_eq!(first["judged"], 2, "{first}");
+    assert_eq!(first["already_judged"], 1, "{first}");
+    assert_eq!(first["cannot"], 1, "{first}");
+    assert_eq!(first["failed"], 0, "{first}");
+    assert_eq!(first["remaining"], 0, "{first}");
+    assert_eq!(first["calls"], 2, "{first}");
+    assert_eq!(first["tag"], JUDGED_TAG, "{first}");
+    assert_eq!(
+        b.calls.load(AtomicOrdering::SeqCst),
+        2,
+        "one call per unjudged finding"
+    );
+    assert!(
+        first["unjudgeable"][LOST]
+            .as_str()
+            .is_some_and(|why| !why.is_empty()),
+        "the lost one is kept with browse's reason: {first}"
+    );
+
+    // The verdicts are browse's, archived on the findings — the Queue reads them back, and
+    // the lost one is labeled with the reason and ordered after them.
+    let html = page(&b.door, &[]);
+    let [first_word, _, _] = verdict::triage();
+    assert!(
+        html.contains(&format!("judge: {first_word} · {JUDGED_TAG}")),
+        "{html}"
+    );
+    assert!(html.contains("judge: could not judge — "), "{html}");
+    assert_eq!(
+        order_on(&html, &[FRESH_1, LOST]),
+        [FRESH_1, LOST],
+        "a judged finding before the one the judge could not judge:\n{html}"
+    );
+    assert!(
+        html.contains("Judge backfill done"),
+        "the page says where the run stands:\n{html}"
+    );
+
+    sink_backfill(&b.door, backfill::START).expect("a second run");
+    let second = settled(&b.door);
+    assert_eq!(second["phase"], "done", "{second}");
+    assert_eq!(second["judged"], 0, "{second}");
+    assert_eq!(second["already_judged"], 3, "{second}");
+    assert_eq!(
+        second["cannot"], 1,
+        "asked once more, counted again: {second}"
+    );
+    assert_eq!(
+        b.calls.load(AtomicOrdering::SeqCst),
+        2,
+        "the second run paid nothing it had already paid for"
+    );
+    drop(b.hub);
+}
+
+/// ★ **Stop ends a run after the call in flight; start resumes past what it judged.**
+#[test]
+fn a_stopped_backfill_resumes_past_what_it_judged() {
+    let dir = scratch_root();
+    let b = backfilled(&dir, Some(FAKE));
+    plant_backfill(&b.door);
+    // The first model call asks the run to stop: it finishes that one and stops.
+    *b.stop_on_first.lock().expect("lock") = Some(Arc::clone(&b.backfill));
+    sink_backfill(&b.door, backfill::START).expect("start");
+    let stopped = settled(&b.door);
+    assert_eq!(stopped["phase"], "stopped", "{stopped}");
+    assert_eq!(
+        stopped["judged"], 1,
+        "the call in flight finished: {stopped}"
+    );
+    assert!(
+        stopped["remaining"].as_u64().is_some_and(|r| r > 0),
+        "{stopped}"
+    );
+    assert_eq!(b.calls.load(AtomicOrdering::SeqCst), 1);
+
+    sink_backfill(&b.door, backfill::START).expect("resume");
+    let resumed = settled(&b.door);
+    assert_eq!(resumed["phase"], "done", "{resumed}");
+    assert_eq!(
+        resumed["judged"], 1,
+        "only the one not yet judged: {resumed}"
+    );
+    assert_eq!(resumed["already_judged"], 2, "{resumed}");
+    assert_eq!(
+        b.calls.load(AtomicOrdering::SeqCst),
+        2,
+        "two calls across both runs, one per unjudged finding"
+    );
+}
+
+/// ★ **It yields to a review pass**: while a pass is in flight no judge call is made, and a
+/// stop while yielding stops without one.
+#[test]
+fn a_backfill_waits_while_a_review_pass_is_in_flight() {
+    let dir = scratch_root();
+    let b = backfilled(&dir, Some(FAKE));
+    plant_backfill(&b.door);
+    let pass = b.activity.begin(1).expect("a pass in flight");
+    sink_backfill(&b.door, backfill::START).expect("start");
+    let began = Instant::now();
+    while backfill_status(&b.door)["phase"] != "yielding" {
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "it never yielded"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        b.calls.load(AtomicOrdering::SeqCst),
+        0,
+        "no call while a pass runs"
+    );
+    sink_backfill(&b.door, backfill::STOP).expect("stop");
+    let stopped = settled(&b.door);
+    assert_eq!(stopped["phase"], "stopped", "{stopped}");
+    assert_eq!(stopped["done"], 0, "{stopped}");
+    assert!(
+        stopped["yielded_ms"].as_u64().is_some_and(|ms| ms > 0),
+        "{stopped}"
+    );
+    drop(pass);
+    assert_eq!(b.calls.load(AtomicOrdering::SeqCst), 0);
+}
+
+/// The Sink's refusals: the judge switched off, a word it does not know, and a caller who
+/// could not make the judge spend.
+#[test]
+fn the_backfill_refuses_without_a_judge_a_word_or_a_net_grant() {
+    let dir = scratch_root();
+    let off = backfilled(&dir, None);
+    match sink_backfill(&off.door, backfill::START) {
+        Err(ikigai_core::Error::Unavailable(why)) => assert!(why.contains("off"), "{why}"),
+        other => panic!("no judge, no run: {other:?}"),
+    }
+    assert_eq!(backfill_status(&off.door)["phase"], "idle");
+
+    let on = backfilled(&dir, Some(FAKE));
+    match sink_backfill(&on.door, "whenever") {
+        Err(ikigai_core::Error::InvalidArgument { .. }) => {}
+        other => panic!("an undeclared word: {other:?}"),
+    }
+    match issue(
+        &on.door,
+        Verb::Sink,
+        backfill::BACKFILL,
+        &[("content", backfill::START)],
+        &reviewer(),
+    ) {
+        Err(ikigai_core::Error::Denied(_)) => {}
+        other => panic!("a browse grant without a net grant may not start it: {other:?}"),
+    }
+    assert_eq!(on.calls.load(AtomicOrdering::SeqCst), 0);
+}
+
+/// The backfill is a module citizen: the conformance walk over a kernel holding it alone.
+/// The Sink is walked with `stop` — a word that changes nothing when no run is live, so the
+/// walk spends nothing.
+#[test]
+fn the_backfill_conforms() {
+    let backfill = Arc::new(Backfill::new(
+        vec![ROOT.to_string()],
+        QueuePolicy::default(),
+        Some(FAKE.to_string()),
+        vec![ikigai_browse::CAP_WILDCARD.to_string()],
+        Arc::new(Activity::default()),
+        None,
+    ));
+    let kernel =
+        Kernel::with_meta_renderer(backfill.space(), Arc::new(ikigai_vocab::TurtleRenderer));
+    let report = ikigai_conformance::Suite::new()
+        .fixture(
+            ikigai_conformance::Fixture::new("gonk-judge-backfill", Verb::Sink)
+                .arg("content", backfill::STOP),
+        )
+        .live("gonk-judge-backfill")
+        .run_blocking(&kernel);
+    println!("{report}");
+    assert!(report.is_clean(), "{report}");
 }

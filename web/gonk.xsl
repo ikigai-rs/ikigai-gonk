@@ -350,6 +350,7 @@
         </xsl:if>
       </header>
       <xsl:apply-templates select="view:intray"/>
+      <xsl:apply-templates select="view:backfill"/>
       <xsl:apply-templates select="view:flash"/>
       <!-- ★ The same sentence, ANNOUNCED (ledger #657): a swapped-in paragraph is seen and
            not heard, so a fragment also carries it out of band into #flash, the polite live
@@ -952,6 +953,11 @@
   <xsl:template match="view:answer">
     <dt><xsl:value-of select="@question"/><xsl:text>: </xsl:text><xsl:value-of select="@answer"/></dt>
     <dd><xsl:value-of select="."/></dd>
+  </xsl:template>
+
+  <!-- Where the judge backfill stands (ledger #696), once it has run in this process. -->
+  <xsl:template match="view:backfill">
+    <p class="intray backfill"><xsl:value-of select="."/></p>
   </xsl:template>
 
   <!-- The sentence that says the list is ORDERED, and by what (ledger #696). -->

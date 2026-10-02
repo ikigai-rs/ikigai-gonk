@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use ikigai_gonk::backfill;
 use ikigai_gonk::backup::{self, Backups};
 use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
@@ -202,7 +203,7 @@ fn serve(flags: &config::Flags) -> ! {
         None => None,
     };
     let activity = Arc::new(trigger::Activity::default());
-    let trigger_spaces = match &settings.review {
+    let mut trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
             trigger::space(
@@ -214,6 +215,30 @@ fn serve(flags: &config::Flags) -> ! {
         }
         None => Vec::new(),
     };
+    // ★ The judge backfill (ledger #696), bound only where judge-finding is — beside the
+    // explain families, so only with a peer to judge on. It runs under exactly the browse read
+    // and a net grant naming the mounted peer's host: what judge-finding declares, and nothing
+    // a store write, an annotation or `gh` would need.
+    let backfill = explains.then(|| {
+        Arc::new(backfill::Backfill::new(
+            settings
+                .browse_roots
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+            settings.queue.clone(),
+            settings.explain.judge.clone(),
+            vec![
+                ikigai_browse::CAP_WILDCARD.to_string(),
+                format!("urn:cap:net:{}", mount_host(&settings)),
+            ],
+            Arc::clone(&activity),
+            settings.review.clone(),
+        ))
+    });
+    if let Some(backfill) = &backfill {
+        trigger_spaces.push(backfill.space());
+    }
     let hub = Arc::new(compose_with(
         store,
         browse_space,
@@ -285,6 +310,12 @@ fn serve(flags: &config::Flags) -> ! {
             review_line(&settings, &layout)
         }
     };
+
+    // The backfill gets its kernel, and whether a waiting review request is a pass about to
+    // run (armed) — it starts nothing: an operator does, with its Sink.
+    if let Some(backfill) = &backfill {
+        backfill.attach(&hub, reviewer.is_some());
+    }
 
     let backup_line = start_backups(&hub, &jobs, &backup_settings, &settings.socket);
 
@@ -701,7 +732,12 @@ fn judge_line(settings: &config::Settings, explains: bool, checked: bool) -> Str
     match &settings.explain.judge {
         Some(provider) => format!(
             "{provider} — one call per serious finding a pass mints (gonk.review.judge; \
-             browse's default is urn:llm:coder:ask); {ordering}"
+             browse's default is urn:llm:coder:ask); {ordering}. Backfill the older queue \
+             with `sink {} content={}` on the socket (one call at a time, yielding to review \
+             passes; `{}` says where it stands)",
+            backfill::BACKFILL,
+            backfill::START,
+            backfill::BACKFILL
         ),
         None => format!(
             "off (gonk.review.judge = \"off\") — passes mint findings with no verdict; \
