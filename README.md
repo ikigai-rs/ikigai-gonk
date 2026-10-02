@@ -364,6 +364,15 @@ judge", and asked again only on the next run. The run uses exactly the browse re
 any derivation. With `gonk.review.judge = "off"` it refuses to start. The Queue page shows where
 the run stands once it has run.
 
+★ **"Real, reproduced" is recorded on a publish** (ledger #696). The decide form carries a
+"reproduced" box beside Publish (its value is the finding contract's own `reproduced` word; the
+note says how), and a published finding not yet marked offers a folded "record a reproduction"
+form: `decision=publish reproduced=… revises=<the publish>`, a revision that keeps the outcome and
+the rating, stamped `made=single` at the door like every decision. A reproduced publication says
+so on its row, in words. The mark travels only with a publish: a box ticked before pressing
+Decline is dropped, as a reason word picked before pressing Publish is. A refused submit keeps the
+tick and the note, and a refused reproduction comes back open with its note.
+
 ★ **The badge counts each root once per change, not once per poll** (ledger #667). It keeps
 the last count per root and per caller's grant, and re-reads a root only when that root has
 moved since: the watch cut its narrow thread (a file changed), a write through the browse family

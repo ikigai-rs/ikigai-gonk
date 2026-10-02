@@ -179,6 +179,11 @@ fn plant_finding_from(
     pass: &str,
     severity: &str,
 ) {
+    // An empty word plants an UNRATED finding: no proposal at all.
+    let rated = match severity {
+        "" => String::new(),
+        word => format!("sh:resultSeverity <urn:iki:severity:{word}> ;"),
+    };
     let start = LIB.find(exact).expect("the quote is in the file");
     let end = start + exact.len();
     update(
@@ -196,7 +201,7 @@ INSERT DATA {{ GRAPH <{graph}> {{
     dcterms:creator "a-test-reviewer" ;
     dcterms:created "2026-10-01T12:00:00Z"^^xsd:dateTime ;
     prov:wasGeneratedBy <{pass}> ;
-    sh:resultSeverity <urn:iki:severity:{severity}> ;
+    {rated}
     ik:annotates <urn:repo:{ROOT}:file:src/lib.rs> ;
     ik:repo "{ROOT}" ;
     ik:path "src/lib.rs" ;
@@ -940,4 +945,240 @@ fn the_backfill_conforms() {
         .run_blocking(&kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+}
+
+// ------------------------------------------------------- the reproduced mark (PR C)
+
+/// The contract's one reproduced word — never spelled here.
+fn reproduced_word(door: &Kernel) -> String {
+    queue::one_of(
+        door,
+        "urn:iki:finding:0123456789abcdef01234567",
+        Verb::Sink,
+        queue::REPRODUCED_ARG,
+    )
+    .expect("browse 0.16.0 declares the reproduced mark")
+    .into_iter()
+    .next()
+    .expect("one word")
+}
+
+fn decide(door: &Kernel, body: &str) -> String {
+    String::from_utf8(
+        issue(
+            door,
+            Verb::Sink,
+            queue::DECIDE_IRI,
+            &[("content", body)],
+            &reviewer(),
+        )
+        .expect("the decide adapter renders")
+        .bytes,
+    )
+    .expect("utf-8")
+}
+
+/// A finding's row, as the findings face reads it back.
+fn finding_row(door: &Kernel, id: &str) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(
+        &issue(
+            door,
+            Verb::Source,
+            &format!("urn:repo:{ROOT}:findings"),
+            &[("as", "application/json"), ("state", "all")],
+            &reviewer(),
+        )
+        .expect("the findings read")
+        .bytes,
+    )
+    .expect("json rows");
+    rows.into_iter()
+        .find(|row| row["id"] == id)
+        .unwrap_or_else(|| panic!("no `{id}`"))
+}
+
+/// ★ The decide form's box sits beside Publish, carries the contract's word, and a publish
+/// with it ticked records the mark — shown on the row in words, with no reproduction form left
+/// to offer.
+#[test]
+fn a_publish_with_the_box_ticked_records_the_reproduced_mark() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_finding(&door, UPHELD, "fn delta() {}", "delta is wrong");
+    let word = reproduced_word(&door);
+    let html = page(&door, &[]);
+    let publish = html.find("value='publish'").expect("the Publish button");
+    let box_at = html.find("name='reproduced'").expect("the reproduced box");
+    let decline = html.find("value='decline'").expect("the Decline button");
+    assert!(
+        publish < box_at && box_at < decline,
+        "the box is beside Publish:\n{html}"
+    );
+    let input_at = html[..box_at].rfind("<input").expect("the box is an input");
+    let input = &html[input_at..input_at + html[input_at..].find('>').expect("closes")];
+    assert!(
+        input.contains("type='checkbox'") && input.contains(&format!("value='{word}'")),
+        "a checkbox carrying the contract's word: {input}"
+    );
+
+    let after = decide(
+        &door,
+        &format!("id={UPHELD}&decision=publish&reproduced={word}&content=ran+it+and+it+broke&_state=published"),
+    );
+    assert!(!after.contains("flash error"), "{after}");
+    let row = finding_row(&door, UPHELD);
+    assert_eq!(row["decision"]["reproduced"], true, "{row}");
+    assert_eq!(
+        row["decision"]["made"], "single",
+        "stamped at the door: {row}"
+    );
+    assert!(
+        after.contains("reproduced — a human showed the defect happen"),
+        "the mark, in words:\n{after}"
+    );
+    assert!(
+        !after.contains("class='reproduce'"),
+        "a reproduced publication offers no reproduction form:\n{after}"
+    );
+}
+
+/// A tick followed by Decline is a tick the person abandoned: the decline is recorded and the
+/// mark is not sent (browse would refuse it beside a decline).
+#[test]
+fn a_tick_then_decline_declines_without_the_mark() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_finding(&door, UPHELD, "fn delta() {}", "delta is wrong");
+    let word = reproduced_word(&door);
+    let after = decide(
+        &door,
+        &format!("id={UPHELD}&decision=decline&reproduced={word}&_state=pending"),
+    );
+    assert!(!after.contains("flash error"), "{after}");
+    let row = finding_row(&door, UPHELD);
+    assert_eq!(row["state"], "declined", "{row}");
+    assert_eq!(row["decision"]["reproduced"], false, "{row}");
+}
+
+/// ★ A published finding offers a FOLDED "record a reproduction" form that revises its
+/// publish: posting it adds the mark and keeps the outcome and the rating.
+#[test]
+fn a_published_finding_records_a_reproduction_by_revising_its_publish() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_finding(&door, UPHELD, "fn delta() {}", "delta is wrong");
+    decide(
+        &door,
+        &format!("id={UPHELD}&decision=publish&_state=published"),
+    );
+    let before = finding_row(&door, UPHELD);
+    let decision_iri = before["decision"]["iri"]
+        .as_str()
+        .expect("an IRI")
+        .to_string();
+    assert_eq!(before["decision"]["reproduced"], false);
+
+    let html = page(&door, &[("state", "published")]);
+    let form = html.find("class='reproduce'").expect("the folded form");
+    let tail = &html[form..];
+    assert!(
+        tail.contains("<summary>record a reproduction</summary>"),
+        "{tail}"
+    );
+    assert!(
+        !tail[..tail.find("</summary>").unwrap()].contains("open="),
+        "folded:\n{tail}"
+    );
+    assert!(
+        tail.contains(&format!("value='{decision_iri}'")),
+        "revises the publish:\n{tail}"
+    );
+
+    let word = reproduced_word(&door);
+    let after = decide(
+        &door,
+        &format!(
+            "id={UPHELD}&decision=publish&reproduced={word}&revises={}&content=a+failing+test&_state=published",
+            decision_iri.replace(':', "%3A")
+        ),
+    );
+    assert!(!after.contains("flash error"), "{after}");
+    let row = finding_row(&door, UPHELD);
+    assert_eq!(row["decision"]["reproduced"], true, "{row}");
+    assert_eq!(
+        row["decision"]["outcome"], before["decision"]["outcome"],
+        "{row}"
+    );
+    assert_eq!(
+        row["decision"]["severity"], before["decision"]["severity"],
+        "{row}"
+    );
+    assert_eq!(row["decision"]["made"], "single", "{row}");
+    assert!(after.contains("reproduced — a human showed"), "{after}");
+}
+
+/// ★ A refused reproduction keeps its input (ledger #657): the form comes back OPEN, the note
+/// the person typed in it, the refusal marked on the row.
+#[test]
+fn a_refused_reproduction_comes_back_open_with_its_note() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_finding(&door, UPHELD, "fn delta() {}", "delta is wrong");
+    decide(
+        &door,
+        &format!("id={UPHELD}&decision=publish&_state=published"),
+    );
+    let word = reproduced_word(&door);
+    let after = decide(
+        &door,
+        &format!(
+            "id={UPHELD}&decision=publish&reproduced={word}&revises=urn%3Aiki%3Afinding%3Anot-this-one&content=my+careful+steps&_state=published"
+        ),
+    );
+    assert!(
+        after.contains("flash error"),
+        "a stale revises is refused:\n{after}"
+    );
+    let form = after
+        .find("class='reproduce'")
+        .expect("the form is drawn back");
+    let tail = &after[form..];
+    assert!(tail.contains("open='open'"), "open:\n{tail}");
+    assert!(tail.contains("my careful steps"), "with the note:\n{tail}");
+    assert!(
+        tail.contains("class='problem'"),
+        "and the refusal on the row:\n{tail}"
+    );
+    assert!(
+        !after.contains("Your note was not recorded"),
+        "the note is in the form, not beside it:\n{after}"
+    );
+}
+
+/// A refused decision keeps the reproduced tick, as it keeps the rating, word and note.
+#[test]
+fn a_refused_decision_keeps_the_reproduced_tick() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    // An UNRATED finding: publishing it with no rating is refused (there is no proposal to
+    // accept), and the form must come back with the box still ticked.
+    plant_finding_from(
+        &door,
+        UPHELD,
+        "fn delta() {}",
+        "delta is wrong",
+        "urn:ikigai:browse:review:demo:src/lib.rs",
+        "",
+    );
+    let word = reproduced_word(&door);
+    let after = decide(
+        &door,
+        &format!("id={UPHELD}&decision=publish&reproduced={word}&content=the+steps&_state=pending"),
+    );
+    assert!(after.contains("flash error"), "{after}");
+    let at = after.find("name='reproduced'").expect("the box");
+    let start = after[..at].rfind("<input").expect("an input");
+    let input = &after[start..start + after[start..].find('>').expect("closes")];
+    assert!(input.contains("checked"), "still ticked: {input}");
+    assert!(after.contains("the steps"), "{after}");
 }

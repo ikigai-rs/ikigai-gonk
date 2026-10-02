@@ -921,6 +921,7 @@
       <xsl:call-template name="verdict-line"/>
       <xsl:apply-templates select="view:prior"/>
       <xsl:apply-templates select="view:decision"/>
+      <xsl:apply-templates select="view:reproduce"/>
       <xsl:apply-templates select="view:unsaved"/>
       <xsl:apply-templates select="view:decide"/>
       <xsl:apply-templates select="view:no-form"/>
@@ -991,6 +992,9 @@
         <xsl:value-of select="@outcome"/>
         <xsl:if test="@reason"><xsl:text> (</xsl:text><span class="reason-word"><xsl:value-of select="@reason"/></span><xsl:text>)</xsl:text></xsl:if>
         <xsl:text> as </xsl:text><xsl:value-of select="@severity"/><xsl:text> · </xsl:text><xsl:value-of select="@at"/>
+        <xsl:if test="@reproduced">
+          <xsl:text> · </xsl:text><span class="reproduced"><xsl:value-of select="@reproduced"/></span>
+        </xsl:if>
         <xsl:call-template name="unconfirmed"/>
       </p>
       <xsl:if test="view:note">
@@ -1076,6 +1080,15 @@
        word sent with any other decision, so a pick followed by Publish still publishes. -->
   <xsl:template match="view:decision-option">
     <xsl:choose>
+      <!-- ★ The reproduced box (ledger #696), grouped WITH Publish: the mark is a publish's
+           alone, and the note above is where the person says how. Its one value is the
+           contract's word, carried in from src/queue.rs. -->
+      <xsl:when test="view:reproduced-option">
+        <span class="decide-mark">
+          <xsl:call-template name="decide-button"/>
+          <xsl:apply-templates select="view:reproduced-option"/>
+        </span>
+      </xsl:when>
       <xsl:when test="view:reason-option">
         <span class="decide-why">
           <xsl:call-template name="decide-button"/>
@@ -1086,6 +1099,58 @@
       </xsl:when>
       <xsl:otherwise><xsl:call-template name="decide-button"/></xsl:otherwise>
     </xsl:choose>
+  </xsl:template>
+
+  <xsl:template match="view:reproduced-option">
+    <label class="decide-reproduced">
+      <input type="checkbox">
+        <xsl:attribute name="name">reproduced</xsl:attribute>
+        <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
+        <xsl:if test="@checked = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if>
+      </input>
+      <xsl:text> </xsl:text><xsl:value-of select="@label"/>
+    </label>
+  </xsl:template>
+
+  <!-- ★ The folded "record a reproduction" form on a published finding (ledger #696): a
+       revision of the publish that keeps its outcome and rating and adds the mark, the note
+       saying how. A refused one comes back OPEN with the note (ledger #657). -->
+  <xsl:template match="view:reproduce">
+    <details class="reproduce">
+      <xsl:if test="@open = 'true'"><xsl:attribute name="open">open</xsl:attribute></xsl:if>
+      <summary><xsl:value-of select="@summary-label"/></summary>
+      <xsl:if test="@problem">
+        <p class="problem">
+          <xsl:attribute name="id">problem-<xsl:value-of select="@id"/></xsl:attribute>
+          <xsl:value-of select="@problem"/>
+        </p>
+      </xsl:if>
+      <form class="decide reproduce" method="post" hx-target="#queue" hx-swap="outerHTML">
+        <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+        <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+        <xsl:if test="@problem"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
+        <input type="hidden" name="id"><xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute></input>
+        <input type="hidden" name="_state"><xsl:attribute name="value"><xsl:value-of select="@state"/></xsl:attribute></input>
+        <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
+        <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
+        <input type="hidden" name="decision"><xsl:attribute name="value"><xsl:value-of select="@decision"/></xsl:attribute></input>
+        <input type="hidden" name="reproduced"><xsl:attribute name="value"><xsl:value-of select="@reproduced"/></xsl:attribute></input>
+        <input type="hidden" name="revises"><xsl:attribute name="value"><xsl:value-of select="@revises"/></xsl:attribute></input>
+        <label class="decide-reason">
+          <xsl:text>How it was reproduced</xsl:text>
+          <textarea name="content" rows="2" required="required">
+            <xsl:if test="@problem">
+              <xsl:attribute name="autofocus">autofocus</xsl:attribute>
+              <xsl:attribute name="aria-describedby">problem-<xsl:value-of select="@id"/></xsl:attribute>
+            </xsl:if>
+            <xsl:value-of select="view:note"/>
+          </textarea>
+        </label>
+        <div class="decide-buttons">
+          <button type="submit" class="decide-button reproduce">Record the reproduction</button>
+        </div>
+      </form>
+    </details>
   </xsl:template>
 
   <xsl:template name="decide-button">
