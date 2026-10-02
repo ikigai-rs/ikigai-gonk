@@ -135,6 +135,9 @@ const MEMBER_KEY_PREFIX: &str = "key:";
 /// GONK's own field on a group, set while gating: how many members the serious scope left
 /// out of it. Browse's JSON never carries it.
 const LEFT_OUT: &str = "gonk_left_out";
+/// GONK's own field on a group, set while filtering: how many members the verdict filter
+/// left out of it (ledger #704). Browse's JSON never carries it.
+const JUDGED_OUT: &str = "gonk_judged_out";
 
 /// The picker's empty option when a word must still be chosen — selected, not submittable.
 const CHOOSE_REASON_LABEL: &str = "choose a reason";
@@ -191,7 +194,7 @@ pub(crate) fn kind_wanted(
 }
 
 /// `group=<kind>`, `…&repo=x`, `…&severity=all` — the batch view's query.
-pub(crate) fn group_query(kind: &str, repo: Option<&str>, scope: &str) -> String {
+pub(crate) fn group_query(kind: &str, repo: Option<&str>, scope: &str, shown: bool) -> String {
     let mut out = format!("{GROUP_ARG}={kind}");
     if let Some(repo) = repo.filter(|r| !r.is_empty()) {
         out.push_str(&format!("&repo={repo}"));
@@ -199,6 +202,7 @@ pub(crate) fn group_query(kind: &str, repo: Option<&str>, scope: &str) -> String
     if scope != SCOPE_SERIOUS {
         out.push_str(&format!("&{SCOPE_ARG}={scope}"));
     }
+    out.push_str(&crate::verdict::query_part(shown));
     out
 }
 
@@ -212,11 +216,12 @@ pub(crate) fn kind_nav(
     current: Option<&str>,
     only: Option<&str>,
     scope: &str,
+    shown: bool,
 ) -> String {
     kinds
         .iter()
         .map(|kind| {
-            let query = group_query(kind, only, scope);
+            let query = group_query(kind, only, scope, shown);
             element(
                 "kind",
                 &[
@@ -238,6 +243,9 @@ pub(crate) struct Frame<'a> {
     pub(crate) states: Option<&'a [String]>,
     pub(crate) only: Option<&'a str>,
     pub(crate) scope: &'static str,
+    /// Whether the undecided members the judge refuted are listed (ledger #704) — hidden by
+    /// default, as on the rows.
+    pub(crate) shown: bool,
     pub(crate) chosen: &'a [String],
     pub(crate) no_roots: bool,
     /// Whether the findings contract offers the walk over unconfirmed declines
@@ -415,6 +423,7 @@ pub(crate) async fn section(
         states,
         only,
         scope,
+        shown,
         chosen,
         no_roots,
         walk,
@@ -452,26 +461,49 @@ pub(crate) async fn section(
     // Stable, so within one standing the group keeps browse's member order.
     let unjudgeable = crate::backfill::unjudgeable(inv).await;
     let cannot = |id: &str| unjudgeable.get(id).cloned();
+    // ★★ And the VERDICT (ledger #704), after the severity gate as on the rows: a member the
+    // judge refuted is left out by default, so no batch here declines it — the group says how
+    // many it lost, and a group left with NO member is not shown (a group of nothing is not a
+    // proposal) and is counted in the line above the groups instead. `judged_out` counts in
+    // both modes, so a shown view can say what it is showing.
+    let mut judged_out = 0usize;
+    let mut emptied = 0usize;
     for (_, answer) in &mut read {
         if let Ok(groups) = answer {
             for group in groups.iter_mut() {
                 if let Some(Value::Array(members)) = group.get_mut("members") {
                     crate::verdict::order(members, |row| row, &cannot);
                 }
-                if scope != SCOPE_SERIOUS {
-                    continue;
-                }
                 let mut left_out = 0usize;
-                if let Some(Value::Array(members)) = group.get_mut("members") {
-                    let before = members.len();
-                    members.retain(|row| policy.queues(queue::rated(row)));
-                    left_out = before - members.len();
+                if scope == SCOPE_SERIOUS {
+                    if let Some(Value::Array(members)) = group.get_mut("members") {
+                        let before = members.len();
+                        members.retain(|row| policy.queues(queue::rated(row)));
+                        left_out = before - members.len();
+                    }
                 }
                 hidden += left_out;
                 // Browse's label counts every severity ("22 findings on …"); the group
                 // says on itself how many the gate left out, so the two numbers agree.
                 if let (true, Some(object)) = (left_out > 0, group.as_object_mut()) {
                     object.insert(LEFT_OUT.to_string(), Value::from(left_out));
+                }
+                let mut out_here = 0usize;
+                if let Some(Value::Array(members)) = group.get_mut("members") {
+                    let out =
+                        |row: &Value| crate::verdict::hidden_by_default(row, queue::decided(row));
+                    out_here = members.iter().filter(|row| out(row)).count();
+                    if !shown {
+                        let had = !members.is_empty();
+                        members.retain(|row| !out(row));
+                        if had && members.is_empty() {
+                            emptied += 1;
+                        }
+                    }
+                }
+                judged_out += out_here;
+                if let (true, false, Some(object)) = (out_here > 0, shown, group.as_object_mut()) {
+                    object.insert(JUDGED_OUT.to_string(), Value::from(out_here));
                 }
             }
             groups.retain(|group| !members(group).is_empty());
@@ -482,7 +514,7 @@ pub(crate) async fn section(
         .filter_map(|(_, answer)| answer.as_ref().ok())
         .flatten()
         .collect();
-    let shown: usize = groups.iter().map(|g| members(g).len()).sum();
+    let listed: usize = groups.iter().map(|g| members(g).len()).sum();
     // ★ The mode is the DATA's: a view whose groups carry a declined twin decides each
     // member with its own twin's word, all groups in one form.
     let per_twin = groups.iter().any(|g| !is_null_or_absent(g, "twin"));
@@ -504,7 +536,7 @@ pub(crate) async fn section(
     children.push_str(&page.intray_element(inv).await);
     if let Some(known) = states {
         for name in known {
-            let q = queue::query(name, only, scope);
+            let q = queue::query(name, only, scope, shown);
             children.push_str(&element(
                 "state",
                 &[
@@ -522,7 +554,7 @@ pub(crate) async fn section(
         (SCOPE_SERIOUS, serious_label.as_str()),
         (SCOPE_ALL, "all severities"),
     ] {
-        let q = group_query(kind, only, name);
+        let q = group_query(kind, only, name, shown);
         children.push_str(&element(
             "scope",
             &[
@@ -535,7 +567,7 @@ pub(crate) async fn section(
             "",
         ));
     }
-    children.push_str(&kind_nav(kinds, Some(kind), only, scope));
+    children.push_str(&kind_nav(kinds, Some(kind), only, scope, shown));
     if walk {
         children.push_str(&crate::walk::nav(only, false));
     }
@@ -549,7 +581,7 @@ pub(crate) async fn section(
         many => format!("{} repositories", many.len()),
     };
     if hidden > 0 {
-        let all = group_query(kind, only, SCOPE_ALL);
+        let all = group_query(kind, only, SCOPE_ALL, shown);
         let others = queue::proposal_words(&web.hub, policy);
         let rated = match &others {
             Some(words) if !words.is_empty() => format!(" rated {}", queue::join_or(words)),
@@ -570,6 +602,20 @@ pub(crate) async fn section(
                 if hidden == 1 { "is" } else { "are" },
                 if hidden == 1 { "it" } else { "them" },
             ),
+        ));
+    }
+    if judged_out > 0 {
+        let (text, label) = if shown {
+            crate::verdict::shown_sentence(judged_out)
+        } else {
+            crate::verdict::batch_sentence(judged_out, emptied)
+        };
+        children.push_str(&queue::verdict_element(
+            judged_out,
+            shown,
+            &text,
+            label,
+            &group_query(kind, only, scope, !shown),
         ));
     }
     if folded > 0 {
@@ -594,6 +640,12 @@ pub(crate) async fn section(
             ("group", kind.to_string()),
             ("repo", only.unwrap_or("").to_string()),
             ("scope", scope.to_string()),
+            // The shown mode rides the form, so the re-render keeps it (ledger #704).
+            ("shown-field", crate::verdict::form_field()),
+            (
+                "shown-value",
+                if shown { crate::verdict::SHOW } else { "" }.to_string(),
+            ),
             ("decide", flag(decide && reasons.is_some()).to_string()),
             ("per-twin", flag(per_twin).to_string()),
             // The single-row Decline button's own class, so the batch button reads as the
@@ -759,7 +811,7 @@ pub(crate) async fn section(
     }
 
     // ---- the section's own attributes
-    let q = group_query(kind, only, scope);
+    let q = group_query(kind, only, scope, shown);
     let mut attributes: Vec<(&str, String)> = vec![
         ("view", "queue".to_string()),
         ("mode", "batch".to_string()),
@@ -805,10 +857,18 @@ pub(crate) async fn section(
         attributes.push(("empty", "true".to_string()));
         attributes.push((
             "empty-text",
-            format!(
-                "No {kind} groups among the {serious}pending findings in {where_}. Nothing here \
-                 is waiting for a batch decision."
-            ),
+            if emptied > 0 {
+                // ⚠ "Nothing is waiting" would be false: the hidden members are waiting.
+                format!(
+                    "No {kind} groups to show among the {serious}pending findings in \
+                     {where_}: every member left was one the line above hides."
+                )
+            } else {
+                format!(
+                    "No {kind} groups among the {serious}pending findings in {where_}. Nothing \
+                     here is waiting for a batch decision."
+                )
+            },
         ));
     } else if !groups.is_empty() {
         attributes.push((
@@ -821,7 +881,7 @@ pub(crate) async fn section(
                     &format!("{kind} groups")
                 ),
                 plural(
-                    shown,
+                    listed,
                     &format!("{serious}pending finding"),
                     &format!("{serious}pending findings")
                 ),
@@ -1095,6 +1155,9 @@ fn group_element(
             ),
         ));
     }
+    if let Some(out) = group.get(JUDGED_OUT).and_then(Value::as_u64) {
+        attributes.push(("judged-out", crate::verdict::group_clause(out as usize)));
+    }
     if let (false, Some(word)) = (evidence, suggested(group)) {
         attributes.push(("suggested", word.to_string()));
         attributes.push((
@@ -1240,6 +1303,8 @@ struct Form {
     kind: Option<String>,
     repo: Option<String>,
     scope: Option<String>,
+    /// Whether the page it was posted from showed the members the judge refuted.
+    refuted: Option<String>,
     decision: Option<String>,
 }
 
@@ -1253,6 +1318,7 @@ fn read_form(body: &str) -> Result<Form> {
         kind: None,
         repo: None,
         scope: None,
+        refuted: None,
         decision: None,
     };
     let kept = |v: String| Some(v.trim().to_string()).filter(|v| !v.is_empty());
@@ -1271,6 +1337,7 @@ fn read_form(body: &str) -> Result<Form> {
             "_key" => form.key = kept(value),
             "_repo" => form.repo = kept(value),
             "_severity" => form.scope = kept(value),
+            field if field == crate::verdict::form_field() => form.refuted = kept(value),
             // ★ The door says how a decision was made (ledger #653): a form naming the
             // provenance itself is refused by name, as the single decide refuses it.
             queue::MADE_ARG | queue::BATCH_ARG => return Err(queue::provenance_refused(&name)),
@@ -1561,6 +1628,7 @@ impl Endpoint for Batch {
             scope: form.scope,
             group: form.kind,
             summary: None,
+            refuted: form.refuted,
         };
         let echo = match &submitted {
             Some(submitted) => queue::Echo::Batch(submitted),
@@ -1601,12 +1669,13 @@ impl Endpoint for Batch {
                     // Every call it can make is the finding Sink, which requires both.
                     .requires(ikigai_browse::CAP_ANNOTATE)
                     .requires(ikigai_browse::CAP_WILDCARD)
-                    .input(ArgSpec::new("content").class(XSD_STRING).summary(
+                    .input(ArgSpec::new("content").class(XSD_STRING).summary(format!(
                         "the form: `member` (repeated), `reason:<id>` per member and/or \
                          `reason` as the fallback for members without one, `key:<id>` per \
                          member (its group key, for the provenance stamp), plus `_group`, \
-                         `_key`, `_repo` and `_severity` for the re-render",
-                    ))
+                         `_key`, `_repo`, `_severity` and `{}` for the re-render",
+                        crate::verdict::form_field()
+                    )))
                     .output("text/html"),
             )
             .verb(Verb::Meta)

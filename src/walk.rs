@@ -277,7 +277,7 @@ pub(crate) async fn section(
     }
     children.push_str(&page.intray_element(inv).await);
     for name in states.unwrap_or_default() {
-        let q = queue::query(name, only, scope);
+        let q = queue::query(name, only, scope, false);
         children.push_str(&element(
             "state",
             &[
@@ -290,7 +290,7 @@ pub(crate) async fn section(
         ));
     }
     if let Some(kinds) = kinds {
-        children.push_str(&crate::batch::kind_nav(kinds, None, only, scope));
+        children.push_str(&crate::batch::kind_nav(kinds, None, only, scope, false));
     }
     children.push_str(&nav(only, true));
     for (root, why) in &refused {

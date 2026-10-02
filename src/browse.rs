@@ -727,9 +727,12 @@ fn touch_for(request: &Request) -> Option<Touch> {
     let root = || split_repo_iri(target).map(|(root, _)| Touch::Root(root.to_string()));
     match request.verb {
         Verb::Exists | Verb::Meta => None,
-        // A review pass mints findings during a READ.
+        // A review pass mints findings during a READ — and judges the serious ones; and the
+        // backfill's `judge-finding:{id}` archives a verdict during a read too. A verdict now
+        // moves the badge's count, since the Queue hides what the judge refuted (ledger #704),
+        // so both touch the root they name.
         Verb::Source => split_repo_iri(target)
-            .filter(|(_, rest)| rest.starts_with("review"))
+            .filter(|(_, rest)| rest.starts_with("review") || rest.starts_with("judge-finding:"))
             .and_then(|_| root()),
         _ => {
             if let Some(id) = target.strip_prefix(crate::queue::FINDING_PREFIX) {
@@ -920,6 +923,13 @@ mod tests {
             touch(Verb::Source, "urn:repo:core:review:a.rs", None),
             root("core")
         );
+        // The backfill archives a verdict during a read (ledger #704); asking the judge about
+        // a claim by argument archives nothing.
+        assert_eq!(
+            touch(Verb::Source, "urn:repo:core:judge-finding:f1", None),
+            root("core")
+        );
+        assert_eq!(touch(Verb::Source, "urn:repo:core:judge:a.rs", None), None);
         assert_eq!(
             touch(Verb::Sink, "urn:iki:finding:f1", None),
             Some(Touch::Finding("f1".to_string()))
