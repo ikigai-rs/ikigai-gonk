@@ -311,6 +311,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * else's: one outline around both, the picker the same height as the button. */
 .decide-why { display: inline-flex; align-items: stretch; gap: 0.25rem; padding: 0.15rem; border: 1px solid var(--line); border-radius: var(--radius); }
 .decide-why-word { min-width: 8rem; }
+.decide-mark { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .reason-word { font-weight: 600; }
 
 /* The batch view (ledger #506). The kind nav sits under the scope nav; each proposed group is
@@ -367,3 +368,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .judge-answer-list { margin: 0.25rem 0 0; padding-left: 0.75rem; border-left: 2px solid var(--line); }
 .judge-answer-list dt { font-weight: 600; }
 .judge-answer-list dd { margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+/* The "real, reproduced" mark and its form (ledger #696). The WORD carries the mark. */
+.reproduced { font-weight: 600; }
+.decide-reproduced { display: inline-flex; gap: 0.3rem; align-items: center; }
+.reproduce > summary { cursor: pointer; color: var(--muted); }

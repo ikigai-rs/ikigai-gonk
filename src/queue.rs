@@ -187,6 +187,17 @@ pub(crate) const REASONED_DECISION: &str = "decline";
 /// The picker's empty first option: "no reason", which browse reads as omitted.
 const NO_REASON_LABEL: &str = "why? (optional)";
 
+/// The finding Sink's "real, reproduced" mark (browse 0.16.0, ledger
+/// [#696](http://localhost:1060/l/default/item/696)): a human SHOWED the defect happen, and the
+/// note says how. An argument NAME; its one word is the contract's `one_of`, never spelled here.
+/// ⚠ It travels only with a publish — browse refuses it beside any other decision — so the
+/// adapter drops it from any other, as it drops a reason word from a publish.
+pub const REPRODUCED_ARG: &str = "reproduced";
+
+/// The decision a reproduction travels with — the wording table's word, like
+/// [`REASONED_DECISION`]. Checked against the contract's `decision` set before a form is drawn.
+pub(crate) const PUBLISH_DECISION: &str = "publish";
+
 /// The finding Sink's revision argument (browse 0.14.0, ledger
 /// [#653](http://localhost:1060/l/default/item/653)): the IRI of the CURRENT decision a new one
 /// revises. An argument NAME, like [`REASON_ARG`]; its value is always read off the row's own
@@ -555,6 +566,11 @@ pub(crate) struct Kept {
     pub(crate) severity: Option<String>,
     pub(crate) reason: Option<String>,
     pub(crate) note: Option<String>,
+    /// Whether the "reproduced" box was ticked (ledger #696).
+    pub(crate) reproduced: bool,
+    /// Whether the refused form was the reproduction form on a PUBLISHED finding — it comes
+    /// back open, with the note, rather than as an undecided row's decision form.
+    pub(crate) revising: bool,
     /// The refusal, marked on the finding's own row as well as in the flash.
     pub(crate) problem: String,
 }
@@ -1399,9 +1415,18 @@ impl QueuePage {
         }
         if let Some(decision) = row.get("decision").filter(|d| !d.is_null()) {
             children.push_str(&decision_element(decision));
+            // ★ A published finding not yet marked reproduced offers the reproduction form
+            // (ledger #696), folded; a refused one comes back open with its note.
+            let reproduction = decide
+                .then(|| self.reproduce_element(id, decision, (state, only, scope), kept))
+                .flatten();
+            let drawn_back = reproduction.is_some() && kept.is_some_and(|k| k.revising);
+            if let Some(form) = reproduction {
+                children.push_str(&form);
+            }
             // ★ Decided meanwhile, so there is no form to draw a refused note back into — the
             // note is still the person's, and it is SHOWN rather than dropped (ledger #657).
-            if let Some(note) = kept.and_then(|k| k.note.as_deref()) {
+            if let (false, Some(note)) = (drawn_back, kept.and_then(|k| k.note.as_deref())) {
                 children.push_str(&element(
                     "unsaved",
                     &[("label", "Your note was not recorded:")],
@@ -1490,8 +1515,26 @@ impl QueuePage {
         // alone; the adapter drops it from any other decision ([`Decide`]). An older browse
         // that declares no `reason` simply gets no picker — the form still decides.
         let reasons = one_of_with_meanings(&self.web.hub, &iri, Verb::Sink, REASON_ARG);
+        // ★ The reproduced box (browse 0.16.0, ledger #696): the contract's one word, beside
+        // Publish only — an older browse that declares no `reproduced` gets no box.
+        let reproduced = one_of(&self.web.hub, &iri, Verb::Sink, REPRODUCED_ARG)
+            .and_then(|words| words.into_iter().next());
         for value in &decisions {
             let mut picker = String::new();
+            if let (Some(word), PUBLISH_DECISION) = (&reproduced, value.as_str()) {
+                picker.push_str(&element(
+                    "reproduced-option",
+                    &[
+                        ("value", word),
+                        (
+                            "label",
+                            "reproduced — I showed the defect happen; the note says how",
+                        ),
+                        ("checked", flag(kept.is_some_and(|k| k.reproduced))),
+                    ],
+                    "",
+                ));
+            }
             if let (Some(reasons), REASONED_DECISION) = (&reasons, value.as_str()) {
                 let picked = kept.and_then(|k| k.reason.as_deref());
                 picker.push_str(&element(
@@ -1544,6 +1587,58 @@ impl QueuePage {
             attributes.push(("problem", &kept.problem));
         }
         wrap("decide", &attributes, &options)
+    }
+}
+
+impl QueuePage {
+    /// The folded "record a reproduction" form on a PUBLISHED finding not yet marked
+    /// reproduced (ledger #696): `decision=publish reproduced=<the contract's word>
+    /// revises=<the decision's IRI>`, the note saying how — a revision that keeps the outcome
+    /// and the rating, stamped `made=single` at the door like every decision this page sends.
+    /// `None` on any other row, or when the contract declares no mark or no publish.
+    fn reproduce_element(
+        &self,
+        id: &str,
+        decision: &Value,
+        (state, only, scope): (&str, Option<&str>, &str),
+        kept: Option<&Kept>,
+    ) -> Option<String> {
+        let text = |key: &str| decision.get(key).and_then(Value::as_str).unwrap_or("");
+        if text("outcome") != "published"
+            || decision.get(REPRODUCED_ARG).and_then(Value::as_bool) == Some(true)
+            || text("iri").is_empty()
+        {
+            return None;
+        }
+        let iri = finding_iri(id);
+        let word = one_of(&self.web.hub, &iri, Verb::Sink, REPRODUCED_ARG)?
+            .into_iter()
+            .next()?;
+        let publish = decision_words(&self.web.hub, &iri)?
+            .answers
+            .into_iter()
+            .find(|w| w == PUBLISH_DECISION)?;
+        let kept = kept.filter(|k| k.revising);
+        let mut attributes: Vec<(&str, &str)> = vec![
+            ("action", DECIDE_PATH),
+            ("id", id),
+            ("state", state),
+            ("repo", only.unwrap_or("")),
+            ("scope", scope),
+            ("decision", &publish),
+            ("reproduced", &word),
+            ("revises", text("iri")),
+            ("summary-label", "record a reproduction"),
+            ("open", flag(kept.is_some())),
+        ];
+        if let Some(kept) = kept {
+            attributes.push(("problem", &kept.problem));
+        }
+        let note = kept
+            .and_then(|k| k.note.as_deref())
+            .map(|note| element("note", &[], note))
+            .unwrap_or_default();
+        Some(wrap("reproduce", &attributes, &note))
     }
 }
 
@@ -1651,6 +1746,13 @@ pub(crate) fn decision_element_linking(decision: &Value, walk_link: bool) -> Str
     if !reason.is_empty() {
         attributes.push((REASON_ARG, reason.to_string()));
     }
+    // ★ The "real, reproduced" mark (ledger #696), in words.
+    if decision.get(REPRODUCED_ARG).and_then(Value::as_bool) == Some(true) {
+        attributes.push((
+            REPRODUCED_ARG,
+            "reproduced — a human showed the defect happen; the note says how".to_string(),
+        ));
+    }
     if let Some(why) = unconfirmed_sentence(decision) {
         attributes.push(("unconfirmed", why));
         if walk_link {
@@ -1671,7 +1773,7 @@ pub(crate) fn decision_element_linking(decision: &Value, walk_link: bool) -> Str
 /// ours, and a value this table does not know keeps its own word rather than disappearing.
 pub(crate) fn decision_label(value: &str) -> &str {
     match value {
-        "publish" => "Publish to Gonk",
+        PUBLISH_DECISION => "Publish to Gonk",
         REASONED_DECISION => "Decline",
         other => other,
     }
@@ -2196,6 +2298,8 @@ impl Endpoint for Decide {
         // What the person chose, kept aside in case the decision is refused (ledger #657).
         let chose = |name: &str| fields.get(name).filter(|v| !v.trim().is_empty()).cloned();
         let (severity, reason, note) = (chose("severity"), chose(REASON_ARG), chose("content"));
+        let reproduced = chose(REPRODUCED_ARG).is_some();
+        let revising = chose(REVISES_ARG).is_some();
         // ⚠ **A reason word travels only with a decline.** The form is ONE form with one
         // picker and two buttons, so a person can pick a word and then press Publish — and
         // browse REFUSES a word beside a publish (a publish reason has no consumer). The word
@@ -2204,6 +2308,12 @@ impl Endpoint for Decide {
         // An empty `reason=` (the "no reason" option) is dropped by the loop below either way.
         if fields.get("decision").map(|d| d.trim()) != Some(REASONED_DECISION) {
             fields.remove(REASON_ARG);
+        }
+        // ⚠ And the reproduced mark travels only with a PUBLISH, for the same reason: the box
+        // sits beside Publish on a form that also has Decline, and browse refuses the mark
+        // beside a decline. A tick followed by Decline is a tick the person abandoned.
+        if fields.get("decision").map(|d| d.trim()) != Some(PUBLISH_DECISION) {
+            fields.remove(REPRODUCED_ARG);
         }
         let target = finding_iri(&id);
         let target_iri = Iri::parse(&target).map_err(|e| Error::InvalidArgument {
@@ -2282,6 +2392,8 @@ impl Endpoint for Decide {
                     severity,
                     reason,
                     note,
+                    reproduced,
+                    revising,
                     problem: format!(
                         "Not decided — your rating, word and note are kept here. The \
                          refusal: {text}"
@@ -2321,7 +2433,10 @@ impl Endpoint for Decide {
                 "The Queue page's form adapter: an urlencoded body naming `id`, `decision` \
                  and optionally `severity`, `reason` (one word from the finding's own \
                  `one_of`, forwarded ONLY with decision=decline and dropped from any other), \
-                 `revises` (the current decision's IRI, from the walk's revise forms) and \
+                 `reproduced` (the contract's word: a human showed the defect happen, the note \
+                 says how — forwarded ONLY with decision=publish and dropped from any other), \
+                 `revises` (the current decision's IRI, from the walk's revise forms and a \
+                 published finding's reproduction form) and \
                  `content` (the human's free-text note), forwarded to \
                  `urn:iki:finding:{id}`'s Sink under the caller's own capability and answered \
                  with the queue section re-rendered. The door stamps `made=single` on every \
@@ -2339,7 +2454,8 @@ impl Endpoint for Decide {
                     .requires(ikigai_browse::CAP_ANNOTATE)
                     .input(ArgSpec::new("content").class(XSD_STRING).summary(
                         "the form: `id`, `decision`, optional `severity`, `reason` (decline \
-                                 only), `revises` and `content`, plus `_state`, `_repo`, \
+                                 only), `reproduced` (publish only), `revises` and `content`, \
+                                 plus `_state`, `_repo`, \
                                  `_severity` and `_summary` for the re-render",
                     ))
                     .output("text/html"),
