@@ -1,8 +1,15 @@
-//! The judge's verdict on the Queue (ledger #696): ordered, never hidden.
+//! The judge's verdict on the Queue (ledger #696): ordered — and, since ledger #704, the
+//! undecided refuted hidden by default, one click away.
 //!
-//! - [`the_queue_orders_by_verdict_and_folds_the_refuted_last`] — confirmed first, then
-//!   unjudged, then unsure, then refuted, folded and still decidable; every row says its
-//!   standing in words with the judge's tag.
+//! - [`the_queue_orders_by_verdict_and_folds_the_refuted_last`] — shown on request: confirmed
+//!   first, then unjudged, then unsure, then refuted, folded and still decidable; every row
+//!   says its standing in words with the judge's tag.
+//! - [`the_queue_hides_the_refuted_by_default_and_one_click_shows_them`] — ledger #704: the
+//!   default leaves them out and says how many, the link brings them back folded, an unjudged
+//!   and an unsure row are never hidden, and nothing is written.
+//! - [`a_batch_group_hides_its_refuted_members_and_says_so`] and
+//!   [`a_group_with_only_refuted_members_is_not_shown_and_is_counted`] — the same in the batch
+//!   view.
 //! - [`each_batch_group_orders_its_members_by_verdict`] — the same order inside a group, a
 //!   folded member still carrying its box.
 //! - [`no_verdict_word_is_written_down_in_this_crate`] — the anti-drift guard's fourth
@@ -333,9 +340,15 @@ fn plant_four(door: &Kernel) {
     );
 }
 
-/// ★★ **Order, never hide** (Brian, 2026-10-02): confirmed, then unjudged, then unsure, then
-/// refuted — the refuted one FOLDED, its answers inside, its decision form intact — and every
-/// row saying its standing in words with the judge's tag.
+/// The page argument that lists the refuted rows — the verdict module's own name and value.
+fn shown() -> [(&'static str, &'static str); 1] {
+    [(verdict::REFUTED_ARG, verdict::SHOW)]
+}
+
+/// ★★ **Ordered** (Brian, 2026-10-02), as the page draws it when asked to SHOW the refuted
+/// (ledger #704): confirmed, then unjudged, then unsure, then refuted — the refuted one FOLDED,
+/// its answers inside, its decision form intact — and every row saying its standing in words
+/// with the judge's tag.
 #[test]
 fn the_queue_orders_by_verdict_and_folds_the_refuted_last() {
     let dir = scratch_root();
@@ -362,7 +375,7 @@ fn the_queue_orders_by_verdict_and_folds_the_refuted_last() {
         "browse reads the planted verdict"
     );
 
-    let html = page(&door, &[]);
+    let html = page(&door, &shown());
     assert_eq!(
         order_on(&html, &[UPHELD, NOBODY, UNSURE, REFUTED]),
         [UPHELD, NOBODY, UNSURE, REFUTED],
@@ -403,6 +416,149 @@ fn the_queue_orders_by_verdict_and_folds_the_refuted_last() {
         html.contains("4 serious pending findings in demo"),
         "{html}"
     );
+    // ★ And the page says it is showing them, with the one click that hides them again.
+    assert!(
+        html.contains(&format!(
+            "1 undecided finding the judge {last} is shown, folded last, because this page was \
+             asked to show it."
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains("href='/queue?state=pending'") && html.contains(">hide it</a>"),
+        "{html}"
+    );
+}
+
+/// ★★ **Hidden by default, one click away** (Brian, 2026-10-02, ledger #704). The default Queue
+/// leaves out the undecided row the judge refuted, says how many it left out with the link
+/// that lists them, and never hides the unjudged or the unsure; the link brings it back folded
+/// with its form, and the mode rides the form so a decision's re-render keeps it. Nothing is
+/// written: the row is still pending, undecided, with its verdict.
+#[test]
+fn the_queue_hides_the_refuted_by_default_and_one_click_shows_them() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_four(&door);
+    let [first, middle, last] = verdict::triage();
+
+    let html = page(&door, &[]);
+    assert!(
+        !html.contains(&format!("value='{REFUTED}'")),
+        "the refuted row is not drawn:\n{html}"
+    );
+    // The unjudged and the unsure are never hidden; the confirmed leads.
+    assert_eq!(
+        order_on(&html, &[UPHELD, NOBODY, UNSURE]),
+        [UPHELD, NOBODY, UNSURE],
+        "{html}"
+    );
+    assert!(!html.contains("class='verdict-fold'"), "{html}");
+    // How many, in words, and the link that lists them.
+    assert!(
+        html.contains(&format!(
+            "1 undecided finding the judge {last} is hidden. Nothing was recorded: it is still \
+             waiting and decidable"
+        )),
+        "the line says how many:\n{html}"
+    );
+    let show = format!(
+        "/queue?state=pending&amp;{}={}",
+        verdict::REFUTED_ARG,
+        verdict::SHOW
+    );
+    assert!(
+        html.contains(&format!("href='{show}'")) && html.contains(">show it</a>"),
+        "the one click:\n{html}"
+    );
+    // The order sentence names them as hidden, never as absent; the count is what is listed.
+    assert!(
+        html.contains(&format!(
+            "1 {first} first, 1 not yet judged, 1 {middle}, 1 {last}, hidden (see above)"
+        )),
+        "{html}"
+    );
+    assert!(!html.contains("Nothing is hidden"), "{html}");
+    assert!(
+        html.contains("3 serious pending findings in demo"),
+        "{html}"
+    );
+    // Every severity view hides it too.
+    let all = page(&door, &[("severity", "all")]);
+    assert!(!all.contains(&format!("value='{REFUTED}'")), "{all}");
+    assert!(all.contains(">show it</a>"), "{all}");
+
+    // ★ Nothing was written: the finding is still pending, undecided, with its verdict.
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(
+        &issue(
+            &door,
+            Verb::Source,
+            &format!("urn:repo:{ROOT}:findings"),
+            &[("as", "application/json")],
+            &reviewer(),
+        )
+        .expect("the findings read")
+        .bytes,
+    )
+    .expect("json rows");
+    let row = rows
+        .iter()
+        .find(|r| r["id"] == REFUTED)
+        .expect("still pending");
+    assert!(row["decision"].is_null(), "{row}");
+    assert_eq!(row["judge"]["verdict"], last);
+
+    // The click: the row is back, folded, decidable — and its form carries the mode, so the
+    // re-render after a decision on THIS page keeps showing them.
+    let back = page(&door, &shown());
+    assert!(back.contains(&format!("value='{REFUTED}'")), "{back}");
+    assert!(back.contains("class='verdict-fold'"), "{back}");
+    let field = verdict::form_field();
+    assert!(
+        back.contains(&format!(
+            "name='{field}' type='hidden' value='{}'",
+            verdict::SHOW
+        )),
+        "the forms carry the mode:\n{back}"
+    );
+    let decided = issue(
+        &door,
+        Verb::Sink,
+        queue::DECIDE_IRI,
+        &[(
+            "content",
+            &format!(
+                "id={UNSURE}&decision=publish&_state=pending&_repo=&_severity=serious&{field}={}",
+                verdict::SHOW
+            ),
+        )],
+        &reviewer(),
+    )
+    .expect("the decide adapter");
+    let after = String::from_utf8(decided.bytes).expect("utf-8");
+    assert!(
+        after.contains(&format!("value='{REFUTED}'")),
+        "the re-render keeps the refuted shown:\n{after}"
+    );
+}
+
+/// A value the argument does not declare is refused by name, never read as the default.
+#[test]
+fn an_undeclared_refuted_value_is_refused() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    let err = issue(
+        &door,
+        Verb::Source,
+        queue::QUEUE_IRI,
+        &[(verdict::REFUTED_ARG, "maybe")],
+        &reviewer(),
+    )
+    .expect_err("refused");
+    assert!(
+        matches!(&err, ikigai_core::Error::InvalidArgument { name, .. } if name == verdict::REFUTED_ARG),
+        "{err:?}"
+    );
 }
 
 /// A DECIDED refuted finding is a record, and a record is never folded away.
@@ -433,25 +589,21 @@ fn a_decided_refuted_finding_is_not_folded() {
     assert!(!published.contains("class='verdict-fold'"), "{published}");
 }
 
-/// The same order inside a batch group, a refuted member folded with its box OUTSIDE the fold.
-#[test]
-fn each_batch_group_orders_its_members_by_verdict() {
-    let dir = scratch_root();
-    let (door, _hub, _config) = door(&dir);
-    plant_four(&door);
+/// A group kind whose grouped read puts every one of `ids` in one group (the whole file) —
+/// read from the findings contract and browse's own answer, never named here.
+fn kind_holding(door: &Kernel, ids: &[&str]) -> String {
     let kinds = queue::one_of(
-        &door,
+        door,
         &format!("urn:repo:{ROOT}:findings"),
         Verb::Source,
         ikigai_gonk::batch::GROUP_ARG,
     )
     .expect("the group kinds");
-    let ids = [UPHELD, NOBODY, UNSURE, REFUTED];
-    let kind = kinds
+    kinds
         .into_iter()
         .find(|kind| {
             let answer = issue(
-                &door,
+                door,
                 Verb::Source,
                 &format!("urn:repo:{ROOT}:findings"),
                 &[("as", "application/json"), ("group", kind)],
@@ -469,8 +621,18 @@ fn each_batch_group_orders_its_members_by_verdict() {
                 })
             })
         })
-        .expect("a kind that groups the whole file");
-    let html = page(&door, &[("group", &kind)]);
+        .expect("a kind that groups the whole file")
+}
+
+/// The same order inside a batch group, a refuted member folded with its box OUTSIDE the fold.
+#[test]
+fn each_batch_group_orders_its_members_by_verdict() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_four(&door);
+    let ids = [UPHELD, NOBODY, UNSURE, REFUTED];
+    let kind = kind_holding(&door, &ids);
+    let html = page(&door, &[("group", &kind), shown()[0]]);
     assert_eq!(
         order_on(&html, &ids),
         ids,
@@ -481,6 +643,100 @@ fn each_batch_group_orders_its_members_by_verdict() {
         .find(&format!("value='{REFUTED}'"))
         .expect("the refuted member's box");
     assert!(tick < fold, "the box sits outside the fold:\n{html}");
+}
+
+/// ★ The batch view hides a refuted member by default (ledger #704): it is not drawn, so no
+/// batch here can decline it; the group says how many it lost and the page says how many in
+/// all, with the link that lists them. The unjudged and the unsure members stay.
+#[test]
+fn a_batch_group_hides_its_refuted_members_and_says_so() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    plant_four(&door);
+    let [_, _, last] = verdict::triage();
+    let kind = kind_holding(&door, &[UPHELD, NOBODY, UNSURE, REFUTED]);
+    let html = page(&door, &[("group", &kind)]);
+    assert!(
+        !html.contains(&format!("value='{REFUTED}'")),
+        "the refuted member has no box:\n{html}"
+    );
+    assert_eq!(
+        order_on(&html, &[UPHELD, NOBODY, UNSURE]),
+        [UPHELD, NOBODY, UNSURE],
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            "1 undecided finding in this group the judge {last} is hidden"
+        )),
+        "the group says what it lost:\n{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            "1 undecided finding the judge {last} is left out of these groups, so no batch \
+             here declines it."
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            "href='/queue?group={kind}&amp;{}={}'",
+            verdict::REFUTED_ARG,
+            verdict::SHOW
+        )),
+        "the one click:\n{html}"
+    );
+    // The batch form carries the mode for its re-render (empty: the default).
+    assert!(
+        html.contains(&format!(
+            "name='{}' type='hidden' value=''",
+            verdict::form_field()
+        )),
+        "{html}"
+    );
+}
+
+/// ★ A group whose every member the filter left out is NOT shown — a group of nothing is not a
+/// proposal — and the line above the groups counts it, so it is not silently gone; the
+/// empty-view sentence does not claim that nothing is waiting.
+#[test]
+fn a_group_with_only_refuted_members_is_not_shown_and_is_counted() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    let [_, _, last] = verdict::triage();
+    let other = "aaaaaaaaaaaaaaaaaaaa0005";
+    plant_finding(&door, REFUTED, "fn alpha() {}", "alpha is wrong");
+    plant_finding(&door, other, "fn beta() {}", "beta is wrong");
+    let answers = [
+        ("no", "it does not"),
+        ("yes", "the comment above says so"),
+        ("no", "it would not"),
+        ("no", "not a test"),
+    ];
+    plant_verdict(&door, REFUTED, last, answers);
+    plant_verdict(&door, other, last, answers);
+    let kind = kind_holding(&door, &[REFUTED, other]);
+    let html = page(&door, &[("group", &kind)]);
+    for id in [REFUTED, other] {
+        assert!(!html.contains(&format!("value='{id}'")), "{html}");
+    }
+    assert!(
+        html.contains(&format!(
+            "2 undecided findings the judge {last} are left out of these groups, so no batch \
+             here declines them. 1 group had no other member and is not shown."
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains("every member left was one the line above hides"),
+        "{html}"
+    );
+    assert!(!html.contains("Nothing here is waiting"), "{html}");
+    // Shown, the group is back with both members folded.
+    let back = page(&door, &[("group", &kind), shown()[0]]);
+    for id in [REFUTED, other] {
+        assert!(back.contains(&format!("value='{id}'")), "{back}");
+    }
 }
 
 /// ★ The anti-drift guard's fourth sibling. The verdict words have no `one_of` in browse's

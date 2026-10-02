@@ -592,6 +592,9 @@ pub(crate) struct Params {
     /// [`crate::walk::WALK`] (ledger #653): the walk over unconfirmed declines instead of the
     /// rows — validated against the findings contract's own `summary` set.
     pub(crate) summary: Option<String>,
+    /// [`crate::verdict::SHOW`] lists the undecided rows the judge refuted, which the Queue and
+    /// the batch views leave out by default (ledger #704) — [`crate::verdict::REFUTED_ARG`].
+    pub(crate) refuted: Option<String>,
 }
 
 impl Params {
@@ -605,6 +608,7 @@ impl Params {
             scope: arg(SCOPE_ARG),
             group: arg(crate::batch::GROUP_ARG),
             summary: arg(crate::walk::SUMMARY_ARG),
+            refuted: arg(crate::verdict::REFUTED_ARG),
         }
     }
 }
@@ -684,8 +688,12 @@ pub(crate) fn rated(row: &Value) -> Option<&str> {
 
 /// What is waiting for a human across the readable roots, split the way the page splits it.
 struct Counts {
-    /// Rows the default page asks about: serious, or unrated.
+    /// Rows the default page asks about AND shows: serious or unrated, and not hidden by the
+    /// judge's verdict (ledger #704).
     serious: usize,
+    /// Rows the serious gate admits and the verdict hides — waiting, not counted in
+    /// `serious`, and NAMED in the tooltip so the number never drops in silence.
+    judged_out: usize,
     /// Rows it only counts.
     other: usize,
     /// Roots whose findings could not be read under this caller.
@@ -702,6 +710,9 @@ impl Counts {
             self.other,
             if self.other == 1 { "" } else { "s" },
         );
+        if self.judged_out > 0 {
+            out.push_str(&crate::verdict::badge_clause(self.judged_out));
+        }
         if self.refused > 0 {
             out.push_str(&format!(
                 " ({} repositor{} could not be read.)",
@@ -718,6 +729,7 @@ impl Counts {
 struct Counted {
     epoch: u64,
     serious: usize,
+    judged_out: usize,
     other: usize,
 }
 
@@ -748,6 +760,7 @@ fn scopes_key(inv: &Invocation<'_>) -> String {
 async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) -> Counts {
     let mut counts = Counts {
         serious: 0,
+        judged_out: 0,
         other: 0,
         refused: 0,
     };
@@ -761,18 +774,27 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
             let hit = memo.lock().ok().and_then(|m| m.get(slot).copied());
             if let Some(hit) = hit.filter(|hit| hit.epoch == stamp) {
                 counts.serious += hit.serious;
+                counts.judged_out += hit.judged_out;
                 counts.other += hit.other;
                 continue;
             }
         }
         match read_findings(inv, &root, "pending").await {
             Rows::Got(rows) => {
-                let serious = rows
+                let queued: Vec<&Value> = rows
                     .iter()
                     .filter(|row| web.queue.queues(rated(row)))
+                    .collect();
+                let other = rows.len() - queued.len();
+                // ★ The verdict filter (ledger #704) on the rows this read already holds —
+                // a read-side split, so the memo below holds it like the rest.
+                let judged_out = queued
+                    .iter()
+                    .filter(|row| crate::verdict::hidden_by_default(row, decided(row)))
                     .count();
-                let other = rows.len() - serious;
+                let serious = queued.len() - judged_out;
                 counts.serious += serious;
+                counts.judged_out += judged_out;
                 counts.other += other;
                 if let (Some(epoch), Some(memo), Some(slot), Some(epochs)) =
                     (stamp, memo, slot, epochs)
@@ -788,6 +810,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
                             Counted {
                                 epoch,
                                 serious,
+                                judged_out,
                                 other,
                             },
                         );
@@ -826,6 +849,10 @@ impl QueuePage {
         let roots = crate::k::readable_roots(&self.web, inv);
         let wanted = rows_wanted(params.limit.as_deref())?;
         let scope = scope_wanted(params.scope.as_deref())?;
+        // ★ Whether the undecided rows the judge refuted are listed (ledger #704): hidden by
+        // default, one click away. Checked here, before any branch, so a bad value is refused
+        // on every view rather than ignored on some.
+        let shown = crate::verdict::shown_wanted(params.refuted.as_deref())?;
         let only = params
             .repo
             .as_deref()
@@ -915,6 +942,7 @@ impl QueuePage {
                     states: states.as_deref(),
                     only: only.as_deref(),
                     scope,
+                    shown,
                     chosen: &chosen,
                     no_roots: roots.is_empty(),
                     walk,
@@ -953,6 +981,13 @@ impl QueuePage {
         let policy = &self.web.queue;
         let mut hidden = 0usize;
         let mut undecided = 0usize;
+        // ★★ AND THE VERDICT (ledger #704, Brian 2026-10-02): an undecided row the judge
+        // refuted is left out by default, under every severity scope, AFTER the severity gate
+        // — so a row is counted once, by the first gate that left it out. Nothing is written:
+        // the row is still pending and decidable, `?refuted=show` lists it folded last, and a
+        // later verdict that does not refute brings it back. `judged_out` counts them in BOTH
+        // modes, so the page can say how many it hides, or how many it is showing.
+        let mut judged_out = 0usize;
         for (_, rows) in &mut read {
             if let Rows::Got(rows) = rows {
                 undecided += rows.iter().filter(|row| !decided(row)).count();
@@ -960,6 +995,11 @@ impl QueuePage {
                     let before = rows.len();
                     rows.retain(|row| decided(row) || policy.queues(rated(row)));
                     hidden += before - rows.len();
+                }
+                let out = |row: &Value| crate::verdict::hidden_by_default(row, decided(row));
+                judged_out += rows.iter().filter(|row| out(row)).count();
+                if !shown {
+                    rows.retain(|row| !out(row));
                 }
             }
         }
@@ -997,8 +1037,14 @@ impl QueuePage {
                     "state",
                     &[
                         ("name", name),
-                        ("href", &page_url(&query(name, only.as_deref(), scope))),
-                        ("rows-url", &rows_url(&query(name, only.as_deref(), scope))),
+                        (
+                            "href",
+                            &page_url(&query(name, only.as_deref(), scope, shown)),
+                        ),
+                        (
+                            "rows-url",
+                            &rows_url(&query(name, only.as_deref(), scope, shown)),
+                        ),
                         ("current", flag(name == &state)),
                     ],
                     "",
@@ -1022,8 +1068,14 @@ impl QueuePage {
                     &[
                         ("name", name),
                         ("label", label),
-                        ("href", &page_url(&query(&state, only.as_deref(), name))),
-                        ("rows-url", &rows_url(&query(&state, only.as_deref(), name))),
+                        (
+                            "href",
+                            &page_url(&query(&state, only.as_deref(), name, shown)),
+                        ),
+                        (
+                            "rows-url",
+                            &rows_url(&query(&state, only.as_deref(), name, shown)),
+                        ),
                         ("current", flag(name == scope)),
                     ],
                     "",
@@ -1031,7 +1083,13 @@ impl QueuePage {
             }
         }
         if let Some(kinds) = &kinds {
-            children.push_str(&crate::batch::kind_nav(kinds, None, only.as_deref(), scope));
+            children.push_str(&crate::batch::kind_nav(
+                kinds,
+                None,
+                only.as_deref(),
+                scope,
+                shown,
+            ));
         }
         if walk {
             children.push_str(&crate::walk::nav(only.as_deref(), false));
@@ -1055,11 +1113,11 @@ impl QueuePage {
                     ("count", &hidden.to_string()),
                     (
                         "href",
-                        &page_url(&query(&state, only.as_deref(), SCOPE_ALL)),
+                        &page_url(&query(&state, only.as_deref(), SCOPE_ALL, shown)),
                     ),
                     (
                         "rows-url",
-                        &rows_url(&query(&state, only.as_deref(), SCOPE_ALL)),
+                        &rows_url(&query(&state, only.as_deref(), SCOPE_ALL, shown)),
                     ),
                     ("label", "list all severities"),
                 ],
@@ -1070,6 +1128,13 @@ impl QueuePage {
                     if hidden == 1 { "is" } else { "are" },
                 ),
             ));
+        }
+        if judged_out > 0 {
+            // ★ The rows the verdict left out are SAID, with the one click that lists them —
+            // and, once listed, the click that hides them again (ledger #704).
+            children.push_str(&verdict_line(judged_out, shown, |show| {
+                query(&state, only.as_deref(), scope, show)
+            }));
         }
 
         // The rows, each repository's in the order its resource returned them — which is
@@ -1118,7 +1183,8 @@ impl QueuePage {
             .iter()
             .map(|(_, row)| crate::verdict::Standing::of(row, &cannot))
             .collect();
-        if let Some(sentence) = crate::verdict::order_sentence(&standings) {
+        let hidden_by_verdict = if shown { 0 } else { judged_out };
+        if let Some(sentence) = crate::verdict::order_sentence(&standings, hidden_by_verdict) {
             children.push_str(&element("order", &[], &sentence));
         }
         let mut drawn = 0usize;
@@ -1155,7 +1221,7 @@ impl QueuePage {
                 row,
                 root,
                 decide,
-                (&state, only.as_deref(), scope),
+                (&state, only.as_deref(), scope, shown),
                 kept,
                 standing,
             ));
@@ -1172,8 +1238,14 @@ impl QueuePage {
             ("title", "Queue".to_string()),
             ("state", state.clone()),
             ("scope", scope.to_string()),
-            ("page-url", page_url(&query(&state, only.as_deref(), scope))),
-            ("rows-url", rows_url(&query(&state, only.as_deref(), scope))),
+            (
+                "page-url",
+                page_url(&query(&state, only.as_deref(), scope, shown)),
+            ),
+            (
+                "rows-url",
+                rows_url(&query(&state, only.as_deref(), scope, shown)),
+            ),
             // ★ How this section re-fetches ITSELF when the header's poll brings news
             // ([#469](http://localhost:1060/l/default/item/469)). It is the rows URL with
             // this request's own `limit` kept, because a human who asked to see all 300
@@ -1185,6 +1257,7 @@ impl QueuePage {
                     &state,
                     only.as_deref(),
                     scope,
+                    shown,
                     params.limit.as_deref(),
                 )),
             ),
@@ -1233,7 +1306,13 @@ impl QueuePage {
             attributes.push(("empty", "true".to_string()));
             attributes.push((
                 "empty-text",
-                if hidden > 0 {
+                if hidden_by_verdict > 0 {
+                    // ⚠ "Nothing is waiting" would be false: the hidden rows are waiting.
+                    format!(
+                        "No {state} findings to show in {where_}: {}.",
+                        crate::verdict::empty_clause(hidden_by_verdict)
+                    )
+                } else if hidden > 0 {
                     format!(
                         "No serious {state} findings in {where_}. Nothing is waiting for a \
                          decision; {hidden} other finding{} minted and not queued.",
@@ -1254,14 +1333,14 @@ impl QueuePage {
                     "more-url",
                     page_url(&format!(
                         "{}&limit=all",
-                        query(&state, only.as_deref(), scope)
+                        query(&state, only.as_deref(), scope, shown)
                     )),
                 ));
                 attributes.push((
                     "more-rows-url",
                     rows_url(&format!(
                         "{}&limit=all",
-                        query(&state, only.as_deref(), scope)
+                        query(&state, only.as_deref(), scope, shown)
                     )),
                 ));
                 attributes.push(("more-label", format!("show all {matched}")));
@@ -1333,7 +1412,7 @@ impl QueuePage {
         row: &Value,
         root: &str,
         decide: bool,
-        (state, only, scope): (&str, Option<&str>, &str),
+        (state, only, scope, shown): (&str, Option<&str>, &str, bool),
         kept: Option<&Kept>,
         standing: &crate::verdict::Standing,
     ) -> String {
@@ -1418,7 +1497,7 @@ impl QueuePage {
             // ★ A published finding not yet marked reproduced offers the reproduction form
             // (ledger #696), folded; a refused one comes back open with its note.
             let reproduction = decide
-                .then(|| self.reproduce_element(id, decision, (state, only, scope), kept))
+                .then(|| self.reproduce_element(id, decision, (state, only, scope, shown), kept))
                 .flatten();
             let drawn_back = reproduction.is_some() && kept.is_some_and(|k| k.revising);
             if let Some(form) = reproduction {
@@ -1434,7 +1513,12 @@ impl QueuePage {
                 ));
             }
         } else if decide {
-            children.push_str(&self.decide_element(id, proposal, (state, only, scope), kept));
+            children.push_str(&self.decide_element(
+                id,
+                proposal,
+                (state, only, scope, shown),
+                kept,
+            ));
         }
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -1454,7 +1538,7 @@ impl QueuePage {
         &self,
         id: &str,
         proposal: Option<&str>,
-        (state, only, scope): (&str, Option<&str>, &str),
+        (state, only, scope, shown): (&str, Option<&str>, &str, bool),
         kept: Option<&Kept>,
     ) -> String {
         let iri = finding_iri(id);
@@ -1572,7 +1656,8 @@ impl QueuePage {
         if let Some(note) = kept.and_then(|k| k.note.as_deref()) {
             options.push_str(&element("note", &[], note));
         }
-        let rows_url = rows_url(&query(state, only, scope));
+        let rows_url = rows_url(&query(state, only, scope, shown));
+        let shown_field = crate::verdict::form_field();
         let mut attributes: Vec<(&str, &str)> = vec![
             ("action", DECIDE_PATH),
             ("id", id),
@@ -1582,6 +1667,8 @@ impl QueuePage {
             ("rows-url", &rows_url),
             ("required", flag(proposal.is_none())),
         ];
+        // The shown mode rides the form, so the re-render after a decision keeps it.
+        shown_attributes(&mut attributes, &shown_field, shown);
         if let Some(kept) = kept {
             attributes.push(("refused", "true"));
             attributes.push(("problem", &kept.problem));
@@ -1600,7 +1687,7 @@ impl QueuePage {
         &self,
         id: &str,
         decision: &Value,
-        (state, only, scope): (&str, Option<&str>, &str),
+        (state, only, scope, shown): (&str, Option<&str>, &str, bool),
         kept: Option<&Kept>,
     ) -> Option<String> {
         let text = |key: &str| decision.get(key).and_then(Value::as_str).unwrap_or("");
@@ -1619,6 +1706,7 @@ impl QueuePage {
             .into_iter()
             .find(|w| w == PUBLISH_DECISION)?;
         let kept = kept.filter(|k| k.revising);
+        let shown_field = crate::verdict::form_field();
         let mut attributes: Vec<(&str, &str)> = vec![
             ("action", DECIDE_PATH),
             ("id", id),
@@ -1631,6 +1719,7 @@ impl QueuePage {
             ("summary-label", "record a reproduction"),
             ("open", flag(kept.is_some())),
         ];
+        shown_attributes(&mut attributes, &shown_field, shown);
         if let Some(kept) = kept {
             attributes.push(("problem", &kept.problem));
         }
@@ -2030,10 +2119,15 @@ impl Endpoint for Badge {
         // finding minted by ANOTHER process, or decided from another tab, moved nothing in
         // this server's own counters and so never refreshed the list. A pending count is a
         // fact about the store, whoever wrote it.
+        // The hidden count joins it too: a verdict landing (a backfill, a pass's judge) moves
+        // a row out of the list, and that is news the list should refresh on.
         let rev = if rev.is_empty() {
             rev
         } else {
-            format!("{rev}.{}.{}", counts.serious, counts.other)
+            format!(
+                "{rev}.{}.{}.{}",
+                counts.serious, counts.other, counts.judged_out
+            )
         };
         let (count, other) = (counts.serious.to_string(), counts.other.to_string());
         let mut attributes = vec![
@@ -2065,8 +2159,10 @@ impl Endpoint for Badge {
             .summary(
                 "Two numbers, one state word and one revision, polled by the Queue link in \
                  the header. The numbers are what is waiting for a HUMAN: findings in the \
-                 serious set `gonk.queue.serious` names (plus any unrated), and the rest — \
-                 minted and counted, not queued. The colour, the spark and the tooltip's \
+                 serious set `gonk.queue.serious` names (plus any unrated) that the Queue \
+                 SHOWS — not the ones the judge's latest verdict refutes, which it hides by \
+                 default and the tooltip counts by name (ledger #704) — and the rest, minted \
+                 and counted, not queued. The color, the spark and the tooltip's \
                  first sentence render `urn:iki:gonk:review:depth` unchanged, and that half \
                  is a LIVENESS signal rather than a count: a queue that is armed and not \
                  empty with nothing in flight is a dead watcher, and a pass shorter than \
@@ -2112,6 +2208,50 @@ fn count_sentence(
     }
 }
 
+/// The two attributes a form carries so its re-render keeps the shown mode (ledger #704): the
+/// field's NAME, built by [`crate::verdict::form_field`] so no stylesheet spells the verdict
+/// word, and its value — [`crate::verdict::SHOW`] only when shown.
+pub(crate) fn shown_attributes<'a>(
+    attributes: &mut Vec<(&'a str, &'a str)>,
+    field: &'a str,
+    shown: bool,
+) {
+    attributes.push(("shown-field", field));
+    attributes.push(("shown-value", if shown { crate::verdict::SHOW } else { "" }));
+}
+
+/// The line naming the undecided rows the judge refuted — hidden, or shown on request — with
+/// the one link that flips the mode (ledger #704). `q` builds this view's query for a mode.
+pub(crate) fn verdict_line(n: usize, shown: bool, q: impl Fn(bool) -> String) -> String {
+    let (text, label) = if shown {
+        crate::verdict::shown_sentence(n)
+    } else {
+        crate::verdict::hidden_sentence(n)
+    };
+    verdict_element(n, shown, &text, label, &q(!shown))
+}
+
+/// [`verdict_line`]'s element, for a view that words its own sentence (the batch view).
+pub(crate) fn verdict_element(
+    n: usize,
+    shown: bool,
+    text: &str,
+    label: &str,
+    query: &str,
+) -> String {
+    element(
+        "hidden",
+        &[
+            ("kind", if shown { "judged-shown" } else { "judged-out" }),
+            ("count", &n.to_string()),
+            ("href", &page_url(query)),
+            ("rows-url", &rows_url(query)),
+            ("label", label),
+        ],
+        text,
+    )
+}
+
 pub(crate) fn flag(yes: bool) -> &'static str {
     if yes {
         "true"
@@ -2123,7 +2263,7 @@ pub(crate) fn flag(yes: bool) -> &'static str {
 /// `state=pending`, `state=pending&repo=x`, `state=pending&severity=all` — the query both
 /// URLs carry. The default scope is left OUT, so a URL narrowed to the serious set is the
 /// plain one and only the widened page says so.
-pub(crate) fn query(state: &str, repo: Option<&str>, scope: &str) -> String {
+pub(crate) fn query(state: &str, repo: Option<&str>, scope: &str, shown: bool) -> String {
     let mut out = format!("state={state}");
     if let Some(repo) = repo.filter(|r| !r.is_empty()) {
         out.push_str(&format!("&repo={repo}"));
@@ -2131,6 +2271,7 @@ pub(crate) fn query(state: &str, repo: Option<&str>, scope: &str) -> String {
     if scope != SCOPE_SERIOUS {
         out.push_str(&format!("&{SCOPE_ARG}={scope}"));
     }
+    out.push_str(&crate::verdict::query_part(shown));
     out
 }
 
@@ -2144,10 +2285,16 @@ pub(crate) fn rows_url(query: &str) -> String {
 
 /// The query a self-refresh repeats: the filter AND the row bound this request was made
 /// with, so a refresh shows what the human is already looking at rather than the default.
-fn refresh_query(state: &str, repo: Option<&str>, scope: &str, limit: Option<&str>) -> String {
+fn refresh_query(
+    state: &str,
+    repo: Option<&str>,
+    scope: &str,
+    shown: bool,
+    limit: Option<&str>,
+) -> String {
     match limit.map(str::trim).filter(|l| !l.is_empty()) {
-        Some(limit) => format!("{}&limit={limit}", query(state, repo, scope)),
-        None => query(state, repo, scope),
+        Some(limit) => format!("{}&limit={limit}", query(state, repo, scope, shown)),
+        None => query(state, repo, scope, shown),
     }
 }
 
@@ -2238,6 +2385,22 @@ impl Endpoint for QueuePage {
                     ),
             )
             .input(
+                ArgSpec::new(crate::verdict::REFUTED_ARG)
+                    .optional()
+                    .class(XSD_STRING)
+                    .one_of([crate::verdict::HIDE, crate::verdict::SHOW])
+                    .default_value(crate::verdict::HIDE)
+                    .summary(
+                        "the undecided findings the judge's LATEST verdict refutes (ledger \
+                         #704): `hide` — left out of the rows and the batch groups, under every \
+                         severity scope, and counted in a line above them with the link that \
+                         shows them — or `show`, listed folded last with the judge's answers. \
+                         Nothing is written either way: they stay pending and decidable, and a \
+                         later verdict that does not refute brings one back. A decided finding \
+                         is never hidden, and neither is an unjudged or unsure one.",
+                    ),
+            )
+            .input(
                 ArgSpec::new(crate::walk::SUMMARY_ARG)
                     .optional()
                     .class(XSD_STRING)
@@ -2288,6 +2451,8 @@ impl Endpoint for Decide {
         let scope = take("_severity");
         // The walk a revision was posted from (ledger #653), so the re-render stays on it.
         let summary = take("_summary");
+        // Whether the list it was posted from showed the rows the judge refuted (ledger #704).
+        let refuted = take(&crate::verdict::form_field());
         // ★ The door says how a decision was made (ledger #653), as it names the author: a
         // form that tries to say it is refused, not quietly overruled.
         for name in [MADE_ARG, BATCH_ARG] {
@@ -2413,6 +2578,7 @@ impl Endpoint for Decide {
             scope,
             group: None,
             summary,
+            refuted,
         };
         let echo = match &kept {
             Some(kept) => Echo::Decide(kept),
@@ -2437,7 +2603,8 @@ impl Endpoint for Decide {
                  says how — forwarded ONLY with decision=publish and dropped from any other), \
                  `revises` (the current decision's IRI, from the walk's revise forms and a \
                  published finding's reproduction form) and \
-                 `content` (the human's free-text note), forwarded to \
+                 `content` (the human's free-text note), plus underscore fields for the \
+                 re-render, forwarded to \
                  `urn:iki:finding:{id}`'s Sink under the caller's own capability and answered \
                  with the queue section re-rendered. The door stamps `made=single` on every \
                  decision it forwards (ledger #653); a form naming `made` or `batch` is \
@@ -2452,12 +2619,12 @@ impl Endpoint for Decide {
                 ActionSpec::new(Verb::Sink)
                     .summary("forward one decision and re-render the queue")
                     .requires(ikigai_browse::CAP_ANNOTATE)
-                    .input(ArgSpec::new("content").class(XSD_STRING).summary(
+                    .input(ArgSpec::new("content").class(XSD_STRING).summary(format!(
                         "the form: `id`, `decision`, optional `severity`, `reason` (decline \
-                                 only), `reproduced` (publish only), `revises` and `content`, \
-                                 plus `_state`, `_repo`, \
-                                 `_severity` and `_summary` for the re-render",
-                    ))
+                         only), `reproduced` (publish only), `revises` and `content`, plus \
+                         `_state`, `_repo`, `_severity`, `_summary` and `{}` for the re-render",
+                        crate::verdict::form_field()
+                    )))
                     .output("text/html"),
             )
             .verb(Verb::Meta)

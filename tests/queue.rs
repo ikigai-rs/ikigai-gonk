@@ -2189,6 +2189,140 @@ fn the_badge_rereads_a_root_only_when_something_says_it_moved() {
     assert_eq!(serious_count(&badge(door)), 5, "the cut re-read the root");
 }
 
+/// One judge verdict on one finding, the shape browse's `judge::store_verdict` writes (as
+/// `tests/judge.rs` plants it): `word` is a verdict word read from `ikigai_gonk::verdict`.
+fn plant_verdict(door: &Kernel, id: &str, word: &str) {
+    let graph = browse::Graph::chosen()
+        .named()
+        .expect("a named browse graph")
+        .as_str()
+        .to_string();
+    let v = format!("urn:iki:finding:{id}:judge:judge-v1@a-test-judge");
+    let update = format!(
+        r#"PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX ik: <https://ikigai-rs.dev/ns#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+INSERT DATA {{ GRAPH <{graph}> {{
+  <{v}> a prov:Activity ;
+    prov:used <urn:iki:finding:{id}> ;
+    dcterms:type <urn:iki:judge:verdict:{word}> ;
+    ik:versionTag "judge-v1@a-test-judge" ;
+    dcterms:creator "a-test-judge" ;
+    dcterms:subject <urn:iki:judge:site:code> ;
+    dcterms:description "planted" ;
+    dcterms:created "2026-10-02T09:00:00Z"^^xsd:dateTime .
+}} }}"#
+    );
+    issue(
+        door,
+        Verb::Sink,
+        "urn:iki:store:graph-update",
+        &[("graph", &graph), ("content", &update)],
+        &reviewer(),
+    )
+    .expect("the browse graph's write token plants the verdict");
+}
+
+/// ★★ **The badge counts what the Queue SHOWS** (ledger #704): a serious finding the judge
+/// refuted is not in the serious number, and the tooltip names how many it left out, so the
+/// number never drops in silence. The per-root memo (ledger #667) still holds: the split is
+/// made on the rows the read already has, so a verdict written behind every door changes
+/// nothing until something says the root moved — and a write through the store's door does.
+#[test]
+fn the_badge_counts_the_shown_set_and_names_the_hidden() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    let counting = door_counting(&dir, trigger);
+    let (door, reviewer) = (&counting.door, reviewer());
+    let (serious, _) = a_serious_and_an_other_word(door);
+    let [upheld, middle, last] = ikigai_gonk::verdict::triage();
+    let id = |n: u32| format!("aaaabbbbccccddddeeee{n:04}");
+    for n in 1..=3 {
+        plant_finding(door, &reviewer, &id(n), Some(&serious), "One of three.");
+    }
+    assert_eq!(serious_count(&badge(door)), 3);
+
+    // Through the store's door, observed: the refuted one leaves the number and is named.
+    plant_verdict(door, &id(1), last);
+    plant_verdict(door, &id(2), middle);
+    let markup = badge(door);
+    assert_eq!(
+        serious_count(&markup),
+        2,
+        "the unsure is still counted, the refuted is not: {markup}"
+    );
+    assert!(
+        markup.contains(&format!(
+            "2 serious findings waiting for a decision, 0 others minted and not queued. 1 more \
+             serious finding the judge {last} is waiting too, hidden from the Queue and not \
+             counted here."
+        )),
+        "the tooltip names the hidden count: {markup}"
+    );
+
+    // Behind every door: the memo answers, so the stale count is the proof nothing was read.
+    plant_verdict(&counting.elsewhere, &id(3), last);
+    assert_eq!(serious_count(&badge(door)), 2, "{}", badge(door));
+    // A store-door write touches every root: re-read, and now two are hidden.
+    plant_verdict(door, &id(2), upheld);
+    let markup = badge(door);
+    assert_eq!(serious_count(&markup), 1, "{markup}");
+    assert!(
+        markup.contains(&format!(
+            "2 more serious findings the judge {last} are waiting too"
+        )),
+        "{markup}"
+    );
+}
+
+/// ★ **The walk is unaffected** (ledger #704): `summary=unconfirmed` lists the unconfirmed
+/// declines that steer pending findings whatever the judge said of those findings — a decline
+/// is a record, and the verdict filter hides only undecided rows from the Queue's lists.
+#[test]
+fn the_walk_is_unaffected_by_the_verdict_filter() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    let ([t1, t2], [f1, f2], _) = plant_unconfirmed(&door);
+    let [_, _, last] = ikigai_gonk::verdict::triage();
+    // The judge refuted a declined twin AND the pending repeat it steers.
+    plant_verdict(&door, t1, last);
+    plant_verdict(&door, f1, last);
+    let walk = page(&door, &[("summary", "unconfirmed")], &reviewer());
+    assert!(
+        walk.contains("2 unconfirmed declines still steer 2 pending findings"),
+        "{walk}"
+    );
+    for (twin, fresh) in [(t1, f1), (t2, f2)] {
+        assert!(walk.contains(&format!("id='decline-{twin}'")), "{walk}");
+        assert!(walk.contains(fresh), "what it still marks:\n{walk}");
+    }
+    assert!(!walk.contains("hidden-rows judged-out"), "{walk}");
+    let shown = page(
+        &door,
+        &[
+            ("summary", "unconfirmed"),
+            (
+                ikigai_gonk::verdict::REFUTED_ARG,
+                ikigai_gonk::verdict::SHOW,
+            ),
+        ],
+        &reviewer(),
+    );
+    assert_eq!(walk, shown, "the walk does not read the mode at all");
+    // The rows view, by contrast, hides the refuted repeat.
+    let rows = page(&door, &[], &reviewer());
+    assert!(!rows.contains(&format!("value='{f1}'")), "{rows}");
+    assert!(rows.contains(&format!("value='{f2}'")), "{rows}");
+}
+
 /// ★ **A serious word the contract does not declare stops the server at start, naming both
 /// lists** — and the shipped default passes the same check, so a browse release that renames
 /// a severity is a refusal here rather than a queue that silently asks about nothing.

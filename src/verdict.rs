@@ -1,5 +1,6 @@
-//! The **judge's verdict**, as the Queue routes on it — by ORDERING, never by hiding
-//! (ledger [#696](http://localhost:1060/l/default/item/696)).
+//! The **judge's verdict**, as the Queue routes on it — by ORDERING, and by hiding the
+//! refuted ONE CLICK AWAY (ledgers [#696](http://localhost:1060/l/default/item/696) and
+//! [#704](http://localhost:1060/l/default/item/704)).
 //!
 //! `ikigai-browse` 0.16.0 runs a JUDGE on each serious finding a review pass mints: a second
 //! call, with the context the reviewer did not have, answering four narrow questions and
@@ -26,6 +27,24 @@
 //!   With one configured judge (`gonk.review.judge`) that is the configured judge's verdict;
 //!   a second judge's verdict sits beside it in `judges` and, being later, is the one shown.
 //!
+//! # ★ Revised the same day (Brian, 2026-10-02, ledger #704): the refuted are HIDDEN by default
+//!
+//! After the backfill judged the existing queue (1,330 serious pending: 243 confirmed, 392
+//! unsure, 680 refuted, 15 unjudged), Brian asked to suppress the refuted, and chose a
+//! READ-SIDE FILTER over a bulk decline. So, for the refuted only:
+//!
+//! - **The Queue and the batch views leave out an UNDECIDED row whose latest verdict refutes
+//!   it** ([`hidden_by_default`]) — the same rows that were folded. A decided row is a record
+//!   and is never hidden; an unjudged, unsure or could-not-judge row is never hidden.
+//! - **The page says how many it left out, with the link that shows them**
+//!   (`?`[`REFUTED_ARG`]`=`[`SHOW`], declared on the page's own `describe()`); shown, they
+//!   render exactly as before — folded last, with the judge's answers — beside a link back.
+//! - **The badge counts what is shown** (serious, not refuted) and its tooltip names how many
+//!   it does not count, so the number never drops in silence.
+//! - **Nothing is written.** No decision, no store change: the judge is not proof (on the eval
+//!   set it refuted 30 of 65 published findings), so a refuted finding stays pending and
+//!   decidable, and a later verdict that does not refute brings it back on its own.
+//!
 //! # ⚠ The verdict words are spelled HERE, once — the contract declares no closed set
 //!
 //! Every other menu on the Queue is read from a resource's own `one_of` (`crate::queue`). The
@@ -39,13 +58,171 @@
 //! had looked. `tests/judge.rs::no_verdict_word_is_written_down_in_this_crate` holds the page
 //! code, the stylesheet and the script to that. A `one_of` on the browse side would retire the
 //! copy (reported to the hub).
+//!
+//! ★ That includes the page argument that shows the hidden rows: it is NAMED by the verdict
+//! word ([`REFUTED_ARG`] is the last word of [`triage`]), so it is not a second spelling, and
+//! every sentence that says the word is built here.
 
-use ikigai_core::{Iri, Kernel};
+use ikigai_core::{Error, Iri, Kernel, Result};
 use serde_json::Value;
 
 /// The verdict words in the order a reader triages them: the first is read first, the last
 /// is folded last. ★ The ONE place this crate spells them — see the module docs.
 const TRIAGE: [&str; 3] = ["confirmed", "unsure", "refuted"];
+
+/// The Queue's argument that shows the rows it hides by default — `?refuted=show` (ledger
+/// #704). ★ Named BY the verdict word, the last of [`triage`], so the word is still spelled
+/// once; a browse release that renamed it would rename this argument with it, after
+/// [`check_verdicts`] had stopped the server to say so.
+pub const REFUTED_ARG: &str = TRIAGE[TRIAGE.len() - 1];
+/// [`REFUTED_ARG`]'s value that shows them, folded last as before.
+pub const SHOW: &str = "show";
+/// [`REFUTED_ARG`]'s default: hidden, counted, one click away.
+pub const HIDE: &str = "hide";
+
+/// Whether a request asked to SEE the hidden rows: `show`, else `hide` (the default).
+///
+/// # Errors
+///
+/// Any other value is refused by name rather than read as the default — an argument accepted
+/// and then ignored is the failure invisible from the caller's side.
+pub fn shown_wanted(asked: Option<&str>) -> Result<bool> {
+    match asked.map(str::trim) {
+        None | Some("") | Some(HIDE) => Ok(false),
+        Some(SHOW) => Ok(true),
+        Some(other) => Err(Error::InvalidArgument {
+            name: REFUTED_ARG.to_string(),
+            detail: format!(
+                "`{other}`: `{HIDE}` (the default — an undecided finding the judge {REFUTED_ARG} \
+                 is left out of the Queue and counted) or `{SHOW}` (listed, folded last)"
+            ),
+        }),
+    }
+}
+
+/// The form field that carries the shown mode through a decision's re-render — `_` and the
+/// argument's name, as `_severity` carries `severity`. Built here so no form spells the word.
+#[must_use]
+pub fn form_field() -> String {
+    format!("_{REFUTED_ARG}")
+}
+
+/// `&refuted=show` when `shown`, else nothing — the default is left out of a URL, as the
+/// severity scope's is.
+#[must_use]
+pub fn query_part(shown: bool) -> String {
+    if shown {
+        format!("&{REFUTED_ARG}={SHOW}")
+    } else {
+        String::new()
+    }
+}
+
+/// Whether the row's LATEST verdict refutes it — read off `judge` alone, so it needs nothing
+/// a caller has not already read (the badge counts it from rows it already holds).
+#[must_use]
+pub fn refuted(row: &Value) -> bool {
+    row.get("judge")
+        .and_then(|v| v.get("verdict"))
+        .and_then(Value::as_str)
+        == Some(REFUTED_ARG)
+}
+
+/// ★ **The rows the Queue leaves out by default** (ledger #704): undecided, and refuted by
+/// the latest verdict — exactly the rows [`Standing::folds`]. A decided row is a record and is
+/// never hidden; no other standing is ever hidden.
+#[must_use]
+pub fn hidden_by_default(row: &Value, decided: bool) -> bool {
+    !decided && refuted(row)
+}
+
+/// `n finding` / `n findings`, and the verb that agrees with it.
+fn findings(n: usize) -> (String, &'static str) {
+    if n == 1 {
+        (format!("{n} undecided finding"), "is")
+    } else {
+        (format!("{n} undecided findings"), "are")
+    }
+}
+
+/// The line above a list that left `n` rows out, and its link's label.
+#[must_use]
+pub fn hidden_sentence(n: usize) -> (String, &'static str) {
+    let (what, is) = findings(n);
+    let (still, back) = if n == 1 {
+        ("it is", "it")
+    } else {
+        ("they are", "one")
+    };
+    (
+        format!(
+            "{what} the judge {REFUTED_ARG} {is} hidden. Nothing was recorded: {still} still \
+             waiting and decidable, and a later verdict that does not refute {back} brings it \
+             back on its own."
+        ),
+        if n == 1 { "show it" } else { "show them" },
+    )
+}
+
+/// The line above a list that SHOWS `n` such rows on request, and the link back.
+#[must_use]
+pub fn shown_sentence(n: usize) -> (String, &'static str) {
+    let (what, is) = findings(n);
+    (
+        format!(
+            "{what} the judge {REFUTED_ARG} {is} shown, folded last, because this page was \
+             asked to show {}.",
+            if n == 1 { "it" } else { "them" }
+        ),
+        if n == 1 { "hide it" } else { "hide them" },
+    )
+}
+
+/// The clause an empty list adds when every row it had was left out — "nothing is waiting"
+/// would be false.
+#[must_use]
+pub fn empty_clause(n: usize) -> String {
+    let (what, is) = findings(n);
+    format!("{what} the judge {REFUTED_ARG} {is} waiting, hidden above")
+}
+
+/// The badge tooltip's clause for `n` serious findings it does not count.
+#[must_use]
+pub fn badge_clause(n: usize) -> String {
+    format!(
+        " {n} more serious finding{} the judge {REFUTED_ARG} {} waiting too, hidden from the \
+         Queue and not counted here.",
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "is" } else { "are" },
+    )
+}
+
+/// The note on a batch group that lost `n` members to the filter.
+#[must_use]
+pub fn group_clause(n: usize) -> String {
+    let (what, is) = findings(n);
+    format!("{what} in this group the judge {REFUTED_ARG} {is} hidden")
+}
+
+/// The batch view's line for `n` hidden members, `emptied` of whose groups had no other.
+#[must_use]
+pub fn batch_sentence(n: usize, emptied: usize) -> (String, &'static str) {
+    let (what, is) = findings(n);
+    let mut out = format!(
+        "{what} the judge {REFUTED_ARG} {is} left out of these groups, so no batch here \
+         declines {}.",
+        if n == 1 { "it" } else { "them" }
+    );
+    if emptied > 0 {
+        out.push_str(&format!(
+            " {emptied} group{} had no other member and {} not shown.",
+            if emptied == 1 { "" } else { "s" },
+            if emptied == 1 { "is" } else { "are" },
+        ));
+    }
+    out.push_str(" Nothing was recorded.");
+    (out, if n == 1 { "show it" } else { "show them" })
+}
 
 /// Where a row stands with the judge — the first sort key on the Queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,16 +325,18 @@ pub fn order<T>(
 }
 
 /// How many rows stand where, after [`order`] — the sentence the page prints above them, so a
-/// reader knows the list is ordered and by what. `None` when no row has been judged and none
-/// was refused, because then the order is browse's alone and saying otherwise would be noise.
+/// reader knows the list is ordered and by what. `hidden` is how many rows the default left
+/// out ([`hidden_by_default`]); they are named in the sentence, never counted as absent.
+/// `None` when no row has been judged, none was refused and none was hidden, because then the
+/// order is browse's alone and saying otherwise would be noise.
 #[must_use]
-pub fn order_sentence(standings: &[Standing]) -> Option<String> {
+pub fn order_sentence(standings: &[Standing], hidden: usize) -> Option<String> {
     let mut counts = [0usize; 5];
     for standing in standings {
         counts[usize::from(standing.rank())] += 1;
     }
     let [upheld, unjudged, uncertain, unjudgeable, refuted] = counts;
-    if unjudged == standings.len() {
+    if unjudged == standings.len() && hidden == 0 {
         return None;
     }
     let [first, middle, last] = TRIAGE;
@@ -166,6 +345,17 @@ pub fn order_sentence(standings: &[Standing]) -> Option<String> {
     parts.push(format!("{uncertain} {middle}"));
     if unjudgeable > 0 {
         parts.push(format!("{unjudgeable} the judge could not judge"));
+    }
+    if hidden > 0 {
+        parts.push(format!("{hidden} {last}, hidden (see above)"));
+        if refuted > 0 {
+            // Decided rows: records, never hidden, and never folded.
+            parts.push(format!("{refuted} {last} and already decided"));
+        }
+        return Some(format!(
+            "Ordered by the judge's verdict — {}. The judge's answers are on each row.",
+            parts.join(", ")
+        ));
     }
     parts.push(format!("{refuted} {last}, folded last and still decidable"));
     Some(format!(
@@ -231,7 +421,10 @@ fn judge_probe(root: &str) -> String {
 ///
 /// When the judge is bound and its summary does not state a word — a browse release that
 /// renamed a verdict, which would otherwise order every judged row as uncertain in silence.
-pub fn check_verdicts(hub: &Kernel, root: &str) -> Result<Option<Vec<&'static str>>, String> {
+pub fn check_verdicts(
+    hub: &Kernel,
+    root: &str,
+) -> std::result::Result<Option<Vec<&'static str>>, String> {
     let probe = judge_probe(root);
     let target = Iri::parse(&probe).map_err(|e| format!("`{probe}`: {e}"))?;
     let Some(description) = hub.describe(&target) else {

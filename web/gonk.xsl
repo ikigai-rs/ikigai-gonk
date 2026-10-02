@@ -546,6 +546,18 @@
     </xsl:if>
   </xsl:template>
 
+  <!-- ★ The verdict filter's mode, carried through a decision's re-render (ledger #704). The
+       field's NAME arrives from src/verdict.rs (`@shown-field`), so this file spells no
+       verdict word; an empty value means the default. -->
+  <xsl:template name="shown-field">
+    <xsl:if test="@shown-field">
+      <input type="hidden">
+        <xsl:attribute name="name"><xsl:value-of select="@shown-field"/></xsl:attribute>
+        <xsl:attribute name="value"><xsl:value-of select="@shown-value"/></xsl:attribute>
+      </input>
+    </xsl:if>
+  </xsl:template>
+
   <xsl:template name="revise-hidden">
     <input type="hidden" name="id"><xsl:attribute name="value"><xsl:value-of select="@id"/></xsl:attribute></input>
     <input type="hidden" name="revises"><xsl:attribute name="value"><xsl:value-of select="@revises"/></xsl:attribute></input>
@@ -589,6 +601,7 @@
       <input type="hidden" name="_group"><xsl:attribute name="value"><xsl:value-of select="@group"/></xsl:attribute></input>
       <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
       <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
+      <xsl:call-template name="shown-field"/>
       <xsl:apply-templates select="view:group"/>
       <xsl:apply-templates select="view:slot[@name = 'groups']"/>
       <xsl:if test="@decide = 'true'">
@@ -641,6 +654,11 @@
            scope left out of THIS group, so the two numbers agree. -->
       <xsl:if test="@left-out">
         <p class="note left-out"><xsl:value-of select="@left-out"/></p>
+      </xsl:if>
+      <!-- What the verdict filter left out of THIS group (ledger #704), said rather than
+           silently subtracted from browse's label. -->
+      <xsl:if test="@judged-out">
+        <p class="note left-out"><xsl:value-of select="@judged-out"/></p>
       </xsl:if>
       <xsl:apply-templates select="view:twin"/>
       <ol class="findings group-members">
@@ -831,8 +849,12 @@
 
   <!-- The rows the serious gate left out, SAID rather than silently absent (ledger #496):
        how many, which words, and the one link that lists them. -->
+  <!-- Rows a gate left out, said with the one link that lists them: the severity gate's
+       (ledger #496), or the verdict filter's (ledger #704, `@kind`), which in its shown mode
+       links back instead. The sentence and the label are src/queue.rs's and src/verdict.rs's. -->
   <xsl:template match="view:hidden">
-    <p class="note hidden-rows">
+    <p>
+      <xsl:attribute name="class">note hidden-rows <xsl:value-of select="@kind"/></xsl:attribute>
       <xsl:value-of select="."/>
       <xsl:text> </xsl:text>
       <a hx-target="#queue" hx-swap="outerHTML">
@@ -1041,6 +1063,7 @@
       <!-- The scope the human was looking at, so the re-render after a decision keeps it
            (ledger #496). `_severity` is the page argument; `severity` below is the rating. -->
       <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
+      <xsl:call-template name="shown-field"/>
       <label class="decide-severity">
         <xsl:text>Severity</xsl:text>
         <select name="severity">
@@ -1133,6 +1156,7 @@
         <input type="hidden" name="_state"><xsl:attribute name="value"><xsl:value-of select="@state"/></xsl:attribute></input>
         <input type="hidden" name="_repo"><xsl:attribute name="value"><xsl:value-of select="@repo"/></xsl:attribute></input>
         <input type="hidden" name="_severity"><xsl:attribute name="value"><xsl:value-of select="@scope"/></xsl:attribute></input>
+        <xsl:call-template name="shown-field"/>
         <input type="hidden" name="decision"><xsl:attribute name="value"><xsl:value-of select="@decision"/></xsl:attribute></input>
         <input type="hidden" name="reproduced"><xsl:attribute name="value"><xsl:value-of select="@reproduced"/></xsl:attribute></input>
         <input type="hidden" name="revises"><xsl:attribute name="value"><xsl:value-of select="@revises"/></xsl:attribute></input>
