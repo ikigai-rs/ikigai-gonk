@@ -330,6 +330,21 @@ nothing. The words are validated at start against the finding contract's own `se
 so a `gonk.queue.serious` the contract does not declare stops the server naming both lists.
 On 2026-09-21 the default hid 185 of 319 pending rows.
 
+★ **The page ORDERS by the judge's verdict, and hides nothing** (ledger
+[#696](http://localhost:1060/l/default/item/696), Brian 2026-10-02). `ikigai-browse` 0.16.0 runs a
+JUDGE on each serious finding a pass mints — a second call with the context the reviewer lacked,
+four narrow answers, a verdict by rule — and attaches the verdict to the finding row. The Queue
+draws confirmed findings first, then the ones no judge has looked at, then the unsure, then the
+ones a judge could not judge, then the refuted, **folded last** with the judge's four answers and
+reasons inside and the decision form intact. The sort is stable, so within one standing the
+findings resource's own triage order is kept; the same order holds inside every batch group,
+where a folded member keeps its box outside the fold. Every row says where it stands in words with
+the judge's tag (`judge: … · judge-v1@<model>`), the list says how many stand where, and the
+header badge's numbers do not change: a refuted finding is still waiting for a decision. The
+judge is `gonk.review.judge` (default `urn:llm:coder:ask`, browse's own; `"off"` for none). Its
+verdict words have no closed set in browse's contract, so `src/verdict.rs` spells them once and
+the server checks them at start against the judge's own contract.
+
 ★ **The badge counts each root once per change, not once per poll** (ledger #667). It keeps
 the last count per root and per caller's grant, and re-reads a root only when that root has
 moved since: the watch cut its narrow thread (a file changed), a write through the browse family
@@ -701,6 +716,8 @@ gonk.review.space = "reviews"        # bind the queue at urn:space:reviews
 # gonk.review.root = "~/.ikigai/spaces"
 # gonk.queue.serious = "critical,major"   # what the Queue asks a human about (the default);
                                           # the rest are minted and counted, not queued
+# gonk.review.judge = "urn:llm:coder-next:ask"   # the judge on each serious finding a pass
+                                          # mints (default urn:llm:coder:ask); "off" for none
 ```
 
 ```text
@@ -1190,6 +1207,7 @@ gonk.backup.every = "24h"             # the cadence; "off" (or --no-backup) take
 # gonk.review.arm = true              # ⚠ and the word that arms it; needs the grant above
 # gonk.review.root = "~/.ikigai/spaces"
 # gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
+# gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.

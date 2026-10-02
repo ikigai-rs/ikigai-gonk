@@ -405,8 +405,12 @@ pub fn wire(
 /// configured model id through `urn:llm:{provider}:model` — over the mount — at explain
 /// time, so swapping the peer's model re-keys the archive with no gonk-side config. An
 /// operator override here would pin tags to a string that can silently stop being true.
+///
+/// ★ The JUDGE (`gonk.review.judge`, ledger #696) is set here too, and it is NOT made
+/// selectable: browse's `selectable()` leaves the judge provider out, so a backfill that named
+/// it as `provider=` would be Denied — the backfill omits `provider=` and gets this one.
 fn explain_config(store: Arc<Store>, tiers: &ExplainTiers) -> ExplainConfig {
-    ExplainConfig::new(store)
+    let config = ExplainConfig::new(store)
         .file_provider(&tiers.file.provider)
         .file_max_tokens(tiers.file.max_tokens)
         .dir_provider(&tiers.dir.provider)
@@ -415,7 +419,11 @@ fn explain_config(store: Arc<Store>, tiers: &ExplainTiers) -> ExplainConfig {
         .review_max_tokens(tiers.review.max_tokens)
         .pr_provider(&tiers.pr.provider)
         .pr_max_tokens(tiers.pr.max_tokens)
-        .max_prompt_bytes(tiers.max_prompt_bytes)
+        .max_prompt_bytes(tiers.max_prompt_bytes);
+    match &tiers.judge {
+        Some(provider) => config.judge_provider(provider),
+        None => config.no_judge(),
+    }
 }
 
 /// What [`wire`] hands back.

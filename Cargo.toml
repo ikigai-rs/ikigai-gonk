@@ -250,7 +250,16 @@ ikigai-ledger = "0.2.1"
 # twin's current decision is a CONFIRMED decline. On 0.14.x `focus` is undeclared (the `/k` door
 # refuses it) and the form has no `prefix`/`suffix` to fill, which is why this is the floor.
 # `^0.14.0` is `<0.15.0`. Minor: an additive input, an additive face, two additive form fields.
-ikigai-browse = "0.15.0"
+# ★ 0.16.0 (ledger #483/#696, browse PRs #59/#60/#63/#64) adds a JUDGE: a second call per serious
+# finding a pass mints, confirming or refuting the claim with the context the reviewer lacked,
+# its verdict ATTACHED to the finding row (`judge`, `judges`) and never acted on by browse. The
+# Queue ORDERS by it (`crate::verdict`), never hides. `ExplainConfig::judge_provider` / `no_judge`
+# are what `gonk.review.judge` sets; `urn:repo:{repo}:judge-finding:{id}` judges one queued
+# finding on demand, archived, so the queue that predates the judge can be backfilled; and the
+# finding Sink takes `reproduced=` beside a publish. On 0.15.x none of the three exists, which is
+# why this is the floor. `^0.15.0` is `<0.16.0`. Minor: additive builder methods, additive json
+# fields, a new resource and an additive Sink input.
+ikigai-browse = "0.16.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

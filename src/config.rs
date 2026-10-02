@@ -20,6 +20,8 @@
 //! # gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
 //! # gonk.review.arm = true             # ⚠ ARM it: watch the queue and review on every drop
 //! # gonk.review.root = "~/.ikigai/spaces"   # the spaces tree (this IS the default)
+//! # gonk.review.judge = "urn:llm:coder-next:ask"   # the JUDGE on each serious finding a pass
+//!                                       # mints (default urn:llm:coder:ask, browse's); "off" for none
 //! # gonk.queue.serious = "critical,major"   # the severities the Queue page asks a human about
 //!                                       # (this IS the default); the rest are minted, not queued
 //! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
@@ -79,7 +81,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 24] = [
+const KEYS: [&str; 25] = [
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -104,6 +106,7 @@ const KEYS: [&str; 24] = [
     "gonk.review.grant",
     "gonk.review.root",
     "gonk.review.arm",
+    "gonk.review.judge",
 ];
 
 /// How to invoke the binary.
@@ -426,6 +429,18 @@ pub struct ExplainTiers {
     pub pr: Tier,
     /// How much of a file (or a rollup's material) is fed to the model before truncation.
     pub max_prompt_bytes: usize,
+    /// The provider the JUDGE asks about each serious finding a review pass mints
+    /// (`gonk.review.judge`), or `None` for no judge (`gonk.review.judge = "off"`).
+    ///
+    /// ★ A key under `gonk.review`, not `gonk.explain`, because it is read as part of the
+    /// review: the judge rides with the pass that mints the finding (ledger #696). It is parsed
+    /// with the tiers because it is the same kind of fact — one `urn:llm:` provider an
+    /// operator chose for one call — and lands in the same `ExplainConfig`.
+    ///
+    /// ⚠ Off means passes mint findings with no verdict, as every pass before 0.16.0 did. It
+    /// does NOT unbind `urn:repo:{root}:judge-finding:{id}`: browse binds that with the review
+    /// family and, with no judge configured, falls back to the REVIEW tier.
+    pub judge: Option<String>,
 }
 
 /// One grain's backend and ceiling.
@@ -452,6 +467,8 @@ impl Default for ExplainTiers {
             review: tier("urn:llm:coder:ask", 800),
             pr: tier("urn:llm:coder:ask", 600),
             max_prompt_bytes: 16 * 1024,
+            // browse 0.16.0's own default — the review tier's provider.
+            judge: Some("urn:llm:coder:ask".to_string()),
         }
     }
 }
@@ -982,7 +999,30 @@ fn explain_tiers(text: &str) -> Result<ExplainTiers, String> {
             format!("gonk.explain.max_prompt_bytes: `{spelled}` is not a byte count")
         })?;
     }
+    if let Some(spelled) = value_for(text, "gonk.review.judge") {
+        tiers.judge = judge_provider(&spelled)?;
+    }
     Ok(tiers)
+}
+
+/// `gonk.review.judge`: a provider under `urn:llm:`, or `off` for no judge.
+///
+/// ⚠ An empty value is refused rather than read as `off`: switching off a check that confirms
+/// or refutes every serious finding is a word an operator writes, not a blank they leave.
+fn judge_provider(spelled: &str) -> Result<Option<String>, String> {
+    let spelled = spelled.trim();
+    if spelled.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    if !spelled.starts_with(mount::LLM_PREFIX) || spelled.len() == mount::LLM_PREFIX.len() {
+        return Err(format!(
+            "gonk.review.judge: `{spelled}` is neither a provider under `{}` — the only prefix \
+             a gonk.mount line may claim, so nothing in this process could resolve it — nor \
+             `off`, which runs review passes with no judge",
+            mount::LLM_PREFIX
+        ));
+    }
+    Ok(Some(spelled.to_string()))
 }
 
 /// The browsable roots, from flags then config — `name=path` per line, `~/`-expanded, the
@@ -1467,6 +1507,37 @@ mod tests {
         ] {
             let refused = super::settings(&Flags::default(), spelling, &homes()).unwrap_err();
             assert!(refused.contains(expected), "{spelling}: {refused}");
+        }
+    }
+
+    /// `gonk.review.judge` (ledger #696): browse's own default when no line is written, a
+    /// provider under `urn:llm:` when one is, no judge at all for `off` — and anything else,
+    /// a blank included, stops the server naming the line.
+    #[test]
+    fn the_judge_key_names_a_provider_or_off_and_nothing_else() {
+        let judge = |text: &str| {
+            super::settings(&Flags::default(), text, &homes()).map(|s| s.explain.judge)
+        };
+        assert_eq!(judge("").unwrap().as_deref(), Some("urn:llm:coder:ask"));
+        assert_eq!(
+            judge("gonk.review.judge = \"urn:llm:coder-next:ask\"\n")
+                .unwrap()
+                .as_deref(),
+            Some("urn:llm:coder-next:ask")
+        );
+        assert_eq!(judge("gonk.review.judge = \"off\"\n").unwrap(), None);
+        // The judge is set independently of the review queue: no space line is needed.
+        assert!(judge("gonk.review.judge = \"off\"\n").is_ok());
+        for spelling in [
+            "gonk.review.judge = \"urn:mistral:ask\"\n",
+            "gonk.review.judge = \"\"\n",
+            "gonk.review.judge = \"urn:llm:\"\n",
+        ] {
+            let refused = judge(spelling).unwrap_err();
+            assert!(
+                refused.contains("gonk.review.judge") && refused.contains("off"),
+                "{spelling}: {refused}"
+            );
         }
     }
 

@@ -47,6 +47,7 @@ pub mod quic;
 pub mod render;
 pub mod rules;
 pub mod trigger;
+pub mod verdict;
 pub mod walk;
 pub mod watch;
 pub mod web;

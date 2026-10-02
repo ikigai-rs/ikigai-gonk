@@ -355,3 +355,15 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
   .decide-reason { flex: 1 1 auto; }
   .batch-decide { flex-direction: column; align-items: stretch; }
 }
+
+/* The judge's standing (ledger #696). The WORDS carry it on every row ("judge: … · <tag>");
+   this only sets the line apart and folds a refuted row out of the way. No color is invented:
+   --line and --muted are the contrast-tested tokens. */
+.verdict-line { margin: 0.25rem 0; font-size: 0.9em; font-weight: 600; overflow-wrap: anywhere; }
+.verdict-fold > summary { cursor: pointer; color: var(--muted); overflow-wrap: anywhere; }
+.verdict-fold[open] > summary { margin-bottom: 0.4rem; }
+.judge-answers { margin: 0.25rem 0; font-size: 0.9em; }
+.judge-answers > summary { cursor: pointer; color: var(--muted); }
+.judge-answer-list { margin: 0.25rem 0 0; padding-left: 0.75rem; border-left: 2px solid var(--line); }
+.judge-answer-list dt { font-weight: 600; }
+.judge-answer-list dd { margin: 0 0 0.25rem; overflow-wrap: anywhere; }

@@ -11,7 +11,7 @@ use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
-use ikigai_gonk::{browse, compose_with, doors, mount, queue, quic, trigger, watch, web};
+use ikigai_gonk::{browse, compose_with, doors, mount, queue, quic, trigger, verdict, watch, web};
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
 use ikigai_store::{DurableStore, StoreConfig};
@@ -242,6 +242,18 @@ fn serve(flags: &config::Flags) -> ! {
         let declared = queue::check_serious(&hub, &settings.queue).unwrap_or_else(|e| fail(&e));
         queue_line(&settings, &declared)
     };
+    // ★ The judge's verdict words, checked against the judge contract THIS kernel binds
+    // (ledger #696): the Queue orders by them, browse declares no closed set, and a word its
+    // contract stopped stating would order every judged row as uncertain in silence.
+    let judge_line = judge_line(
+        &settings,
+        explains,
+        settings
+            .browse_roots
+            .first()
+            .and_then(|(root, _)| verdict::check_verdicts(&hub, root).unwrap_or_else(|e| fail(&e)))
+            .is_some(),
+    );
 
     // ★★ ARMING, and it is deliberately the last thing before the doors: the reviewer's
     // grant is checked against the CONTRACT of the review this kernel actually binds, and a
@@ -377,6 +389,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
         eprintln!("  review  {review_line}");
+        eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
@@ -662,6 +675,39 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
         tiers.pr.provider,
         tiers.pr.max_tokens,
     )
+}
+
+/// The banner's judge line: which provider confirms or refutes each serious finding a pass
+/// mints (`gonk.review.judge`), and what the Queue does with its verdict.
+fn judge_line(settings: &config::Settings, explains: bool, checked: bool) -> String {
+    if !explains {
+        return "not bound — no review pass can run here, so no finding is judged; verdicts \
+                already on file still order the Queue"
+            .to_string();
+    }
+    let order = verdict::triage();
+    let ordering = format!(
+        "the Queue orders {} first, then unjudged, {}, could-not-judge, {} folded last — \
+         nothing hidden{}",
+        order[0],
+        order[1],
+        order[2],
+        if checked {
+            ""
+        } else {
+            " (the judge contract could not be read to check those words)"
+        }
+    );
+    match &settings.explain.judge {
+        Some(provider) => format!(
+            "{provider} — one call per serious finding a pass mints (gonk.review.judge; \
+             browse's default is urn:llm:coder:ask); {ordering}"
+        ),
+        None => format!(
+            "off (gonk.review.judge = \"off\") — passes mint findings with no verdict; \
+             {ordering}"
+        ),
+    }
 }
 
 /// The render rules in effect: this deployment's `gonk/render-rules.ttl`, else the table

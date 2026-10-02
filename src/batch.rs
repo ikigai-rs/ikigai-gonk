@@ -447,9 +447,16 @@ pub(crate) async fn section(
     // ★★ THE GATE, as on the rows (ledger #496): under the serious scope a member is shown
     // only when the Queue would ask about it. A group left with no member is not a proposal.
     let mut hidden = 0usize;
+    // ★ And ORDERED inside each group by the judge's verdict (ledger #696): confirmed first,
+    // refuted folded last, every member still shown and still tickable ([`crate::verdict`]).
+    // Stable, so within one standing the group keeps browse's member order.
+    let cannot = |_: &str| -> Option<String> { None };
     for (_, answer) in &mut read {
         if let Ok(groups) = answer {
             for group in groups.iter_mut() {
+                if let Some(Value::Array(members)) = group.get_mut("members") {
+                    crate::verdict::order(members, |row| row, &cannot);
+                }
                 if scope != SCOPE_SERIOUS {
                     continue;
                 }
@@ -1143,6 +1150,9 @@ fn where_of(row: &Value) -> String {
 fn row_element_with(name: &str, row: &Value, extra: &[(&str, String)], inner: &str) -> String {
     let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
     let proposal = row.get("severity").and_then(Value::as_str);
+    // The judge's standing in words, on every row of a group (ledger #696); a refuted MEMBER
+    // is folded, its box and picker outside the fold so it is still decided like the rest.
+    let standing = crate::verdict::Standing::of(row, &|_: &str| -> Option<String> { None });
     let mut attributes: Vec<(&str, String)> = vec![
         ("id", text("id").to_string()),
         ("where", where_of(row)),
@@ -1156,6 +1166,12 @@ fn row_element_with(name: &str, row: &Value, extra: &[(&str, String)], inner: &s
             flag(row.get("orphaned").and_then(Value::as_bool) == Some(true)).to_string(),
         ),
         ("provenance", queue::provenance(row)),
+        ("verdict-label", standing.label()),
+        ("verdict", standing.class().to_string()),
+        (
+            "fold",
+            flag(name == "member" && standing.folds(queue::decided(row))).to_string(),
+        ),
     ];
     if !text("annotates").is_empty() {
         attributes.push(("browse-href", browse_url(text("annotates"))));
@@ -1165,6 +1181,10 @@ fn row_element_with(name: &str, row: &Value, extra: &[(&str, String)], inner: &s
     if !text("exact").is_empty() {
         children.push_str(&element("quote", &[], text("exact")));
     }
+    children.push_str(&crate::verdict::answers_element(
+        row,
+        name == "member" && standing.folds(queue::decided(row)),
+    ));
     if let Some(prior) = row.get("prior_decision").filter(|p| !p.is_null()) {
         children.push_str(&queue::prior_element(prior));
     }
