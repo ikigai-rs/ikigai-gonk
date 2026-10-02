@@ -345,6 +345,25 @@ judge is `gonk.review.judge` (default `urn:llm:coder:ask`, browse's own; `"off"`
 verdict words have no closed set in browse's contract, so `src/verdict.rs` spells them once and
 the server checks them at start against the judge's own contract.
 
+★ **The queue that predates the judge is BACKFILLED on an operator's word**, never on start:
+
+```text
+urn:iki:gonk:judge:backfill   Source  where the run stands (as=application/json for the numbers)
+                              Sink    content=start | content=stop
+```
+
+`ikigai -c 'sink urn:iki:gonk:judge:backfill content=start'` over the owner-only socket walks
+every serious pending finding that exists when it starts, one at a time, through browse's
+`urn:repo:{repo}:judge-finding:{id}` with the configured judge. Exists comes first, so a
+finding already judged under that judge's tag costs no model call. A stop takes effect after the
+call in flight, and the next start resumes past everything judged. The run waits while a review
+pass is in flight or the armed review queue has requests waiting. A finding whose reviewed
+version cannot be recovered is counted with browse's reason, shown on its Queue row as "could not
+judge", and asked again only on the next run. The run uses exactly the browse read and
+`urn:cap:net:<the mounted peer's host>`; starting it needs a browse read and a net grant, like
+any derivation. With `gonk.review.judge = "off"` it refuses to start. The Queue page shows where
+the run stands once it has run.
+
 ★ **The badge counts each root once per change, not once per poll** (ledger #667). It keeps
 the last count per root and per caller's grant, and re-reads a root only when that root has
 moved since: the watch cut its narrow thread (a file changed), a write through the browse family

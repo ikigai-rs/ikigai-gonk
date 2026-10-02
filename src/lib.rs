@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backfill;
 pub mod backup;
 pub mod batch;
 pub mod browse;

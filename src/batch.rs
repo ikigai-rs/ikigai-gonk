@@ -450,7 +450,8 @@ pub(crate) async fn section(
     // ★ And ORDERED inside each group by the judge's verdict (ledger #696): confirmed first,
     // refuted folded last, every member still shown and still tickable ([`crate::verdict`]).
     // Stable, so within one standing the group keeps browse's member order.
-    let cannot = |_: &str| -> Option<String> { None };
+    let unjudgeable = crate::backfill::unjudgeable(inv).await;
+    let cannot = |id: &str| unjudgeable.get(id).cloned();
     for (_, answer) in &mut read {
         if let Ok(groups) = answer {
             for group in groups.iter_mut() {
@@ -639,6 +640,7 @@ pub(crate) async fn section(
                 true,
                 echo,
                 &mut focus,
+                &cannot,
             )));
             let word = twin_word(group);
             for member in members(group) {
@@ -720,6 +722,7 @@ pub(crate) async fn section(
                 false,
                 echo,
                 &mut rows_focus,
+                &cannot,
             );
             // ★ Pre-selected only beside evidence: a target-only group's word is shown on the
             // group (`suggested`, in `group_element`) and the picker waits for the person. A
@@ -976,6 +979,7 @@ fn group_element(
     per_twin: bool,
     echo: Option<&Submitted>,
     focus: &mut bool,
+    cannot: &dyn Fn(&str) -> Option<String>,
 ) -> String {
     let text = |key: &str| group.get(key).and_then(Value::as_str).unwrap_or("");
     let mut children = String::new();
@@ -984,7 +988,7 @@ fn group_element(
         children.push_str(&twin_element(twin));
     }
     if let Some(kept) = group.get("kept").filter(|k| !k.is_null()) {
-        children.push_str(&row_element("kept", kept, &[]));
+        children.push_str(&row_element("kept", kept, &[], cannot));
     }
     let evidence = !by_target_only(group);
     // A member's own word, in the twin-carrying view: the twin's, when it has one.
@@ -1071,7 +1075,7 @@ fn group_element(
                 *focus = false;
             }
         }
-        children.push_str(&row_element_with("member", member, &extra, &inner));
+        children.push_str(&row_element_with("member", member, &extra, &inner, cannot));
     }
     let mut attributes: Vec<(&str, String)> = vec![
         ("key", text("key").to_string()),
@@ -1133,8 +1137,13 @@ fn twin_element(twin: &Value) -> String {
     wrap("twin", &borrowed(&attributes), &children)
 }
 
-fn row_element(name: &str, row: &Value, extra: &[(&str, String)]) -> String {
-    row_element_with(name, row, extra, "")
+fn row_element(
+    name: &str,
+    row: &Value,
+    extra: &[(&str, String)],
+    cannot: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    row_element_with(name, row, extra, "", cannot)
 }
 
 /// `path:line`, or the path alone — how a row is named to a person.
@@ -1147,12 +1156,18 @@ fn where_of(row: &Value) -> String {
 }
 
 /// One finding in a group — the fields a person needs to judge it before unticking it.
-fn row_element_with(name: &str, row: &Value, extra: &[(&str, String)], inner: &str) -> String {
+fn row_element_with(
+    name: &str,
+    row: &Value,
+    extra: &[(&str, String)],
+    inner: &str,
+    cannot: &dyn Fn(&str) -> Option<String>,
+) -> String {
     let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or("");
     let proposal = row.get("severity").and_then(Value::as_str);
     // The judge's standing in words, on every row of a group (ledger #696); a refuted MEMBER
     // is folded, its box and picker outside the fold so it is still decided like the rest.
-    let standing = crate::verdict::Standing::of(row, &|_: &str| -> Option<String> { None });
+    let standing = crate::verdict::Standing::of(row, cannot);
     let mut attributes: Vec<(&str, String)> = vec![
         ("id", text("id").to_string()),
         ("where", where_of(row)),

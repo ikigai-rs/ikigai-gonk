@@ -1081,9 +1081,14 @@ impl QueuePage {
         // alone every chunk after it would shift by one row and miss, while a boundary at
         // the file keeps the shift inside the one file the decision was about. Triage
         // order already groups a file's rows together, so this costs no re-ordering.
-        // What a judge was asked about and could not judge — nothing yet: no verdict records
-        // a refusal, so only a run that asked can say (the backfill, ledger #696).
-        let cannot = |_: &str| -> Option<String> { None };
+        // What a judge was asked about and could not judge: no verdict records a refusal, so
+        // only a run that asked can say — the backfill, read through the kernel under this
+        // caller's capability like the depth ([`crate::backfill::unjudgeable`]).
+        let unjudgeable = crate::backfill::unjudgeable(inv).await;
+        let cannot = |id: &str| unjudgeable.get(id).cloned();
+        if let Some(sentence) = crate::backfill::page_sentence(inv).await {
+            children.push_str(&element("backfill", &[], &sentence));
+        }
         let mut ordered: Vec<(&String, &Value)> = read
             .iter()
             .filter_map(|(root, rows)| match rows {
