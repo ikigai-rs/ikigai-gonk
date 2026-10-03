@@ -160,8 +160,17 @@ fn serve(flags: &config::Flags) -> ! {
         )
     });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched(), &browse_graph);
+    // What this process spends on review passes — the queue's slot, and every review in
+    // flight through the browse family whoever started it (the page's Review button too), so
+    // the judge backfill can yield to all of them (ledger #702 item 4).
+    let activity = Arc::new(trigger::Activity::default());
     let (browse_space, style) = match browse {
-        Some(wired) => (Some(Arc::new(wired.space)), Some(wired.style)),
+        Some(wired) => (
+            Some(Arc::new(
+                wired.space.observing_reviews(Arc::clone(&activity)),
+            )),
+            Some(wired.style),
+        ),
         None => (None, None),
     };
     // The mounts are built before the kernel and dialled by neither: `crate::mount` dials on
@@ -202,7 +211,6 @@ fn serve(flags: &config::Flags) -> ! {
         Some(t) => resolve_reviewer(t, &layout),
         None => None,
     };
-    let activity = Arc::new(trigger::Activity::default());
     let mut trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
@@ -718,8 +726,8 @@ fn judge_line(settings: &config::Settings, explains: bool, checked: bool) -> Str
     }
     let order = verdict::triage();
     let ordering = format!(
-        "the Queue orders {} first, then unjudged, {}, could-not-judge, {} folded last — \
-         nothing hidden{}",
+        "the Queue orders {} first, then unjudged, {}, could-not-judge, and hides the \
+         undecided {} one click away (ledger #704){}",
         order[0],
         order[1],
         order[2],
@@ -731,10 +739,12 @@ fn judge_line(settings: &config::Settings, explains: bool, checked: bool) -> Str
     );
     match &settings.explain.judge {
         Some(provider) => format!(
-            "{provider} — one call per serious finding a pass mints (gonk.review.judge; \
-             browse's default is urn:llm:coder:ask); {ordering}. Backfill the older queue \
+            "{provider} @{} tokens — one call per serious finding a pass mints \
+             (gonk.review.judge, gonk.review.judge_max_tokens; browse's defaults are \
+             urn:llm:coder:ask @400); {ordering}. Backfill the older queue \
              with `sink {} content={}` on the socket (one call at a time, yielding to review \
              passes; `{}` says where it stands)",
+            settings.explain.judge_max_tokens,
             backfill::BACKFILL,
             backfill::START,
             backfill::BACKFILL

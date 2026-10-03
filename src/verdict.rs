@@ -128,6 +128,26 @@ pub fn refuted(row: &Value) -> bool {
         == Some(REFUTED_ARG)
 }
 
+/// How many verdicts the row carries: every judge's (`judges`), else the latest alone
+/// (`judge`), else none. What the badge's revision counts so a verdict ARRIVING is news to an
+/// open Queue, whatever it says (ledger #702 item 5) — read without naming a single word.
+///
+/// ```
+/// use ikigai_gonk::verdict::verdicts_on;
+/// use serde_json::json;
+///
+/// assert_eq!(verdicts_on(&json!({"judge": null, "judges": []})), 0);
+/// assert_eq!(verdicts_on(&json!({"judge": {"tag": "a"}})), 1);
+/// assert_eq!(verdicts_on(&json!({"judge": {"tag": "b"}, "judges": [{}, {}]})), 2);
+/// ```
+#[must_use]
+pub fn verdicts_on(row: &Value) -> usize {
+    match row.get("judges").and_then(Value::as_array) {
+        Some(all) if !all.is_empty() => all.len(),
+        _ => usize::from(row.get("judge").is_some_and(Value::is_object)),
+    }
+}
+
 /// ★ **The rows the Queue leaves out by default** (ledger #704): undecided, and refuted by
 /// the latest verdict — exactly the rows [`Standing::folds`]. A decided row is a record and is
 /// never hidden; no other standing is ever hidden.

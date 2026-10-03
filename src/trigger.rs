@@ -590,6 +590,13 @@ pub struct Passes {
     /// they replay labels an earlier pass chose, and the number this feeds exists to watch
     /// the labels a model is choosing NOW ([`Status::serious_share_percent`]).
     pub by_severity: BTreeMap<String, u64>,
+    /// Review Sources in flight through the browse family right now, WHOEVER issued them —
+    /// this queue's passes, and every other door's: the page's Review button (the `/k/`
+    /// adapter), a person on the socket. Counted by the family's overlay
+    /// ([`crate::browse::CachedReads::observing_reviews`]), never by [`Activity::begin`], so
+    /// it bounds nothing and refuses nothing: it is what the judge backfill yields to
+    /// (ledger #702 item 4), because a click spends the same model a pass does.
+    pub reviews_in_flight: u64,
 }
 
 impl Passes {
@@ -613,6 +620,7 @@ struct Record {
     last_end_ms: Option<u64>,
     last_ms: Option<u64>,
     by_severity: BTreeMap<String, u64>,
+    reviews_in_flight: u64,
 }
 
 impl Activity {
@@ -654,6 +662,20 @@ impl Activity {
             last_end_ms: record.last_end_ms,
             last_ms: record.last_ms,
             by_severity: record.by_severity.clone(),
+            reviews_in_flight: record.reviews_in_flight,
+        }
+    }
+
+    /// Count one review in flight until the guard drops — whoever started it. See
+    /// [`Passes::reviews_in_flight`]. ⚠ Not a slot: any number may be in flight at once, and
+    /// a queued pass holds both this and [`Activity::begin`]'s.
+    pub fn reviewing(self: &Arc<Self>) -> Reviewing {
+        self.record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reviews_in_flight += 1;
+        Reviewing {
+            activity: Arc::clone(self),
         }
     }
 
@@ -671,6 +693,24 @@ impl Activity {
         for label in labels {
             *record.by_severity.entry(label.clone()).or_insert(0) += 1;
         }
+    }
+}
+
+/// One review in flight, counted until it drops — see [`Activity::reviewing`]. A guard for
+/// the reason [`Pass`] is one: a review that ends by `?` or by a refusal must still be
+/// uncounted, or the backfill would yield to it for the life of the process.
+pub struct Reviewing {
+    activity: Arc<Activity>,
+}
+
+impl Drop for Reviewing {
+    fn drop(&mut self) {
+        let mut record = self
+            .activity
+            .record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        record.reviews_in_flight = record.reviews_in_flight.saturating_sub(1);
     }
 }
 

@@ -4458,3 +4458,116 @@ fn the_k_door_decides_one_finding_and_stamps_it_made_single() {
     let decision = &row(&door, "declined", FINDING)["decision"];
     assert_eq!(decision["made"], queue::MADE_SINGLE, "{decision}");
 }
+
+/// ★ **The Queue page DECLARES `group`** (ledger
+/// [#682](http://localhost:1060/l/default/item/682) item 2): the page and its rows fragment
+/// both answer `?group=<kind>` with the batch view, so both contracts name the argument —
+/// optional, a string, and no `one_of` here, because its values are the findings resource's
+/// own `group` set, read from that contract on every request. An argument a page answers and
+/// its contract omits is invisible to the manifold, to selection and to every projection.
+#[test]
+fn the_queue_page_declares_its_group_argument() {
+    let dir = batch_root();
+    let (door, _config) = door(&dir, None);
+    for iri in [queue::QUEUE_IRI, queue::ROWS_IRI] {
+        let description = door
+            .describe(&Iri::parse(iri).expect("an IRI"))
+            .unwrap_or_else(|| panic!("{iri} describes itself"));
+        let source = description
+            .action_specs()
+            .into_iter()
+            .find(|spec| spec.verb == Verb::Source)
+            .unwrap_or_else(|| panic!("{iri} has a Source action"));
+        let group = source
+            .inputs
+            .iter()
+            .find(|input| input.name == ikigai_gonk::batch::GROUP_ARG)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{iri} declares `{}`; it declares {:?}",
+                    ikigai_gonk::batch::GROUP_ARG,
+                    source.inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
+                )
+            });
+        assert!(!group.required, "{iri}: `group` is optional");
+        assert_eq!(
+            group.class.as_deref(),
+            Some("http://www.w3.org/2001/XMLSchema#string"),
+            "{iri}"
+        );
+        assert!(
+            group.one_of.is_empty(),
+            "{iri}: the kinds are the findings contract's, never a list here"
+        );
+    }
+    // And what it declares is what it answers: a kind the findings contract names is the
+    // batch view, through the same page.
+    let findings = Iri::parse(format!("urn:repo:{ROOT}:findings")).expect("an IRI");
+    let kinds = door
+        .describe(&findings)
+        .expect("the findings contract")
+        .action_specs()
+        .into_iter()
+        .find(|spec| spec.verb == Verb::Source)
+        .expect("a Source action")
+        .inputs
+        .iter()
+        .find(|input| input.name == ikigai_gonk::batch::GROUP_ARG)
+        .expect("the findings contract's group set")
+        .one_of
+        .clone();
+    let kind = kinds.first().expect("at least one kind");
+    page(&door, &[(ikigai_gonk::batch::GROUP_ARG, kind)], &reviewer());
+}
+
+/// ★★ **A new verdict moves the badge's revision** (ledger
+/// [#702](http://localhost:1060/l/default/item/702) item 5). The Queue list refreshes when the
+/// revision moves, and a verdict reorders the list (confirmed first) and labels its row — so a
+/// verdict that is not a refutation, which moves none of the counts, must move the revision
+/// on its own. The per-root memo (ledger #667) still holds: a verdict written behind every
+/// door moves nothing until something says the root moved.
+#[test]
+fn a_verdict_that_moves_no_count_still_moves_the_badge_revision() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    let counting = door_counting(&dir, trigger);
+    let (door, reviewer) = (&counting.door, reviewer());
+    let (serious, _) = a_serious_and_an_other_word(door);
+    let [upheld, middle, _] = ikigai_gonk::verdict::triage();
+    let id = |n: u32| format!("aaaabbbbccccddddeeee{n:04}");
+    let rev = |markup: &str| {
+        let at = markup
+            .find("data-rev=")
+            .expect("the badge carries a revision");
+        let rest = &markup[at + "data-rev=".len() + 1..];
+        rest[..rest.find('\'').expect("a closed attribute")].to_string()
+    };
+    plant_finding(door, &reviewer, &id(1), Some(&serious), "One.");
+    plant_finding(door, &reviewer, &id(2), Some(&serious), "Two.");
+    let first = badge(door);
+    assert_eq!(serious_count(&first), 2);
+    assert_eq!(rev(&first), rev(&badge(door)), "stable while nothing moves");
+
+    // Behind every door: the memo answers, so the revision does not move yet.
+    plant_verdict(&counting.elsewhere, &id(1), upheld);
+    assert_eq!(rev(&first), rev(&badge(door)), "the memo held");
+
+    // Through the store's door: observed, re-read, and the count is unchanged — two serious,
+    // none hidden — yet the list has news.
+    plant_verdict(door, &id(2), middle);
+    let second = badge(door);
+    assert_eq!(serious_count(&second), 2, "{second}");
+    assert_ne!(
+        rev(&first),
+        rev(&second),
+        "a verdict that hides nothing still reorders and labels the list: {second}"
+    );
+    assert_eq!(rev(&second), rev(&badge(door)), "and is stable again");
+}

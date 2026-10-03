@@ -324,13 +324,27 @@
   // A deep link into a view already on the page when this script runs (a deferred script
   // runs after parsing, so the lines are there if the server drew them inline).
   fillFromHash();
+  // ★ A deep link SCROLLS to its line too (ledger #682 item 1). The browser scrolls to a
+  // fragment once, at load, and the file view is not there yet: the browse shell fetches it
+  // by htmx afterwards, so `#L17` stayed at the top of the page (measured: the line at
+  // top=469, scrollY 0). So the swap that brings the line in scrolls to it, ONCE per load:
+  // an annotate re-renders the same view with the same hash, and focuses its new card, and a
+  // second scroll would pull the page away from it. A hash the person changes later is the
+  // browser's own to scroll, and it does.
+  let scrollPending = LINE_HASH.test(location.hash);
+
   // A deep link (`…#L42`) names a line before the file view has arrived: fill once it has.
   // ⚠ Only for the swap that brought that line in — the header badge settles a swap every
   // ten seconds on every page, and must not re-fill a field the person has just emptied.
   document.addEventListener("htmx:afterSettle", (e) => {
     const m = location.hash.match(LINE_HASH);
     const target = e.detail && e.detail.target;
-    if (m && target && target.querySelector && target.querySelector("#L" + m[1])) {
+    const line = m && target && target.querySelector && target.querySelector("#L" + m[1]);
+    if (line) {
+      if (scrollPending) {
+        scrollPending = false;
+        line.scrollIntoView({ block: "start" });
+      }
       fillQuote(m[1]);
     }
   });

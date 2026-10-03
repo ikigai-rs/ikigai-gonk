@@ -22,6 +22,8 @@
 //! # gonk.review.root = "~/.ikigai/spaces"   # the spaces tree (this IS the default)
 //! # gonk.review.judge = "urn:llm:coder-next:ask"   # the JUDGE on each serious finding a pass
 //!                                       # mints (default urn:llm:coder:ask, browse's); "off" for none
+//! # gonk.review.judge_max_tokens = 4000   # the judge's per-call ceiling (default 400, browse's);
+//!                                       # a REASONING judge answers empty at 400
 //! # gonk.queue.serious = "critical,major"   # the severities the Queue page asks a human about
 //!                                       # (this IS the default); the rest are minted, not queued
 //! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
@@ -81,7 +83,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 25] = [
+const KEYS: [&str; 26] = [
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -107,6 +109,7 @@ const KEYS: [&str; 25] = [
     "gonk.review.root",
     "gonk.review.arm",
     "gonk.review.judge",
+    "gonk.review.judge_max_tokens",
 ];
 
 /// How to invoke the binary.
@@ -441,6 +444,15 @@ pub struct ExplainTiers {
     /// does NOT unbind `urn:repo:{root}:judge-finding:{id}`: browse binds that with the review
     /// family and, with no judge configured, falls back to the REVIEW tier.
     pub judge: Option<String>,
+    /// The judge's `max_tokens` ceiling for one call (`gonk.review.judge_max_tokens`, ledger
+    /// #702 item 6) — browse's 400 unless the config says otherwise.
+    ///
+    /// ★ A REASONING judge spends its budget thinking before it answers: gpt-oss returned
+    /// EMPTY answers at 400 and was measured at 4000 (ledger #696's comments). An empty answer
+    /// is not a refusal, so a ceiling too low for the model reads as a judge that has nothing
+    /// to say. Set beside the judge, applied whether or not one is configured (with none, it
+    /// governs nothing).
+    pub judge_max_tokens: u32,
 }
 
 /// One grain's backend and ceiling.
@@ -469,6 +481,8 @@ impl Default for ExplainTiers {
             max_prompt_bytes: 16 * 1024,
             // browse 0.16.0's own default — the review tier's provider.
             judge: Some("urn:llm:coder:ask".to_string()),
+            // browse 0.16.0's own default (`ExplainConfig::judge_max_tokens`).
+            judge_max_tokens: 400,
         }
     }
 }
@@ -1001,6 +1015,20 @@ fn explain_tiers(text: &str) -> Result<ExplainTiers, String> {
     }
     if let Some(spelled) = value_for(text, "gonk.review.judge") {
         tiers.judge = judge_provider(&spelled)?;
+    }
+    if let Some(spelled) = value_for(text, "gonk.review.judge_max_tokens") {
+        tiers.judge_max_tokens =
+            spelled
+                .trim()
+                .parse()
+                .ok()
+                .filter(|t| *t > 0)
+                .ok_or_else(|| {
+                    format!(
+                    "gonk.review.judge_max_tokens: `{spelled}` is not a token count — a positive \
+                     whole number, the judge's ceiling for one call"
+                )
+                })?;
     }
     Ok(tiers)
 }
@@ -1536,6 +1564,40 @@ mod tests {
             let refused = judge(spelling).unwrap_err();
             assert!(
                 refused.contains("gonk.review.judge") && refused.contains("off"),
+                "{spelling}: {refused}"
+            );
+        }
+    }
+
+    /// `gonk.review.judge_max_tokens` (ledger #702 item 6): browse's 400 when no line is
+    /// written, the number when one is, and anything but a positive whole number stops the
+    /// server naming the line.
+    #[test]
+    fn the_judge_token_ceiling_is_a_positive_count_and_nothing_else() {
+        let ceiling = |text: &str| {
+            super::settings(&Flags::default(), text, &homes()).map(|s| s.explain.judge_max_tokens)
+        };
+        assert_eq!(ceiling("").unwrap(), 400);
+        assert_eq!(
+            ceiling("gonk.review.judge_max_tokens = 4000\n").unwrap(),
+            4000
+        );
+        assert_eq!(
+            ceiling("gonk.review.judge_max_tokens = \"4000\"\n").unwrap(),
+            4000,
+            "quoted like every other value"
+        );
+        for spelling in [
+            "gonk.review.judge_max_tokens = 0\n",
+            "gonk.review.judge_max_tokens = -1\n",
+            "gonk.review.judge_max_tokens = \"\"\n",
+            "gonk.review.judge_max_tokens = \"lots\"\n",
+            "gonk.review.judge_max_tokens = 4000.5\n",
+        ] {
+            let refused = ceiling(spelling).unwrap_err();
+            assert!(
+                refused.contains("gonk.review.judge_max_tokens")
+                    && refused.contains("is not a token count"),
                 "{spelling}: {refused}"
             );
         }

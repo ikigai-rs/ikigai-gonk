@@ -29,8 +29,12 @@
 //! - **It yields to review passes.** The peer is one model with two users, and the review
 //!   queue's passes run one at a time. Before each finding the run waits while a pass is in
 //!   flight, or while the ARMED queue still has requests waiting, so a pass is delayed by at
-//!   most the one judge call already in flight. ⚠ It cannot see a pass a person started by
-//!   hand (the review button calls browse directly, past [`crate::trigger::Activity`]).
+//!   most the one judge call already in flight. ★ "A pass" is ANY review Source through the
+//!   browse family, not only the queue's: the page's Review button calls browse through the
+//!   `/k/` adapter, past [`crate::trigger::Activity::begin`], so the family's overlay counts
+//!   every review in flight ([`crate::browse::CachedReads::observing_reviews`], ledger #702
+//!   item 4). ⚠ It does NOT yield to an explain or a PR review, which spend the same model
+//!   and are not review passes.
 //! - **`status: cannot` is counted, never retried in a loop.** browse answers a finding whose
 //!   reviewed version cannot be recovered as a value; the run records the reason, moves on, and
 //!   asks again only on the next run. The Queue reads those reasons through this resource and
@@ -254,10 +258,13 @@ impl Backfill {
         });
     }
 
-    /// Whether a review pass should go first: one is in flight, or the armed queue has
-    /// requests waiting for the reactor.
+    /// Whether a review pass should go first: one is in flight — a queued pass, or a review
+    /// any other door started (the page's Review button, a person on the socket), which the
+    /// browse family's overlay counts (ledger #702 item 4) — or the armed queue has requests
+    /// waiting for the reactor.
     fn review_first(&self) -> bool {
-        if self.activity.snapshot().in_flight_since_ms.is_some() {
+        let passes = self.activity.snapshot();
+        if passes.in_flight_since_ms.is_some() || passes.reviews_in_flight > 0 {
             return true;
         }
         self.armed.load(Ordering::SeqCst)
