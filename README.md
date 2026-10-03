@@ -339,13 +339,19 @@ ones a judge could not judge, then the refuted, **folded last** with the judge's
 reasons inside and the decision form intact. The sort is stable, so within one standing the
 findings resource's own triage order is kept; the same order holds inside every batch group,
 where a folded member keeps its box outside the fold. Every row says where it stands in words with
-the judge's tag (`judge: … · judge-v1@<model>`), the list says how many stand where, and the
+the judge's tag (`judge: … · judge-v2@<model>`), the list says how many stand where, and the
 header badge's numbers do not change: a refuted finding is still waiting for a decision. The
 judge is `gonk.review.judge` (default `urn:llm:coder:ask`, browse's own; `"off"` for none), and
 its per-call ceiling `gonk.review.judge_max_tokens` (default 400, browse's own; a reasoning judge
 such as gpt-oss answers empty at 400 and wants thousands). Its
-verdict words have no closed set in browse's contract, so `src/verdict.rs` spells them once and
-the server checks them at start against the judge's own contract.
+verdict words are the findings contract's own `verdict` set (browse 0.16.1): gonk reads them from
+it and spells none, ordering by POSITION in that set (the first leads, the second is folded and
+hidden, any other is uncertain), a mapping a test pins by running browse's own judge rule. A
+browse that declares no set stops the server at start, naming the floor. A row is routed by its
+LATEST verdict and labeled with that judge's tag, so after a judge or prompt-version change
+(judge-v2, ledger #483) a row judged only by the earlier version keeps its verdict, says whose it
+is, and is re-judged by the next backfill run; while more than one tag is in play the order line
+counts them.
 
 ★ **The queue that predates the judge is BACKFILLED on an operator's word**, never on start:
 

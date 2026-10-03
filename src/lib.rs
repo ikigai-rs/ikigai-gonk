@@ -209,6 +209,10 @@ pub fn compose_with(
     // poll. It is the one `gonk-` id the socket and QUIC doors serve — a render of the
     // caller's own bytes, gated by nothing because it reads nothing.
     spaces.push(Arc::new(render::space()));
+    // The root to read the verdict set through, kept before the family is moved in.
+    let verdict_root = browse
+        .as_ref()
+        .and_then(|b| b.first_root().map(str::to_string));
     if let Some(browse) = browse {
         spaces.push(browse as Arc<dyn Space>);
         spaces.push(Arc::new(ikigai_repo::space()));
@@ -222,6 +226,14 @@ pub fn compose_with(
     // door (the door kernels forward this name) and a hit reports it as `answered_by` when
     // no space inside claims one — today none of the linked crates' spaces do.
     let hub = Fallback::new(spaces).named(self::spaces::iri(self::spaces::HUB));
-    Kernel::with_meta_renderer(Arc::new(hub), Arc::new(TurtleRenderer))
-        .with_clock(Arc::new(SystemClock))
+    let kernel = Kernel::with_meta_renderer(Arc::new(hub), Arc::new(TurtleRenderer))
+        .with_clock(Arc::new(SystemClock));
+    // ★ The judge's verdict words, adopted from the browse family this hub composes (ledger
+    // #702 item 1): the Queue orders, folds and hides by them, and spells none of them. An
+    // error here is not swallowed so much as deferred — `main` adopts again at start and
+    // stops on it, naming the browse floor; a hub that adopted nothing orders nothing.
+    if let Some(root) = verdict_root {
+        let _ = crate::verdict::adopt(&kernel, &root);
+    }
+    kernel
 }

@@ -13,7 +13,14 @@
 //! - [`each_batch_group_orders_its_members_by_verdict`] — the same order inside a group, a
 //!   folded member still carrying its box.
 //! - [`no_verdict_word_is_written_down_in_this_crate`] — the anti-drift guard's fourth
-//!   sibling, with the triage order checked against the judge contract itself.
+//!   sibling: the words are the findings contract's `verdict` set (browse 0.16.1), and no
+//!   source file of this crate spells one.
+//! - [`browse_s_own_rule_gives_the_first_word_to_support_and_the_second_to_refutation`] — the
+//!   ROLES gonk reads by position, pinned by running browse's judge rule, not by prose.
+//! - [`a_finding_judged_only_under_an_earlier_judge_tag_is_judged_again`] and
+//!   [`a_later_verdict_under_a_new_tag_routes_the_row_and_an_earlier_one_says_its_tag`] —
+//!   judge-v2 (ledger #483): the backfill re-judges a v1-only finding, and the Queue routes on
+//!   the latest verdict, labeled with its tag.
 //!
 //! Every verdict here is PLANTED, as `ikigai-browse`'s judge stores one, through the browse
 //! graph's own write token — a judge needs a model, and what is tested is gonk's routing on
@@ -40,6 +47,20 @@ use ikigai_store::DurableStore;
 use tempfile::TempDir;
 
 const ROOT: &str = "demo";
+
+/// The verdict words in the Queue's triage order — the findings contract's own set, adopted
+/// when a door composed browse ([`verdict::adopt`]); this file spells none of them.
+fn triage() -> [&'static str; 3] {
+    verdict::words()
+        .triage()
+        .try_into()
+        .expect("browse declares three verdict words")
+}
+
+/// The page argument that shows the rows the judge refuted — named by the contract's word.
+fn refuted_arg() -> &'static str {
+    verdict::refuted_arg().expect("a verdict set is adopted")
+}
 
 /// The file every finding here quotes, one line per finding.
 const LIB: &str = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\nfn delta() {}\nfn omega() {}\n";
@@ -250,6 +271,19 @@ fn plant_verdict_tagged(
     answers: [(&str, &str); 4],
     tag: &str,
 ) {
+    plant_verdict_at(door, id, word, answers, tag, "2026-10-02T09:00:00Z");
+}
+
+/// The same, made at `at` — browse orders a row's `judges` by when each was made, and the
+/// row's `judge` is the last.
+fn plant_verdict_at(
+    door: &Kernel,
+    id: &str,
+    word: &str,
+    answers: [(&str, &str); 4],
+    tag: &str,
+    at: &str,
+) {
     let v = format!("urn:iki:finding:{id}:judge:{tag}");
     let questions = ["code", "disclosed", "occurs", "test"];
     let mut parts = String::new();
@@ -276,7 +310,7 @@ INSERT DATA {{ GRAPH <{graph}> {{
     dcterms:creator "a-test-judge" ;
     dcterms:subject <urn:iki:judge:site:code> ;
     dcterms:description "planted" ;
-    dcterms:created "2026-10-02T09:00:00Z"^^xsd:dateTime .
+    dcterms:created "{at}"^^xsd:dateTime .
 {parts}}} }}"#,
             graph = graph_iri()
         ),
@@ -306,7 +340,7 @@ const REFUTED: &str = "aaaaaaaaaaaaaaaaaaaa0004";
 /// Four serious findings, one per standing, planted so that browse's own order (by position
 /// in the file) is the REVERSE of the judge's: the refuted one quotes the first line.
 fn plant_four(door: &Kernel) {
-    let [first, middle, last] = verdict::triage();
+    let [first, middle, last] = triage();
     plant_finding(door, REFUTED, "fn alpha() {}", "alpha is wrong");
     plant_finding(door, UNSURE, "fn beta() {}", "beta is wrong");
     plant_finding(door, NOBODY, "fn gamma() {}", "gamma is wrong");
@@ -348,7 +382,7 @@ fn plant_four(door: &Kernel) {
 
 /// The page argument that lists the refuted rows — the verdict module's own name and value.
 fn shown() -> [(&'static str, &'static str); 1] {
-    [(verdict::REFUTED_ARG, verdict::SHOW)]
+    [(refuted_arg(), verdict::SHOW)]
 }
 
 /// ★★ **Ordered** (Brian, 2026-10-02), as the page draws it when asked to SHOW the refuted
@@ -360,7 +394,7 @@ fn the_queue_orders_by_verdict_and_folds_the_refuted_last() {
     let dir = scratch_root();
     let (door, _hub, _config) = door(&dir);
     plant_four(&door);
-    let [first, middle, last] = verdict::triage();
+    let [first, middle, last] = triage();
 
     // browse's own order is by position: the refuted one first.
     let rows: Vec<serde_json::Value> = serde_json::from_slice(
@@ -446,7 +480,7 @@ fn the_queue_hides_the_refuted_by_default_and_one_click_shows_them() {
     let dir = scratch_root();
     let (door, _hub, _config) = door(&dir);
     plant_four(&door);
-    let [first, middle, last] = verdict::triage();
+    let [first, middle, last] = triage();
 
     let html = page(&door, &[]);
     assert!(
@@ -470,7 +504,7 @@ fn the_queue_hides_the_refuted_by_default_and_one_click_shows_them() {
     );
     let show = format!(
         "/queue?state=pending&amp;{}={}",
-        verdict::REFUTED_ARG,
+        refuted_arg(),
         verdict::SHOW
     );
     assert!(
@@ -557,12 +591,12 @@ fn an_undeclared_refuted_value_is_refused() {
         &door,
         Verb::Source,
         queue::QUEUE_IRI,
-        &[(verdict::REFUTED_ARG, "maybe")],
+        &[(refuted_arg(), "maybe")],
         &reviewer(),
     )
     .expect_err("refused");
     assert!(
-        matches!(&err, ikigai_core::Error::InvalidArgument { name, .. } if name == verdict::REFUTED_ARG),
+        matches!(&err, ikigai_core::Error::InvalidArgument { name, .. } if name == refuted_arg()),
         "{err:?}"
     );
 }
@@ -587,7 +621,7 @@ fn a_decided_refuted_finding_is_not_folded() {
     let html = String::from_utf8(decided.bytes).expect("utf-8");
     assert!(!html.contains("class='verdict-fold'"), "{html}");
     let published = page(&door, &[("state", "published")]);
-    let [_, _, last] = verdict::triage();
+    let [_, _, last] = triage();
     assert!(
         published.contains(&format!("judge: {last} · {TAG}")),
         "the record still says the judge's word:\n{published}"
@@ -659,7 +693,7 @@ fn a_batch_group_hides_its_refuted_members_and_says_so() {
     let dir = scratch_root();
     let (door, _hub, _config) = door(&dir);
     plant_four(&door);
-    let [_, _, last] = verdict::triage();
+    let [_, _, last] = triage();
     let kind = kind_holding(&door, &[UPHELD, NOBODY, UNSURE, REFUTED]);
     let html = page(&door, &[("group", &kind)]);
     assert!(
@@ -687,7 +721,7 @@ fn a_batch_group_hides_its_refuted_members_and_says_so() {
     assert!(
         html.contains(&format!(
             "href='/queue?group={kind}&amp;{}={}'",
-            verdict::REFUTED_ARG,
+            refuted_arg(),
             verdict::SHOW
         )),
         "the one click:\n{html}"
@@ -709,7 +743,7 @@ fn a_batch_group_hides_its_refuted_members_and_says_so() {
 fn a_group_with_only_refuted_members_is_not_shown_and_is_counted() {
     let dir = scratch_root();
     let (door, _hub, _config) = door(&dir);
-    let [_, _, last] = verdict::triage();
+    let [_, _, last] = triage();
     let other = "aaaaaaaaaaaaaaaaaaaa0005";
     plant_finding(&door, REFUTED, "fn alpha() {}", "alpha is wrong");
     plant_finding(&door, other, "fn beta() {}", "beta is wrong");
@@ -745,11 +779,10 @@ fn a_group_with_only_refuted_members_is_not_shown_and_is_counted() {
     }
 }
 
-/// ★ The anti-drift guard's fourth sibling. The verdict words have no `one_of` in browse's
-/// contract — the judge states them only in the summary of `urn:repo:{repo}:judge:{path}` —
-/// so `src/verdict.rs` spells them ONCE, and `main` checks them against that summary at start.
-/// This asserts both halves: the check passes against the contract this build links, and no
-/// other page file spells a verdict word.
+/// ★ The anti-drift guard's fourth sibling. Since browse 0.16.1 the verdict words are the
+/// findings contract's own `verdict` set, and this crate reads them from it
+/// ([`verdict::adopt`]) — so NO source file spells one, `src/verdict.rs` included. This asserts
+/// both halves: the set this build links is declared and adopted, and no file spells a word.
 ///
 /// ⚠ One word is also the NAME of a decision field browse 0.14.0 computes (`confirmed`, read
 /// with `.get(…)`), so a quoted spelling is allowed exactly where it is a field read.
@@ -757,22 +790,36 @@ fn a_group_with_only_refuted_members_is_not_shown_and_is_counted() {
 fn no_verdict_word_is_written_down_in_this_crate() {
     let dir = scratch_root();
     let (_door, hub, _config) = door(&dir);
-    let checked = verdict::check_verdicts(&hub, ROOT)
-        .expect("the judge contract states every word")
-        .expect("the judge is bound with the explain families");
-    assert_eq!(checked, verdict::triage());
+    let adopted = verdict::adopt(&hub, ROOT).expect("the findings contract declares the set");
+    let declared = queue::one_of(
+        &hub,
+        &format!("urn:repo:{ROOT}:findings"),
+        Verb::Source,
+        verdict::VERDICT_INPUT,
+    )
+    .expect("a closed verdict set");
+    assert_eq!(
+        adopted.words(),
+        declared.as_slice(),
+        "contract order, whole"
+    );
+    assert_eq!(verdict::words(), adopted, "what the pages read");
 
     let xsl = include_str!("../web/gonk.xsl");
     let start = xsl.find("the review queue -->").expect("the queue section");
     let end = start + xsl[start..].find("a ledger -->").expect("the next section");
     for (what, source) in [
+        ("src/verdict.rs", include_str!("../src/verdict.rs")),
         ("src/queue.rs", include_str!("../src/queue.rs")),
         ("src/batch.rs", include_str!("../src/batch.rs")),
         ("src/walk.rs", include_str!("../src/walk.rs")),
+        ("src/backfill.rs", include_str!("../src/backfill.rs")),
+        ("src/main.rs", include_str!("../src/main.rs")),
+        ("src/lib.rs", include_str!("../src/lib.rs")),
         ("web/gonk.xsl (the review queue)", &xsl[start..end]),
         ("web/gonk.js", include_str!("../web/gonk.js")),
     ] {
-        for word in verdict::triage() {
+        for word in adopted.words() {
             let field_read = format!(".get(\"{word}\")");
             let source = source.replace(&field_read, "");
             for spelled in [
@@ -782,8 +829,8 @@ fn no_verdict_word_is_written_down_in_this_crate() {
             ] {
                 assert!(
                     !source.contains(&spelled),
-                    "`{what}` spells the verdict `{word}` as {spelled}. The words live in \
-                     src/verdict.rs, checked against the judge contract."
+                    "`{what}` spells the verdict `{word}` as {spelled}. The words are the \
+                     findings contract's `verdict` set, read by src/verdict.rs."
                 );
             }
         }
@@ -833,6 +880,37 @@ impl Endpoint for FakeJudge {
     }
 }
 
+/// A judge that answers every claim with a REFUTING answer — what browse's rule must turn into
+/// the contract's second word, the one the Queue folds and hides.
+struct NayJudge;
+
+#[async_trait]
+impl Endpoint for NayJudge {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"CODE: no - it does not do that\nDISCLOSED: yes - the comment says so\nOCCURS: no - no input reaches it\nTEST: no - not a test\n"
+                .to_vec(),
+        ))
+    }
+    fn name(&self) -> &str {
+        "nay-judge"
+    }
+    fn describe(&self) -> Description {
+        let optional = |name: &str| ArgSpec::new(name).optional();
+        Description::new("nay-judge")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(optional("prompt"))
+            .input(optional("system"))
+            .input(optional("temperature"))
+            .input(optional("max_tokens"))
+    }
+}
+
+/// The refuting judge's provider, beside [`FAKE`].
+const NAY: &str = "urn:llm:nay:ask";
+
 struct FakeModel;
 
 #[async_trait]
@@ -881,7 +959,9 @@ fn backfilled_with(dir: &TempDir, judge: Option<&str>, slow: Option<SlowReview>)
                 stop_on_first: Arc::clone(&stop_on_first),
             },
         )
-        .bind(Exact::new("urn:llm:fake:model"), FakeModel);
+        .bind(Exact::new("urn:llm:fake:model"), FakeModel)
+        .bind(Exact::new(NAY), NayJudge)
+        .bind(Exact::new("urn:llm:nay:model"), FakeModel);
     let mut tiers = ExplainTiers {
         judge: judge.map(str::to_string),
         ..ExplainTiers::default()
@@ -969,7 +1049,13 @@ fn settled(kernel: &Kernel) -> serde_json::Value {
     }
 }
 
-const JUDGED_TAG: &str = "judge-v1@fake-model";
+/// The configured judge's CURRENT tag: browse 0.16.1's prompt version at the fake model.
+/// ⚠ Spelled because it is what is pinned — a browse that bumps its prompt version fails here,
+/// on the lock bump that adopts it, and that is the place to read what changed.
+const JUDGED_TAG: &str = "judge-v2@fake-model";
+/// The same judge under the PREVIOUS prompt version: a verdict browse keeps archived beside
+/// the current one and never answers Exists for.
+const EARLIER_TAG: &str = "judge-v1@fake-model";
 const FRESH_1: &str = "bbbbbbbbbbbbbbbbbbbb0001";
 const FRESH_2: &str = "bbbbbbbbbbbbbbbbbbbb0002";
 const ALREADY: &str = "bbbbbbbbbbbbbbbbbbbb0003";
@@ -986,7 +1072,7 @@ fn plant_backfill(door: &Kernel) {
     plant_verdict_tagged(
         door,
         ALREADY,
-        verdict::triage()[0],
+        triage()[0],
         [("yes", "a"), ("no", "b"), ("yes", "c"), ("no", "d")],
         JUDGED_TAG,
     );
@@ -1066,7 +1152,7 @@ fn a_backfill_judges_each_unjudged_finding_once_and_skips_the_judged() {
     // The verdicts are browse's, archived on the findings — the Queue reads them back, and
     // the lost one is labeled with the reason and ordered after them.
     let html = page(&b.door, &[]);
-    let [first_word, _, _] = verdict::triage();
+    let [first_word, _, _] = triage();
     assert!(
         html.contains(&format!("judge: {first_word} · {JUDGED_TAG}")),
         "{html}"
@@ -1578,4 +1664,203 @@ fn a_refused_decision_keeps_the_reproduced_tick() {
     let input = &after[start..start + after[start..].find('>').expect("closes")];
     assert!(input.contains("checked"), "still ticked: {input}");
     assert!(after.contains("the steps"), "{after}");
+}
+
+// ------------------------------------------------------------------ the contract's words (browse 0.16.1)
+
+/// The latest verdict on one finding's row — its word and its tag — and how many it carries.
+fn latest_verdict(door: &Kernel, id: &str) -> (String, String, usize) {
+    let answer = issue(
+        door,
+        Verb::Source,
+        &format!("urn:repo:{ROOT}:findings"),
+        &[("as", "application/json"), ("state", "pending")],
+        &reviewer(),
+    )
+    .expect("the findings");
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&answer.bytes).expect("json");
+    let row = rows
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap_or_else(|| panic!("`{id}` is not pending: {rows:?}"));
+    let text = |key: &str| row["judge"][key].as_str().unwrap_or("").to_string();
+    let judges = row["judges"].as_array().map_or(0, Vec::len);
+    (text("verdict"), text("tag"), judges)
+}
+
+/// ★ **The ROLES gonk reads by position are browse's, pinned by its RULE.** The contract
+/// declares the set and not which word means what (ledger #708), so `crate::verdict` gives the
+/// first word to "read first" and the second to "fold and hide". This runs browse's own judge
+/// over a fake judge's answers: four supporting answers must yield the first word and a
+/// refuting answer the second. A browse release that reordered its set fails HERE, on the lock
+/// bump that adopts it — not as a Queue that hides the confirmed findings.
+#[test]
+fn browse_s_own_rule_gives_the_first_word_to_support_and_the_second_to_refutation() {
+    for (judge, role) in [(FAKE, "upheld"), (NAY, "refuting")] {
+        let dir = scratch_root();
+        let b = backfilled(&dir, Some(judge));
+        plant_finding(&b.door, FRESH_1, "fn alpha() {}", "alpha is wrong");
+        sink_backfill(&b.door, backfill::START).expect("start");
+        let run = settled(&b.door);
+        assert_eq!(run["judged"], 1, "{judge}: {run}");
+        let (word, tag, _) = latest_verdict(&b.door, FRESH_1);
+        let set = verdict::words();
+        let expected = if role == "upheld" {
+            set.upheld()
+        } else {
+            set.refuting()
+        };
+        assert_eq!(
+            Some(word.as_str()),
+            expected,
+            "{judge}'s answers under browse's rule give the {role} word"
+        );
+        assert_eq!(tag, JUDGED_TAG, "{judge}");
+    }
+}
+
+/// ★ **judge-v2: a finding judged only under the PREVIOUS tag is unjudged for the current
+/// one** (ledger #483). judge-finding's Exists asks about the configured judge's current tag,
+/// so `sink urn:iki:gonk:judge:backfill content=start` re-judges it — one call — while a
+/// finding already judged under the current tag costs none. The earlier verdict stays on the
+/// row beside the new one, and the row is routed by the new one: here the v1 verdict refuted
+/// it, the v2 verdict upholds it, and it comes back off the hidden list on its own.
+#[test]
+fn a_finding_judged_only_under_an_earlier_judge_tag_is_judged_again() {
+    let dir = scratch_root();
+    let b = backfilled(&dir, Some(FAKE));
+    let [_, _, last] = triage();
+    plant_finding(&b.door, FRESH_1, "fn alpha() {}", "alpha is wrong");
+    plant_finding(&b.door, ALREADY, "fn gamma() {}", "gamma is wrong");
+    plant_verdict_tagged(
+        &b.door,
+        FRESH_1,
+        last,
+        [("no", "a"), ("yes", "b"), ("no", "c"), ("no", "d")],
+        EARLIER_TAG,
+    );
+    plant_verdict_tagged(
+        &b.door,
+        ALREADY,
+        last,
+        [("no", "a"), ("yes", "b"), ("no", "c"), ("no", "d")],
+        JUDGED_TAG,
+    );
+    let before = page(&b.door, &[]);
+    assert!(
+        !before.contains(&format!("value='{FRESH_1}'")),
+        "refuted under v1, it is hidden meanwhile:\n{before}"
+    );
+
+    sink_backfill(&b.door, backfill::START).expect("start");
+    let run = settled(&b.door);
+    assert_eq!(run["total"], 2, "{run}");
+    assert_eq!(
+        run["judged"], 1,
+        "the v1-only finding is judged again: {run}"
+    );
+    assert_eq!(run["already_judged"], 1, "the v2 one costs no call: {run}");
+    assert_eq!(run["calls"], 1, "{run}");
+    assert_eq!(b.calls.load(AtomicOrdering::SeqCst), 1);
+
+    let (word, tag, judges) = latest_verdict(&b.door, FRESH_1);
+    assert_eq!(judges, 2, "the v1 verdict stays archived beside the v2 one");
+    assert_eq!(
+        tag, JUDGED_TAG,
+        "the row's latest verdict is the current judge's"
+    );
+    assert_eq!(Some(word.as_str()), verdict::words().upheld());
+    let after = page(&b.door, &[]);
+    let [first, _, _] = triage();
+    assert!(
+        after.contains(&format!("judge: {first} · {JUDGED_TAG}")),
+        "routed and labeled by the current judge, back on the page:\n{after}"
+    );
+    drop(b.hub);
+}
+
+/// ★ **The Queue routes on the LATEST verdict and says whose it is** (ledger #483). A row with
+/// a v1 verdict and a later v2 one is ordered, folded and hidden by the v2 one; a row judged
+/// only under v1 meanwhile is routed by that verdict and LABELED with its tag — not treated as
+/// unjudged, because browse does not publish its current tag and a backfill converges the rows
+/// within the hour. While the listed rows' verdicts come from more than one tag, the order line
+/// counts them per tag.
+#[test]
+fn a_later_verdict_under_a_new_tag_routes_the_row_and_an_earlier_one_says_its_tag() {
+    let dir = scratch_root();
+    let (door, _hub, _config) = door(&dir);
+    let [first, middle, last] = triage();
+    let refutes = [("no", "a"), ("yes", "b"), ("no", "c"), ("no", "d")];
+    let supports = [("yes", "a"), ("no", "b"), ("yes", "c"), ("no", "d")];
+    // Overturned: refuted by v1 at nine, upheld by v2 at ten.
+    plant_finding(&door, UPHELD, "fn alpha() {}", "alpha is wrong");
+    plant_verdict_at(
+        &door,
+        UPHELD,
+        last,
+        refutes,
+        EARLIER_TAG,
+        "2026-10-02T09:00:00Z",
+    );
+    plant_verdict_at(
+        &door,
+        UPHELD,
+        first,
+        supports,
+        JUDGED_TAG,
+        "2026-10-03T10:00:00Z",
+    );
+    // Judged only by v1, which refuted it.
+    plant_finding(&door, REFUTED, "fn beta() {}", "beta is wrong");
+    plant_verdict_at(
+        &door,
+        REFUTED,
+        last,
+        refutes,
+        EARLIER_TAG,
+        "2026-10-02T09:00:00Z",
+    );
+    // Judged by v2, uncertain.
+    plant_finding(&door, UNSURE, "fn gamma() {}", "gamma is wrong");
+    plant_verdict_at(
+        &door,
+        UNSURE,
+        middle,
+        supports,
+        JUDGED_TAG,
+        "2026-10-03T10:00:00Z",
+    );
+
+    let html = page(&door, &[]);
+    assert!(
+        html.contains(&format!("judge: {first} · {JUDGED_TAG}")),
+        "the overturned row is routed by its latest verdict:\n{html}"
+    );
+    assert!(
+        !html.contains(&format!("value='{REFUTED}'")),
+        "the v1-only refuted row is hidden like any refuted row:\n{html}"
+    );
+    assert_eq!(order_on(&html, &[UNSURE, UPHELD]), [UPHELD, UNSURE]);
+    assert!(
+        !html.contains("judges:"),
+        "one tag among the listed rows, so no per-tag count:\n{html}"
+    );
+
+    let shown_html = page(&door, &shown());
+    assert!(
+        shown_html.contains(&format!("judge: {last} · {EARLIER_TAG}")),
+        "shown, the v1-only row names the judge it is routed by:\n{shown_html}"
+    );
+    assert_eq!(
+        order_on(&shown_html, &[REFUTED, UNSURE, UPHELD]),
+        [UPHELD, UNSURE, REFUTED]
+    );
+    assert!(
+        shown_html.contains(&format!(
+            "come from 2 judges: 2 by {JUDGED_TAG}, 1 by {EARLIER_TAG}"
+        )) || shown_html.contains(&format!(
+            "come from 2 judges: 1 by {EARLIER_TAG}, 2 by {JUDGED_TAG}"
+        )),
+        "the order line counts the latest verdicts per tag:\n{shown_html}"
+    );
 }

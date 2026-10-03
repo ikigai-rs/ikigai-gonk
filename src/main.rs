@@ -275,18 +275,15 @@ fn serve(flags: &config::Flags) -> ! {
         let declared = queue::check_serious(&hub, &settings.queue).unwrap_or_else(|e| fail(&e));
         queue_line(&settings, &declared)
     };
-    // ★ The judge's verdict words, checked against the judge contract THIS kernel binds
-    // (ledger #696): the Queue orders by them, browse declares no closed set, and a word its
-    // contract stopped stating would order every judged row as uncertain in silence.
-    let judge_line = judge_line(
-        &settings,
-        explains,
-        settings
-            .browse_roots
-            .first()
-            .and_then(|(root, _)| verdict::check_verdicts(&hub, root).unwrap_or_else(|e| fail(&e)))
-            .is_some(),
-    );
+    // ★ The judge's verdict words, read from the findings contract THIS kernel binds (ledger
+    // #702 item 1): the Queue orders, folds and hides by them and spells none of them, so a
+    // browse below the floor that declares no set stops this server naming the floor, rather
+    // than serving a Queue that orders every judged row as uncertain in silence.
+    let verdicts = settings
+        .browse_roots
+        .first()
+        .map(|(root, _)| verdict::adopt(&hub, root).unwrap_or_else(|e| fail(&e)));
+    let judge_line = judge_line(&settings, explains, verdicts);
 
     // ★★ ARMING, and it is deliberately the last thing before the doors: the reviewer's
     // grant is checked against the CONTRACT of the review this kernel actually binds, and a
@@ -718,25 +715,28 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
 
 /// The banner's judge line: which provider confirms or refutes each serious finding a pass
 /// mints (`gonk.review.judge`), and what the Queue does with its verdict.
-fn judge_line(settings: &config::Settings, explains: bool, checked: bool) -> String {
+fn judge_line(
+    settings: &config::Settings,
+    explains: bool,
+    verdicts: Option<&verdict::Verdicts>,
+) -> String {
     if !explains {
         return "not bound — no review pass can run here, so no finding is judged; verdicts \
                 already on file still order the Queue"
             .to_string();
     }
-    let order = verdict::triage();
-    let ordering = format!(
-        "the Queue orders {} first, then unjudged, {}, could-not-judge, and hides the \
-         undecided {} one click away (ledger #704){}",
-        order[0],
-        order[1],
-        order[2],
-        if checked {
-            ""
-        } else {
-            " (the judge contract could not be read to check those words)"
-        }
-    );
+    let ordering = match verdicts {
+        Some(set) => format!(
+            "the Queue orders {} first, then unjudged, {}, could-not-judge, and hides the \
+             undecided {} one click away (ledger #704); the words are the findings \
+             contract's `{}` set",
+            set.upheld().unwrap_or_default(),
+            queue::join_or(set.uncertain()),
+            set.refuting().unwrap_or_default(),
+            verdict::VERDICT_INPUT,
+        ),
+        None => "no gonk.browse.root, so no Queue to order".to_string(),
+    };
     match &settings.explain.judge {
         Some(provider) => format!(
             "{provider} @{} tokens — one call per serious finding a pass mints \

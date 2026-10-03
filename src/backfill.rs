@@ -7,7 +7,7 @@
 //!                               Sink    content=start | content=stop
 //! ```
 //!
-//! `ikigai-browse` 0.16.0 judges only the serious findings a review pass MINTS, so every
+//! `ikigai-browse` (0.16.0 on) judges only the serious findings a review pass MINTS, so every
 //! finding queued before it carries no verdict and the Queue can only order it as unjudged.
 //! `urn:repo:{repo}:judge-finding:{id}` judges one queued finding on demand and archives the
 //! verdict exactly as a pass does. This is the job that walks the queue through it.
@@ -44,8 +44,22 @@
 //!   nothing else: no store write (browse archives the verdict itself), no annotate, no `gh`.
 //! - **No `provider=`.** browse's `selectable()` leaves the judge out, so naming it would be
 //!   Denied; omitted, judge-finding asks the configured judge (`gonk.review.judge`). With the
-//!   judge OFF the run refuses to start: judge-finding would fall back to the REVIEW tier, and
-//!   an operator who switched the judge off did not ask for that.
+//!   judge OFF the run refuses to start, before it lists anything: since `ikigai-browse`
+//!   0.16.1 judge-finding itself refuses then (a typed `Conflict`; 0.16.0 fell back to the
+//!   REVIEW tier, silently), so every finding would only come back failed.
+//! - **★ A new judge TAG is a new run's work** (judge-v2, ledger #483). Exists asks about the
+//!   configured judge's CURRENT tag, so a finding judged only under an earlier prompt version
+//!   (`judge-v1@<model>`) is unjudged for `judge-v2@<model>`, and a run judges it again — one
+//!   call — while the v1 verdict stays archived beside the new one. The Queue routes on the
+//!   newest ([`crate::verdict`]).
+//! - **★ A `cannot` survives a restart in browse, not here.** Since 0.16.1 browse archives a
+//!   `cannot` with a lasting reason, and judge-finding answers it again from the archive
+//!   (`archived: true`, `calls: 0`) until the judge tag or the file's search basis changes.
+//!   This process still keeps the reasons it was told in memory ([`Run::unjudgeable`]), which
+//!   is what the Queue reads; after a restart the next run refills them for free. Reading them
+//!   per row from browse instead is not cheap — judge-finding's Source recomputes the basis
+//!   from git for every row, and JUDGES a row that has none on file — so it waits on browse
+//!   carrying the record on the finding row (ledger #709).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -206,8 +220,8 @@ impl Backfill {
         if self.judge.is_none() {
             return Err(Error::Unavailable(
                 "the judge is off (gonk.review.judge = \"off\"), so there is nothing to \
-                 backfill with: judge-finding would fall back to the REVIEW tier, which is not \
-                 what switching the judge off asked for"
+                 backfill with: judge-finding refuses every finding when no judge is \
+                 configured"
                     .to_string(),
             ));
         }

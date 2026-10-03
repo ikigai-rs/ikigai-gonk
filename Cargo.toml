@@ -259,7 +259,14 @@ ikigai-ledger = "0.2.1"
 # finding Sink takes `reproduced=` beside a publish. On 0.15.x none of the three exists, which is
 # why this is the floor. `^0.15.0` is `<0.16.0`. Minor: additive builder methods, additive json
 # fields, a new resource and an additive Sink input.
-ikigai-browse = "0.16.0"
+# ★ 0.16.1 (ledger #702, browse PRs #66/#67/#68) DECLARES THE VERDICT WORDS: the findings Source's
+# `verdict` input carries the closed set as its `one_of`, which is what `crate::verdict` now reads
+# instead of spelling the words and checking them against the judge's prose. It also refuses
+# judge-finding with no judge (a typed Conflict, no silent review-tier fallback), archives a
+# `cannot` with a lasting reason, and ships judge-v2 (a new tag beside the archived judge-v1
+# verdicts). On 0.16.0 there is no `verdict` one_of and this server refuses to start, which is
+# why this is the floor. `^0.16.1` is `<0.17.0`. Patch: an additive input, additive json fields.
+ikigai-browse = "0.16.1"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
