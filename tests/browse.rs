@@ -2050,6 +2050,51 @@ fn the_line_hook_names_what_the_file_view_emits() {
     }
 }
 
+/// ★ **A deep link scrolls to its line once the file view arrives** (ledger
+/// [#682](http://localhost:1060/l/default/item/682) item 1). What a test can pin, since nothing
+/// in this crate runs JavaScript: the shell's first paint does NOT carry the line (its one region
+/// is fetched by htmx on `load`, which is why the browser's own scroll-to-fragment, done once
+/// at load, finds nothing); the view that arrives DOES carry `id="L{n}"`; and the script's
+/// settle hook — the one that already fills the quote for the swap that brought the line in —
+/// scrolls to it, once per load. The behavior itself was measured in a real browser against a
+/// scratch gonk (the PR says the numbers).
+#[test]
+fn a_deep_link_scrolls_to_its_line_once_the_file_view_arrives() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    let (status, shell) = door.get_html("/browse/urn:repo:demo:file:src/lib.rs", Some(&token));
+    assert_eq!(status, 200, "{shell}");
+    assert!(
+        !shell.contains("id=\"L1\"") && !shell.contains("id='L1'"),
+        "the first paint carries no line, so the browser has nothing to scroll to: {shell}"
+    );
+    assert!(
+        shell.contains("hx-trigger='load'"),
+        "the file view arrives by htmx after load: {shell}"
+    );
+    assert!(shell.contains("/static/gonk.js"), "the hook ships: {shell}");
+    let (status, file) = door.get_html(
+        &k("source urn:repo:demo:file:src/lib.rs as=text/html"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{file}");
+    assert!(
+        file.contains("<span class=\"browse-line\" id=\"L1\">"),
+        "the view that arrives carries the anchor: {file}"
+    );
+    let script = include_str!("../web/gonk.js");
+    let hook = &script[script
+        .find("document.addEventListener(\"htmx:afterSettle\", (e) => {\n    const m = location.hash.match(LINE_HASH);")
+        .expect("the line hook's settle listener")..];
+    let hook = &hook[..hook.find("\n  });").expect("its end")];
+    assert!(
+        hook.contains("scrollIntoView") && hook.contains("scrollPending"),
+        "the settle hook scrolls to the line, once: {hook}"
+    );
+}
+
 /// ★ **An annotate from the file view lands back on the file view** (ledger #658, browse
 /// 0.15.0), walked through this door the way a browser walks it: the form browse serves, posted
 /// as htmx posts it, then the GET its acknowledgement asks for.

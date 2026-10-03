@@ -55,25 +55,31 @@ fn scratch_root() -> TempDir {
 /// bound (so the judge's contract is there to read) — and no model behind them: nothing here
 /// derives, so nothing here dials one.
 fn door(dir: &TempDir) -> (Kernel, Arc<Kernel>, TempDir) {
-    door_with(dir, &ExplainTiers::default(), Vec::new(), Vec::new())
+    door_with(dir, &ExplainTiers::default(), Vec::new(), Vec::new(), None)
 }
 
 /// The same, with the tiers, the mounted spaces (a fake `urn:llm:`) and extra spaces (the
-/// backfill) a test chooses.
+/// backfill) a test chooses — and, as `main` wires it, the pass counters the browse family
+/// counts every review on.
 fn door_with(
     dir: &TempDir,
     tiers: &ExplainTiers,
     mounted: Vec<Arc<dyn Space>>,
     extra: Vec<Arc<dyn Space>>,
+    reviews: Option<Arc<Activity>>,
 ) -> (Kernel, Arc<Kernel>, TempDir) {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let roots: Vec<(String, PathBuf)> = vec![(ROOT.to_string(), dir.path().to_path_buf())];
     let wired = browse::wire(roots, handle, None, Some(tiers), &graph);
+    let space = match reviews {
+        Some(activity) => wired.space.observing_reviews(activity),
+        None => wired.space,
+    };
     let hub = Arc::new(compose_with(
         store,
-        Some(Arc::new(wired.space)),
+        Some(Arc::new(space)),
         mounted,
         extra,
         None,
@@ -859,23 +865,34 @@ struct Backfilled {
 }
 
 fn backfilled(dir: &TempDir, judge: Option<&str>) -> Backfilled {
+    backfilled_with(dir, judge, None)
+}
+
+/// The same, with the REVIEW tier asking `slow` — a reviewer that holds its call open until
+/// the test lets it go, so a pass can be in flight for as long as a test needs.
+fn backfilled_with(dir: &TempDir, judge: Option<&str>, slow: Option<SlowReview>) -> Backfilled {
     let calls = Arc::new(AtomicUsize::new(0));
     let stop_on_first = Arc::new(Mutex::new(None));
-    let llm: Arc<dyn Space> = Arc::new(
-        EndpointSpace::new()
-            .bind(
-                Exact::new(FAKE),
-                FakeJudge {
-                    calls: Arc::clone(&calls),
-                    stop_on_first: Arc::clone(&stop_on_first),
-                },
-            )
-            .bind(Exact::new("urn:llm:fake:model"), FakeModel),
-    );
-    let tiers = ExplainTiers {
+    let mut space = EndpointSpace::new()
+        .bind(
+            Exact::new(FAKE),
+            FakeJudge {
+                calls: Arc::clone(&calls),
+                stop_on_first: Arc::clone(&stop_on_first),
+            },
+        )
+        .bind(Exact::new("urn:llm:fake:model"), FakeModel);
+    let mut tiers = ExplainTiers {
         judge: judge.map(str::to_string),
         ..ExplainTiers::default()
     };
+    if let Some(slow) = slow {
+        tiers.review.provider = SLOW.to_string();
+        space = space
+            .bind(Exact::new(SLOW), slow)
+            .bind(Exact::new("urn:llm:slow:model"), FakeModel);
+    }
+    let llm: Arc<dyn Space> = Arc::new(space);
     let activity = Arc::new(Activity::default());
     let backfill = Arc::new(
         Backfill::new(
@@ -891,7 +908,13 @@ fn backfilled(dir: &TempDir, judge: Option<&str>) -> Backfilled {
         )
         .with_pause(Duration::from_millis(20)),
     );
-    let (door, hub, config) = door_with(dir, &tiers, vec![llm], vec![backfill.space()]);
+    let (door, hub, config) = door_with(
+        dir,
+        &tiers,
+        vec![llm],
+        vec![backfill.space()],
+        Some(Arc::clone(&activity)),
+    );
     backfill.attach(&hub, false);
     Backfilled {
         door,
@@ -1145,6 +1168,124 @@ fn a_backfill_waits_while_a_review_pass_is_in_flight() {
     );
     drop(pass);
     assert_eq!(b.calls.load(AtomicOrdering::SeqCst), 0);
+}
+
+/// The review tier [`SlowReview`] serves in [`backfilled_with`].
+const SLOW: &str = "urn:llm:slow:ask";
+
+/// A reviewer that says it has been asked, then holds the call open until released — a
+/// review pass in flight for exactly as long as a test wants one.
+#[derive(Clone, Default)]
+struct SlowReview {
+    entered: Arc<std::sync::atomic::AtomicBool>,
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Endpoint for SlowReview {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        self.entered.store(true, AtomicOrdering::SeqCst);
+        let began = Instant::now();
+        while !self.release.load(AtomicOrdering::SeqCst)
+            && began.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            b"[]".to_vec(),
+        ))
+    }
+    fn name(&self) -> &str {
+        "slow-review"
+    }
+    fn describe(&self) -> Description {
+        let optional = |name: &str| ArgSpec::new(name).optional();
+        Description::new("slow-review")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(optional("prompt"))
+            .input(optional("system"))
+            .input(optional("temperature"))
+            .input(optional("max_tokens"))
+    }
+}
+
+/// ★★ **A review pass started from the PAGE BUTTON makes the backfill wait too** (ledger
+/// [#702](http://localhost:1060/l/default/item/702) item 4). The button does not go through
+/// the review queue: browse's file face emits `hx-get="/k/source urn:repo:{root}:review:{path}
+/// as=text/html"`, and the `/k/` adapter resolves it under the caller's grant. So the signal
+/// the backfill yields to has to be raised where every review passes — the browse family's
+/// overlay — not only where the queue's passes begin. Here the button's request is held open
+/// at the model, the backfill is started, and it must yield until the click's pass ends.
+#[test]
+fn a_backfill_waits_while_a_button_review_is_in_flight() {
+    let dir = scratch_root();
+    let slow = SlowReview::default();
+    let b = backfilled_with(&dir, Some(FAKE), Some(slow.clone()));
+    plant_backfill(&b.door);
+    let clicker = Capability::scoped(vec![
+        ikigai_browse::CAP_WILDCARD.to_string(),
+        "urn:cap:net:localhost".to_string(),
+    ]);
+    std::thread::scope(|scope| {
+        let click = scope.spawn(|| {
+            issue(
+                &b.door,
+                Verb::Source,
+                ikigai_gonk::k::K_IRI,
+                &[(
+                    "c",
+                    &format!("source urn:repo:{ROOT}:review:src/lib.rs as=text/html"),
+                )],
+                &clicker,
+            )
+        });
+        let began = Instant::now();
+        while !slow.entered.load(AtomicOrdering::SeqCst) {
+            assert!(
+                !click.is_finished(),
+                "the click ended before it reached the reviewer: {:?}",
+                click.join()
+            );
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "the click never reached the reviewer"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        sink_backfill(&b.door, backfill::START).expect("start");
+        let began = Instant::now();
+        while backfill_status(&b.door)["phase"] != "yielding" {
+            let status = backfill_status(&b.door);
+            assert!(
+                began.elapsed() < Duration::from_secs(10) && status["done"] == 0,
+                "it never yielded to the button's pass: {status}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            b.calls.load(AtomicOrdering::SeqCst),
+            0,
+            "no judge call while the button's pass runs"
+        );
+        assert_eq!(backfill_status(&b.door)["done"], 0);
+
+        slow.release.store(true, AtomicOrdering::SeqCst);
+        let _ = click.join().expect("the click's thread");
+    });
+    let finished = settled(&b.door);
+    assert_eq!(finished["phase"], "done", "{finished}");
+    assert_eq!(
+        finished["judged"], 2,
+        "it went on once the pass ended: {finished}"
+    );
+    assert!(
+        finished["yielded_ms"].as_u64().is_some_and(|ms| ms > 0),
+        "{finished}"
+    );
 }
 
 /// The Sink's refusals: the judge switched off, a word it does not know, and a caller who

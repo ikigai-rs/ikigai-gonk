@@ -419,7 +419,9 @@ fn explain_config(store: Arc<Store>, tiers: &ExplainTiers) -> ExplainConfig {
         .review_max_tokens(tiers.review.max_tokens)
         .pr_provider(&tiers.pr.provider)
         .pr_max_tokens(tiers.pr.max_tokens)
-        .max_prompt_bytes(tiers.max_prompt_bytes);
+        .max_prompt_bytes(tiers.max_prompt_bytes)
+        // ★ ledger #702 item 6: a reasoning judge answers empty at browse's 400.
+        .judge_max_tokens(tiers.judge_max_tokens);
     match &tiers.judge {
         Some(provider) => config.judge_provider(provider),
         None => config.no_judge(),
@@ -498,6 +500,7 @@ pub fn cached_reads(
             .collect(),
         epochs,
         graph: None,
+        reviews: None,
     }
 }
 
@@ -523,6 +526,9 @@ pub struct CachedReads {
     /// The graph browse writes (`None`: the default graph) — what a store-door write must
     /// name to move a pending count ([`Self::observe_store_writes`]).
     graph: Option<String>,
+    /// Where every review Source through the family is counted while it runs
+    /// ([`Self::observing_reviews`]).
+    reviews: Option<Arc<crate::trigger::Activity>>,
 }
 
 impl CachedReads {
@@ -530,6 +536,24 @@ impl CachedReads {
     #[must_use]
     pub fn writing_to(mut self, graph: &Graph) -> Self {
         self.graph = graph.named().map(|g| g.as_str().to_string());
+        self
+    }
+
+    /// Count every review Source through the family on `activity` while it runs
+    /// ([`crate::trigger::Passes::reviews_in_flight`]) — whoever issued it.
+    ///
+    /// ★ **Why here, and not where a pass begins** (ledger
+    /// [#702](http://localhost:1060/l/default/item/702) item 4): the review queue's passes
+    /// claim [`crate::trigger::Activity::begin`]'s slot, but the page's Review button does
+    /// not go through the queue — browse's face emits `/k/source urn:repo:{root}:review:{path}
+    /// as=text/html`, and the `/k/` adapter resolves that under the caller's grant, straight
+    /// into this family. A person on the socket does the same. This overlay is the one place
+    /// every review passes, so it is where "a review is running" is true for all of them, and
+    /// the judge backfill yields to that. It changes no answer, declares nothing and refuses
+    /// nothing; it counts.
+    #[must_use]
+    pub fn observing_reviews(mut self, activity: Arc<crate::trigger::Activity>) -> Self {
+        self.reviews = Some(activity);
         self
     }
 
@@ -617,6 +641,73 @@ impl Space for StoreWrites {
 
 impl Space for CachedReads {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolution = self.resolve_touching(request, scope);
+        match &self.reviews {
+            Some(activity) if is_review(request) => {
+                let activity = Arc::clone(activity);
+                resolution.map_endpoint(move |endpoint| {
+                    Arc::new(Reviewed {
+                        inner: endpoint,
+                        activity: Arc::clone(&activity),
+                    }) as Arc<dyn Endpoint>
+                })
+            }
+            _ => resolution,
+        }
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        // The catalog is browse's, unchanged.
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
+    }
+}
+
+/// Whether `request` is a review pass: a Source of `urn:repo:{root}:review:{path}`.
+///
+/// ⚠ Only that family. `judge-finding:{id}` is the backfill's OWN call (counting it would
+/// make the backfill yield to itself forever), and the explain and PR families spend the same
+/// model without being review passes.
+fn is_review(request: &Request) -> bool {
+    request.verb == Verb::Source
+        && split_repo_iri(request.target.as_str())
+            .is_some_and(|(_, rest)| rest.starts_with("review:"))
+}
+
+/// One review through the family, counted in flight while it runs — see
+/// [`CachedReads::observing_reviews`].
+struct Reviewed {
+    inner: Arc<dyn Endpoint>,
+    activity: Arc<crate::trigger::Activity>,
+}
+
+#[async_trait]
+impl Endpoint for Reviewed {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let _counted = self.activity.reviewing();
+        self.inner.invoke(inv).await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
+    }
+}
+
+impl CachedReads {
+    /// The family's own resolution, with the badge's epochs touched by a write and a cached
+    /// read hung on its thread — everything [`cached_reads`] describes.
+    fn resolve_touching(&self, request: &Request, scope: &Scope) -> Resolution {
         let resolution = self.inner.resolve(request, scope);
         if let (Some(epochs), Some(touch)) = (&self.epochs, touch_for(request)) {
             let epochs = Arc::clone(epochs);
@@ -639,21 +730,6 @@ impl Space for CachedReads {
         }
     }
 
-    fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        // The catalog is browse's, unchanged.
-        self.inner.entries()
-    }
-
-    fn id(&self) -> Option<Iri> {
-        self.inner.id()
-    }
-
-    fn topology(&self) -> Topology {
-        self.inner.topology()
-    }
-}
-
-impl CachedReads {
     /// The golden thread this request's answer depends on, when it is one of the reads this
     /// server caches. See [`cached_reads`] for the table.
     fn thread_for(&self, request: &Request) -> Option<String> {

@@ -696,6 +696,11 @@ struct Counts {
     judged_out: usize,
     /// Rows it only counts.
     other: usize,
+    /// Judge verdicts on file across every pending row — what tells the list a verdict has
+    /// ARRIVED (ledger #702 item 5). A verdict that refutes nothing moves none of the counts
+    /// above and still reorders the list and labels its row. Never drawn; only the revision
+    /// carries it.
+    verdicts: usize,
     /// Roots whose findings could not be read under this caller.
     refused: usize,
 }
@@ -731,6 +736,7 @@ struct Counted {
     serious: usize,
     judged_out: usize,
     other: usize,
+    verdicts: usize,
 }
 
 /// The badge's memo: `(root, capability)` → what that read counted.
@@ -762,6 +768,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
         serious: 0,
         judged_out: 0,
         other: 0,
+        verdicts: 0,
         refused: 0,
     };
     let epochs = web.epochs.as_deref();
@@ -776,6 +783,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
                 counts.serious += hit.serious;
                 counts.judged_out += hit.judged_out;
                 counts.other += hit.other;
+                counts.verdicts += hit.verdicts;
                 continue;
             }
         }
@@ -793,9 +801,12 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
                     .filter(|row| crate::verdict::hidden_by_default(row, decided(row)))
                     .count();
                 let serious = queued.len() - judged_out;
+                // Every pending row, not only the queued: `severity=all` lists the rest.
+                let verdicts = rows.iter().map(crate::verdict::verdicts_on).sum();
                 counts.serious += serious;
                 counts.judged_out += judged_out;
                 counts.other += other;
+                counts.verdicts += verdicts;
                 if let (Some(epoch), Some(memo), Some(slot), Some(epochs)) =
                     (stamp, memo, slot, epochs)
                 {
@@ -812,6 +823,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
                                 serious,
                                 judged_out,
                                 other,
+                                verdicts,
                             },
                         );
                     }
@@ -2121,12 +2133,21 @@ impl Endpoint for Badge {
         // fact about the store, whoever wrote it.
         // The hidden count joins it too: a verdict landing (a backfill, a pass's judge) moves
         // a row out of the list, and that is news the list should refresh on.
+        // ★ And so does the number of verdicts on file (ledger #702 item 5): a verdict that
+        // confirms or is unsure hides nothing, so it moved none of the three counts and the
+        // list never learned of it — yet it reorders the list (confirmed first) and labels its
+        // row. Verdicts are archived once per finding and judge, so the number only grows
+        // while the findings stay pending. ⚠ It is a count, not a digest: a decision that
+        // takes a judged row out of pending lowers it, so a decision, a new finding and a new
+        // verdict all landing between two polls could leave the whole key where it was. That
+        // is three writes inside ten seconds against a list a person is reading, and the next
+        // write moves it again.
         let rev = if rev.is_empty() {
             rev
         } else {
             format!(
-                "{rev}.{}.{}.{}",
-                counts.serious, counts.other, counts.judged_out
+                "{rev}.{}.{}.{}.{}",
+                counts.serious, counts.other, counts.judged_out, counts.verdicts
             )
         };
         let (count, other) = (counts.serious.to_string(), counts.other.to_string());
@@ -2411,6 +2432,22 @@ impl Endpoint for QueuePage {
                          the burst or batch it was made in, oldest first, each with the forms \
                          that confirm it with a word, withdraw it, or reverse it. Offered when \
                          `urn:repo:{repo}:findings` declares the same `summary` word.",
+                    ),
+            )
+            // ★ Declared (ledger #682 item 2): the page answered `?group=` from ledger #506 on
+            // and the manifold never listed it. No `one_of`, for the reason `state` has none:
+            // the kinds are the findings contract's own `group` set, read on every request.
+            .input(
+                ArgSpec::new(crate::batch::GROUP_ARG)
+                    .optional()
+                    .class(XSD_STRING)
+                    .summary(
+                        "one group kind: the BATCH view instead of the rows (ledger #506) — \
+                         the pending findings grouped by that kind, each group declinable in \
+                         one decision. The kinds are the values `urn:repo:{repo}:findings` \
+                         declares for its own `group` input, validated against that contract, \
+                         never against a list here. Pending only, so a `state` other than \
+                         pending is refused beside it, and so is `summary` (a different view).",
                     ),
             )
             .input(web::as_html_arg())

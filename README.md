@@ -341,7 +341,9 @@ findings resource's own triage order is kept; the same order holds inside every 
 where a folded member keeps its box outside the fold. Every row says where it stands in words with
 the judge's tag (`judge: … · judge-v1@<model>`), the list says how many stand where, and the
 header badge's numbers do not change: a refuted finding is still waiting for a decision. The
-judge is `gonk.review.judge` (default `urn:llm:coder:ask`, browse's own; `"off"` for none). Its
+judge is `gonk.review.judge` (default `urn:llm:coder:ask`, browse's own; `"off"` for none), and
+its per-call ceiling `gonk.review.judge_max_tokens` (default 400, browse's own; a reasoning judge
+such as gpt-oss answers empty at 400 and wants thousands). Its
 verdict words have no closed set in browse's contract, so `src/verdict.rs` spells them once and
 the server checks them at start against the judge's own contract.
 
@@ -357,7 +359,9 @@ every serious pending finding that exists when it starts, one at a time, through
 `urn:repo:{repo}:judge-finding:{id}` with the configured judge. Exists comes first, so a
 finding already judged under that judge's tag costs no model call. A stop takes effect after the
 call in flight, and the next start resumes past everything judged. The run waits while a review
-pass is in flight or the armed review queue has requests waiting. A finding whose reviewed
+pass is in flight, however it was started (the queue's passes, the page's Review button, a person
+on the socket: the browse family counts every review Source while it runs), or while the armed
+review queue has requests waiting. A finding whose reviewed
 version cannot be recovered is counted with browse's reason, shown on its Queue row as "could not
 judge", and asked again only on the next run. The run uses exactly the browse read and
 `urn:cap:net:<the mounted peer's host>`; starting it needs a browse read and a net grant, like
@@ -746,6 +750,7 @@ gonk.review.space = "reviews"        # bind the queue at urn:space:reviews
                                           # the rest are minted and counted, not queued
 # gonk.review.judge = "urn:llm:coder-next:ask"   # the judge on each serious finding a pass
                                           # mints (default urn:llm:coder:ask); "off" for none
+# gonk.review.judge_max_tokens = 4000   # the judge's per-call ceiling (default 400)
 ```
 
 ```text
