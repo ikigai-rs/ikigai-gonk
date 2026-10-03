@@ -1741,3 +1741,23 @@ fn the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it() {
         "the ledger declares no `principal`, so the mechanical route is exactly as it was: {graph}"
     );
 }
+
+/// A search term comes back into the page as the search box's `value` attribute, so a hostile term must
+/// arrive ESCAPED, never as markup. The machine reviewer raised this as an XSS claim (finding 603f11e2, and
+/// its kind on notes and error text) during findings sweep 2 (ledger #706); a probe showed the stylesheet's
+/// serializer escapes it. This pins that, so a template change that stops escaping fails here.
+#[test]
+fn a_hostile_search_term_comes_back_escaped_not_as_markup() {
+    let server = Server::start();
+    file(&server, "Item one");
+    let hostile = "x'\"><script>alert(1)</script>";
+    let page = server.page(&format!("/l/default?text={}", encode(hostile)), None);
+    assert!(
+        !page.body.contains("<script>alert(1)</script>"),
+        "the term must not reach the page as markup: {page:?}"
+    );
+    assert!(
+        page.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "the term is echoed into the search box, escaped: {page:?}"
+    );
+}
