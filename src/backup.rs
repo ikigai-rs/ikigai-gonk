@@ -507,7 +507,7 @@ impl TakeBackup {
             .ok_or_else(|| Error::Endpoint("no clock: a backup must be able to say when".into()))?;
         let stamp = stamp_compact(now);
         let name = format!("gonk-store-{stamp}{ARCHIVE_SUFFIX}");
-        std::fs::create_dir_all(&settings.dir)
+        create_private_dir(&settings.dir)
             .map_err(|e| Error::Endpoint(format!("creating {}: {e}", settings.dir.display())))?;
 
         let meta = meta_json(&MetaFields {
@@ -637,24 +637,54 @@ fn prune(dir: &Path, keep: usize) -> Vec<String> {
 /// a directory, so the rotation set never holds a half-written archive that a later restore
 /// would discover was short.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
     let temporary = path.with_extension("partial");
-    std::fs::write(&temporary, bytes)
+    let mut file = create_private(&temporary)
+        .map_err(|e| Error::Endpoint(format!("creating {}: {e}", temporary.display())))?;
+    file.write_all(bytes)
         .map_err(|e| Error::Endpoint(format!("writing {}: {e}", temporary.display())))?;
-    restrict(&temporary);
+    drop(file);
     std::fs::rename(&temporary, path)
         .map_err(|e| Error::Endpoint(format!("renaming into {}: {e}", path.display())))
 }
 
-/// `0600`. A backup is the whole dataset in one file, including every graph the per-graph
-/// capabilities exist to separate; it is owner-only or it has undone them.
-#[cfg(unix)]
-fn restrict(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+/// A new, empty file that is `0600` FROM THE MOMENT IT EXISTS. A backup is the whole dataset
+/// in one file, including every graph the per-graph capabilities exist to separate; it is
+/// owner-only or it has undone them — and narrowing the mode after the bytes are written
+/// leaves them readable for as long as the write takes.
+///
+/// A temporary left by a crash is removed first rather than reopened: opening an existing
+/// file keeps ITS mode, whatever this one asks for. `create_new` also refuses to follow a
+/// symlink planted at the name.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
-#[cfg(not(unix))]
-fn restrict(_path: &Path) {}
+/// The rotation directory and any parent it needs, created `0700` — no one else lists the
+/// archives. A directory that already exists keeps the mode its operator gave it: the
+/// files in it are owner-only either way, and narrowing a directory gonk did not create is
+/// not this function's call.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
 
 // ---------------------------------------------------------------- the status
 
@@ -1485,6 +1515,35 @@ mod tests {
         assert_eq!(dump.graphs.len(), 2, "two tenants, two graphs");
         let back = counts_in_nquads(&dump.nquads).expect("re-parses");
         assert_eq!(back.len(), 2, "and the file still says so");
+    }
+
+    /// ★ The temporary is owner-only from the moment it exists, before a byte is in it —
+    /// and a stale one a crash left at `0644` is replaced, not reopened with its old mode.
+    #[cfg(unix)]
+    #[test]
+    fn the_temporary_is_owner_only_before_a_byte_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join(format!("gonk-store-x{ARCHIVE_SUFFIX}"));
+        let stale = target.with_extension("partial");
+        std::fs::write(&stale, b"left by a crash").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file = create_private(&stale).expect("created");
+        let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the temporary was {mode:o} before anything was written"
+        );
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            0,
+            "the stale bytes are gone"
+        );
+        drop(file);
+        write_atomic(&target, b"the archive").expect("written");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!stale.exists(), "the temporary was renamed into place");
     }
 
     #[test]
