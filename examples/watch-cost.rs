@@ -184,19 +184,19 @@ fn main() {
     let phase = |name: &str, build: Option<&PathBuf>| {
         let (cpu0, cuts0, t0) = (cpu_seconds(), root_cuts(&hub), Instant::now());
         let (mut latencies, mut builds) = (Vec::new(), 0usize);
-        let mut child: Option<std::process::Child> = None;
+        let mut child = Build(None);
         while t0.elapsed() < Duration::from_secs(seconds) {
             // A clean build, again and again: one build of a small crate is over in seconds,
             // and the phase is about a build that is RUNNING.
             if let Some(dir) = build {
-                let finished = match child.as_mut() {
+                let finished = match child.0.as_mut() {
                     None => true,
                     Some(c) => c.try_wait().expect("the build's status").is_some(),
                 };
                 if finished {
-                    builds += usize::from(child.is_some());
+                    builds += usize::from(child.0.is_some());
                     cargo(dir, "clean").wait().expect("cargo clean");
-                    child = Some(cargo(dir, "build"));
+                    child.0 = Some(cargo(dir, "build"));
                 }
             }
             let t = Instant::now();
@@ -205,10 +205,7 @@ fn main() {
             latencies.push(t.elapsed().as_secs_f64() * 1000.0);
             std::thread::sleep(Duration::from_millis(poll_ms).saturating_sub(t.elapsed()));
         }
-        if let Some(mut c) = child {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+        drop(child);
         let (wall, cpu) = (t0.elapsed().as_secs_f64(), cpu_seconds() - cpu0);
         latencies.sort_by(f64::total_cmp);
         let at = |q: f64| latencies[((latencies.len() - 1) as f64 * q) as usize];
@@ -229,6 +226,21 @@ fn main() {
     let last =
         issue(&door, Verb::Source, queue::BADGE_IRI, &[], &reviewer).expect("the badge answers");
     println!("last poll        {}", badge_summary(&last));
+}
+
+/// The build a phase keeps running, killed and reaped when the phase ends — or when it
+/// panics. ⚠ `std::process::Child` has no `Drop`, so a bare handle dropped by an unwinding
+/// `expect` leaves `cargo build` running in the scratch clone after this process is gone,
+/// and the next run's build phase waits on that build's target-dir lock.
+struct Build(Option<std::process::Child>);
+
+impl Drop for Build {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
 }
 
 /// `cargo <verb>` in `dir`, quietly, writing only into that directory's own `target/`.
