@@ -634,6 +634,114 @@ fn the_recorded_instant_is_what_startup_reads_not_the_file_mtime() {
     );
 }
 
+// ------------------------------------------------------------------ owner-only on disk
+
+/// ★ A backup is the whole dataset in one file, every graph the per-graph capabilities
+/// separate included, so it is owner-only from the first byte or it has undone them. The
+/// rotation directory gonk creates is `0700` and every file in it `0600` — checked on a
+/// directory that does NOT exist yet, because a `tempdir` is already `0700` and would hide
+/// a directory created world-listable.
+#[cfg(unix)]
+#[test]
+fn the_rotation_directory_and_every_file_in_it_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempfile::tempdir().expect("tempdir");
+    let dir = parent.path().join("nested").join("rotation");
+    let hub = hub(&dir, 5);
+    seed(&hub);
+    issue(&hub, Verb::Source, backup::BACKUP, &[]);
+    for created in [dir.as_path(), dir.parent().expect("a parent")] {
+        let mode = std::fs::metadata(created)
+            .expect("created")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{} is {mode:o}", created.display());
+    }
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the rotation directory")
+        .flatten()
+        .collect();
+    assert_eq!(files.len(), 2, "an archive and its sidecar: {files:?}");
+    for file in files {
+        let mode = file.metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{:?} is {mode:o}", file.file_name());
+    }
+}
+
+/// The same promise observed WHILE the archive is written, not only after: a watcher polls
+/// the directory during real backups of a dataset big enough that the write is not
+/// instantaneous, and no file with bytes in it may ever be readable by group or other.
+/// Reproduction from the review-value experiment (ledger #723, unled arm): before the fix
+/// the temporary was created by `std::fs::write` at `0644` and narrowed only after the whole
+/// archive was in it. Timing-based, so it can miss on a fast write; it cannot fail falsely.
+#[cfg(unix)]
+#[test]
+fn no_backup_byte_is_ever_readable_by_group_or_other() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hub = hub(dir.path(), 5);
+    // Distinct literals, so the gzipped archive is megabytes rather than a few kilobytes.
+    let mut doc = String::new();
+    for i in 0..60_000u64 {
+        let noise = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        doc.push_str(&format!(
+            "<urn:item:{i}> <urn:p> \"{noise:x}-{:x}-{:x}\" <urn:g:{}> .\n",
+            noise.rotate_left(17),
+            noise.rotate_left(41),
+            i % 7
+        ));
+    }
+    issue(
+        &hub,
+        Verb::Sink,
+        "urn:iki:store:load",
+        &[
+            ("content", doc.as_bytes()),
+            ("format", b"application/n-quads"),
+        ],
+    );
+    let done = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, u32, u64)>::new()));
+    let watcher = {
+        let (done, seen, path) = (done.clone(), seen.clone(), dir.path().to_path_buf());
+        std::thread::spawn(move || {
+            while !done.load(Ordering::Relaxed) {
+                let Ok(entries) = std::fs::read_dir(&path) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let Ok(meta) = entry.metadata() else {
+                        continue;
+                    };
+                    let mode = meta.permissions().mode() & 0o777;
+                    if mode & 0o044 != 0 && meta.len() > 0 {
+                        seen.lock().expect("lock").push((
+                            entry.file_name().to_string_lossy().into_owned(),
+                            mode,
+                            meta.len(),
+                        ));
+                    }
+                }
+            }
+        })
+    };
+    // Distinct stamps (the name has one-second resolution), so each is a fresh write.
+    for _ in 0..3 {
+        issue(&hub, Verb::Source, backup::BACKUP, &[]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    done.store(true, Ordering::Relaxed);
+    watcher.join().expect("the watcher");
+    let seen = seen.lock().expect("lock");
+    assert!(
+        seen.is_empty(),
+        "backup bytes readable by group or other while being written: {:?}",
+        &seen[..seen.len().min(5)]
+    );
+}
+
 // ------------------------------------------------------------------ the real artifact
 
 /// ★★ **The stopgap archive, actually loaded.** The hub recorded
