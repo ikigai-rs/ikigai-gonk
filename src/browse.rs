@@ -371,6 +371,7 @@ pub fn wire(
     explain: Option<&ExplainTiers>,
     graph: &Graph,
 ) -> Wired {
+    let first = roots.first().map(|(name, _)| name.clone());
     let mount = graph.on(Mount::new(roots)
         .annotations(Arc::clone(&store))
         // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style`
@@ -387,7 +388,8 @@ pub fn wire(
             Some(watch) => cached_reads(space, watch.watched(), Some(watch.epochs())),
             None => cached_reads(space, &[], None),
         }
-        .writing_to(graph),
+        .writing_to(graph)
+        .reading_contracts_through(first),
         style,
     }
 }
@@ -501,6 +503,7 @@ pub fn cached_reads(
         epochs,
         graph: None,
         reviews: None,
+        contract_root: None,
     }
 }
 
@@ -529,6 +532,8 @@ pub struct CachedReads {
     /// Where every review Source through the family is counted while it runs
     /// ([`Self::observing_reviews`]).
     reviews: Option<Arc<crate::trigger::Activity>>,
+    /// A configured root to read the family's contracts through ([`Self::first_root`]).
+    contract_root: Option<String>,
 }
 
 impl CachedReads {
@@ -555,6 +560,23 @@ impl CachedReads {
     pub fn observing_reviews(mut self, activity: Arc<crate::trigger::Activity>) -> Self {
         self.reviews = Some(activity);
         self
+    }
+
+    /// Name the configured root the family's contracts are read through — [`wire`]'s first.
+    #[must_use]
+    pub fn reading_contracts_through(mut self, root: Option<String>) -> Self {
+        self.contract_root = root;
+        self
+    }
+
+    /// A configured root's name to read the family's CONTRACT through
+    /// ([`crate::verdict::adopt`]): every root's contract is the same template's, but browse
+    /// resolves `urn:repo:{root}:…` only for a configured root, so a made-up name describes
+    /// nothing. The one [`wire`] was given first, else the first watched one.
+    pub fn first_root(&self) -> Option<&str> {
+        self.contract_root
+            .as_deref()
+            .or_else(|| self.roots.keys().next().map(String::as_str))
     }
 
     /// The badge's epochs, when the roots are watched.

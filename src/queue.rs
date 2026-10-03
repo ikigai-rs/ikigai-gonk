@@ -593,7 +593,7 @@ pub(crate) struct Params {
     /// rows — validated against the findings contract's own `summary` set.
     pub(crate) summary: Option<String>,
     /// [`crate::verdict::SHOW`] lists the undecided rows the judge refuted, which the Queue and
-    /// the batch views leave out by default (ledger #704) — [`crate::verdict::REFUTED_ARG`].
+    /// the batch views leave out by default (ledger #704) — [`crate::verdict::refuted_arg`].
     pub(crate) refuted: Option<String>,
 }
 
@@ -608,7 +608,7 @@ impl Params {
             scope: arg(SCOPE_ARG),
             group: arg(crate::batch::GROUP_ARG),
             summary: arg(crate::walk::SUMMARY_ARG),
-            refuted: arg(crate::verdict::REFUTED_ARG),
+            refuted: crate::verdict::refuted_arg().and_then(arg),
         }
     }
 }
@@ -836,7 +836,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
 }
 
 /// `a`, `a or b`, `a, b or c`.
-pub(crate) fn join_or(words: &[String]) -> String {
+pub fn join_or(words: &[String]) -> String {
     match words {
         [] => String::new(),
         [one] => one.clone(),
@@ -2347,7 +2347,7 @@ impl Endpoint for QueuePage {
 
     fn describe(&self) -> Description {
         let id = self.name();
-        Description::new(id)
+        let described = Description::new(id)
             .title(if self.fragment {
                 "The review queue, as a fragment"
             } else {
@@ -2404,9 +2404,13 @@ impl Endpoint for QueuePage {
                          rest are minted, anchored and counted either way; they are just not \
                          queued.",
                     ),
-            )
-            .input(
-                ArgSpec::new(crate::verdict::REFUTED_ARG)
+            );
+        // ★ Named by the findings contract's refuting verdict word (`crate::verdict`), so it is
+        // declared only once a verdict set is adopted — a gonk with no browse has no rows to
+        // hide and no word to name the argument by.
+        let described = match crate::verdict::refuted_arg() {
+            Some(arg) => described.input(
+                ArgSpec::new(arg)
                     .optional()
                     .class(XSD_STRING)
                     .one_of([crate::verdict::HIDE, crate::verdict::SHOW])
@@ -2418,9 +2422,14 @@ impl Endpoint for QueuePage {
                          shows them — or `show`, listed folded last with the judge's answers. \
                          Nothing is written either way: they stay pending and decidable, and a \
                          later verdict that does not refute brings one back. A decided finding \
-                         is never hidden, and neither is an unjudged or unsure one.",
+                         is never hidden, and neither is an unjudged or uncertain one. The \
+                         argument is named by the refuting word of the findings contract's \
+                         `verdict` set.",
                     ),
-            )
+            ),
+            None => described,
+        };
+        described
             .input(
                 ArgSpec::new(crate::walk::SUMMARY_ARG)
                     .optional()

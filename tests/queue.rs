@@ -2243,7 +2243,7 @@ fn the_badge_counts_the_shown_set_and_names_the_hidden() {
     let counting = door_counting(&dir, trigger);
     let (door, reviewer) = (&counting.door, reviewer());
     let (serious, _) = a_serious_and_an_other_word(door);
-    let [upheld, middle, last] = ikigai_gonk::verdict::triage();
+    let [upheld, middle, last] = verdict_triage();
     let id = |n: u32| format!("aaaabbbbccccddddeeee{n:04}");
     for n in 1..=3 {
         plant_finding(door, &reviewer, &id(n), Some(&serious), "One of three.");
@@ -2291,7 +2291,7 @@ fn the_walk_is_unaffected_by_the_verdict_filter() {
     let dir = batch_root();
     let (door, _config) = door(&dir, None);
     let ([t1, t2], [f1, f2], _) = plant_unconfirmed(&door);
-    let [_, _, last] = ikigai_gonk::verdict::triage();
+    let [_, _, last] = verdict_triage();
     // The judge refuted a declined twin AND the pending repeat it steers.
     plant_verdict(&door, t1, last);
     plant_verdict(&door, f1, last);
@@ -2309,10 +2309,7 @@ fn the_walk_is_unaffected_by_the_verdict_filter() {
         &door,
         &[
             ("summary", "unconfirmed"),
-            (
-                ikigai_gonk::verdict::REFUTED_ARG,
-                ikigai_gonk::verdict::SHOW,
-            ),
+            (verdict_arg(), ikigai_gonk::verdict::SHOW),
         ],
         &reviewer(),
     );
@@ -4540,7 +4537,7 @@ fn a_verdict_that_moves_no_count_still_moves_the_badge_revision() {
     let counting = door_counting(&dir, trigger);
     let (door, reviewer) = (&counting.door, reviewer());
     let (serious, _) = a_serious_and_an_other_word(door);
-    let [upheld, middle, _] = ikigai_gonk::verdict::triage();
+    let [upheld, middle, _] = verdict_triage();
     let id = |n: u32| format!("aaaabbbbccccddddeeee{n:04}");
     let rev = |markup: &str| {
         let at = markup
@@ -4570,4 +4567,18 @@ fn a_verdict_that_moves_no_count_still_moves_the_badge_revision() {
         "a verdict that hides nothing still reorders and labels the list: {second}"
     );
     assert_eq!(rev(&second), rev(&badge(door)), "and is stable again");
+}
+
+/// The verdict words in the Queue's triage order — the findings contract's own set, adopted
+/// when a door composed browse (`ikigai_gonk::verdict`); this file spells none of them.
+fn verdict_triage() -> [&'static str; 3] {
+    ikigai_gonk::verdict::words()
+        .triage()
+        .try_into()
+        .expect("browse declares three verdict words")
+}
+
+/// The page argument that shows the rows the judge refuted — named by the contract's word.
+fn verdict_arg() -> &'static str {
+    ikigai_gonk::verdict::refuted_arg().expect("a verdict set is adopted")
 }

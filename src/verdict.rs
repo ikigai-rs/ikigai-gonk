@@ -2,7 +2,7 @@
 //! refuted ONE CLICK AWAY (ledgers [#696](http://localhost:1060/l/default/item/696) and
 //! [#704](http://localhost:1060/l/default/item/704)).
 //!
-//! `ikigai-browse` 0.16.0 runs a JUDGE on each serious finding a review pass mints: a second
+//! `ikigai-browse` (0.16.0 on) runs a JUDGE on each serious finding a review pass mints: a second
 //! call, with the context the reviewer did not have, answering four narrow questions and
 //! deriving a verdict from them by rule. The verdict is ATTACHED to the finding row (`judge`,
 //! the latest; `judges`, all of them) and browse acts on none of it — routing is the host's,
@@ -16,7 +16,7 @@
 //! judge (ledger #483's comments) refutes most known-false findings and still loses some
 //! verified-real ones, so a verdict is a reason to read a row later, never a reason not to.
 //!
-//! - **Every row says its standing in TEXT**, with the judge's tag (`judge-v1@<model>`), so the
+//! - **Every row says its standing in TEXT**, with the judge's tag (`judge-v2@<model>`), so the
 //!   order is never carried by position or color alone ([`Standing::label`]).
 //! - **The sort is STABLE.** Within one standing the findings resource's own triage order
 //!   (severity rank, then path, then position) is kept exactly: this module adds one key in
@@ -37,7 +37,7 @@
 //!   it** ([`hidden_by_default`]) — the same rows that were folded. A decided row is a record
 //!   and is never hidden; an unjudged, unsure or could-not-judge row is never hidden.
 //! - **The page says how many it left out, with the link that shows them**
-//!   (`?`[`REFUTED_ARG`]`=`[`SHOW`], declared on the page's own `describe()`); shown, they
+//!   (`?`[`refuted_arg`]`=`[`SHOW`], declared on the page's own `describe()`); shown, they
 //!   render exactly as before — folded last, with the judge's answers — beside a link back.
 //! - **The badge counts what is shown** (serious, not refuted) and its tooltip names how many
 //!   it does not count, so the number never drops in silence.
@@ -45,39 +45,216 @@
 //!   set it refuted 30 of 65 published findings), so a refuted finding stays pending and
 //!   decidable, and a later verdict that does not refute brings it back on its own.
 //!
-//! # ⚠ The verdict words are spelled HERE, once — the contract declares no closed set
+//! # ★ The verdict words are the CONTRACT'S (browse 0.16.1, ledger #702 item 1)
 //!
-//! Every other menu on the Queue is read from a resource's own `one_of` (`crate::queue`). The
-//! verdict has none: `ikigai-browse` 0.16.0 keeps its three words in a crate-private constant
-//! and states them only in prose, in the summary of `urn:repo:{repo}:judge:{path}` ("refuted
-//! when any answer refutes, confirmed when all support, else unsure"). So the triage order
-//! below is the ONE place this crate spells them — the same shape as
-//! [`crate::config::DEFAULT_QUEUE_SERIOUS`] for the severity default — and it is CHECKED rather
-//! than trusted: `main` runs [`check_verdicts`] before a door opens, and a word that summary no
-//! longer states stops this server naming both, instead of ordering every row as if no judge
-//! had looked. `tests/judge.rs::no_verdict_word_is_written_down_in_this_crate` holds the page
-//! code, the stylesheet and the script to that. A `one_of` on the browse side would retire the
-//! copy (reported to the hub).
+//! Every menu on the Queue is read from a resource's own `one_of` (`crate::queue`), and since
+//! `ikigai-browse` 0.16.1 the verdict is no exception: the findings Source declares an
+//! optional `verdict` filter whose `one_of` is the closed set of verdict words. [`Verdicts`]
+//! reads that set from the hub ([`adopt`]); this crate spells none of the words.
+//! `tests/judge.rs::no_verdict_word_is_written_down_in_this_crate` holds every page file, and
+//! this one, to that.
 //!
-//! ★ That includes the page argument that shows the hidden rows: it is NAMED by the verdict
-//! word ([`REFUTED_ARG`] is the last word of [`triage`]), so it is not a second spelling, and
-//! every sentence that says the word is built here.
+//! **The ORDER is gonk's policy, expressed over the contract's words by POSITION**: the set's
+//! first word leads the Queue, its second is the one folded last and hidden by default, and any
+//! further word is ordered with the uncertain ([`Verdicts`]). ⚠ The contract does not STATE
+//! those roles: browse's set is "in the order a reader triages them" only in a crate-private
+//! doc comment, and core's `ArgSpec` has no per-value metadata to say which word refutes
+//! (ledger #708, the same gap the decision words have). So the roles are PINNED BY BEHAVIOR,
+//! not by prose: `tests/judge.rs` runs browse's own judge rule over a fake judge's answers and
+//! asserts that all-supporting answers yield the first word and a refuting answer the second.
+//! A browse release that reordered the set fails that test on the lock bump that adopts it.
+//!
+//! ⚠ **One set per process, because it is the LINKED crate's.** gonk composes
+//! `ikigai-browse` in-process ([`crate::compose_with`]), so every hub this binary builds
+//! declares the same set — it is a property of the build, reachable only through a kernel.
+//! [`crate::compose_with`] adopts it once, the free functions below read the adopted set
+//! ([`words`]), and `main` adopts it again at start through [`adopt`], which REFUSES when the
+//! contract declares no set (a browse below the floor) and names [`BROWSE_FLOOR`]. A hub
+//! composed without browse adopts nothing; its words are empty, so nothing is ordered, folded
+//! or hidden by a verdict — and it serves no Queue to order.
+//!
+//! ★ That includes the page argument that shows the hidden rows: it is NAMED by the contract's
+//! hiding word ([`refuted_arg`]), so it is not a spelling, and every sentence that says the word
+//! is built here from the adopted set.
+//!
+//! # ★ judge-v2 and the CURRENT tag (ledger #483)
+//!
+//! browse 0.16.1 ships `judge-v2`: a new tag (`judge-v2@<model>`), the words and the shapes
+//! unchanged, the v1 verdicts left archived beside it. A verdict is keyed by (finding, tag), so:
+//!
+//! - **The backfill re-judges under v2.** judge-finding's Exists asks about the CONFIGURED
+//!   judge's current tag, so a finding judged only under v1 is unjudged for v2 and a run judges
+//!   it again ([`crate::backfill`]; pinned in `tests/judge.rs`).
+//! - **The Queue routes on the LATEST verdict, labeled with its tag.** browse orders a row's
+//!   `judges` by when each was made, and `judge` is the last, so once a v2 verdict exists it is
+//!   the one the row is ordered, folded and hidden by. A row judged only under v1 meanwhile is
+//!   ordered by its v1 verdict and SAYS so (`judge: … · judge-v1@<model>`), and the order line
+//!   counts the latest verdicts per tag while more than one tag is in play. It is not treated as
+//!   unjudged: browse does not publish its current tag (the prompt version is crate-private, and
+//!   reading it off an answer would cost a judge call per row), and treating the v1 verdicts on
+//!   file as absent would bring back the 680 rows v1 refuted (2026-10-02's count) for the hour a
+//!   backfill takes, only to hide most of them again. A label is the honest middle: nothing moves twice,
+//!   and every row names the judge it is ordered by.
 
-use ikigai_core::{Error, Iri, Kernel, Result};
+use std::sync::OnceLock;
+
+use ikigai_core::{Error, Kernel, Result, Verb};
 use serde_json::Value;
 
-/// The verdict words in the order a reader triages them: the first is read first, the last
-/// is folded last. ★ The ONE place this crate spells them — see the module docs.
-const TRIAGE: [&str; 3] = ["confirmed", "unsure", "refuted"];
+/// The release whose findings contract first declares the verdict set — what [`adopt`]'s
+/// refusal names.
+pub const BROWSE_FLOOR: &str = "ikigai-browse 0.16.1";
 
-/// The Queue's argument that shows the rows it hides by default — `?refuted=show` (ledger
-/// #704). ★ Named BY the verdict word, the last of [`triage`], so the word is still spelled
-/// once; a browse release that renamed it would rename this argument with it, after
-/// [`check_verdicts`] had stopped the server to say so.
-pub const REFUTED_ARG: &str = TRIAGE[TRIAGE.len() - 1];
-/// [`REFUTED_ARG`]'s value that shows them, folded last as before.
+/// The findings Source's verdict filter — an argument NAME (browse's), never a word.
+pub const VERDICT_INPUT: &str = "verdict";
+
+/// The verdict words this server's browse declares, in CONTRACT order, read by role.
+///
+/// The roles are gonk's policy over that order (see the module docs): the first word is
+/// UPHELD (read first), the second REFUTES (folded last, hidden by default), and every
+/// further word is UNCERTAIN (after the unjudged). An empty set (no browse composed) gives no
+/// word any role.
+///
+/// ```
+/// use ikigai_gonk::verdict::Verdicts;
+///
+/// let set = Verdicts::declared(vec!["ayes".into(), "nays".into(), "dunno".into()]).unwrap();
+/// assert_eq!(set.upheld(), Some("ayes"));
+/// assert_eq!(set.refuting(), Some("nays"));
+/// assert_eq!(set.uncertain(), ["dunno".to_string()]);
+/// assert_eq!(set.triage(), ["ayes", "dunno", "nays"]);
+/// assert!(Verdicts::declared(vec!["ayes".into()]).is_err());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Verdicts {
+    words: Vec<String>,
+}
+
+impl Verdicts {
+    /// A declared set, refused when it is too small to carry the policy's two named roles.
+    ///
+    /// # Errors
+    ///
+    /// Fewer than two words: there would be no word to read first and one to fold last.
+    pub fn declared(words: Vec<String>) -> std::result::Result<Verdicts, String> {
+        if words.len() < 2 {
+            return Err(format!(
+                "the findings contract declares {} verdict word{} ({}); the Queue's order needs                  at least two — the first leads, the second is folded last and hidden",
+                words.len(),
+                if words.len() == 1 { "" } else { "s" },
+                words.join(", ")
+            ));
+        }
+        Ok(Verdicts { words })
+    }
+
+    /// The set `hub` declares on `urn:repo:{root}:findings`'s Source `verdict` input.
+    ///
+    /// # Errors
+    ///
+    /// When the input declares no closed set — a browse below [`BROWSE_FLOOR`], or a changed
+    /// contract — or a set too small to order by ([`Verdicts::declared`]).
+    pub fn read(hub: &Kernel, root: &str) -> std::result::Result<Verdicts, String> {
+        let findings = crate::queue::findings_iri(root);
+        let Some(words) = crate::queue::one_of(hub, &findings, Verb::Source, VERDICT_INPUT) else {
+            return Err(format!(
+                "`{findings}` declares no closed `{VERDICT_INPUT}` set for Source. The Queue \
+                 orders findings by the judge's verdict and reads the words from that set, \
+                 which {BROWSE_FLOOR} is the first release to declare; this server composes \
+                 ikigai-browse itself, so a build below that floor (or a changed contract) is \
+                 the cause, not a configuration to fix"
+            ));
+        };
+        Verdicts::declared(words)
+    }
+
+    /// Every word, in contract order.
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.words
+    }
+
+    /// The word the Queue reads first: the contract's first.
+    #[must_use]
+    pub fn upheld(&self) -> Option<&str> {
+        self.words.first().map(String::as_str)
+    }
+
+    /// The word the Queue folds last and hides by default: the contract's second.
+    #[must_use]
+    pub fn refuting(&self) -> Option<&str> {
+        self.words.get(1).map(String::as_str)
+    }
+
+    /// Every other word, in contract order: ordered after the unjudged.
+    #[must_use]
+    pub fn uncertain(&self) -> &[String] {
+        self.words.get(2..).unwrap_or_default()
+    }
+
+    /// The words in the order a reader triages them on the Queue: upheld, the uncertain,
+    /// refuting (the unjudged and the could-not-judge sit between, and have no word).
+    #[must_use]
+    pub fn triage(&self) -> Vec<&str> {
+        self.upheld()
+            .into_iter()
+            .chain(self.uncertain().iter().map(String::as_str))
+            .chain(self.refuting())
+            .collect()
+    }
+}
+
+/// The set this process adopted ([`adopt`]).
+static ADOPTED: OnceLock<Verdicts> = OnceLock::new();
+/// What [`words`] answers before anything is adopted: no word has a role.
+static NONE: Verdicts = Verdicts { words: Vec::new() };
+
+/// ★ Read the set `hub` declares and adopt it for this process — what [`words`] answers from
+/// then on. Called by [`crate::compose_with`] on every hub it composes with browse, and by
+/// `main` at start, where an `Err` stops the server.
+///
+/// # Errors
+///
+/// [`Verdicts::read`]'s, or a set that differs from the one already adopted — which cannot
+/// happen while the set is the linked crate's, and would mean two browse builds in one process.
+pub fn adopt(hub: &Kernel, root: &str) -> std::result::Result<&'static Verdicts, String> {
+    let read = Verdicts::read(hub, root)?;
+    let held = ADOPTED.get_or_init(|| read.clone());
+    if *held != read {
+        return Err(format!(
+            "two different verdict sets in one process: {} adopted, then {} — every hub this \
+             binary composes links the same ikigai-browse, so this is a bug",
+            held.words.join(", "),
+            read.words.join(", ")
+        ));
+    }
+    Ok(held)
+}
+
+/// The adopted set, or the empty one when no hub with browse has been composed.
+#[must_use]
+pub fn words() -> &'static Verdicts {
+    ADOPTED.get().unwrap_or(&NONE)
+}
+
+/// The Queue's argument that shows the rows it hides by default — `?refuted=show` today
+/// (ledger #704). ★ NAMED by the contract's refuting word ([`Verdicts::refuting`]), so it is
+/// not a spelling: a browse release that renamed the word would rename this argument with it.
+/// `None` when no set is adopted, and then the page declares no such argument.
+#[must_use]
+pub fn refuted_arg() -> Option<&'static str> {
+    words().refuting()
+}
+
+/// The refuting word in a sentence — only ever called when a row was refuted, so the set
+/// is adopted.
+fn refuting_word() -> &'static str {
+    words().refuting().unwrap_or_default()
+}
+
+/// [`refuted_arg`]'s value that shows them, folded last as before.
 pub const SHOW: &str = "show";
-/// [`REFUTED_ARG`]'s default: hidden, counted, one click away.
+/// [`refuted_arg`]'s default: hidden, counted, one click away.
 pub const HIDE: &str = "hide";
 
 /// Whether a request asked to SEE the hidden rows: `show`, else `hide` (the default).
@@ -90,31 +267,34 @@ pub fn shown_wanted(asked: Option<&str>) -> Result<bool> {
     match asked.map(str::trim) {
         None | Some("") | Some(HIDE) => Ok(false),
         Some(SHOW) => Ok(true),
-        Some(other) => Err(Error::InvalidArgument {
-            name: REFUTED_ARG.to_string(),
-            detail: format!(
-                "`{other}`: `{HIDE}` (the default — an undecided finding the judge {REFUTED_ARG} \
-                 is left out of the Queue and counted) or `{SHOW}` (listed, folded last)"
-            ),
-        }),
+        Some(other) => {
+            let word = refuting_word();
+            Err(Error::InvalidArgument {
+                name: word.to_string(),
+                detail: format!(
+                    "`{other}`: `{HIDE}` (the default — an undecided finding the judge {word} \
+                     is left out of the Queue and counted) or `{SHOW}` (listed, folded last)"
+                ),
+            })
+        }
     }
 }
 
 /// The form field that carries the shown mode through a decision's re-render — `_` and the
 /// argument's name, as `_severity` carries `severity`. Built here so no form spells the word.
+/// With no set adopted it is a bare `_`, which no form this server draws carries.
 #[must_use]
 pub fn form_field() -> String {
-    format!("_{REFUTED_ARG}")
+    format!("_{}", refuted_arg().unwrap_or_default())
 }
 
 /// `&refuted=show` when `shown`, else nothing — the default is left out of a URL, as the
 /// severity scope's is.
 #[must_use]
 pub fn query_part(shown: bool) -> String {
-    if shown {
-        format!("&{REFUTED_ARG}={SHOW}")
-    } else {
-        String::new()
+    match refuted_arg().filter(|_| shown) {
+        Some(arg) => format!("&{arg}={SHOW}"),
+        None => String::new(),
     }
 }
 
@@ -122,10 +302,11 @@ pub fn query_part(shown: bool) -> String {
 /// a caller has not already read (the badge counts it from rows it already holds).
 #[must_use]
 pub fn refuted(row: &Value) -> bool {
-    row.get("judge")
+    let word = row
+        .get("judge")
         .and_then(|v| v.get("verdict"))
-        .and_then(Value::as_str)
-        == Some(REFUTED_ARG)
+        .and_then(Value::as_str);
+    word.is_some() && word == words().refuting()
 }
 
 /// How many verdicts the row carries: every judge's (`judges`), else the latest alone
@@ -168,6 +349,7 @@ fn findings(n: usize) -> (String, &'static str) {
 /// The line above a list that left `n` rows out, and its link's label.
 #[must_use]
 pub fn hidden_sentence(n: usize) -> (String, &'static str) {
+    let word = refuting_word();
     let (what, is) = findings(n);
     let (still, back) = if n == 1 {
         ("it is", "it")
@@ -176,7 +358,7 @@ pub fn hidden_sentence(n: usize) -> (String, &'static str) {
     };
     (
         format!(
-            "{what} the judge {REFUTED_ARG} {is} hidden. Nothing was recorded: {still} still \
+            "{what} the judge {word} {is} hidden. Nothing was recorded: {still} still \
              waiting and decidable, and a later verdict that does not refute {back} brings it \
              back on its own."
         ),
@@ -187,10 +369,11 @@ pub fn hidden_sentence(n: usize) -> (String, &'static str) {
 /// The line above a list that SHOWS `n` such rows on request, and the link back.
 #[must_use]
 pub fn shown_sentence(n: usize) -> (String, &'static str) {
+    let word = refuting_word();
     let (what, is) = findings(n);
     (
         format!(
-            "{what} the judge {REFUTED_ARG} {is} shown, folded last, because this page was \
+            "{what} the judge {word} {is} shown, folded last, because this page was \
              asked to show {}.",
             if n == 1 { "it" } else { "them" }
         ),
@@ -202,15 +385,17 @@ pub fn shown_sentence(n: usize) -> (String, &'static str) {
 /// would be false.
 #[must_use]
 pub fn empty_clause(n: usize) -> String {
+    let word = refuting_word();
     let (what, is) = findings(n);
-    format!("{what} the judge {REFUTED_ARG} {is} waiting, hidden above")
+    format!("{what} the judge {word} {is} waiting, hidden above")
 }
 
 /// The badge tooltip's clause for `n` serious findings it does not count.
 #[must_use]
 pub fn badge_clause(n: usize) -> String {
+    let word = refuting_word();
     format!(
-        " {n} more serious finding{} the judge {REFUTED_ARG} {} waiting too, hidden from the \
+        " {n} more serious finding{} the judge {word} {} waiting too, hidden from the \
          Queue and not counted here.",
         if n == 1 { "" } else { "s" },
         if n == 1 { "is" } else { "are" },
@@ -220,16 +405,18 @@ pub fn badge_clause(n: usize) -> String {
 /// The note on a batch group that lost `n` members to the filter.
 #[must_use]
 pub fn group_clause(n: usize) -> String {
+    let word = refuting_word();
     let (what, is) = findings(n);
-    format!("{what} in this group the judge {REFUTED_ARG} {is} hidden")
+    format!("{what} in this group the judge {word} {is} hidden")
 }
 
 /// The batch view's line for `n` hidden members, `emptied` of whose groups had no other.
 #[must_use]
 pub fn batch_sentence(n: usize, emptied: usize) -> (String, &'static str) {
+    let word = refuting_word();
     let (what, is) = findings(n);
     let mut out = format!(
-        "{what} the judge {REFUTED_ARG} {is} left out of these groups, so no batch here \
+        "{what} the judge {word} {is} left out of these groups, so no batch here \
          declines {}.",
         if n == 1 { "it" } else { "them" }
     );
@@ -251,8 +438,9 @@ pub enum Standing {
     Upheld { word: String, tag: String },
     /// No judge has looked at this finding.
     Unjudged,
-    /// The latest verdict is neither — or is a word this build does not know, which is ordered
-    /// with the uncertain and labeled with its own word rather than dropped.
+    /// The latest verdict is neither — any word of the contract's after its second, or a word
+    /// the adopted set does not hold, which is ordered with the uncertain and labeled with its
+    /// own word rather than dropped.
     Uncertain { word: String, tag: String },
     /// A judge was asked and could not judge it (`status: cannot` from
     /// `urn:repo:{repo}:judge-finding:{id}`), with the reason it gave.
@@ -275,10 +463,13 @@ impl Standing {
                     .to_string()
             };
             let (word, tag) = (text("verdict"), text("tag"));
-            return match TRIAGE.iter().position(|w| *w == word) {
-                Some(0) => Standing::Upheld { word, tag },
-                Some(last) if last == TRIAGE.len() - 1 => Standing::Refuted { word, tag },
-                _ => Standing::Uncertain { word, tag },
+            let set = words();
+            return if set.upheld() == Some(word.as_str()) {
+                Standing::Upheld { word, tag }
+            } else if set.refuting() == Some(word.as_str()) {
+                Standing::Refuted { word, tag }
+            } else {
+                Standing::Uncertain { word, tag }
             };
         }
         let id = row.get("id").and_then(Value::as_str).unwrap_or("");
@@ -305,6 +496,18 @@ impl Standing {
     #[must_use]
     pub fn folds(&self, decided: bool) -> bool {
         !decided && matches!(self, Standing::Refuted { .. })
+    }
+
+    /// The tag of the judge whose verdict placed the row — `None` for the two standings that
+    /// carry no verdict.
+    #[must_use]
+    pub fn tag(&self) -> Option<&str> {
+        match self {
+            Standing::Upheld { tag, .. }
+            | Standing::Uncertain { tag, .. }
+            | Standing::Refuted { tag, .. } => Some(tag),
+            Standing::Unjudged | Standing::Unjudgeable { .. } => None,
+        }
     }
 
     /// The row's standing in words, with the judge's tag — what every row carries, so the
@@ -349,23 +552,46 @@ pub fn order<T>(
 /// out ([`hidden_by_default`]); they are named in the sentence, never counted as absent.
 /// `None` when no row has been judged, none was refused and none was hidden, because then the
 /// order is browse's alone and saying otherwise would be noise.
+///
+/// ★ While the listed rows' latest verdicts come from MORE THAN ONE judge tag — the judge-v2
+/// backfill's hour, when some rows still carry only a judge-v1 verdict — the sentence counts
+/// them per tag, so a reader sees how far the re-judging has got.
 #[must_use]
 pub fn order_sentence(standings: &[Standing], hidden: usize) -> Option<String> {
     let mut counts = [0usize; 5];
+    let mut tags: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for standing in standings {
         counts[usize::from(standing.rank())] += 1;
+        if let Some(tag) = standing.tag() {
+            *tags.entry(tag).or_default() += 1;
+        }
     }
     let [upheld, unjudged, uncertain, unjudgeable, refuted] = counts;
     if unjudged == standings.len() && hidden == 0 {
         return None;
     }
-    let [first, middle, last] = TRIAGE;
+    let set = words();
+    let first = set.upheld().unwrap_or_default();
+    let last = set.refuting().unwrap_or_default();
+    let middle = crate::queue::join_or(set.uncertain());
     let mut parts = vec![format!("{upheld} {first} first")];
     parts.push(format!("{unjudged} not yet judged"));
     parts.push(format!("{uncertain} {middle}"));
     if unjudgeable > 0 {
         parts.push(format!("{unjudgeable} the judge could not judge"));
     }
+    let by_tag = if tags.len() > 1 {
+        format!(
+            " The listed rows' latest verdicts come from {} judges: {}.",
+            tags.len(),
+            tags.iter()
+                .map(|(tag, n)| format!("{n} by {tag}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        String::new()
+    };
     if hidden > 0 {
         parts.push(format!("{hidden} {last}, hidden (see above)"));
         if refuted > 0 {
@@ -373,14 +599,14 @@ pub fn order_sentence(standings: &[Standing], hidden: usize) -> Option<String> {
             parts.push(format!("{refuted} {last} and already decided"));
         }
         return Some(format!(
-            "Ordered by the judge's verdict — {}. The judge's answers are on each row.",
+            "Ordered by the judge's verdict — {}. The judge's answers are on each row.{by_tag}",
             parts.join(", ")
         ));
     }
     parts.push(format!("{refuted} {last}, folded last and still decidable"));
     Some(format!(
         "Ordered by the judge's verdict — {}. Nothing is hidden; the judge's answers are on \
-         each row.",
+         each row.{by_tag}",
         parts.join(", ")
     ))
 }
@@ -421,58 +647,4 @@ pub fn answers_element(row: &Value, open: bool) -> String {
         ],
         &children,
     )
-}
-
-/// An IRI to read the judge's CONTRACT through — `urn:repo:{root}:judge:{path}`, whose summary
-/// is the one place browse states its verdict words. The description is the template's, so the
-/// path names no file and nothing is read.
-fn judge_probe(root: &str) -> String {
-    format!("urn:repo:{root}:judge:{}", crate::queue::PROBE_ID)
-}
-
-/// ★ **The triage order checked against the judge's own contract**, before a door opens.
-///
-/// Every word of [`triage`] must appear, as a whole word, in the summary of
-/// `urn:repo:{root}:judge:{path}`. `Ok(None)` when no judge is bound (no explain families:
-/// no mount, so no `urn:llm:*`), because then there is no contract to check and no pass can
-/// mint a verdict; `Ok(Some(words))` when every word was found.
-///
-/// # Errors
-///
-/// When the judge is bound and its summary does not state a word — a browse release that
-/// renamed a verdict, which would otherwise order every judged row as uncertain in silence.
-pub fn check_verdicts(
-    hub: &Kernel,
-    root: &str,
-) -> std::result::Result<Option<Vec<&'static str>>, String> {
-    let probe = judge_probe(root);
-    let target = Iri::parse(&probe).map_err(|e| format!("`{probe}`: {e}"))?;
-    let Some(description) = hub.describe(&target) else {
-        return Ok(None);
-    };
-    let summary = description.summary;
-    let stated = |word: &str| {
-        summary
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|token| token == word)
-    };
-    let missing: Vec<&str> = TRIAGE.iter().copied().filter(|w| !stated(w)).collect();
-    if missing.is_empty() {
-        return Ok(Some(TRIAGE.to_vec()));
-    }
-    Err(format!(
-        "the Queue orders findings by the judge's verdict in the order {}, and `{probe}`'s \
-         contract no longer states {}. ikigai-browse declares no closed verdict set, so this \
-         build spells the three words in src/verdict.rs and checks them here; a browse release \
-         that renamed one would leave every judged row ordered as uncertain. Its summary \
-         says: {summary}",
-        TRIAGE.join(", "),
-        missing.join(", ")
-    ))
-}
-
-/// The triage order, for a test or a banner — the same words [`check_verdicts`] checks.
-#[must_use]
-pub fn triage() -> [&'static str; 3] {
-    TRIAGE
 }

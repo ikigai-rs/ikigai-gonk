@@ -442,7 +442,8 @@ pub struct ExplainTiers {
     ///
     /// ⚠ Off means passes mint findings with no verdict, as every pass before 0.16.0 did. It
     /// does NOT unbind `urn:repo:{root}:judge-finding:{id}`: browse binds that with the review
-    /// family and, with no judge configured, falls back to the REVIEW tier.
+    /// family and, with no judge configured, REFUSES it (a typed `Conflict`, since 0.16.1 —
+    /// 0.16.0 fell back to the review tier).
     pub judge: Option<String>,
     /// The judge's `max_tokens` ceiling for one call (`gonk.review.judge_max_tokens`, ledger
     /// #702 item 6) — browse's 400 unless the config says otherwise.
