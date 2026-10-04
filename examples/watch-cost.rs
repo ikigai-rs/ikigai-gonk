@@ -26,7 +26,7 @@
 //! running in `--build DIR` (skipped without it). Each
 //! prints the process CPU over the phase, the badge latency (min / median / max), how many
 //! times the watch cut a root thread (from `urn:kernel:threads`), the polls made and the clean
-//! builds completed. The build phase runs `cargo clean` and `cargo build` back to back for the
+//! builds that SUCCEEDED (a failed one is reported on stderr, not counted). The build phase runs `cargo clean` and `cargo build` back to back for the
 //! whole phase, so a small crate keeps a build RUNNING rather than finishing in seconds. The
 //! badge's tooltip is printed after the first poll and after the last, so a change to how it
 //! counts is visible as a change in what it says (`WATCH_COST_RAW=1` prints its whole markup).
@@ -61,7 +61,14 @@ fn main() {
                 let (name, path) = spec.split_once('=').expect("--root name=path");
                 roots.push((name.to_string(), expand(path)));
             }
-            "--seconds" => seconds = value().parse().expect("--seconds N"),
+            // A phase of zero seconds makes no poll, and there is no latency to report.
+            "--seconds" => {
+                seconds = value()
+                    .parse()
+                    .ok()
+                    .filter(|s| *s > 0)
+                    .expect("--seconds N, at least 1")
+            }
             "--poll-ms" => poll_ms = value().parse().expect("--poll-ms M"),
             "--build" => build = Some(expand(&value())),
             other => panic!("`{other}`: --root, --seconds, --poll-ms or --build"),
@@ -183,18 +190,25 @@ fn main() {
     );
     let phase = |name: &str, build: Option<&PathBuf>| {
         let (cpu0, cuts0, t0) = (cpu_seconds(), root_cuts(&hub), Instant::now());
-        let (mut latencies, mut builds) = (Vec::new(), 0usize);
+        let (mut latencies, mut builds, mut failed) = (Vec::new(), 0usize, 0usize);
         let mut child = Build(None);
         while t0.elapsed() < Duration::from_secs(seconds) {
             // A clean build, again and again: one build of a small crate is over in seconds,
             // and the phase is about a build that is RUNNING.
             if let Some(dir) = build {
+                // `builds` counts builds that SUCCEEDED: a crate that does not build ends each
+                // one in a moment, and counting those would report a phase under build load
+                // that never had one.
                 let finished = match child.0.as_mut() {
-                    None => true,
-                    Some(c) => c.try_wait().expect("the build's status").is_some(),
+                    None => Some(None),
+                    Some(c) => c.try_wait().expect("the build's status").map(Some),
                 };
-                if finished {
-                    builds += usize::from(child.0.is_some());
+                if let Some(status) = finished {
+                    match status {
+                        Some(status) if status.success() => builds += 1,
+                        Some(_) => failed += 1,
+                        None => {}
+                    }
                     cargo(dir, "clean").wait().expect("cargo clean");
                     child.0 = Some(cargo(dir, "build"));
                 }
@@ -206,6 +220,12 @@ fn main() {
             std::thread::sleep(Duration::from_millis(poll_ms).saturating_sub(t.elapsed()));
         }
         drop(child);
+        if failed > 0 {
+            eprintln!(
+                "⚠ {name}: {failed} build(s) FAILED and are not counted — this phase did not \
+                 run under the build load it names"
+            );
+        }
         let (wall, cpu) = (t0.elapsed().as_secs_f64(), cpu_seconds() - cpu0);
         latencies.sort_by(f64::total_cmp);
         let at = |q: f64| latencies[((latencies.len() - 1) as f64 * q) as usize];
@@ -330,11 +350,13 @@ fn issue(
         .map_err(|e| format!("{verb:?} {iri}: {e}"))
 }
 
-/// `gonk.browse.root = "name=~/path"` lines of the operator's config, `~` expanded.
+/// `gonk.browse.root = "name=~/path"` lines of the operator's config, `~` expanded — the
+/// config home the server itself reads (`$XDG_CONFIG_HOME/ikigai`, else `~/.config/ikigai`).
 fn configured_roots() -> Vec<(String, PathBuf)> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
-    let text = std::fs::read_to_string(home.join(".config/ikigai/config.toml"))
-        .expect("~/.config/ikigai/config.toml, or --root name=path");
+    let homes = ikigai_gonk::config::Homes::from_process().expect("the ikigai config home");
+    let path = homes.config.join("config.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{}: {e} — or pass --root name=path", path.display()));
     let mut roots: Vec<(String, PathBuf)> = Vec::new();
     for line in text.lines() {
         let Some(rest) = line.trim().strip_prefix("gonk.browse.root") else {
