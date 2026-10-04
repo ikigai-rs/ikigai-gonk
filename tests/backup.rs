@@ -583,6 +583,101 @@ fn the_rotation_keeps_the_last_five_and_prunes_the_oldest() {
     assert!(report.contains("pruned"), "{report}");
 }
 
+/// The rotation directory is a directory an operator can name (`gonk.backup.dir`), so it
+/// can hold files gonk did not write. The rotation is over gonk's OWN archives — the
+/// `gonk-store-<stamp>.nq.gz` names it mints — and nothing else in the directory is
+/// listed, counted against `keep`, or deleted. Reproduction from the review-value
+/// experiment (ledger #723, led arm P5a): on 4c1caec an operator's own export was pruned.
+#[test]
+fn the_rotation_never_deletes_a_file_gonk_did_not_write() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let foreign = [
+        "a-export.nq.gz",
+        "zz-export.nq.gz",
+        "gonk-store-latest.nq.gz",
+        "gonk-store-2026-09-01T000000Z.copy.nq.gz",
+    ];
+    for name in foreign {
+        std::fs::write(backups.path().join(name), b"not gonk's").expect("plant");
+    }
+    let hub = hub(backups.path(), 1);
+    seed(&hub);
+    let report = issue(&hub, Verb::Source, backup::BACKUP, &[]);
+    for name in foreign {
+        assert!(
+            backups.path().join(name).exists(),
+            "the rotation deleted `{name}`, which this server did not write:\n{report}"
+        );
+    }
+    let listed: Vec<String> = backup::archives(backups.path())
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(
+        listed.len(),
+        1,
+        "only gonk's own archive is listed: {listed:?}"
+    );
+    assert!(listed[0].starts_with("gonk-store-"), "{listed:?}");
+}
+
+/// ★ **The backup just taken survives its own prune**, whatever else is in the rotation.
+/// On 4c1caec it did not when the directory held a file that sorted after it: a foreign
+/// `zz-export.nq.gz` (led arm P5b), or `keep` archives stamped later than the clock — copied
+/// in from a machine whose clock ran ahead, or left by a clock stepped back (unled arm). Each
+/// sorted as "newest", so every backup taken here was pruned the moment it was written.
+#[test]
+fn the_backup_just_taken_survives_its_own_prune() {
+    // A file that sorts after `gonk-store-…`, with `keep` 1.
+    let backups = tempfile::tempdir().expect("tempdir");
+    std::fs::write(backups.path().join("zz-export.nq.gz"), b"not gonk's").expect("plant");
+    let late = hub(backups.path(), 1);
+    seed(&late);
+    let report = issue(&late, Verb::Source, backup::BACKUP, &[]);
+    let taken = report
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("backup "))
+        .expect("the report names the archive")
+        .to_string();
+    assert!(backups.path().join(&taken).exists(), "{report}");
+
+    // `keep` archives stamped in the future, with `keep` 2.
+    let backups = tempfile::tempdir().expect("tempdir");
+    for day in 1..=2 {
+        let name = format!(
+            "gonk-store-2099-01-0{day}T000000Z{}",
+            backup::ARCHIVE_SUFFIX
+        );
+        std::fs::write(backups.path().join(&name), b"planted").expect("plant");
+        std::fs::write(
+            backups
+                .path()
+                .join(format!("{name}{}", backup::META_SUFFIX)),
+            b"{}",
+        )
+        .expect("plant a sidecar");
+    }
+    let ahead = hub(backups.path(), 2);
+    seed(&ahead);
+    let report = issue(&ahead, Verb::Source, backup::BACKUP, &[]);
+    let taken = report
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("backup "))
+        .expect("the report names the archive")
+        .to_string();
+    assert!(
+        backups.path().join(&taken).exists(),
+        "the backup just taken was deleted by its own prune:\n{report}"
+    );
+    assert_eq!(
+        backup::archives(backups.path()).len(),
+        2,
+        "`keep` still holds: {report}"
+    );
+}
+
 /// ★ `STATUS` is what makes a 24-hour schedule worth having: a job that HANGS reads STALE
 /// forever and never reads FAILING, so "when was the last good backup" has to be a query
 /// against what is actually on disk.

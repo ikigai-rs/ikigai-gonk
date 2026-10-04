@@ -376,8 +376,17 @@ pub struct Archive {
     pub meta: Option<String>,
 }
 
-/// The rotation set, oldest first. Names sort chronologically because the stamp in them
-/// does — one fewer thing depending on a file system's idea of mtime.
+/// The rotation set, oldest first: gonk's OWN archives and nothing else in the directory.
+///
+/// ★ **Only names this server mints** — `gonk-store-<stamp>.nq.gz`, the stamp exactly as
+/// [`stamp_compact`] spells it. `gonk.backup.dir` is a directory an
+/// operator names, so it can hold an export of their own, a copy, a `latest` link; before
+/// ledger #737 every `*.nq.gz` in it was rotated, so such a file was DELETED by the prune, or
+/// — sorting after `gonk-store-…` — kept as "the newest" while the backup just taken went.
+///
+/// Among its own names the sort is by the instant each was taken: the stamp in the name IS
+/// that instant, at one-second resolution and zero-padded, so the names sort chronologically
+/// — one fewer thing depending on a file system's idea of mtime.
 pub fn archives(dir: &Path) -> Vec<Archive> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -386,7 +395,7 @@ pub fn archives(dir: &Path) -> Vec<Archive> {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(ARCHIVE_SUFFIX) {
+            if !is_own_archive(&name) {
                 return None;
             }
             let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -396,6 +405,23 @@ pub fn archives(dir: &Path) -> Vec<Archive> {
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// Whether `name` is an archive this server writes: `gonk-store-YYYY-MM-DDTHHMMSSZ.nq.gz`,
+/// digits where [`stamp_compact`] puts digits, and nothing before or after.
+fn is_own_archive(name: &str) -> bool {
+    let Some(stamp) = name
+        .strip_prefix("gonk-store-")
+        .and_then(|rest| rest.strip_suffix(ARCHIVE_SUFFIX))
+    else {
+        return false;
+    };
+    let shape = b"dddd-dd-ddTddddddZ";
+    stamp.len() == shape.len()
+        && stamp.bytes().zip(shape).all(|(byte, want)| match want {
+            b'd' => byte.is_ascii_digit(),
+            literal => byte == *literal,
+        })
 }
 
 /// When the newest archive in `dir` was taken, from its sidecar — `None` when there is no
@@ -533,7 +559,7 @@ impl TakeBackup {
             meta.as_bytes(),
         )?;
 
-        let pruned = prune(&settings.dir, settings.keep);
+        let pruned = prune(&settings.dir, settings.keep, &name);
         let previous = archives(&settings.dir)
             .iter()
             .rev()
@@ -614,13 +640,23 @@ impl TakeBackup {
 
 /// Keep the newest `keep` archives, deleting the rest with their sidecars. Returns what
 /// went.
-fn prune(dir: &Path, keep: usize) -> Vec<String> {
-    let found = archives(dir);
-    if found.len() <= keep {
+///
+/// ★ **`taken` — the archive this backup just wrote — is never pruned, and counts as one of
+/// the `keep`.** Without that, `keep` archives stamped LATER than the clock (copied in from
+/// a machine whose clock ran ahead, or left by a clock stepped back) sort as the newest for
+/// ever, and every backup taken here is deleted the moment it is written while the report
+/// says "backup gonk-store-…". `keep` is at least 1 ([`crate::config`] refuses 0).
+fn prune(dir: &Path, keep: usize, taken: &str) -> Vec<String> {
+    let others: Vec<Archive> = archives(dir)
+        .into_iter()
+        .filter(|archive| archive.name != taken)
+        .collect();
+    let keep_others = keep.saturating_sub(1);
+    if others.len() <= keep_others {
         return Vec::new();
     }
     let mut gone = Vec::new();
-    for archive in &found[..found.len() - keep] {
+    for archive in &others[..others.len() - keep_others] {
         // The sidecar goes FIRST. A sidecar left behind describes a file that is not there,
         // which is the one state that reads like a backup and is not.
         let _ = std::fs::remove_file(dir.join(format!("{}{META_SUFFIX}", archive.name)));
@@ -1421,6 +1457,45 @@ mod tests {
         assert_eq!(names[2], "gonk-store-2026-09-17T172813Z.nq.gz");
     }
 
+    /// The rotation's notion of "ours" is exactly the name [`TakeBackup`] mints.
+    #[test]
+    fn only_the_names_this_server_mints_are_its_archives() {
+        let minted = format!(
+            "gonk-store-{}{ARCHIVE_SUFFIX}",
+            stamp_compact(1_789_579_693_000)
+        );
+        assert!(is_own_archive(&minted), "{minted}");
+        for foreign in [
+            "a-export.nq.gz",
+            "zz-export.nq.gz",
+            "gonk-store-latest.nq.gz",
+            "gonk-store-2026-09-16T172813Z.nq",
+            "gonk-store-2026-09-16T172813Z.copy.nq.gz",
+            "old-gonk-store-2026-09-16T172813Z.nq.gz",
+            "gonk-store-2026-09-16T17281Z.nq.gz",
+            "gonk-store-2026-09-16 172813Z.nq.gz",
+            "gonk-store-2026-09-16T172813Z.nq.gz.meta.json",
+        ] {
+            assert!(!is_own_archive(foreign), "{foreign}");
+        }
+    }
+
+    /// The archive just written stays, even when every other one sorts after it.
+    #[test]
+    fn pruning_never_takes_the_archive_just_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let taken = format!("gonk-store-2026-10-03T000000Z{ARCHIVE_SUFFIX}");
+        for stamp in ["2099-01-01T000000Z", "2099-01-02T000000Z"] {
+            let name = format!("gonk-store-{stamp}{ARCHIVE_SUFFIX}");
+            std::fs::write(dir.path().join(&name), b"x").unwrap();
+        }
+        std::fs::write(dir.path().join(&taken), b"x").unwrap();
+        let gone = prune(dir.path(), 2, &taken);
+        assert_eq!(gone, ["gonk-store-2099-01-01T000000Z.nq.gz"]);
+        assert!(dir.path().join(&taken).exists());
+        assert_eq!(archives(dir.path()).len(), 2);
+    }
+
     /// ★ `{name}` comes from a caller and names a file this endpoint reads. Every escape
     /// out of the backup directory is refused, not sanitized.
     #[test]
@@ -1559,7 +1634,7 @@ mod tests {
             std::fs::write(dir.path().join(format!("{name}{META_SUFFIX}")), b"{}").unwrap();
         }
         assert_eq!(archives(dir.path()).len(), 3);
-        let gone = prune(dir.path(), 2);
+        let gone = prune(dir.path(), 2, "gonk-store-2026-09-12T000000Z.nq.gz");
         assert_eq!(gone, ["gonk-store-2026-09-10T000000Z.nq.gz"]);
         let left = archives(dir.path());
         assert_eq!(left.len(), 2);

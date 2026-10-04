@@ -1263,7 +1263,7 @@ would assert instead, which arrives as a panic where the banner should be.
 | `gonk/invites.json` | outstanding passkey invites, by the SHA-256 of their codes |
 | `gonk/render-rules.ttl` | this deployment's render rules, replacing the shipped table wholesale |
 | `gonk/quic/` | `server.crt`, `server.key`, and one `clients/<name>/` bundle per client |
-| `~/.ikigai/backups/` | the rotation: `gonk-store-<stamp>.nq.gz` and a `.meta.json` sidecar each |
+| `~/.ikigai/backups/` | the rotation: `gonk-store-<stamp>.nq.gz` and a `.meta.json` sidecar each, owner-only; any other file there is never listed or pruned |
 
 ## What it composes
 
