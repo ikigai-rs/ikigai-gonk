@@ -238,6 +238,19 @@ pub fn check_space_name(name: &str) -> std::result::Result<(), String> {
              (it is the `{{name}}` of `urn:space:{{name}}`)"
         ));
     }
+    // What `urn:space:{name}` cannot carry as itself: whitespace and the rest an IRI forbids
+    // make every drop fail, and `#`, `?`, `%`, `[`, `]` would make it name another space or
+    // none. Refused here, at startup, rather than at the first drop (ledger #737).
+    if let Some(bad) = name
+        .chars()
+        .find(|c| c.is_whitespace() || c.is_control() || "\"<>{}|^`#?%[]".contains(*c))
+    {
+        return Err(format!(
+            "gonk.review.space: `{name}` is not a space name — it may not contain `{}`, \
+             which `urn:space:{{name}}` cannot carry as itself",
+            bad.escape_default()
+        ));
+    }
     Ok(())
 }
 
@@ -1281,6 +1294,20 @@ fn restrict_file(_path: &Path) {}
 /// `review request` writes into the inbox with no server running, so the tree must be there
 /// whether or not this process has started.
 pub fn prepare(trigger: &Trigger) -> std::result::Result<(), String> {
+    // The spaces root and any parent it needs are CREATED `0700`, as [`SPACES_DIR`] says;
+    // one that already exists keeps the mode its operator gave it (`gonk.review.root` is a
+    // path an operator names). The space and its inbox are this server's and are narrowed
+    // every time.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&trigger.root)
+        .map_err(|e| format!("creating {}: {e}", trigger.root.display()))?;
     for dir in [trigger.dir(), trigger.inbox()] {
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         restrict(&dir)?;
