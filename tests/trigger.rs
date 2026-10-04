@@ -770,6 +770,75 @@ fn a_space_name_is_one_segment() {
     }
 }
 
+/// ★ **A space name the config check passes is one a drop can use.** The check exists to
+/// catch at startup what would otherwise fail at the first drop, where nobody is watching. On
+/// 4c1caec `my reviews` passed it and every drop then failed (`urn:space:my reviews` is not an
+/// IRI), and `a#b` passed and named a different space (`#` starts a fragment). Reproduction
+/// from the review-value experiment (ledger #723, unled arm).
+#[test]
+fn a_space_name_the_check_passes_can_be_dropped_into() {
+    for bad in [
+        "my reviews",
+        "tab\there",
+        "a#b",
+        "a?b",
+        "a%41",
+        "a[b]",
+        "a<b>",
+        "a\"b",
+        "a{b}",
+        "a|b",
+        "a^b",
+        "a`b",
+    ] {
+        let refusal = trigger::check_space_name(bad).expect_err(bad);
+        assert!(refusal.contains("gonk.review.space"), "{refusal}");
+    }
+    for good in ["reviews", "my-reviews", "reviews_2", "révisions"] {
+        trigger::check_space_name(good).expect(good);
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let q = Trigger {
+            space: good.to_string(),
+            grant: None,
+            root: dir.path().join("spaces"),
+            arm: false,
+        };
+        trigger::drop_tuple(
+            &q,
+            &Tuple {
+                repo: "demo".to_string(),
+                path: "src/x.rs".to_string(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("`{good}` passed the check and a drop failed: {e}"));
+        assert_eq!(
+            trigger::pending(&q),
+            1,
+            "`{good}`: the drop landed in its inbox"
+        );
+    }
+}
+
+/// The spaces tree is created `0700` — the root as well as the space and its inbox, which
+/// `SPACES_DIR` says gonk owns. On 4c1caec the root was left at the umask default. Checked on
+/// a root that does not exist yet, because a `tempdir` is already `0700`.
+#[cfg(unix)]
+#[test]
+fn the_spaces_tree_is_created_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    trigger::prepare(&q).expect("prepare");
+    for created in [q.root.clone(), q.dir(), q.inbox()] {
+        let mode = std::fs::metadata(&created)
+            .expect("created")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{} is {mode:o}", created.display());
+    }
+}
+
 /// ★★ **The reviewer grant's shape is READ OFF THE CONTRACT of the review this kernel binds,
 /// so it cannot go stale the way it did.**
 ///
