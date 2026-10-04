@@ -7,16 +7,21 @@
 //! setting has one spelling.
 //!
 //! ```toml
-//! gonk.bind = "127.0.0.1:1060"          # the HTTP door (loopback only; this IS the default)
+//! # the HTTP door (loopback only; this IS the default)
+//! gonk.bind = "127.0.0.1:1060"
 //! # gonk.port = 1060                    # shorthand for gonk.bind = "127.0.0.1:<port>"
-//! gonk.socket = "~/.ikigai/gonk.sock"   # the owner-only socket (this IS the default)
+//! # the owner-only socket (this IS the default)
+//! gonk.socket = "~/.ikigai/gonk.sock"
 //! # gonk.quic.bind = "0.0.0.0:1060"     # set it to REQUIRE the QUIC door; unset, it opens at
 //!                                       # this default once a client certificate is enrolled
-//! gonk.http.ledger = "default"          # ledgers the HTTP door may read and write; repeatable
-//! gonk.browse.root = "core=~/git-personal/ikigai-core"   # a browsable repository; repeatable
+//! # ledgers the HTTP door may read and write; repeatable
+//! gonk.http.ledger = "default"
+//! # a browsable repository; repeatable
+//! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
-//! gonk.review.space = "reviews"        # bind the git-event review QUEUE (urn:space:reviews)
+//! # bind the git-event review QUEUE (urn:space:reviews)
+//! gonk.review.space = "reviews"
 //! # gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
 //! # gonk.review.arm = true             # ⚠ ARM it: watch the queue and review on every drop
 //! # gonk.review.root = "~/.ikigai/spaces"   # the spaces tree (this IS the default)
@@ -26,7 +31,8 @@
 //!                                       # a REASONING judge answers empty at 400
 //! # gonk.queue.serious = "critical,major"   # the severities the Queue page asks a human about
 //!                                       # (this IS the default); the rest are minted, not queued
-//! gonk.backup.every = "24h"            # the backup cadence (this IS the default; "off" for none)
+//! # the backup cadence (this IS the default; "off" for none)
+//! gonk.backup.every = "24h"
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
 //! ```
@@ -971,7 +977,9 @@ fn mounts(flags: &Flags, text: &str, homes: &Homes) -> Result<Vec<Mount>, String
         let mount = mount::parse(&line, &homes.home)?;
         if mounts.iter().any(|seen| seen.prefix == mount.prefix) {
             return Err(format!(
-                "gonk.mount `{}`: `{}` is mounted twice — one prefix, one peer. (The cli                  orders overlapping mounts by prefix length; there is nothing to order here,                  because this server mounts one prefix.)",
+                "gonk.mount `{}`: `{}` is mounted twice — one prefix, one peer. (The cli \
+                 orders overlapping mounts by prefix length; there is nothing to order here, \
+                 because this server mounts one prefix.)",
                 line, mount.prefix
             ));
         }
@@ -995,9 +1003,14 @@ fn explain_tiers(text: &str) -> Result<ExplainTiers, String> {
         ("pr", &mut tiers.pr),
     ] {
         if let Some(provider) = value_for(text, &format!("gonk.explain.{kind}.provider")) {
-            if !provider.starts_with(mount::LLM_PREFIX) {
+            // A bare `urn:llm:` names no provider: refused here as `gonk.review.judge` refuses
+            // it, rather than becoming an `Unresolved` in the middle of an explain.
+            if !provider.starts_with(mount::LLM_PREFIX) || provider.len() == mount::LLM_PREFIX.len()
+            {
                 return Err(format!(
-                    "gonk.explain.{kind}.provider: `{provider}` is not under                      `{}` — the only prefix a gonk.mount line may claim, so nothing in this                      process could resolve it",
+                    "gonk.explain.{kind}.provider: `{provider}` is not a provider under \
+                     `{}` — the only prefix a gonk.mount line may claim, so nothing in this \
+                     process could resolve it",
                     mount::LLM_PREFIX
                 ));
             }
@@ -1163,8 +1176,23 @@ pub fn refuse_non_loopback(addr: SocketAddr) -> Result<(), String> {
     ))
 }
 
-/// Refuse any `gonk.*` key this server does not read.
+/// Refuse any `gonk.*` key this server does not read, and any `gonk.` line that is not a
+/// `key = value` line at all.
+///
+/// ⚠ The second half matters because [`lines`] skips a line with no `=` — so
+/// `gonk.backup.every "off"`, a TOML typo, would otherwise be dropped before the key check
+/// saw it, and the default schedule would run while the operator believes it is off.
 fn check_keys(text: &str) -> Result<(), String> {
+    if let Some(line) = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("gonk.") && !line.contains('='))
+    {
+        return Err(format!(
+            "config line `{line}` is not a `key = value` line — this server reads \
+             `gonk.<key> = \"<value>\"`, so as written it would be silently ignored"
+        ));
+    }
     let unknown: Vec<&str> = lines(text)
         .map(|(name, _)| name)
         .filter(|name| name.starts_with("gonk.") && !KEYS.contains(name))
@@ -1701,5 +1729,113 @@ mod tests {
         ));
         assert!(parse_args(args("grants --browse read")).is_err(), "a typo");
         assert!(parse_args(args("client add x --browse-graph nonsense")).is_err());
+    }
+
+    // ------------------------------------------------ ledger #737 minor items (ledger #723)
+
+    /// A `gonk.` line with no `=` is refused, not silently skipped with the default in effect.
+    #[test]
+    fn a_gonk_line_that_is_not_key_equals_value_is_refused() {
+        let refused = settings(&Flags::default(), "gonk.backup.every \"off\"\n", &homes())
+            .expect_err("a typo that would leave the default schedule running");
+        assert!(refused.contains("gonk.backup.every \"off\""), "{refused}");
+        assert!(refused.contains("not a `key = value` line"), "{refused}");
+        // A comment and another process's key are not this server's to judge.
+        assert!(settings(
+            &Flags::default(),
+            "# gonk.backup.every\nother thing\n",
+            &homes()
+        )
+        .is_ok());
+    }
+
+    /// A bare `urn:llm:` names no provider, for the tiers as for the judge.
+    #[test]
+    fn a_bare_llm_prefix_is_not_a_provider() {
+        for key in ["gonk.review.judge", "gonk.explain.review.provider"] {
+            let text = format!("{key} = \"urn:llm:\"\n");
+            assert!(
+                settings(&Flags::default(), &text, &homes()).is_err(),
+                "{key} accepted `urn:llm:`"
+            );
+        }
+    }
+
+    /// Refusals are sentences an operator reads: no run of indentation inside one, which is
+    /// what a string literal split across lines without its `\\` produces.
+    #[test]
+    fn refusal_messages_have_no_embedded_indentation() {
+        let twice = "gonk.mount = \"prefer urn:llm:=~/.ikigai/host.sock\"\n\
+                     gonk.mount = \"prefer urn:llm:=~/.ikigai/host.sock\"\n";
+        let mounted = settings(&Flags::default(), twice, &homes()).expect_err("mounted twice");
+        assert!(mounted.contains("mounted twice"), "{mounted}");
+        let outside = settings(
+            &Flags::default(),
+            "gonk.explain.file.provider = \"urn:x:ask\"\n",
+            &homes(),
+        )
+        .expect_err("not under urn:llm:");
+        for message in [mounted, outside] {
+            assert!(!message.contains("   "), "{message}");
+        }
+    }
+
+    /// ★ **Every config line this server's documentation shows reads back as it means.**
+    ///
+    /// The line grammar every ikigai process reads (`key = "value"`, a `#` line a comment) has
+    /// no trailing comment: the reader keeps everything after `=`, so a documented
+    /// `gonk.bind = "127.0.0.1:1060"   # …` became a value with the comment in it and stopped
+    /// the server (ledger #737, from ledger #723). The docs are what changed, not the reader,
+    /// because the grammar is shared. This reads every uncommented line in the README's
+    /// fenced config blocks and in this module's own doc, and requires the value the reader
+    /// takes to be exactly the quoted value (or the bare token) the line shows.
+    #[test]
+    fn every_documented_config_line_reads_back_as_it_means() {
+        let readme = include_str!("../README.md");
+        let this = include_str!("config.rs");
+        let mut documented: Vec<String> = Vec::new();
+        let mut fenced = false;
+        for line in readme.lines() {
+            if line.starts_with("```") {
+                fenced = line.starts_with("```toml");
+                continue;
+            }
+            if fenced {
+                documented.push(line.to_string());
+            }
+        }
+        documented.extend(
+            this.lines()
+                .filter_map(|line| line.strip_prefix("//! "))
+                .filter(|line| line.starts_with("gonk."))
+                .map(str::to_string),
+        );
+        let mut wrong = Vec::new();
+        let mut checked = 0;
+        for line in &documented {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains('=') {
+                continue;
+            }
+            let Some((name, read)) = lines(trimmed).next() else {
+                continue;
+            };
+            let spelled = trimmed.split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
+            let meant = match spelled.strip_prefix('"') {
+                Some(rest) => rest.split('"').next().unwrap_or(""),
+                None => spelled.split_whitespace().next().unwrap_or(""),
+            };
+            checked += 1;
+            if read != meant {
+                wrong.push(format!(
+                    "{name}: the reader takes `{read}`, the line means `{meant}`"
+                ));
+            }
+        }
+        assert!(
+            checked >= 10,
+            "the scan found only {checked} documented lines"
+        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }
