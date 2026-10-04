@@ -346,13 +346,21 @@ fn quad_from_solution(solution: &oxigraph::sparql::QuerySolution) -> Result<Quad
 /// ⚠ It must not come from the same code path that produced the dump. A dump and a
 /// comparison that share a counter agree with each other about a dataset neither of them
 /// read.
+///
+/// It counts distinct QUADS, not lines: a dataset is a set, a document may repeat a
+/// statement, and the store keeps one — so a line count reports a correct restore as a
+/// mismatch (ledger #737).
 fn counts_in_nquads(bytes: &[u8]) -> Result<BTreeMap<String, u64>> {
     let mut graphs: BTreeMap<String, u64> = BTreeMap::new();
+    let mut seen: std::collections::HashSet<Quad> = std::collections::HashSet::new();
     for quad in RdfParser::from_format(RdfFormat::NQuads).for_reader(bytes) {
         let quad = quad.map_err(|e| Error::InvalidArgument {
             name: "content".to_string(),
             detail: format!("parsing N-Quads: {e}"),
         })?;
+        if !seen.insert(quad.clone()) {
+            continue;
+        }
         let key = match &quad.graph_name {
             GraphName::DefaultGraph => DEFAULT_GRAPH_KEY.to_string(),
             GraphName::NamedNode(node) => node.as_str().to_string(),
@@ -1068,7 +1076,7 @@ impl Restore {
         } else {
             (content.to_vec(), "plain n-quads")
         };
-        let expected = counts_in_nquads(&nquads)?;
+        let expected = blank_graphs_by_shape(counts_in_nquads(&nquads)?);
         let expected_total: u64 = expected.values().sum();
 
         std::fs::create_dir_all(&into)
@@ -1091,7 +1099,7 @@ impl Restore {
             .await?;
 
         let read = Capability::scoped([ikigai_store::CAP_READ]);
-        let actual = graph_counts(&restored, &read).await?;
+        let actual = blank_graphs_by_shape(graph_counts(&restored, &read).await?);
         let actual_total: u64 = actual.values().sum();
         // Drop the store so the RocksDB lock is released before the caller is told the
         // directory is ready to be moved into place.
@@ -1228,6 +1236,30 @@ async fn graph_counts(kernel: &Kernel, capability: &Capability) -> Result<BTreeM
         counts.insert(key, count);
     }
     Ok(counts)
+}
+
+/// Re-key blank-node graphs by what survives a load: their number and their sizes.
+///
+/// A blank-node graph label is local to the document that wrote it, and the store mints its
+/// own on load, so a comparison keyed by label could never match (ledger #737). Each side's
+/// blank graphs are renamed `_:blank-graph-1…n` in order of size, which makes the per-graph
+/// comparison a comparison of the two multisets of sizes; named and default graphs are
+/// untouched.
+fn blank_graphs_by_shape(counts: BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+    let mut named = BTreeMap::new();
+    let mut sizes: Vec<u64> = Vec::new();
+    for (graph, count) in counts {
+        if graph.starts_with("_:") {
+            sizes.push(count);
+        } else {
+            named.insert(graph, count);
+        }
+    }
+    sizes.sort_unstable();
+    for (n, count) in sizes.into_iter().enumerate() {
+        named.insert(format!("_:blank-graph-{}", n + 1), count);
+    }
+    named
 }
 
 // ---------------------------------------------------------------- odds and ends
