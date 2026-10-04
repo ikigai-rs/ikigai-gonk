@@ -837,6 +837,13 @@ gonk lives drains nothing and says nothing until a restart — and gonk runs no 
 that stops falling is the whole symptom; the readout says `NONE IN FLIGHT` and the badge
 turns red. The fix is to restart this server.
 
+⚠ **A restart in the middle of a pass LOSES that request, and the depth says so.** The reactor
+moves a tuple into `<space>/.processing/` when a pass starts and out when it ends; a restart in
+between leaves it there, and the catch-up at startup reads only the inbox. The readout counts
+`.processing/` (`in_processing` and `lost` in the JSON face), names a claimed request no pass
+is running as one that NOTHING WILL RETRY, and on an armed server the badge turns red. Until `ikigai-intray`
+recovers these itself, move the file back into `inbox/` to have it reviewed.
+
 ### Filling the queue from a hook
 
 ```sh

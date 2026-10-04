@@ -1057,6 +1057,7 @@ fn an_armed_trigger_reviews_what_was_already_waiting() {
         trigger::depth(Some(&q)),
         trigger::Depth::Counted {
             inbox: 0,
+            processing: 0,
             outbox: 1,
             error: 0
         },
@@ -1220,6 +1221,91 @@ fn the_depth_tells_a_slow_queue_from_a_stuck_one() {
     );
 }
 
+/// ★ **A request a restart caught mid-pass is visible, not an empty queue.**
+///
+/// `SpaceReactor` claims a tuple by renaming `inbox/<id>.tuple` into `.processing/` and
+/// settles it only after the pass returns — about a minute of model call — and gonk is
+/// restarted on every reinstall. A restart in that minute leaves the tuple in `.processing/`,
+/// the restarted reactor's catch-up reads only the inbox, and on 4c1caec the depth said
+/// "The review queue is empty". Reproduction from the review-value experiment (ledger #723,
+/// unled arm; item 4 of ledger #737), with the claim done by the reactor's own rename.
+/// Retrying the request is `ikigai-intray`'s (ledger #738); gonk's half is that it is SEEN.
+#[test]
+fn a_request_a_restart_caught_mid_pass_is_counted_and_called_lost() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut q = queue(dir.path());
+    q.arm = true;
+    trigger::prepare(&q).expect("prepare");
+    let id = trigger::drop_tuple(
+        &q,
+        &Tuple {
+            repo: "demo".to_string(),
+            path: "src/x.rs".to_string(),
+        },
+    )
+    .expect("dropped");
+    // The reactor's claim, and then the process dies before it settles.
+    let processing = q.dir().join(".processing");
+    std::fs::create_dir_all(&processing).expect("staging");
+    std::fs::rename(
+        q.inbox().join(format!("{id}.tuple")),
+        processing.join(format!("{id}.tuple")),
+    )
+    .expect("claimed");
+
+    assert_eq!(
+        trigger::depth(Some(&q)),
+        trigger::Depth::Counted {
+            inbox: 0,
+            processing: 1,
+            outbox: 0,
+            error: 0
+        }
+    );
+    // The restarted server: armed, nothing in flight in THIS process.
+    let activity = Arc::new(trigger::Activity::default());
+    let depth = trigger::DepthEndpoint {
+        trigger: Some(Arc::new(q.clone())),
+        activity: Arc::clone(&activity),
+        armed: true,
+        policy: QueuePolicy::default(),
+    };
+    let status = depth.status();
+    assert_eq!(status.lost(), 1);
+    assert!(status.stuck(), "{status:?}");
+    let sentence = status.sentence(10_000);
+    assert!(
+        sentence.contains("1 request was claimed by a pass that never finished"),
+        "{sentence}"
+    );
+    assert!(sentence.contains("NOTHING WILL RETRY IT"), "{sentence}");
+    assert!(
+        !sentence.contains("STUCK reviewer"),
+        "a restart does not bring a lost request back, so the stuck-watcher advice is wrong \
+         here: {sentence}"
+    );
+
+    // Unarmed after the restart: still lost, and still said.
+    let unarmed = trigger::DepthEndpoint {
+        trigger: Some(Arc::new(q.clone())),
+        activity: Arc::new(trigger::Activity::default()),
+        armed: false,
+        policy: QueuePolicy::default(),
+    };
+    assert!(unarmed
+        .status()
+        .sentence(0)
+        .contains("NOTHING WILL RETRY IT"));
+
+    // A pass in flight holds exactly one claimed tuple: that one is working, not lost.
+    let pass = activity.begin(5_000).expect("a pass");
+    let status = depth.status();
+    assert_eq!(status.lost(), 0);
+    assert!(!status.stuck(), "{status:?}");
+    assert!(!status.sentence(6_000).contains("never finished"));
+    pass.succeeded();
+}
+
 /// The depth is reachable through the kernel under the browse read it declares, and refused
 /// without it — the floor ledger [#464](http://localhost:1060/l/default/item/464) asked for,
 /// instead of the space's own token, which this server mints for nobody.
@@ -1263,6 +1349,8 @@ fn the_depth_has_its_own_floor_and_answers_both_faces() {
     assert_eq!(v["configured"], true);
     assert_eq!(v["armed"], false);
     assert_eq!(v["waiting"], 0);
+    assert_eq!(v["in_processing"], 0);
+    assert_eq!(v["lost"], 0);
     assert_eq!(v["stuck"], false);
     // ★ The sentence rides WITH the numbers, so the badge, the page and the socket cannot
     // disagree about what the queue is doing.
