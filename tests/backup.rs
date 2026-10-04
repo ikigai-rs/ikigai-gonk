@@ -545,6 +545,59 @@ fn restoring_over_the_live_store_is_refused() {
     assert!(message.contains("LIVE store"), "{message}");
 }
 
+/// A plain N-Quads document may repeat a statement — a dataset is a set, and the store
+/// dedups on load — and it restores correctly. Before ledger #737 the archive side counted
+/// LINES and the store side QUADS, so the restore was refused as a mismatch (and the target
+/// directory left behind). Reproduction from the review-value experiment (ledger #723).
+#[test]
+fn a_document_that_repeats_a_statement_restores_and_verifies() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    let into = tempfile::tempdir().expect("tempdir");
+    let target = into.path().join("restored");
+    let doc = "<urn:a> <urn:p> \"x\" <urn:g:1> .\n<urn:a> <urn:p> \"x\" <urn:g:1> .\n\
+               <urn:b> <urn:p> \"y\" .\n";
+    let report = issue(
+        &hub,
+        Verb::Sink,
+        backup::RESTORE,
+        &[
+            ("content", doc.as_bytes()),
+            ("into", target.to_str().expect("utf-8").as_bytes()),
+        ],
+    );
+    assert!(report.contains("restored 2 quads"), "{report}");
+    assert_eq!(
+        counts_on_disk(&target),
+        BTreeMap::from([("urn:g:1".to_string(), 1), (String::new(), 1)])
+    );
+}
+
+/// A blank-node graph label is legal N-Quads, and the store mints its own label for it, so
+/// a comparison keyed by label could never match. Blank-node graphs are compared as what
+/// survives a load: how many there are and how many quads each holds. Reproduction from the
+/// review-value experiment (ledger #723).
+#[test]
+fn a_blank_node_graph_restores_and_verifies() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    let into = tempfile::tempdir().expect("tempdir");
+    let target = into.path().join("restored");
+    let doc = "<urn:a> <urn:p> \"x\" _:g1 .\n<urn:b> <urn:p> \"y\" _:g1 .\n\
+               <urn:c> <urn:p> \"z\" _:g2 .\n<urn:d> <urn:p> \"w\" <urn:g:1> .\n";
+    let report = issue(
+        &hub,
+        Verb::Sink,
+        backup::RESTORE,
+        &[
+            ("content", doc.as_bytes()),
+            ("into", target.to_str().expect("utf-8").as_bytes()),
+        ],
+    );
+    assert!(report.contains("restored 4 quads"), "{report}");
+    assert!(report.contains("match the archive exactly"), "{report}");
+}
+
 // ------------------------------------------------------------------ retention and status
 
 #[test]
