@@ -386,9 +386,14 @@ pub struct Tuple {
 
 impl Tuple {
     /// The tuple's own name. Skolemized, never a blank node — the module recipe's rule, and
-    /// the reason a queued request can be joined to anything else in a query.
+    /// the reason a queued request can be joined to anything else in a query. The path is
+    /// percent-encoded as in the review IRI (see [`check_request`]); the repository is not.
     pub fn iri(&self) -> String {
-        format!("urn:iki:gonk:review:request:{}:{}", self.repo, self.path)
+        format!(
+            "urn:iki:gonk:review:request:{}:{}",
+            self.repo,
+            iri_path(&self.path)
+        )
     }
 }
 
@@ -426,6 +431,30 @@ pub fn tuple_turtle(tuple: &Tuple) -> String {
 /// The vocabulary namespace the tuple's two predicates come from.
 const IK_NS: &str = "https://ikigai-rs.dev/ns#";
 
+/// A git path as the `{path}` of a `urn:repo:{repo}:…` IRI: `/` and the URN-safe
+/// punctuation literal, every other byte (`%`, `[`, `#`, `?`, non-ASCII…) percent-encoded.
+///
+/// ⚠ **A MIRROR of `ikigai-browse`'s `iri_encode`, which is private to that crate** — the
+/// encoder its Review button builds `urn:repo:{repo}:review:{path}` with, and the inverse of
+/// the decode its `{path}` binding goes through. Both halves matter: the decode is why a raw
+/// path names the wrong file, and the button is why the encoding must be browse's exactly —
+/// the trigger and the button are one call ([`review_request`]). A path of plain characters
+/// encodes to itself, so the common case is byte-identical to the unencoded form.
+/// `tests/browse.rs::the_trigger_encodes_a_path_exactly_as_browse_does` reads browse's own
+/// encoding off a listing and goes red the day the two differ.
+fn iri_path(path: &str) -> String {
+    const SAFE: &[u8] = b"-._~/!$&'()*+,;=:@";
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || SAFE.contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// ⚠ **Refuse a request this module cannot express, rather than writing a tuple nothing can
 /// read back.**
 ///
@@ -443,6 +472,16 @@ const IK_NS: &str = "https://ikigai-rs.dev/ns#";
 /// The set is the union of what Turtle's quoted literal and an IRI each forbid, so one rule
 /// covers both positions a value is emitted in.
 ///
+/// ⚠ **The path is percent-ENCODED in its two IRIs** (as [`review_request`] builds them),
+/// because `ikigai-browse` percent-DECODES the `{path}` it binds. A raw `%41` reviewed `A`
+/// instead (a different file, silently), and a raw `[`, `]` or lone `%` made an IRI nothing
+/// parses — a poison tuple that this check had passed (ledger #737). So for the PATH the
+/// IRI's own forbidden set no longer binds; the set below is still applied to it whole,
+/// which is a choice and not a necessity: admitting a space or `<` would widen what a drop
+/// accepts, and that is a contract change for whoever decides it. The repository is NOT
+/// encoded (browse does not encode it either), so it is also refused `[`, `]`, `%`, `#` and
+/// `?`, each of which would change what the IRI names there.
+///
 /// # Errors
 ///
 /// When either field is empty or carries a character this module cannot emit.
@@ -451,15 +490,19 @@ pub fn check_request(tuple: &Tuple) -> std::result::Result<(), String> {
         if value.is_empty() {
             return Err(format!("a review request's {field} may not be empty"));
         }
-        if let Some(bad) = value
-            .chars()
-            .find(|c| c.is_whitespace() || c.is_control() || "\"\\<>{}|^`".contains(*c))
-        {
+        let unencoded = field == "repository";
+        if let Some(bad) = value.chars().find(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || "\"\\<>{}|^`".contains(*c)
+                || (unencoded && "[]%#?".contains(*c))
+        }) {
             return Err(format!(
                 "a review request's {field} may not contain `{}`: this server emits a \
-                 request as Turtle with a `urn:iki:gonk:review:request:` IRI, and that \
-                 character is legal in neither. Refused here rather than queued as a tuple \
-                 nothing can read back",
+                 request as Turtle with a `urn:iki:gonk:review:request:` IRI and reviews \
+                 it through a `urn:repo:` one, and that character cannot be carried there \
+                 as itself. Refused here rather than queued as a tuple nothing can read \
+                 back, or that names another file",
                 bad.escape_default()
             ));
         }
@@ -815,8 +858,12 @@ fn now_ms() -> u64 {
 ///
 /// # Errors
 ///
-/// When `repo` and `path` do not make a resolvable IRI — a path carrying a space, say.
+/// When `repo` and the encoded `path` do not make a resolvable IRI — a repository name
+/// carrying a space, say. The path itself is percent-encoded first, as browse's own Review
+/// button encodes it, because browse DECODES the `{path}` it binds: a raw `a%41.rs` would
+/// review `aA.rs`.
 pub fn review_request(repo: &str, path: &str) -> Result<Request> {
+    let path = iri_path(path);
     let iri = Iri::parse(format!("urn:repo:{repo}:review:{path}")).map_err(|e| {
         Error::InvalidArgument {
             name: "path".to_string(),

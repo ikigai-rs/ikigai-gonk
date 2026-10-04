@@ -477,6 +477,123 @@ fn a_tuple_that_is_not_a_review_request_says_so() {
     );
 }
 
+/// Git paths an IRI cannot carry raw. Each passed [`trigger::check_request`] before ledger
+/// #737 and then failed one hop later: `[`, `]` and a `%` that is not an escape made a tuple
+/// `parse_tuple` refused (a POISON tuple — the drop succeeded and the request could never
+/// run), and a `%` that IS an escape named a different file once browse decoded it.
+const AWKWARD_PATHS: [&str; 9] = [
+    "pages/[id].tsx",
+    "docs/100%.md",
+    "a%zz.rs",
+    "a%.rs",
+    "a%41.rs",
+    "docs/a%20b.md",
+    "notes/c#.md",
+    "a?b.rs",
+    "src/café.rs",
+];
+
+/// ★ Everything [`trigger::check_request`] accepts reads back as the SAME tuple and names a
+/// review. Reproductions from the review-value experiment (ledger #723, both arms): on
+/// 4c1caec `pages/[id].tsx` and `docs/100%.md` were accepted and did neither.
+#[test]
+fn every_path_the_check_accepts_reads_back_and_names_a_review() {
+    for path in AWKWARD_PATHS {
+        let tuple = Tuple {
+            repo: "demo".to_string(),
+            path: path.to_string(),
+        };
+        trigger::check_request(&tuple).expect("a git path the trigger can express");
+        let back = trigger::parse_tuple(trigger::tuple_turtle(&tuple).as_bytes());
+        assert_eq!(
+            back.ok().as_ref(),
+            Some(&tuple),
+            "`{path}` did not read back"
+        );
+        trigger::review_request("demo", path)
+            .unwrap_or_else(|e| panic!("`{path}` was accepted and names no review: {e}"));
+    }
+}
+
+/// The same end to end at the drop: what lands in the inbox is runnable, never poison.
+#[test]
+fn a_dropped_tuple_is_never_poison() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let q = queue(dir.path());
+    for path in AWKWARD_PATHS {
+        let tuple = Tuple {
+            repo: "demo".to_string(),
+            path: path.to_string(),
+        };
+        trigger::drop_tuple(&q, &tuple).unwrap_or_else(|e| panic!("`{path}`: {e}"));
+    }
+    assert_eq!(trigger::pending(&q), AWKWARD_PATHS.len());
+    let mut read: Vec<String> = std::fs::read_dir(q.inbox())
+        .expect("the inbox")
+        .flatten()
+        .map(|entry| {
+            let bytes = std::fs::read(entry.path()).expect("a tuple");
+            trigger::parse_tuple(&bytes)
+                .unwrap_or_else(|e| panic!("{} is poison: {e}", entry.path().display()))
+                .path
+        })
+        .collect();
+    read.sort();
+    let mut want: Vec<String> = AWKWARD_PATHS.iter().map(|p| p.to_string()).collect();
+    want.sort();
+    assert_eq!(read, want);
+}
+
+/// The path is percent-encoded in both IRIs exactly as `ikigai-browse` encodes it for its
+/// own Review button (its private `iri_encode`), and only there: the `ik:path` literal keeps
+/// the path as git spells it, and a path with nothing to encode is byte-identical to what a
+/// hook wrote before (see [`a_tuple_round_trips_and_its_bytes_are_pinned`]).
+#[test]
+fn the_path_is_encoded_in_the_iris_and_literal_in_the_tuple() {
+    for (path, encoded) in [
+        ("pages/[id].tsx", "pages/%5Bid%5D.tsx"),
+        ("docs/100%.md", "docs/100%25.md"),
+        ("a%41.rs", "a%2541.rs"),
+        ("notes/c#.md", "notes/c%23.md"),
+        ("a?b.rs", "a%3Fb.rs"),
+        ("src/café.rs", "src/caf%C3%A9.rs"),
+        ("a-b_c.2~/x!$&'()*+,;=:@.rs", "a-b_c.2~/x!$&'()*+,;=:@.rs"),
+    ] {
+        let review = trigger::review_request("demo", path).expect("a review");
+        assert_eq!(
+            review.target.as_str(),
+            format!("urn:repo:demo:review:{encoded}")
+        );
+        let tuple = Tuple {
+            repo: "demo".to_string(),
+            path: path.to_string(),
+        };
+        assert_eq!(
+            tuple.iri(),
+            format!("urn:iki:gonk:review:request:demo:{encoded}")
+        );
+        assert!(
+            trigger::tuple_turtle(&tuple).contains(&format!("ik:path \"{path}\"")),
+            "the literal is the path as git spells it"
+        );
+    }
+}
+
+/// The repository is a configured root name and is NOT encoded — browse does not encode it
+/// either — so a character that would change what the IRI means there is refused at the
+/// drop rather than queued.
+#[test]
+fn a_repository_name_an_iri_cannot_carry_is_refused() {
+    for repo in ["de[mo", "de]mo", "de%mo", "de#mo", "de?mo"] {
+        let tuple = Tuple {
+            repo: repo.to_string(),
+            path: "a.rs".to_string(),
+        };
+        let refusal = trigger::check_request(&tuple).expect_err(repo);
+        assert!(refusal.contains("review request's repository"), "{refusal}");
+    }
+}
+
 // ------------------------------------------------------------- 4. the queue
 
 /// ★ **The bound Brian asked for, as a property of the queue rather than of a policy.**

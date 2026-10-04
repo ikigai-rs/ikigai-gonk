@@ -2938,3 +2938,72 @@ fn a_mount_is_the_one_opaque_node_and_it_is_the_hubs_first_layer() {
         "and it is the opaque one:\n{turtle}"
     );
 }
+
+// ------------------------------------------------------------- the trigger's path
+
+/// ★ **The review a trigger asks for is of the file that changed.** Browse percent-DECODES
+/// the `{path}` binding before it touches the filesystem, so before ledger #737 the trigger,
+/// which put the path into `urn:repo:{repo}:review:{path}` raw, reviewed `aA.rs` when
+/// `a%41.rs` changed, and `docs/a b.md` when `docs/a%20b.md` did. Reproduction from the
+/// review-value experiment (ledger #723, led arm P2), read through this root's `file` face:
+/// the same `{path}` binding and the same decode as the review, with no model behind it.
+#[test]
+fn the_trigger_names_the_file_that_changed_not_a_decoding_of_it() {
+    let dir = scratch_root();
+    let files = [
+        ("a%41.rs", "aA.rs"),
+        ("docs/a%20b.md", "docs/a b.md"),
+        ("pages/[id].tsx", "pages/x.tsx"),
+        ("docs/100%.md", "docs/100.md"),
+        ("notes/c#.md", "notes/c"),
+        ("a?b.rs", "a"),
+        ("src/café.rs", "src/cafe.rs"),
+    ];
+    for (changed, decoy) in files {
+        for (name, body) in [(changed, "THE FILE THAT CHANGED"), (decoy, "a decoy")] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
+            std::fs::write(&path, format!("{body}: {name}\n")).expect("write");
+        }
+    }
+    let (hub, _watch) = served(&dir);
+    for (changed, _) in files {
+        let review = ikigai_gonk::trigger::review_request("demo", changed).expect("a review");
+        let as_file = review.target.as_str().replace(":review:", ":file:");
+        let body = text(&hub, Verb::Source, &as_file, &[]);
+        assert!(
+            body.contains(&format!("THE FILE THAT CHANGED: {changed}")),
+            "the review IRI for `{changed}` reads:\n{body}"
+        );
+    }
+}
+
+/// And it is the BUTTON's IRI, byte for byte: browse lists each file under the `file:` IRI
+/// it builds with the same private encoder its Review button uses, so the trigger's IRI with
+/// `review` for `file` must appear in the listing verbatim. The day browse changes its
+/// encoding, this goes red before a trigger quietly stops sharing the button's archive key.
+#[test]
+fn the_trigger_encodes_a_path_exactly_as_browse_does() {
+    let dir = scratch_root();
+    let names = [
+        "a%41.rs", "[id].tsx", "100%.md", "c#.md", "a?b.rs", "café.rs",
+    ];
+    for name in names {
+        std::fs::write(dir.path().join(name), "x\n").expect("write");
+    }
+    let (hub, _watch) = served(&dir);
+    let listing = text(
+        &hub,
+        Verb::Source,
+        "urn:repo:demo:tree",
+        &[("as", "text/html")],
+    );
+    for name in names {
+        let review = ikigai_gonk::trigger::review_request("demo", name).expect("a review");
+        let as_file = review.target.as_str().replace(":review:", ":file:");
+        assert!(
+            listing.contains(&as_file),
+            "browse lists `{name}` under some IRI other than `{as_file}`:\n{listing}"
+        );
+    }
+}
