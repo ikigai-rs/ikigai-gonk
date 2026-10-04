@@ -593,7 +593,8 @@ lines for the same reason, plus one spelling that is easy to get wrong:
 
 ```toml
 mount = "prefer urn:repo:=/Users/you/.ikigai/gonk.sock"
-mount = "prefer urn:iki:annotation=/Users/you/.ikigai/gonk.sock"   # ⚠ no trailing colon
+# ⚠ no trailing colon
+mount = "prefer urn:iki:annotation=/Users/you/.ikigai/gonk.sock"
 ```
 
 The annotation line has no trailing colon deliberately: mounts match by plain string prefix,
@@ -748,7 +749,8 @@ a commit touching forty files drops forty requests, and they come back out one a
 Nothing decides a file was not worth reviewing.
 
 ```toml
-gonk.review.space = "reviews"        # bind the queue at urn:space:reviews
+# bind the queue at urn:space:reviews
+gonk.review.space = "reviews"
 # gonk.review.grant = "reviewer"     # the grant a pass runs under; naming it arms NOTHING
 # gonk.review.arm = true             # ⚠ ARM it: review on every drop. See below
 # gonk.review.root = "~/.ikigai/spaces"
@@ -778,8 +780,10 @@ unattended drainer safe, and it is why arming this is a decision about a grant.
 Arming takes **both** of:
 
 ```toml
-gonk.review.grant = "reviewer"   # an authority written into grants.json
-gonk.review.arm = true           # and the word that says to use it
+# an authority written into grants.json
+gonk.review.grant = "reviewer"
+# and the word that says to use it
+gonk.review.arm = true
 ```
 
 `arm` without a usable grant **stops this server**. Naming a grant without `arm` does what
@@ -1230,22 +1234,28 @@ Two things make the schedule trustworthy rather than merely present:
 ## Configuration
 
 Flags override config wholesale; there is no environment-variable channel. The config home
-is `~/.config/ikigai` (or `$XDG_CONFIG_HOME/ikigai`).
+is `~/.config/ikigai` (or `$XDG_CONFIG_HOME/ikigai`). ⚠ A comment goes on a line of its own: the
+`key = "value"` grammar every ikigai process reads has no trailing comment, so one after a
+value becomes part of the value.
 
 ```toml
 # ~/.config/ikigai/config.toml
-gonk.bind = "127.0.0.1:1060"          # or gonk.port = 1060, which always means loopback
+# or gonk.port = 1060, which always means loopback
+gonk.bind = "127.0.0.1:1060"
 gonk.socket = "~/.ikigai/gonk.sock"
 # gonk.quic.bind = "0.0.0.0:1060"     # unset: QUIC opens here once a certificate is enrolled;
                                       # set: QUIC must open, or gonk refuses to start
-gonk.http.ledger = "default"          # repeatable
-gonk.browse.root = "core=~/git-personal/ikigai-core"   # repeatable; unset, no browse family
+# repeatable
+gonk.http.ledger = "default"
+# repeatable; unset, no browse family
+gonk.browse.root = "core=~/git-personal/ikigai-core"
 gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 # gonk.explain.file.provider = "urn:llm:coder:ask"     # the tiers, and the per-call ceilings
 # gonk.explain.file.max_tokens = 400                   # file 400, dir 600, review 800, pr 600
 # gonk.explain.dir.provider = "urn:llm:ask"            # .dir / .review / .pr take the same pair
 # gonk.explain.max_prompt_bytes = 16384
-gonk.backup.every = "24h"             # the cadence; "off" (or --no-backup) takes none
+# the cadence; "off" (or --no-backup) takes none
+gonk.backup.every = "24h"
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
 # gonk.review.space = "reviews"       # bind the git-event review QUEUE; arms nothing
