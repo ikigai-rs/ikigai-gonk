@@ -266,7 +266,21 @@ ikigai-ledger = "0.2.1"
 # `cannot` with a lasting reason, and ships judge-v2 (a new tag beside the archived judge-v1
 # verdicts). On 0.16.0 there is no `verdict` one_of and this server refuses to start, which is
 # why this is the floor. `^0.16.1` is `<0.17.0`. Patch: an additive input, additive json fields.
-ikigai-browse = "0.16.1"
+# ★ 0.17.0 (ledger #736, browse PRs #69-#76) is the SECURITY release, and this server runs browse
+# IN-PROCESS, so the tenancy fix reaches the live host only through this line: the annotation
+# Delete and an updating Sink now check the grant of the EXISTING record's root (a caller with
+# `urn:cap:annotate` and a grant on root a can no longer delete or overwrite root b's annotation),
+# and the Delete's ActionSpec declares `urn:cap:browse:read:*` beside `urn:cap:annotate`, so an
+# annotate-only caller loses Delete. gonk itself issues no Delete; a person deleting through `/k`
+# needs `urn:cap:browse:read:{root}` beside `urn:cap:annotate`, which is the pair the README's
+# browsing grant already lists. Also: `state`
+# json paths are root-relative and only under the root, Turtle faces keep `\r`, `hx-get` IRIs are
+# entity-escaped, overlapping quote occurrences anchor on the one their context names, and
+# timestamps sort by time. On 0.16.x the cross-root write is open, which is why this is the floor.
+# `tests/browse.rs::deleting_an_annotation_needs_a_read_grant_on_its_own_root` is the FLOOR TEST:
+# red on 0.16.1, where `urn:cap:annotate` alone deletes. `^0.17.0` is `<0.18.0`. Minor: a
+# narrowed Delete (it refuses calls that used to succeed).
+ikigai-browse = "0.17.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

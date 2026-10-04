@@ -947,6 +947,62 @@ fn a_ledger_item_joins_an_annotation_on_a_repo_file() {
     );
 }
 
+/// ★ **The floor test for `ikigai-browse = "0.17.0"`** (ledger #736): deleting an annotation
+/// takes a browse read grant on the root the EXISTING annotation is on, beside
+/// `urn:cap:annotate`. Through 0.16.x `urn:cap:annotate` alone deleted any root's annotation,
+/// and gonk runs browse in-process, so this composition is where the tenancy fix lives or
+/// does not. A grant on another root is the cross-root case the release closed.
+#[test]
+fn deleting_an_annotation_needs_a_read_grant_on_its_own_root() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    annotate(
+        &hub,
+        "n1",
+        "urn:repo:demo:file:src/lib.rs",
+        "first",
+        "this line is the one",
+    );
+    let delete = |scopes: &[&str]| {
+        block_on(Kernel::issue(
+            &hub,
+            request(Verb::Delete, "urn:iki:annotation:n1", &[]),
+            &Capability::scoped(scopes.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+        ))
+    };
+    for (who, scopes) in [
+        ("annotate alone", &["urn:cap:annotate"][..]),
+        (
+            "annotate with ANOTHER root's read grant",
+            &["urn:cap:annotate", "urn:cap:browse:read:elsewhere"][..],
+        ),
+    ] {
+        let answer = delete(scopes);
+        assert!(
+            matches!(answer, Err(ikigai_core::Error::Denied(_))),
+            "{who} must not delete an annotation on `demo`: {answer:?}"
+        );
+    }
+    let read = || {
+        block_on(Kernel::issue(
+            &hub,
+            request(Verb::Source, "urn:iki:annotation:n1", &[]),
+            &Capability::root(),
+        ))
+    };
+    assert!(
+        read().is_ok(),
+        "the refused deletes left the annotation in place"
+    );
+    delete(&["urn:cap:annotate", "urn:cap:browse:read:demo"])
+        .expect("annotate plus a read grant on the annotation's own root deletes it");
+    let gone = read();
+    assert!(
+        matches!(gone, Err(ikigai_core::Error::NotFound(_))),
+        "the permitted delete removed it: {gone:?}"
+    );
+}
+
 /// ★ **Obligation 3, from the running kernel rather than from the store's promise.**
 ///
 /// `a_named_graph_choice_moves_the_promise_with_it` asks `ikigai-store` whether the browse

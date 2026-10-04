@@ -276,7 +276,9 @@ urn:cap:browse:read:*     read the repository at all (the wildcard browse declar
 urn:cap:annotate          mint annotations — publishing a finding, and the human ones.
                           ⚠ A review PASS no longer declares it (browse 0.5.0): a pass
                           writes pending findings and cannot publish, which is what lets
-                          the git-event trigger be armed at all
+                          the git-event trigger be armed at all. DELETING an
+                          annotation also needs browse read on ITS root (browse
+                          0.17.0): annotate alone no longer deletes anything
 urn:cap:net:localhost     reach the mounted model, which is what deriving costs authority for
 urn:cap:store:{read,write}:graph:urn:iki:browse:graph:default    the archive those land in
 ```
