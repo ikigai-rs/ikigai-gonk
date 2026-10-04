@@ -49,8 +49,11 @@ path = "src/main.rs"
 # Nothing in gonk constructs or matches `Conflict` yet — the ledger's claim refusal moving to
 # it is ledger #584, the next wave. 0.1.81 (levels and seals, ledger #600) is admitted by the
 # caret and not relied on.
-# ⚠ `"0.1.80"` is also a ceiling (`<0.2.0`); when core reaches 0.2 this line must move.
-ikigai-core = "0.1.80"
+# ★ 0.1.84 is the floor now, and it is a RESOLUTION floor again: `ikigai-intray` 0.1.36 below
+# (in-flight recovery, ledger #738/#742) requires `^0.1.84`, so a lower pin here is one this
+# build can never resolve. Nothing between 0.1.81 and 0.1.84 is called by name here.
+# ⚠ `"0.1.84"` is also a ceiling (`<0.2.0`); when core reaches 0.2 this line must move.
+ikigai-core = "0.1.84"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -325,7 +328,19 @@ ikigai-repo = "0.1.6"
 # below) carry wire v8 and the hardened edge. Nothing in the tuplespace or the reactor moved
 # between 0.1.24 and 0.1.30 that this binary uses; the pin moves so the graph holds ONE
 # release of that workspace rather than two, each pinning its own core floor.
-ikigai-intray = "0.1.30"
+# ★★ 0.1.36 is the floor for a reason this binary NEEDS (ledger #738/#742, ikigai-cli PR #392):
+# `SpaceReactor` claims a tuple by renaming it into `<space>/.processing/` before the pass runs,
+# and through 0.1.35 a restart mid-pass stranded it there forever — the catch-up lists only
+# `inbox/`, so the request was neither retried nor dead-lettered. 0.1.36 recovers
+# `.processing/` when a reactor starts, under a `<root>/.reactor.lock` lease, and
+# `SpaceReactor::on_interrupted(Interrupted::Requeue)` — which `crate::trigger::arm` calls,
+# because a review pass is idempotent — moves it back to `inbox/` for the catch-up to run.
+# It also exports `PROCESSING_DIR`, which `crate::trigger::depth` now reads instead of a copy.
+# `tests/trigger.rs::a_request_a_restart_caught_mid_pass_is_requeued_and_reviewed` is the FLOOR
+# TEST. ⚠ This release requires core `^0.1.84` and resolve `^0.1.36`, so both floors moved
+# with it; the other cli-workspace lines (ipc, quic, web, passkey) did NOT, so the graph holds
+# two releases of that workspace until they do.
+ikigai-intray = "0.1.36"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -334,11 +349,12 @@ ikigai-intray = "0.1.30"
 # worth keeping: 0.1.18 -> 0.1.22 by `ikigai-time`, which requires `^0.1.22`; 0.1.22 ->
 # 0.1.24 because ipc and quic below needed 0.1.24; 0.1.24 -> 0.1.25 because ipc below needs
 # 0.1.25 and requires `ikigai-resolve ^0.1.25`; 0.1.25 -> 0.1.30 because ipc and quic below
-# are 0.1.30 (wire v8) and require `ikigai-resolve ^0.1.30`. All of them ship from one
+# are 0.1.30 (wire v8) and require `ikigai-resolve ^0.1.30`; 0.1.30 -> 0.1.36 because
+# `ikigai-intray` 0.1.36 above requires `ikigai-resolve ^0.1.36`. All of them ship from one
 # workspace on a single shared version — so a lower pin here is a floor this build can never
 # resolve. The pin states the minimum that COMPILES with everything else here, and it moves
 # when a sibling moves it.
-ikigai-resolve = "0.1.30"
+ikigai-resolve = "0.1.36"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without

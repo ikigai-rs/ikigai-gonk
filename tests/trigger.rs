@@ -1298,7 +1298,9 @@ fn the_depth_tells_a_slow_queue_from_a_stuck_one() {
 /// the restarted reactor's catch-up reads only the inbox, and on 4c1caec the depth said
 /// "The review queue is empty". Reproduction from the review-value experiment (ledger #723,
 /// unled arm; item 4 of ledger #737), with the claim done by the reactor's own rename.
-/// Retrying the request is `ikigai-intray`'s (ledger #738); gonk's half is that it is SEEN.
+/// Retrying it is the next armed START's (ledger #742, and the test after this one); this one
+/// is the half where it is SEEN, and where what the sentence promises depends on whether the
+/// server reading it is armed.
 #[test]
 fn a_request_a_restart_caught_mid_pass_is_counted_and_called_lost() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -1347,24 +1349,31 @@ fn a_request_a_restart_caught_mid_pass_is_counted_and_called_lost() {
         sentence.contains("1 request was claimed by a pass that never finished"),
         "{sentence}"
     );
-    assert!(sentence.contains("NOTHING WILL RETRY IT"), "{sentence}");
+    assert!(
+        sentence.contains("its next start requeues it and the catch-up reviews it"),
+        "an armed server's next start requeues a lost request (ikigai-intray 0.1.36): \
+         {sentence}"
+    );
+    assert!(!sentence.contains("NOTHING RECOVERS"), "{sentence}");
     assert!(
         !sentence.contains("STUCK reviewer"),
-        "a restart does not bring a lost request back, so the stuck-watcher advice is wrong \
-         here: {sentence}"
+        "the stuck-watcher advice is about a WAITING request, and nothing is waiting: \
+         {sentence}"
     );
 
-    // Unarmed after the restart: still lost, and still said.
+    // Unarmed after the restart: still lost, still said, and nothing will bring it back.
     let unarmed = trigger::DepthEndpoint {
         trigger: Some(Arc::new(q.clone())),
         activity: Arc::new(trigger::Activity::default()),
         armed: false,
         policy: QueuePolicy::default(),
     };
-    assert!(unarmed
-        .status()
-        .sentence(0)
-        .contains("NOTHING WILL RETRY IT"));
+    let sentence = unarmed.status().sentence(0);
+    assert!(
+        sentence.contains("NOTHING RECOVERS IT: an unarmed server runs no reactor"),
+        "{sentence}"
+    );
+    assert!(!sentence.contains("next start requeues"), "{sentence}");
 
     // A pass in flight holds exactly one claimed tuple: that one is working, not lost.
     let pass = activity.begin(5_000).expect("a pass");
@@ -1373,6 +1382,101 @@ fn a_request_a_restart_caught_mid_pass_is_counted_and_called_lost() {
     assert!(!status.stuck(), "{status:?}");
     assert!(!status.sentence(6_000).contains("never finished"));
     pass.succeeded();
+}
+
+/// ★★ **The floor test for `ikigai-intray = "0.1.36"`: a request a restart caught mid-pass is
+/// requeued at the next armed start and reviewed** (ledger
+/// [#742](http://localhost:1060/l/default/item/742), [#738](http://localhost:1060/l/default/item/738)).
+///
+/// The tuple is put where a reactor that died mid-pass leaves it — `.processing/`, out of the
+/// inbox — and then [`trigger::arm`] starts a fresh reactor over the tree. Through 0.1.35 the
+/// catch-up read only `inbox/` and nothing ever reached the review. On 0.1.36 with the crate's
+/// default (`Interrupted::DeadLetter`) the tuple would land in `error/` and the review would
+/// not be called; with gonk's `Interrupted::Requeue` it goes back to the inbox, the catch-up
+/// reviews it exactly once, and it settles in the outbox. The banner sentence `arm` returns
+/// names it.
+#[test]
+fn a_request_a_restart_caught_mid_pass_is_requeued_and_reviewed() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut q = queue(dir.path());
+    q.arm = true;
+    trigger::prepare(&q).expect("prepare");
+    let id = trigger::drop_tuple(
+        &q,
+        &Tuple {
+            repo: "demo".to_string(),
+            path: "a.rs".to_string(),
+        },
+    )
+    .expect("dropped");
+    // The dead reactor's claim: the same rename `SpaceReactor` makes, and no settle after it.
+    let processing = q.dir().join(ikigai_intray::PROCESSING_DIR);
+    std::fs::create_dir_all(&processing).expect("staging");
+    std::fs::rename(
+        q.inbox().join(format!("{id}.tuple")),
+        processing.join(format!("{id}.tuple")),
+    )
+    .expect("claimed");
+    assert_eq!(
+        trigger::pending(&q),
+        0,
+        "the inbox reads empty, which was the bug"
+    );
+
+    let (kernel, seen) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let hub = Arc::new(kernel);
+    let scopes = trigger::reviewer_grant_shape(&hub, "urn:repo:demo:review:a.rs", "localhost")
+        .expect("a bound review");
+    let banner = trigger::arm(&q, Arc::clone(&hub), &scopes).expect("arming");
+    assert!(
+        banner.contains("Requeued 1 request a stopped pass had claimed") && banner.contains(&id),
+        "the banner names what recovery requeued: {banner}"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline
+        && trigger::depth(Some(&q))
+            != (trigger::Depth::Counted {
+                inbox: 0,
+                processing: 0,
+                outbox: 1,
+                error: 0,
+            })
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let calls = seen.lock().expect("not poisoned").clone();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the interrupted request must reach the review exactly once: {calls:?}"
+    );
+    assert_eq!(calls[0].1, "urn:repo:demo:review:a.rs");
+    assert_eq!(
+        trigger::depth(Some(&q)),
+        trigger::Depth::Counted {
+            inbox: 0,
+            processing: 0,
+            outbox: 1,
+            error: 0
+        },
+        "requeued and handled — not dead-lettered, which is the crate's default"
+    );
+}
+
+/// An armed start with nothing interrupted says so, rather than saying nothing.
+#[test]
+fn an_armed_start_with_nothing_interrupted_says_so() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut q = queue(dir.path());
+    q.arm = true;
+    trigger::prepare(&q).expect("prepare");
+    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
+    let hub = Arc::new(kernel);
+    let scopes = trigger::reviewer_grant_shape(&hub, "urn:repo:demo:review:a.rs", "localhost")
+        .expect("a bound review");
+    let banner = trigger::arm(&q, hub, &scopes).expect("arming");
+    assert_eq!(banner, "No request was interrupted by the last stop.");
 }
 
 /// The depth is reachable through the kernel under the browse read it declares, and refused

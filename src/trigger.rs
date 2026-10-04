@@ -130,6 +130,7 @@ use ikigai_core::{
     ArgSpec, Capability, Description, Endpoint, Error, Invocation, Iri, Kernel, ReprType,
     Representation, Request, Result, Space, Verb,
 };
+use ikigai_intray::PROCESSING_DIR;
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::store::Store;
 
@@ -1185,6 +1186,27 @@ pub fn grant_stanza(hub: &Kernel, review_iri: &str, host: &str) -> String {
 /// writes a `handler` only there, so this is belt-and-braces — and it is the cheap half of
 /// the two.
 ///
+/// ★ **A request a restart caught mid-pass is REQUEUED, and that is a choice this host
+/// makes** (ledger [#742](http://localhost:1060/l/default/item/742)). The reactor claims a
+/// tuple into `.processing/` before the pass runs; from `ikigai-intray` 0.1.36 a reactor
+/// recovers what a STOPPED one left there before its first claim, and its default is to
+/// dead-letter it, because the crate cannot know whether a handler that died mid-call acted.
+/// gonk can: a review pass is idempotent. Its archive key is the file's content hash and the
+/// pass tag, so a pass that finished before the restart is an archive HIT the second time
+/// (nothing paid, nothing minted), and one that did not costs a model call and mints PENDING
+/// findings whose ids derive from that same key — nothing a re-run does is published, and
+/// nothing reaches a person but the Queue. So [`Interrupted::Requeue`] it is, and the
+/// startup catch-up reviews it like any other waiting request.
+///
+/// ⚠ Recovery runs HERE, synchronously, rather than inside the reactor's first drain on the
+/// watch thread: it is renames, not passes, so it costs nothing at startup, and running it
+/// here is what lets the returned sentence say what it found for the banner. The reactor
+/// remembers the result, so the watch thread's drain does not recover twice.
+///
+/// Returns one sentence for the banner: what recovery found, or why it was skipped.
+///
+/// [`Interrupted::Requeue`]: ikigai_intray::Interrupted::Requeue
+///
 /// # Errors
 ///
 /// When the handler cannot be written, or a `cap` file is sitting in a space this reactor
@@ -1195,7 +1217,7 @@ pub fn arm(
     trigger: &Trigger,
     hub: Arc<Kernel>,
     scopes: &[String],
-) -> std::result::Result<(), String> {
+) -> std::result::Result<String, String> {
     set_handler(trigger, true)?;
     let space = trigger.space.clone();
     let reviewer = Capability::scoped(scopes.to_vec());
@@ -1213,7 +1235,8 @@ pub fn arm(
             // the only way to say "this space gets nothing".
             Some(Capability::scoped(Vec::<String>::new()))
         }
-    });
+    })
+    .on_interrupted(ikigai_intray::Interrupted::Requeue);
     let ignored = reactor.ignored_cap_files();
     if !ignored.is_empty() {
         return Err(format!(
@@ -1240,8 +1263,61 @@ pub fn arm(
     // handler must stop this server, and a refusal on a background thread would not.
     // Reported up: the crate's doc says "returns immediately", and for any host with a
     // non-empty inbox that is not true.
+    // ⚠ After the refusals, never before: a server that will not start must not have moved
+    // anything.
+    let recovered = recovery_sentence(reactor.recover_interrupted());
     std::thread::spawn(move || Arc::new(reactor).watch());
-    Ok(())
+    Ok(recovered)
+}
+
+/// What the reactor's startup recovery did, as the banner says it.
+fn recovery_sentence(report: std::result::Result<&[ikigai_intray::Recovered], &str>) -> String {
+    let recovered = match report {
+        Err(why) => {
+            return format!(
+                "⚠ Interrupted requests were NOT recovered at this start: {why}. Anything in \
+                 `{PROCESSING_DIR}/` stays there and the depth counts it as lost."
+            )
+        }
+        Ok(recovered) => recovered,
+    };
+    if recovered.is_empty() {
+        return "No request was interrupted by the last stop.".to_string();
+    }
+    // Grouped by what actually happened to each, not by the policy this host asked for: the
+    // report is the crate's, and a sentence that assumed the policy would misreport the day
+    // the policy line moves.
+    let ids = |want: ikigai_intray::Interrupted| {
+        recovered
+            .iter()
+            .filter(|r| r.outcome.as_ref().is_ok_and(|done| *done == want))
+            .map(|r| r.tuple.as_str())
+            .collect::<Vec<_>>()
+    };
+    let mut said = Vec::new();
+    for (want, verb) in [
+        (ikigai_intray::Interrupted::Requeue, "Requeued"),
+        (ikigai_intray::Interrupted::DeadLetter, "Dead-lettered"),
+    ] {
+        let these = ids(want);
+        if !these.is_empty() {
+            said.push(format!(
+                "{verb} {} request{} a stopped pass had claimed ({}).",
+                these.len(),
+                if these.len() == 1 { "" } else { "s" },
+                these.join(", ")
+            ));
+        }
+    }
+    for r in recovered {
+        if let Err(why) = &r.outcome {
+            said.push(format!(
+                "⚠ {} could not be recovered and stays in `{PROCESSING_DIR}/`: {why}.",
+                r.tuple
+            ));
+        }
+    }
+    said.join(" ")
 }
 
 /// Write (or remove) the `handler` file that makes this space reactive.
@@ -1384,9 +1460,9 @@ pub enum Depth {
         /// Claimed by a pass and not yet settled: `SpaceReactor` renames a tuple into
         /// `<space>/.processing/` when a pass starts and out of it when the pass ends. One
         /// there while a pass is in flight is that pass; any other is a request a pass took
-        /// and never finished — a restart mid-pass leaves exactly that — which the reactor's
-        /// startup catch-up does not see (ledger #737, item 4). Counted so that it is visible;
-        /// recovering it is `ikigai-intray`'s (ledger #738).
+        /// and never finished — a restart mid-pass leaves exactly that (ledger #737, item 4).
+        /// An ARMED server requeues those when it starts (`ikigai-intray` 0.1.36, ledger
+        /// #742); an unarmed one runs no reactor and recovers nothing, so they stay here.
         processing: usize,
         /// Handled.
         outbox: usize,
@@ -1432,10 +1508,6 @@ pub fn depth(trigger: Option<&Trigger>) -> Depth {
         error: count_tuples(&trigger.dir().join("error")).unwrap_or(0),
     }
 }
-
-/// Where `ikigai-intray`'s `SpaceReactor` stages a tuple it has claimed for a pass (its
-/// private `claim`, 0.1.31): `<space>/.processing/<id>.tuple`, renamed out on settle.
-const PROCESSING_DIR: &str = ".processing";
 
 /// The `*.tuple` files in one stage directory.
 fn count_tuples(dir: &Path) -> std::io::Result<usize> {
@@ -1534,19 +1606,32 @@ impl Status {
             )
         };
         // ⚠ Before the armed check: a request lost by an ARMED run is still lost after a
-        // restart that comes up unarmed, and it is the one thing on this line that no
-        // restart and no catch-up will ever bring back.
+        // restart that comes up unarmed, and an unarmed server is the one that never brings
+        // it back.
         if lost > 0 {
+            let it = if lost == 1 { "it" } else { "them" };
             out.push_str(&format!(
                 " ⚠ {lost} request{} claimed by a pass that never finished — left in \
-                 `.processing/`, which a restart mid-pass does — and NOTHING WILL RETRY {}: \
-                 the catch-up at startup reads only the inbox. Move {} back into `inbox/` to \
-                 have {} reviewed.",
+                 `{PROCESSING_DIR}/`, which a stop mid-pass does.",
                 if lost == 1 { " was" } else { "s were" },
-                if lost == 1 { "IT" } else { "THEM" },
-                if lost == 1 { "it" } else { "them" },
-                if lost == 1 { "it" } else { "them" },
             ));
+            // ★ Since ikigai-intray 0.1.36 (ledger #742) an ARMED start requeues what a
+            // stopped reactor left claimed, so the honest advice depends on which server
+            // this is. A lost request on a RUNNING armed server means recovery did not reach
+            // it — the watcher died mid-pass, or recovery was skipped at this start (the
+            // banner says which) — and the next armed start is what retries it.
+            if self.armed {
+                out.push_str(&format!(
+                    " This server is armed, so its next start requeues {it} and the catch-up \
+                     reviews {it}."
+                ));
+            } else {
+                out.push_str(&format!(
+                    " NOTHING RECOVERS {}: an unarmed server runs no reactor, so only an armed \
+                     start requeues {it}.",
+                    if lost == 1 { "IT" } else { "THEM" },
+                ));
+            }
         }
         if !self.armed {
             out.push_str(

@@ -843,12 +843,20 @@ gonk lives drains nothing and says nothing until a restart — and gonk runs no 
 that stops falling is the whole symptom; the readout says `NONE IN FLIGHT` and the badge
 turns red. The fix is to restart this server.
 
-⚠ **A restart in the middle of a pass LOSES that request, and the depth says so.** The reactor
-moves a tuple into `<space>/.processing/` when a pass starts and out when it ends; a restart in
-between leaves it there, and the catch-up at startup reads only the inbox. The readout counts
-`.processing/` (`in_processing` and `lost` in the JSON face), names a claimed request no pass
-is running as one that NOTHING WILL RETRY, and on an armed server the badge turns red. Until `ikigai-intray`
-recovers these itself, move the file back into `inbox/` to have it reviewed.
+★ **A restart in the middle of a pass REQUEUES that request — on an armed server.** The reactor
+moves a tuple into `<space>/.processing/` when a pass starts and out when it ends, so a restart
+in between leaves it there. Since `ikigai-intray` 0.1.36 a reactor recovers `.processing/` when
+it starts, and gonk asks it to move what it finds back into `inbox/` (`Interrupted::Requeue`),
+because a review pass is idempotent: a finished one is an archive hit the second time, and an
+unfinished one mints only pending findings. The catch-up then reviews it. The banner's `review`
+line says what recovery found at this start, or why it was skipped (another live reactor on the
+same spaces root holds the lease).
+
+⚠ **An UNARMED server recovers nothing.** It runs no reactor, so a request a stopped armed run
+left in `.processing/` stays there until an armed start. The readout counts `.processing/`
+(`in_processing` and `lost` in the JSON face) and names a claimed request no pass is running as
+lost — saying that its next start requeues it on an armed server, and that NOTHING RECOVERS IT
+on an unarmed one — and on an armed server the badge turns red.
 
 ### Filling the queue from a hook
 

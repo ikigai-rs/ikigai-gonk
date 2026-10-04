@@ -302,8 +302,9 @@ fn serve(flags: &config::Flags) -> ! {
                     )
                 });
             trigger::check_reviewer(&hub, &probe, &host, scopes).unwrap_or_else(|e| fail(&e));
-            trigger::arm(queue, Arc::clone(&hub), scopes).unwrap_or_else(|e| fail(&e));
-            armed_line(queue, scopes.len(), &host)
+            let recovered =
+                trigger::arm(queue, Arc::clone(&hub), scopes).unwrap_or_else(|e| fail(&e));
+            format!("{}. {recovered}", armed_line(queue, scopes.len(), &host))
         }
         _ => {
             // Not armed: make sure nothing is left behind that a reactor would fire. The
