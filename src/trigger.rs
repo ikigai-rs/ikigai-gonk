@@ -1348,12 +1348,19 @@ pub fn drop_tuple(trigger: &Trigger, tuple: &Tuple) -> std::result::Result<Strin
 pub enum Depth {
     /// No `gonk.review.space`: this server binds no queue, and nothing can drop into one.
     NotConfigured,
-    /// The three stages' counts. `outbox` and `error` are the reactor's, and are zero on
-    /// this server because it runs no reactor — they are read anyway, so that the day one
-    /// runs the page does not have to change.
+    /// The stages' counts. `processing`, `outbox` and `error` are the reactor's, and are
+    /// zero on a server that is not armed — they are read anyway, so that the day one runs
+    /// the page does not have to change.
     Counted {
         /// Waiting to be reviewed.
         inbox: usize,
+        /// Claimed by a pass and not yet settled: `SpaceReactor` renames a tuple into
+        /// `<space>/.processing/` when a pass starts and out of it when the pass ends. One
+        /// there while a pass is in flight is that pass; any other is a request a pass took
+        /// and never finished — a restart mid-pass leaves exactly that — which the reactor's
+        /// startup catch-up does not see (ledger #737, item 4). Counted so that it is visible;
+        /// recovering it is `ikigai-intray`'s (ledger #738).
+        processing: usize,
         /// Handled.
         outbox: usize,
         /// Dead-lettered.
@@ -1393,10 +1400,15 @@ pub fn depth(trigger: Option<&Trigger>) -> Depth {
     };
     Depth::Counted {
         inbox,
+        processing: count_tuples(&trigger.dir().join(PROCESSING_DIR)).unwrap_or(0),
         outbox: count_tuples(&trigger.dir().join("outbox")).unwrap_or(0),
         error: count_tuples(&trigger.dir().join("error")).unwrap_or(0),
     }
 }
+
+/// Where `ikigai-intray`'s `SpaceReactor` stages a tuple it has claimed for a pass (its
+/// private `claim`, 0.1.31): `<space>/.processing/<id>.tuple`, renamed out on settle.
+const PROCESSING_DIR: &str = ".processing";
 
 /// The `*.tuple` files in one stage directory.
 fn count_tuples(dir: &Path) -> std::io::Result<usize> {
@@ -1479,8 +1491,10 @@ impl Status {
                 inbox,
                 outbox,
                 error,
+                ..
             } => (*inbox, handled(*outbox, *error)),
         };
+        let lost = self.lost();
         // ⚠ "empty" keeps its own affirmative sentence rather than becoming "0 waiting".
         // Ledger #446: "nothing is waiting" and "the page failed to load" must not look
         // alike, and a bare zero is halfway to looking like the second.
@@ -1492,6 +1506,21 @@ impl Status {
                 if waiting == 1 { " is" } else { "s are" }
             )
         };
+        // ⚠ Before the armed check: a request lost by an ARMED run is still lost after a
+        // restart that comes up unarmed, and it is the one thing on this line that no
+        // restart and no catch-up will ever bring back.
+        if lost > 0 {
+            out.push_str(&format!(
+                " ⚠ {lost} request{} claimed by a pass that never finished — left in \
+                 `.processing/`, which a restart mid-pass does — and NOTHING WILL RETRY {}: \
+                 the catch-up at startup reads only the inbox. Move {} back into `inbox/` to \
+                 have {} reviewed.",
+                if lost == 1 { " was" } else { "s were" },
+                if lost == 1 { "IT" } else { "THEM" },
+                if lost == 1 { "it" } else { "them" },
+                if lost == 1 { "it" } else { "them" },
+            ));
+        }
         if !self.armed {
             out.push_str(
                 " NOTHING IS DRAINING THIS QUEUE: this server is not armed \
@@ -1521,7 +1550,7 @@ impl Status {
             }
             None => out.push('.'),
         }
-        if self.stuck() {
+        if self.stuck() && waiting > 0 {
             out.push_str(
                 " ⚠ A queue that is not empty with nothing in flight is a STUCK reviewer: the \
                  watcher thread is gone, and only a restart of this server brings it back.",
@@ -1542,14 +1571,22 @@ impl Status {
 
     /// The numbers, for anything that wants to compute rather than read.
     fn json(&self, now_ms: u64) -> String {
-        let (configured, inbox, outbox, error, unreadable) = match &self.depth {
-            Depth::NotConfigured => (false, None, None, None, None),
-            Depth::Unreadable(why) => (true, None, None, None, Some(why.clone())),
+        let (configured, inbox, processing, outbox, error, unreadable) = match &self.depth {
+            Depth::NotConfigured => (false, None, None, None, None, None),
+            Depth::Unreadable(why) => (true, None, None, None, None, Some(why.clone())),
             Depth::Counted {
                 inbox,
+                processing,
                 outbox,
                 error,
-            } => (true, Some(*inbox), Some(*outbox), Some(*error), None),
+            } => (
+                true,
+                Some(*inbox),
+                Some(*processing),
+                Some(*outbox),
+                Some(*error),
+                None,
+            ),
         };
         serde_json::json!({
             // ★ The prose, beside the numbers, so a face that renders the sentence and a
@@ -1560,6 +1597,9 @@ impl Status {
             "configured": configured,
             "armed": self.armed,
             "waiting": inbox,
+            // Claimed by a pass and not settled, and how many of those no pass is running.
+            "in_processing": processing,
+            "lost": processing.map(|_| self.lost()),
             "handled": outbox,
             "dead_lettered": error,
             "unreadable": unreadable,
@@ -1588,12 +1628,35 @@ impl Status {
         .to_string()
     }
 
-    /// The one boolean an operator's eye is looking for: armed, something waiting, nothing
-    /// running.
+    /// The one boolean an operator's eye is looking for: armed, something waiting or claimed,
+    /// nothing running.
+    ///
+    /// A tuple in `.processing/` with no pass in flight counts, since ledger #737: it is a
+    /// request a pass took and never settled, and before that it read as an EMPTY queue.
     pub fn stuck(&self) -> bool {
         self.armed
             && self.passes.in_flight_since_ms.is_none()
-            && matches!(self.depth, Depth::Counted { inbox, .. } if inbox > 0)
+            && matches!(
+                self.depth,
+                Depth::Counted { inbox, processing, .. } if inbox > 0 || processing > 0
+            )
+    }
+
+    /// Claimed tuples no pass of this process is running: everything in `.processing/` but
+    /// the one an in-flight pass holds.
+    ///
+    /// ⚠ Two edges, both stated rather than hidden. The reactor claims a tuple a moment
+    /// before the pass starts and settles it a moment after it ends, so a poll that lands in
+    /// either gap reads one lost for that poll. And a pass a person runs by hand through the
+    /// socket claims nothing, so while one is in flight a real lost tuple can read as its.
+    pub fn lost(&self) -> usize {
+        match self.depth {
+            Depth::Counted { processing, .. } => {
+                let running = usize::from(self.passes.in_flight_since_ms.is_some());
+                processing.saturating_sub(running)
+            }
+            _ => 0,
+        }
     }
 }
 
@@ -1692,13 +1755,15 @@ impl Endpoint for DepthEndpoint {
         Description::new("gonk-review-depth")
             .title("How deep the review queue is, and whether anything is draining it")
             .summary(
-                "The git-event review queue's three stages (waiting, handled, \
-                 dead-lettered), whether this process is ARMED to drain it, whether a pass \
-                 is in flight right now, and what this run has spent. ⚠ It is a LIVENESS \
-                 signal, not a statistic: `watch()` catches up at startup, so a watcher \
-                 thread that dies while this server lives drains nothing and says nothing \
-                 until a restart. A queue that is armed and not empty with nothing in \
-                 flight is stuck — `stuck` in the JSON face says so directly. Four \
+                "The git-event review queue's four stages (waiting, claimed by a pass, \
+                 handled, dead-lettered), whether this process is ARMED to drain it, \
+                 whether a pass is in flight right now, and what this run has spent. ⚠ It \
+                 is a LIVENESS signal, not a statistic: `watch()` catches up at startup, so \
+                 a watcher thread that dies while this server lives drains nothing and says \
+                 nothing until a restart. A queue that is armed and not empty with nothing \
+                 in flight is stuck — `stuck` in the JSON face says so directly — and a \
+                 claimed request no pass is running is LOST (`lost`): a restart mid-pass \
+                 leaves one, and no catch-up retries it. Four \
                  answers, and three of them are not a number: not configured, unreadable, \
                  empty and counted are different statements.",
             )

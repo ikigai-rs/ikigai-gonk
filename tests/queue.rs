@@ -979,6 +979,7 @@ fn the_intray_depth_tells_absent_empty_and_unreadable_apart() {
         ikigai_gonk::trigger::depth(Some(&trigger)),
         Depth::Counted {
             inbox: 0,
+            processing: 0,
             outbox: 0,
             error: 0
         }
@@ -993,6 +994,7 @@ fn the_intray_depth_tells_absent_empty_and_unreadable_apart() {
         ikigai_gonk::trigger::depth(Some(&trigger)),
         Depth::Counted {
             inbox: 3,
+            processing: 0,
             outbox: 0,
             error: 0
         }
