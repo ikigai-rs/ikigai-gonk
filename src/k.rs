@@ -3,7 +3,7 @@
 //! ```text
 //! /k?c=source {iri} [k=v …]   urn:iki:gonk:k                    Source  one read, the caller's cap
 //! /k?c=sink {iri} [k=v …]     urn:iki:gonk:k                    Sink    the annotation and finding families
-//! /browse/{iri}               urn:iki:gonk:page:browse:{iri}    Source  the page those faces live in
+//! /browse/{+iri}              urn:iki:gonk:page:browse:{+iri}   Source  the page those faces live in
 //! /browse                     urn:iki:gonk:page:browse          Source  the roots this caller may read
 //! ```
 //!

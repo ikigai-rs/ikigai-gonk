@@ -12,7 +12,7 @@
 //! /auth/{op}                 urn:iki:gonk:passkey:{op}              Sink    passkey ceremonies, sessions
 //! /static/{name}             urn:iki:gonk:asset:{name}              Source  css, js, htmx
 //! /k?c={command}             urn:iki:gonk:k                         Source/Sink  the browse faces' adapter
-//! /browse/{iri}              urn:iki:gonk:page:browse:{iri}         Source  the page they render inside
+//! /browse/{+iri}             urn:iki:gonk:page:browse:{+iri}        Source  the page they render inside (raw: colons and all)
 //! ```
 //!
 //! The last two are [`crate::k`] — the door `ikigai-browse`'s HTML faces are authored

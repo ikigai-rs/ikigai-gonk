@@ -338,9 +338,14 @@ ikigai-repo = "0.1.6"
 # It also exports `PROCESSING_DIR`, which `crate::trigger::depth` now reads instead of a copy.
 # `tests/trigger.rs::a_request_a_restart_caught_mid_pass_is_requeued_and_reviewed` is the FLOOR
 # TEST. ⚠ This release requires core `^0.1.84` and resolve `^0.1.36`, so both floors moved
-# with it; the other cli-workspace lines (ipc, quic, web, passkey) did NOT, so the graph holds
-# two releases of that workspace until they do.
-ikigai-intray = "0.1.36"
+# with it; the other cli-workspace lines (ipc, quic, web, passkey) did NOT, so the graph held
+# two releases of that workspace until 0.1.37.
+# ★ 0.1.37 is the pin now, and for the intray it is the ONE-RELEASE reason only: nothing in the
+# tuplespace or the reactor moved between 0.1.36 and 0.1.37 that this binary uses, but every
+# cli-workspace line here moved to 0.1.37 together (ikigai-web's strict route variables are the
+# change gonk needed, ledger #740), so the graph holds one release of that workspace again.
+# 0.1.37 requires core `^0.1.84` (unchanged) and resolve `^0.1.37`.
+ikigai-intray = "0.1.37"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -350,11 +355,12 @@ ikigai-intray = "0.1.36"
 # 0.1.24 because ipc and quic below needed 0.1.24; 0.1.24 -> 0.1.25 because ipc below needs
 # 0.1.25 and requires `ikigai-resolve ^0.1.25`; 0.1.25 -> 0.1.30 because ipc and quic below
 # are 0.1.30 (wire v8) and require `ikigai-resolve ^0.1.30`; 0.1.30 -> 0.1.36 because
-# `ikigai-intray` 0.1.36 above requires `ikigai-resolve ^0.1.36`. All of them ship from one
+# `ikigai-intray` 0.1.36 above requires `ikigai-resolve ^0.1.36`; 0.1.36 -> 0.1.37 because
+# intray, ipc and quic at 0.1.37 require `ikigai-resolve ^0.1.37`. All of them ship from one
 # workspace on a single shared version — so a lower pin here is a floor this build can never
 # resolve. The pin states the minimum that COMPILES with everything else here, and it moves
 # when a sibling moves it.
-ikigai-resolve = "0.1.36"
+ikigai-resolve = "0.1.37"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -381,7 +387,10 @@ ikigai-resolve = "0.1.36"
 # `ikigai` on bug this binary dials is not required to move with it). Nothing in gonk pins a
 # wire version or matches `WireError` — the only use of the wire is `serve`/`connect` — so the
 # new variant is not source-breaking here (ledger #598 is the consumers for whom it is).
-ikigai-ipc = "0.1.30"
+# 0.1.37 is the pin now for the one-release reason (see `ikigai-intray` above); nothing in the
+# socket transport moved between 0.1.30 and 0.1.37 that this binary calls by name, and the
+# wire is still v8.
+ikigai-ipc = "0.1.37"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -400,7 +409,15 @@ ikigai-ipc = "0.1.30"
 # client of this server and a v7 peer this server mounts are both still served — a `Conflict`
 # reaches a v7 peer as the untyped endpoint error it always received. As with ipc, nothing
 # here names a wire version or a `WireError` variant.
-ikigai-quic = "0.1.30"
+# ★ 0.1.37 is the pin now, and it changes BEHAVIOR on both halves of this door (ledger #734,
+# ikigai-cli PR #394), with no wire version bump. As a SERVER: every call carries the caller's
+# capability (`IssueAs`) and the server answers at the NARROWER of it and the connection's
+# minted authority, so a narrowed client is narrowed here too rather than answered at its
+# certificate's whole grant. As a CLIENT (a `gonk.mount` line): a Sink is never re-sent once
+# its request went out, so the first Sink after an unnoticed peer restart fails TRANSIENT
+# instead of possibly landing twice. The end-to-end QUIC door test in `tests/doors.rs` passes
+# unchanged on 0.1.37.
+ikigai-quic = "0.1.37"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -429,8 +446,9 @@ ikigai-quic = "0.1.30"
 # its segment and never a separator, and `+` is literal in a path. The hostile link
 # `rules::percent` builds for a ledger named `../../etc` — `/l/..%2F..%2Fetc/item/244` — used to
 # fall through to the mechanical mapping; it now MATCHES `/l/{ledger}/item/{id}` with the
-# ledger `../../etc`, and has to be refused by the page rather than by the router.
-# `tests/web.rs::a_hostile_ledger_link_reaches_the_page_and_is_refused_there` pins that.
+# ledger `../../etc`, and has to be refused by the page rather than by the router. (Since
+# 0.1.37 the strict `{ledger}` refuses it at the edge instead — see the 0.1.37 note below;
+# `tests/web.rs::a_hostile_ledger_link_is_refused_never_resolved` pins both refusals.)
 # 0.1.31 is the reason for the current floor: HONEST CACHE HEADERS (ledger #604). Before it, a
 # kernel answer with `Expiry::Never` went out as `public, max-age=31536000, immutable`, so a
 # browser kept gonk's `/iki/ledger/items` listing for a YEAR and never revalidated. Now `Never`
@@ -439,7 +457,16 @@ ikigai-quic = "0.1.30"
 # gonk's own HTML pages already sent `no-store`, so only the mechanical `/iki/*` faces change.
 # ⚠ It is a FLOOR and a CEILING both (`^0.1.31` is `<0.2.0`), and the crate ships from the
 # cli's workspace on a shared version, so this line moves when that workspace releases.
-ikigai-web = "0.1.31"
+# ★★ 0.1.37 is the floor now, and it is a FLAG DAY for this door (ledger #740, ikigai-cli PR
+# #397): route variables are STRICT. A `{var}` refuses a decoded value carrying any of
+# `: / ? # [ ] @` (raw or percent-encoded) with a FINAL 400 naming the variable — no later route
+# and no mechanical mapping answers it — and `{+var}` opts a variable into carrying them raw.
+# The browse door's captures are IRIs, colons and all, so `doors::browse_routes` writes
+# `{+pN}`; every other variable here (`{ledger}`, `{id}`, `{op}`, `{name}`) stays strict, which
+# closes the hostile ledger link at the edge rather than at the page (`tests/web.rs`). Also in
+# 0.1.36/0.1.37 and not relied on: a CORS preflight answers under the route's own policy, and
+# `If-Match` is a strong comparison.
+ikigai-web = "0.1.37"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -508,8 +535,8 @@ ikigai-xslt = "0.1.3"
 # nothing here needs a CBOR decoder. Present from 0.1.14; the verifier has not changed since
 # (its last change is ikigai-cli PR #296), so this is not an API floor: 0.1.30 is what is built
 # and tested, and it is the cli workspace's shared version, which every other line from that
-# workspace here now names.
-ikigai-passkey = "0.1.30"
+# workspace here now names (0.1.37: the verifier is unchanged since 0.1.30).
+ikigai-passkey = "0.1.37"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
