@@ -441,10 +441,21 @@ pub const BROWSE_DEPTH: usize = 16;
 /// ⚠ **A route pattern's `{var}` captures exactly ONE path segment**, and the browse family's
 /// file IRIs carry slashes (`urn:repo:ikigai-core:file:crates/ikigai-vocab/src/lib.rs`), so
 /// a single route cannot match them and `ikigai-web`'s table has no trailing-segment
-/// capture. The arity is therefore written out — `{p1}`, `{p1}/{p2}`, … — and the IRI
+/// capture. The arity is therefore written out — `{+p1}`, `{+p1}/{+p2}`, … — and the IRI
 /// template rejoins the captures with `/`, which is lossless: an IRI has no spaces, so
 /// unlike the `/k/` command (which is why [`crate::k`] carries its command as an argument)
 /// it survives the trip through a decoded path.
+///
+/// ★ Every capture is the RAW spelling, `{+pN}`, and it has to be. Since `ikigai-web` 0.1.37 a
+/// plain `{var}` is STRICT (ledger #740): it refuses a value carrying any of `: / ? # [ ] @`
+/// with a final 400, because in an ordinary route a `:` in one segment addresses a deeper
+/// resource than the route names. Here that IS the design — a capture is a piece of an IRI
+/// (`urn:repo:ikigai-gonk:file:src`), so a strict `{pN}` would refuse every browse URL there
+/// is. The same `captures` string feeds the pattern and the template, so both sides say
+/// `{+pN}`, which is what the library requires before it treats a variable as raw (a pattern
+/// and a template that disagree are strict). What the door reaches does not change: through
+/// 0.1.36 every variable was raw, so `{+pN}` is the old behavior spelled explicitly, and the
+/// expansion still lands under `urn:iki:gonk:page:browse:`, read under the caller's capability.
 ///
 /// Since `ikigai-web` 0.1.30 an ENCODED slash (`%2F`) is data inside its segment rather than a
 /// separator, so `/browse/urn:repo:x:file:src%2Flib.rs` is one segment and takes the depth-1
@@ -460,7 +471,7 @@ fn browse_routes() -> Vec<Route> {
     (1..=BROWSE_DEPTH)
         .map(|depth| {
             let captures = (1..=depth)
-                .map(|n| format!("{{p{n}}}"))
+                .map(|n| format!("{{+p{n}}}"))
                 .collect::<Vec<_>>()
                 .join("/");
             Route {

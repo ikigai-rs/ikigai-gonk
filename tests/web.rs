@@ -7,7 +7,7 @@
 //!
 //! - [`a_listing_renders_a_bounded_number_of_rows_and_says_what_it_left_out`]
 //! - [`a_browser_gets_html_pages_and_a_readable_404`]
-//! - [`a_hostile_ledger_link_reaches_the_page_and_is_refused_there`]
+//! - [`a_hostile_ledger_link_is_refused_never_resolved`]
 //! - [`a_person_files_edits_comments_and_closes_through_forms`]
 //! - [`a_form_can_send_only_what_the_ledger_declares`]
 //! - [`a_cross_site_write_and_a_rebound_host_get_nothing`]
@@ -371,27 +371,36 @@ fn a_browser_gets_html_pages_and_a_readable_404() {
     assert_eq!(missing_item.status, 404, "{missing_item:?}");
 }
 
-/// ★ **The hostile link `rules::percent` builds now REACHES a page, and the page refuses it.**
+/// ★ **A hostile ledger link is refused and never resolved: at the edge when it carries a
+/// delimiter, at the page when it is merely not a ledger name.**
 ///
 /// `rules::percent` escapes a ledger name before it goes into a link, so a hostile name
-/// `../../etc` becomes `/l/..%2F..%2Fetc/item/244` (pinned in `rules`'s own unit test). Through
-/// ikigai-web 0.1.29 the decoder turned `%2F` back into a separator, the path had six segments,
-/// no route matched, and the mechanical mapping answered. From 0.1.30 an encoded slash is data
-/// inside its segment (RFC 3986 §2.2), so the path has FOUR segments and matches
-/// `/l/{ledger}/item/{id}` with the ledger `../../etc` — the router no longer stands between
-/// that name and the page. What refuses it now is `Ledger::parse`, which admits only
-/// lowercase letters, digits, `-` and `_`; this pins that the refusal happens, on every page
-/// shape that takes a `{ledger}`, and that it is a 400 naming the rule rather than a read.
+/// `../../etc` becomes `/l/..%2F..%2Fetc/item/244` (pinned in `rules`'s own unit test). Where
+/// that link is refused has moved with `ikigai-web` twice:
+///
+/// - Through 0.1.29 the decoder turned `%2F` back into a separator, the path had six segments,
+///   no route matched, and the mechanical mapping answered.
+/// - From 0.1.30 an encoded slash is data inside its segment (RFC 3986 §2.2), so the path had
+///   FOUR segments and matched `/l/{ledger}/item/{id}` with the ledger `../../etc`; what
+///   refused it was the page, through `Ledger::parse`.
+/// - From 0.1.37 (ledger #740) a route variable is STRICT: `{ledger}` refuses a decoded value
+///   carrying any of `: / ? # [ ] @` with a FINAL `400` that names the variable, so neither a
+///   later route nor the mechanical mapping answers, and the page never sees the name.
+///
+/// So this pins two refusals, on every page shape that takes a `{ledger}`: a name carrying a
+/// delimiter (`..%2F..%2Fetc`, `default%2F`) is refused at the EDGE, and a name that is only
+/// wrong by the ledger's own rule (`Default`: lowercase letters, digits, `-` and `_`) still
+/// reaches the page and is refused THERE. Both are a `400` naming the rule, and neither reads
+/// anything.
 ///
 /// A `:` is pinned beside the slash because it is the character that could re-split the page
-/// IRI, `urn:iki:gonk:page:item:{ledger}:{id}`. It is NOT refused by name: the template binds
-/// `{ledger}` to the colon-free run before the first `:`, so `default:item:1` reads as the
-/// ledger `default` with the item id `item:1:1`, which the ledger answers `404`. That is not
-/// new with 0.1.30 (a `%3A` decoded to `:` before it too), and it cannot reach another ledger:
-/// the ledger that is read is the one spelled to the left of the colon, under the same read
-/// check as a plain link to it. The assertion is that it stays so.
+/// IRI, `urn:iki:gonk:page:item:{ledger}:{id}`. Through 0.1.36 it was not refused: the template
+/// bound `{ledger}` to the colon-free run before the first `:`, so `default%3Aitem%3A1` read as
+/// the ledger `default` with the item id `item:1:1` and answered `404`. That could not reach
+/// another ledger, but it resolved a name the link never spelled. Strict `{ledger}` closes the
+/// re-split at the edge, and `{id}` is strict the same way.
 #[test]
-fn a_hostile_ledger_link_reaches_the_page_and_is_refused_there() {
+fn a_hostile_ledger_link_is_refused_never_resolved() {
     let server = Server::start();
     let item = server.form(
         &[
@@ -403,32 +412,56 @@ fn a_hostile_ledger_link_reaches_the_page_and_is_refused_there() {
     );
     assert_eq!(item.status, 200, "{item:?}");
 
-    // What the renderer emits for a hostile ledger name — the exact href `rules` pins.
-    let hostile = ikigai_gonk::rules::percent("../../etc");
-    assert_eq!(hostile, "..%2F..%2Fetc");
-    for name in [hostile.as_str(), "Default", "default%2F"] {
-        for path in [
+    let pages = |name: &str| {
+        [
             format!("/l/{name}"),
             format!("/l/{name}/items"),
             format!("/l/{name}/item/1"),
             format!("/l/{name}/item/1/card"),
-        ] {
+        ]
+    };
+
+    // What the renderer emits for a hostile ledger name — the exact href `rules` pins — and
+    // the other delimiter-carrying spellings: refused by the edge, before any page runs.
+    let hostile = ikigai_gonk::rules::percent("../../etc");
+    assert_eq!(hostile, "..%2F..%2Fetc");
+    let colon = ikigai_gonk::rules::percent("default:item:1");
+    assert_eq!(colon, "default%3Aitem%3A1");
+    for (name, delim) in [
+        (hostile.as_str(), '/'),
+        ("default%2F", '/'),
+        (colon.as_str(), ':'),
+    ] {
+        for path in pages(name) {
             let got = server.page(&path, None);
             assert_eq!(got.status, 400, "{path}: {got:?}");
-            assert!(got.body.contains("is not a ledger name"), "{path}: {got:?}");
+            assert!(
+                got.body
+                    .contains(&format!("route variable {{ledger}} cannot carry '{delim}'")),
+                "refused at the edge, naming the variable: {path}: {got:?}"
+            );
+            assert!(
+                !got.body.contains("is not a ledger name"),
+                "{path}: {got:?}"
+            );
             assert!(!got.body.contains("the one real item"), "{path}: {got:?}");
         }
     }
-
-    let colon = ikigai_gonk::rules::percent("default:item:1");
-    assert_eq!(colon, "default%3Aitem%3A1");
-    let got = server.page(&format!("/l/{colon}/item/1"), None);
-    assert_eq!(got.status, 404, "{got:?}");
+    let got = server.page("/l/default/item/1%3A1", None);
+    assert_eq!(got.status, 400, "{got:?}");
     assert!(
-        got.body
-            .contains("no ledger item at `urn:iki:ledger:default:item:item:1:1`"),
-        "the ledger read is the one left of the colon, and the rest is an item id: {got:?}"
+        got.body.contains("route variable {id} cannot carry ':'"),
+        "{got:?}"
     );
+
+    // A name with no delimiter in it passes the edge, and the page refuses it by the
+    // ledger's own rule.
+    for path in pages("Default") {
+        let got = server.page(&path, None);
+        assert_eq!(got.status, 400, "{path}: {got:?}");
+        assert!(got.body.contains("is not a ledger name"), "{path}: {got:?}");
+        assert!(!got.body.contains("the one real item"), "{path}: {got:?}");
+    }
 
     // …and the edge refuses a malformed escape before gonk sees the request at all.
     for path in ["/l/%zz/item/1", "/l/default/item/%", "/l/%E9/item/1"] {
