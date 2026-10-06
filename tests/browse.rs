@@ -2320,6 +2320,137 @@ fn the_read_only_posture_is_stated_only_when_the_caller_cannot_annotate() {
     );
 }
 
+/// The signed-out visitor's notice, cut out of a page: from the notice's own wrapper to the
+/// end of the signed-out paragraph, which is everything a visitor with no session SEES of it.
+/// The stylesheet's serializer writes an apostrophe as `&apos;`; a browser reads it back.
+fn signed_out_part(page: &str) -> String {
+    let start = page
+        .find("data-signin-notice")
+        .unwrap_or_else(|| panic!("no sign-in notice on the page: {page}"));
+    let rest = &page[start..];
+    let end = rest
+        .find("</p>")
+        .unwrap_or_else(|| panic!("an unterminated notice: {rest}"));
+    rest[..end].replace("&apos;", "'")
+}
+
+/// The signed-in half of the notice: the hidden block, through its grant footnote.
+fn signed_in_part(page: &str) -> String {
+    let start = page
+        .find("class='signed-in'")
+        .unwrap_or_else(|| panic!("no signed-in half: {page}"));
+    let rest = &page[start..];
+    let end = rest
+        .find("</details>")
+        .unwrap_or_else(|| panic!("no grant footnote: {rest}"));
+    rest[..end].replace("&apos;", "'")
+}
+
+/// ★ A caller short of a grant reads a SENTENCE first (ledger #739). Brian, on the old one
+/// ("This browser holds no grant naming a repository here. A grant names one root as
+/// `urn:cap:browse:read:<root>` …"): *"kind of an obnoxious default error message."*
+///
+/// Pinned per page, both browse pages: the signed-out sentence is visible and carries no
+/// capability IRI, and the signed-in sentence — with the exact grants behind a `<details>`
+/// for the operator — arrives HIDDEN, for `web/gonk.js` to show when `/auth/session` says
+/// there is a session. ⚠ The server renders the same notice to a signed-in caller whose
+/// grant names another root, and that is the point rather than a gap: a page is a read, and
+/// `ikigai-web` hands the principal to writes only, so the choice is the script's.
+#[test]
+fn a_caller_short_of_a_repository_grant_reads_a_sentence_not_a_grant() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let mut elsewhere = grants_for("default", Authority::Read).expect("the ledger's tokens");
+    elsewhere.push(format!("{}not-configured-here", ikigai_browse::CAP_PREFIX));
+    let other_root = door.enrol_and_sign_in_as("another-root", elsewhere);
+
+    // The landing page is short of ANY repository; the shell opened inside `demo` is short
+    // of THAT one, which is what a grant naming another root needs to be told.
+    let pages = [
+        (
+            "/browse",
+            "Sign in to browse the repositories.",
+            "Your passkey's grant doesn't include any repository.",
+            format!("<code>{}&lt;root&gt;</code>", ikigai_browse::CAP_PREFIX),
+        ),
+        (
+            "/browse/urn:repo:demo:tree",
+            "Sign in to browse the repository \"demo\".",
+            "Your passkey's grant doesn't include the repository \"demo\".",
+            format!("<code>{}demo</code>", ikigai_browse::CAP_PREFIX),
+        ),
+    ];
+    for (path, signed_out, signed_in, one_root) in &pages {
+        for session in [None, Some(other_root.as_str())] {
+            let (status, page) = door.get_html(path, session);
+            assert_eq!(status, 200, "{path}: {page}");
+            assert!(
+                !page.contains("hx-get='/k"),
+                "{path}: a page the grant does not reach loads nothing: {page}"
+            );
+            let seen = signed_out_part(&page).replace("&quot;", "\"");
+            assert!(
+                seen.contains(signed_out),
+                "{path}: the signed-out sentence: {seen}"
+            );
+            assert!(
+                seen.contains("class='signin-here'"),
+                "{path}: …with the way in beside it: {seen}"
+            );
+            assert!(
+                !seen.contains("urn:cap:") && !page.contains("holds no grant"),
+                "{path}: no capability IRI is the first thing anybody reads: {seen}"
+            );
+            let inside = signed_in_part(&page).replace("&quot;", "\"");
+            assert!(
+                inside.contains("hidden='hidden'"),
+                "{path}: the signed-in half waits for the script: {inside}"
+            );
+            assert!(
+                inside.contains(signed_in),
+                "{path}: the signed-in sentence: {inside}"
+            );
+            assert!(
+                inside.contains("<details")
+                    && inside.contains(one_root.as_str())
+                    && inside.contains(&format!("<code>{}</code>", ikigai_browse::CAP_WILDCARD)),
+                "{path}: …and the exact grants, secondary: {inside}"
+            );
+        }
+    }
+
+    // A caller who CAN browse is told nothing of the kind.
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    for path in ["/browse", "/browse/urn:repo:demo:tree"] {
+        let (_, page) = door.get_html(path, Some(&token));
+        assert!(
+            !page.contains("data-signin-notice"),
+            "{path}: a caller whose grant reaches the page reads no notice: {page}"
+        );
+    }
+}
+
+/// The script that picks the sentence travels in what this server serves, and it picks it
+/// from `/auth/session` — the same `Passkeys::identity` the door's principal is computed by.
+#[test]
+fn the_script_this_server_serves_picks_the_notice_from_the_session() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let (status, script) = door.get_html("/static/gonk.js", None);
+    assert_eq!(status, 200, "{script}");
+    for needle in [
+        "[data-signin-notice]",
+        "/auth/session",
+        "signedIn = true",
+        ".signin-here",
+        "htmx:afterSettle",
+    ] {
+        assert!(script.contains(needle), "`{needle}` in the served script");
+    }
+}
+
 /// ★ The way IN (ledger #442): a header link, and the landing page behind it — both built
 /// from the roots this caller may READ, never from the roots the server has.
 ///

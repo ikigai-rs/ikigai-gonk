@@ -1293,23 +1293,18 @@ impl QueuePage {
         if let Some(repo) = &only {
             attributes.push(("repo", repo.clone()));
         }
-        if roots.is_empty() {
+        if roots.is_empty() && self.web.browse_roots.is_empty() {
             attributes.push(("empty", "true".to_string()));
             attributes.push((
                 "empty-text",
-                if self.web.browse_roots.is_empty() {
-                    "This server has no browse root configured (`gonk.browse.root`), so no \
-                     review pass can run and there is no queue to show."
-                        .to_string()
-                } else {
-                    format!(
-                        "This browser holds no grant naming a repository here, so no finding is \
-                         readable. A grant names one root as `{}<root>`, or every root as `{}`.",
-                        ikigai_browse::CAP_PREFIX,
-                        ikigai_browse::CAP_WILDCARD
-                    )
-                },
+                "This server has no browse root configured (`gonk.browse.root`), so no review \
+                 pass can run and there is no queue to show."
+                    .to_string(),
             ));
+        } else if roots.is_empty() {
+            // A caller short of a grant reads `web::Lacking`'s two sentences, the ones every
+            // page that can say so shares (ledger #739) — never a list of capability IRIs.
+            children.push_str(&web::Lacking::findings().element());
         } else if matched == 0 && refused.is_empty() {
             // ⚠ The affirmative sentence, and it is the point of writing it out: "no pending
             // findings" is a DIFFERENT statement from a page that failed to load, and the two

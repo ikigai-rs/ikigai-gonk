@@ -422,6 +422,46 @@ fn an_anonymous_loopback_caller_can_neither_read_nor_decide_a_finding() {
     );
 }
 
+/// ★ The Queue's notice for a caller short of every repository is `web::Lacking`'s, worded
+/// for findings (ledger #739): a sentence first — "Sign in to review findings." — and the
+/// signed-in sentence with the exact grants behind a `<details>`, hidden until the script
+/// learns there is a session. Never the old list of capability IRIs.
+#[test]
+fn a_caller_short_of_a_repository_grant_is_told_to_sign_in_to_review() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let html = page(&door, &[], &anonymous()).replace("&apos;", "'");
+    let notice = &html[html
+        .find("data-signin-notice")
+        .unwrap_or_else(|| panic!("no sign-in notice: {html}"))..];
+    let (seen, rest) = notice.split_once("</p>").expect("the signed-out paragraph");
+    assert!(seen.contains("Sign in to review findings."), "{seen}");
+    assert!(!seen.contains("urn:cap:"), "no IRI is read first: {seen}");
+    assert!(
+        !html.contains("holds no grant"),
+        "the old sentence is gone: {html}"
+    );
+    let (inside, _) = rest.split_once("</details>").expect("the grant footnote");
+    assert!(
+        inside.contains("class='signed-in' hidden='hidden'"),
+        "{inside}"
+    );
+    assert!(
+        inside.contains(
+            "Your passkey's grant doesn't include any repository, so there are no findings to show."
+        ),
+        "{inside}"
+    );
+    assert!(
+        inside.contains(&format!("<code>{}</code>", ikigai_browse::CAP_WILDCARD)),
+        "{inside}"
+    );
+
+    // A caller who reads the root is not told to sign in.
+    let html = page(&door, &[], &reviewer());
+    assert!(!html.contains("data-signin-notice"), "{html}");
+}
+
 // ---------------------------------------------------------------------- the offer
 
 /// An offer you refuse is a worse UI than no offer: no Queue link, no decision form, and a

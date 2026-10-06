@@ -522,13 +522,29 @@ fn can_annotate(inv: &Invocation<'_>) -> bool {
 pub(crate) fn readable_roots(web: &Web, inv: &Invocation<'_>) -> Vec<String> {
     web.browse_roots
         .iter()
-        .filter(|root| {
-            inv.capability
-                .allows(&format!("{BROWSE_READ_PREFIX}{root}"))
-                || inv.capability.allows(ikigai_browse::CAP_WILDCARD)
-        })
+        .filter(|root| reads_root(inv, root))
         .cloned()
         .collect()
+}
+
+/// Whether this caller may read `root` — `ikigai-browse`'s own two exact tests, as
+/// [`readable_roots`] states them.
+fn reads_root(inv: &Invocation<'_>, root: &str) -> bool {
+    inv.capability
+        .allows(&format!("{BROWSE_READ_PREFIX}{root}"))
+        || inv.capability.allows(ikigai_browse::CAP_WILDCARD)
+}
+
+/// The CONFIGURED root a browse start names, when it names one: `urn:repo:{root}:…`.
+///
+/// ★ It is what lets the shell tell a caller whose grant names ANOTHER root that this one is
+/// not theirs, in words, instead of offering a region that loads a 403 (ledger #739). A name
+/// that is not `urn:repo:{configured root}:…` returns `None`, and the shell falls back to the
+/// floor every browse row declares ([`can_browse`]) — the family's own refusal is still the
+/// boundary either way.
+fn configured_root<'a>(web: &Web, start: &'a str) -> Option<&'a str> {
+    let root = start.strip_prefix("urn:repo:")?.split(':').next()?;
+    web.browse_roots.iter().any(|r| r == root).then_some(root)
 }
 
 /// The tree IRI a root's link opens on — the browse family's own entry face.
@@ -559,23 +575,20 @@ impl Endpoint for BrowseRoots {
         }
         web::html_only(inv)?;
         let roots = readable_roots(&self.web, inv);
+        let mut children = web::nav(&self.web, inv, &web::readable_ledgers(&self.web, inv), None);
+        // ★ Three cases, and only the operator's is a sentence of this page's own: a caller
+        // short of a grant reads `web::Lacking`'s two sentences, which every page that can say
+        // so shares (ledger #739).
         let message = if roots.is_empty() && self.web.browse_roots.is_empty() {
             "This server has no browse root configured (`gonk.browse.root`), so there is \
              nothing to browse here."
-                .to_string()
         } else if roots.is_empty() {
-            format!(
-                "This browser holds no grant naming a repository here. A grant names one \
-                 root as `{BROWSE_READ_PREFIX}<root>`, or every root as \
-                 `{}`. Sign in with a passkey whose grant carries one.",
-                ikigai_browse::CAP_WILDCARD
-            )
+            children.push_str(&web::Lacking::repositories().element());
+            ""
         } else {
             "The repositories this grant may read. Each opens on its tree; everything after \
              that is the browse family's own pages."
-                .to_string()
         };
-        let mut children = web::nav(&self.web, inv, &web::readable_ledgers(&self.web, inv), None);
         for root in &roots {
             children.push_str(&element(
                 "root",
@@ -593,7 +606,7 @@ impl Endpoint for BrowseRoots {
                 ("view", "roots"),
                 ("full", "true"),
                 ("title", "Browse"),
-                ("message", &message),
+                ("message", message),
             ],
             &children,
         );
@@ -647,8 +660,16 @@ impl Endpoint for BrowseShell {
         // ★ Honesty of presentation, never the boundary. A caller without the browse floor
         // gets the reason and the sign-in control rather than a shell that paints itself
         // with two 403s — and `urn:repo:style` is refused to exactly the same caller, so
-        // the stylesheet link is withheld with the rest.
-        if can_browse(inv) {
+        // the stylesheet link is withheld with the rest. A start inside a configured root is
+        // judged on THAT root (ledger #739): a grant naming another one reaches the floor and
+        // not this page.
+        let lacking = match configured_root(&self.web, &start) {
+            Some(root) if !reads_root(inv, root) => Some(web::Lacking::repository(root)),
+            Some(_) => None,
+            None if !can_browse(inv) => Some(web::Lacking::repositories()),
+            None => None,
+        };
+        if lacking.is_none() {
             attributes.push(("start-url", k_url(&format!("source {start} as=text/html"))));
             attributes.push(("stylesheet", k_url("source urn:repo:style")));
             // ★ The SECOND sheet, and the one that makes the faces legible: `urn:repo:style`
@@ -671,15 +692,6 @@ impl Endpoint for BrowseShell {
                 attributes.push(("posture", "read-only".to_string()));
             }
             attributes.push(("message", format!("loading {start}…")));
-        } else {
-            attributes.push((
-                "message",
-                format!(
-                    "Browsing needs a grant naming `{BROWSE_READ_PREFIX}*`, which this \
-                     server gives no anonymous caller. Sign in with a passkey whose grant \
-                     carries it."
-                ),
-            ));
         }
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -687,9 +699,14 @@ impl Endpoint for BrowseShell {
             "page",
             &attributes,
             &format!(
-                "{}{}",
+                "{}{}{}",
                 web::nav(&self.web, inv, &ledgers, None),
-                element("flash", &[], "")
+                element("flash", &[], ""),
+                // The reason the region is empty, in `web::Lacking`'s words (ledger #739).
+                lacking
+                    .as_ref()
+                    .map(web::Lacking::element)
+                    .unwrap_or_default()
             ),
         );
         Ok(web::html(
