@@ -681,16 +681,15 @@ with no findings files nothing. A review that opens like roborev's rendering but
 parse back to it exactly (format drift in a new roborev) is refused with exit 1 and nothing
 filed, rather than filed as a guess.
 
-⚠ **File sequentially until gonk takes `ikigai-ledger` 0.3.0.** The 0.2.x line this server
-links can give two appends that land in the same millisecond the same item id (fixed in
-0.3.0, ledger #768). One invocation files its findings one at a time, so that is safe; two
-hooks running at once are not, and roborev runs every hook in its own goroutine. ⚠ **A panel
-is the case that bites:** each member's completion fires `review.completed` (only the
-bookkeeping events are hook-suppressed), the members finish close together, and the
-synthesis fires once more with the findings merged and reworded. A hook cannot tell a member
-from a synthesis (there is no job-type variable), so a panel files every member's findings
-and the synthesis's, deduplicated only where the words match. Until 0.3.0, point this hook
-at single-agent reviews.
+**Concurrent hooks are safe.** roborev runs every hook in its own goroutine, so two reviews
+can file at once. gonk links `ikigai-ledger` 0.3.0 (since PR #81), which gives two appends
+landing in the same millisecond distinct item ids; the 0.2.x line could give them the same one
+(ledger #768). ⚠ **A panel still files more than once:** each member's completion fires
+`review.completed` (only the bookkeeping events are hook-suppressed), and the synthesis fires
+once more with the findings merged and reworded. A hook cannot tell a member from a synthesis
+(there is no job-type variable), so a panel files every member's findings and the
+synthesis's, deduplicated only where the words match. Point this hook at single-agent reviews
+if one item per defect matters more than seeing every reviewer's wording.
 
 ## Importing from kata
 
@@ -1504,7 +1503,7 @@ gonk reads gonk.browse.root at startup only: restart it to serve the new root(s)
 - **Where.** Each URL is cloned into `~/.ikigai/checkouts/<name>` (`--dir` for another
   directory). `<name>` is the URL's last path segment without `.git`, and it is also the
   browse root's name, so `name=url` sets both. It is checked like any root name.
-- **Again.** Run it again with the same URLs and each clone is fetched and its default branch
+- **Again.** Run it again with the same URLs (or with `--all`, below) and each clone is fetched and its default branch
   **fast-forwarded**, and nothing else. A checkout with local changes (untracked files
   included), on another branch, or with commits that upstream does not have is **refused and left
   exactly as it was**: nothing is reset, stashed, merged or discarded. Each URL is reported on
@@ -1523,6 +1522,88 @@ gonk reads gonk.browse.root at startup only: restart it to serve the new root(s)
 
 It is a command, like `review request`: it opens no store and binds no door, and the server
 itself has no code that fetches anything.
+
+**Why `kickstart` and not a re-registration.** Adding a root changes only `config.toml`, which
+gonk reads when it starts, so restarting the process is the whole fix and `launchctl kickstart
+-k` does exactly that. A re-registration (`bootout`, then `bootstrap`) is what a REPLACED
+binary or plist needs, because `kickstart` respawns inside the old registration; gonk holds no
+macOS privacy grant (no calendar, contacts or Keychain prompt), so there is nothing a fresh
+registration would re-attribute either. If you already run a tool that re-registers agents
+whose config changed (the ikigai devtools' `just reregister --only dev.ikigai-rs.gonk`, for
+one), that works too; it is the same restart with a staleness check in front.
+
+### Keeping them current
+
+`--all` updates every checkout already in the managed directory without the URL list:
+
+```sh
+ikigai-gonk checkout --all            # or --dir DIR, --config PATH
+```
+
+```text
+updated    ikigai-gonk 5050879..9b182ff (3 commit(s), fast-forward)  ~/.ikigai/checkouts/ikigai-gonk
+REFUSED    kata  ~/.ikigai/checkouts/kata
+  it has local changes (1 path(s); `git -C /Users/you/.ikigai/checkouts/kata status`). A managed checkout is fast-forwarded only; nothing was fetched or changed
+current    tools at 1c2d3e4  ~/.ikigai/checkouts/tools
+
+coverage of ~/.ikigai/checkouts by the roots in /Users/you/.config/ikigai/config.toml:
+  unused     tools  ~/.ikigai/checkouts/tools  no gonk.browse.root points into it: gonk does not browse it (`checkout <url> --write-config` adds its line)
+```
+
+- **What it updates.** Every directory under the managed directory, each from its own
+  `origin`, under its own directory name. The per-repository lines, the refusals (local
+  changes, untracked files included; another branch or a detached HEAD; commits of its own;
+  diverged) and the exit status are the ones above: any refusal or failure is exit 1, and the
+  rest still run. A directory there that is not a git checkout is refused like any other
+  surprise; names starting with `.` are skipped.
+- **What it never does.** It clones nothing (a missing managed directory is an error, not
+  created), writes no config (`--all --write-config` is refused), and takes no URLs (`--all`
+  with URLs is refused). Bare `checkout` with no URLs is an error that names `--all`, rather
+  than a quiet `--all`: a command that fetches every repository should say so on its line.
+- **Coverage.** After the updates it reports, changing nothing, how the checkouts and the
+  config's roots cover each other: `unused` for a checkout no `gonk.browse.root` points into
+  (gonk does not browse it), and `missing` for a root that points into the managed directory
+  at nothing (gonk refuses to start until it exists). Roots elsewhere are not its business.
+  Paths are compared with symlinks resolved, and a root inside a checkout counts as using it.
+  Coverage lines are information and do not change the exit status.
+
+**On a timer.** Nothing in the server fetches, so a periodic update is this command run by the
+system's scheduler. gonk needs no restart for it: every root it serves is watched, and a
+fast-forward is a change on disk like any other, so the next read sees it. A refusal leaves
+that checkout where it was, and the log says why.
+
+macOS, a `launchd` agent beside gonk's own (`~/Library/LaunchAgents/dev.ikigai-rs.gonk-checkout.plist`),
+every 15 minutes:
+
+```xml
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.ikigai-rs.gonk-checkout</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>date; exec /Users/you/.cargo/bin/ikigai-gonk checkout --all</string>
+  </array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>StandardOutPath</key><string>/tmp/ikigai-gonk-checkout.log</string>
+  <key>StandardErrorPath</key><string>/tmp/ikigai-gonk-checkout.log</string>
+</dict></plist>
+```
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ikigai-rs.gonk-checkout.plist
+```
+
+Linux, a crontab line (`crontab -e`), the same interval and log:
+
+```text
+*/15 * * * * (date; $HOME/.cargo/bin/ikigai-gonk checkout --all) >> /tmp/ikigai-gonk-checkout.log 2>&1
+```
+
+The log is `/tmp/ikigai-gonk-checkout.log` in both, one `date` line before each run's report:
+the command prints no time of its own, and neither scheduler adds one. (Plain `date` in the
+crontab on purpose: cron reads `%` as a newline.) Under either scheduler git runs without a terminal:
+an HTTPS remote needs a credential helper and an SSH remote a key the agent already holds,
+or that checkout is a `FAILED` line (git's own message) rather than a hang.
 
 ⚠ **A managed clone shows its default branch.** Work in progress in other branches or
 worktrees (a kata-flight loop's worktrees, for one) is not what gonk browses there; point a
@@ -2056,9 +2137,9 @@ body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) h
   archive is the one that still works when the engine has moved or the store will not open.
 - **A restore does not adopt.** It builds a store beside the live one and tells you what it
   verified; swapping it in is manual, with the server stopped.
-- **No browse face on the HTTP door.** The family is reachable through the socket and QUIC
-  doors and by SPARQL; the browser face still serves ledgers only, and no route maps to
-  `urn:repo:*`.
+- **No fetching in the server.** gonk browses what is on disk and watches it; it never pulls.
+  Keeping managed checkouts current is `ikigai-gonk checkout --all` on a timer (see
+  *Keeping them current*), a command outside the server.
 
 The page's htmx is htmx 2.0.4 (Zero-Clause BSD), vendored as `web/htmx.min.js`.
 

@@ -303,3 +303,164 @@ fn a_name_is_given_with_name_equals() {
     assert!(out.contains("cloned     mine"), "{out}");
     assert!(world.checkouts().join("mine/README.md").exists());
 }
+
+/// A second upstream beside the world's `demo`, with its own pushing clone.
+struct Second {
+    upstream: PathBuf,
+    pusher: PathBuf,
+}
+
+impl Second {
+    fn new(world: &World, name: &str) -> Second {
+        let upstream = world.root.join(format!("upstream/{name}.git"));
+        let pusher = world.root.join(format!("pusher-{name}"));
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "--quiet", "--bare", "-b", "main"]);
+        git(
+            &world.root,
+            &[
+                "clone",
+                "--quiet",
+                &url(&upstream),
+                pusher.to_str().unwrap(),
+            ],
+        );
+        let second = Second { upstream, pusher };
+        second.commit_upstream("README.md", "first\n");
+        second
+    }
+
+    fn commit_upstream(&self, file: &str, text: &str) {
+        std::fs::write(self.pusher.join(file), text).unwrap();
+        git(&self.pusher, &["add", file]);
+        git(&self.pusher, &["commit", "--quiet", "-m", text.trim()]);
+        git(&self.pusher, &["push", "--quiet", "origin", "HEAD:main"]);
+    }
+
+    fn url(&self) -> String {
+        url(&self.upstream)
+    }
+
+    fn upstream_head(&self) -> String {
+        git(&self.upstream, &["rev-parse", "main"])
+    }
+}
+
+#[test]
+fn all_fast_forwards_every_checkout_from_its_own_origin() {
+    let world = World::new();
+    let tools = Second::new(&world, "tools");
+    ok(&world.run(&[&world.url(), &tools.url()]));
+    world.commit_upstream("README.md", "two\n");
+    tools.commit_upstream("README.md", "second\n");
+    tools.commit_upstream("NOTES.md", "third\n");
+
+    let out = ok(&world.run(&["--all"]));
+    assert!(
+        out.contains("updated    demo ") && out.contains("(1 commit(s), fast-forward)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("updated    tools ") && out.contains("(2 commit(s), fast-forward)"),
+        "{out}"
+    );
+    assert_eq!(world.head(), world.upstream_head());
+    assert_eq!(
+        git(&world.checkouts().join("tools"), &["rev-parse", "HEAD"]),
+        tools.upstream_head()
+    );
+    assert!(
+        !out.contains("browse roots:"),
+        "--all adds no root, so prints no root lines: {out}"
+    );
+    assert!(!world.config().exists(), "--all never writes config");
+
+    let again = ok(&world.run(&["--all"]));
+    assert!(again.contains("current    demo at "), "{again}");
+    assert!(again.contains("current    tools at "), "{again}");
+}
+
+#[test]
+fn all_refuses_a_dirty_checkout_and_still_updates_the_rest() {
+    let world = World::new();
+    let tools = Second::new(&world, "tools");
+    ok(&world.run(&[&world.url(), &tools.url()]));
+    let before = world.head();
+    // Untracked counts: a file the operator dropped in is still theirs.
+    std::fs::write(world.checkout_dir().join("SCRATCH.md"), "mine\n").unwrap();
+    world.commit_upstream("README.md", "two\n");
+    tools.commit_upstream("README.md", "second\n");
+
+    let out = refused(&world.run(&["--all"]));
+    assert!(out.contains("REFUSED    demo"), "{out}");
+    assert!(out.contains("local changes"), "{out}");
+    assert!(
+        out.contains("updated    tools "),
+        "the other still ran: {out}"
+    );
+    assert_eq!(world.head(), before, "nothing moved in the dirty one");
+    assert_eq!(
+        git(&world.checkouts().join("tools"), &["rev-parse", "HEAD"]),
+        tools.upstream_head()
+    );
+    assert!(world.checkout_dir().join("SCRATCH.md").exists());
+}
+
+#[test]
+fn all_reports_coverage_without_changing_the_config() {
+    let world = World::new();
+    let tools = Second::new(&world, "tools");
+    ok(&world.run(&[&world.url(), &tools.url()]));
+    // A dot-directory is not a checkout; a plain directory is refused as one.
+    std::fs::create_dir_all(world.checkouts().join(".cache")).unwrap();
+    std::fs::create_dir_all(world.checkouts().join("stray")).unwrap();
+    let config = world.config();
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let text = format!(
+        "gonk.browse.root = \"demo={demo}/crates\"\n\
+         gonk.browse.root = \"gone={gone}\"\n\
+         gonk.browse.root = \"elsewhere=/srv/elsewhere\"\n",
+        demo = world.checkout_dir().display(),
+        gone = world.checkouts().join("gone").display(),
+    );
+    std::fs::write(&config, &text).unwrap();
+
+    let out = refused(&world.run(&["--all"]));
+    assert!(out.contains("current    demo at "), "{out}");
+    assert!(out.contains("current    tools at "), "{out}");
+    assert!(out.contains("REFUSED    stray"), "{out}");
+    assert!(out.contains("is not a git checkout"), "{out}");
+    assert!(
+        !out.contains(".cache"),
+        "dot-directories are skipped: {out}"
+    );
+    assert!(out.contains("\ncoverage of "), "{out}");
+    assert!(
+        out.contains("  unused     tools  "),
+        "no root points into tools: {out}"
+    );
+    assert!(
+        !out.contains("unused     demo"),
+        "a root inside a checkout uses it: {out}"
+    );
+    assert!(out.contains("  missing    gone  "), "{out}");
+    assert!(
+        !out.contains("elsewhere"),
+        "a root outside the managed directory is not this report's business: {out}"
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), text, "untouched");
+}
+
+#[test]
+fn all_on_a_directory_that_does_not_exist_clones_and_creates_nothing() {
+    let world = World::new();
+    let out = world.run(&["--all"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--all only updates"), "{stderr}");
+    assert!(!world.checkouts().exists(), "not created");
+
+    let both = world.run(&["--all", &world.url()]);
+    assert_eq!(both.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&both.stderr).contains("not both"));
+}

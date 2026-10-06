@@ -179,6 +179,12 @@ usage:
                                    `gonk.browse.root` line; --write-config appends the missing
                                    ones to config.toml (a backup beside it). No store, no door.
                                    gonk reads its roots at startup: restart it after adding one
+  ikigai-gonk checkout --all [--dir DIR] [--config PATH]
+                                   fetch and fast-forward EVERY checkout already under the
+                                   managed directory, each from its own `origin`, with the same
+                                   refusals; then say which checkouts no gonk.browse.root uses
+                                   and which roots there have no checkout. Clones nothing,
+                                   writes no config: the command a timer runs
   ikigai-gonk kata import <export.jsonl> [--gonk http://127.0.0.1:1060] [--ledger default]
                      [--project NAME] [--dry-run]
                                    file a `kata export` file's issues as ledger items over the
