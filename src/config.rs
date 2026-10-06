@@ -149,6 +149,14 @@ usage:
                                    `review.completed` runs (README, \"Filing roborev findings\").
                                    A finding already filed is skipped; low ones are skipped
                                    unless --min-severity low
+  ikigai-gonk checkout [<name>=]<git-url>... [--dir DIR] [--write-config] [--config PATH]
+                                   clone each repository into ~/.ikigai/checkouts/<name> (or
+                                   --dir), or fetch and FAST-FORWARD the clone already there;
+                                   a checkout with local changes, on another branch, or
+                                   diverged is refused and left alone. Prints each
+                                   `gonk.browse.root` line; --write-config appends the missing
+                                   ones to config.toml (a backup beside it). No store, no door.
+                                   gonk reads its roots at startup: restart it after adding one
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
@@ -241,6 +249,8 @@ pub enum Command {
     },
     /// File one roborev review's findings into a ledger over the HTTP door.
     RoborevFile(crate::roborev::FileArgs),
+    /// Clone or fast-forward the repositories gonk browses, and print their root lines.
+    Checkout(crate::checkout::Args),
     /// Print the usage.
     Help,
 }
@@ -582,6 +592,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("roborev") => {
             args.next();
             return crate::roborev::parse_args(args).map(Command::RoborevFile);
+        }
+        Some("checkout") => {
+            args.next();
+            return crate::checkout::parse_args(args).map(Command::Checkout);
         }
         Some("grants") => {
             args.next();
@@ -1246,7 +1260,7 @@ fn check_keys(text: &str) -> Result<(), String> {
 }
 
 /// `~/`-expansion against `home`.
-fn expand_home(spelled: &str, home: &Path) -> PathBuf {
+pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
     match spelled.strip_prefix("~/") {
         Some(rest) => home.join(rest),
         None => PathBuf::from(spelled),
@@ -1259,7 +1273,7 @@ fn value_for(text: &str, key: &str) -> Option<String> {
 }
 
 /// Every `key = value` line for `key`, in file order.
-fn values_for(text: &str, key: &str) -> Vec<String> {
+pub(crate) fn values_for(text: &str, key: &str) -> Vec<String> {
     lines(text)
         .filter(|(name, _)| *name == key)
         .map(|(_, v)| v)

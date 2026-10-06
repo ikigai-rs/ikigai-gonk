@@ -1361,6 +1361,59 @@ not repeat, and may not be `pr` or `style` (those read as the other family's nam
 directory must exist. Each is refused at startup with the line to edit — `ikigai-browse`
 would assert instead, which arrives as a panic where the banner should be.
 
+### Checking out the repositories it browses
+
+On a new machine the roots have to be cloned before gonk will start. `ikigai-gonk checkout`
+does that and writes the lines:
+
+```sh
+ikigai-gonk checkout https://github.com/ikigai-rs/ikigai-gonk.git kata=git@github.com:kenn-io/kata.git --write-config
+```
+
+```text
+cloned     ikigai-gonk at 5050879  ~/.ikigai/checkouts/ikigai-gonk
+cloned     kata at 1c2d3e4  ~/.ikigai/checkouts/kata
+
+browse roots:
+  gonk.browse.root = "ikigai-gonk=~/.ikigai/checkouts/ikigai-gonk"
+  gonk.browse.root = "kata=~/.ikigai/checkouts/kata"
+
+/Users/you/.config/ikigai/config.toml:
+  added      gonk.browse.root = "ikigai-gonk=~/.ikigai/checkouts/ikigai-gonk"
+  added      gonk.browse.root = "kata=~/.ikigai/checkouts/kata"
+  backup     /Users/you/.config/ikigai/config.toml.1791302400.bak
+
+gonk reads gonk.browse.root at startup only: restart it to serve the new root(s). Under launchd:
+  launchctl kickstart -k gui/$(id -u)/dev.ikigai-rs.gonk
+```
+
+- **Where.** Each URL is cloned into `~/.ikigai/checkouts/<name>` (`--dir` for another
+  directory). `<name>` is the URL's last path segment without `.git`, and it is also the
+  browse root's name, so `name=url` sets both. It is checked like any root name.
+- **Again.** Run it again with the same URLs and each clone is fetched and its default branch
+  **fast-forwarded**, and nothing else. A checkout with local changes (untracked files
+  included), on another branch, or with commits that upstream does not have is **refused and left
+  exactly as it was**: nothing is reset, stashed, merged or discarded. Each URL is reported on
+  its own and the rest still run; any refusal or failure makes the exit status 1. A root gonk
+  already serves needs no restart after an update: gonk watches it, and a fast-forward is a
+  change on disk like any other.
+- **The config.** Without `--write-config` the lines are only printed. With it, the missing
+  ones are appended to the config home's `config.toml` (or `--config PATH`): the previous file
+  is copied beside it first, no other line is touched, a name already configured for the same
+  directory is left as it is, and a name configured for a DIFFERENT directory is a conflict
+  that writes nothing for it.
+- **No prompts.** git runs with stdin closed and `GIT_TERMINAL_PROMPT=0`, and ssh in
+  `BatchMode` unless `GIT_SSH_COMMAND` or `core.sshCommand` already says how to run it, so a
+  repository that needs credentials fails with git's message instead of waiting. Credential
+  helpers and ssh agents work as usual.
+
+It is a command, like `review request`: it opens no store and binds no door, and the server
+itself has no code that fetches anything.
+
+⚠ **A managed clone shows its default branch.** Work in progress in other branches or
+worktrees (a kata-flight loop's worktrees, for one) is not what gonk browses there; point a
+root at that worktree by hand if that is what you want to read.
+
 | file | what it holds |
 | --- | --- |
 | `store.toml`, `gonk.store.toml` | `path = "…"` — where the dataset lives, read by `ikigai-store` |

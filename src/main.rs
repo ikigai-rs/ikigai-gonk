@@ -55,6 +55,14 @@ fn main() {
         Command::RoborevFile(args) => {
             ikigai_gonk::roborev::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
         }
+        Command::Checkout(args) => {
+            let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+            let all_ok = ikigai_gonk::checkout::run(&args, &homes, &mut std::io::stdout())
+                .unwrap_or_else(|e| fail(&e));
+            if !all_ok {
+                std::process::exit(1);
+            }
+        }
         Command::Serve(flags) => serve(&flags),
     }
 }
