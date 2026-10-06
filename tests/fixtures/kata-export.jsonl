@@ -1,0 +1,20 @@
+{"kind":"meta","data":{"key":"export_version","value":"27"}}
+{"kind":"meta","data":{"key":"instance_uid","value":"01K6Z0000000000000000INST1"}}
+{"kind":"meta","data":{"key":"schema_version","value":"27"}}
+{"kind":"project","data":{"created_at":"2026-09-01T12:00:00.000Z","id":1,"metadata":{},"name":"flight","revision":1,"uid":"01K6Z00000000000000000PRJ1"}}
+{"kind":"issue","data":{"author":"chris","body":"The loop should stop when the queue is empty.\n\nSee the flight log.","closed_at":null,"closed_reason":null,"content_revision":1,"created_at":"2026-09-02T09:15:00.000Z","deleted_at":null,"id":1,"metadata":{},"owner":"chris","priority":1,"project_id":1,"revision":3,"short_id":"0001","status":"open","title":"Stop the loop on an empty queue","uid":"01K6Z000000000000000000001","updated_at":"2026-09-03T10:00:00.000Z"}}
+{"kind":"issue","data":{"author":"chris","body":"","closed_at":"2026-09-04T08:00:00.000Z","closed_reason":"wontfix","content_revision":0,"created_at":"2026-09-02T09:20:00.000Z","deleted_at":null,"id":2,"metadata":{},"owner":null,"priority":3,"project_id":1,"revision":2,"short_id":"0002","status":"closed","title":"Rename the flight binary","uid":"01K6Z000000000000000000002","updated_at":"2026-09-04T08:00:00.000Z"}}
+{"kind":"issue","data":{"author":"agent-7","body":"Child of 0001.","closed_at":null,"closed_reason":null,"content_revision":0,"created_at":"2026-09-02T11:00:00.000Z","deleted_at":null,"id":3,"metadata":{},"owner":null,"project_id":1,"revision":1,"short_id":"0003","status":"open","title":"Write the empty-queue test","uid":"01K6Z000000000000000000003","updated_at":"2026-09-02T11:00:00.000Z"}}
+{"kind":"issue","data":{"author":"chris","body":"Filed by mistake.","closed_at":null,"closed_reason":null,"content_revision":0,"created_at":"2026-09-02T12:00:00.000Z","deleted_at":"2026-09-02T12:05:00.000Z","id":4,"metadata":{},"owner":null,"priority":2,"project_id":1,"revision":2,"short_id":"0004","status":"open","title":"A mistake","uid":"01K6Z000000000000000000004","updated_at":"2026-09-02T12:05:00.000Z"}}
+{"kind":"comment","data":{"author":"chris","body":"Seen twice this week.","created_at":"2026-09-02T10:00:00.000Z","id":1,"issue_id":1,"uid":"01K6Z0000000000000000000C1"}}
+{"kind":"comment","data":{"author":"chris","body":"Agent 7 is on it.","created_at":"2026-09-03T10:00:00.000Z","id":2,"issue_id":1,"teammate":"agent-7","uid":"01K6Z0000000000000000000C2"}}
+{"kind":"comment","data":{"author":"chris","body":"Never mind.","created_at":"2026-09-02T12:04:00.000Z","id":3,"issue_id":4,"uid":"01K6Z0000000000000000000C3"}}
+{"kind":"issue_label","data":{"author":"chris","created_at":"2026-09-02T09:15:00.000Z","issue_id":1,"label":"bug"}}
+{"kind":"issue_label","data":{"author":"chris","created_at":"2026-09-02T09:15:00.000Z","issue_id":1,"label":"area:loop"}}
+{"kind":"issue_label","data":{"author":"chris","created_at":"2026-09-02T09:20:00.000Z","issue_id":2,"label":"chore"}}
+{"kind":"link","data":{"author":"agent-7","created_at":"2026-09-02T11:00:00.000Z","from_issue_id":3,"from_issue_uid":"01K6Z000000000000000000003","id":1,"to_issue_id":1,"to_issue_uid":"01K6Z000000000000000000001","type":"parent"}}
+{"kind":"link","data":{"author":"agent-7","created_at":"2026-09-02T11:01:00.000Z","from_issue_id":3,"from_issue_uid":"01K6Z000000000000000000003","id":2,"to_issue_id":1,"to_issue_uid":"01K6Z000000000000000000001","type":"blocks"}}
+{"kind":"link","data":{"author":"chris","created_at":"2026-09-02T09:21:00.000Z","from_issue_id":1,"from_issue_uid":"01K6Z000000000000000000001","id":3,"to_issue_id":2,"to_issue_uid":"01K6Z000000000000000000002","type":"related"}}
+{"kind":"link","data":{"author":"chris","created_at":"2026-09-02T12:01:00.000Z","from_issue_id":1,"from_issue_uid":"01K6Z000000000000000000001","id":4,"to_issue_id":4,"to_issue_uid":"01K6Z000000000000000000004","type":"related"}}
+{"kind":"event","data":{"actor":"chris","created_at":"2026-09-02T09:15:00.000Z","id":1,"issue_id":1,"payload":{},"project_id":1,"type":"issue.created","uid":"01K6Z0000000000000000000E1"}}
+{"kind":"sqlite_sequence","data":{"name":"issues","seq":4}}

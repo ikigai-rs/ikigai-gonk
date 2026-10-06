@@ -649,6 +649,73 @@ from a synthesis (there is no job-type variable), so a panel files every member'
 and the synthesis's, deduplicated only where the words match. Until 0.3.0, point this hook
 at single-agent reviews.
 
+## Importing from kata
+
+[kata](https://github.com/kenn-io/kata) keeps issues in its own database. `kata export` writes
+it out as JSONL, and `ikigai-gonk kata import` files that file's issues into a ledger here,
+over the HTTP door:
+
+```sh
+kata export --output kata.jsonl          # with kata's daemon stopped, or --allow-running-daemon
+ikigai-gonk kata import kata.jsonl --ledger default
+```
+
+```text
+kata export version 27: 4 issue(s), 4 link(s)
+filed     #1       kata 0001  Stop the loop on an empty queue
+commented #1       kata comment 01K6Z0000000000000000000C1
+…
+closed    #2       kata 0002
+deleted   kata 0004  not imported
+linked    #3 parent #1
+
+3 filed, 0 already there; 2 comment(s), 1 close(s), 3 link(s) added; 1 deleted issue(s) and 1 link(s) skipped; not read: event 1, sqlite_sequence 1
+```
+
+`--gonk` defaults to `http://127.0.0.1:1060` and `--ledger` to `default`; `--project NAME`
+imports one kata project's issues; `--dry-run` prints what would be filed and touches nothing.
+
+**The grant** is `roborev file`'s: the door's anonymous loopback caller holds the read and
+write tokens of the ledgers in `gonk.http.ledger`, and an import needs both (write to file,
+read to check what is already there). To import into a ledger of its own, list it there
+(`gonk.http.ledger = "kata"`) and restart. A ledger the door does not grant answers `403`, and
+the import stops with exit 1 and names the setting.
+
+**The mapping.** `ikigai-ledger` took its model from kata, so most of this is one to one:
+
+| kata | ledger item |
+| --- | --- |
+| `title` | the title (whitespace collapsed to one line) |
+| `body` | the body, followed by a provenance line: `Imported from kata <project>#<short_id> (<uid>), filed <created_at> by <author>; owner <owner>.` |
+| `author` | `author` |
+| `priority` 0–4 (absent = unset) | `priority` 0–4, the same scale (absent = unset) |
+| labels | `labels` |
+| comments | `comment`, with the comment's author, ending `(kata comment <uid>, <created_at>, for <teammate>)` |
+| `status` closed, `closed_reason` | `close` with the same reason (`done`, `wontfix`, `duplicate`, `superseded`, `audit-no-change`), and `Closed in kata at <closed_at>.` as its note |
+| links `parent`, `blocks`, `related` | `link` with the same type, same direction (`parent` from the child, `blocks` from the prerequisite), made after every issue has an item |
+| `uid` | `about urn:kata:issue:<uid>`, the idempotence key |
+| `deleted_at` set (soft-deleted) | not imported, nor its comments, labels or links |
+
+kata has no item kind, so none is filed.
+
+**What is lost.** The ledger stamps its own filed time and mints its own number, so kata's
+`created_at`, `short_id` and `uid` survive only as the text above; a faithful import that keeps
+them as data is ledger [#774](http://localhost:1060/l/default/item/774). Not carried at all:
+`owner` as a claim (it is in the provenance line), `updated_at`, `metadata`, assignment
+expiry, recurrences, who added a label or a link and when, kata's event history, and every
+other export kind (sync bindings, federation state, claims, purge logs), which are counted
+on the last line instead.
+
+**Running it again.** Before filing, the ledger is asked for an item, open or closed, about
+the issue's key, and an issue already there is not filed again. The run then CONVERGES on
+that item: a comment whose `kata comment <uid>` marker is not on it is added, an issue closed
+in kata whose item is open is closed, and a link the item does not show is made. So the same
+export imported twice changes nothing, and a later export adds the comments, closes and links
+that are new. ⚠ An issue's title, body, labels and priority are written once, when it is
+filed; a later edit in kata does not reach the item. And the check and the append are two
+requests, so two imports of one export at the same instant can both file an issue (ledger
+[#779](http://localhost:1060/l/default/item/779) is the atomic append that closes that).
+
 ## From another ikigai process on this machine
 
 Gonk holds the dataset, so nothing else opens it. Every other ikigai process — the REPL, a

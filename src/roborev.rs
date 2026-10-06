@@ -602,13 +602,13 @@ pub fn run(args: &FileArgs, out: &mut impl Write) -> Result<Vec<Outcome>, String
 
 /// The door's URL path for one of a ledger's resources: the IRI with `urn:` dropped and
 /// every `:` a `/`, which is the mapping `ikigai-web` reverses.
-fn path_of(ledger: &Ledger, action: &str) -> String {
+pub(crate) fn path_of(ledger: &Ledger, action: &str) -> String {
     let iri = ledger.resource(action);
     format!("/{}", iri.trim_start_matches("urn:").replace(':', "/"))
 }
 
 /// The first item in a plain-text listing (`  #12  open  p1  title …`), if any.
-fn first_item(listing: &str) -> Option<String> {
+pub(crate) fn first_item(listing: &str) -> Option<String> {
     listing.lines().find_map(|line| {
         let token = line.split_whitespace().next()?;
         let (_, number) = token.split_once('#')?;
@@ -617,7 +617,7 @@ fn first_item(listing: &str) -> Option<String> {
     })
 }
 
-fn url_encode(value: &str) -> String {
+pub(crate) fn url_encode(value: &str) -> String {
     value
         .bytes()
         .map(|b| match b {
@@ -634,15 +634,15 @@ fn url_encode(value: &str) -> String {
 /// Loopback names only, because the door grants nothing to any other `Host` (DNS
 /// rebinding, `crate::doors`): an address this command could reach and gonk would refuse
 /// is a misconfiguration to name now, not a 403 to explain later. Plain HTTP only, which
-/// is all the door speaks.
+/// is all the door speaks. `kata import` ([`crate::kata`]) speaks through it too.
 #[derive(Debug)]
-struct Door {
+pub(crate) struct Door {
     host: String,
     port: u16,
 }
 
 impl Door {
-    fn parse(url: &str) -> Result<Door, String> {
+    pub(crate) fn parse(url: &str) -> Result<Door, String> {
         let bad = |why: &str| format!("--gonk `{url}`: {why} (expected http://127.0.0.1:1060)");
         let rest = url
             .strip_prefix("http://")
@@ -663,7 +663,13 @@ impl Door {
     }
 
     /// One request, `Connection: close`; the body of a 200, or an error naming the refusal.
-    fn call(&self, method: &str, path: &str, query: &str, body: &str) -> Result<String, String> {
+    pub(crate) fn call(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &str,
+    ) -> Result<String, String> {
         let target = format!(
             "{}:{}",
             self.host.trim_matches(|c| c == '[' || c == ']'),
@@ -725,7 +731,7 @@ impl Door {
                 "gonk refused {method} {path} (403): {}. The HTTP door grants an anonymous \
                  loopback caller the read and write tokens of the ledgers in `gonk.http.ledger` \
                  and nothing else; filing needs both (`ikigai-gonk grants <ledger> write` \
-                 prints them)",
+                 prints them, and listing the ledger there grants them)",
                 text.trim()
             )),
             _ => Err(format!(

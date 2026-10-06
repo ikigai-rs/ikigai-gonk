@@ -44,6 +44,7 @@ pub mod doors;
 pub mod grants;
 pub mod identity;
 pub mod k;
+pub mod kata;
 pub mod mount;
 pub mod queue;
 pub mod quic;
