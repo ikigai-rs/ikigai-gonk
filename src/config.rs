@@ -35,6 +35,8 @@
 //! gonk.backup.every = "24h"
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
+//! # one access line per request on stderr (this IS the default; `false` for none)
+//! # gonk.log.access = true
 //! ```
 //!
 //! With no `gonk.browse.root` line this server composes exactly what it composed before: the
@@ -89,7 +91,8 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 26] = [
+const KEYS: [&str; 27] = [
+    "gonk.log.access",
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -286,6 +289,9 @@ pub struct Settings {
     pub review: Option<crate::trigger::Trigger>,
     /// Which severities the Queue page asks a human about (`gonk.queue.serious`).
     pub queue: QueuePolicy,
+    /// Whether every door writes one access line per request to stderr (`gonk.log.access`,
+    /// on unless a line says `false`) — see [`crate::access`].
+    pub access_log: bool,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -842,7 +848,24 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         backup,
         review,
         queue: queue_policy(text)?,
+        access_log: access_log(text)?,
     })
+}
+
+/// `gonk.log.access`: the access log is ON unless a line turns it off (ledger #739).
+///
+/// On by default because the case it exists for is the one nobody planned: a demo that
+/// slowed down, diagnosed afterwards from a log that had to be running already. A value that
+/// is neither word is refused rather than read as either — the same rule as
+/// `gonk.review.arm`, for a setting whose silent misreading is exactly the missing log.
+fn access_log(text: &str) -> Result<bool, String> {
+    match value_for(text, "gonk.log.access").as_deref() {
+        None | Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(other) => Err(format!(
+            "gonk.log.access = `{other}` is neither `true` nor `false`"
+        )),
+    }
 }
 
 /// The review queue, from `gonk.review.*` — `None` unless `gonk.review.space` names one.
@@ -1300,6 +1323,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(twice.contains("names `alpha` twice"), "{twice}");
+    }
+
+    /// Ledger #739: the access log is on unless a line says `false`, and a value that is
+    /// neither word is refused rather than read as either.
+    #[test]
+    fn the_access_log_is_on_unless_turned_off() {
+        let on = |text: &str| settings(&Flags::default(), text, &homes()).map(|s| s.access_log);
+        assert_eq!(on(""), Ok(true));
+        assert_eq!(on("gonk.log.access = true"), Ok(true));
+        assert_eq!(on("gonk.log.access = \"false\""), Ok(false));
+        let refused = on("gonk.log.access = off").unwrap_err();
+        assert!(refused.contains("neither `true` nor `false`"), "{refused}");
     }
 
     /// ★ The requirement as Brian stated it, as a test: every 24 hours, keep the last five,

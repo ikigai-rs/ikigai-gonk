@@ -43,6 +43,7 @@ use ikigai_core::{
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{CapFn, EdgeConfig, HttpRequest, PrincipalFn, Route, RouteTable};
 
+use crate::access::AccessLog;
 use crate::identity::{self, Passkeys};
 use crate::spaces;
 
@@ -184,7 +185,24 @@ impl CachePolicy for NoCache {
 /// renderer (a mounting client reads contracts through this kernel's JSON Meta face), and
 /// [`NoCache`].
 pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
-    Kernel::with_meta_renderer(Arc::new(HubSpace::new(hub)), Arc::new(TurtleRenderer))
+    door_kernel_with(hub, None)
+}
+
+/// [`door_kernel`], writing one access line per request when `access` is given — what `main`
+/// builds for the socket and QUIC doors ([`crate::access`]).
+pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
+    over(Arc::new(HubSpace::new(hub)), access)
+}
+
+/// The kernel every door gets: a Meta renderer, the system clock, [`NoCache`], and the access
+/// log over the root when one is on. The log is an overlay with no identity of its own, so
+/// the arrangement at `urn:kernel:topology` is the same either way.
+fn over(space: Arc<dyn Space>, access: Option<AccessLog>) -> Kernel {
+    let space = match access {
+        Some(log) => Arc::new(log.over(space)) as Arc<dyn Space>,
+        None => space,
+    };
+    Kernel::with_meta_renderer(space, Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock))
         .with_cache_policy(Arc::new(NoCache))
 }
@@ -211,14 +229,21 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
 ///   rendered as an `ik:Limit` over the empty family, which is what the end of a `Fallback`
 ///   already is to resolution: a name no layer binds is refused.
 pub fn http_kernel(hub: Arc<Kernel>, pages: EndpointSpace) -> Kernel {
+    http_kernel_with(hub, pages, None)
+}
+
+/// [`http_kernel`], writing one access line per request when `access` is given.
+pub fn http_kernel_with(
+    hub: Arc<Kernel>,
+    pages: EndpointSpace,
+    access: Option<AccessLog>,
+) -> Kernel {
     let space = Fallback::new(vec![
         Arc::new(pages) as Arc<dyn Space>,
         Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
     ])
     .named(spaces::iri(spaces::HTTP_DOOR));
-    Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer))
-        .with_clock(Arc::new(SystemClock))
-        .with_cache_policy(Arc::new(NoCache))
+    over(Arc::new(space), access)
 }
 
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —

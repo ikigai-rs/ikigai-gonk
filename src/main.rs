@@ -12,7 +12,9 @@ use ikigai_gonk::config::{self, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
-use ikigai_gonk::{browse, compose_with, doors, mount, queue, quic, trigger, verdict, watch, web};
+use ikigai_gonk::{
+    access, browse, compose_with, doors, mount, queue, quic, trigger, verdict, watch, web,
+};
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
 use ikigai_store::{DurableStore, StoreConfig};
@@ -346,9 +348,12 @@ fn serve(flags: &config::Flags) -> ! {
         std::fs::create_dir_all(parent)
             .unwrap_or_else(|e| fail(&format!("creating {}: {e}", parent.display())));
     }
+    // One access line per request at every door (ledger #739), unless `gonk.log.access`
+    // turns it off — off means not wrapped at all, not wrapped and silent.
+    let access = |door: access::Door| settings.access_log.then(|| access::AccessLog::stderr(door));
     let (socket, door) = (
         settings.socket.clone(),
-        doors::door_kernel(Arc::clone(&hub)),
+        doors::door_kernel_with(Arc::clone(&hub), access(access::Door::Socket)),
     );
     std::thread::spawn(move || {
         let error = ikigai_ipc::serve(door, &socket).err();
@@ -367,7 +372,7 @@ fn serve(flags: &config::Flags) -> ! {
             enrolled,
         } => {
             let (door, minter) = (
-                doors::door_kernel(Arc::clone(&hub)),
+                doors::door_kernel_with(Arc::clone(&hub), access(access::Door::Quic)),
                 quic::minter(layout.clone()),
             );
             let line = format!(
@@ -408,7 +413,11 @@ fn serve(flags: &config::Flags) -> ! {
             queue: settings.queue.clone(),
             epochs: Some(Arc::clone(&epochs)),
         });
-        let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
+        let http = Arc::new(doors::http_kernel_with(
+            Arc::clone(&hub),
+            web::space(face),
+            access(access::Door::Http),
+        ));
         eprintln!(
             "ikigai-gonk {} — holding the store at {}",
             env!("CARGO_PKG_VERSION"),
@@ -430,6 +439,15 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  queue   {queue_line}");
         eprintln!("  socket  {} — owner only", settings.socket.display());
         eprintln!("  quic    {quic_line}");
+        eprintln!(
+            "  log     {}",
+            if settings.access_log {
+                "one `gonk:Access` line per request at each door, on stderr \
+                 (`gonk.log.access = false` turns it off)"
+            } else {
+                "no access lines (`gonk.log.access = false`)"
+            }
+        );
         eprintln!(
             "  mount   mount = \"prefer urn:iki:ledger:={}\"  (and the same for urn:iki:store:)",
             settings.socket.display()

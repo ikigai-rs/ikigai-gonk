@@ -1274,6 +1274,7 @@ gonk.backup.every = "24h"
 # gonk.review.root = "~/.ikigai/spaces"
 # gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
 # gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
+# gonk.log.access = false             # no access lines (they are ON by default)
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
@@ -1707,6 +1708,26 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   <key>StandardErrorPath</key><string>/tmp/ikigai-gonk.log</string>
 </dict></plist>
 ```
+
+### The access log
+
+Every door writes one line per request to stderr, so under that agent a slow page can be read
+back from `/tmp/ikigai-gonk.log` after the fact (ledger #739). The grammar is `ikigai-log`'s —
+time, class, subject IRI, then `key=value` columns, every key on every line in this order:
+
+```text
+2026-10-06T04:57:53.855Z gonk:Access urn:iki:gonk:page:ledger:default door=http verb=source outcome=ok bytes=3943 dur=1468 principal=- q=as=text/html&status=all
+2026-10-06T04:57:55.323Z gonk:Access urn:iki:ledger:append door=http verb=sink outcome=ok bytes=48 dur=2 principal=anon q=-
+2026-10-06T04:57:53.886Z gonk:Access urn:iki:ledger:items door=socket verb=source outcome=ok bytes=46 dur=2 principal=owner q=-
+```
+
+`dur` is milliseconds and the time is when the request started; `grep ' dur=[0-9]\{4,\} '` is
+every request that took a second or more. `outcome` is `ok` or the kernel's error kind — **not
+the HTTP status**, which `ikigai-web` decides after the kernel returns and does not report
+back. An HTTP read's `principal` is `-` for the same reason: the library tells a door who a
+WRITE is from, never a read. A refusal the door kernel makes before dispatch (a capability
+floor, a name nothing binds) writes no line. No line ever carries a cookie, a token or a form
+body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
 
 ## Not built
 
