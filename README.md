@@ -571,6 +571,84 @@ resource the ledger binds, `Sink urn:iki:ledger:comment`. A listing face across 
 [`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger)'s to add; this server binds the
 ledger's resources and hand-writes none of its own over them, so it does not paper over the gap.
 
+## Filing roborev findings
+
+[roborev](https://github.com/kenn-io/roborev) reviews each commit with a coding agent. Keep
+running it, and add one `[[hooks]]` entry to its config (`~/.roborev/config.toml`, or a
+repository's `.roborev.toml`): every finding of every completed review becomes a ledger item
+here, which can be triaged, labeled, linked, claimed and closed like any other, and which
+shows up on browse's page for the file it is about.
+
+```toml
+[[hooks]]
+event = "review.completed"
+command = "ikigai-gonk roborev file --gonk http://127.0.0.1:1060 --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
+```
+
+roborev replaces each `{…}` with a single-quoted value before `sh -c` runs the line, so
+nothing in a finding can escape into the shell. `--root` is the **browse root name** gonk
+serves the repository under (`gonk.browse.root = "<name>=<path>"`); `{repo_name}` is right
+when the two match, and otherwise write the name in. `--dry-run` prints what would be filed
+and touches nothing.
+
+**The grant.** The command speaks to the HTTP door, whose anonymous loopback caller holds the
+read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and nothing
+else. Filing needs both: write to append, read to check first whether a finding is already
+filed. To file into a ledger of its own, list it:
+
+```toml
+gonk.http.ledger = "default"
+gonk.http.ledger = "reviews"
+```
+
+`ikigai-gonk grants reviews write` prints what that grants (`urn:cap:ledger:write:reviews`,
+`urn:cap:ledger:read:reviews` and the two store tokens for its graph). A ledger the door does
+not grant answers `403`, and the command stops with exit 1, says so, and names the setting.
+roborev logs a hook's failure and output in its daemon log; it never retries.
+
+**What a finding becomes.**
+
+| roborev | ledger item |
+| --- | --- |
+| `problem` | the title (its first line, cut near 100 characters), and the body's first paragraph in full |
+| `fix` | `Fix: …` in the body |
+| severity | the labels `roborev` and the severity, and the priority: critical `0`, high `1`, medium `2`, low `3` |
+| `location` (`file:line`) | `about urn:repo:{root}:file:{path}` — the join browse's file page makes. The line stays in the body. An absolute path under `--repo-path` is made relative; a location that names no file inside the repository gives no file `about` rather than a guessed one |
+| the commit | `revision`, and `commit:` in the body |
+| the job | `roborev job: N (roborev show N)` in the body |
+| a panel's reviewers | `reported by:` in the body |
+| — | `about urn:roborev:finding:{hash}`, the idempotence key, and `author roborev` |
+
+**Low findings are skipped by default** (`--min-severity medium`): roborev renders them on a
+passing review too, and one ledger item per nit buries the findings worth a person's time.
+`--min-severity low` files them; `high` files less.
+
+**Filed once.** The key hashes the root, the file's path and the problem's text with its
+whitespace collapsed, and an item, open or closed, already about that key is not filed
+again. So the same hook payload run twice files once, and roborev carrying a finding forward
+verbatim (a rerun, or a later commit's review) files nothing new. ⚠ Two limits, both stated:
+the same defect described in **different words** is a new key and a second item, and the key
+is deliberately not roborev's job id, because a rerun keeps its job id and produces new
+findings, so (job, index) would skip a real one. And the check and the append are two
+requests, so two hooks filing the same finding at the same instant can both file it.
+
+**What it files nothing for.** `review.completed` also fires for roborev's `fix` and `task`
+jobs, whose output is prose rather than a review: the command says so and exits 0. A review
+with no findings files nothing. A review that opens like roborev's rendering but does not
+parse back to it exactly (format drift in a new roborev) is refused with exit 1 and nothing
+filed, rather than filed as a guess.
+
+⚠ **File sequentially until gonk takes `ikigai-ledger` 0.3.0.** The 0.2.x line this server
+links can give two appends that land in the same millisecond the same item id (fixed in
+0.3.0, ledger #768). One invocation files its findings one at a time, so that is safe; two
+hooks running at once are not, and roborev runs every hook in its own goroutine. ⚠ **A panel
+is the case that bites:** each member's completion fires `review.completed` (only the
+bookkeeping events are hook-suppressed), the members finish close together, and the
+synthesis fires once more with the findings merged and reworded. A hook cannot tell a member
+from a synthesis (there is no job-type variable), so a panel files every member's findings
+and the synthesis's, deduplicated only where the words match. Until 0.3.0, point this hook
+at single-agent reviews.
+
 ## From another ikigai process on this machine
 
 Gonk holds the dataset, so nothing else opens it. Every other ikigai process — the REPL, a
