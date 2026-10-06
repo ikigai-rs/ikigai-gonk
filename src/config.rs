@@ -157,6 +157,13 @@ usage:
                                    `gonk.browse.root` line; --write-config appends the missing
                                    ones to config.toml (a backup beside it). No store, no door.
                                    gonk reads its roots at startup: restart it after adding one
+  ikigai-gonk kata import <export.jsonl> [--gonk http://127.0.0.1:1060] [--ledger default]
+                     [--project NAME] [--dry-run]
+                                   file a `kata export` file's issues as ledger items over the
+                                   HTTP door: labels, priority, comments, closes, then links.
+                                   Lossy (kata's ids and times survive as text) and idempotent:
+                                   each item is `about urn:kata:issue:<uid>`, and a re-run
+                                   adds only what is missing (README, \"Importing from kata\")
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
@@ -251,6 +258,8 @@ pub enum Command {
     RoborevFile(crate::roborev::FileArgs),
     /// Clone or fast-forward the repositories gonk browses, and print their root lines.
     Checkout(crate::checkout::Args),
+    /// Import a `kata export` file into a ledger over the HTTP door.
+    KataImport(crate::kata::ImportArgs),
     /// Print the usage.
     Help,
 }
@@ -596,6 +605,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("checkout") => {
             args.next();
             return crate::checkout::parse_args(args).map(Command::Checkout);
+        }
+        Some("kata") => {
+            args.next();
+            return crate::kata::parse_args(args).map(Command::KataImport);
         }
         Some("grants") => {
             args.next();

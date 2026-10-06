@@ -63,6 +63,9 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Command::KataImport(args) => {
+            ikigai_gonk::kata::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
+        }
         Command::Serve(flags) => serve(&flags),
     }
 }
