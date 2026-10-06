@@ -36,7 +36,7 @@ use ikigai_core::{
     Iri, Kernel, ReprType, Representation, Request, Result, Space, Verb,
 };
 use ikigai_gonk::config::QueuePolicy;
-use ikigai_gonk::grants::{self, Authority};
+use ikigai_gonk::grants::{self, Authority, BrowseRole};
 use ikigai_gonk::trigger::{self, Trigger, Tuple};
 
 // ----------------------------------------------------------------- fixtures
@@ -289,49 +289,63 @@ fn a_pass_is_denied_short_of_any_one_of_them() {
 /// The trigger can be armed now (ledger
 /// [#466](http://localhost:1060/l/default/item/466)) — browse 0.5.0 made a pass unable to
 /// publish, so a headless reviewer no longer violates Brian's rule. What has NOT changed, and
-/// is what this test holds, is that **nothing this server MINTS can carry the authority a
-/// pass needs**. `client add --ledger`, `passkey invite --ledger` and `--browse-graph` hand
-/// out ledger tokens and the browse graph's two store doors; the browse read and the net
-/// grant have no flag at all, so a reviewer grant is something a person wrote into
-/// `grants.json` with their hands. An arming path that could be reached by enrolling a client
-/// would be a very different feature.
+/// is what this test holds, is that **nothing this server MINTS can arm it**.
 ///
-/// ★ And the second half: `urn:cap:annotate` — the publish token — must stay unmintable by
-/// the browse-graph flag too, because the interlock is exactly that the reviewer lacks it.
+/// ★ Since ledger [#435](http://localhost:1060/l/default/item/435) the browse read, the net
+/// grant and `urn:cap:annotate` ARE mintable — as the `--browse read|derive` roles — so the
+/// interlock is no longer "has no flag". It is arithmetic over what the flags can combine:
+/// **every mintable grant that may derive also carries `urn:cap:annotate`** (`derive` bundles
+/// the two), and [`trigger::check_reviewer`] refuses any grant that can publish. So every
+/// grant a provisioning command can write either cannot derive or can publish, and neither
+/// arms. This walks every combination the flags can express and asks the real check.
+///
+/// ★ And `urn:cap:exec:gh` (the PR review tier's `gh`) stays unmintable by every flag.
 #[test]
 fn no_provisioning_command_can_mint_a_reviewer() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let q = queue(dir.path());
     trigger::prepare(&q).expect("prepare");
-    let (kernel, _) = kernel_with_recorder(&q, "urn:repo:demo:review:a.rs");
-    let needed = trigger::reviewer_grant_shape(&kernel, "urn:repo:demo:review:a.rs", "localhost")
-        .expect("a bound review");
-    let mut mintable: Vec<String> = Vec::new();
-    for authority in [
+    let probe = "urn:repo:demo:review:a.rs";
+    let (kernel, _) = kernel_with_recorder(&q, probe);
+    let needed =
+        trigger::reviewer_grant_shape(&kernel, probe, "localhost").expect("a bound review");
+    let authorities = [
         Authority::Read,
         Authority::Write,
         Authority::Delete,
         Authority::Purge,
-    ] {
-        mintable.extend(grants::grants_for("default", authority).expect("a ledger grant"));
-        mintable.extend(grants::browse_graph_grants(authority).expect("the browse graph"));
+    ];
+    let mut every_token: Vec<String> = Vec::new();
+    for ledger in authorities {
+        for graph in [None, Some(Authority::Read), Some(Authority::Write)] {
+            for role in [None, Some(BrowseRole::Read), Some(BrowseRole::Derive)] {
+                let mut grant = grants::grants_for("default", ledger).expect("a ledger grant");
+                if let Some(graph) = graph {
+                    grant.extend(grants::browse_graph_grants(graph).expect("the browse graph"));
+                }
+                if let Some(role) = role {
+                    grant.extend(
+                        grants::browse_role_grants(role, &[], Some("localhost")).expect("a role"),
+                    );
+                }
+                assert!(
+                    trigger::check_reviewer(&kernel, probe, "localhost", &grant).is_err(),
+                    "this MINTABLE grant arms a headless reviewer: {grant:?}. A role that \
+                     spends inference without carrying `{}` would be exactly a mintable \
+                     reviewer",
+                    ikigai_browse::CAP_ANNOTATE
+                );
+                every_token.extend(grant);
+            }
+        }
     }
-    for token in [
-        ikigai_browse::CAP_WILDCARD,
-        ikigai_browse::CAP_ANNOTATE,
-        "urn:cap:net:localhost",
-        trigger::CAP_EXEC_GH,
-    ] {
-        assert!(
-            !mintable.contains(&token.to_string()),
-            "`{token}` is now mintable by this server's own provisioning. Arming a headless \
-             reviewer must stay a thing an operator writes into grants.json by hand — and if \
-             the token is `urn:cap:annotate`, a mintable one would hand the reviewer the \
-             publish authority the whole interlock rests on its lacking"
-        );
-    }
-    // The two store tokens ARE mintable (`--browse-graph write`), which is the point: the
-    // rest of what a pass needs has no flag at all. Ledger #435.
+    assert!(
+        !every_token.contains(&trigger::CAP_EXEC_GH.to_string()),
+        "`{}` is now mintable by this server's own provisioning",
+        trigger::CAP_EXEC_GH
+    );
+    // The two store tokens ARE mintable (`--browse-graph write`), and the reviewer's shape
+    // must be computed from them rather than transcribed.
     for token in grants::browse_graph_grants(Authority::Write).expect("the browse graph") {
         assert!(
             needed.contains(&token),
@@ -405,6 +419,8 @@ fn a_reviewer_grant_that_could_publish_is_refused_before_anything_is_armed() {
 fn no_grant_this_server_mints_can_reach_the_queue() {
     let mut mintable: Vec<String> = grants::grants_for("default", Authority::Purge).unwrap();
     mintable.extend(grants::browse_graph_grants(Authority::Write).unwrap());
+    mintable
+        .extend(grants::browse_role_grants(BrowseRole::Derive, &[], Some("localhost")).unwrap());
     for token in [
         ikigai_intray::CAP_OUT,
         ikigai_intray::CAP_READ,

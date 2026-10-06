@@ -526,6 +526,129 @@ pub fn scopes_for_grant(
     Ok(scopes.clone())
 }
 
+/// What writing a scope list under a grant name would do to the grant already there.
+///
+/// ★ **A silent narrowing of authority is the same class of defect as a silent widening, and
+/// arguably worse**, because nothing fails until someone clicks a button (ledger
+/// [#435](http://localhost:1060/l/default/item/435)). `passkey invite brian --force` used to
+/// rewrite a hand-widened grant back to what the flags could express and say nothing about
+/// what it dropped; the feature that needed the dropped scopes went dark with no signal. So
+/// every rewrite of an existing grant is described in both directions — a refusal names what
+/// it WOULD remove and add, and a forced write prints what it DID.
+///
+/// Compared as SETS: a reordering is no change, so it is neither refused nor reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantChange {
+    /// Whether a grant of that name was already in the file.
+    pub existed: bool,
+    /// Scopes the existing grant holds that the new list does not — what a write takes away.
+    pub removed: Vec<String>,
+    /// Scopes the new list holds that the existing grant does not — what a write hands out.
+    pub added: Vec<String>,
+}
+
+impl GrantChange {
+    /// The change from `existing` (a grant's JSON value, if there is one) to `wanted`.
+    ///
+    /// A malformed existing value — not an array, or with non-string members — is read as
+    /// the strings it does hold, so a forced write can still replace it and say what it
+    /// replaced.
+    pub fn against(existing: Option<&Value>, wanted: &[String]) -> GrantChange {
+        let Some(existing) = existing else {
+            return GrantChange::default();
+        };
+        let held: Vec<String> = existing
+            .as_array()
+            .map(|scopes| {
+                scopes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        GrantChange {
+            existed: true,
+            removed: held
+                .iter()
+                .filter(|scope| !wanted.contains(scope))
+                .cloned()
+                .collect(),
+            added: wanted
+                .iter()
+                .filter(|scope| !held.contains(scope))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Whether the write would change an EXISTING grant — what needs `--force`.
+    pub fn changes(&self) -> bool {
+        self.existed && !(self.removed.is_empty() && self.added.is_empty())
+    }
+
+    /// Whether the write would take authority away from an existing grant.
+    pub fn narrows(&self) -> bool {
+        self.existed && !self.removed.is_empty()
+    }
+
+    /// One line per scope, `removes` first: what an operator reads before (or after) a
+    /// `--force`.
+    ///
+    /// ```
+    /// use ikigai_gonk::quic::GrantChange;
+    /// let existing = serde_json::json!(["urn:cap:net:localhost", "urn:cap:annotate"]);
+    /// let change = GrantChange::against(
+    ///     Some(&existing),
+    ///     &["urn:cap:annotate".to_string(), "urn:cap:net:127.0.0.1".to_string()],
+    /// );
+    /// assert_eq!(
+    ///     change.lines(),
+    ///     "    removes  urn:cap:net:localhost\n    adds     urn:cap:net:127.0.0.1"
+    /// );
+    /// ```
+    pub fn lines(&self) -> String {
+        self.removed
+            .iter()
+            .map(|scope| format!("    removes  {scope}"))
+            .chain(
+                self.added
+                    .iter()
+                    .map(|scope| format!("    adds     {scope}")),
+            )
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The refusal for a change written without `--force`, naming every scope it would move.
+    pub fn refusal(&self, grant: &str, grants_json: &Path) -> String {
+        let how = match (self.removed.is_empty(), self.added.is_empty()) {
+            (false, true) => "NARROW it",
+            (false, false) => "NARROW it and widen it",
+            _ => "widen it",
+        };
+        format!(
+            "grant `{grant}` already exists in {} with different scopes — nothing was \
+             written. Replacing it would {how}:\n{}\nUse --force to replace it, which \
+             changes every identity enrolled under it",
+            grants_json.display(),
+            self.lines()
+        )
+    }
+}
+
+/// The change writing `scopes` under `grant` would make to `grants.json` as it is now — read
+/// BEFORE anything is written, so a command can refuse (or describe) the rewrite before it
+/// mints a bundle or an invite.
+pub fn grant_change(
+    layout: &Layout,
+    grant: &str,
+    scopes: &[String],
+) -> Result<GrantChange, String> {
+    let grants = read_object(&layout.grants_json())?;
+    Ok(GrantChange::against(grants.get(grant), scopes))
+}
+
 /// Write one grant into `grants.json` alone — for an identity that is not a certificate (a
 /// passkey invite). The same refusals as [`enrol`]: a broad token always, and an existing
 /// grant with different scopes unless `force`, because a grant name may be shared by a
@@ -546,18 +669,11 @@ pub fn put_grant(
     }
     private_dir(&layout.dir)?;
     let mut grants = read_object(&layout.grants_json())?;
-    let wanted = json!(scopes);
-    if let Some(existing) = grants.get(grant) {
-        if existing != &wanted && !force {
-            return Err(format!(
-                "grant `{grant}` already exists in {} with different scopes — nothing was \
-                 written (use --force to replace it, which changes every identity enrolled \
-                 under it)",
-                layout.grants_json().display()
-            ));
-        }
+    let change = GrantChange::against(grants.get(grant), scopes);
+    if change.changes() && !force {
+        return Err(change.refusal(grant, &layout.grants_json()));
     }
-    grants.insert(grant.to_string(), wanted);
+    grants.insert(grant.to_string(), json!(scopes));
     let text = pretty(&Value::Object(grants))?;
     parse_grants(&text)?;
     write_private(&layout.grants_json(), &text)
@@ -618,14 +734,9 @@ pub fn enrol(
     }
     let mut grants = read_object(&layout.grants_json())?;
     let wanted = json!(scopes);
-    if let Some(existing) = grants.get(grant) {
-        if existing != &wanted && !force {
-            return Err(format!(
-                "grant `{grant}` already exists in {} with different scopes — nothing was \
-                 written (use --force to replace it)",
-                layout.grants_json().display()
-            ));
-        }
+    let change = GrantChange::against(grants.get(grant), scopes);
+    if change.changes() && !force {
+        return Err(change.refusal(grant, &layout.grants_json()));
     }
     let mut clients_doc = read_object(&layout.clients_json())?;
     let key = normalize(fingerprint);
@@ -885,6 +996,85 @@ mod tests {
         let broad = vec!["urn:cap:store:read".to_string()];
         assert!(enrol(&layout, "laptop", &bundle.fingerprint, &broad, true).is_err());
         assert!(add_client(&layout, "Bad Name", None, false).is_err());
+    }
+
+    /// ★ **A rewrite of an existing grant says what it moves, in both directions** (ledger
+    /// #435). The live case: a hand-widened passkey grant re-enrolled with flags that cannot
+    /// express all of it. Without `--force` it is refused and the refusal NAMES the scopes it
+    /// would drop and the ones it would add; with `--force` the write happens and
+    /// [`grant_change`], asked first, is what the CLI prints. A reorder is no change.
+    #[test]
+    fn rewriting_a_grant_names_what_it_removes_and_adds() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let hand_widened = owned(&[
+            "urn:cap:ledger:read:default",
+            "urn:cap:browse:read:*",
+            "urn:cap:annotate",
+            "urn:cap:net:localhost",
+            "urn:cap:exec:gh",
+        ]);
+        put_grant(&layout, "brian", &hand_widened, false).unwrap();
+        // A new grant is no change, and a reordering of the same set is none either.
+        let mut reordered = hand_widened.clone();
+        reordered.reverse();
+        assert!(!grant_change(&layout, "brian", &reordered)
+            .unwrap()
+            .changes());
+        put_grant(&layout, "brian", &reordered, false).expect("the same set, reordered");
+
+        let reenrolled = owned(&[
+            "urn:cap:ledger:read:default",
+            "urn:cap:browse:read:*",
+            "urn:cap:annotate",
+            "urn:cap:net:127.0.0.1",
+        ]);
+        let change = grant_change(&layout, "brian", &reenrolled).unwrap();
+        assert!(change.changes() && change.narrows());
+        // In the file's order — which the reorder above reversed.
+        assert_eq!(change.removed, ["urn:cap:exec:gh", "urn:cap:net:localhost"]);
+        assert_eq!(change.added, ["urn:cap:net:127.0.0.1"]);
+
+        let refused = put_grant(&layout, "brian", &reenrolled, false).unwrap_err();
+        assert!(refused.contains("NARROW it and widen it"), "{refused}");
+        for line in [
+            "    removes  urn:cap:net:localhost",
+            "    removes  urn:cap:exec:gh",
+            "    adds     urn:cap:net:127.0.0.1",
+        ] {
+            assert!(refused.contains(line), "`{line}` in: {refused}");
+        }
+        assert_eq!(
+            read_grants(&layout.grants_json()).unwrap()["brian"],
+            reordered,
+            "nothing was written"
+        );
+
+        // The certificate path refuses with the same list.
+        let bundle = add_client(&layout, "brian", None, false).unwrap();
+        let by_cert = enrol(&layout, "brian", &bundle.fingerprint, &reenrolled, false).unwrap_err();
+        assert!(
+            by_cert.contains("    removes  urn:cap:exec:gh"),
+            "{by_cert}"
+        );
+
+        // --force writes it.
+        put_grant(&layout, "brian", &reenrolled, true).unwrap();
+        assert_eq!(
+            read_grants(&layout.grants_json()).unwrap()["brian"],
+            reenrolled
+        );
+
+        // A pure widening is refused too, and says it widens.
+        let mut wider = reenrolled.clone();
+        wider.push("urn:cap:ledger:write:default".to_string());
+        let widening = put_grant(&layout, "brian", &wider, false).unwrap_err();
+        assert!(widening.contains("would widen it"), "{widening}");
+        assert!(!widening.contains("removes"), "{widening}");
+        assert!(widening.contains("    adds     urn:cap:ledger:write:default"));
+        let change = grant_change(&layout, "brian", &wider).unwrap();
+        assert!(change.changes() && !change.narrows());
     }
 
     fn at(spelled: &str) -> SocketAddr {

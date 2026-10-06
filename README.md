@@ -99,8 +99,10 @@ palette is held to the WCAG AA contrast floor in both by a test.
 ### Passkeys: who you are, and what that grants
 
 An anonymous caller on this machine can read and write the ledgers in `gonk.http.ledger` —
-exactly what the HTTP door granted before it had a face. Anything more, such as delete, purge
-or another ledger, belongs to an identity:
+exactly what the HTTP door granted before it had a face. Anything more, such as delete, purge,
+another ledger, or browsing and explaining the repositories
+([the `--browse` roles](#provisioning-a-browsing-identity-the---browse-roles)), belongs to an
+identity:
 
 ```sh
 ikigai-gonk passkey invite brian --ledger default=delete
@@ -269,29 +271,70 @@ never overwritten. It is a hook on browse's own selection, not a new one: with s
 per-request capability above — so a cross-site `POST` mints nothing, a rebound `Host` reads
 nothing, and the anonymous loopback caller, which holds ledger tokens only, cannot read a
 repository at all, let alone spend inference on explaining one. A signed-in identity can do
-exactly what its grant names, and browsing needs four tokens beyond a ledger's:
+exactly what its grant names, and browsing needs a role beyond a ledger's grant.
+
+### Provisioning a browsing identity: the `--browse` roles
+
+`passkey invite` and `client add` take `--browse <read|derive>`: the repositories as a ROLE,
+the way `--ledger` and `--browse-graph` are roles, so an operator names what an identity may
+DO and the tool writes the tokens. Each role holds the one before it:
 
 ```text
-urn:cap:browse:read:*     read the repository at all (the wildcard browse declares)
-urn:cap:annotate          mint annotations — publishing a finding, and the human ones.
-                          ⚠ A review PASS no longer declares it (browse 0.5.0): a pass
-                          writes pending findings and cannot publish, which is what lets
-                          the git-event trigger be armed at all. DELETING an
-                          annotation also needs browse read on ITS root (browse
-                          0.17.0): annotate alone no longer deletes anything
-urn:cap:net:localhost     reach the mounted model, which is what deriving costs authority for
-urn:cap:store:{read,write}:graph:urn:iki:browse:graph:default    the archive those land in
+--browse read     urn:cap:browse:read:*     read the repositories: files, trees, git state,
+                                            annotations, the archive listing. --root <root>
+                                            (repeatable) names roots instead of every root
+                  urn:cap:store:read:graph:urn:iki:browse:graph:default
+                                            the browse graph's quads, through
+                                            urn:iki:store:graph-* (no file contents)
+--browse derive   urn:cap:annotate          mint annotations, publish a finding. DELETING an
+                                            annotation also needs the read on ITS root
+                                            (browse 0.17.0), which the role carries
+                  urn:cap:net:<mount host>  EXPLAIN and REVIEW: reach the mounted model,
+                                            which spends its inference
 ```
 
-⚠ **Only the last pair can be minted by this binary** (`passkey invite … --browse-graph
-write`). The first three have no flag: `passkey invite` and `client add` mint per-ledger
-grants and the browse graph's store doors, and nothing else — so a browsing identity is made
-today by adding those names to its entry in `~/.config/ikigai/gonk/grants.json` by hand. That
-is not a hole in the boundary: the file is re-read on every request and checked fail-closed
-each time, so the store's whole-dataset tokens and the `urn:cap:net:*` / `urn:cap:exec:*`
-offering wildcards are refused whether they were written by this binary or by an editor —
-but that the tooling cannot express a grant an operator is expected to hold is a real gap
-(ledger #435).
+```sh
+ikigai-gonk grants --browse derive            # print what it would write, on THIS server
+ikigai-gonk passkey invite brian --ledger default=delete --browse derive
+ikigai-gonk client add box --browse read --root ikigai-core
+```
+
+- **`derive` is the dangerous one, and it is one word on purpose.** Spending inference used to
+  be three tokens an operator assembled by hand; now it is a flag `--help` names and a grant
+  visibly carries.
+- **The net scope is read from this server's own `gonk.mount`**, never typed: the host of a
+  `quic://` target (`urn:cap:net:127.0.0.1` for `quic://127.0.0.1:4433`, the peer's name for a
+  remote one), `localhost` for a socket. With no mount, `derive` is refused: explain and review
+  derive through the mounted peer, so there is nothing to grant. A `--root` that is not a
+  configured `gonk.browse.root` is refused too, since a token naming it would match nothing.
+  So these commands read `config.toml` (or `--config`) whenever `--browse` is given.
+- **`derive` always carries `urn:cap:annotate`, and that keeps the review trigger safe.** A
+  headless reviewer needs the net grant WITHOUT the publish token, and arming refuses any
+  grant that can publish (below). Since no role mints one without the other, nothing these
+  commands write can arm the trigger.
+- **Not in either role:** the browse graph's WRITE door (raw quads, `--browse-graph write`;
+  `ikigai-browse` writes its own archive and annotations without it), and `urn:cap:exec:gh`,
+  which the pull-request layers need. A grant that should reach those still names them in
+  `grants.json` by hand, and the file is re-read on every request and checked fail-closed
+  either way: the whole-dataset store tokens and the `urn:cap:net:*` / `urn:cap:exec:*`
+  offering wildcards are refused however they got there.
+
+**Rewriting a grant says what it moves.** A grant name is shared by every certificate and
+passkey enrolled under it, so writing different scopes under an existing name is refused
+unless `--force` — and the refusal names every scope the rewrite would remove and add. With
+`--force` the same list is printed after the write. Re-enrolling a hand-widened grant used to
+narrow it silently, which turned a feature off with no signal (ledger
+[#435](http://localhost:1060/l/default/item/435)); now it reads:
+
+```text
+ikigai-gonk: grant `brian` already exists in …/gonk/grants.json with different scopes — nothing was written. Replacing it would NARROW it and widen it:
+    removes  urn:cap:net:localhost
+    removes  urn:cap:exec:gh
+    adds     urn:cap:net:127.0.0.1
+Use --force to replace it, which changes every identity enrolled under it
+```
+
+A reordering of the same scopes is no change, and is written without `--force`.
 
 ⚠ **A click on Explain spends inference, and nothing here counts it.** The per-face token
 ceilings (`gonk.explain.*.max_tokens`) bound ONE call. A directory-grain explanation fans out
@@ -887,7 +930,10 @@ any backend the peer holds, and that is not a caller's decision.
 
 **Who may spend** is [the doors table](#the-three-doors), and the short form is that an
 anonymous HTTP caller holds no browse grant at all, so it can neither derive an explanation
-nor read an archived one, while the socket door's root can do both.
+nor read an archived one, while the socket door's root can do both. A signed-in or
+certificate identity may derive when its grant was minted with `--browse derive`
+([the roles](#provisioning-a-browsing-identity-the---browse-roles)), whose net scope names
+this mount's host.
 
 ## Reviewing on a git event
 
@@ -1100,9 +1146,9 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:repo:{root}:*` (`urn:cap:browse:read:{root}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:annotation` (`urn:cap:annotate`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
-| `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `passkey invite … --browse-graph read` | yes (root) | only if the grant names it |
+| `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `--browse read`, or `--browse-graph read` alone | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
-| `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`; ⚠ the two reviews no longer require `urn:cap:annotate` — browse 0.5.0 — so a pass writes pending findings and cannot publish) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`; ⚠ the two reviews no longer require `urn:cap:annotate` — browse 0.5.0 — so a pass writes pending findings and cannot publish) | **no** | only if the grant names it — `--browse derive` | yes (root) | only if the grant names it |
 | `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 
 **Deriving is the privileged act, and it is one capability away from every door.** Explaining
@@ -1110,10 +1156,11 @@ a file, reviewing one, or explaining a pull request calls a model on the mounted
 costs the operator tokens and — where the peer is metered — money. `ikigai-browse` declares
 that as `urn:cap:net:*` (the offering wildcard) on every derivation, and `declared =
 enforced`, so a caller with no net grant is refused before dispatch and never appears in
-front of a model. **This server mints no net grant**: `ikigai-gonk grants`, `client add` and
-`passkey invite` write per-ledger and per-graph store tokens only, so an identity that may derive is one an
-operator wrote by hand into `grants.json`, naming the host
-(`urn:cap:net:localhost`) — the wildcard itself is refused there, like `urn:cap:exec:*`.
+front of a model. **This server mints exactly one net grant**: `--browse derive` on
+`client add` and `passkey invite`, which names the host of this server's own `gonk.mount`
+(`urn:cap:net:127.0.0.1` for a peer at `quic://127.0.0.1:4433`) and always comes with
+`urn:cap:annotate` — see [the roles](#provisioning-a-browsing-identity-the---browse-roles).
+The wildcard itself is refused in `grants.json`, like `urn:cap:exec:*`.
 
 ⚠ **A net grant is the authority to spend that peer's inference, not only to explain.** The
 mount serves the peer's whole `urn:llm:` namespace through every door, so the same grant that

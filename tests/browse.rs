@@ -52,7 +52,9 @@ use ikigai_core::{
     ArgRef, Capability, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock, Verb,
 };
 use ikigai_gonk::config::ExplainTiers;
-use ikigai_gonk::grants::{browse_graph_grants, grants_for, grants_for_all, Authority};
+use ikigai_gonk::grants::{
+    browse_graph_grants, browse_role_grants, grants_for, grants_for_all, Authority, BrowseRole,
+};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::mount::{self, Mount};
 use ikigai_gonk::watch::RootWatch;
@@ -518,6 +520,118 @@ fn a_peer_that_is_down_costs_explain_and_nothing_else() {
             .is_some_and(ikigai_core::Error::is_transient),
         "{asked:?}"
     );
+}
+
+/// ★★ **The `--browse` roles hold what the CONTRACT asks — read against the kernel this
+/// server composes, not against a remembered list** (ledger
+/// [#435](http://localhost:1060/l/default/item/435)).
+///
+/// `read`: files, the archive listing and the browse graph's quads, and NO derivation — the
+/// spending rows are neither offered nor invocable. `derive`: the explain AND review rows are
+/// offered, an explain gets past the capability check (to the peer, which is down here, so
+/// the answer is a TRANSIENT failure and never `Denied`), and an annotation can be minted and
+/// deleted. The net scope is the one `main` derives from this fixture's socket mount.
+#[test]
+fn the_browse_roles_satisfy_the_contract_they_are_minted_for() {
+    let dir = scratch_root();
+    let (hub, _watch) = served_explaining(&dir);
+    let host = dead_mount().target.net_host();
+    assert_eq!(host, "localhost", "a socket mount names this machine");
+    let role = |role: BrowseRole| {
+        Capability::scoped(browse_role_grants(role, &[], Some(&host)).expect("a role"))
+    };
+    let (reader, deriver) = (role(BrowseRole::Read), role(BrowseRole::Derive));
+    let issue_as = |capability: &Capability, verb: Verb, iri: &str, args: &[(&str, &str)]| {
+        block_on(Kernel::issue(&hub, request(verb, iri, args), capability))
+    };
+    let offered = |capability: &Capability| -> String {
+        String::from_utf8_lossy(
+            &issue_as(capability, Verb::Source, "urn:kernel:actions", &[])
+                .expect("the manifold answers")
+                .bytes,
+        )
+        .into_owned()
+    };
+
+    // read: the file, the archive listing, the graph's quads — and no spending row.
+    for capability in [&reader, &deriver] {
+        assert_eq!(
+            issue_as(
+                capability,
+                Verb::Source,
+                "urn:repo:demo:file:src/lib.rs",
+                &[]
+            )
+            .expect("both roles read a file")
+            .bytes,
+            b"the first version\n"
+        );
+        issue_as(
+            capability,
+            Verb::Source,
+            "urn:repo:demo:explain-versions:src/lib.rs",
+            &[],
+        )
+        .expect("both roles list the archive");
+    }
+    let explain = "urn:repo:demo:explain:src/lib.rs";
+    let review = "urn:repo:demo:review:src/lib.rs";
+    for iri in [explain, review] {
+        let answer = issue_as(&reader, Verb::Source, iri, &[]);
+        assert!(
+            matches!(answer, Err(ikigai_core::Error::Denied(_))),
+            "`read` must not spend inference on {iri}: {answer:?}"
+        );
+    }
+    let to_reader = offered(&reader);
+    assert!(!to_reader.contains("urn:repo:demo:explain:"), "{to_reader}");
+    assert!(!to_reader.contains("urn:repo:demo:review:"), "{to_reader}");
+
+    // derive: both spending rows offered, and past the capability check to the (down) peer.
+    let to_deriver = offered(&deriver);
+    assert!(
+        to_deriver.contains("urn:repo:demo:explain:"),
+        "{to_deriver}"
+    );
+    assert!(to_deriver.contains("urn:repo:demo:review:"), "{to_deriver}");
+    for iri in [explain, review] {
+        let error = issue_as(&deriver, Verb::Source, iri, &[])
+            .expect_err("there is no peer to derive against");
+        assert!(
+            error.is_transient(),
+            "`derive` reaches the peer on {iri} — a down peer, not a denial: {error:?}"
+        );
+    }
+
+    // derive mints and deletes an annotation; read can do neither.
+    let note = [
+        ("target", "urn:repo:demo:file:src/lib.rs"),
+        ("exact", "first"),
+        ("body", "minted under the derive role"),
+    ];
+    assert!(matches!(
+        issue_as(&reader, Verb::Sink, "urn:iki:annotation:r1", &note),
+        Err(ikigai_core::Error::Denied(_))
+    ));
+    issue_as(&deriver, Verb::Sink, "urn:iki:annotation:r1", &note)
+        .expect("derive carries urn:cap:annotate");
+    issue_as(&deriver, Verb::Delete, "urn:iki:annotation:r1", &[])
+        .expect("…and the read on the annotation's own root that a delete needs");
+
+    // A role over NAMED roots reaches those roots only.
+    let elsewhere = Capability::scoped(
+        browse_role_grants(BrowseRole::Derive, &["elsewhere".to_string()], Some(&host))
+            .expect("a role"),
+    );
+    assert!(matches!(
+        issue_as(
+            &elsewhere,
+            Verb::Source,
+            "urn:repo:demo:file:src/lib.rs",
+            &[]
+        ),
+        Err(ikigai_core::Error::Denied(_))
+    ));
 }
 
 // ------------------------------------------------- where browse's quads land
@@ -1914,9 +2028,9 @@ fn the_join_runs_through_the_http_door_under_a_signed_in_grant() {
 /// is a scope this server mints for NO anonymous caller — which is the whole design, and
 /// what the two refusal tests below are about.
 ///
-/// ⚠ No `urn:cap:net:*` of any spelling, so nothing here can derive. That is not an omission
-/// in the fixture: gonk mints no net grant, and a test that granted one would be testing a
-/// server nobody runs.
+/// ⚠ No `urn:cap:net:*` of any spelling, so nothing here can derive. That is deliberate: the
+/// net grant is `--browse derive`'s alone, and these tests are about the door's affordances,
+/// not about spending — `the_browse_roles_satisfy_the_contract_they_are_minted_for` is.
 fn browsing_scopes() -> Vec<String> {
     let mut scopes = grants_for("default", Authority::Read).expect("the ledger's tokens");
     scopes.extend(browse_graph_grants(Authority::Write).expect("a named browse graph"));
@@ -2464,7 +2578,7 @@ fn the_header_offers_browse_only_where_a_root_is_readable() {
     let (hub, _watch) = served(&dir);
     let door = HttpDoorHarness::start(Arc::clone(&hub));
 
-    // 1. Anonymous: gonk mints no browse token for anyone, so there is no way in and no
+    // 1. Anonymous: the anonymous grant carries no browse token, so there is no way in and no
     //    link to one — but the page behind it still says which grant would open it.
     let (status, page) = door.get_html("/", None);
     assert_eq!(status, 200, "{page}");
@@ -2519,8 +2633,8 @@ fn the_header_offers_browse_only_where_a_root_is_readable() {
 }
 
 /// ★★ **An anonymous caller cannot derive**, which is the whole economic boundary of this
-/// door: a click on Explain spends inference, and gonk mints no net grant for anybody, let
-/// alone for whoever reaches loopback.
+/// door: a click on Explain spends inference, and the only net grant gonk mints is
+/// `--browse derive`'s, for a named identity — never for whoever reaches loopback.
 ///
 /// The shell is still served — and says why it is empty, with the sign-in control on the
 /// page — because a 403 in plain text would take the only affordance that fixes it away.
