@@ -101,7 +101,11 @@ ikigai-store = { version = "0.2.6", features = ["persistent"] }
 # one IRI for concurrent same-millisecond appends, so two filings merged), a delete that keeps
 # a racing write, purge that reaches a deleted item (and READS the graveyard, so purge carries
 # `cap_read_graph(<L>:deleted)`, see `grants.rs`), and `next` over every open item.
-ikigai-ledger = "0.3.0"
+# ★★ 0.4.0 is the floor now (ledger #779, #810): the keyed append (`append key=`, one store
+# update, a taken key answers the existing item) and the JSON face (`ikigai_ledger::json`,
+# schema 1). The roborev and kata bridges are built on both — before it they checked
+# `items?about=` and then appended, which raced, and parsed the plain face.
+ikigai-ledger = "0.4.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,

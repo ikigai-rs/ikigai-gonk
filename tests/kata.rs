@@ -287,6 +287,67 @@ fn a_later_export_adds_what_is_new_to_items_already_filed() {
     assert!(item_about(&hub, "kata", ISSUE_2).contains("(wontfix)"));
 }
 
+/// ★ The race the keyed append exists for (ledger #779, #810), with the importer's own code:
+/// several imports of ONE export at the same instant. Through the check-then-append path every
+/// import whose `items?about=` check landed before the first append filed the issue again. The
+/// keyed append is one store update, so the issue is one item however many imports race.
+///
+/// The export is issues only, open, with no comments or links: comments, closes and links are
+/// converged by reading the item and then writing, which is still check-then-act (the ledger
+/// has no keyed comment), so two imports racing on a NEW comment can both add it. The README
+/// says so.
+#[test]
+fn concurrent_imports_of_one_issue_file_it_once() {
+    const IMPORTS: usize = 8;
+    const ROUNDS: usize = 5;
+    let (hub, addr, _config) = serve("kata");
+    let scratch = tempfile::tempdir().unwrap();
+    let meta = r#"{"kind":"meta","data":{"key":"export_version","value":"27"}}"#;
+    for round in 0..ROUNDS {
+        let uid = format!("01K6ZRACE0000000000000000{round}");
+        let issue = format!(
+            r#"{{"kind":"issue","data":{{"id":1,"uid":"{uid}","project_id":1,"short_id":"r{round}","title":"Race {round}","body":"","status":"open","closed_reason":null,"owner":null,"author":"chris","created_at":"2026-10-01T00:00:00.000Z","updated_at":"2026-10-01T00:00:00.000Z","closed_at":null,"deleted_at":null}}}}"#
+        );
+        let path = scratch.path().join(format!("race{round}.jsonl"));
+        std::fs::write(&path, format!("{meta}\n{issue}\n")).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(IMPORTS));
+        let imports: Vec<_> = (0..IMPORTS)
+            .map(|_| {
+                let (barrier, path) = (Arc::clone(&barrier), path.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    import(addr, "kata", &path)
+                })
+            })
+            .collect();
+        let outputs: Vec<String> = imports
+            .into_iter()
+            .map(|import| stdout(&import.join().unwrap()))
+            .collect();
+        let listing = source(
+            &hub,
+            "urn:iki:ledger:kata:items",
+            &[("status", "all"), ("about", &format!("urn:kata:issue:{uid}"))],
+        );
+        let filed = listing
+            .lines()
+            .filter(|l| l.trim_start().starts_with("kata#"))
+            .count();
+        assert_eq!(
+            filed,
+            1,
+            "round {round}: {IMPORTS} concurrent imports filed one issue {filed} time(s):\n{listing}\n{}",
+            outputs.join("\n")
+        );
+        assert_eq!(
+            outputs.iter().filter(|o| o.contains("1 filed")).count(),
+            1,
+            "exactly one import says it filed:\n{}",
+            outputs.join("\n")
+        );
+    }
+}
+
 #[test]
 fn a_ledger_the_door_does_not_grant_is_refused_plainly() {
     let (hub, addr, _config) = serve("kata");

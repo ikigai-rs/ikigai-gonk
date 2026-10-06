@@ -186,6 +186,60 @@ fn a_review_files_one_item_per_finding_once() {
     );
 }
 
+/// ★ The race the keyed append exists for (ledger #779, #810), with the bridge's own code:
+/// several hooks filing ONE finding at the same instant. Through the check-then-append path
+/// (`GET items?about=<key>`, then `POST append` when the list was empty) every hook whose check
+/// landed before the first append filed it, so one finding became several items. The keyed
+/// append is one store update, so exactly one hook files and the rest are told `already`.
+#[test]
+fn concurrent_hooks_filing_one_finding_file_it_once() {
+    const HOOKS: usize = 8;
+    const ROUNDS: usize = 5;
+    let (hub, addr, _config) = serve("reviews");
+    for round in 0..ROUNDS {
+        let markdown = format!(
+            "## Summary\n\nOne.\n\n## Findings\n\n### 1. High\n\n**Location:** src/race.rs:{round}\
+             \n\n**Problem:** Round {round} races.\n\n**Fix:** Key the append.\n"
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(HOOKS));
+        let hooks: Vec<_> = (0..HOOKS)
+            .map(|_| {
+                let (barrier, markdown) = (Arc::clone(&barrier), markdown.clone());
+                std::thread::spawn(move || {
+                    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+                    command
+                        .args(["roborev", "file", "--gonk"])
+                        .arg(format!("http://127.0.0.1:{}", addr.port()))
+                        .args(["--ledger", "reviews", "--root", "demo"])
+                        .args(["--findings", &markdown]);
+                    barrier.wait();
+                    command.output().expect("run ikigai-gonk")
+                })
+            })
+            .collect();
+        let outputs: Vec<String> = hooks
+            .into_iter()
+            .map(|hook| stdout(&hook.join().unwrap()))
+            .collect();
+        let filed = outputs.iter().filter(|o| o.contains("filed ")).count();
+        let lines = item_lines(&items(
+            &hub,
+            "reviews",
+            &[("about", &format!("urn:repo:demo:file:src/race.rs"))],
+        ))
+        .len();
+        assert_eq!(
+            lines,
+            round + 1,
+            "round {round}: {HOOKS} concurrent hooks filed one finding {} time(s) (stdout says \
+             {filed}):\n{}",
+            lines - round,
+            outputs.join("\n")
+        );
+        assert_eq!(filed, 1, "exactly one hook says it filed:\n{}", outputs.join("\n"));
+    }
+}
+
 #[test]
 fn a_ledger_the_door_does_not_grant_is_refused_plainly() {
     let (hub, addr, _config) = serve("reviews");
