@@ -141,6 +141,14 @@ usage:
                                    network — so a git hook can call it per changed file and a
                                    commit never waits. Identical requests collapse to one
                                    tuple (the drop is content-addressed)
+  ikigai-gonk roborev file --gonk http://127.0.0.1:1060 --ledger <ledger> --root <browse root>
+                     --findings <markdown|-> [--job N] [--sha SHA] [--agent NAME]
+                     [--repo-path PATH] [--min-severity critical|high|medium|low] [--dry-run]
+                                   file each finding of ONE roborev review as a ledger item over
+                                   the HTTP door — what a roborev `[[hooks]]` entry on
+                                   `review.completed` runs (README, \"Filing roborev findings\").
+                                   A finding already filed is skipped; low ones are skipped
+                                   unless --min-severity low
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
@@ -231,6 +239,8 @@ pub enum Command {
         /// The authority.
         authority: Authority,
     },
+    /// File one roborev review's findings into a ledger over the HTTP door.
+    RoborevFile(crate::roborev::FileArgs),
     /// Print the usage.
     Help,
 }
@@ -568,6 +578,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("review") => {
             args.next();
             return parse_review(args);
+        }
+        Some("roborev") => {
+            args.next();
+            return crate::roborev::parse_args(args).map(Command::RoborevFile);
         }
         Some("grants") => {
             args.next();

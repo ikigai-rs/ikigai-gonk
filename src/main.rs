@@ -52,6 +52,9 @@ fn main() {
             minutes,
             flags,
         } => passkey_invite(&name, &ledgers, browse_graph, force, minutes, &flags),
+        Command::RoborevFile(args) => {
+            ikigai_gonk::roborev::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
+        }
         Command::Serve(flags) => serve(&flags),
     }
 }

@@ -47,6 +47,7 @@ pub mod mount;
 pub mod queue;
 pub mod quic;
 pub mod render;
+pub mod roborev;
 pub mod rules;
 pub mod trigger;
 pub mod verdict;
