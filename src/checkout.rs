@@ -14,6 +14,12 @@
 //! - each root's `gonk.browse.root = "<name>=<path>"` line is printed, and with
 //!   `--write-config` the missing ones are appended to the config home's `config.toml`.
 //!
+//! `checkout --all` is the same update without the URL list: every checkout already under the
+//! managed directory is fetched and fast-forwarded from its own `origin`, with the same
+//! refusals, and the run ends with how the checkouts and the config's roots cover each other
+//! (a checkout no root uses, a root there with no checkout). It clones nothing and writes no
+//! config, which is what makes it safe to put on a timer.
+//!
 //! It is a COMMAND, like `review request` and `roborev file`: it opens no store, binds no door,
 //! and the server gains no network code. gonk reads its roots at startup, so a new root needs
 //! a restart, and the command says so. A root that is already configured needs nothing: gonk
@@ -49,7 +55,11 @@ pub struct Args {
     /// `--write-config`: append the missing root lines to the config file.
     pub write_config: bool,
     /// `--config`: the config file to append to, instead of `<config home>/config.toml`.
+    /// Under `--all`, the config file whose roots the coverage report reads.
     pub config: Option<PathBuf>,
+    /// `--all`: update every checkout already under the managed directory instead of the
+    /// repositories named here (which must then be none).
+    pub all: bool,
 }
 
 /// One repository to check out.
@@ -68,6 +78,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
         dir: None,
         write_config: false,
         config: None,
+        all: false,
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
@@ -78,6 +89,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
             "--dir" => out.dir = Some(PathBuf::from(value("--dir")?)),
             "--config" => out.config = Some(PathBuf::from(value("--config")?)),
             "--write-config" => out.write_config = true,
+            "--all" => out.all = true,
             flag if flag.starts_with('-') => {
                 return Err(format!("checkout: unknown argument `{flag}`"))
             }
@@ -94,8 +106,27 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
             }
         }
     }
-    if out.repos.is_empty() {
-        return Err("checkout: expected at least one <git-url> (or <name>=<git-url>)".into());
+    if out.all {
+        if !out.repos.is_empty() {
+            return Err(
+                "checkout: --all takes its URLs from each checkout's own `origin`; give \
+                 either --all or URLs, not both"
+                    .into(),
+            );
+        }
+        if out.write_config {
+            return Err(
+                "checkout: --all never writes config (it adds no root); run `checkout <url>… \
+                 --write-config` for the repositories whose lines are missing"
+                    .into(),
+            );
+        }
+    } else if out.repos.is_empty() {
+        return Err(
+            "checkout: expected at least one <git-url> (or <name>=<git-url>), or --all to \
+             update every checkout already under the managed directory"
+                .into(),
+        );
     }
     Ok(out)
 }
@@ -209,6 +240,9 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         .dir
         .clone()
         .unwrap_or_else(|| homes.data.join(CHECKOUTS_DIR));
+    if args.all {
+        return run_all(&dir, args.config.as_deref(), homes, out);
+    }
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let git = Git::new();
     let mut roots = Vec::new();
@@ -217,21 +251,7 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         let path = dir.join(&repo.name);
         let outcome = checkout(&git, repo, &path);
         let shown = display(&path, &homes.home);
-        let _ = match &outcome {
-            Outcome::Cloned { head } => {
-                writeln!(out, "cloned     {} at {head}  {shown}", repo.name)
-            }
-            Outcome::Updated { from, to, commits } => writeln!(
-                out,
-                "updated    {} {from}..{to} ({commits} commit(s), fast-forward)  {shown}",
-                repo.name
-            ),
-            Outcome::UpToDate { head } => {
-                writeln!(out, "current    {} at {head}  {shown}", repo.name)
-            }
-            Outcome::Refused(why) => writeln!(out, "REFUSED    {}  {shown}\n  {why}", repo.name),
-            Outcome::Failed(why) => writeln!(out, "FAILED     {}  {shown}\n  {why}", repo.name),
-        };
+        report(out, &repo.name, &shown, &outcome);
         if outcome.is_root() {
             roots.push((repo.name.clone(), shown));
         } else {
@@ -282,6 +302,9 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         let _ = writeln!(out, "  backup     {}", backup.display());
     }
     if added {
+        // `kickstart -k`, not a re-registration: only config.toml changed, which gonk reads at
+        // startup, and gonk holds no TCC grant a fresh registration would re-attribute. A
+        // replaced BINARY is what needs bootout + bootstrap (README, "Why `kickstart`").
         let _ = writeln!(
             out,
             "\ngonk reads gonk.browse.root at startup only: restart it to serve the new \
@@ -289,6 +312,221 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         );
     }
     Ok(all_ok)
+}
+
+/// One repository's line (and, for a refusal or a failure, its reason on the next).
+fn report(out: &mut impl Write, name: &str, shown: &str, outcome: &Outcome) {
+    let _ = match outcome {
+        Outcome::Cloned { head } => writeln!(out, "cloned     {name} at {head}  {shown}"),
+        Outcome::Updated { from, to, commits } => writeln!(
+            out,
+            "updated    {name} {from}..{to} ({commits} commit(s), fast-forward)  {shown}"
+        ),
+        Outcome::UpToDate { head } => writeln!(out, "current    {name} at {head}  {shown}"),
+        Outcome::Refused(why) => writeln!(out, "REFUSED    {name}  {shown}\n  {why}"),
+        Outcome::Failed(why) => writeln!(out, "FAILED     {name}  {shown}\n  {why}"),
+    };
+}
+
+/// `checkout --all`: fetch and fast-forward every checkout already under `dir`, then report
+/// how those checkouts and the config's roots cover each other.
+///
+/// Each subdirectory is one checkout: its name is the directory's, its URL is its own
+/// `origin`, and it goes through exactly the update a named URL does, so the refusals are the
+/// same. Nothing is cloned (a missing directory is reported, not created) and no config is
+/// written. Entries whose names begin with `.` and entries that are not directories are
+/// skipped; a directory that is not a git checkout is REFUSED, like any other surprise in a
+/// directory this command manages. The coverage lines are information: the exit status
+/// answers only whether every checkout came out usable.
+fn run_all(
+    dir: &Path,
+    config: Option<&Path>,
+    homes: &Homes,
+    out: &mut impl Write,
+) -> Result<bool, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "checkout --all: reading {}: {e} — nothing has been checked out there yet \
+             (`ikigai-gonk checkout <url>…` clones; --all only updates)",
+            dir.display()
+        )
+    })?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("checkout --all: reading {}: {e}", dir.display()))?;
+        // Followed, so a symlink to a checkout counts as one; `update` then insists the
+        // directory IS a checkout's top level.
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            let _ = writeln!(
+                out,
+                "skipped    {}  (not a UTF-8 name, so not a root name)",
+                entry.path().display()
+            );
+            continue;
+        };
+        if !name.starts_with('.') {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let git = Git::new();
+    let mut all_ok = true;
+    let mut checkouts = Vec::new();
+    for name in &names {
+        let path = dir.join(name);
+        let shown = display(&path, &homes.home);
+        // The URL is the checkout's own origin, so `update`'s same-repository check holds by
+        // construction; when there is none, `update` itself refuses (after first asking
+        // whether this is a checkout at all, which a directory inside another one is not).
+        let repo = Repo {
+            name: name.clone(),
+            url: git
+                .run(Some(&path), &["remote", "get-url", "origin"])
+                .unwrap_or_default(),
+        };
+        // `update`, never `checkout`: the directory exists, and --all never clones.
+        let outcome = match update(&git, &repo, &path) {
+            Ok(outcome) => outcome,
+            Err(Stop::Refuse(why)) => Outcome::Refused(why),
+            Err(Stop::Fail(why)) => Outcome::Failed(why),
+        };
+        report(out, name, &shown, &outcome);
+        all_ok &= outcome.is_root();
+        checkouts.push((name.clone(), path));
+    }
+    if names.is_empty() {
+        let _ = writeln!(out, "no checkouts under {}", display(dir, &homes.home));
+    }
+    let config = config
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| homes.config.join("config.toml"));
+    let roots = match std::fs::read_to_string(&config) {
+        Ok(text) => configured_roots(&text, &homes.home),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("reading {}: {e}", config.display())),
+    };
+    let coverage = coverage(dir, &checkouts, &roots);
+    let _ = writeln!(
+        out,
+        "\ncoverage of {} by the roots in {}:",
+        display(dir, &homes.home),
+        config.display()
+    );
+    if coverage.is_empty() {
+        let _ = writeln!(
+            out,
+            "  complete   every checkout here is a browse root, and every root here has a checkout"
+        );
+    }
+    for gap in &coverage {
+        let _ = match gap {
+            Gap::Unused { name, path } => writeln!(
+                out,
+                "  unused     {name}  {}  no gonk.browse.root points into it: gonk does not \
+                 browse it (`checkout <url> --write-config` adds its line)",
+                display(path, &homes.home)
+            ),
+            Gap::Missing { name, path } => writeln!(
+                out,
+                "  missing    {name}  {}  root `{name}` points here and nothing is checked \
+                 out: gonk refuses to start until it exists (`checkout <url>` clones it)",
+                display(path, &homes.home)
+            ),
+        };
+    }
+    Ok(all_ok)
+}
+
+/// The `gonk.browse.root` lines of a config text, as (name, directory). Lines that do not
+/// parse are skipped: the coverage report is information, and gonk's own startup names a
+/// bad line.
+fn configured_roots(text: &str, home: &Path) -> Vec<(String, PathBuf)> {
+    crate::config::values_for(text, "gonk.browse.root")
+        .into_iter()
+        .filter_map(|line| {
+            let (name, path) = line.split_once('=')?;
+            Some((
+                name.trim().to_string(),
+                crate::config::expand_home(path.trim(), home),
+            ))
+        })
+        .collect()
+}
+
+/// One way the checkouts under the managed directory and the configured roots fail to cover
+/// each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gap {
+    /// A checkout that no root points into.
+    Unused {
+        /// The checkout's directory name.
+        name: String,
+        /// Where it is.
+        path: PathBuf,
+    },
+    /// A root that points into the managed directory at something that does not exist.
+    Missing {
+        /// The root's name.
+        name: String,
+        /// Where it points.
+        path: PathBuf,
+    },
+}
+
+/// Which checkouts no root uses, and which roots inside `dir` have nothing to point at.
+///
+/// A root "uses" a checkout when it points at the checkout or anywhere inside it. Paths are
+/// compared after resolving symlinks — for a path that does not exist, through its nearest
+/// existing ancestor — so `/tmp/x` and `/private/tmp/x` are one directory. Roots outside
+/// `dir` are none of this report's business.
+pub fn coverage(
+    dir: &Path,
+    checkouts: &[(String, PathBuf)],
+    roots: &[(String, PathBuf)],
+) -> Vec<Gap> {
+    let dir = resolve(dir);
+    let roots: Vec<(&String, &PathBuf, PathBuf)> =
+        roots.iter().map(|(n, p)| (n, p, resolve(p))).collect();
+    let mut gaps = Vec::new();
+    for (name, path) in checkouts {
+        let here = resolve(path);
+        if !roots.iter().any(|(_, _, root)| root.starts_with(&here)) {
+            gaps.push(Gap::Unused {
+                name: name.clone(),
+                path: path.clone(),
+            });
+        }
+    }
+    for (name, written, root) in roots {
+        if root.starts_with(&dir) && root != dir && !root.exists() {
+            gaps.push(Gap::Missing {
+                name: name.clone(),
+                path: written.clone(),
+            });
+        }
+    }
+    gaps
+}
+
+/// `path` with symlinks resolved as far as it exists, and the rest appended as written.
+fn resolve(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// `gonk.browse.root = "<name>=<path>"`.
@@ -618,6 +856,57 @@ mod tests {
             .contains("reserved"));
         assert!(parse(&["--bogus"]).unwrap_err().contains("unknown"));
         assert!(parse(&["https://example.com/"]).is_err());
+    }
+
+    #[test]
+    fn all_takes_no_urls_and_writes_no_config() {
+        let args = parse(&["--all", "--dir", "/srv/co"]).unwrap();
+        assert!(args.all && args.repos.is_empty());
+        assert!(parse(&["--all", "https://a/x.git"])
+            .unwrap_err()
+            .contains("not both"));
+        assert!(parse(&["--all", "--write-config"])
+            .unwrap_err()
+            .contains("never writes config"));
+        assert!(
+            parse(&[]).unwrap_err().contains("--all"),
+            "named as the way"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_compares_through_symlinks_and_ignores_roots_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("a/src")).unwrap();
+        std::fs::create_dir_all(real.join("b")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let checkouts = [
+            ("a".to_string(), real.join("a")),
+            ("b".to_string(), real.join("b")),
+        ];
+        let roots = [
+            // Through the symlink, and inside the checkout: still uses `a`.
+            ("a".to_string(), link.join("a/src")),
+            // Through the symlink, and not there.
+            ("gone".to_string(), link.join("gone")),
+            ("far".to_string(), PathBuf::from("/nowhere/far")),
+        ];
+        assert_eq!(
+            coverage(&real, &checkouts, &roots),
+            [
+                Gap::Unused {
+                    name: "b".into(),
+                    path: real.join("b")
+                },
+                Gap::Missing {
+                    name: "gone".into(),
+                    path: link.join("gone")
+                },
+            ]
+        );
     }
 
     #[test]
