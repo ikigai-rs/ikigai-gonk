@@ -372,3 +372,8 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .reproduced { font-weight: 600; }
 .decide-reproduced { display: inline-flex; gap: 0.3rem; align-items: center; }
 .reproduce > summary { cursor: pointer; color: var(--muted); }
+/* A caller short of a grant (ledger #739): one sentence, and the way in beside it. The
+   exact grant is a footnote for the operator, and it may be long, so it wraps. */
+.signin-notice .signed-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+.signin-notice .grant-needed > summary { color: var(--muted); }
+.signin-notice .grant-needed code { overflow-wrap: anywhere; }

@@ -329,10 +329,9 @@ fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
         ikigai_store::cap_read_graph(&ledger.graph()),
     ] {
         if !inv.capability.allows(&scope) {
-            return Err(Error::Denied(format!(
-                "this capability does not hold `{scope}`, so this ledger's pages are not \
-                 visible to it. Sign in with a passkey whose grant names the ledger."
-            )));
+            return Err(Error::Denied(
+                Lacking::ledger(ledger.name(), &scope).plain(),
+            ));
         }
     }
     Ok(())
@@ -418,6 +417,158 @@ pub(crate) fn nav(
         ));
     }
     out
+}
+
+/// What a page says when the caller's grant does not reach what it shows — ONE shape for
+/// every page that can say it, so the pages cannot drift apart again (ledger
+/// [#739](http://localhost:1060/l/default/item/739)).
+///
+/// Brian, 2026-10-05, on the sentence a signed-out visitor used to read first ("This
+/// browser holds no grant naming a repository here. A grant names one root as
+/// `urn:cap:browse:read:<root>` …"): *"kind of an obnoxious default error message."*
+/// Capability IRIs are the wrong first thing to show somebody who simply has not signed in.
+/// So there are two sentences and a footnote:
+///
+/// - **signed out**: one plain sentence and the way in — the page's notice carries its own
+///   sign-in button — and no IRI anywhere visible;
+/// - **signed in, and the grant does not cover this page**: one sentence naming what is
+///   missing in words, with the exact grant behind a `<details>` for the operator who has to
+///   fix it.
+///
+/// ★ **Which of the two shows is decided in the browser, and that is not a new heuristic.**
+/// "Signed in" is [`crate::doors::http_principal`]: the session cookie through
+/// [`Passkeys::identity`]. A page cannot ask it: `ikigai-web` hands the principal to WRITES
+/// only (an argument is part of a read's cache key, so it never rides a read), and every page
+/// here is a read. `web/gonk.js` already asks the same question of the same function on every
+/// page — `/auth/session` is `Passkeys::identity` over the same cookie, and it is what draws
+/// "Signed in as …" in the header — so the script picks the sentence from that answer. The
+/// server renders both, signed-out visible: with scripting off there is no way to sign in
+/// anyway, so the signed-out sentence is the right one to fall back to.
+///
+/// A typed refusal ([`Error::Denied`], written by `ikigai-web` as plain text with no page
+/// around it) cannot carry a script or a control, so [`Lacking::plain`] is the same words for
+/// a reader whose state is unknown.
+pub(crate) struct Lacking {
+    /// What a signed-out visitor reads, beside the sign-in button.
+    pub signed_out: String,
+    /// What a signed-in caller reads: what is missing, in words.
+    pub signed_in: String,
+    /// The exact grants, each with what it is for — secondary, for the operator.
+    pub needs: Vec<(String, String)>,
+}
+
+impl Lacking {
+    /// No repository is readable: the browse landing page and the browse shell.
+    pub(crate) fn repositories() -> Lacking {
+        Lacking {
+            signed_out: "Sign in to browse the repositories.".to_string(),
+            signed_in: "Your passkey's grant doesn't include any repository.".to_string(),
+            needs: repository_grants(),
+        }
+    }
+
+    /// This one repository is not readable: the browse shell opened on `urn:repo:{root}:…`.
+    pub(crate) fn repository(root: &str) -> Lacking {
+        Lacking {
+            signed_out: format!("Sign in to browse the repository \"{root}\"."),
+            signed_in: format!("Your passkey's grant doesn't include the repository \"{root}\"."),
+            needs: vec![
+                (
+                    format!("{}{root}", ikigai_browse::CAP_PREFIX),
+                    "to read this repository".to_string(),
+                ),
+                (
+                    ikigai_browse::CAP_WILDCARD.to_string(),
+                    "to read every repository".to_string(),
+                ),
+            ],
+        }
+    }
+
+    /// No repository is readable, so no finding is: the review queue.
+    pub(crate) fn findings() -> Lacking {
+        Lacking {
+            signed_out: "Sign in to review findings.".to_string(),
+            signed_in: "Your passkey's grant doesn't include any repository, so there are no \
+                        findings to show."
+                .to_string(),
+            needs: repository_grants(),
+        }
+    }
+
+    /// No ledger is readable: the front page.
+    pub(crate) fn ledgers() -> Lacking {
+        Lacking {
+            signed_out: "Sign in to read the ledgers.".to_string(),
+            signed_in: "Your passkey's grant doesn't include any ledger.".to_string(),
+            needs: vec![(
+                "urn:cap:ledger:read:<ledger>".to_string(),
+                "to read one ledger, with the store read token for its graph \
+                     (`ikigai-gonk passkey invite <name> --ledger <ledger>=read` writes both)"
+                    .to_string(),
+            )],
+        }
+    }
+
+    /// This ledger is not readable: a ledger or item page, refused by [`require_read`].
+    pub(crate) fn ledger(name: &str, missing: &str) -> Lacking {
+        Lacking {
+            signed_out: format!("Sign in to read the ledger \"{name}\"."),
+            signed_in: format!("Your passkey's grant doesn't include the ledger \"{name}\"."),
+            needs: vec![(
+                missing.to_string(),
+                format!("to read the ledger \"{name}\""),
+            )],
+        }
+    }
+
+    /// The `view:signin` element the stylesheet renders: both sentences and the grants, the
+    /// signed-in half hidden until `web/gonk.js` learns there is a session.
+    pub(crate) fn element(&self) -> String {
+        let needs: String = self
+            .needs
+            .iter()
+            .map(|(iri, what)| element("need", &[("iri", iri), ("for", what)], ""))
+            .collect();
+        crate::render::wrap(
+            "signin",
+            &[
+                ("signed-out", &self.signed_out),
+                ("signed-in", &self.signed_in),
+            ],
+            &needs,
+        )
+    }
+
+    /// The same words as plain text, for a refusal that has no page to stand in — neither
+    /// sentence presumes whether the reader is signed in, and the grant comes second.
+    pub(crate) fn plain(&self) -> String {
+        let needs: Vec<String> = self
+            .needs
+            .iter()
+            .map(|(iri, what)| format!("{iri} ({what})"))
+            .collect();
+        format!(
+            "{}\nSigned in already? {}\nThe grant it needs: {}",
+            self.signed_out,
+            self.signed_in,
+            needs.join("; ")
+        )
+    }
+}
+
+/// The two ways a grant reaches a repository, in `ikigai-browse`'s own spelling.
+fn repository_grants() -> Vec<(String, String)> {
+    vec![
+        (
+            format!("{}<root>", ikigai_browse::CAP_PREFIX),
+            "to read one repository".to_string(),
+        ),
+        (
+            ikigai_browse::CAP_WILDCARD.to_string(),
+            "to read every repository".to_string(),
+        ),
+    ]
 }
 
 /// `2026-09-14T10:00:00.123Z` → `2026-09-14 10:00 UTC`.
@@ -888,14 +1039,12 @@ impl Endpoint for LedgerView {
                             ("view", "empty"),
                             ("full", "true"),
                             ("title", "No ledger to show"),
-                            (
-                                "message",
-                                "This browser holds no grant to read any ledger here. Sign in \
-                                 with a passkey — `ikigai-gonk passkey invite` on the server \
-                                 makes one.",
-                            ),
                         ],
-                        &nav(&self.web, inv, &[], None),
+                        &format!(
+                            "{}{}",
+                            nav(&self.web, inv, &[], None),
+                            Lacking::ledgers().element()
+                        ),
                     );
                     return Ok(html(render::render(&doc, true).map_err(render_err)?));
                 }

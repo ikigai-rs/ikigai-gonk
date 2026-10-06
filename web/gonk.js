@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does six things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does seven things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -13,7 +13,10 @@
 // finding's word picker is required exactly while its box is ticked and no batch word stands
 // behind it — a condition over three controls, which no static attribute can state (ledger
 // #657). (6) a line selected by its number in a browse file view fills that view's annotate
-// quote — browse ships no scripts, and the selection is browse's own  (ledger #658).
+// quote — browse ships no scripts, and the selection is browse's own  (ledger #658). (7) a
+// page a caller's grant does not reach says "sign in" to a signed-out visitor and "your grant
+// doesn't include it" to a signed-in one, and which of the two is a question about the
+// session that only this script asks of the server on a read (ledger #739).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -349,6 +352,37 @@
     }
   });
 
+  // ------------------------------------------------------------------ sign-in notices
+
+  // ★ A PAGE THE GRANT DOES NOT REACH SAYS SO IN WORDS (ledger #739). The server renders both
+  // sentences of src/web.rs `Lacking` — the signed-out one visible, the signed-in one and its
+  // grant footnote hidden — because a page is a READ and `ikigai-web` hands the principal to
+  // writes only. Whether there is a session is answered below by `/auth/session`, which is
+  // `Passkeys::identity` over the same cookie the door's `http_principal` reads: the same
+  // question, asked of the same function, once per page.
+  //
+  // `signedIn` stays false until that answer arrives, and the notice is re-drawn on every
+  // settle because the Queue swaps its own section in, notice and all.
+  let signedIn = false;
+  let canSignIn = false;
+
+  function drawNotices(root) {
+    const scope = root && root.querySelectorAll ? root : document;
+    scope.querySelectorAll("[data-signin-notice]").forEach((notice) => {
+      const out = notice.querySelector(".signed-out");
+      const inside = notice.querySelector(".signed-in");
+      const button = notice.querySelector(".signin-here");
+      if (out) out.hidden = signedIn;
+      if (inside) inside.hidden = !signedIn;
+      if (button) button.hidden = signedIn || !canSignIn;
+    });
+  }
+
+  document.addEventListener("htmx:afterSettle", (e) => drawNotices(e.detail && e.detail.target));
+  document.addEventListener("click", (e) => {
+    if (canSignIn && e.target.closest && e.target.closest(".signin-here")) signIn();
+  });
+
   // ------------------------------------------------------------------ bytes
 
   function toB64(buffer) {
@@ -553,6 +587,7 @@
     }
     login.addEventListener("click", signIn);
     $("auth-logout").addEventListener("click", signOut);
+    canSignIn = true;
 
     const t = token();
     if (t) {
@@ -561,6 +596,7 @@
         $("auth-who").textContent = "Signed in as " + who.label + " (grant " + who.grant + ")";
         $("auth-who").hidden = false;
         $("auth-logout").hidden = false;
+        signedIn = true;
       } catch (_) {
         setToken("", 0);
         login.hidden = false;
@@ -568,6 +604,7 @@
     } else {
       login.hidden = false;
     }
+    drawNotices(document);
 
     const m = location.hash.match(/^#invite=([A-Za-z0-9_-]+)$/);
     if (m) {

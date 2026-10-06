@@ -229,10 +229,44 @@
       <xsl:otherwise>
         <section class="panel empty-state">
           <h1><xsl:value-of select="@title"/></h1>
-          <p><xsl:value-of select="@message"/></p>
+          <xsl:if test="@message">
+            <p><xsl:value-of select="@message"/></p>
+          </xsl:if>
+          <xsl:apply-templates select="view:signin"/>
         </section>
       </xsl:otherwise>
     </xsl:choose>
+  </xsl:template>
+
+  <!--
+    A caller whose grant does not reach this page (ledger #739): src/web.rs `Lacking`, the one
+    shape every page that can say so shares. Two sentences and a footnote, and the
+    signed-out one is what shows: no capability IRI is the first thing anybody reads.
+
+    ★ Which sentence shows is web/gonk.js's call, from the same `/auth/session` answer that
+    draws "Signed in as …" in the header — a page is a read, and `ikigai-web` hands the
+    principal to writes only. So the signed-in half arrives hidden, and so does the button
+    (the script shows it where a passkey can actually be used, as it does the header's).
+  -->
+  <xsl:template match="view:signin">
+    <div class="signin-notice" data-signin-notice="true">
+      <p class="signed-out">
+        <xsl:value-of select="@signed-out"/>
+        <xsl:text> </xsl:text>
+        <button type="button" class="signin-here" hidden="hidden">Sign in with passkey</button>
+      </p>
+      <div class="signed-in" hidden="hidden">
+        <p><xsl:value-of select="@signed-in"/></p>
+        <details class="grant-needed">
+          <summary>The grant this needs</summary>
+          <ul>
+            <xsl:for-each select="view:need">
+              <li><code><xsl:value-of select="@iri"/></code> — <xsl:value-of select="@for"/></li>
+            </xsl:for-each>
+          </ul>
+        </details>
+      </div>
+    </div>
   </xsl:template>
 
   <!-- ======================================================== browse shell -->
@@ -250,7 +284,10 @@
   <xsl:template name="roots">
     <section class="panel roots" aria-labelledby="roots-title">
       <h1 id="roots-title"><xsl:value-of select="@title"/></h1>
-      <p class="note"><xsl:value-of select="@message"/></p>
+      <xsl:if test="@message != ''">
+        <p class="note"><xsl:value-of select="@message"/></p>
+      </xsl:if>
+      <xsl:apply-templates select="view:signin"/>
       <ul class="root-list">
         <xsl:apply-templates select="view:root"/>
       </ul>
@@ -284,7 +321,10 @@
         <xsl:otherwise>
           <div id="browse" class="browse panel">
             <h1><xsl:value-of select="@title"/></h1>
-            <p class="note"><xsl:value-of select="@message"/></p>
+            <xsl:if test="@message">
+              <p class="note"><xsl:value-of select="@message"/></p>
+            </xsl:if>
+            <xsl:apply-templates select="view:signin"/>
           </div>
         </xsl:otherwise>
       </xsl:choose>
@@ -369,6 +409,7 @@
       <xsl:apply-templates select="view:hidden"/>
       <xsl:apply-templates select="view:order"/>
       <xsl:apply-templates select="view:folded"/>
+      <xsl:apply-templates select="view:signin"/>
       <xsl:if test="@empty = 'true'">
         <p class="empty"><xsl:value-of select="@empty-text"/></p>
       </xsl:if>

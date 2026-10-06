@@ -666,6 +666,94 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
     assert_eq!(curl.status, 200, "{curl:?}");
 }
 
+/// ★ A caller who may read no ledger reads a sentence first (ledger #739): the front page's
+/// notice is `web::Lacking`'s, signed-out sentence visible and free of capability IRIs, the
+/// signed-in sentence and its exact grant hidden for the script to show. And a ledger page
+/// refused outright — a typed 403 in plain text, with no page to carry a button — says the
+/// same thing in the same order: the words, then the grant.
+#[test]
+fn a_caller_short_of_a_ledger_grant_reads_a_sentence_before_a_grant() {
+    let server = Server::start();
+    // A rebound `Host` holds nothing at all, so the front page has no ledger to show.
+    let home = server.raw(
+        "GET",
+        "/",
+        &[
+            ("Host", "evil.example".to_string()),
+            ("Accept", CHROME_ACCEPT.to_string()),
+        ],
+        "",
+    );
+    let body = home.body.replace("&apos;", "'");
+    let notice = &body[body
+        .find("data-signin-notice")
+        .unwrap_or_else(|| panic!("no sign-in notice: {home:?}"))..];
+    let (seen, rest) = notice.split_once("</p>").expect("the signed-out paragraph");
+    assert!(seen.contains("Sign in to read the ledgers."), "{seen}");
+    assert!(!seen.contains("urn:cap:"), "no IRI is read first: {seen}");
+    assert!(
+        !body.contains("holds no grant"),
+        "the old sentence is gone: {body}"
+    );
+    let (inside, _) = rest.split_once("</details>").expect("the grant footnote");
+    assert!(
+        inside.contains("class='signed-in' hidden='hidden'"),
+        "{inside}"
+    );
+    assert!(
+        inside.contains("Your passkey's grant doesn't include any ledger."),
+        "{inside}"
+    );
+    assert!(
+        inside.contains("<code>urn:cap:ledger:read:&lt;ledger&gt;</code>"),
+        "{inside}"
+    );
+
+    // A ledger this browser's grant does not name: the plain-text refusal.
+    let refused = server.page("/l/acme", None);
+    assert_eq!(refused.status, 403, "{refused:?}");
+    let lines: Vec<&str> = refused.body.lines().collect();
+    assert_eq!(
+        lines.first().copied(),
+        // `denied: ` is `ikigai-web`'s prefix for a typed refusal, not gonk's word.
+        Some("denied: Sign in to read the ledger \"acme\"."),
+        "{refused:?}"
+    );
+    assert!(
+        refused.body.contains(
+            "Signed in already? Your passkey's grant doesn't include the ledger \"acme\"."
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        lines
+            .last()
+            .is_some_and(|l| l.contains("urn:cap:ledger:read:acme")),
+        "the grant comes LAST: {refused:?}"
+    );
+
+    // No root configured is the operator's sentence, unchanged, on both pages that say it —
+    // there is nothing to sign in FOR, so no notice offers to.
+    for (path, sentence) in [
+        (
+            "/browse",
+            "no browse root configured (`gonk.browse.root`), so there is nothing to browse",
+        ),
+        (
+            "/queue",
+            "no browse root configured (`gonk.browse.root`), so no review pass can run",
+        ),
+    ] {
+        let page = server.page(path, None);
+        assert_eq!(page.status, 200, "{path}: {page:?}");
+        assert!(page.body.contains(sentence), "{path}: {page:?}");
+        assert!(
+            !page.body.contains("data-signin-notice"),
+            "{path}: {page:?}"
+        );
+    }
+}
+
 #[test]
 fn sparql_is_confined_to_one_ledger_graph() {
     let server = Server::start();
