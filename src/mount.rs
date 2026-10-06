@@ -104,6 +104,33 @@ pub enum Target {
     Socket(PathBuf),
 }
 
+impl Target {
+    /// The host a `urn:cap:net:` grant names to reach this peer — the authority's HOST for a
+    /// `quic://` target, and `localhost` for a socket.
+    ///
+    /// ⚠ **The authority's host, not the whole authority and not `localhost`.**
+    /// `Capability::allows` is exact string containment, so `urn:cap:net:localhost` and
+    /// `urn:cap:net:127.0.0.1` are different hosts as far as a capability is concerned,
+    /// however the same they are to a resolver. A socket reaches a peer on this machine and
+    /// has no authority to take a host from, so it takes the name a person would write.
+    ///
+    /// ```
+    /// use ikigai_gonk::mount;
+    /// let home = std::path::Path::new("/home/nobody");
+    /// let socket = mount::parse("prefer urn:llm:=/tmp/llm.sock", home).unwrap();
+    /// assert_eq!(socket.target.net_host(), "localhost");
+    /// ```
+    pub fn net_host(&self) -> String {
+        match self {
+            Target::Quic { authority, .. } => authority
+                .rsplit_once(':')
+                .map(|(host, _)| host.to_string())
+                .unwrap_or_else(|| authority.clone()),
+            Target::Socket(_) => "localhost".to_string(),
+        }
+    }
+}
+
 impl std::fmt::Display for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

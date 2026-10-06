@@ -54,7 +54,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::grants::Authority;
+use crate::grants::{Authority, BrowseRole};
 use crate::mount::{self, Mount};
 
 /// The HTTP door's default port — and the QUIC door's, on UDP. See the README for 1060.
@@ -127,14 +127,36 @@ ikigai-gonk — a standalone ikigai work-ledger server
 
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
-  ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>] [--cert <client.crt>] [--force]
+  ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
+                     [--browse <read|derive> [--root <root>]...] [--cert <client.crt>] [--config PATH] [--force]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
-                                   with --ledger enrol its fingerprint under a grant
-  ikigai-gonk passkey invite <name> --ledger <ledger>=<read|write|delete|purge>... [--browse-graph <read|write>] [--minutes N] [--port N] [--config PATH] [--force]
+                                   with --ledger, --browse-graph or --browse enrol its
+                                   fingerprint under a grant
+  ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
+                     [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrols a passkey under that grant
+
+  Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
+  remove and add; --force writes it and prints the same list. A grant name is shared by every
+  certificate and passkey enrolled under it, so the change reaches all of them.
+
+  --browse is the repositories as a ROLE (each role holds the one before it):
+    read     urn:cap:browse:read:*            files, trees, git state, annotations (every
+                                              root; --root <root> names one, repeatable)
+             urn:cap:store:read:graph:urn:iki:browse:graph:default
+                                              the browse graph's quads, through
+                                              urn:iki:store:graph-*
+    derive   urn:cap:annotate                 mint annotations, publish findings
+             urn:cap:net:<mount host>         EXPLAIN and REVIEW: spends the mounted peer's
+                                              inference. The host is this server's own
+                                              gonk.mount target's (127.0.0.1 for
+                                              quic://127.0.0.1:4433, localhost for a
+                                              socket); with no gonk.mount, derive is refused
+  It reads config.toml (or --config) for the roots and the mount. Not covered: the PR
+  layers' `gh` (urn:cap:exec:gh) and the browse graph's WRITE door (--browse-graph write)
   ikigai-gonk review request <repo> <path> [--config PATH]
                                    drop ONE review request into the queue `gonk.review.space`
                                    names. Writes one file and exits: no store, no door, no
@@ -171,6 +193,10 @@ usage:
                                    annotations, archived explanations and review findings as
                                    quads, through urn:iki:store:graph-*. Not the browse
                                    endpoints: no file contents, no gh, and no deriving
+  ikigai-gonk grants --browse <read|derive> [--root <root>]... [--config PATH]
+                                   print the tokens a --browse role mints on THIS server
+                                   (its roots, its mount's host) — what `client add` and
+                                   `passkey invite` would write, before they write it
 
 serve flags (each overrides its config key wholesale):
   --bind IP:PORT        the HTTP door (config `gonk.bind`); loopback only — default 127.0.0.1:1060
@@ -189,8 +215,8 @@ serve flags (each overrides its config key wholesale):
                         `gonk.mount`) — the peer that serves urn:llm:*, which is what binds
                         the explain and review families over the browse roots. Unset, they
                         are not bound at all: an action no kernel can satisfy is an
-                        over-offer. Deriving one requires a net grant, which no grant this
-                        server MINTS carries — see `grants` and the README
+                        over-offer. Deriving one requires a net grant naming this
+                        mount's host, which only `--browse derive` mints — see `grants`
   --no-backup           take no SCHEDULED backup this run (config `gonk.backup.every =
                         \"off\"`). urn:iki:gonk:backup and urn:iki:gonk:restore stay bound:
                         this server is the only thing that can export the dataset
@@ -220,8 +246,12 @@ pub enum Command {
         ledgers: Vec<(String, Authority)>,
         /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
         browse_graph: Option<Authority>,
+        /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
+        browse: Option<BrowseGrant>,
         /// Replace an existing bundle or enrolment.
         force: bool,
+        /// `--config`, read only when `--browse` needs this server's roots and mount.
+        flags: Flags,
     },
     /// Drop one review request into the configured queue.
     ReviewRequest {
@@ -240,6 +270,8 @@ pub enum Command {
         ledgers: Vec<(String, Authority)>,
         /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
         browse_graph: Option<Authority>,
+        /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
+        browse: Option<BrowseGrant>,
         /// Replace an existing grant of that name with different scopes.
         force: bool,
         /// How long the invite is valid.
@@ -254,6 +286,13 @@ pub enum Command {
         /// The authority.
         authority: Authority,
     },
+    /// Print the tokens a browse ROLE mints on this server (`grants --browse …`).
+    GrantsBrowse {
+        /// The role and its roots.
+        browse: BrowseGrant,
+        /// `--config`: where this server's roots and mount are read from.
+        flags: Flags,
+    },
     /// File one roborev review's findings into a ledger over the HTTP door.
     RoborevFile(crate::roborev::FileArgs),
     /// Clone or fast-forward the repositories gonk browses, and print their root lines.
@@ -262,6 +301,36 @@ pub enum Command {
     KataImport(crate::kata::ImportArgs),
     /// Print the usage.
     Help,
+}
+
+/// `--browse <read|derive>` with its `--root`s, as given on a minting command line.
+///
+/// ★ A ROLE, in the house style `--browse-graph` set: the operator names what the identity
+/// may DO, and [`crate::grants::browse_role_for`] turns that into tokens against this
+/// server's own roots and mount. No roots means every root (`urn:cap:browse:read:*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowseGrant {
+    /// What the identity may do.
+    pub role: BrowseRole,
+    /// The roots it may do it over; empty is every root.
+    pub roots: Vec<String>,
+}
+
+/// Collect `--browse` and `--root` into one value, refusing a `--root` with no role: it
+/// narrows a grant, and on its own there is nothing for it to narrow.
+fn browse_grant(
+    role: Option<BrowseRole>,
+    roots: Vec<String>,
+) -> Result<Option<BrowseGrant>, String> {
+    match role {
+        Some(role) => Ok(Some(BrowseGrant { role, roots })),
+        None if roots.is_empty() => Ok(None),
+        None => Err(
+            "--root narrows a --browse role to named roots; give `--browse read` or \
+             `--browse derive` with it"
+                .to_string(),
+        ),
+    }
 }
 
 /// The serve flags, unmerged.
@@ -451,6 +520,16 @@ impl Settings {
     pub fn explains(&self) -> bool {
         !self.mounts.is_empty() && !self.browse_roots.is_empty()
     }
+
+    /// The host a `urn:cap:net:` grant must name to reach the mounted peer, or `None` with
+    /// no `gonk.mount` — see [`crate::mount::Target::net_host`].
+    ///
+    /// ★ Derived from the mount, never typed: a grant that names `localhost` for a peer
+    /// mounted at `127.0.0.1` says something the mount does not, and the first remote peer
+    /// would make a hard-coded `localhost` say something false.
+    pub fn mount_host(&self) -> Option<String> {
+        self.mounts.first().map(|mount| mount.target.net_host())
+    }
 }
 
 /// What each explanation grain asks, and at what ceiling — `ikigai-browse`'s own defaults
@@ -612,9 +691,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         }
         Some("grants") => {
             args.next();
-            let subject = args
-                .next()
-                .ok_or("grants: expected <ledger> [read|write|delete|purge], or --browse-graph")?;
+            let subject = args.next().ok_or(
+                "grants: expected <ledger> [read|write|delete|purge], --browse-graph, or \
+                 --browse <read|derive>",
+            )?;
+            if subject == "--browse" {
+                return parse_grants_browse(args);
+            }
             // ★ A FLAG, not a reserved ledger name. `grants browse …` would have read
             // better and would have been a trap: `browse` is a name `Ledger::parse`
             // accepts, so a server with a ledger called that could never print its tokens.
@@ -716,9 +799,13 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         .filter(|name| !name.starts_with('-'))
         .ok_or("client add: expected <name>")?;
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
+    let (mut role, mut roots, mut flags) = (None, Vec::new(), Flags::default());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
+            "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
+            "--root" => roots.push(value(&mut args, "--root")?),
+            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
             "--ledger" => {
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
@@ -738,7 +825,9 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         cert,
         ledgers,
         browse_graph,
+        browse: browse_grant(role, roots)?,
         force,
+        flags,
     })
 }
 
@@ -763,8 +852,11 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         crate::identity::INVITE_MINUTES,
         Flags::default(),
     );
+    let (mut role, mut roots) = (None, Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
+            "--root" => roots.push(value(&mut args, "--root")?),
             "--ledger" => {
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
@@ -799,8 +891,34 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         name,
         ledgers,
         browse_graph,
+        browse: browse_grant(role, roots)?,
         force,
         minutes,
+        flags,
+    })
+}
+
+/// `ikigai-gonk grants --browse <read|derive> [--root R]... [--config PATH]`.
+///
+/// ★ It reads the config, unlike `grants <ledger>`, because a browse role's tokens depend on
+/// this server: `--root` must name a configured root, and `derive`'s net grant names the host
+/// of this server's own `gonk.mount`. Printing what a mint WOULD write is the point, so it
+/// has to be computed the way the mint computes it.
+fn parse_grants_browse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let role: BrowseRole = args
+        .next()
+        .ok_or("grants --browse: expected a role (read | derive)")?
+        .parse()?;
+    let (mut roots, mut flags) = (Vec::new(), Flags::default());
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => roots.push(value(&mut args, "--root")?),
+            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            other => return Err(format!("grants --browse: unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::GrantsBrowse {
+        browse: BrowseGrant { role, roots },
         flags,
     })
 }
@@ -1720,10 +1838,13 @@ mod tests {
                 name,
                 ledgers,
                 browse_graph,
+                browse,
                 cert,
                 force,
+                flags,
             } => {
                 assert_eq!(name, "laptop");
+                assert!(browse.is_none() && flags.config.is_none());
                 assert_eq!(
                     ledgers,
                     [
@@ -1803,8 +1924,69 @@ mod tests {
             parse_args(args("grants browse read")).unwrap(),
             Command::Grants { ledger: Some(name), .. } if name == "browse"
         ));
-        assert!(parse_args(args("grants --browse read")).is_err(), "a typo");
         assert!(parse_args(args("client add x --browse-graph nonsense")).is_err());
+    }
+
+    /// ★ The browse family as a ROLE (ledger #435), on all three paths that mint or print it,
+    /// and the two spellings that are wrong on their face refused at parse time.
+    ///
+    /// ⚠ `grants --browse read` used to be pinned here as a TYPO of `--browse-graph`. It is a
+    /// command now, and deliberately: the role and the graph are different subjects, and the
+    /// flag that names the repositories is the shorter one.
+    #[test]
+    fn the_browse_role_parses_on_every_minting_path() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        match parse_args(args(
+            "grants --browse derive --root core --config /tmp/c.toml",
+        ))
+        .unwrap()
+        {
+            Command::GrantsBrowse { browse, flags } => {
+                assert_eq!(browse.role, BrowseRole::Derive);
+                assert_eq!(browse.roots, ["core"]);
+                assert_eq!(flags.config, Some(PathBuf::from("/tmp/c.toml")));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(args("client add box --browse read --root a --root b")).unwrap() {
+            Command::ClientAdd {
+                browse, ledgers, ..
+            } => {
+                assert!(ledgers.is_empty());
+                assert_eq!(
+                    browse,
+                    Some(BrowseGrant {
+                        role: BrowseRole::Read,
+                        roots: vec!["a".to_string(), "b".to_string()],
+                    })
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(args(
+            "passkey invite brian --ledger default=delete --browse derive",
+        ))
+        .unwrap()
+        {
+            Command::PasskeyInvite { browse, .. } => assert_eq!(
+                browse,
+                Some(BrowseGrant {
+                    role: BrowseRole::Derive,
+                    roots: Vec::new(),
+                })
+            ),
+            other => panic!("{other:?}"),
+        }
+        for refused in [
+            "grants --browse",
+            "grants --browse write",
+            "client add box --browse admin",
+            "client add box --root core",
+            "passkey invite x --ledger default=read --root core",
+            "grants --browse read --ledger default=read",
+        ] {
+            assert!(parse_args(args(refused)).is_err(), "{refused}");
+        }
     }
 
     // ------------------------------------------------ ledger #737 minor items (ledger #723)

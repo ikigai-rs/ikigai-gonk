@@ -57,11 +57,13 @@
 //! `urn:kernel:actions` — capability-scoped by construction — does not offer an explain row
 //! to a caller who could not invoke it.
 //!
-//! So the whole gate is which door's capability carries a net grant. gonk mints none:
-//! `ikigai-gonk grants`, `client add` and `passkey invite` write per-ledger tokens and — since
-//! the graph decision — the browse graph's two STORE tokens, which are authority over quads in
-//! one graph and over nothing else. `grants.json` refuses the wildcard `urn:cap:net:*` as a
-//! GRANT the way it refuses
+//! So the whole gate is which door's capability carries a net grant, and gonk mints exactly
+//! one spelling of it: `--browse derive` on `client add` / `passkey invite`, which names the
+//! host of this server's own `gonk.mount` ([`crate::grants::browse_role_for`]) and always
+//! comes with `urn:cap:annotate` — so no mintable grant can derive without being able to
+//! publish, which is what keeps the review trigger unarmable from the provisioning tool.
+//! Everything else those commands write is per-ledger tokens and the browse graph's STORE
+//! tokens. `grants.json` refuses the wildcard `urn:cap:net:*` as a GRANT the way it refuses
 //! `urn:cap:exec:*` ([`crate::grants::unbounded_net_scopes`]). The per-door table is in the
 //! README; the short form is that **an anonymous HTTP caller cannot reach a browse row at
 //! all**, so it can neither derive an explanation nor read an archived one, and the socket

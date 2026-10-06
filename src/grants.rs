@@ -126,8 +126,8 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 ///
 /// They are **not** the browse family: `urn:cap:browse:read:*` (file contents, trees, the
 /// PR rows), `urn:cap:annotate` (the annotation endpoints) and `urn:cap:net:*` (deriving)
-/// are separate, and this function mints none of them. An identity holding only these two
-/// can read browse's graph and cannot read a file.
+/// are separate, and this function mints none of them ([`browse_role_grants`] does). An
+/// identity holding only these two can read browse's graph and cannot read a file.
 ///
 /// ⚠ **Delete and Purge are the ledger's vocabulary, not this one.** A ledger's Delete needs
 /// a second graph (its graveyard) and Purge is a ledger verb; browse has neither — deleting
@@ -154,6 +154,179 @@ pub fn browse_graph_grants(authority: Authority) -> Result<Vec<String>, String> 
         grants.push(ikigai_store::cap_write_graph(graph.as_str()));
     }
     Ok(grants)
+}
+
+/// What a browsing identity may do with the repositories this server serves — a ROLE, the way
+/// `--browse-graph` is one, never a list of scopes an operator assembles (ledger
+/// [#435](http://localhost:1060/l/default/item/435)).
+///
+/// Cumulative, like [`Authority`]: `derive` holds everything `read` does.
+///
+/// ★ **`derive` is the dangerous capability, and it is ONE word on purpose.** Deriving an
+/// explanation or a review spends the mounted peer's inference. As three loose tokens
+/// (`urn:cap:browse:read:*`, `urn:cap:annotate`, `urn:cap:net:{host}`) an operator had to
+/// assemble that authority by hand and could not see it in a flag list; as a role it is a
+/// thing `--help` names and a grant visibly carries.
+///
+/// ⚠ **And `derive` bundles `urn:cap:annotate` with the net grant, which is load-bearing for
+/// the review interlock.** A headless reviewer needs net WITHOUT annotate, and
+/// [`crate::trigger::check_reviewer`] refuses any grant that can publish. No role here mints
+/// net without annotate, so nothing this server mints can arm the trigger: a role that
+/// spent inference but could not publish would be exactly a mintable reviewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseRole {
+    /// Read the repositories (file contents, trees, git state, the archive listings and the
+    /// annotations on them through `urn:repo:{root}:*`), and the browse graph's quads through
+    /// the store's per-graph read door. Spends nothing and writes nothing.
+    Read,
+    /// …plus `urn:cap:annotate` (mint annotations and publish findings) and
+    /// `urn:cap:net:{host}` for the mounted peer, so the identity may EXPLAIN and REVIEW —
+    /// which spends that peer's inference.
+    Derive,
+}
+
+impl std::str::FromStr for BrowseRole {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "read" => Ok(BrowseRole::Read),
+            "derive" => Ok(BrowseRole::Derive),
+            other => Err(format!("`{other}` is not a browse role (read | derive)")),
+        }
+    }
+}
+
+/// Why `derive` cannot be minted on a server with no `gonk.mount` — the refusal itself, so
+/// the CLI and the tests say the same sentence.
+pub const DERIVE_NEEDS_A_MOUNT: &str =
+    "--browse derive grants explain and review, which derive through the peer a `gonk.mount` \
+     line names — and this server has none, so there is no host for the net grant to name and \
+     nothing a derivation could reach. Add `gonk.mount = \"prefer urn:llm:=…\"` to config.toml \
+     (README, \"Explaining what it browses\"), or grant `--browse read`";
+
+/// Every token a browsing identity needs for `role` — over every root (`roots` empty, the
+/// all-roots wildcard) or over exactly the roots named.
+///
+/// `net_host` is where the mounted LLM peer lives ([`crate::config::Settings::mount_host`]);
+/// `derive` needs it and `read` ignores it.
+///
+/// ```
+/// use ikigai_gonk::grants::{browse_role_grants, BrowseRole};
+/// assert_eq!(
+///     browse_role_grants(BrowseRole::Read, &[], None).unwrap(),
+///     [
+///         "urn:cap:browse:read:*",
+///         "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+///     ]
+/// );
+/// assert_eq!(
+///     browse_role_grants(BrowseRole::Derive, &["ikigai-core".to_string()], Some("127.0.0.1"))
+///         .unwrap(),
+///     [
+///         "urn:cap:browse:read:ikigai-core",
+///         "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+///         "urn:cap:annotate",
+///         "urn:cap:net:127.0.0.1",
+///     ]
+/// );
+/// ```
+///
+/// ⚠ **No browse-graph WRITE token, and that is measured, not forgotten.** `ikigai-browse`
+/// writes its archive, its annotations and its findings through its own handle on this
+/// dataset, not through `urn:iki:store:graph-update`, so neither deriving nor annotating
+/// needs it. That token is raw quad authority over the whole graph — every annotation, every
+/// finding — and stays what `--browse-graph write` says it is.
+///
+/// # Errors
+///
+/// `derive` with no `net_host` ([`DERIVE_NEEDS_A_MOUNT`]); a root that could not be a root
+/// name (`*`, whitespace, or anything [`crate::browse::check_root_name`] refuses — each would
+/// forge a different token); and the browse graph's own refusal ([`browse_graph_grants`]).
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn browse_role_grants(
+    role: BrowseRole,
+    roots: &[String],
+    net_host: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut grants: Vec<String> = Vec::new();
+    if roots.is_empty() {
+        grants.push(ikigai_browse::CAP_WILDCARD.to_string());
+    }
+    for root in roots {
+        if root == "*" || root.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "--root `{root}` cannot be a browse root name; omit --root for every root"
+            ));
+        }
+        crate::browse::check_root_name(root)?;
+        let token = format!("{}{root}", ikigai_browse::CAP_PREFIX);
+        if !grants.contains(&token) {
+            grants.push(token);
+        }
+    }
+    grants.extend(browse_graph_grants(Authority::Read)?);
+    if role == BrowseRole::Read {
+        return Ok(grants);
+    }
+    let host = net_host.ok_or_else(|| DERIVE_NEEDS_A_MOUNT.to_string())?;
+    if host.is_empty() || host == "*" || host.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "`{host}` cannot be the mounted peer's host in a net grant"
+        ));
+    }
+    grants.push(ikigai_browse::CAP_ANNOTATE.to_string());
+    grants.push(format!("urn:cap:net:{host}"));
+    Ok(grants)
+}
+
+/// [`browse_role_grants`] for THIS server's configuration: every `--root` must be a
+/// configured `gonk.browse.root`, and `derive`'s net grant names the host of this server's
+/// own `gonk.mount` ([`crate::config::Settings::mount_host`]).
+///
+/// ★ Both checks turn a silent denial into a refusal at mint time. A root this server does
+/// not serve is a token that matches nothing; a net grant for a host the mount does not name
+/// would say the identity may reach somewhere it may not, and a hard-coded `localhost` says
+/// exactly that the moment the peer moves to another machine.
+///
+/// # Errors
+///
+/// A root that is not configured, `derive` on a server that binds no explain or review (no
+/// `gonk.mount`, or no `gonk.browse.root` for it to derive over), or any refusal of
+/// [`browse_role_grants`].
+pub fn browse_role_for(
+    settings: &crate::config::Settings,
+    role: BrowseRole,
+    roots: &[String],
+) -> Result<Vec<String>, String> {
+    let configured: Vec<&str> = settings
+        .browse_roots
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for root in roots {
+        if !configured.contains(&root.as_str()) {
+            return Err(format!(
+                "--root `{root}` is not a gonk.browse.root on this server ({}), so a token \
+                 naming it would match nothing",
+                if configured.is_empty() {
+                    "none is configured".to_string()
+                } else {
+                    format!("configured: {}", configured.join(", "))
+                }
+            ));
+        }
+    }
+    let host = settings.mount_host();
+    if role == BrowseRole::Derive && host.is_some() && configured.is_empty() {
+        return Err(
+            "--browse derive grants explain and review over this server's browse roots, and \
+             it has no gonk.browse.root — so neither is bound here and the grant would spend \
+             nothing. Add a root (`ikigai-gonk checkout … --write-config`) first"
+                .to_string(),
+        );
+    }
+    browse_role_grants(role, roots, host.as_deref())
 }
 
 /// The union of [`grants_for`] over several ledgers at one authority, first-seen order.
@@ -323,6 +496,161 @@ mod tests {
             browse_graph_grants(Authority::Read).unwrap(),
             [ikigai_store::cap_read_graph(graph.as_str())]
         );
+    }
+
+    /// ★ Each browse ROLE's tokens as literals (ledger #435), for the reason the ledger's
+    /// are: they go into an operator's `grants.json`, and a change to how `ikigai-browse`
+    /// spells a scope, or how this server names its graph, has to fail HERE, where the
+    /// operator's file would have to change too.
+    #[test]
+    fn each_browse_role_mints_exactly_these_tokens() {
+        assert_eq!(
+            browse_role_grants(BrowseRole::Read, &[], None).unwrap(),
+            [
+                "urn:cap:browse:read:*",
+                "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+            ]
+        );
+        assert_eq!(
+            browse_role_grants(BrowseRole::Derive, &[], Some("127.0.0.1")).unwrap(),
+            [
+                "urn:cap:browse:read:*",
+                "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+                "urn:cap:annotate",
+                "urn:cap:net:127.0.0.1",
+            ]
+        );
+        let roots = vec!["ikigai-core".to_string(), "ikigai-gonk".to_string()];
+        assert_eq!(
+            browse_role_grants(BrowseRole::Derive, &roots, Some("localhost")).unwrap(),
+            [
+                "urn:cap:browse:read:ikigai-core",
+                "urn:cap:browse:read:ikigai-gonk",
+                "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+                "urn:cap:annotate",
+                "urn:cap:net:localhost",
+            ]
+        );
+        // Read ignores the host: it spends nothing, so it names no peer.
+        assert_eq!(
+            browse_role_grants(BrowseRole::Read, &[], Some("127.0.0.1")).unwrap(),
+            browse_role_grants(BrowseRole::Read, &[], None).unwrap()
+        );
+    }
+
+    /// ★ Nothing a role mints is a token this server refuses as a GRANT: no broad store
+    /// token, no offering wildcard, no backup family — so a minted grant always admits the
+    /// identity it was minted for. And the browse graph's WRITE door is not in either role.
+    #[test]
+    fn a_role_mints_nothing_this_server_refuses_and_no_raw_graph_write() {
+        for role in [BrowseRole::Read, BrowseRole::Derive] {
+            let grants = browse_role_grants(role, &[], Some("127.0.0.1")).unwrap();
+            assert!(broad_store_scopes(&grants).is_empty(), "{grants:?}");
+            assert!(unbounded_net_scopes(&grants).is_empty(), "{grants:?}");
+            assert!(unbounded_exec_scopes(&grants).is_empty(), "{grants:?}");
+            assert!(gonk_admin_scopes(&grants).is_empty(), "{grants:?}");
+            let write = &browse_graph_grants(Authority::Write).unwrap()[1];
+            assert!(!grants.contains(write), "{role:?} must not carry {write}");
+        }
+    }
+
+    #[test]
+    fn derive_without_a_mount_and_a_root_that_forges_a_token_are_refused() {
+        let refused = browse_role_grants(BrowseRole::Derive, &[], None).unwrap_err();
+        assert_eq!(refused, DERIVE_NEEDS_A_MOUNT);
+        assert!(refused.contains("gonk.mount"), "{refused}");
+        for host in ["*", "", "a b"] {
+            assert!(
+                browse_role_grants(BrowseRole::Derive, &[], Some(host)).is_err(),
+                "`{host}`"
+            );
+        }
+        for root in ["*", "a:b", "", "a b", "x/y"] {
+            assert!(
+                browse_role_grants(BrowseRole::Read, &[root.to_string()], None).is_err(),
+                "`{root}`"
+            );
+        }
+        assert!("write".parse::<BrowseRole>().is_err());
+        assert_eq!("derive".parse::<BrowseRole>(), Ok(BrowseRole::Derive));
+    }
+
+    /// ★ **The net scope is this server's mount's host, read from the config — never typed.**
+    /// A quic mount at `127.0.0.1` mints `urn:cap:net:127.0.0.1` (not `localhost`); a socket
+    /// mints `localhost`; a server with no mount refuses `derive` and still mints `read`; and
+    /// a `--root` this server does not serve is refused rather than written as a token that
+    /// matches nothing.
+    #[test]
+    fn the_net_scope_is_derived_from_this_servers_own_mount() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let repo = dir.path().join("repo");
+        let certs = dir.path().join("certs");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&certs).unwrap();
+        let homes = crate::config::Homes {
+            home: dir.path().to_path_buf(),
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        let settings = |text: String| {
+            crate::config::settings(&crate::config::Flags::default(), &text, &homes)
+                .expect("a scratch config")
+        };
+        let root = format!("gonk.browse.root = \"demo={}\"\n", repo.display());
+        let quic = settings(format!(
+            "{root}gonk.mount = \"prefer urn:llm:=quic://127.0.0.1:4433 {}\"\n",
+            certs.display()
+        ));
+        assert_eq!(
+            browse_role_for(&quic, BrowseRole::Derive, &[]).unwrap(),
+            [
+                "urn:cap:browse:read:*",
+                "urn:cap:store:read:graph:urn:iki:browse:graph:default",
+                "urn:cap:annotate",
+                "urn:cap:net:127.0.0.1",
+            ]
+        );
+        let remote = settings(format!(
+            "{root}gonk.mount = \"prefer urn:llm:=quic://plasma.local:4433 {}\"\n",
+            certs.display()
+        ));
+        assert_eq!(
+            browse_role_for(&remote, BrowseRole::Derive, &["demo".to_string()])
+                .unwrap()
+                .last()
+                .map(String::as_str),
+            Some("urn:cap:net:plasma.local")
+        );
+        let socket = settings(format!(
+            "{root}gonk.mount = \"prefer urn:llm:=/nonexistent/llm.sock\"\n"
+        ));
+        assert_eq!(
+            browse_role_for(&socket, BrowseRole::Derive, &[])
+                .unwrap()
+                .last()
+                .map(String::as_str),
+            Some("urn:cap:net:localhost")
+        );
+
+        let unmounted = settings(root.clone());
+        assert_eq!(
+            browse_role_for(&unmounted, BrowseRole::Derive, &[]).unwrap_err(),
+            DERIVE_NEEDS_A_MOUNT
+        );
+        assert!(browse_role_for(&unmounted, BrowseRole::Read, &[]).is_ok());
+
+        let elsewhere =
+            browse_role_for(&quic, BrowseRole::Read, &["core".to_string()]).unwrap_err();
+        assert!(elsewhere.contains("`core`"), "{elsewhere}");
+        assert!(elsewhere.contains("configured: demo"), "{elsewhere}");
+
+        // A mount with no root binds no explain and no review: derive would spend nothing.
+        let rootless = settings(format!(
+            "gonk.mount = \"prefer urn:llm:=quic://127.0.0.1:4433 {}\"\n",
+            certs.display()
+        ));
+        let refused = browse_role_for(&rootless, BrowseRole::Derive, &[]).unwrap_err();
+        assert!(refused.contains("no gonk.browse.root"), "{refused}");
     }
 
     #[test]

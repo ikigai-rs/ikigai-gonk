@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ikigai_gonk::backfill;
 use ikigai_gonk::backup::{self, Backups};
-use ikigai_gonk::config::{self, Command, Homes};
+use ikigai_gonk::config::{self, BrowseGrant, Command, Homes};
 use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
@@ -36,22 +36,54 @@ fn main() {
                 serde_json::to_string_pretty(&tokens).expect("strings serialize")
             );
         }
+        Command::GrantsBrowse { browse, flags } => {
+            let settings = read_settings(&flags);
+            let tokens = browse_tokens(Some(&browse), &settings);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tokens).expect("strings serialize")
+            );
+        }
         Command::ReviewRequest { repo, path, flags } => review_request(&repo, &path, &flags),
         Command::ClientAdd {
             name,
             cert,
             ledgers,
             browse_graph,
+            browse,
             force,
-        } => client_add(&name, cert.as_deref(), &ledgers, browse_graph, force),
+            flags,
+        } => {
+            // The config is read only when a role needs this server's roots and mount, so a
+            // ledger-only enrolment works exactly as before on a host with no config.toml.
+            let browse_scopes = match &browse {
+                Some(_) => browse_tokens(browse.as_ref(), &read_settings(&flags)),
+                None => Vec::new(),
+            };
+            client_add(
+                &name,
+                cert.as_deref(),
+                &scopes_for(&ledgers, browse_graph, &browse_scopes),
+                force,
+            )
+        }
         Command::PasskeyInvite {
             name,
             ledgers,
             browse_graph,
+            browse,
             force,
             minutes,
             flags,
-        } => passkey_invite(&name, &ledgers, browse_graph, force, minutes, &flags),
+        } => passkey_invite(
+            &name,
+            &ledgers,
+            browse_graph,
+            browse.as_ref(),
+            force,
+            minutes,
+            &flags,
+        ),
         Command::RoborevFile(args) => {
             ikigai_gonk::roborev::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
         }
@@ -733,7 +765,8 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
     let tiers = &settings.explain;
     format!(
         "{} (prefer; dialled on first use) — explain/review bound; file {} @{}, dir {} @{}, \
-         review {} @{}, pr {} @{} tokens. Deriving needs a net grant; this server mints none",
+         review {} @{}, pr {} @{} tokens. Deriving needs urn:cap:net:{}, which \
+         `--browse derive` mints and nothing else does",
         mount.target,
         tiers.file.provider,
         tiers.file.max_tokens,
@@ -743,6 +776,7 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
         tiers.review.max_tokens,
         tiers.pr.provider,
         tiers.pr.max_tokens,
+        mount.target.net_host(),
     )
 }
 
@@ -808,13 +842,18 @@ fn read_render_rules(layout: &quic::Layout) -> Result<Arc<str>, String> {
 }
 
 /// Every token an enrolment asks for: the ledgers' grants, plus — when `--browse-graph` was
-/// given — the browse graph's two store doors, in first-seen order.
+/// given — the browse graph's store doors, plus a `--browse` role's tokens (already computed
+/// against this server's roots and mount by [`browse_tokens`]), in first-seen order.
 ///
 /// ★ One function for both minting paths, because a grant that means different things on a
 /// certificate and on a passkey would be a difference nothing in this server could justify.
 /// Every name is checked here, before anything is written: a typo refused at mint time is a
 /// grant that never exists, and a typo written is a silent denial at first use.
-fn scopes_for(ledgers: &[(String, Authority)], browse_graph: Option<Authority>) -> Vec<String> {
+fn scopes_for(
+    ledgers: &[(String, Authority)],
+    browse_graph: Option<Authority>,
+    browse: &[String],
+) -> Vec<String> {
     let mut scopes: Vec<String> = Vec::new();
     let mut add = |token: String| {
         if !scopes.contains(&token) {
@@ -831,19 +870,71 @@ fn scopes_for(ledgers: &[(String, Authority)], browse_graph: Option<Authority>) 
             add(token);
         }
     }
+    for token in browse {
+        add(token.clone());
+    }
     scopes
 }
 
-fn client_add(
-    name: &str,
-    cert: Option<&std::path::Path>,
-    ledgers: &[(String, Authority)],
-    browse_graph: Option<Authority>,
+/// This server's settings, for a command that mints against them — the same read `serve`
+/// makes, so a role is computed against the roots and the mount the server will run with.
+fn read_settings(flags: &config::Flags) -> config::Settings {
+    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
+    config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e))
+}
+
+/// A `--browse` role's tokens on this server, or none without one.
+fn browse_tokens(browse: Option<&BrowseGrant>, settings: &config::Settings) -> Vec<String> {
+    match browse {
+        Some(browse) => grants::browse_role_for(settings, browse.role, &browse.roots)
+            .unwrap_or_else(|e| fail(&e)),
+        None => Vec::new(),
+    }
+}
+
+/// What writing `scopes` under `grant` would change — and, without `--force`, the refusal
+/// when it changes an existing grant at all, naming every scope it would remove and add.
+///
+/// ★ Asked BEFORE anything is written (a certificate bundle, an invite), so a refused
+/// rewrite leaves nothing behind. The writers refuse the same way on their own; this is the
+/// early copy of that check, not a replacement for it.
+fn checked_change(
+    layout: &quic::Layout,
+    grant: &str,
+    scopes: &[String],
     force: bool,
-) {
+) -> quic::GrantChange {
+    let change = quic::grant_change(layout, grant, scopes).unwrap_or_else(|e| fail(&e));
+    if change.changes() && !force {
+        fail(&change.refusal(grant, &layout.grants_json()));
+    }
+    change
+}
+
+/// After a forced rewrite: what it took away and what it handed out (ledger
+/// [#435](http://localhost:1060/l/default/item/435)). A
+/// narrowing nobody is told about is how a feature goes dark with no signal.
+fn print_change(grant: &str, change: &quic::GrantChange) {
+    if !change.changes() {
+        return;
+    }
+    println!(
+        "  REPLACED     grant `{grant}` (--force){} — every identity enrolled under it holds \
+         the new list from its next request or connection:",
+        if change.narrows() {
+            ", NARROWING it"
+        } else {
+            ""
+        }
+    );
+    println!("{}", change.lines());
+}
+
+fn client_add(name: &str, cert: Option<&std::path::Path>, scopes: &[String], force: bool) {
     let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
-    let scopes = scopes_for(ledgers, browse_graph);
+    let change = (!scopes.is_empty()).then(|| checked_change(&layout, name, scopes, force));
     let bundle = quic::add_client(&layout, name, cert, force).unwrap_or_else(|e| fail(&e));
     println!("client `{name}`  {}", bundle.dir.display());
     println!("  fingerprint  {}", bundle.fingerprint);
@@ -851,13 +942,15 @@ fn client_add(
         println!("  NOT enrolled — a trusted certificate with no grant is refused. Enrol it:");
         println!("    ikigai-gonk client add {name} --ledger default=write");
     } else {
-        quic::enrol(&layout, name, &bundle.fingerprint, &scopes, force)
-            .unwrap_or_else(|e| fail(&e));
+        quic::enrol(&layout, name, &bundle.fingerprint, scopes, force).unwrap_or_else(|e| fail(&e));
         println!(
             "  enrolled     grant `{name}` ({} scopes) in {}",
             scopes.len(),
             layout.grants_json().display()
         );
+        if let Some(change) = &change {
+            print_change(name, change);
+        }
     }
     println!("  restart ikigai-gonk: trusted certificates are read at startup");
     if cert.is_some() {
@@ -881,21 +974,22 @@ fn passkey_invite(
     name: &str,
     ledgers: &[(String, Authority)],
     browse_graph: Option<Authority>,
+    browse: Option<&BrowseGrant>,
     force: bool,
     minutes: u64,
     flags: &config::Flags,
 ) {
     let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
-    let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
-    let settings = config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e));
+    let settings = read_settings(flags);
     let layout = quic::Layout::in_config_home(&homes.config);
-    if ledgers.is_empty() && browse_graph.is_none() {
+    if ledgers.is_empty() && browse_graph.is_none() && browse.is_none() {
         fail(&format!(
             "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`, \
-             or `--browse-graph read` for the browse graph alone"
+             `--browse read` (or `derive`) for the repositories, or `--browse-graph read` for \
+             the browse graph alone"
         ));
     }
-    let scopes = scopes_for(ledgers, browse_graph);
+    let scopes = scopes_for(ledgers, browse_graph, &browse_tokens(browse, &settings));
     // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
     // in would be a ceremony that changes nothing — and a grant that looked like it limited
     // someone would not.
@@ -913,6 +1007,7 @@ fn passkey_invite(
                 .unwrap_or("default")
         ));
     }
+    let change = checked_change(&layout, name, &scopes, force);
     let code = identity::invite(
         &layout,
         name,
@@ -927,6 +1022,7 @@ fn passkey_invite(
         scopes.len(),
         layout.grants_json().display()
     );
+    print_change(name, &change);
     println!("  valid for {minutes} minutes, once");
     println!(
         "  open  http://localhost:{}/#invite={code}",
@@ -1000,22 +1096,12 @@ fn resolve_reviewer(queue: &trigger::Trigger, layout: &quic::Layout) -> Option<V
     Some(scopes)
 }
 
-/// The host a `urn:cap:net:` grant must name — where the mounted peer lives.
-///
-/// ⚠ **The authority's HOST, not the whole authority and not `localhost`.**
-/// `Capability::allows` is exact string containment, so `urn:cap:net:localhost` does not
-/// satisfy a call to `127.0.0.1`: the two spellings are different hosts as far as a
-/// capability is concerned, however the same they are to a resolver. A socket mount reaches
-/// a peer on this machine and has no authority to take a host from, so it takes the name a
-/// person would write.
+/// The host a `urn:cap:net:` grant must name — where the mounted peer lives
+/// ([`config::Settings::mount_host`]), and `localhost` with no mount.
 fn mount_host(settings: &config::Settings) -> String {
-    match settings.mounts.first().map(|m| &m.target) {
-        Some(mount::Target::Quic { authority, .. }) => authority
-            .rsplit_once(':')
-            .map(|(host, _)| host.to_string())
-            .unwrap_or_else(|| authority.clone()),
-        _ => "localhost".to_string(),
-    }
+    settings
+        .mount_host()
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 /// The banner's review line when the trigger IS armed.

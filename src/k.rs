@@ -60,7 +60,8 @@
 //!
 //! - **an anonymous loopback caller cannot derive.** `gonk.http.ledger`'s anonymous grant is
 //!   ledger tokens only; every browse row declares `urn:cap:browse:read:*` and every
-//!   derivation also `urn:cap:net:*`, which gonk mints for nobody. The refusal is the
+//!   derivation also `urn:cap:net:*`, which gonk mints only for a named identity
+//!   (`--browse derive`), never for the anonymous grant. The refusal is the
 //!   kernel's typed `Denied`, before dispatch, naming the token;
 //! - **a cross-site POST cannot annotate.** `/k?c=sink …` is a POST like any other, so it
 //!   goes through the same [`crate::doors::http_scopes`] check that closed the first arc's
