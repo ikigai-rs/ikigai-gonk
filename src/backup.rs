@@ -1418,6 +1418,16 @@ pub fn stamp_iso(millis: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
+/// `2026-09-16T17:28:13.042Z` — [`stamp_iso`] with its milliseconds, the RFC 3339 instant an
+/// `ikigai-log` line opens with (and the access log's first column, [`crate::access`]).
+pub fn stamp_iso_ms(millis: u64) -> String {
+    let (y, mo, d, h, mi, s) = civil(millis);
+    format!(
+        "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{:03}Z",
+        millis % 1000
+    )
+}
+
 /// Milliseconds since the epoch → UTC civil time.
 ///
 /// ⚠ **This is the THIRD copy of Howard Hinnant's `civil_from_days` in the ecosystem**
