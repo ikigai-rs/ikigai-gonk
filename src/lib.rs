@@ -38,6 +38,7 @@ pub mod backfill;
 pub mod backup;
 pub mod batch;
 pub mod browse;
+pub mod checkout;
 pub mod config;
 pub mod doors;
 pub mod grants;
