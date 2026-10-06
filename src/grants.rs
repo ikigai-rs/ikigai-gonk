@@ -89,6 +89,11 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
         return Ok(grants);
     }
     grants.push(ledger.cap_purge());
+    // ★ Purge READS the graveyard (ikigai-ledger 0.3.0 resolves a deleted item through its
+    // tombstone and clears what it archived), and since ikigai-store 0.2.6 an update with a
+    // WHERE needs the read grant on the graph it reads. A plain delete only INSERTs there,
+    // so the read token is purge's alone (ledger #760, #768).
+    grants.push(ikigai_store::cap_read_graph(&ledger.deleted_graph()));
     Ok(grants)
 }
 
@@ -266,7 +271,14 @@ mod tests {
         );
         assert!(broad_store_scopes(&grants).is_empty());
         let purge = grants_for("acme", Authority::Purge).unwrap();
-        assert_eq!(purge.last().unwrap(), "urn:cap:ledger:purge:acme");
+        assert_eq!(
+            purge[grants.len()..],
+            [
+                "urn:cap:ledger:purge:acme",
+                "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:deleted",
+            ]
+        );
+        assert!(broad_store_scopes(&purge).is_empty());
     }
 
     /// ★ The browse graph's tokens, as literals for the same reason the ledger's are: they

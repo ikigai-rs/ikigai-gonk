@@ -90,13 +90,18 @@ ikigai-vocab = "0.1.69"
 # scoped read stays cached; `the_browse_graphs_scoped_reads_are_not_cached_and_the_ledgers_
 # still_are` asserts both. 0.2.5 also renames the graph-list resource to `urn:iki:store:graphs`
 # (one more id in the served catalog, pinned by `tests/conformance.rs`) and deprecates
-# `is_covered`; nothing here calls it — `read_is_covered` is a different function.
-ikigai-store = { version = "0.2.5", features = ["persistent"] }
+# `is_covered`; nothing here calls it — `read_is_covered` is a different function. 0.2.6 (the
+# audit release, ledger #751): an update with a WHERE needs the READ grant on what it reads
+# (hence purge's graveyard read token), and two live spaces over one store forfeit coverage.
+ikigai-store = { version = "0.2.6", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
-# reading one item out of it.
-ikigai-ledger = "0.2.1"
+# reading one item out of it. ★ 0.3.0 is the floor now (ledger #768): unique ids (0.2.x minted
+# one IRI for concurrent same-millisecond appends, so two filings merged), a delete that keeps
+# a racing write, purge that reaches a deleted item (and READS the graveyard, so purge carries
+# `cap_read_graph(<L>:deleted)`, see `grants.rs`), and `next` over every open item.
+ikigai-ledger = "0.3.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
@@ -282,8 +287,10 @@ ikigai-ledger = "0.2.1"
 # timestamps sort by time. On 0.16.x the cross-root write is open, which is why this is the floor.
 # `tests/browse.rs::deleting_an_annotation_needs_a_read_grant_on_its_own_root` is the FLOOR TEST:
 # red on 0.16.1, where `urn:cap:annotate` alone deletes. `^0.17.0` is `<0.18.0`. Minor: a
-# narrowed Delete (it refuses calls that used to succeed).
-ikigai-browse = "0.17.0"
+# narrowed Delete (it refuses calls that used to succeed). 0.18.0: the explain and review
+# controls say what a click will cost (archived, or a live model call) and show a polite live
+# region while it runs; additive.
+ikigai-browse = "0.18.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
