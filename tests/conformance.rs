@@ -69,11 +69,31 @@ const LEDGER_IDS: [&str; 14] = [
     "ledger-reopen",
 ];
 
-/// gonk's own resources in the HUB — behind every door, socket and QUIC included. One:
+/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Five:
 /// the page renderer's chunk transform, bound where the process's one cache is
-/// (`ikigai_gonk::render::rendered_chunks` says why). It reads nothing and is gated by
-/// nothing; a caller renders its own bytes.
-const HUB_IDS: [&str; 1] = ["gonk-render"];
+/// (`ikigai_gonk::render::rendered_chunks` says why), which reads nothing and is gated by
+/// nothing; and the four `urn:sparql:*` forms (`ikigai_gonk::sparql`, ledger #836), each one
+/// hop onto the store's graph-scoped twin under the caller's capability.
+const HUB_IDS: [&str; 5] = [
+    "gonk-render",
+    "sparql-select",
+    "sparql-ask",
+    "sparql-construct",
+    "sparql-describe",
+];
+
+/// A real query per `urn:sparql:*` form — the synthesized `"x"` the walk would otherwise
+/// send is not SPARQL. Each reads the union default (the walk runs under root, so every named
+/// graph), which the seeded ledger items make non-empty.
+const SPARQL_FIXTURES: [(&str, &str); 4] = [
+    ("sparql-select", "SELECT * WHERE { ?s ?p ?o } LIMIT 1"),
+    ("sparql-ask", "ASK { ?s ?p ?o }"),
+    (
+        "sparql-construct",
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o } LIMIT 1",
+    ),
+    ("sparql-describe", "DESCRIBE ?s WHERE { ?s ?p ?o } LIMIT 1"),
+];
 
 fn hub() -> Arc<Kernel> {
     Arc::new(compose(
@@ -128,9 +148,14 @@ fn fixtures(a: &str, b: &str, c: &str) -> Suite {
     let item = format!("urn:iki:ledger:default:item:{a}");
     let target = format!("urn:iki:ledger:default:item:{b}");
     let purge_target = format!("urn:iki:ledger:default:item:{c}");
+    let suite = SPARQL_FIXTURES
+        .iter()
+        .fold(Suite::new(), |suite, (id, query)| {
+            suite.fixture(Fixture::new(*id, Verb::Source).arg("query", *query))
+        });
     STORE_IDS
         .iter()
-        .fold(Suite::new(), |suite, id| {
+        .fold(suite, |suite, id| {
             suite.opt_out(
                 *id,
                 None,
@@ -139,6 +164,11 @@ fn fixtures(a: &str, b: &str, c: &str) -> Suite {
             )
         })
         .namespace("https://ikigai-rs.dev/ns/ledger#")
+        // ★ `urn:sparql:describe` echoes the DATA, and the ledger stamps every item with
+        // `sig:contentHash` — `ikigai-sign`'s term, which `ikigai-ledger` adopts on purpose
+        // (its `vocabulary::CONTENT_HASH`) and `ikigai-vocab` does not carry. The ledger's own
+        // faces never surfaced it to this walk; a query face over its graph does.
+        .namespace("https://ikigai-rs.dev/ns/sign#")
         // The chunk renderer wants a chunk document, which no ArgSpec can shape.
         .fixture(
             Fixture::new("gonk-render", Verb::Source)
@@ -202,6 +232,12 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         // A chunk's HTML is a function of the document alone; the content-addressed
         // request is the cache key and nothing needs a thread to cut.
         .pure("gonk-render")
+        // The store's answer, forwarded whole: cacheable under its write threads, keyed on
+        // the capability fingerprint, and the readable-set read beside it on the same threads.
+        .cacheable("sparql-select")
+        .cacheable("sparql-ask")
+        .cacheable("sparql-construct")
+        .cacheable("sparql-describe")
 }
 
 /// Every non-kernel entry's description id.
@@ -267,13 +303,17 @@ fn the_hub_conforms() {
 
 /// The reads whose representations are cacheable — cached by the HUB. The chunk renderer
 /// is one: a pure function of its document, keyed by the content-addressed request.
-const CACHED_READS: [&str; 6] = [
+const CACHED_READS: [&str; 10] = [
     "ledger-ledgers",
     "ledger-policy",
     "ledger-items",
     "ledger-item",
     "ledger-next",
     "gonk-render",
+    "sparql-select",
+    "sparql-ask",
+    "sparql-construct",
+    "sparql-describe",
 ];
 
 /// The same walk through a door. Every check runs except `CACHEABLE` on the five reads,
@@ -509,9 +549,10 @@ fn the_http_door_conforms() {
         .walked
         .iter()
         .map(String::as_str)
-        .filter(|id| id.starts_with("gonk-"))
+        .filter(|id| id.starts_with("gonk-") || id.starts_with("sparql-"))
         .collect();
-    // The pages, and the hub's own chunk renderer behind them.
+    // The pages, and the hub's own resources behind them: the chunk renderer and the query
+    // face.
     assert_eq!(
         walked,
         WEB_IDS.iter().chain(HUB_IDS.iter()).copied().collect(),
