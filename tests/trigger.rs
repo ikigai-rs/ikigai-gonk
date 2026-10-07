@@ -410,6 +410,13 @@ fn a_reviewer_grant_that_could_publish_is_refused_before_anything_is_armed() {
         !good.iter().any(|s| s == grants::CAP_NET_ANY),
         "the offering wildcard is not a grant: {good:?}"
     );
+
+    // ★ And the HOST is checked exactly (ledger #805): `localhost` satisfies the kernel's
+    // wildcard, but the mount at `127.0.0.1` refuses it, so a reviewer granted for the wrong
+    // host is refused HERE rather than dead-lettering every pass.
+    let refusal = trigger::check_reviewer(&kernel, probe, "127.0.0.1", &good)
+        .expect_err("a net grant for another host must be refused");
+    assert!(refusal.contains("urn:cap:net:127.0.0.1"), "{refusal}");
 }
 
 /// The queue's own three tokens are minted by nobody either, so neither network door can

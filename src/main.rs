@@ -954,7 +954,16 @@ fn print_change(grant: &str, change: &quic::GrantChange) {
 fn client_add(name: &str, cert: Option<&std::path::Path>, scopes: &[String], force: bool) {
     let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
-    let change = (!scopes.is_empty()).then(|| checked_change(&layout, name, scopes, force));
+    // ★ Every refusal BEFORE anything is minted (ledger #805, part 3): the bundle name, an
+    // import over an existing bundle, every token no identity may hold, a rewrite of an
+    // existing grant, and a certificate already enrolled elsewhere. Only then is a key pair
+    // generated, so a refused command leaves no bundle and no server identity behind.
+    let planned =
+        quic::planned_fingerprint(&layout, name, cert, force).unwrap_or_else(|e| fail(&e));
+    let change = (!scopes.is_empty()).then(|| {
+        quic::enrol_refusal(&layout, name, planned.as_deref(), scopes, force)
+            .unwrap_or_else(|e| fail(&e))
+    });
     let bundle = quic::add_client(&layout, name, cert, force).unwrap_or_else(|e| fail(&e));
     println!("client `{name}`  {}", bundle.dir.display());
     println!("  fingerprint  {}", bundle.fingerprint);

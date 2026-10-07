@@ -1370,8 +1370,11 @@ token belongs.
 
 ⚠ `urn:cap:net:` takes the **host of the mounted peer**, narrow. `urn:cap:net:*` is the
 OFFERING wildcard `ikigai-browse` declares and is refused as a grant — and
-`urn:cap:net:localhost` does **not** satisfy a call to `127.0.0.1`, because a capability is
-matched by exact string containment. Take the host from `gonk.mount`.
+`urn:cap:net:localhost` does **not** reach a peer at `127.0.0.1`. The kernel satisfies
+browse's wildcard with ANY net grant, so the exact host is checked where the call leaves: the
+mount refuses a scoped caller whose grant does not name the host it dials (`mount::net_grant`,
+ledger #805), and arming checks the same token, so a reviewer granted for the wrong host stops
+the server instead of dead-lettering every pass. Take the host from `gonk.mount`.
 
 ★ The list above is not maintained by hand: it is read off the review's own contract on the
 running kernel (`trigger::reviewer_grant_shape`), and the startup refusal prints it as JSON
@@ -1530,7 +1533,11 @@ front of a model. **This server mints exactly one net grant**: `--browse derive`
 `client add` and `passkey invite`, which names the host of this server's own `gonk.mount`
 (`urn:cap:net:127.0.0.1` for a peer at `quic://127.0.0.1:4433`) and always comes with
 `urn:cap:annotate` — see [the roles](#provisioning-a-browsing-identity-the---browse-roles).
-The wildcard itself is refused in `grants.json`, like `urn:cap:exec:*`.
+The wildcard itself is refused in `grants.json`, like `urn:cap:exec:*`. ★ And the host is
+**enforced**, not only named: the mount refuses any scoped caller whose grant does not hold
+`urn:cap:net:<the host it dials>` exactly, so a hand-written grant for another host (or one
+written before `gonk.mount` moved) is refused with the token it lacks rather than reaching
+the peer through the kernel's prefix match on the wildcard (ledger #805).
 
 ⚠ **A net grant is the authority to spend that peer's inference, not only to explain.** The
 mount serves the peer's whole `urn:llm:` namespace through every door, so the same grant that
@@ -1661,6 +1668,12 @@ Until then, other machines use the QUIC door.
   `urn:cap:store:write` is `DROP ALL`. A `grants.json` naming either stops the server at
   startup, and a connection or session whose grant names one is refused. The store's narrow
   write door refuses the broad key anyway, so such a grant could not write either.
+- **The backup family's tokens in any grant** (`urn:cap:gonk:backup`, `urn:cap:gonk:restore`).
+  ★ This list and the two below are ONE decision, `quic::grant_refusal`, and every path that
+  turns a grant into scopes asks it: startup, every QUIC connection, every passkey request,
+  the reviewer grant, and both writers (`client add`, `passkey invite`). Until ledger #864 the
+  backup family was checked at startup only, so a `grants.json` edited while gonk ran put
+  `urn:cap:gonk:restore` on a QUIC client, which then built a store at a path it chose.
 - **A certificate it trusts but has no grant for**, or whose grant is unknown or empty. The
   refusal is logged with the full fingerprint.
 - **A QUIC door it was told to open and cannot.** A named QUIC bind with no client
@@ -1684,7 +1697,14 @@ Until then, other machines use the QUIC door.
 - **A grant naming `urn:cap:net:*`**, the offering wildcard `ikigai-browse` declares on every
   derivation, which as a grant is every host this kernel could dial. Name the host:
   `urn:cap:net:localhost`. Both wildcards are checked at startup and again per connection,
-  because the file is re-read per connection.
+  because the file is re-read per connection — and by `client add` as well as `passkey
+  invite` (until ledger #805 a certificate enrolment checked only the broad store tokens).
+- **A net grant for a host the mount does not dial.** The mount refuses it by name before it
+  dials (see [Explaining what it browses](#explaining-what-it-browses)).
+- **A `client add` it would have to undo.** Every refusal — the name, an import over an
+  existing bundle, a refused token, a rewrite of an existing grant without `--force`, a
+  certificate already enrolled under another grant — runs before a key pair is minted or a
+  bundle written, so a refused command leaves nothing behind.
 - **A `gonk.mount` line that is not `prefer urn:llm:=<target>`**: another mode, another
   prefix, a `quic://` target with no certificate directory (or one that is not there), a
   socket target WITH one, or two lines claiming the same prefix.
@@ -1768,7 +1788,7 @@ its own door, not a flag on the public one:
 | `urn:cap:gonk:restore` | build a store from an archive | the same |
 | `urn:cap:store:read` | every graph (declared by `urn:iki:gonk:backup`, because it really reads them) | the same |
 
-`gonk/grants.json` is **refused at startup** if it names any of them, exactly as it is for
+`gonk/grants.json` is **refused at startup, and on every use,** if it names any of them, exactly as it is for
 the store's broad tokens and the offering wildcards: a grant a reader could mistake for a
 narrowing must not be silently the opposite. `tests/doors.rs` drives the real HTTP door and
 asserts a `403` on every one of these, alongside `urn:iki:store:info` — the posture that had

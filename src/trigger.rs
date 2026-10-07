@@ -1071,8 +1071,11 @@ const PROBE_PATH: &str = "README.md";
 /// - **Too little.** Every scope `review` declares is checked the way the kernel will check
 ///   it — `Capability::allows` over the capability this grant builds — so the offering
 ///   wildcard `urn:cap:net:*` is satisfied by the narrow `urn:cap:net:127.0.0.1` exactly as
-///   it will be at dispatch, and a grant that names `localhost` for a peer at `127.0.0.1`
-///   fails HERE instead of on the first commit. The browse graph's two store doors are
+///   it will be at dispatch. ★ And the mount's own host is checked EXACTLY on top of that,
+///   because the mount enforces it (`crate::mount::net_grant`, ledger #805): a grant that
+///   names `localhost` for a peer at `127.0.0.1` satisfies the kernel's wildcard and is
+///   refused at the mount, so it fails HERE instead of on the first commit. (Until #805 the
+///   wildcard was the only check, here and at dispatch, and this sentence was false.) The browse graph's two store doors are
 ///   checked too: they are not on the review's contract (a finding is written through a
 ///   sub-request, and a capability travels down unchanged), and without them a pass derives
 ///   an answer and cannot record it.
@@ -1112,7 +1115,14 @@ pub fn check_reviewer(
         .map(|spec| spec.requires)
         .unwrap_or_default();
     let store = crate::grants::browse_graph_grants(crate::grants::Authority::Write)?;
-    for scope in required.iter().chain(store.iter()) {
+    // ★ The wildcard is satisfied by ANY net grant, and the mount enforces the exact host
+    // (`mount::net_grant`, ledger #805): so the exact token is what a pass will be asked for,
+    // and checking only the wildcard here would pass a grant every pass then dead-letters on.
+    let host_grant = required
+        .iter()
+        .any(|scope| scope == crate::grants::CAP_NET_ANY)
+        .then(|| format!("urn:cap:net:{host}"));
+    for scope in required.iter().chain(store.iter()).chain(host_grant.iter()) {
         if !satisfies(&capability, scope) {
             return Err(format!(
                 "the reviewer grant does not satisfy `{scope}`, which a review pass needs. \
