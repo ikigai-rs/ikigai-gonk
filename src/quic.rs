@@ -15,8 +15,9 @@
 //!
 //! **Fail closed at every step.** A trusted certificate with no grant is refused. A grant
 //! that names no scopes (a typo, or one deleted from `grants.json`) is refused, not treated
-//! as unrestricted. A grant naming either of the store's broad tokens is refused — at
-//! startup, and again per connection in case the file was edited after. An enrolment file
+//! as unrestricted. A grant naming a broad store token, an offering wildcard or the backup
+//! family is refused ([`grant_refusal`]) — at startup, and again per connection in case the
+//! file was edited after. An enrolment file
 //! that does not parse stops the server rather than degrading it.
 //!
 //! Everything lives under `<config home>/gonk/`:
@@ -207,6 +208,40 @@ pub fn add_client(
         fingerprint,
         key_minted,
     })
+}
+
+/// The fingerprint [`add_client`] WOULD enrol, worked out without writing anything — so
+/// every refusal can run before a key pair is minted ([`enrol_refusal`]).
+///
+/// `None` when the call would mint a new identity, whose fingerprint does not exist yet and
+/// so cannot already be enrolled under anything.
+///
+/// # Errors
+///
+/// The refusals [`add_client`] makes up front: a name that cannot be a bundle, an import
+/// over an existing bundle, and an unreadable certificate.
+pub fn planned_fingerprint(
+    layout: &Layout,
+    name: &str,
+    import: Option<&Path>,
+    force: bool,
+) -> Result<Option<String>, String> {
+    valid_name(name)?;
+    let existing = layout.clients_dir().join(name).join("client.crt");
+    let pem = match import {
+        Some(_) if existing.is_file() => {
+            return Err(format!(
+                "client `{name}` already exists at {} — import under a new name",
+                layout.clients_dir().join(name).display()
+            ))
+        }
+        Some(path) => read(path)?,
+        None if existing.is_file() && !force => read(&existing)?,
+        None => return Ok(None),
+    };
+    ikigai_quic::fingerprint_of_pem(&pem)
+        .map(Some)
+        .map_err(|e| format!("client `{name}`: not a PEM certificate: {e}"))
 }
 
 /// The parsed `clients.json`: fingerprint → grant name, plus an explicit shared default.
@@ -421,34 +456,59 @@ pub fn read_grants(path: &Path) -> Result<BTreeMap<String, Vec<String>>, String>
     }
 }
 
-/// Refuse a grants file in which any grant names a broad store token, or the exec wildcard.
+/// Refuse a grants file in which any grant names a token [`grant_refusal`] refuses.
 ///
-/// Both checks are the same check: a token whose SHAPE says "all of them", written where an
-/// operator means "this one". They run before the store opens and before either identity
-/// door reads the file, so a grant that would hand a remote client the whole dataset or the
-/// whole shell stops the server instead of admitting one connection under it.
+/// Run before the store opens and before either identity door reads the file, so a grant
+/// that would hand a remote client the whole dataset, the whole shell or the backup family
+/// stops the server instead of admitting one connection under it. It is the STARTUP copy of
+/// the one rule; [`scopes_for_grant`] is the per-use copy, and both are [`grant_refusal`].
 pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
     for (name, scopes) in grants {
-        let broad = broad_store_scopes(scopes);
-        if !broad.is_empty() {
-            return Err(broad_refusal(name, &broad));
-        }
-        if let Some(refusal) = wildcard_refusal(name, scopes) {
+        if let Some(refusal) = grant_refusal(name, scopes) {
             return Err(refusal);
-        }
-        let admin = crate::grants::gonk_admin_scopes(scopes);
-        if !admin.is_empty() {
-            return Err(format!(
-                "grant `{name}` names {} — the backup family's tokens. A backup is every \
-                 graph in the dataset in one file and a restore builds a store from bytes \
-                 the caller supplies; neither belongs on a certificate or a passkey. They \
-                 are reachable from the owner-only socket, whose caller can read the \
-                 dataset's files anyway",
-                admin.join(" and ")
-            ));
         }
     }
     Ok(())
+}
+
+/// ★★ **The one decision about which tokens no identity this server admits may hold** — and
+/// every path that turns a grant into scopes goes through it: the startup check
+/// ([`check_grants`]), every QUIC connection and every passkey request
+/// ([`scopes_for_grant`], through [`authority`] and `identity::scopes_of`), the headless
+/// reviewer (`trigger::reviewer_scopes`), and both writers of `grants.json` ([`put_grant`],
+/// [`enrol`]).
+///
+/// Three families, each a token whose SHAPE says "all of them" or "the airlock":
+///
+/// - the store's broad tokens ([`broad_store_scopes`]): every graph, or `DROP ALL`;
+/// - the offering wildcards (`wildcard_refusal`): every program, or every host;
+/// - the backup family ([`crate::grants::gonk_admin_scopes`]): every graph in one file, and a
+///   store built at a path the caller names. Reachable from the owner-only socket only.
+///
+/// ⚠ Audit round 4 (ledger [#864](http://localhost:1060/l/default/item/864), R1) found the
+/// third family checked at STARTUP and nowhere else: `grants.json` is re-read per connection
+/// precisely so an edit takes effect, and an edit after startup put `urn:cap:gonk:restore` on
+/// a QUIC client, which then wrote a RocksDB store at a path it chose. The list lived in four
+/// places and one of them had all three; this function is the list, once.
+pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
+    let broad = broad_store_scopes(scopes);
+    if !broad.is_empty() {
+        return Some(broad_refusal(name, &broad));
+    }
+    if let Some(refusal) = wildcard_refusal(name, scopes) {
+        return Some(refusal);
+    }
+    let admin = crate::grants::gonk_admin_scopes(scopes);
+    if !admin.is_empty() {
+        return Some(format!(
+            "grant `{name}` names {} — the backup family's tokens. A backup is every graph in \
+             the dataset in one file and a restore builds a store from bytes the caller \
+             supplies; neither belongs on a certificate or a passkey. They are reachable from \
+             the owner-only socket, whose caller can read the dataset's files anyway",
+            admin.join(" and ")
+        ));
+    }
+    None
 }
 
 /// The offering wildcards that must never be a grant, and why each is not.
@@ -504,8 +564,9 @@ pub fn authority(
 }
 
 /// A grant name's scopes, **fail closed** — the one rule both identity doors apply: a grant
-/// that is unknown, that names no scopes, or that names a broad store token is refused. The
-/// QUIC door calls it per connection; the HTTP door per request carrying a passkey session.
+/// that is unknown, that names no scopes, or that names any token [`grant_refusal`] refuses
+/// is refused. The QUIC door calls it per connection; the HTTP door per request carrying a
+/// passkey session; the trigger once, for the reviewer.
 pub fn scopes_for_grant(
     grants: &BTreeMap<String, Vec<String>>,
     grant: &str,
@@ -516,11 +577,7 @@ pub fn scopes_for_grant(
         .ok_or_else(|| {
             format!("grant `{grant}` is unknown or grants no scopes (check grants.json)")
         })?;
-    let broad = broad_store_scopes(scopes);
-    if !broad.is_empty() {
-        return Err(broad_refusal(grant, &broad));
-    }
-    if let Some(refusal) = wildcard_refusal(grant, scopes) {
+    if let Some(refusal) = grant_refusal(grant, scopes) {
         return Err(refusal);
     }
     Ok(scopes.clone())
@@ -650,9 +707,9 @@ pub fn grant_change(
 }
 
 /// Write one grant into `grants.json` alone — for an identity that is not a certificate (a
-/// passkey invite). The same refusals as [`enrol`]: a broad token always, and an existing
-/// grant with different scopes unless `force`, because a grant name may be shared by a
-/// certificate and a passkey and replacing it changes both.
+/// passkey invite). The same refusals as [`enrol`]: [`grant_refusal`] always, and an
+/// existing grant with different scopes unless `force`, because a grant name may be shared by
+/// a certificate and a passkey and replacing it changes both.
 pub fn put_grant(
     layout: &Layout,
     grant: &str,
@@ -660,11 +717,7 @@ pub fn put_grant(
     force: bool,
 ) -> Result<(), String> {
     valid_name(grant)?;
-    let broad = broad_store_scopes(scopes);
-    if !broad.is_empty() {
-        return Err(broad_refusal(grant, &broad));
-    }
-    if let Some(refusal) = wildcard_refusal(grant, scopes) {
+    if let Some(refusal) = grant_refusal(grant, scopes) {
         return Err(refusal);
     }
     private_dir(&layout.dir)?;
@@ -717,10 +770,63 @@ pub fn minter(layout: Layout) -> Minter {
     })
 }
 
+/// Everything [`enrol`] would refuse, checked WITHOUT writing — so `client add` can ask
+/// before it mints a key pair or writes a bundle (ledger
+/// [#805](http://localhost:1060/l/default/item/805), part 3). Returns what the write would do
+/// to an existing grant, for the caller to report.
+///
+/// `fingerprint` is `None` when it is not known yet (a key pair about to be minted is a new
+/// identity, so it cannot already be enrolled under anything).
+///
+/// # Errors
+///
+/// A name that cannot be a grant, any token [`grant_refusal`] refuses, an existing grant
+/// with different scopes without `force`, or a fingerprint already enrolled under a different
+/// grant without `force`.
+pub fn enrol_refusal(
+    layout: &Layout,
+    grant: &str,
+    fingerprint: Option<&str>,
+    scopes: &[String],
+    force: bool,
+) -> Result<GrantChange, String> {
+    valid_name(grant)?;
+    if let Some(refusal) = grant_refusal(grant, scopes) {
+        return Err(refusal);
+    }
+    let grants = read_object(&layout.grants_json())?;
+    let change = GrantChange::against(grants.get(grant), scopes);
+    if change.changes() && !force {
+        return Err(change.refusal(grant, &layout.grants_json()));
+    }
+    if let Some(fingerprint) = fingerprint {
+        let mut clients_doc = read_object(&layout.clients_json())?;
+        let clients = match clients_doc.remove("clients") {
+            None => Map::new(),
+            Some(Value::Object(map)) => map,
+            Some(_) => return Err("`clients` must be an object".to_string()),
+        };
+        if let Some(existing) = clients.get(&normalize(fingerprint)) {
+            let current = existing
+                .as_str()
+                .or_else(|| existing.get("grant").and_then(Value::as_str));
+            if current != Some(grant) && !force {
+                return Err(format!(
+                    "this certificate is already enrolled under grant `{}` — nothing was \
+                     written (use --force to replace it)",
+                    current.unwrap_or("?")
+                ));
+            }
+        }
+    }
+    Ok(change)
+}
+
 /// Enrol `fingerprint` under a grant called `grant` holding `scopes`, writing both files.
 ///
-/// Both files are checked before either is written: an existing grant with different scopes,
-/// or a fingerprint already enrolled under a different grant, is refused unless `force`.
+/// Both files are checked before either is written ([`enrol_refusal`]): any token
+/// [`grant_refusal`] refuses always, and an existing grant with different scopes, or a
+/// fingerprint already enrolled under a different grant, unless `force`.
 pub fn enrol(
     layout: &Layout,
     grant: &str,
@@ -728,16 +834,8 @@ pub fn enrol(
     scopes: &[String],
     force: bool,
 ) -> Result<(), String> {
-    let broad = broad_store_scopes(scopes);
-    if !broad.is_empty() {
-        return Err(broad_refusal(grant, &broad));
-    }
+    enrol_refusal(layout, grant, Some(fingerprint), scopes, force)?;
     let mut grants = read_object(&layout.grants_json())?;
-    let wanted = json!(scopes);
-    let change = GrantChange::against(grants.get(grant), scopes);
-    if change.changes() && !force {
-        return Err(change.refusal(grant, &layout.grants_json()));
-    }
     let mut clients_doc = read_object(&layout.clients_json())?;
     let key = normalize(fingerprint);
     let mut clients = match clients_doc.remove("clients") {
@@ -745,19 +843,7 @@ pub fn enrol(
         Some(Value::Object(map)) => map,
         Some(_) => return Err("`clients` must be an object".to_string()),
     };
-    if let Some(existing) = clients.get(&key) {
-        let current = existing
-            .as_str()
-            .or_else(|| existing.get("grant").and_then(Value::as_str));
-        if current != Some(grant) && !force {
-            return Err(format!(
-                "this certificate is already enrolled under grant `{}` — nothing was written \
-                 (use --force to replace it)",
-                current.unwrap_or("?")
-            ));
-        }
-    }
-    grants.insert(grant.to_string(), wanted);
+    grants.insert(grant.to_string(), json!(scopes));
     clients.insert(key, json!({ "grant": grant, "label": grant }));
     clients_doc.insert("clients".to_string(), Value::Object(clients));
 

@@ -55,7 +55,6 @@ use ikigai_passkey::{Assertion, Policy, RegisteredCredential};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::grants::broad_store_scopes;
 use crate::quic::{self, Layout};
 
 /// The relying-party ID. ⚠ An IP address is not a valid RP ID, so the page must be opened
@@ -230,8 +229,8 @@ fn redeem(layout: &Layout, code: &str, now: u64) -> Result<String, String> {
     Ok(grant)
 }
 
-/// The scopes a grant name holds, fail-closed: unknown, empty, or naming a broad store
-/// token is an error. The same rule the QUIC door applies.
+/// The scopes a grant name holds, fail-closed: unknown, empty, or naming any token
+/// [`quic::grant_refusal`] refuses is an error. The same rule the QUIC door applies.
 pub fn scopes_of(layout: &Layout, grant: &str) -> Result<Vec<String>, String> {
     let grants = quic::read_grants(&layout.grants_json())?;
     quic::scopes_for_grant(&grants, grant)
@@ -512,16 +511,13 @@ impl Passkeys {
     }
 }
 
-/// Refuse a scope list naming a broad store token — shared with the invite command.
+/// Refuse a scope list holding any token no identity may hold — [`quic::grant_refusal`],
+/// the one decision, under its old name. Kept for callers of the library; nothing in this
+/// crate needs a second spelling of the rule.
 pub fn refuse_broad(grant: &str, scopes: &[String]) -> Result<(), String> {
-    let broad = broad_store_scopes(scopes);
-    if broad.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "grant `{grant}` would name {} — the store's whole-dataset tokens",
-            broad.join(" and ")
-        ))
+    match quic::grant_refusal(grant, scopes) {
+        None => Ok(()),
+        Some(refusal) => Err(refusal),
     }
 }
 

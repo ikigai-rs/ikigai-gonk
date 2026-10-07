@@ -15,7 +15,8 @@
 //! either would make the per-ledger boundary decorative. They are also useless here —
 //! `urn:iki:store:graph-update` refuses the broad key by design — so a grant built around
 //! them yields a ledger that cannot write and a `Denied` that looks like a ledger bug.
-//! [`broad_store_scopes`] is the check `quic.rs` applies to every grant.
+//! [`broad_store_scopes`] is one of the three checks `quic::grant_refusal` applies to every
+//! grant, on every path.
 
 use ikigai_ledger::Ledger;
 
@@ -387,7 +388,8 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
 /// capability on the socket satisfies them, exactly as it satisfies everything else.
 pub const CAP_GONK_ADMIN: [&str; 2] = [crate::backup::CAP_BACKUP, crate::backup::CAP_RESTORE];
 
-/// The scopes in `scopes` that are one of the backup family's tokens.
+/// The scopes in `scopes` that are one of the backup family's tokens — asked by
+/// `quic::grant_refusal`, and through it by every path that turns a grant into scopes.
 pub fn gonk_admin_scopes(scopes: &[String]) -> Vec<String> {
     scopes
         .iter()
@@ -412,7 +414,9 @@ pub const CAP_NET_ANY: &str = "urn:cap:net:*";
 /// `urn:cap:net:localhost` for a peer on this machine.
 ///
 /// ⚠ It is refused as a grant, NOT as a requirement: the narrow grant still satisfies
-/// browse's wildcard declaration, which is what the offering form means.
+/// browse's wildcard declaration, which is what the offering form means — and since ledger
+/// #805 the mount then checks that the narrow grant names the host it dials
+/// ([`crate::mount::net_grant`]), which the kernel's prefix match on the wildcard cannot.
 pub fn unbounded_net_scopes(scopes: &[String]) -> Vec<String> {
     scopes
         .iter()

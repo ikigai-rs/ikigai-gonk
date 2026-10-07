@@ -348,6 +348,61 @@ impl LazyMount {
     }
 }
 
+/// ★ **The net grant is enforced against the host this mount dials** (ledger
+/// [#805](http://localhost:1060/l/default/item/805), part 1).
+///
+/// `ikigai-browse` declares the OFFERING wildcard `urn:cap:net:*` on every derivation, and the
+/// kernel satisfies a trailing-`*` requirement with ANY grant under the prefix — so before
+/// this check a grant naming `urn:cap:net:localhost` reached a peer at `127.0.0.1`, and one
+/// naming `urn:cap:net:anywhere.example` reached it too. The kernel's answer is right for an
+/// offering (it cannot know which host an argument will name); the host is known HERE, at
+/// the one place a call leaves for it, so this is where "may reach that host" is decided.
+///
+/// Root (the owner-only socket, and this process's own startup reads) holds every host. A
+/// scoped capability must hold `urn:cap:net:{host}` exactly — [`Target::net_host`], the same
+/// spelling `--browse derive` mints and `trigger::check_reviewer` checks, so a grant this
+/// server minted always passes and a hand-written one for another host is refused by name.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_gonk::mount;
+/// let home = std::path::Path::new("/home/nobody");
+/// let socket = mount::parse("prefer urn:llm:=/tmp/llm.sock", home).unwrap().target;
+/// let named = |host: &str| Capability::scoped([format!("urn:cap:net:{host}")]);
+/// assert!(mount::net_grant(&socket, &named("localhost")).is_ok());
+/// assert!(mount::net_grant(&socket, &named("127.0.0.1")).is_err());
+/// assert!(mount::net_grant(&socket, &Capability::root()).is_ok());
+/// ```
+///
+/// # Errors
+///
+/// [`Error::Denied`], naming the token the caller lacks and the host the mount dials.
+pub fn net_grant(target: &Target, capability: &Capability) -> Result<(), Error> {
+    let needed = format!("urn:cap:net:{}", target.net_host());
+    if capability.allows(&needed) {
+        return Ok(());
+    }
+    let held: Vec<&str> = capability
+        .scopes()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .map(String::as_str)
+                .filter(|scope| scope.starts_with("urn:cap:net:"))
+                .collect()
+        })
+        .unwrap_or_default();
+    Err(Error::Denied(format!(
+        "reaching the mounted peer at {target} needs `{needed}` — a net grant names the host \
+         the mount dials, exactly{}",
+        if held.is_empty() {
+            String::new()
+        } else {
+            format!(", and this capability names {}", held.join(", "))
+        }
+    )))
+}
+
 /// Dial `target`. Neither transport blocks longer than its own connect timeout.
 fn dial(target: &Target) -> Result<Arc<dyn Resolver>, String> {
     match target {
@@ -405,6 +460,8 @@ impl Resolver for LazyMount {
         request: Request,
         capability: &Capability,
     ) -> Result<(Representation, CacheStatus), Error> {
+        // Before the dial: a caller this mount refuses costs no handshake.
+        net_grant(&self.target, capability)?;
         let resolver = self.resolver()?;
         let capability = capability.clone();
         let target = self.target.to_string();
