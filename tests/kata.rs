@@ -460,3 +460,21 @@ fn a_ledger_the_door_does_not_grant_is_refused_plainly() {
         "nothing filed anywhere: {all}"
     );
 }
+
+/// The DEFAULT ledger's names have no ledger segment (`urn:iki:ledger:item:key:…`), so the key
+/// lookup through the door is a different path there: the import, the re-run and the dry run
+/// must work on it exactly as on a named ledger.
+#[test]
+fn the_default_ledger_is_keyed_the_same_way() {
+    let (_hub, addr, _config) = serve("default");
+    let first = stdout(&import(addr, "default", Path::new(FIXTURE)));
+    assert!(first.contains("3 filed, 0 already there"), "{first}");
+    let again = stdout(&import(addr, "default", Path::new(FIXTURE)));
+    assert!(again.contains("0 filed, 3 already there"), "{again}");
+    assert!(
+        again.contains("0 comment(s), 0 close(s), 0 link(s) added"),
+        "{again}"
+    );
+    let dry = stdout(&dry_run(addr, "default", Path::new(FIXTURE)));
+    assert!(dry.contains("0 would be filed, 3 already there"), "{dry}");
+}
