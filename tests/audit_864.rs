@@ -881,3 +881,149 @@ fn a_quic_write_is_logged_and_may_name_only_its_own_client() {
         "{logged:#?}"
     );
 }
+
+// ------------------------------------------------------------------------------------------
+// R3. `/sparql` (and the editor page) misreads the query form of valid SPARQL.
+//
+// On `c3443a6`: `web::query_form` skips `PREFIX` by consuming exactly two whitespace-separated words, and
+// matches the form keyword as a whole whitespace token. SPARQL needs no whitespace between a
+// PNAME_NS and its IRIREF (`PREFIX ex:<urn:x#>`) or after `SELECT` (`SELECT*{…}`), and the
+// store parses both — but the protocol face answers 400 "not a SELECT, ASK, CONSTRUCT or
+// DESCRIBE query" and the editor page "Not a query form this page runs".
+// ------------------------------------------------------------------------------------------
+#[test]
+fn r3_valid_sparql_is_read_as_its_query_form() {
+    let hub = compose(DurableStore::in_memory().unwrap());
+    let queries = [
+        "PREFIX ex:<urn:x#> SELECT ?s WHERE { ?s ?p ?o }",
+        "SELECT*{ ?s ?p ?o }",
+    ];
+    let mut wrong = Vec::new();
+    for query in queries {
+        // The store's own parser accepts it (root, over a named graph).
+        let store = block_on(Kernel::issue(
+            &hub,
+            request(
+                Verb::Source,
+                "urn:iki:store:graph-select",
+                &[
+                    ("query", query.as_bytes()),
+                    ("graph", b"urn:iki:ledger:graph:default"),
+                ],
+            ),
+            &Capability::root(),
+        ));
+        let form = web::query_form(query);
+        if form != Some("select") {
+            wrong.push(format!(
+                "{query:?}: query_form = {form:?}; the store answered it: {}",
+                store.is_ok()
+            ));
+        }
+    }
+    // And end to end through the protocol face. ⚠ One item first: `urn:sparql:*` refuses an
+    // EMPTY default dataset by design, and a fresh store has no ledger graph yet — the
+    // auditor's test met that refusal after `query_form` was fixed, and it is the fixture's,
+    // not the defect's.
+    let server = Server::start();
+    let (status, body) = server.raw("POST", "/iki/ledger/append", &[], "One item");
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = server.raw(
+        "GET",
+        "/sparql?query=SELECT*%7B%3Fs%20%3Fp%20%3Fo%7D&as=application%2Fsparql-results%2Bjson",
+        &[("Accept", "application/sparql-results+json".to_string())],
+        "",
+    );
+    assert!(
+        wrong.is_empty() && status == 200,
+        "{wrong:#?}\nGET /sparql?query=SELECT*{{?s ?p ?o}} → {status}: {}",
+        body.trim()
+    );
+}
+
+// ------------------------------------------------------------------------------------------
+// Ledger #799: a scratch gonk is named by flags, not smuggled in through the environment.
+// `HOME` and `XDG_CONFIG_HOME` point at an "elsewhere" that must stay empty; the server and the
+// command that provisions it both take `--config-home` / `--data-home`, and the store follows
+// the data home.
+// ------------------------------------------------------------------------------------------
+#[test]
+fn a_scratch_gonk_is_named_by_its_home_flags() {
+    use std::io::BufRead;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let (config, data, elsewhere) = (root.join("cfg"), root.join("data"), root.join("elsewhere"));
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let gonk = || {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+        command
+            .current_dir(&root)
+            .env("HOME", &elsewhere)
+            .env("XDG_CONFIG_HOME", elsewhere.join("xdg"))
+            .stdin(std::process::Stdio::null());
+        command
+    };
+    let homes = [
+        "--config-home",
+        config.to_str().unwrap(),
+        "--data-home",
+        data.to_str().unwrap(),
+    ];
+
+    let added = gonk()
+        .args(["client", "add", "laptop", "--ledger", "default=read"])
+        .args(homes)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    assert!(config.join("gonk/clients.json").is_file());
+
+    let mut child = gonk()
+        .args([
+            "--port",
+            "0",
+            "--socket",
+            "g.sock",
+            "--no-quic",
+            "--no-backup",
+        ])
+        .args(homes)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut banner = String::new();
+    for line in std::io::BufReader::new(child.stderr.take().unwrap())
+        .lines()
+        .map_while(std::result::Result::ok)
+    {
+        banner.push_str(&line);
+        banner.push('\n');
+        if line.trim_start().starts_with("mount") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(banner.contains("http://localhost:"), "no banner:\n{banner}");
+    assert!(
+        data.join("store").is_dir(),
+        "the store follows --data-home:\n{banner}"
+    );
+    let stray: Vec<_> = walk(&elsewhere);
+    assert!(
+        stray.is_empty(),
+        "written outside the named homes: {stray:?}"
+    );
+}
+
+fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        found.push(entry.path());
+        if entry.path().is_dir() {
+            found.extend(walk(&entry.path()));
+        }
+    }
+    found
+}

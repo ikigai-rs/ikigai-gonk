@@ -70,12 +70,12 @@ fn main() {
                 &flags,
             )
         }
-        Command::ClientList { flags: _ } => client_list(),
+        Command::ClientList { flags } => client_list(&flags),
         Command::ClientRemove {
             key,
             by_name,
-            flags: _,
-        } => client_remove(&key, by_name),
+            flags,
+        } => client_remove(&key, by_name, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -113,7 +113,7 @@ fn main() {
 }
 
 fn serve(flags: &config::Flags) -> ! {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let (config_path, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     // Not prefixed with the config path: a setting may have come from a flag, and a message
     // that names the file sends the operator to edit a line that is not there.
@@ -156,9 +156,16 @@ fn serve(flags: &config::Flags) -> ! {
     }
 
     // Hold the store. A second holder is refused by RocksDB — and the fix is topology.
-    let store_path = StoreConfig::load(Some("gonk"))
-        .unwrap_or_else(|e| fail(&e.to_string()))
-        .path;
+    // `--store` outright, else `store.toml` read from THIS run's homes — `load_in`, so a
+    // `--config-home` / `--data-home` moves the dataset with everything else (ledger #799).
+    let store_path = match &flags.store {
+        Some(path) => path.clone(),
+        None => {
+            StoreConfig::load_in(&homes.config, &homes.data, Some("gonk"))
+                .unwrap_or_else(|e| fail(&e.to_string()))
+                .path
+        }
+    };
     // ★ The handle leaves this crate ONLY when something else in this process needs it. The
     // browse annotation family takes an `Arc<Store>`, which is how its quads land in the
     // dataset the ledger lives in — the whole point of composing them here.
@@ -908,7 +915,7 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
 }
 
 fn read_settings(flags: &config::Flags) -> config::Settings {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e))
 }
@@ -974,7 +981,7 @@ fn client_add(
     rewrite: Rewrite,
     flags: &config::Flags,
 ) {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
     // The port the printed `--connect` line names: the one `serve` would bind with this
     // config and these flags (ledger #816 — it used to be a literal 1060).
@@ -1050,8 +1057,8 @@ fn client_add(
 }
 
 /// `ikigai-gonk client list` — every bundle and every enrolled fingerprint, joined.
-fn client_list() {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+fn client_list(flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
     let (rows, default) = quic::list_clients(&layout).unwrap_or_else(|e| fail(&e));
     if rows.is_empty() {
@@ -1079,8 +1086,8 @@ fn client_list() {
 }
 
 /// `ikigai-gonk client remove <name> | --fingerprint <fp>`.
-fn client_remove(key: &str, by_name: bool) {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+fn client_remove(key: &str, by_name: bool, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
     let removed = quic::remove_client(&layout, key, by_name).unwrap_or_else(|e| fail(&e));
     if let Some(dir) = &removed.bundle {
@@ -1108,7 +1115,7 @@ fn passkey_invite(
     minutes: u64,
     flags: &config::Flags,
 ) {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let settings = read_settings(flags);
     let layout = quic::Layout::in_config_home(&homes.config);
     if ledgers.is_empty() && browse_graph.is_none() && browse.is_none() {
@@ -1184,7 +1191,7 @@ fn fail(message: &str) -> ! {
 /// is run — with the kernel's own `Unresolved` naming the IRI — rather than be silently
 /// dropped at the door by a second copy of the root list.
 fn review_request(repo: &str, path: &str, flags: &config::Flags) {
-    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     let settings = config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e));
     let Some(queue) = settings.review else {

@@ -562,6 +562,13 @@ ikigai-passkey = "0.1.39"
 # keeps a literal containing ` .`, a language tag or a datatype from becoming a corrupt
 # line in the one file nobody reads until they need it.
 oxigraph = { version = "0.5", default-features = false }
+# ★ The SPARQL query FORM (`web::query_form`, which picks `urn:sparql:{form}` and the editor's
+# `graph-{form}`) is read by the parser the store itself runs: `oxigraph` 0.5.11 pins
+# `spargebra = "=0.4.7"`, so this adds an edge to a crate already in the graph and no
+# compile. A hand-rolled reader of the prologue misread valid SPARQL — `PREFIX ex:<urn:x#>`
+# and `SELECT*{…}` need no whitespace — and answered 400 for queries the store would run
+# (ledger #864, R3). No features: `oxigraph` enables the ones it needs, and they unify.
+spargebra = { version = "0.4.7", default-features = false }
 # Passkey challenges and session tokens: 32 bytes from the OS.
 getrandom = "0.3"
 # base64url for WebAuthn's byte fields (credential ids, challenges, keys).

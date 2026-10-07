@@ -252,8 +252,16 @@ serve flags (each overrides its config key wholesale):
                         \"off\"`). urn:iki:gonk:backup and urn:iki:gonk:restore stay bound:
                         this server is the only thing that can export the dataset
   --config PATH         read this file instead of <config home>/config.toml
+  --config-home DIR     the config home (config.toml, store.toml, gonk/) instead of
+                        $XDG_CONFIG_HOME/ikigai or ~/.config/ikigai. Also taken by `client`,
+                        `passkey invite`, `review request` and `grants --browse`
+  --data-home DIR       the data home (the socket, the store, backups, the review queue)
+                        instead of ~/.ikigai; same commands
+  --store DIR           the dataset's directory, outright (default: store.toml's, else
+                        <data home>/store)
 
-files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME says otherwise):
+files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME or --config-home says
+otherwise):
   config.toml               the gonk.* keys above
   store.toml, gonk.store.toml   where the dataset lives (default ~/.ikigai/store)
   gonk/clients.json         identity -> grant name: certificates under `clients` (the QUIC door
@@ -409,6 +417,14 @@ pub struct Flags {
     /// `--no-backup`: take no SCHEDULED backup this run. The backup family stays bound —
     /// see [`BackupPolicy::every`].
     pub no_backup: bool,
+    /// `--config-home`: the config home (`gonk/`, `config.toml`, `store.toml`) instead of
+    /// `$XDG_CONFIG_HOME/ikigai` or `~/.config/ikigai` — see [`Homes::resolve`].
+    pub config_home: Option<PathBuf>,
+    /// `--data-home`: the data home (the socket, the store, backups, the review queue)
+    /// instead of `~/.ikigai`.
+    pub data_home: Option<PathBuf>,
+    /// `--store`: the dataset's directory, outright, instead of what `store.toml` says.
+    pub store: Option<PathBuf>,
 }
 
 /// Everything `serve` needs, merged and validated.
@@ -698,6 +714,60 @@ pub struct Homes {
 }
 
 impl Homes {
+    /// The homes a command runs against: `--config-home` and `--data-home` when given,
+    /// otherwise the process's real ones ([`Homes::from_process`]).
+    ///
+    /// ★ Ledger #799: a scratch gonk used to need `env HOME=… XDG_CONFIG_HOME=…`, because
+    /// nothing else moved its files — the gonk Book taught exactly that. Both homes are now
+    /// flags, on `serve` and on every command that writes this server's files (`client`,
+    /// `passkey invite`, `review request`, `grants --browse`), so a second instance is named
+    /// rather than smuggled in through the environment. `$HOME` is still read for `~/` in
+    /// config values; with both flags given and no `$HOME`, the data home's parent stands in.
+    ///
+    /// ```
+    /// use ikigai_gonk::config::{Flags, Homes};
+    /// let flags = Flags {
+    ///     config_home: Some("/tmp/gk/config".into()),
+    ///     data_home: Some("/tmp/gk/data".into()),
+    ///     ..Flags::default()
+    /// };
+    /// let homes = Homes::resolve(&flags).unwrap();
+    /// assert_eq!(homes.config, std::path::Path::new("/tmp/gk/config"));
+    /// assert_eq!(homes.data, std::path::Path::new("/tmp/gk/data"));
+    /// ```
+    pub fn resolve(flags: &Flags) -> Result<Homes, String> {
+        if flags.config_home.is_none() && flags.data_home.is_none() {
+            return Homes::from_process();
+        }
+        let process = Homes::from_process().ok();
+        let config = match (&flags.config_home, &process) {
+            (Some(dir), _) => dir.clone(),
+            (None, Some(process)) => process.config.clone(),
+            (None, None) => {
+                return Err("--data-home was given and no config home is known: pass \
+                            --config-home too (neither XDG_CONFIG_HOME nor HOME is set)"
+                    .to_string())
+            }
+        };
+        let data = match (&flags.data_home, &process) {
+            (Some(dir), _) => dir.clone(),
+            (None, Some(process)) => process.data.clone(),
+            (None, None) => {
+                return Err("--config-home was given and no data home is known: pass \
+                            --data-home too (HOME is not set)"
+                    .to_string())
+            }
+        };
+        let home = match process {
+            Some(process) => process.home,
+            None => data
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or("the data home has no parent directory")?,
+        };
+        Ok(Homes { home, config, data })
+    }
+
     /// The process's real homes, from `ikigai_core::config` — the one place the ecosystem
     /// spells them. Fails rather than guessing a working-directory-relative path.
     pub fn from_process() -> Result<Homes, String> {
@@ -790,7 +860,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
                         .map_err(|_| format!("--port: `{port}` is not a port number"))?,
                 );
             }
-            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
             "--socket" => flags.socket = Some(value(&mut args, "--socket")?),
             "--quic-bind" => flags.quic_bind = Some(value(&mut args, "--quic-bind")?),
             "--no-quic" => flags.no_quic = true,
@@ -798,6 +870,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             "--browse-root" => flags.browse_roots.push(value(&mut args, "--browse-root")?),
             "--mount" => flags.mounts.push(value(&mut args, "--mount")?),
             "--no-backup" => flags.no_backup = true,
+            "--store" => flags.store = Some(PathBuf::from(value(&mut args, "--store")?)),
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -830,7 +903,9 @@ fn parse_review(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
     let mut flags = Flags::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
             other => return Err(format!("review request: unknown argument `{other}`")),
         }
     }
@@ -847,7 +922,9 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
             let mut flags = Flags::default();
             while let Some(arg) = args.next() {
                 match arg.as_str() {
-                    "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?
+                    }
                     other => return Err(format!("client list: unknown argument `{other}`")),
                 }
             }
@@ -859,7 +936,9 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--fingerprint" => fingerprint = Some(value(&mut args, "--fingerprint")?),
-                    "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?
+                    }
                     other if other.starts_with('-') => {
                         return Err(format!("client remove: unknown argument `{other}`"))
                     }
@@ -902,7 +981,9 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
             "--root" => roots.push(value(&mut args, "--root")?),
-            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
             "--port" => {
                 let port = value(&mut args, "--port")?;
                 flags.port = Some(
@@ -990,7 +1071,9 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                         .map_err(|_| format!("--port: `{port}` is not a port number"))?,
                 );
             }
-            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
             other => return Err(format!("passkey invite: unknown argument `{other}`")),
         }
     }
@@ -1020,7 +1103,9 @@ fn parse_grants_browse(mut args: impl Iterator<Item = String>) -> Result<Command
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => roots.push(value(&mut args, "--root")?),
-            "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
             other => return Err(format!("grants --browse: unknown argument `{other}`")),
         }
     }
@@ -1028,6 +1113,23 @@ fn parse_grants_browse(mut args: impl Iterator<Item = String>) -> Result<Command
         browse: BrowseGrant { role, roots },
         flags,
     })
+}
+
+/// `--config`, `--config-home` and `--data-home`: the three flags every command that reads
+/// this server's files takes, so a scratch gonk and the commands that provision it can name
+/// the same homes (ledger #799).
+fn home_flag(
+    flag: &str,
+    args: &mut impl Iterator<Item = String>,
+    flags: &mut Flags,
+) -> Result<(), String> {
+    let path = PathBuf::from(value(args, flag)?);
+    match flag {
+        "--config" => flags.config = Some(path),
+        "--config-home" => flags.config_home = Some(path),
+        _ => flags.data_home = Some(path),
+    }
+    Ok(())
 }
 
 fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -2042,6 +2144,26 @@ mod tests {
         ));
         assert!(parse_args(args("client remove")).is_err());
         assert!(parse_args(args("client remove a --fingerprint b")).is_err());
+        // Ledger #799: the homes and the store are flags, on serve and on the provisioning
+        // commands alike.
+        match parse_args(args("--config-home /c --data-home /d --store /s")).unwrap() {
+            Command::Serve(flags) => {
+                assert_eq!(flags.config_home, Some(PathBuf::from("/c")));
+                assert_eq!(flags.data_home, Some(PathBuf::from("/d")));
+                assert_eq!(flags.store, Some(PathBuf::from("/s")));
+            }
+            other => panic!("{other:?}"),
+        }
+        for line in [
+            "client add x --config-home /c",
+            "client list --config-home /c",
+            "client remove x --data-home /d",
+            "passkey invite x --config-home /c",
+            "review request r p --config-home /c",
+            "grants --browse read --data-home /d",
+        ] {
+            assert!(parse_args(args(line)).is_ok(), "{line}");
+        }
     }
 
     /// ★ The browse graph is a SUBJECT of a grant, not a ledger — every spelling, because
