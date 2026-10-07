@@ -166,13 +166,44 @@ good until it expires.
 
 A door that grants writes to whatever reaches loopback also grants them to any web page open
 on the machine: a page on any site can `POST` a form to `http://127.0.0.1:1060/` without a
-preflight. So the capability is computed per request, and two browser-only signals take it
-away:
+preflight. So the capability is computed per request, and two browser-only signals turn it
+into a **refusal** — a `403` before the request reaches anything it names:
 
-- a write whose `Origin` or `Sec-Fetch-Site` names another site gets **nothing** (403). A local
-  process such as `curl` or a script sends neither header, so it is unaffected;
-- a request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` gets **nothing**, reads
-  included. That is the DNS-rebinding defence.
+- a write whose `Origin` or `Sec-Fetch-Site` names another site (`same-site` included: a page
+  on another port of `localhost` is another origin). A local process such as `curl` or a
+  script sends neither header, so it is unaffected;
+- a request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` (with this port), reads
+  included. That is the DNS-rebinding defense.
+
+★ **Refused, not "given nothing"** (ledger #864, R2; PENDING item 2). Until then both cases
+computed an EMPTY capability, and an empty capability is still offered every action that
+requires nothing: the pages, and the passkey ceremonies. Audit round 4 used that to fill the
+passkey challenge table from another site with 256 form posts and lock every real sign-in
+out for five minutes, renewable. The door now hands those requests a refusal marker that its
+admission overlay (`crate::admit`) answers with `Denied` before any endpoint runs.
+
+⚠ Two answers `ikigai-web` gives without dispatching, so no overlay of gonk's sees them:
+`OPTIONS` and the `?description` face, which for a refused request still describe the
+capability-free actions. Both disclose a contract and change nothing; closing them needs a
+pre-dispatch admission hook in the library.
+
+⚠ **The challenge table has no per-origin or per-IP bound, on purpose.** With cross-site posts
+refused, every caller that can still mint a challenge is on THIS machine and arrives from
+loopback, and the only origin a ceremony is accepted from is this server's own — so neither
+key separates an attacker from the person signing in. A local process can still fill the
+table (256 challenges, five minutes); a local process can also already write every ledger the
+anonymous grant names, so it is inside the boundary this door draws.
+
+**And a write may not name someone else as its author** (ledger #864, R4). An `author` shaped
+like a principal this server names — `urn:iki:gonk:passkey:<id>`, which the item page renders
+as that passkey's label — is refused unless it is the request's own principal, on every route
+(the mechanical `POST /iki/ledger/append?author=…`, the form adapter, the QUIC door). A
+plain-text author (`chris`, `roborev`) renders as text and is kept. ⚠ The rule binds the
+`author` ARGUMENT: a ledger writer also holds that ledger's per-graph store write token, so
+`urn:iki:store:graph-update` can still write a `ledger:author` triple directly — measured: an
+anonymous loopback `INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { … ledger:author
+"urn:iki:gonk:passkey:…" } }` is accepted and the item page renders that passkey's label.
+Closing that needs the face to trust only door-stamped authors (R4's option (b)), not this rule.
 
 ### SPARQL: the editor page, and the SPARQL 1.1 Protocol
 

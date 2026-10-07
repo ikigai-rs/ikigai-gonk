@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod admit;
 pub mod backfill;
 pub mod backup;
 pub mod batch;

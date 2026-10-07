@@ -49,7 +49,8 @@
 //!   `304`, a `405`, a `406`, a `413` or a strict-route `400` is decided before or after the
 //!   kernel and is not logged at all.
 //! - **who a READ is from.** `ikigai-web` hands the principal to writes only, so an HTTP
-//!   read's `principal` is `-`. QUIC mints a session per connection and the call never sees
+//!   read's `principal` is `-` — and a `?principal=` a reader typed is never taken for one
+//!   ([`crate::admit::principal`]; ledger #864, R6). QUIC mints a session per connection and the call never sees
 //!   it, so a QUIC line's `principal` is `-` too.
 //! - **a refusal the door kernel makes before dispatch** — a capability floor's denial, a name
 //!   nothing binds (`404`), a nesting refusal — and the kernel's own `urn:kernel:*`
@@ -301,24 +302,23 @@ fn verb(verb: Verb) -> &'static str {
     }
 }
 
-/// Who asked, as far as this door is told — never a token.
+/// Who asked, as far as this door is told — never a token, and never a value the caller
+/// typed.
+///
+/// ⚠ Audit round 4 (ledger #864, R6): this used to read the `principal` argument on every
+/// HTTP verb, and on a READ that argument is whatever the caller put in the query string —
+/// `ikigai-web` reserves the provenance names on mutating verbs only (its half is
+/// ikigai-cli's, filed separately). So an anonymous `GET /l/default?principal=urn:…` was
+/// logged as that person. The column now comes from [`crate::admit::principal`], which takes
+/// the door's own stamp and nothing else.
 fn principal(door: Door, request: &Request) -> String {
     match door {
         // The socket's peer UID is checked against this process's own: it is the owner.
         Door::Socket => "owner".to_string(),
         Door::Quic => "-".to_string(),
-        Door::Http => match request.args.get("principal") {
-            // The door stamps it (`doors::http_principal`) and drops a submitted one. Written
-            // only when it is bare — an IRI is — so a value cannot break the line's columns.
-            Some(ArgRef::Inline(bytes)) => {
-                let value = String::from_utf8_lossy(bytes);
-                if !value.is_empty() && value.chars().all(|c| c.is_ascii_graphic()) {
-                    cut(value.into_owned())
-                } else {
-                    "-".to_string()
-                }
-            }
-            Some(_) => "-".to_string(),
+        Door::Http => match crate::admit::principal(door, request) {
+            // Written only when it is bare — an IRI is — so a value cannot break the line.
+            Some(value) => cut(value),
             // A write with no principal is an anonymous one; a read is never told.
             None if request.verb.is_mutating() => "anon".to_string(),
             None => "-".to_string(),

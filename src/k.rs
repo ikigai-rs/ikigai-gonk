@@ -65,8 +65,9 @@
 //!   kernel's typed `Denied`, before dispatch, naming the token;
 //! - **a cross-site POST cannot annotate.** `/k?c=sink …` is a POST like any other, so it
 //!   goes through the same [`crate::doors::http_scopes`] check that closed the first arc's
-//!   hole: a foreign `Origin`/`Sec-Fetch-Site` (or a foreign `Host`, on any method) computes
-//!   an EMPTY capability, and `urn:iki:annotation`'s Sink requires `urn:cap:annotate`;
+//!   hole: a foreign `Origin`/`Sec-Fetch-Site` (or a foreign `Host`, on any method) is
+//!   REFUSED before dispatch ([`crate::admit`]; it computed an empty capability until ledger
+//!   #864), and `urn:iki:annotation`'s Sink requires `urn:cap:annotate` besides;
 //! - **a Sink reaches the annotation family and the finding family, and nothing else.** The
 //!   bound `ikigai-web`'s adapter draws, and the one [`crate::web`]'s `Act` draws around the
 //!   ledger: the adapter never widens a door's write surface beyond what browse's own faces

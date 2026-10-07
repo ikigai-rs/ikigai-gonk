@@ -57,6 +57,13 @@ impl Server {
     /// A server whose render rules are `rules` rather than the shipped table — what a
     /// deployment gets by dropping its own `gonk/render-rules.ttl` beside `grants.json`.
     fn start_with_rules(rules: &str) -> Server {
+        Server::start_configured(rules, grants_for("default", Authority::Write).unwrap())
+    }
+
+    /// A server whose ANONYMOUS loopback caller holds `anonymous` — empty, for a caller that
+    /// may read no ledger. (A rebound `Host` used to be that caller; since ledger #864 it is
+    /// refused outright, so it holds nothing to render a page with.)
+    fn start_configured(rules: &str, anonymous: Vec<String>) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -77,7 +84,7 @@ impl Server {
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
-            anonymous: grants_for("default", Authority::Write).unwrap(),
+            anonymous,
             port: addr.port(),
             passkeys: Some(passkeys),
         };
@@ -653,6 +660,9 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
         rebound.status, 403,
         "a rebound Host reads nothing: {rebound:?}"
     );
+    // ★ Not even the page: a rebound Host is REFUSED before dispatch (ledger #864, R2, and
+    // PENDING item 2). It used to be answered with an empty capability, which still served
+    // every capability-free resource — this page, and the passkey ceremonies.
     let home = server.raw(
         "GET",
         "/",
@@ -662,7 +672,8 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
         ],
         "",
     );
-    assert!(home.body.contains("No ledger to show"), "{home:?}");
+    assert_eq!(home.status, 403, "{home:?}");
+    assert!(home.body.contains("Host"), "the refusal says why: {home:?}");
 
     // A local process — no Origin, no Sec-Fetch-Site — is what the door was always for.
     let curl = server.raw("POST", "/iki/ledger/append", &[], "Filed by curl");
@@ -676,17 +687,9 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
 /// same thing in the same order: the words, then the grant.
 #[test]
 fn a_caller_short_of_a_ledger_grant_reads_a_sentence_before_a_grant() {
-    let server = Server::start();
-    // A rebound `Host` holds nothing at all, so the front page has no ledger to show.
-    let home = server.raw(
-        "GET",
-        "/",
-        &[
-            ("Host", "evil.example".to_string()),
-            ("Accept", CHROME_ACCEPT.to_string()),
-        ],
-        "",
-    );
+    // An anonymous caller holding no ledger grant, so the front page has no ledger to show.
+    let bare = Server::start_configured(ikigai_gonk::rules::DEFAULT_RULES, Vec::new());
+    let home = bare.raw("GET", "/", &[("Accept", CHROME_ACCEPT.to_string())], "");
     let body = home.body.replace("&apos;", "'");
     let notice = &body[body
         .find("data-signin-notice")
@@ -712,7 +715,9 @@ fn a_caller_short_of_a_ledger_grant_reads_a_sentence_before_a_grant() {
         "{inside}"
     );
 
-    // A ledger this browser's grant does not name: the plain-text refusal.
+    // A ledger this browser's grant does not name: the plain-text refusal. (Past the page's
+    // floor, `urn:cap:ledger:read:*`, which the default anonymous grant satisfies.)
+    let server = Server::start();
     let refused = server.page("/l/acme", None);
     assert_eq!(refused.status, 403, "{refused:?}");
     let lines: Vec<&str> = refused.body.lines().collect();
