@@ -22,14 +22,27 @@
 //! ⚠ `review.completed` also fires for roborev's `fix` and `task` jobs, whose output is
 //! free-form prose. That is not a review, so it files nothing and exits 0 ([`Review::NotStructured`]).
 //!
-//! # Idempotence
+//! # Idempotence, and why it is race-free
 //!
 //! Every finding gets a key, `urn:roborev:finding:{hash}`, over the browse root, the file
-//! path, and the problem text with its whitespace collapsed ([`finding_key`]). The key is
-//! filed as one of the item's `about` IRIs, and before filing, the ledger is asked for any
-//! item, open or closed, about that key. So the same hook payload run twice files once, and
-//! roborev re-reporting a finding verbatim (a rerun, or a later commit's review carrying it
-//! forward) files nothing new.
+//! path, and the problem text with its whitespace collapsed ([`finding_key`]). The finding is
+//! filed with ONE request, `append key=<key>` (`ikigai-ledger` 0.4.0, ledger #779): the
+//! ledger checks the key and files the item in one store update, and a key already taken
+//! answers the item that holds it (`outcome: existing`) and files nothing. So the same hook
+//! payload run twice files once, roborev re-reporting a finding verbatim (a rerun, or a later
+//! commit's review carrying it forward) files nothing new, and **two hooks filing the same
+//! finding at the same instant file it once** — which the check-then-append this replaced
+//! (`items?about=<key>`, then `append` when the list was empty) did not: eight concurrent
+//! hooks filed one finding eight times (`tests/roborev.rs`,
+//! `concurrent_hooks_filing_one_finding_file_it_once`). A finding whose item was deleted is
+//! not filed again either: the deleted item's tombstone keeps the key.
+//!
+//! The key is ALSO filed as one of the item's `about` IRIs, beside the file's: browse joins
+//! items to files on `about`, and items filed before keys existed carry only that (`ikigai-gonk
+//! ledger backfill-keys` gives them the key, [`crate::keys`]).
+//!
+//! Every answer is read through the ledger's JSON face (`as=application/json`, schema 1,
+//! [`ikigai_ledger::json`]), never the plain text, which is for people.
 //!
 //! ⚠ Why not the job id and the finding's index: roborev **reuses the job id on a rerun**
 //! (`ReenqueueJob` resets the terminal job in place, `internal/storage/jobs.go`), and a
@@ -38,24 +51,20 @@
 //! the opposite one: the same defect described in different words is filed twice. A
 //! duplicate is closed in one click; a dropped finding is never seen.
 //!
-//! The check and the append are two requests, not one transaction, so two hooks filing the
-//! same finding at the same instant can both file it. One invocation files its findings one
-//! at a time, which is also what `ikigai-ledger` 0.2.x needs: concurrent appends in the same
-//! millisecond can collide on an id there (fixed in 0.3.0, ledger #768).
-//!
 //! # Authority
 //!
 //! The HTTP door grants an anonymous loopback caller the read and write tokens of the
-//! ledgers listed in `gonk.http.ledger`, and nothing else (`crate::doors`). Filing needs
-//! both: write to append, read to check the key first. `ikigai-gonk grants <ledger> write`
-//! prints them (`urn:cap:ledger:write:<ledger>` and its siblings). A ledger the door does not
+//! ledgers listed in `gonk.http.ledger`, and nothing else (`crate::doors`); filing runs
+//! under those. `ikigai-gonk grants <ledger> write` prints them (`urn:cap:ledger:write:<ledger>` and its siblings). A ledger the door does not
 //! grant answers 403, and this command says so and exits 1.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use ikigai_ledger::json::{Answer, MEDIA_TYPE as JSON, SCHEMA};
 use ikigai_ledger::Ledger;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 /// The severities roborev's schema allows, most severe first.
@@ -312,6 +321,9 @@ pub fn file_iri(root: &str, path: &str) -> String {
     format!("urn:repo:{root}:file:{encoded}")
 }
 
+/// The idempotence key's prefix: `urn:roborev:finding:{32 hex}`.
+pub const KEY_PREFIX: &str = "urn:roborev:finding:";
+
 /// The idempotence key: `urn:roborev:finding:{32 hex}`, over the root, the path and the
 /// problem with its whitespace collapsed. Not the severity, the fix or the line: those move
 /// while the defect stays the same one.
@@ -331,7 +343,7 @@ pub fn finding_key(root: &str, path: Option<&str>, problem: &str) -> String {
         path.unwrap_or("")
     ));
     let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
-    format!("urn:roborev:finding:{hex}")
+    format!("{KEY_PREFIX}{hex}")
 }
 
 /// The ledger item's title: the problem's first line, cut at a word near 100 characters.
@@ -491,6 +503,7 @@ pub fn plan(args: &FileArgs, findings: &[Finding]) -> Vec<Planned> {
                 None => key.clone(),
             };
             let mut append = vec![
+                ("key", key.clone()),
                 ("labels", format!("roborev,{}", finding.severity.word())),
                 ("priority", finding.severity.priority().to_string()),
                 ("about", about),
@@ -515,7 +528,7 @@ pub fn plan(args: &FileArgs, findings: &[Finding]) -> Vec<Planned> {
 pub enum Outcome {
     /// Filed now, as this item (`#12`, or `acme#12`).
     Filed(String),
-    /// Already in the ledger as this item; not filed again.
+    /// Already in the ledger as this item (open, closed or deleted); not filed again.
     Already(String),
     /// Below `--min-severity`.
     BelowThreshold(Severity),
@@ -570,32 +583,41 @@ pub fn run(args: &FileArgs, out: &mut impl Write) -> Result<Vec<Outcome>, String
             }
             continue;
         }
-        let query = format!("?about={}&status=all&limit=1", url_encode(&planned.key));
-        let listing = door.call("GET", &path_of(&ledger, "items"), &query, "")?;
-        if let Some(item) = first_item(&listing) {
-            let _ = writeln!(out, "already  {sev:<8} {item} {}", planned.key);
-            outcomes.push(Outcome::Already(item));
-            continue;
-        }
-        let query = planned
-            .args
-            .iter()
-            .map(|(name, value)| format!("{name}={}", url_encode(value)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let filed = door.call(
+        // ONE request: the ledger checks the key and files in the same store update, so two
+        // hooks racing on this finding cannot both file it.
+        let answer: Answer = door.json(
             "POST",
             &path_of(&ledger, "append"),
-            &format!("?{query}"),
+            &planned.args,
             &planned.content,
         )?;
-        let item = filed.split_whitespace().next().unwrap_or("?").to_string();
-        let _ = writeln!(
-            out,
-            "filed    {sev:<8} {item} {}",
-            planned.content.lines().next().unwrap_or("")
-        );
-        outcomes.push(Outcome::Filed(item));
+        let item = answer
+            .item
+            .display
+            .clone()
+            .unwrap_or_else(|| answer.item.iri.clone());
+        match answer.outcome.as_str() {
+            "filed" => {
+                let _ = writeln!(
+                    out,
+                    "filed    {sev:<8} {item} {}",
+                    planned.content.lines().next().unwrap_or("")
+                );
+                outcomes.push(Outcome::Filed(item));
+            }
+            "existing" => {
+                let status = answer.status.as_deref().unwrap_or("?");
+                let _ = writeln!(out, "already  {sev:<8} {item} ({status}) {}", planned.key);
+                outcomes.push(Outcome::Already(item));
+            }
+            other => {
+                return Err(format!(
+                    "gonk answered the append of {} with the outcome `{other}`, which is \
+                     neither `filed` nor `existing`",
+                    planned.key
+                ))
+            }
+        }
     }
     Ok(outcomes)
 }
@@ -607,14 +629,14 @@ pub(crate) fn path_of(ledger: &Ledger, action: &str) -> String {
     format!("/{}", iri.trim_start_matches("urn:").replace(':', "/"))
 }
 
-/// The first item in a plain-text listing (`  #12  open  p1  title …`), if any.
-pub(crate) fn first_item(listing: &str) -> Option<String> {
-    listing.lines().find_map(|line| {
-        let token = line.split_whitespace().next()?;
-        let (_, number) = token.split_once('#')?;
-        (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| token.to_string())
-    })
+/// `?name=value&…`, every value percent-encoded.
+pub(crate) fn encode(args: &[(&str, String)]) -> String {
+    let query = args
+        .iter()
+        .map(|(name, value)| format!("{name}={}", url_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("?{query}")
 }
 
 pub(crate) fn url_encode(value: &str) -> String {
@@ -662,7 +684,7 @@ impl Door {
         })
     }
 
-    /// One request, `Connection: close`; the body of a 200, or an error naming the refusal.
+    /// One request in the plain face; the body of a 2xx, or an error naming the refusal.
     pub(crate) fn call(
         &self,
         method: &str,
@@ -670,6 +692,66 @@ impl Door {
         query: &str,
         body: &str,
     ) -> Result<String, String> {
+        let (status, text) = self.send(method, path, query, body, "text/plain")?;
+        refused(method, path, status, &text)?;
+        Ok(text)
+    }
+
+    /// One request in the ledger's JSON face (`as=application/json`, schema 1), read into
+    /// its type: the machine contract, where the plain face is for people.
+    pub(crate) fn json<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        args: &[(&str, String)],
+        body: &str,
+    ) -> Result<T, String> {
+        self.lookup(method, path, args, body)?.ok_or_else(|| {
+            format!("gonk answered {method} {path} with 404: there is nothing at that name")
+        })
+    }
+
+    /// [`Door::json`], with a 404 answered as `None`: how a read asks "is there one?".
+    pub(crate) fn lookup<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        args: &[(&str, String)],
+        body: &str,
+    ) -> Result<Option<T>, String> {
+        let mut args = args.to_vec();
+        args.push(("as", JSON.to_string()));
+        let (status, text) = self.send(method, path, &encode(&args), body, JSON)?;
+        if status == 404 {
+            return Ok(None);
+        }
+        refused(method, path, status, &text)?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            format!("gonk answered {method} {path} with something that is not JSON ({e}): {text}")
+        })?;
+        let schema = value.get("schema").and_then(serde_json::Value::as_u64);
+        if schema != Some(u64::from(SCHEMA)) {
+            return Err(format!(
+                "gonk answered {method} {path} in the ledger's JSON face schema {}, and this \
+                 build reads schema {SCHEMA}: rebuild ikigai-gonk against the ledger that \
+                 server runs",
+                schema.map_or_else(|| "(none)".to_string(), |s| s.to_string())
+            ));
+        }
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|e| format!("gonk's answer to {method} {path} is not the shape schema {SCHEMA} promises ({e}): {text}"))
+    }
+
+    /// One request, `Connection: close`: the status and the body.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &str,
+        accept: &str,
+    ) -> Result<(u16, String), String> {
         let target = format!(
             "{}:{}",
             self.host.trim_matches(|c| c == '[' || c == ']'),
@@ -700,7 +782,7 @@ impl Door {
         stream.set_read_timeout(timeout).map_err(unreachable)?;
         stream.set_write_timeout(timeout).map_err(unreachable)?;
         let request = format!(
-            "{method} {path}{query} HTTP/1.1\r\nHost: {}:{}\r\nAccept: text/plain\r\n\
+            "{method} {path}{query} HTTP/1.1\r\nHost: {}:{}\r\nAccept: {accept}\r\n\
              Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
             self.host,
@@ -725,20 +807,25 @@ impl Door {
         if let Some(length) = length.filter(|&l| l <= text.len()) {
             text = &text[..length];
         }
-        match status {
-            200..=299 => Ok(text.to_string()),
-            403 => Err(format!(
-                "gonk refused {method} {path} (403): {}. The HTTP door grants an anonymous \
-                 loopback caller the read and write tokens of the ledgers in `gonk.http.ledger` \
-                 and nothing else; filing needs both (`ikigai-gonk grants <ledger> write` \
-                 prints them, and listing the ledger there grants them)",
-                text.trim()
-            )),
-            _ => Err(format!(
-                "gonk answered {method} {path} with {status}: {}",
-                text.trim()
-            )),
-        }
+        Ok((status, text.to_string()))
+    }
+}
+
+/// `Ok` for a 2xx; otherwise the error, and for a 403 the grant that would have allowed it.
+fn refused(method: &str, path: &str, status: u16, text: &str) -> Result<(), String> {
+    match status {
+        200..=299 => Ok(()),
+        403 => Err(format!(
+            "gonk refused {method} {path} (403): {}. The HTTP door grants an anonymous \
+             loopback caller the read and write tokens of the ledgers in `gonk.http.ledger` \
+             and nothing else; filing needs both (`ikigai-gonk grants <ledger> write` \
+             prints them, and listing the ledger there grants them)",
+            text.trim()
+        )),
+        _ => Err(format!(
+            "gonk answered {method} {path} with {status}: {}",
+            text.trim()
+        )),
     }
 }
 
@@ -896,6 +983,11 @@ mod tests {
         );
         assert_eq!(get(&planned[0], "revision").as_deref(), Some("abc123"));
         assert_eq!(
+            get(&planned[0], "key").unwrap(),
+            planned[0].key,
+            "filed keyed"
+        );
+        assert_eq!(
             get(&planned[0], "about").unwrap(),
             format!("urn:repo:gonk:file:src/a.rs {}", planned[0].key)
         );
@@ -917,15 +1009,13 @@ mod tests {
     }
 
     #[test]
-    fn listings_and_paths() {
-        assert_eq!(first_item("no items match\n"), None);
+    fn paths_and_queries() {
         assert_eq!(
-            first_item("  #12  open    p1  Boom.  [critical roborev]\n\n1 item(s)\n").as_deref(),
-            Some("#12")
-        );
-        assert_eq!(
-            first_item("acme#3  closed  p2  x\n").as_deref(),
-            Some("acme#3")
+            encode(&[
+                ("key", "urn:kata:issue:01J".into()),
+                ("about", "a b".into())
+            ]),
+            "?key=urn%3Akata%3Aissue%3A01J&about=a%20b"
         );
         assert_eq!(
             path_of(&Ledger::parse("default").unwrap(), "items"),

@@ -225,7 +225,7 @@ fn concurrent_hooks_filing_one_finding_file_it_once() {
         let lines = item_lines(&items(
             &hub,
             "reviews",
-            &[("about", &format!("urn:repo:demo:file:src/race.rs"))],
+            &[("about", "urn:repo:demo:file:src/race.rs")],
         ))
         .len();
         assert_eq!(
@@ -236,7 +236,12 @@ fn concurrent_hooks_filing_one_finding_file_it_once() {
             lines - round,
             outputs.join("\n")
         );
-        assert_eq!(filed, 1, "exactly one hook says it filed:\n{}", outputs.join("\n"));
+        assert_eq!(
+            filed,
+            1,
+            "exactly one hook says it filed:\n{}",
+            outputs.join("\n")
+        );
     }
 }
 

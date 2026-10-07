@@ -38,19 +38,37 @@
 //! <created_at> by <author>.`), each comment ends with its own, and a close carries kata's
 //! close time as its note. A faithful import, which would keep them as data, is ledger #774.
 //!
-//! # Idempotence
+//! # Idempotence, and why it is race-free
 //!
-//! Each item is filed `about urn:kata:issue:<uid>`, and before filing, the ledger is asked for
-//! any item, open or closed, about that key — the check `roborev file` makes. An issue already
-//! there is not filed again, and the run CONVERGES rather than skipping it: a comment whose
-//! marker (`kata comment <uid>`) is not on the item yet is added, an issue closed in kata whose
-//! item is still open is closed, and a link the item does not show yet is made. So a re-run of
-//! the same export changes nothing, and a later export adds what is new.
+//! Each issue is filed with ONE request, `append key=urn:kata:issue:<uid>` (`ikigai-ledger`
+//! 0.4.0, ledger #779): the ledger checks the key and files the item in the same store
+//! update, and a key already taken answers the item that holds it (`outcome: existing`) and
+//! files nothing. So **two imports of one export at the same instant file each issue once**,
+//! which the check-then-append this replaced did not (eight concurrent imports filed one issue
+//! eight times: `tests/kata.rs`, `concurrent_imports_of_one_issue_file_it_once`). The key is
+//! also filed as the item's `about`, as before, so items filed by earlier versions still join.
+//!
+//! An issue already there is not filed again, and the run CONVERGES rather than skipping it:
+//! it reads the item by its key (`item:key:<key>`, in the ledger's JSON face), and a comment
+//! whose marker (`kata comment <uid>`) is in none of the item's comments is added, an issue
+//! closed in kata whose item is still open is closed, and a link the item does not carry yet
+//! is made — each addressed `item=key:<key>`. So a re-run of the same export changes nothing,
+//! and a later export adds what is new. An issue whose item was DELETED in the ledger is left
+//! alone: its tombstone keeps the key, and a deletion is a decision an import does not undo.
 //!
 //! ⚠ Not converged: an item's title, body, labels and priority are written once, when it is
-//! filed; a later edit in kata does not reach it. The check and the append are two requests,
-//! so two imports of one export at the same instant can both file an issue (ledger #779 is
-//! the atomic append that fixes both this and roborev's case).
+//! filed; a later edit in kata does not reach it. And the convergence itself (read the item,
+//! then comment, close or link) is still check-then-act — the ledger has no keyed comment — so
+//! two imports racing on the SAME new comment can both add it. Only the filing is atomic.
+//!
+//! # `--dry-run`
+//!
+//! A dry run does the READ half for real and skips only the writes: it asks the ledger for
+//! each issue's key, so it says `already` for an issue that is there and reports exactly the
+//! comments, closes and links a real run would add; and a ledger the door does not grant
+//! refuses it (403, exit 1) as it refuses the real run. ⚠ One thing a read cannot tell: an
+//! issue whose item was deleted answers 404 like one never filed, so the dry run says
+//! `would file` where the real run would leave it alone.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -58,7 +76,9 @@ use std::io::Write;
 use ikigai_ledger::Ledger;
 use serde_json::Value;
 
-use crate::roborev::{first_item, path_of, url_encode, Door};
+use ikigai_ledger::json::{Answer, Item, ItemDocument};
+
+use crate::roborev::{encode, path_of, Door};
 
 /// The idempotence key's prefix: `urn:kata:issue:<uid>`.
 pub const KEY_PREFIX: &str = "urn:kata:issue:";
@@ -74,7 +94,7 @@ pub struct ImportArgs {
     pub ledger: String,
     /// `--project`: only this kata project's issues.
     pub project: Option<String>,
-    /// `--dry-run`: print what would be filed and touch nothing.
+    /// `--dry-run`: read the ledger as a real run would, and write nothing.
     pub dry_run: bool,
 }
 
@@ -414,7 +434,11 @@ pub fn append_for(issue: &Issue) -> (String, Vec<(&'static str, String)>) {
         content.push_str(&format!("; owner {owner}"));
     }
     content.push_str(".\n");
-    let mut args = vec![("about", key(&issue.uid)), ("author", issue.author.clone())];
+    let mut args = vec![
+        ("key", key(&issue.uid)),
+        ("about", key(&issue.uid)),
+        ("author", issue.author.clone()),
+    ];
     if let Some(priority) = issue.priority {
         args.push(("priority", priority.to_string()));
     }
@@ -456,57 +480,69 @@ pub struct Summary {
     pub deleted: usize,
     /// Links skipped: an end not imported, or a type the ledger has no word for.
     pub links_skipped: usize,
+    /// Issues whose item was deleted in the ledger: left alone.
+    pub deleted_in_ledger: usize,
 }
 
-/// An item, as the door shows it.
-struct Item {
-    /// `#12` or `acme#12`.
-    short: String,
-    /// Its IRI.
-    iri: String,
-    /// Its detail text: status, links, comments.
-    text: String,
+/// Whether an item, as the JSON face shows it, is still open.
+fn is_open(item: &Item) -> bool {
+    item.status == "open"
 }
 
-impl Item {
-    fn is_open(&self) -> bool {
-        self.text.split_whitespace().nth(1) == Some("open")
-    }
+/// Whether one of its comments carries `marker`.
+fn has_comment(item: &Item, marker: &str) -> bool {
+    item.comments.iter().any(|c| c.text.contains(marker))
+}
 
-    /// Whether the detail shows `<kind>: <to>`.
-    fn has_link(&self, kind: &str, to: &str) -> bool {
-        self.text.lines().any(|line| {
-            let line = line.trim();
-            line.strip_prefix(kind)
-                .and_then(|rest| rest.strip_prefix(':'))
-                .is_some_and(|rest| rest.trim() == to)
-        })
-    }
+/// Whether it carries a `kind` link to `to`.
+fn has_link(item: &Item, kind: &str, to: &str) -> bool {
+    item.links
+        .iter()
+        .any(|link| link.kind == kind && link.target.iri == to)
+}
+
+/// `item=key:<key>`: how every write here names the item, by the issue's own name for it.
+fn by_key(uid: &str) -> (&'static str, String) {
+    ("item", format!("key:{}", key(uid)))
+}
+
+/// Where one issue stands in the ledger, as this run found or made it.
+enum Standing {
+    /// An item: filed now, or already there.
+    Item(Box<Item>),
+    /// Not in the ledger; a dry run would file it.
+    WouldFile,
 }
 
 /// Run `kata import`. Prints one line per thing done to `out` and answers the tally. A
 /// refusal or an unreachable door stops it with an error; what was filed before that stays
 /// filed, and running it again carries on from there.
+///
+/// Under `--dry-run` every read is made and every write is only reported (`would …`), so the
+/// tally is what a real run would do now.
 pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
     let text =
         std::fs::read_to_string(&args.file).map_err(|e| format!("reading {}: {e}", args.file))?;
     let export = parse(&text)?;
     let door = Door::parse(&args.gonk)?;
     let ledger = Ledger::parse(&args.ledger).map_err(|e| e.to_string())?;
+    let dry = args.dry_run;
+    let would = if dry { "would " } else { "" };
     let mut summary = Summary::default();
     let _ = writeln!(
         out,
-        "kata export version {}: {} issue(s), {} link(s)",
+        "kata export version {}: {} issue(s), {} link(s){}",
         export.version.as_deref().unwrap_or("?"),
         export.issues.len(),
-        export.links.len()
+        export.links.len(),
+        if dry { " (dry run: reads only)" } else { "" }
     );
     let wanted = |issue: &Issue| match &args.project {
         Some(project) => issue.project.as_deref() == Some(project.as_str()),
         None => true,
     };
-    // kata uid -> the item it became (or already was).
-    let mut items: HashMap<String, Item> = HashMap::new();
+    // kata uid -> where it stands: the item it became (or already was), or would be filed.
+    let mut items: HashMap<String, Standing> = HashMap::new();
     for issue in export.issues.iter().filter(|i| wanted(i)) {
         if issue.deleted {
             summary.deleted += 1;
@@ -514,82 +550,118 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
             continue;
         }
         let (content, append) = append_for(issue);
-        if args.dry_run {
-            let _ = writeln!(
-                out,
-                "would file  kata {}  {}",
-                issue.short_id,
-                first_line(&content)
-            );
-            for (name, value) in &append {
-                let _ = writeln!(out, "    {name}={value}");
-            }
-            let _ = writeln!(
-                out,
-                "    then {} comment(s){}",
-                issue.comments.len(),
-                if issue.closed.is_some() {
-                    ", close"
-                } else {
-                    ""
+        let item_path = path_of(&ledger, &format!("item:key:{}", key(&issue.uid)));
+        let item = if dry {
+            // The read half of the append: is the key taken?
+            match door.lookup::<ItemDocument>("GET", &item_path, &[], "")? {
+                Some(doc) => {
+                    summary.already += 1;
+                    let _ = writeln!(
+                        out,
+                        "already   {:<8} kata {}",
+                        doc.item.display, issue.short_id
+                    );
+                    doc.item
                 }
-            );
-            continue;
-        }
-        let query = format!("?about={}&status=all&limit=1", url_encode(&key(&issue.uid)));
-        let listing = door.call("GET", &path_of(&ledger, "items"), &query, "")?;
-        let item = match first_item(&listing) {
-            Some(short) => {
-                summary.already += 1;
-                let item = read_item(&door, &ledger, &short)?;
-                let _ = writeln!(out, "already   {:<8} kata {}", item.short, issue.short_id);
-                item
+                None => {
+                    summary.filed += 1;
+                    let _ = writeln!(
+                        out,
+                        "would file  kata {}  {}",
+                        issue.short_id,
+                        first_line(&content)
+                    );
+                    for (name, value) in &append {
+                        let _ = writeln!(out, "    {name}={value}");
+                    }
+                    let _ = writeln!(
+                        out,
+                        "    then {} comment(s){}",
+                        issue.comments.len(),
+                        if issue.closed.is_some() {
+                            ", close"
+                        } else {
+                            ""
+                        }
+                    );
+                    summary.comments += issue.comments.len();
+                    summary.closed += usize::from(issue.closed.is_some());
+                    items.insert(issue.uid.clone(), Standing::WouldFile);
+                    continue;
+                }
             }
-            None => {
-                let query = encode(&append);
-                let filed = door.call("POST", &path_of(&ledger, "append"), &query, &content)?;
-                let short = filed.split_whitespace().next().unwrap_or("?").to_string();
-                summary.filed += 1;
-                let _ = writeln!(
-                    out,
-                    "filed     {short:<8} kata {}  {}",
-                    issue.short_id,
-                    first_line(&content)
-                );
-                read_item(&door, &ledger, &short)?
+        } else {
+            // ONE request: the key is checked and the item filed in the same store update.
+            let answer: Answer =
+                door.json("POST", &path_of(&ledger, "append"), &append, &content)?;
+            let shown = answer
+                .item
+                .display
+                .clone()
+                .unwrap_or_else(|| answer.item.iri.clone());
+            match (answer.outcome.as_str(), answer.status.as_deref()) {
+                ("filed", _) => {
+                    summary.filed += 1;
+                    let _ = writeln!(
+                        out,
+                        "filed     {shown:<8} kata {}  {}",
+                        issue.short_id,
+                        first_line(&content)
+                    );
+                }
+                ("existing", Some("deleted")) => {
+                    summary.deleted_in_ledger += 1;
+                    let _ = writeln!(
+                        out,
+                        "deleted   {shown:<8} kata {}  its item was deleted in the ledger; left alone",
+                        issue.short_id
+                    );
+                    continue;
+                }
+                ("existing", _) => {
+                    summary.already += 1;
+                    let _ = writeln!(out, "already   {shown:<8} kata {}", issue.short_id);
+                }
+                (other, _) => {
+                    return Err(format!(
+                        "gonk answered the append of kata {} with the outcome `{other}`, \
+                         which is neither `filed` nor `existing`",
+                        issue.short_id
+                    ))
+                }
             }
+            door.json::<ItemDocument>("GET", &item_path, &[], "")?.item
         };
         for comment in &issue.comments {
-            if item.text.contains(&comment_marker(&comment.uid)) {
+            if has_comment(&item, &comment_marker(&comment.uid)) {
                 continue;
             }
-            let query = encode(&[
-                ("item", item.iri.clone()),
-                ("author", comment.author.clone()),
-            ]);
-            door.call(
-                "POST",
-                &path_of(&ledger, "comment"),
-                &query,
-                &comment_text(comment),
-            )?;
+            if !dry {
+                let query = encode(&[by_key(&issue.uid), ("author", comment.author.clone())]);
+                door.call(
+                    "POST",
+                    &path_of(&ledger, "comment"),
+                    &query,
+                    &comment_text(comment),
+                )?;
+            }
             summary.comments += 1;
             let _ = writeln!(
                 out,
-                "commented {:<8} kata comment {}",
-                item.short, comment.uid
+                "{would}commented {:<8} kata comment {}",
+                item.display, comment.uid
             );
         }
-        if let (Some(closed), true) = (&issue.closed, item.is_open()) {
-            let mut close = vec![("item", item.iri.clone())];
+        if let (Some(closed), true) = (&issue.closed, is_open(&item)) {
+            let mut close = vec![by_key(&issue.uid)];
             match closed.reason.as_deref().map(|r| (r, close_reason(r))) {
                 Some((_, Some(reason))) => close.push(("reason", reason.to_string())),
                 // An unknown reason closes as the ledger's default (done) and says so.
                 Some((other, None)) => {
                     let _ = writeln!(
                         out,
-                        "note      {:<8} kata close reason `{other}` has no ledger word; closed as done",
-                        item.short
+                        "note      {:<8} kata close reason `{other}` has no ledger word; {would}close as done",
+                        item.display
                     );
                 }
                 None => {}
@@ -607,30 +679,20 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default()
             );
-            door.call("POST", &path_of(&ledger, "close"), &encode(&close), &note)?;
+            if !dry {
+                door.call("POST", &path_of(&ledger, "close"), &encode(&close), &note)?;
+            }
             summary.closed += 1;
-            let _ = writeln!(out, "closed    {:<8} kata {}", item.short, issue.short_id);
+            let _ = writeln!(
+                out,
+                "{would}closed    {:<8} kata {}",
+                item.display, issue.short_id
+            );
         }
         // No re-read: comments and a close add no link, and the link pass reads only links.
-        items.insert(issue.uid.clone(), item);
+        items.insert(issue.uid.clone(), Standing::Item(Box::new(item)));
     }
-    if args.dry_run {
-        let imported = |uid: &str| {
-            export
-                .issues
-                .iter()
-                .any(|i| i.uid == uid && !i.deleted && wanted(i))
-        };
-        for link in &export.links {
-            let verb = match link_type(&link.kind) {
-                Some(_) if imported(&link.from) && imported(&link.to) => "would link",
-                _ => "would skip",
-            };
-            let _ = writeln!(out, "{verb}  {} {} {}", link.from, link.kind, link.to);
-        }
-        return Ok(summary);
-    }
-    // The second pass: every end exists now, or was not imported.
+    // The second pass: every end exists now (or would), or was not imported.
     for link in &export.links {
         let (Some(from), Some(to), Some(kind)) = (
             items.get(&link.from),
@@ -645,13 +707,22 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
             );
             continue;
         };
-        if from.has_link(kind, &to.iri) {
-            continue;
-        }
-        let query = encode(&[("item", from.iri.clone()), ("type", kind.to_string())]);
-        door.call("POST", &path_of(&ledger, "link"), &query, &to.iri)?;
+        let (from_shown, to_shown) = match (from, to) {
+            (Standing::Item(from), Standing::Item(to)) => {
+                if has_link(from, kind, &to.iri) {
+                    continue;
+                }
+                if !dry {
+                    let query = encode(&[by_key(&link.from), ("type", kind.to_string())]);
+                    door.call("POST", &path_of(&ledger, "link"), &query, &to.iri)?;
+                }
+                (from.display.clone(), to.display.clone())
+            }
+            // A dry run, with an end not filed yet: a real run would make this link.
+            _ => (link.from.clone(), link.to.clone()),
+        };
         summary.links += 1;
-        let _ = writeln!(out, "linked    {} {kind} {}", from.short, to.short);
+        let _ = writeln!(out, "{would}linked    {from_shown} {kind} {to_shown}");
     }
     let unread = export
         .unread
@@ -659,12 +730,26 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
         .map(|(kind, n)| format!("{kind} {n}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let maybe = if dry { "would be " } else { "" };
     let _ = writeln!(
         out,
-        "\n{} filed, {} already there; {} comment(s), {} close(s), {} link(s) added; {} deleted \
-         issue(s) and {} link(s) skipped{}",
+        "\n{}{} {maybe}filed, {} already there{}; {} comment(s), {} close(s), {} link(s) \
+         {maybe}added; {} deleted issue(s) and {} link(s) skipped{}",
+        if dry {
+            "dry run, nothing written: "
+        } else {
+            ""
+        },
         summary.filed,
         summary.already,
+        if summary.deleted_in_ledger > 0 {
+            format!(
+                " ({} deleted in the ledger, left alone)",
+                summary.deleted_in_ledger
+            )
+        } else {
+            String::new()
+        },
         summary.comments,
         summary.closed,
         summary.links,
@@ -677,35 +762,6 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
         }
     );
     Ok(summary)
-}
-
-/// `GET` an item's detail by its short form (`#12`, `acme#12`).
-fn read_item(door: &Door, ledger: &Ledger, short: &str) -> Result<Item, String> {
-    let number = short
-        .rsplit_once('#')
-        .map(|(_, n)| n)
-        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .ok_or_else(|| format!("gonk answered `{short}`, which is not an item number"))?;
-    let text = door.call("GET", &path_of(ledger, &format!("item:{number}")), "", "")?;
-    let iri = text
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("iri:"))
-        .map(|iri| iri.trim().to_string())
-        .ok_or_else(|| format!("gonk's item {short} names no IRI"))?;
-    Ok(Item {
-        short: short.to_string(),
-        iri,
-        text,
-    })
-}
-
-fn encode(args: &[(&str, String)]) -> String {
-    let query = args
-        .iter()
-        .map(|(name, value)| format!("{name}={}", url_encode(value)))
-        .collect::<Vec<_>>()
-        .join("&");
-    format!("?{query}")
 }
 
 fn first_line(content: &str) -> &str {
@@ -749,6 +805,7 @@ mod tests {
             )
         );
         assert!(args.contains(&("about", format!("urn:kata:issue:{UID}"))));
+        assert!(args.contains(&("key", format!("urn:kata:issue:{UID}"))));
         assert!(args.contains(&("priority", "0".to_string())));
         assert!(args.contains(&("author", "chris".to_string())));
         assert!(
@@ -804,18 +861,32 @@ mod tests {
     }
 
     #[test]
-    fn an_item_shows_its_status_and_links() {
-        let item = Item {
-            short: "#3".into(),
-            iri: "urn:iki:ledger:default:item:a".into(),
-            text: "   #3  open    p1  T\n  iri:      urn:iki:ledger:default:item:a\n  \
-                   blocks:   urn:iki:ledger:default:item:b\n"
-                .into(),
-        };
-        assert!(item.is_open());
-        assert!(item.has_link("blocks", "urn:iki:ledger:default:item:b"));
-        assert!(!item.has_link("parent", "urn:iki:ledger:default:item:b"));
-        assert!(!item.has_link("blocks", "urn:iki:ledger:default:item:c"));
+    fn an_item_shows_its_status_comments_and_links() {
+        let doc: ItemDocument = serde_json::from_str(
+            r#"{"schema":1,"ledger":"kata","item":{"number":3,"display":"kata#3",
+            "iri":"urn:iki:ledger:kata:item:a","kind":null,"title":"T","body":"",
+            "status":"open","closed_reason":null,"priority":1,"deferred":false,"labels":[],
+            "about":["urn:kata:issue:01J"],"key":"urn:kata:issue:01J","author":"chris",
+            "revision":null,"claim":null,"created":"2026-10-01T00:00:00.000Z",
+            "modified":"2026-10-01T00:00:00.000Z",
+            "links":[{"type":"blocks","target":{"number":4,"display":"kata#4",
+                      "iri":"urn:iki:ledger:kata:item:b"}}],
+            "comments":[{"id":"urn:iki:ledger:kata:comment:c","author":"chris",
+                         "time":"2026-10-01T00:00:00.000Z",
+                         "text":"Seen.\n\n(kata comment 01C, 2026-10-01T00:00:00.000Z)"}]}}"#,
+        )
+        .unwrap();
+        let item = doc.item;
+        assert!(is_open(&item));
+        assert!(has_link(&item, "blocks", "urn:iki:ledger:kata:item:b"));
+        assert!(!has_link(&item, "parent", "urn:iki:ledger:kata:item:b"));
+        assert!(!has_link(&item, "blocks", "urn:iki:ledger:kata:item:c"));
+        assert!(has_comment(&item, &comment_marker("01C")));
+        assert!(!has_comment(&item, &comment_marker("01D")));
+        assert_eq!(
+            by_key("01J"),
+            ("item", "key:urn:kata:issue:01J".to_string())
+        );
     }
 
     #[test]
