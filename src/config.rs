@@ -12,8 +12,8 @@
 //! # gonk.port = 1060                    # shorthand for gonk.bind = "127.0.0.1:<port>"
 //! # the owner-only socket (this IS the default)
 //! gonk.socket = "~/.ikigai/gonk.sock"
-//! # gonk.quic.bind = "0.0.0.0:1060"     # set it to REQUIRE the QUIC door; unset, it opens at
-//!                                       # this default once a client certificate is enrolled
+//! # gonk.quic.bind = "0.0.0.0:1060"     # set it to REQUIRE the QUIC door; unset, it opens on
+//!                                       # UDP at the HTTP port once a certificate is enrolled
 //! # ledgers the HTTP door may read and write; repeatable
 //! gonk.http.ledger = "default"
 //! # a browsable repository; repeatable
@@ -57,7 +57,8 @@ use std::time::Duration;
 use crate::grants::{Authority, BrowseRole};
 use crate::mount::{self, Mount};
 
-/// The HTTP door's default port — and the QUIC door's, on UDP. See the README for 1060.
+/// The HTTP door's default port — and the QUIC door's, on UDP, which follows whatever port
+/// the HTTP door takes ([`quic_bind`]). See the README for 1060.
 pub const DEFAULT_PORT: u16 = 1060;
 
 /// The ledger the HTTP door serves when no `gonk.http.ledger` line names one.
@@ -128,11 +129,25 @@ ikigai-gonk — a standalone ikigai work-ledger server
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
   ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
-                     [--browse <read|derive> [--root <root>]...] [--cert <client.crt>] [--config PATH] [--force]
+                     [--browse <read|derive> [--root <root>]...] [--cert <client.crt>] [--force] [--rotate]
+                     [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
                                    with --ledger, --browse-graph or --browse enrol its
-                                   fingerprint under a grant
+                                   fingerprint under a grant. An existing client KEEPS its
+                                   identity: --force replaces its grant, --rotate replaces its
+                                   key pair (or, with --cert, its certificate) and unenrols the
+                                   old fingerprint. --port / --quic-bind name the server's, so
+                                   the printed --connect line names the right port
+  ikigai-gonk client list [--config PATH]
+                                   every QUIC client: each bundle and each enrolled
+                                   fingerprint, its grant, and whether a connection from it is
+                                   admitted
+  ikigai-gonk client remove <name> | --fingerprint <fp> [--config PATH]
+                                   remove a client's bundle and its enrolment (or one enrolled
+                                   fingerprint with no bundle). grants.json is left alone: a
+                                   grant name may be shared. Effective at its next connection;
+                                   its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
                      [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
@@ -217,7 +232,8 @@ serve flags (each overrides its config key wholesale):
   --bind IP:PORT        the HTTP door (config `gonk.bind`); loopback only — default 127.0.0.1:1060
   --port N              shorthand for --bind 127.0.0.1:N (config `gonk.port`)
   --socket PATH         the owner-only socket (config `gonk.socket`); default ~/.ikigai/gonk.sock
-  --quic-bind IP:PORT   the QUIC door (config `gonk.quic.bind`); default 0.0.0.0:1060 (UDP).
+  --quic-bind IP:PORT   the QUIC door (config `gonk.quic.bind`); default 0.0.0.0 on the HTTP
+                        door's port (UDP) — 1060, or whatever --port / gonk.port says.
                         Unset, the door opens once a client certificate is enrolled; set,
                         it must open, and gonk refuses to start when no client can be admitted
   --no-quic             do not open the QUIC door this run
@@ -263,9 +279,28 @@ pub enum Command {
         browse_graph: Option<Authority>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
-        /// Replace an existing bundle or enrolment.
+        /// Replace an existing GRANT (or an enrolment under another grant). Never the key
+        /// pair: that is `rotate`.
         force: bool,
-        /// `--config`, read only when `--browse` needs this server's roots and mount.
+        /// `--rotate`: mint (or import) a NEW identity for an existing client and take the
+        /// old fingerprint out of `clients.json`.
+        rotate: bool,
+        /// `--config`, `--port` and `--quic-bind`: the config is read for a `--browse` role's
+        /// roots and mount, and for the QUIC port the printed `--connect` line names.
+        flags: Flags,
+    },
+    /// List the QUIC clients this server knows of: bundles and enrolled fingerprints.
+    ClientList {
+        /// Where the config home is read from (`--config` is accepted for symmetry).
+        flags: Flags,
+    },
+    /// Remove a QUIC client: its bundle and its enrolment, or one enrolled fingerprint.
+    ClientRemove {
+        /// The bundle name, or — with `--fingerprint` — the fingerprint.
+        key: String,
+        /// Whether `key` is a bundle name (`true`) or a fingerprint.
+        by_name: bool,
+        /// `--config`.
         flags: Flags,
     },
     /// Drop one review request into the configured queue.
@@ -808,25 +843,74 @@ fn parse_review(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
 fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     match args.next().as_deref() {
         Some("add") => {}
+        Some("list") => {
+            let mut flags = Flags::default();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+                    other => return Err(format!("client list: unknown argument `{other}`")),
+                }
+            }
+            return Ok(Command::ClientList { flags });
+        }
+        Some("remove") => {
+            let mut flags = Flags::default();
+            let (mut name, mut fingerprint) = (None, None);
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--fingerprint" => fingerprint = Some(value(&mut args, "--fingerprint")?),
+                    "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+                    other if other.starts_with('-') => {
+                        return Err(format!("client remove: unknown argument `{other}`"))
+                    }
+                    other if name.is_none() => name = Some(other.to_string()),
+                    other => return Err(format!("client remove: unexpected argument `{other}`")),
+                }
+            }
+            let (key, by_name) = match (name, fingerprint) {
+                (Some(name), None) => (name, true),
+                (None, Some(fingerprint)) => (fingerprint, false),
+                _ => {
+                    return Err(
+                        "client remove: expected <name> (a bundle) or --fingerprint <fp> (an \
+                         enrolment with no bundle), not both"
+                            .to_string(),
+                    )
+                }
+            };
+            return Ok(Command::ClientRemove {
+                key,
+                by_name,
+                flags,
+            });
+        }
         Some(other) => {
             return Err(format!(
-                "client: unknown subcommand `{other}` (expected `add`)"
+                "client: unknown subcommand `{other}` (expected `add`, `list` or `remove`)"
             ))
         }
-        None => return Err("client: expected `add <name>`".to_string()),
+        None => return Err("client: expected `add <name>`, `list` or `remove <name>`".to_string()),
     }
     let name = args
         .next()
         .filter(|name| !name.starts_with('-'))
         .ok_or("client add: expected <name>")?;
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
-    let (mut role, mut roots, mut flags) = (None, Vec::new(), Flags::default());
+    let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
             "--root" => roots.push(value(&mut args, "--root")?),
             "--config" => flags.config = Some(PathBuf::from(value(&mut args, "--config")?)),
+            "--port" => {
+                let port = value(&mut args, "--port")?;
+                flags.port = Some(
+                    port.parse()
+                        .map_err(|_| format!("--port: `{port}` is not a port number"))?,
+                );
+            }
+            "--quic-bind" => flags.quic_bind = Some(value(&mut args, "--quic-bind")?),
             "--ledger" => {
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
@@ -838,6 +922,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
                 browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
             }
             "--force" => force = true,
+            "--rotate" => rotate = true,
             other => return Err(format!("client add: unknown argument `{other}`")),
         }
     }
@@ -848,6 +933,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         browse_graph,
         browse: browse_grant(role, roots)?,
         force,
+        rotate,
         flags,
     })
 }
@@ -977,20 +1063,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         .or_else(|| value_for(text, "gonk.socket"))
         .map(|spelled| expand_home(&spelled, &homes.home))
         .unwrap_or_else(|| homes.data.join(SOCKET_NAME));
-    let quic = if flags.no_quic {
-        QuicBind::Off
-    } else {
-        match flags
-            .quic_bind
-            .clone()
-            .or_else(|| value_for(text, "gonk.quic.bind"))
-        {
-            Some(spelled) => {
-                QuicBind::Explicit(parse_bind(&spelled).map_err(|e| format!("quic {e}"))?)
-            }
-            None => QuicBind::Default(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))),
-        }
-    };
+    let quic = quic_bind(flags, text, http)?;
     // A Unix socket path is bounded by `sun_path` — 104 bytes on macOS, 108 on Linux, the
     // terminator included. Refused here, before the store is opened, rather than as a door
     // that dies a moment after the banner says it is serving.
@@ -1030,6 +1103,48 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         queue: queue_policy(text)?,
         access_log: access_log(text)?,
     })
+}
+
+/// The QUIC door's bind: off with `--no-quic`; `--quic-bind` or `gonk.quic.bind` when either
+/// names one; otherwise UDP on every interface at **the HTTP door's port**.
+///
+/// ★ The port FOLLOWS the HTTP door (ledger #816). It used to be `0.0.0.0:1060` whatever
+/// `--port` said, so a scratch gonk on `--port 1070` with an enrolled client tried to bind
+/// UDP 1060 beside a live gonk and exited; the gonk Book taught `--quic-bind
+/// 127.0.0.1:1070` to dodge it. One port, two protocols, is what 1060 always meant.
+///
+/// ```
+/// use ikigai_gonk::config::{quic_bind, Flags, QuicBind};
+/// let http = "127.0.0.1:1070".parse().unwrap();
+/// assert_eq!(
+///     quic_bind(&Flags::default(), "", http).unwrap(),
+///     QuicBind::Default("0.0.0.0:1070".parse().unwrap())
+/// );
+/// ```
+pub fn quic_bind(flags: &Flags, text: &str, http: SocketAddr) -> Result<QuicBind, String> {
+    if flags.no_quic {
+        return Ok(QuicBind::Off);
+    }
+    Ok(
+        match flags
+            .quic_bind
+            .clone()
+            .or_else(|| value_for(text, "gonk.quic.bind"))
+        {
+            Some(spelled) => {
+                QuicBind::Explicit(parse_bind(&spelled).map_err(|e| format!("quic {e}"))?)
+            }
+            None => QuicBind::Default(SocketAddr::from(([0, 0, 0, 0], http.port()))),
+        },
+    )
+}
+
+/// The QUIC door's address as `serve` would resolve it from `flags` and the config text —
+/// for a command that prints a `quic://host:<port>` line and must name the port the server
+/// listens on (`client add`). `None` with `--no-quic`.
+pub fn quic_addr(flags: &Flags, text: &str) -> Result<Option<SocketAddr>, String> {
+    let http = resolve_bind(flags.bind.as_deref(), flags.port, text)?;
+    Ok(quic_bind(flags, text, http)?.addr())
 }
 
 /// `gonk.log.access`: the access log is ON unless a line turns it off (ledger #739).
@@ -1612,6 +1727,22 @@ mod tests {
             super::settings(&flagged, "", &homes()).unwrap().quic,
             QuicBind::Explicit(addr("127.0.0.1:4000"))
         );
+        // ★ Ledger #816: the default QUIC port FOLLOWS the HTTP port, flag or key — a scratch
+        // gonk on --port 1070 no longer reaches for UDP 1060 beside a live one.
+        let moved = Flags {
+            port: Some(1070),
+            ..Flags::default()
+        };
+        assert_eq!(
+            super::settings(&moved, "", &homes()).unwrap().quic,
+            QuicBind::Default(addr("0.0.0.0:1070"))
+        );
+        assert_eq!(
+            super::settings(&Flags::default(), "gonk.port = 1080\n", &homes())
+                .unwrap()
+                .quic,
+            QuicBind::Default(addr("0.0.0.0:1080"))
+        );
         assert_eq!(settings.http_ledgers, ["default"]);
     }
 
@@ -1862,9 +1993,11 @@ mod tests {
                 browse,
                 cert,
                 force,
+                rotate,
                 flags,
             } => {
                 assert_eq!(name, "laptop");
+                assert!(!rotate);
                 assert!(browse.is_none() && flags.config.is_none());
                 assert_eq!(
                     ledgers,
@@ -1890,6 +2023,25 @@ mod tests {
         ));
         assert!(parse_args(args("client add laptop --ledger default=admin")).is_err());
         assert!(parse_args(args("--bogus")).is_err());
+        // Ledger #816: the QUIC client's lifecycle, and the port its hint names.
+        assert!(matches!(
+            parse_args(args("client add laptop --rotate --port 1070")).unwrap(),
+            Command::ClientAdd { rotate: true, flags, .. } if flags.port == Some(1070)
+        ));
+        assert!(matches!(
+            parse_args(args("client list")).unwrap(),
+            Command::ClientList { .. }
+        ));
+        assert!(matches!(
+            parse_args(args("client remove laptop")).unwrap(),
+            Command::ClientRemove { key, by_name: true, .. } if key == "laptop"
+        ));
+        assert!(matches!(
+            parse_args(args("client remove --fingerprint ab12")).unwrap(),
+            Command::ClientRemove { key, by_name: false, .. } if key == "ab12"
+        ));
+        assert!(parse_args(args("client remove")).is_err());
+        assert!(parse_args(args("client remove a --fingerprint b")).is_err());
     }
 
     /// ★ The browse graph is a SUBJECT of a grant, not a ledger — every spelling, because

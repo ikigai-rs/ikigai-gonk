@@ -659,3 +659,225 @@ fn a_plain_text_author_is_kept_and_another_principal_is_refused_on_every_route()
     ));
     assert!(append("laptop").is_ok());
 }
+
+// ------------------------------------------------------------------------------------------
+// R7 and ledger #816: the QUIC client's lifecycle from the command line. `--rotate` is the
+// explicit replacement (a new identity, the old fingerprint unenrolled, and it SAYS so);
+// `client list` and `client remove` exist; and the printed `--connect` line names the port
+// this config's server listens on, which follows the HTTP port.
+// ------------------------------------------------------------------------------------------
+struct Cli {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl Cli {
+    fn new(config: &str) -> Cli {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for dir in ["home", "xdg/ikigai"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("xdg/ikigai/config.toml"), config).unwrap();
+        Cli { _tmp: tmp, root }
+    }
+
+    fn run(&self, args: &[&str]) -> (bool, String, String) {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+            .args(args)
+            .env("HOME", self.root.join("home"))
+            .env("XDG_CONFIG_HOME", self.root.join("xdg"))
+            .output()
+            .expect("run ikigai-gonk");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    fn enrolled(&self) -> Vec<String> {
+        let text = std::fs::read_to_string(self.root.join("xdg/ikigai/gonk/clients.json")).unwrap();
+        let clients: serde_json::Value = serde_json::from_str(&text).unwrap();
+        clients["clients"]
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+fn fingerprint_in(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("fingerprint"))
+        .map(|rest| rest.trim().to_string())
+        .unwrap_or_else(|| panic!("no fingerprint line in: {stdout}"))
+}
+
+#[test]
+fn rotate_replaces_the_identity_and_unenrols_the_old_one() {
+    let cli = Cli::new("");
+    let (ok, first, err) = cli.run(&["client", "add", "laptop", "--ledger", "default=read"]);
+    assert!(ok, "{err}");
+    let (ok, kept, err) = cli.run(&[
+        "client",
+        "add",
+        "laptop",
+        "--ledger",
+        "default=write",
+        "--force",
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(fingerprint_in(&first), fingerprint_in(&kept));
+    assert!(kept.contains("identity is unchanged"), "{kept}");
+    let (ok, rotated, err) = cli.run(&[
+        "client",
+        "add",
+        "laptop",
+        "--ledger",
+        "default=write",
+        "--rotate",
+    ]);
+    assert!(ok, "{err}");
+    let (old, new) = (fingerprint_in(&first), fingerprint_in(&rotated));
+    assert_ne!(old, new, "--rotate mints a new identity");
+    assert!(
+        rotated.contains("ROTATED") && rotated.contains(&old),
+        "{rotated}"
+    );
+    assert_eq!(
+        cli.enrolled(),
+        [new],
+        "only the new certificate is enrolled"
+    );
+    // Rotating a client that does not exist is refused, before anything is written.
+    let (ok, _, err) = cli.run(&["client", "add", "ghost", "--rotate"]);
+    assert!(!ok && err.contains("no identity to rotate"), "{err}");
+    assert!(!cli.root.join("xdg/ikigai/gonk/quic/clients/ghost").exists());
+}
+
+#[test]
+fn client_list_and_remove_show_and_revoke_what_is_enrolled() {
+    let cli = Cli::new("");
+    let (ok, a, err) = cli.run(&["client", "add", "a", "--ledger", "default=read"]);
+    assert!(ok, "{err}");
+    let (ok, b, err) = cli.run(&["client", "add", "b"]);
+    assert!(ok, "{err}");
+    let (ok, listed, err) = cli.run(&["client", "list"]);
+    assert!(ok, "{err}");
+    let row = |fp: &str| {
+        listed
+            .lines()
+            .find(|line| line.contains(fp))
+            .unwrap_or_else(|| panic!("no row for {fp}: {listed}"))
+            .to_string()
+    };
+    assert!(
+        row(&fingerprint_in(&a)).contains("trusted and enrolled"),
+        "{listed}"
+    );
+    assert!(
+        row(&fingerprint_in(&b)).contains("NOT enrolled"),
+        "{listed}"
+    );
+
+    let (ok, removed, err) = cli.run(&["client", "remove", "a"]);
+    assert!(ok, "{err}");
+    assert!(removed.contains("unenrolled"), "{removed}");
+    assert!(cli.enrolled().is_empty());
+    assert!(!cli.root.join("xdg/ikigai/gonk/quic/clients/a").exists());
+    let grants = std::fs::read_to_string(cli.root.join("xdg/ikigai/gonk/grants.json")).unwrap();
+    assert!(
+        grants.contains("\"a\""),
+        "the grant is left alone: {grants}"
+    );
+
+    // An enrolment with no bundle (what an old `--force` left behind) is removable by its
+    // fingerprint, and listed as what it is until then.
+    let orphan = "ab".repeat(32);
+    std::fs::write(
+        cli.root.join("xdg/ikigai/gonk/clients.json"),
+        format!(r#"{{"clients": {{"{orphan}": {{"grant": "a"}}}}}}"#),
+    )
+    .unwrap();
+    let (_, listed, _) = cli.run(&["client", "list"]);
+    assert!(listed.contains("NO bundle"), "{listed}");
+    let (ok, _, err) = cli.run(&["client", "remove", "--fingerprint", &orphan]);
+    assert!(ok, "{err}");
+    assert!(cli.enrolled().is_empty());
+    let (ok, _, err) = cli.run(&["client", "remove", "nobody"]);
+    assert!(!ok && err.contains("client list"), "{err}");
+}
+
+#[test]
+fn the_connect_line_names_the_port_the_server_listens_on() {
+    let cli = Cli::new("gonk.port = 1070\n");
+    let (ok, out, err) = cli.run(&["client", "add", "a", "--ledger", "default=read"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("quic://<gonk host>:1070 "), "{out}");
+    let (ok, out, err) = cli.run(&[
+        "client",
+        "add",
+        "b",
+        "--ledger",
+        "default=read",
+        "--quic-bind",
+        "0.0.0.0:2000",
+    ]);
+    assert!(ok, "{err}");
+    assert!(out.contains("quic://<gonk host>:2000 "), "{out}");
+}
+
+// ------------------------------------------------------------------------------------------
+// Ledger #816 (4): a QUIC write is attributed. The connection's capability carries the
+// client's name (`quic::authority`), the access log writes it as `principal`, and the author
+// rule lets that client name itself and nobody else.
+// ------------------------------------------------------------------------------------------
+#[test]
+fn a_quic_write_is_logged_and_may_name_only_its_own_client() {
+    const FP: &str = "6f1c00000000000000000000000000000000000000000000000000000000abcd";
+    let mut scopes = grants_for("default", Authority::Write).unwrap();
+    let grants: BTreeMap<String, Vec<String>> =
+        [("rw".to_string(), scopes.clone())].into_iter().collect();
+    let enrolment = quic::parse_enrolment(&format!(r#"{{"clients": {{"{FP}": "rw"}}}}"#)).unwrap();
+    let (_, capability) = quic::authority(&enrolment, &grants, FP).unwrap();
+    let me = quic::client_iri(FP);
+    assert!(capability.allows(&me), "the session names its client");
+    // A grant cannot hand out a client's name.
+    scopes.push(me.clone());
+    assert!(quic::grant_refusal("rw", &scopes).is_some());
+
+    let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let sink = Arc::clone(&lines);
+    let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
+    let door = doors::quic_kernel_with(
+        Arc::clone(&hub),
+        Some(ikigai_gonk::access::AccessLog::to(
+            ikigai_gonk::access::Door::Quic,
+            Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
+        )),
+    );
+    let append = |author: &str| {
+        block_on(Kernel::issue(
+            &door,
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:append",
+                &[("author", author.as_bytes()), ("content", b"over quic")],
+            ),
+            &capability,
+        ))
+    };
+    assert!(append(&me).is_ok(), "a client may name itself");
+    assert!(matches!(
+        append(&quic::client_iri("00")),
+        Err(ikigai_core::Error::Denied(_))
+    ));
+    let logged = lines.lock().unwrap().clone();
+    assert!(
+        logged
+            .iter()
+            .all(|line| line.contains(&format!(" principal={me} "))),
+        "{logged:#?}"
+    );
+}

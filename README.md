@@ -1215,7 +1215,11 @@ That generates this server's identity on first use, mints a client identity into
 `~/.config/ikigai/gonk/quic/clients/laptop/`, and enrols its certificate fingerprint under a
 grant called `laptop` holding exactly the tokens for reading and writing the `default`
 ledger. Restart `ikigai-gonk` — the set of trusted certificates is read at startup — and the
-banner reports `quic  udp 0.0.0.0:1060`.
+banner reports `quic  udp 0.0.0.0:1060`. The QUIC door's port **follows the HTTP door's**:
+`--port 1070` (or `gonk.port = 1070`) puts it on UDP 1070 too, and `client add` prints the
+`--connect` line with that port (pass it `--port` or `--quic-bind` when the server is started
+with flags rather than config). Until ledger #816 the QUIC default was UDP 1060 whatever
+`--port` said, so a scratch gonk with an enrolled client collided with a live one.
 
 Copy that directory to the other machine; it holds `client.crt`, `client.key` and the
 `server.crt` to pin, laid out as the cli's `--cert-dir` expects. There, with a cli built with
@@ -1238,9 +1242,34 @@ enrol only the certificate: `ikigai cert generate --dir ~/gonk-laptop` there, co
 `client.crt` here, and `ikigai-gonk client add laptop --cert client.crt --ledger
 default=write`; then copy the bundle's `server.crt` back over the one in `~/gonk-laptop`.
 
+**A client's lifecycle** (ledger #816, and #864 R7):
+
+```sh
+ikigai-gonk client list                      # every bundle and enrolled fingerprint, its grant, and whether it is admitted
+ikigai-gonk client add laptop --ledger default=delete --force   # a NEW GRANT; the identity is kept
+ikigai-gonk client add laptop --rotate       # a NEW IDENTITY; the old fingerprint is unenrolled, and it says so
+ikigai-gonk client remove laptop             # the bundle and its enrolment (grants.json is left alone)
+ikigai-gonk client remove --fingerprint <fp> # an enrolment with no bundle
+```
+
+⚠ `--force` replaces a client's GRANT and never its key pair. Until ledger #864 (R7) it did
+both: the operator ran the `--force` the grant refusal told them to, the client's deployed
+certificate silently stopped being trusted at the next restart, and its old fingerprint
+stayed enrolled beside the new one. `--rotate` is the explicit replacement, with `--cert` to
+import a certificate the client generated itself. An enrolment left behind by the old
+behavior shows in `client list` as `enrolled, NO bundle`; remove it by fingerprint.
+
+**Every QUIC request is attributed.** The connection's capability carries the client's name,
+`urn:iki:gonk:client:<fingerprint>` (`client add` prints it), and the access log writes it as
+the `principal` of every QUIC request, writes included. A write through that connection may
+name it as its `author`, and no other principal (`crate::admit`). ⚠ A client that carries a
+narrower capability of its own (an `ikigai serve` forwarding an agent's attenuated grant) has
+it clamped to the intersection, which drops the name: those requests log `principal=-`.
+
 What admission means today: a client holding a trusted certificate and an enrolment is
-admitted until its entry is removed from `clients.json`, which takes effect on its next
-connection. There is no certificate authority, no expiry, no rotation and no automated trust
+admitted until it is removed (`client remove`, or its entry deleted from `clients.json`),
+which takes effect on its next connection; its certificate stays trusted at the TLS handshake
+until a restart. There is no certificate authority, no expiry and no automated trust
 distribution — the server certificate is pinned by copying it.
 
 `ikigai-gonk grants <ledger> <read|write|delete|purge>` prints the token list for one
@@ -1866,7 +1895,7 @@ value becomes part of the value.
 # or gonk.port = 1060, which always means loopback
 gonk.bind = "127.0.0.1:1060"
 gonk.socket = "~/.ikigai/gonk.sock"
-# gonk.quic.bind = "0.0.0.0:1060"     # unset: QUIC opens here once a certificate is enrolled;
+# gonk.quic.bind = "0.0.0.0:1060"     # unset: QUIC opens on UDP at the HTTP port once a certificate is enrolled;
                                       # set: QUIC must open, or gonk refuses to start
 # repeatable
 gonk.http.ledger = "default"
@@ -2439,7 +2468,8 @@ policies — see `ikigai-ledger`'s README.
 Port 1060 is the default for both HTTP (TCP) and QUIC (UDP), which are separate namespaces, so
 one number names the server. It is also NetKernel's own port, registered with IANA as
 `polestar`: a machine running both collides, which is why it is a default and not a constant.
-`--port`, `--bind` and `--quic-bind` move it.
+`--port` and `--bind` move both doors (the QUIC door takes the HTTP door's port unless a
+QUIC bind is named); `--quic-bind` moves QUIC alone.
 
 The name and the number are one tribute. GONK carries NK in order; the GNK power droid plods
 around carrying charge so the rest of the scene can work. And 1060 is XML read as Roman
@@ -2475,8 +2505,12 @@ time, class, subject IRI, then `key=value` columns, every key on every line in t
 every request that took a second or more. `outcome` is `ok` or the kernel's error kind — **not
 the HTTP status**, which `ikigai-web` decides after the kernel returns and does not report
 back. An HTTP read's `principal` is `-` for the same reason: the library tells a door who a
-WRITE is from, never a read. A refusal the door kernel makes before dispatch (a capability
-floor, a name nothing binds) writes no line. No line ever carries a cookie, a token or a form
+WRITE is from, never a read — and a `?principal=` a reader types is never written as one
+(ledger #864, R6). A QUIC line names the client the connection authenticated,
+`urn:iki:gonk:client:<fingerprint>` (ledger #816). A refusal the door kernel makes before
+dispatch (a capability floor, a name nothing binds) writes no line; a foreign `Host` or a
+cross-site write is refused one step later, by the door's admission, and does write one
+(`outcome=denied`). No line ever carries a cookie, a token or a form
 body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
 
 ## Not built
