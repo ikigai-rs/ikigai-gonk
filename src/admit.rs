@@ -85,9 +85,12 @@ pub fn refusal(capability: &Capability) -> Option<&'static str> {
     }
 }
 
-/// The IRI prefixes this server names a PRINCIPAL by — what the item page renders as a
-/// person rather than as text.
-pub const PRINCIPAL_PREFIXES: [&str; 1] = [crate::identity::PASSKEY_IRI_PREFIX];
+/// The IRI prefixes this server names a PRINCIPAL by: a passkey (which the item page renders
+/// as that person's label) and a QUIC client certificate ([`crate::quic::client_iri`]).
+pub const PRINCIPAL_PREFIXES: [&str; 2] = [
+    crate::identity::PASSKEY_IRI_PREFIX,
+    crate::quic::CLIENT_IRI_PREFIX,
+];
 
 /// Whether `author` is shaped like a principal this server names — compared the way a
 /// reader would: surrounding whitespace ignored, the prefix's case ignored.
@@ -96,6 +99,7 @@ pub const PRINCIPAL_PREFIXES: [&str; 1] = [crate::identity::PASSKEY_IRI_PREFIX];
 /// use ikigai_gonk::admit::is_principal_iri;
 /// assert!(is_principal_iri("urn:iki:gonk:passkey:Q1JFRC1CUklBTg"));
 /// assert!(is_principal_iri(" URN:IKI:GONK:PASSKEY:x"));
+/// assert!(is_principal_iri("urn:iki:gonk:client:ab12"));
 /// assert!(!is_principal_iri("chris"));
 /// assert!(!is_principal_iri("roborev"));
 /// ```
@@ -115,9 +119,17 @@ pub fn is_principal_iri(author: &str) -> bool {
 ///   `?principal=` on a mutating verb and stamps its own (`doors::http_principal`), so there it
 ///   is the door's. On a READ the library forwards a submitted one untouched (ledger #864, R6:
 ///   its half is ikigai-cli's), so a read names nobody here.
-/// - **QUIC** and the **socket**: `None` — the transport hands an endpoint no principal.
-pub fn principal(door: Door, request: &Request) -> Option<String> {
+/// - **QUIC**: the client's NAME the door put in the connection's capability
+///   ([`crate::quic::authority`]) — never in a request, so a caller cannot type it. Absent
+///   when a client carried a narrower capability of its own (the clamp drops it).
+/// - **socket**: `None` — the owner, who is no principal this server names.
+pub fn principal(door: Door, request: &Request, capability: &Capability) -> Option<String> {
     match door {
+        Door::Quic => capability.scopes().and_then(|held| {
+            held.iter()
+                .find(|scope| scope.starts_with(crate::quic::CLIENT_IRI_PREFIX))
+                .cloned()
+        }),
         Door::Http if request.verb.is_mutating() => match request.args.get("principal") {
             Some(ArgRef::Inline(bytes)) => {
                 let value = String::from_utf8_lossy(bytes);
@@ -136,7 +148,7 @@ pub fn principal(door: Door, request: &Request) -> Option<String> {
 /// ([`principal`]); any other author is text and passes.
 ///
 /// ```
-/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
 /// use ikigai_gonk::{access::Door, admit};
 /// let append = |args: &[(&str, &str)]| {
 ///     args.iter().fold(
@@ -145,15 +157,22 @@ pub fn principal(door: Door, request: &Request) -> Option<String> {
 ///     )
 /// };
 /// let brian = "urn:iki:gonk:passkey:QlJJQU4";
-/// assert!(admit::author_refusal(Door::Http, &append(&[("author", brian)])).is_some());
-/// assert!(admit::author_refusal(Door::Http, &append(&[("author", "chris")])).is_none());
+/// let anyone = Capability::scoped(Vec::<String>::new());
+/// assert!(admit::author_refusal(Door::Http, &append(&[("author", brian)]), &anyone).is_some());
+/// assert!(admit::author_refusal(Door::Http, &append(&[("author", "chris")]), &anyone).is_none());
 /// assert!(admit::author_refusal(
 ///     Door::Http,
-///     &append(&[("author", brian), ("principal", brian)])
+///     &append(&[("author", brian), ("principal", brian)]),
+///     &anyone
 /// )
 /// .is_none());
+/// // A QUIC client may name itself, and nobody else.
+/// let laptop = ikigai_gonk::quic::client_iri("ab12");
+/// let connected = Capability::scoped([laptop.clone()]);
+/// assert!(admit::author_refusal(Door::Quic, &append(&[("author", &laptop)]), &connected).is_none());
+/// assert!(admit::author_refusal(Door::Quic, &append(&[("author", brian)]), &connected).is_some());
 /// ```
-pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
+pub fn author_refusal(door: Door, request: &Request, capability: &Capability) -> Option<String> {
     let Some(ArgRef::Inline(bytes)) = request.args.get("author") else {
         return None;
     };
@@ -161,7 +180,7 @@ pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
     if !is_principal_iri(&author) {
         return None;
     }
-    let own = principal(door, request);
+    let own = principal(door, request, capability);
     if own.as_deref() == Some(author.trim()) {
         return None;
     }
@@ -230,7 +249,7 @@ impl Endpoint for Admitted {
                 return Err(Error::Denied(why.to_string()));
             }
             if inv.request.verb.is_mutating() {
-                if let Some(why) = author_refusal(self.door, inv.request) {
+                if let Some(why) = author_refusal(self.door, inv.request, inv.capability) {
                     return Err(Error::Denied(why));
                 }
             }

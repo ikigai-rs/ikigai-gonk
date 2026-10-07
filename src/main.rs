@@ -52,10 +52,12 @@ fn main() {
             browse_graph,
             browse,
             force,
+            rotate,
             flags,
         } => {
-            // The config is read only when a role needs this server's roots and mount, so a
-            // ledger-only enrolment works exactly as before on a host with no config.toml.
+            // The full settings are read only when a role needs this server's roots and
+            // mount, so a ledger-only enrolment works exactly as before on a host with no
+            // config.toml; the QUIC port for the printed line is read either way.
             let browse_scopes = match &browse {
                 Some(_) => browse_tokens(browse.as_ref(), &read_settings(&flags)),
                 None => Vec::new(),
@@ -64,9 +66,16 @@ fn main() {
                 &name,
                 cert.as_deref(),
                 &scopes_for(&ledgers, browse_graph, &browse_scopes),
-                force,
+                Rewrite { force, rotate },
+                &flags,
             )
         }
+        Command::ClientList { flags: _ } => client_list(),
+        Command::ClientRemove {
+            key,
+            by_name,
+            flags: _,
+        } => client_remove(&key, by_name),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -951,27 +960,48 @@ fn print_change(grant: &str, change: &quic::GrantChange) {
     println!("{}", change.lines());
 }
 
-fn client_add(name: &str, cert: Option<&std::path::Path>, scopes: &[String], force: bool) {
+/// What `client add` may replace on an existing client: its GRANT (`--force`) and, separately,
+/// its IDENTITY (`--rotate`).
+struct Rewrite {
+    force: bool,
+    rotate: bool,
+}
+
+fn client_add(
+    name: &str,
+    cert: Option<&std::path::Path>,
+    scopes: &[String],
+    rewrite: Rewrite,
+    flags: &config::Flags,
+) {
     let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
+    // The port the printed `--connect` line names: the one `serve` would bind with this
+    // config and these flags (ledger #816 — it used to be a literal 1060).
+    let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
+    let port = config::quic_addr(flags, &text)
+        .unwrap_or_else(|e| fail(&e))
+        .map_or(config::DEFAULT_PORT, |addr| addr.port());
     // ★ Every refusal BEFORE anything is minted (ledger #805, part 3): the bundle name, an
     // import over an existing bundle, every token no identity may hold, a rewrite of an
     // existing grant, and a certificate already enrolled elsewhere. Only then is a key pair
     // generated, so a refused command leaves no bundle and no server identity behind.
     let planned =
-        quic::planned_fingerprint(&layout, name, cert, force).unwrap_or_else(|e| fail(&e));
+        quic::planned_fingerprint(&layout, name, cert, rewrite.rotate).unwrap_or_else(|e| fail(&e));
     let change = (!scopes.is_empty()).then(|| {
-        quic::enrol_refusal(&layout, name, planned.as_deref(), scopes, force)
+        quic::enrol_refusal(&layout, name, planned.as_deref(), scopes, rewrite.force)
             .unwrap_or_else(|e| fail(&e))
     });
-    let bundle = quic::add_client(&layout, name, cert, force).unwrap_or_else(|e| fail(&e));
+    let bundle = quic::add_client(&layout, name, cert, rewrite.rotate).unwrap_or_else(|e| fail(&e));
     println!("client `{name}`  {}", bundle.dir.display());
     println!("  fingerprint  {}", bundle.fingerprint);
+    println!("  principal    {}", quic::client_iri(&bundle.fingerprint));
     if scopes.is_empty() {
         println!("  NOT enrolled — a trusted certificate with no grant is refused. Enrol it:");
         println!("    ikigai-gonk client add {name} --ledger default=write");
     } else {
-        quic::enrol(&layout, name, &bundle.fingerprint, scopes, force).unwrap_or_else(|e| fail(&e));
+        quic::enrol(&layout, name, &bundle.fingerprint, scopes, rewrite.force)
+            .unwrap_or_else(|e| fail(&e));
         println!(
             "  enrolled     grant `{name}` ({} scopes) in {}",
             scopes.len(),
@@ -981,6 +1011,20 @@ fn client_add(name: &str, cert: Option<&std::path::Path>, scopes: &[String], for
             print_change(name, change);
         }
     }
+    // ★ A rotation says what it REPLACED (ledger #864, R7): the old certificate is no longer
+    // enrolled, so the deployed bundle stops working at its next connection — on purpose.
+    if let Some(old) = &bundle.replaced {
+        let unenrolled = quic::unenrol(&layout, old).unwrap_or_else(|e| fail(&e));
+        println!(
+            "  ROTATED      the old certificate {old} {} — a client still holding the old \
+             bundle is refused from its next connection; give it this one",
+            if unenrolled {
+                "was unenrolled"
+            } else {
+                "was not enrolled"
+            }
+        );
+    }
     println!("  restart ikigai-gonk: trusted certificates are read at startup");
     if cert.is_some() {
         // An imported certificate's bundle holds no private key: the client already has one.
@@ -989,14 +1033,70 @@ fn client_add(name: &str, cert: Option<&std::path::Path>, scopes: &[String], for
              client.key), then from the client:",
             bundle.dir.join("server.crt").display()
         );
-        println!("    ikigai --connect quic://<gonk host>:1060 --cert-dir <that directory>");
-    } else {
+        println!("    ikigai --connect quic://<gonk host>:{port} --cert-dir <that directory>");
+    } else if bundle.key_minted {
         println!(
             "  this bundle holds the client's PRIVATE key and the server never reads it — move \
              the directory to the client, then from the client:"
         );
-        println!("    ikigai --connect quic://<gonk host>:1060 --cert-dir <the moved directory>");
+        println!("    ikigai --connect quic://<gonk host>:{port} --cert-dir <the moved directory>");
+    } else {
+        println!(
+            "  the client's identity is unchanged — a client already holding this bundle needs \
+             nothing new; it connects as before:"
+        );
+        println!("    ikigai --connect quic://<gonk host>:{port} --cert-dir <its bundle>");
     }
+}
+
+/// `ikigai-gonk client list` — every bundle and every enrolled fingerprint, joined.
+fn client_list() {
+    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let (rows, default) = quic::list_clients(&layout).unwrap_or_else(|e| fail(&e));
+    if rows.is_empty() {
+        println!(
+            "no QUIC clients: nothing under {} and no certificate enrolled in {}",
+            layout.clients_dir().display(),
+            layout.clients_json().display()
+        );
+    }
+    for row in &rows {
+        println!(
+            "{:<16} {}  grant {:<12} {}",
+            row.name.as_deref().unwrap_or("-"),
+            row.fingerprint,
+            row.grant.as_deref().unwrap_or("-"),
+            row.state()
+        );
+    }
+    if let Some(default) = default {
+        println!(
+            "default grant `{default}`: ANY trusted certificate without its own entry is \
+             admitted under it"
+        );
+    }
+}
+
+/// `ikigai-gonk client remove <name> | --fingerprint <fp>`.
+fn client_remove(key: &str, by_name: bool) {
+    let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let removed = quic::remove_client(&layout, key, by_name).unwrap_or_else(|e| fail(&e));
+    if let Some(dir) = &removed.bundle {
+        println!("removed  {}", dir.display());
+    }
+    match &removed.unenrolled {
+        Some(fingerprint) => println!(
+            "unenrolled {fingerprint} from {} — refused from its next connection",
+            layout.clients_json().display()
+        ),
+        None => println!("  (its certificate was not enrolled)"),
+    }
+    println!(
+        "  grants.json is unchanged: a grant name may be shared by other certificates and \
+         passkeys. Restart ikigai-gonk to stop trusting the certificate at the TLS handshake"
+    );
 }
 
 fn passkey_invite(

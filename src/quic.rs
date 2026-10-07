@@ -164,50 +164,89 @@ pub struct Bundle {
     pub fingerprint: String,
     /// Whether this call generated a private key into the bundle.
     pub key_minted: bool,
+    /// The fingerprint of the certificate this call REPLACED (`rotate`), which the caller
+    /// must take out of `clients.json` ([`unenrol`]) — `None` when nothing was replaced.
+    pub replaced: Option<String>,
 }
 
 /// Trust a client: mint an identity into `clients/<name>/`, or import a certificate the
 /// client generated itself (`import`), so its private key never leaves its machine.
 ///
-/// An existing bundle is reused as it is — so `client add` is also how an existing client is
-/// enrolled — unless `force` asks for a new identity. Importing over an existing bundle is
-/// refused: it would leave a private key beside a certificate it does not match.
+/// ★ **An existing bundle is the client's IDENTITY, and only `rotate` replaces it** (ledger
+/// #864, R7). An existing bundle is reused as it is, so `client add` is also how an existing
+/// client is enrolled or re-granted — and `--force`, which replaces a GRANT, no longer
+/// touches the key pair. Until R7, `--force` (the word the grant refusal tells an operator to
+/// type) also minted a new key pair: the client's deployed certificate silently stopped being
+/// trusted at the next restart, and its old fingerprint stayed enrolled beside the new one.
+/// `rotate` says it out loud and reports the fingerprint it replaced in
+/// [`Bundle::replaced`], for the caller to unenrol.
+///
+/// Importing over an existing bundle without `rotate` is refused (it would leave a private
+/// key beside a certificate it does not match); with `rotate` the old key is removed.
 pub fn add_client(
     layout: &Layout,
     name: &str,
     import: Option<&Path>,
-    force: bool,
+    rotate: bool,
 ) -> Result<Bundle, String> {
     valid_name(name)?;
-    let (server, _) = server_identity(layout)?;
     let dir = layout.clients_dir().join(name);
-    let exists = dir.join("client.crt").is_file();
-    if exists && import.is_some() {
+    let existing = dir.join("client.crt");
+    let exists = existing.is_file();
+    if exists && import.is_some() && !rotate {
         return Err(format!(
-            "client `{name}` already exists at {} — import under a new name",
+            "client `{name}` already exists at {} — import under a new name, or pass --rotate \
+             to replace its certificate (the old one stops being trusted)",
             dir.display()
         ));
     }
+    if rotate && !exists {
+        return Err(format!(
+            "client `{name}` does not exist, so there is no identity to rotate — drop --rotate"
+        ));
+    }
+    let replaced = if rotate {
+        Some(fingerprint_of(&read(&existing)?, name)?)
+    } else {
+        None
+    };
+    let (server, _) = server_identity(layout)?;
     private_dir(&layout.clients_dir())?;
     private_dir(&dir)?;
     let (cert_pem, key_minted) = match import {
         Some(path) => (read(path)?, false),
-        None if exists && !force => (read(&dir.join("client.crt"))?, false),
+        None if exists && !rotate => (read(&existing)?, false),
         None => {
             let identity = ikigai_quic::generate();
             write_private(&dir.join("client.key"), &identity.key_pem)?;
             (identity.cert_pem, true)
         }
     };
-    let fingerprint = ikigai_quic::fingerprint_of_pem(&cert_pem)
-        .map_err(|e| format!("client `{name}`: not a PEM certificate: {e}"))?;
+    let fingerprint = fingerprint_of(&cert_pem, name)?;
+    if import.is_some() && rotate {
+        // The client generated this one: the key beside the old certificate is not its key.
+        match std::fs::remove_file(dir.join("client.key")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("removing the old client.key: {e}")),
+        }
+    }
     write_private(&dir.join("client.crt"), &cert_pem)?;
     write_private(&dir.join("server.crt"), &server.cert_pem)?;
     Ok(Bundle {
         dir,
-        fingerprint,
         key_minted,
+        // Rotating onto the SAME certificate (an import of the one already there) replaces
+        // nothing, and unenrolling it would revoke the identity just kept.
+        replaced: replaced.filter(|old| *old != fingerprint),
+        fingerprint,
     })
+}
+
+fn fingerprint_of(pem: &str, name: &str) -> Result<String, String> {
+    ikigai_quic::fingerprint_of_pem(pem)
+        .map(|fingerprint| normalize(&fingerprint))
+        .map_err(|e| format!("client `{name}`: not a PEM certificate: {e}"))
 }
 
 /// The fingerprint [`add_client`] WOULD enrol, worked out without writing anything — so
@@ -219,29 +258,169 @@ pub fn add_client(
 /// # Errors
 ///
 /// The refusals [`add_client`] makes up front: a name that cannot be a bundle, an import
-/// over an existing bundle, and an unreadable certificate.
+/// over an existing bundle without `rotate`, `rotate` with no bundle to rotate, and an
+/// unreadable certificate.
 pub fn planned_fingerprint(
     layout: &Layout,
     name: &str,
     import: Option<&Path>,
-    force: bool,
+    rotate: bool,
 ) -> Result<Option<String>, String> {
     valid_name(name)?;
     let existing = layout.clients_dir().join(name).join("client.crt");
+    let exists = existing.is_file();
+    if exists && import.is_some() && !rotate {
+        return Err(format!(
+            "client `{name}` already exists at {} — import under a new name, or pass --rotate \
+             to replace its certificate (the old one stops being trusted)",
+            layout.clients_dir().join(name).display()
+        ));
+    }
+    if rotate && !exists {
+        return Err(format!(
+            "client `{name}` does not exist, so there is no identity to rotate — drop --rotate"
+        ));
+    }
     let pem = match import {
-        Some(_) if existing.is_file() => {
-            return Err(format!(
-                "client `{name}` already exists at {} — import under a new name",
-                layout.clients_dir().join(name).display()
-            ))
-        }
         Some(path) => read(path)?,
-        None if existing.is_file() && !force => read(&existing)?,
+        None if exists && !rotate => read(&existing)?,
         None => return Ok(None),
     };
-    ikigai_quic::fingerprint_of_pem(&pem)
-        .map(Some)
-        .map_err(|e| format!("client `{name}`: not a PEM certificate: {e}"))
+    fingerprint_of(&pem, name).map(Some)
+}
+
+/// Take `fingerprint` out of `clients.json`'s `clients`, leaving passkeys, the default and
+/// `grants.json` alone. `Ok(false)` when it was not enrolled.
+///
+/// Takes effect at the fingerprint's next connection: `clients.json` is re-read per
+/// connection. A certificate's TRUST is read at startup, so a removed bundle is still
+/// accepted by the TLS handshake until a restart — and then refused for want of a grant.
+pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
+    let mut doc = read_object(&layout.clients_json())?;
+    let Some(Value::Object(mut clients)) = doc.remove("clients") else {
+        return Ok(false);
+    };
+    let removed = clients.remove(&normalize(fingerprint)).is_some();
+    doc.insert("clients".to_string(), Value::Object(clients));
+    if removed {
+        let text = pretty(&Value::Object(doc))?;
+        parse_enrolment(&text)?;
+        write_private(&layout.clients_json(), &text)?;
+    }
+    Ok(removed)
+}
+
+/// One row of `client list`: a bundle, an enrolled fingerprint, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientRow {
+    /// The bundle's name, when a `clients/<name>/client.crt` holds this certificate.
+    pub name: Option<String>,
+    /// The certificate's fingerprint.
+    pub fingerprint: String,
+    /// The grant `clients.json` enrols it under, when it is enrolled.
+    pub grant: Option<String>,
+}
+
+impl ClientRow {
+    /// What this row means for a connection from that certificate.
+    pub fn state(&self) -> &'static str {
+        match (&self.name, &self.grant) {
+            (Some(_), Some(_)) => "trusted and enrolled",
+            (Some(_), None) => "trusted, NOT enrolled (refused at connection)",
+            (None, Some(_)) => "enrolled, NO bundle (not trusted after a restart)",
+            (None, None) => "unknown",
+        }
+    }
+}
+
+/// Every QUIC client this server knows of — each bundle under `clients/`, and each
+/// fingerprint `clients.json` enrols — joined on the fingerprint, bundles first by name.
+/// The `String` is `clients.json`'s explicit shared `default` grant, when one is set.
+pub fn list_clients(layout: &Layout) -> Result<(Vec<ClientRow>, Option<String>), String> {
+    let enrolment = read_enrolment(&layout.clients_json())?.unwrap_or_default();
+    let mut rows: Vec<ClientRow> = Vec::new();
+    for (name, pem) in trusted_client_certs(layout)? {
+        let fingerprint = fingerprint_of(&pem, &name)?;
+        rows.push(ClientRow {
+            grant: enrolment.clients.get(&fingerprint).cloned(),
+            name: Some(name),
+            fingerprint,
+        });
+    }
+    for (fingerprint, grant) in &enrolment.clients {
+        if !rows.iter().any(|row| &row.fingerprint == fingerprint) {
+            rows.push(ClientRow {
+                name: None,
+                fingerprint: fingerprint.clone(),
+                grant: Some(grant.clone()),
+            });
+        }
+    }
+    Ok((rows, enrolment.default_grant))
+}
+
+/// What [`remove_client`] did.
+#[derive(Debug)]
+pub struct Removed {
+    /// The bundle directory removed, when there was one.
+    pub bundle: Option<PathBuf>,
+    /// The fingerprint taken out of `clients.json`, when it was enrolled.
+    pub unenrolled: Option<String>,
+}
+
+/// Remove a client: its bundle (`by_name`), or an enrolled fingerprint with no bundle
+/// (`by_name` false, `key` a fingerprint) — what `client remove` runs.
+///
+/// `grants.json` is left alone: a grant name may be shared by other certificates and by
+/// passkeys, so dropping it would change identities this command was not asked about.
+pub fn remove_client(layout: &Layout, key: &str, by_name: bool) -> Result<Removed, String> {
+    if !by_name {
+        let fingerprint = normalize(key);
+        return if unenrol(layout, &fingerprint)? {
+            Ok(Removed {
+                bundle: None,
+                unenrolled: Some(fingerprint),
+            })
+        } else {
+            Err(format!(
+                "no certificate with fingerprint {fingerprint} is enrolled in {}",
+                layout.clients_json().display()
+            ))
+        };
+    }
+    valid_name(key)?;
+    let dir = layout.clients_dir().join(key);
+    let crt = dir.join("client.crt");
+    if !crt.is_file() {
+        return Err(format!(
+            "there is no client `{key}` (no {}) — `ikigai-gonk client list` shows what there is",
+            crt.display()
+        ));
+    }
+    let fingerprint = fingerprint_of(&read(&crt)?, key)?;
+    let unenrolled = unenrol(layout, &fingerprint)?.then_some(fingerprint);
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("removing {}: {e}", dir.display()))?;
+    Ok(Removed {
+        bundle: Some(dir),
+        unenrolled,
+    })
+}
+
+/// The IRI prefix a QUIC client is NAMED by — the principal its connection carries.
+pub const CLIENT_IRI_PREFIX: &str = "urn:iki:gonk:client:";
+
+/// The stable IRI of the client whose certificate has `fingerprint` (normalized: lowercase
+/// hex, no colons) — what the access log writes as a QUIC request's `principal`, and the one
+/// principal-shaped `author` a write through that connection may name.
+///
+/// ```
+/// assert_eq!(
+///     ikigai_gonk::quic::client_iri("AB:CD"),
+///     "urn:iki:gonk:client:abcd"
+/// );
+/// ```
+pub fn client_iri(fingerprint: &str) -> String {
+    format!("{CLIENT_IRI_PREFIX}{}", normalize(fingerprint))
 }
 
 /// The parsed `clients.json`: fingerprint → grant name, plus an explicit shared default.
@@ -510,6 +689,19 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
             markers.join(" and ")
         ));
     }
+    let names: Vec<&str> = scopes
+        .iter()
+        .map(String::as_str)
+        .filter(|scope| scope.starts_with(CLIENT_IRI_PREFIX))
+        .collect();
+    if !names.is_empty() {
+        return Some(format!(
+            "grant `{name}` names {} — a QUIC client's NAME, which the door attaches to the \
+             connection it authenticated. As a grant it would let every identity under \
+             `{name}` write as that client",
+            names.join(" and ")
+        ));
+    }
     let admin = crate::grants::gonk_admin_scopes(scopes);
     if !admin.is_empty() {
         return Some(format!(
@@ -563,6 +755,17 @@ fn broad_refusal(grant: &str, broad: &[String]) -> String {
 }
 
 /// The authority one authenticated fingerprint runs under, or the reason it is refused.
+///
+/// ★ **The capability also carries the client's NAME** ([`client_iri`]), as one scope no
+/// resource requires and no grant may hold ([`grant_refusal`]). `ikigai-quic` hands an
+/// endpoint the session's capability and nothing else about who connected, so this is the
+/// only channel by which a QUIC request can say who it is from — the access log's
+/// `principal` (ledger #816) and the author rule (`crate::admit`, ledger #864 R4) both read
+/// it there. It is unforgeable: a client cannot add a scope its session lacks (a carried
+/// capability is CLAMPED to the session). ⚠ And it is LOST when a client carries a scoped
+/// capability of its own, because the clamp intersects — such a request is anonymous to the
+/// log (`principal=-`). Reported up: `ikigai_quic::Session` wants a principal the transport
+/// stamps on each request, as `ikigai-web` does.
 pub fn authority(
     enrolment: &Enrolment,
     grants: &BTreeMap<String, Vec<String>>,
@@ -571,7 +774,8 @@ pub fn authority(
     let grant = enrolment
         .grant_for(fingerprint)
         .ok_or("no grant is configured for this certificate")?;
-    let scopes = scopes_for_grant(grants, grant)?;
+    let mut scopes = scopes_for_grant(grants, grant)?;
+    scopes.push(client_iri(fingerprint));
     Ok((grant.to_string(), Capability::scoped(scopes)))
 }
 
@@ -762,7 +966,7 @@ pub fn minter(layout: Layout) -> Minter {
             Ok((grant, capability)) => {
                 eprintln!(
                     "ikigai-gonk: quic client {} → grant \"{grant}\"",
-                    &peer.fingerprint[..peer.fingerprint.len().min(16)]
+                    client_iri(&peer.fingerprint)
                 );
                 Some(Session {
                     capability,
