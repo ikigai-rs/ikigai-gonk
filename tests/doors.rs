@@ -120,6 +120,61 @@ fn the_socket_door_serves_the_hub() {
     );
 }
 
+/// A client that MOUNTS the socket door — the shape of every config-home `mount` line, and so
+/// of `ikigai mcp`, the daemon, `ikigai serve` and `ikigai-web` — must never be told it may
+/// cache an answer only the hub can invalidate.
+///
+/// Golden threads are kernel-local and do not cross a wire (ledger
+/// [#92](http://localhost:1060/l/default/item/92)), so an answer that arrives cacheable
+/// arrives with nothing that can ever cut it, and a long-lived client serves it until the
+/// process restarts. Measured on plasma 2026-10-07 before this test existed: a watched
+/// `urn:repo:{root}:tree` read through a `prefer` mount of gonk's socket came back
+/// `[cached]` and still listed the tree as it was after a file was added under the root, while
+/// gonk itself answered fresh.
+#[test]
+fn a_mounting_client_never_caches_what_only_the_hub_can_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("gonk.sock");
+    let hub = hub();
+    let (door, path) = (doors::door_kernel(Arc::clone(&hub)), socket.clone());
+    std::thread::spawn(move || ikigai_ipc::serve(door, &path));
+    wait_for("the socket", || socket.exists());
+
+    // The client: a default-cache kernel whose `urn:iki:ledger:` is the socket, mounted the
+    // way the cli composes an `override`/`prefer` line.
+    let resolver = ikigai_ipc::connect(&socket).expect("connect");
+    let client = Kernel::with_meta_renderer(
+        Arc::new(ikigai_resolve::MountedRemote::overriding(
+            Arc::new(resolver),
+            "urn:iki:ledger:",
+            socket.display().to_string(),
+        )),
+        Arc::new(ikigai_vocab::TurtleRenderer),
+    );
+    let root = Capability::root();
+    let items = || request(Verb::Source, "urn:iki:ledger:items", &[]);
+    let append = |content| request(Verb::Sink, "urn:iki:ledger:append", &[("content", content)]);
+
+    root_issue(&hub, append("first"));
+    assert!(root_issue(&client, items()).contains("first"));
+    assert!(
+        Kernel::is_cached(&hub, &items(), &root),
+        "the HUB still caches the read: the wire answer is uncacheable, the hub's is not, so \
+         the mount costs a round trip and never a recompute"
+    );
+    assert!(
+        !Kernel::is_cached(&client, &items(), &root),
+        "a mounting client was told it may cache a ledger read; nothing in it can ever cut that"
+    );
+
+    // Another writer — a second session, a page, a hook — changes the ledger in the hub.
+    root_issue(&hub, append("second"));
+    assert!(
+        root_issue(&client, items()).contains("second"),
+        "the mounting client served the ledger as it was before another writer changed it"
+    );
+}
+
 #[test]
 fn the_quic_door_admits_by_grant_and_refuses_a_stranger() {
     let dir = tempfile::tempdir().unwrap();

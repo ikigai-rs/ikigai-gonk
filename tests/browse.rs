@@ -1785,6 +1785,101 @@ fn a_watched_file_read_recomputes_after_the_file_changes_on_disk() {
     );
 }
 
+/// ★ **The config-home lines that retire the dev server, driven as a client drives them**
+/// (ledger [#244](http://localhost:1060/l/default/item/244)): a default-cache kernel that
+/// mounts gonk's SOCKET door at `urn:repo:` and at `urn:iki:annotation` — no trailing colon —
+/// exactly as `mount = "prefer …=~/.ikigai/gonk.sock"` composes them in the REPL, `ikigai mcp`,
+/// `ikigai serve` and `ikigai-web`.
+///
+/// Two halves, each the thing that would silently break after the cutover:
+///
+/// - a watched read that gonk caches comes back FRESH through the mount after the watcher cuts
+///   it. The dev server never had this problem — it answers every browse read uncacheable —
+///   and gonk caches them, so without `doors::for_the_wire` a long-lived client served the tree
+///   as it was when it first asked (measured on plasma 2026-10-07);
+/// - a Sink on the BARE `urn:iki:annotation` mints through the mount, and the minted IRI reads
+///   back. Written `urn:iki:annotation:=`, the mount would not claim the bare IRI and the mint
+///   would never reach gonk.
+#[test]
+fn the_retirement_mount_lines_reach_gonk_fresh_and_mint() {
+    let dir = scratch_root();
+    let (hub, watch) = served(&dir);
+    let sockets = tempfile::tempdir().expect("a socket dir");
+    let socket = sockets.path().join("gonk.sock");
+    let (door, path) = (doors::door_kernel(Arc::clone(&hub)), socket.clone());
+    std::thread::spawn(move || ikigai_ipc::serve(door, &path));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "the socket never appeared");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mounted = |prefix: &str| {
+        Arc::new(ikigai_resolve::MountedRemote::overriding(
+            Arc::new(ikigai_ipc::connect(&socket).expect("connect")),
+            prefix,
+            socket.display().to_string(),
+        )) as Arc<dyn Space>
+    };
+    let client = Kernel::with_meta_renderer(
+        Arc::new(Fallback::new(vec![
+            mounted("urn:repo:"),
+            mounted("urn:iki:annotation"),
+        ])),
+        Arc::new(TurtleRenderer),
+    );
+
+    // Fresh through the mount after the watcher cuts — the premise first: gonk caches it.
+    let tree = "urn:repo:demo:tree";
+    let before = text(&client, Verb::Source, tree, &[]);
+    assert!(!before.contains("added.rs"), "{before}");
+    assert!(
+        cached(&hub).iter().any(|iri| iri == tree),
+        "gonk caches the watched tree read — the half that makes this test worth having"
+    );
+    std::fs::write(dir.path().join("added.rs"), "new\n").expect("the out-of-band edit");
+    let thread = "urn:iki:gonk:browse:root:demo".to_string();
+    let mut cut = false;
+    for _ in 0..64 {
+        match watch.apply_next(&hub, Duration::from_secs(10)) {
+            Some(threads) if threads.contains(&thread) => {
+                cut = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(
+        cut,
+        "the watcher never reported {thread} within its deadline"
+    );
+    assert!(
+        text(&client, Verb::Source, tree, &[]).contains("added.rs"),
+        "the mounting client served the tree as it was before the watcher cut it in gonk"
+    );
+
+    // The bare IRI mints through the mount, and the minted annotation reads back through it.
+    let minted = text(
+        &client,
+        Verb::Sink,
+        "urn:iki:annotation",
+        &[
+            ("target", "urn:repo:demo:file:src/lib.rs"),
+            ("exact", "first"),
+            ("body", "minted through the mount"),
+        ],
+    );
+    let iri = minted
+        .split_whitespace()
+        .find(|word| word.starts_with("urn:iki:annotation:"))
+        .unwrap_or_else(|| panic!("the mint names no annotation IRI: {minted}"))
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+    assert!(
+        text(&client, Verb::Source, iri, &[]).contains("minted through the mount"),
+        "{iri} did not read back through the mount"
+    );
+}
+
 /// ★ **Build output cuts nothing; a tracked file still does** (ledger
 /// [#667](http://localhost:1060/l/default/item/667)). With every repository a root, each file a
 /// cargo build wrote under any `target/` cut its root — 28,467 cuts in 90 s of one build,
