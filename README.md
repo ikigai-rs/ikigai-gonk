@@ -873,9 +873,51 @@ hub cache hit and never a recompute. The HTTP door is unchanged — it turns an 
 `the_retirement_mount_lines_reach_gonk_fresh_and_mint` in `tests/browse.rs` drive a real
 mounting client and fail without it.
 
+### SPARQL as resources: `urn:sparql:*`
+
+gonk binds the query face the ecosystem's clients already speak — `urn:sparql:select`, `:ask`,
+`:construct` and `:describe` — over the store it holds (ledger
+[#836](http://localhost:1060/l/default/item/836)). One more mount line puts it in front of any
+ikigai process; `ikigai-web` reads the same line as `web.mount`:
+
+```toml
+mount = "prefer urn:sparql:=/Users/you/.ikigai/gonk.sock"
+```
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock --plain -c 'source urn:sparql:select as=text/csv query="SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g"'
+```
+
+**The default dataset is the UNION of every named graph the caller may read** — the graphs
+`urn:iki:store:graphs` lists for that caller's grant — so a bare `{ ?s ?p ?o }` matches a
+triple in any of them and `GRAPH ?g` binds each one. That is what the dev server's face
+answered, so the queries written against it (`claude/class/review-queries.md`) keep their
+meaning. It is **not** what `urn:iki:store:select` answers: the store's broad door reads the
+store's own default graph, which is empty here (ledger
+[#378](http://localhost:1060/l/default/item/378) — the same text, two datasets). Every form's
+description says which, in one sentence.
+
+- **`graph=`** narrows the dataset to the graphs named — commas or whitespace between them, as
+  `urn:sparql:*` has always spelled it — and each one needs
+  `urn:cap:store:read:graph:<iri>`. A graph the caller cannot read is **Denied whether or not
+  it exists**, so the face is not an existence oracle.
+- **It is a mapping, not a second query engine.** Each form is one hop onto
+  `urn:iki:store:graph-{form}` under the caller's own capability, which confines the dataset by
+  construction. `FROM` / `FROM NAMED` are refused (the store's rule: `graph=` is the dataset), and
+  an `as` the form cannot answer in is refused rather than substituted.
+- **Sealed.** No `urn:sparql:update` is bound, and nothing here reaches the store's write doors;
+  an update passed as `query` is not a query.
+- **The corridor is the door.** The socket's root reads every named graph — today the browse
+  graph and the ledger's; a QUIC client reads the graphs its grant names; the HTTP door's
+  anonymous caller reads its ledgers' graphs.
+- **Faces:** SPARQL results JSON (default), XML, CSV and TSV for SELECT and ASK; Turtle
+  (default) and N-Triples for CONSTRUCT and DESCRIBE. `ikigai-sparql` also offered N-Quads,
+  TriG, RDF/XML and JSON-LD; the store serves neither, so they are not declared.
+
 ## Retiring `ikigai-dev-server`: the cutover
 
-gonk serves the browse family for every ikigai repository, and since 2026-10-07 nothing a
+gonk serves the browse family for every ikigai repository and, since ledger
+[#836](http://localhost:1060/l/default/item/836), the `urn:sparql:*` query face, so nothing a
 dev-server client relied on is missing here except what is listed below. The retirement is a
 change to four config-home lines, a restart of the processes that read them, and stopping one
 LaunchAgent — **not a data migration** (ledger [#244](http://localhost:1060/l/default/item/244),
@@ -905,7 +947,12 @@ cache trailer.
 | **`urn:repo:folio:*`** | **dev only** | a third party's codebase, deliberately not a gonk root — a disclosure decision. Its 82 archived explanations are not carried |
 | **`explain provider=`** | **dev allows `big`, `ollama`, `qwen`, `rapid` besides its tiers; gonk allows its two tiers only** | `browse.allow_model` in `dev.toml`; gonk deliberately passes no allowlist (`src/browse.rs`, `explain_config`) |
 | **review ceiling** | **dev 1600 tokens; gonk 800** | `browse.review_max_tokens = 1600` in `dev.toml`; `gonk.explain.review.max_tokens` is unset |
-| **`urn:sparql:*`** | **dev only** | gonk binds the store's own faces, `urn:iki:store:{select,…}` and `graph-{select,…}`, which read the DEFAULT graph unless a graph is named (ledger [#378](http://localhost:1060/l/default/item/378)) |
+| `urn:sparql:{select,ask,construct,describe}` | **both; the same answers on the same data** | measured below: every class query identical row for row. The default dataset is the union of the caller's readable graphs on both |
+| `urn:sparql:update` | **dev only** | the dev server bound a write over its shared store; gonk binds no write under `urn:sparql:` |
+| `urn:sparql:*` with `FROM <g>` | **dev IGNORES it and answers the union; gonk refuses** (400 at 8642) | name the graphs in `graph=` instead |
+| `urn:sparql:*` with an `as` of the other family (`application/sparql-results+json` on a CONSTRUCT) | **dev substitutes its default; gonk refuses** (400 at 8642) | `ikigai-web` maps `Accept` to `as=` without looking at the query form, so a client listing a results type FIRST for a CONSTRUCT is refused after the cutover |
+| `urn:sparql:construct`/`describe` faces | **dev: six RDF syntaxes; gonk: Turtle and N-Triples** | the store serves two; Turtle stays the default |
+| the `urn:ikigai:vocab` graph (489 quads) | **dev only** | no class query reads it (measured below); a census over the union counts it on the dev server and not here |
 | `urn:annotation`, `urn:annotation:{id}` | bound by NEITHER | browse 0.3.0 renamed the namespace to `urn:iki:annotation`; the config line that mounts it routes nothing today |
 | `urn:rdf:*`, `urn:llm:*`, `urn:system:exec` | dev binds them | no config-home line routes any of them to the dev server, so the cutover does not move them: a cli host keeps its own |
 
@@ -918,6 +965,22 @@ those 1,147, `folio`'s 738 and the vocabulary's 489. Its 6 MB on disk is RocksDB
 archive's. The root names agree because of the 2026-09-17 rename, so every carried IRI is
 already the IRI a gonk read builds.
 
+**SPARQL parity, measured read-only on 2026-10-07.** The eight queries in
+`claude/class/review-queries.md` and a census, against the live dev server's `urn:sparql:select`
+and against a scratch gonk (this tree) loaded from the newest backup. Three comparisons:
+
+| comparison | the eight class queries | census |
+| --- | --- | --- |
+| dev vs gonk, **the same data** (the dev server's 2,374 triples copied into one scratch graph, queried with `graph=`) | identical, row for row | identical |
+| the same data **without the vocabulary's 489** | identical — no class query reads `urn:iki:vocab` | 1,885 against 2,374 |
+| dev vs gonk's union (the live browse graph, 348,072 quads, and the ledger's, 12,306) | gonk answers more on 1–5 (its archive is larger) and the same on 6–8 | 2,374 against 360,378 |
+| gonk's union vs the browse graph alone | identical — the ledger graph changes no class query | differs by the ledger's 12,306 |
+
+So the vocabulary is not a dependency of any real query. **Proposed, not decided:** if schema
+joins (`?e a/rdfs:subClassOf* ik:Endpoint`) are wanted here, load `ikigai-vocab`'s Turtle into a
+graph of gonk's own (`urn:ikigai:vocab`, read-granted with the browse graph) at startup, rather
+than folding it into the union for every caller; nothing needs it today.
+
 ### The procedure
 
 Each step is the hub's, typed by an operator, in this order. **Repoint before stopping**:
@@ -925,7 +988,8 @@ a `prefer` mount to a server that is gone falls back quietly, so the other order
 REPL and an `ikigai-web` that have lost `urn:repo:` with nothing saying why.
 
 ```sh
-# 0. gonk WITH the wire fix above — before any line moves. From a checkout at origin/main:
+# 0. gonk WITH the wire fix above and `urn:sparql:*` — before any line moves. From a checkout
+#    at origin/main:
 cargo install --locked --force --path ~/git-personal/ikigai-gonk
 just -f ~/git-personal/ikigai-devtools/justfile reregister --only gonk
 #    a mounted read must now be uncacheable at the client — the old binary says `cached`:
@@ -980,6 +1044,10 @@ become:
 # mint IRI AND the slug family.
 mount = "prefer urn:repo:=/Users/brian/.ikigai/gonk.sock"
 mount = "prefer urn:iki:annotation=/Users/brian/.ikigai/gonk.sock"
+# The web process's own sparql route (web.mount is read only by ikigai-web - cli
+# hosts keep their local sparql space). gonk serves urn:sparql:* over the union of
+# the graphs the caller may read (ledger #836).
+web.mount = "prefer urn:sparql:=/Users/brian/.ikigai/gonk.sock"
 ```
 
 - `urn:repo:` and `urn:iki:annotation` move to `gonk.sock`, unchanged otherwise. The second
@@ -987,14 +1055,20 @@ mount = "prefer urn:iki:annotation=/Users/brian/.ikigai/gonk.sock"
   under, and every new annotation would fail to route, silently.
 - `urn:annotation` is **deleted, not repointed**: neither server binds anything under it, so it
   routes nothing today and would route nothing tomorrow.
-- `web.mount` is **deleted, and `ikigai-web`'s `/sparql` page stops answering.** gonk binds no
-  `urn:sparql:*`, so pointing that line at `gonk.sock` would route nothing; the live SPARQL face
-  is gonk's own `/sparql` at 1060, which reads one ledger's graph, and the browse archive is
-  readable as quads through `urn:iki:store:graph-select` with
-  `graph=urn:iki:browse:graph:default`. `ikigai-web` still starts: it composes the remaining
-  `mount` lines, and fails only on zero. Keeping 8642's `/sparql` alive means binding a
-  `urn:sparql:` face here, which is a decision about two SPARQL faces with different default
-  datasets ([#378](http://localhost:1060/l/default/item/378)) and is not made by this change.
+- `web.mount` is **rewritten to `gonk.sock`, not deleted**: gonk binds `urn:sparql:*`
+  ([SPARQL as resources](#sparql-as-resources-urnsparql)), so 8642's `/sparql` keeps answering
+  — now from gonk, with the same default dataset (the union) and the differences in the table
+  above.
+- ⚠ **What 8642 reads changes, and it is the hub's decision, not this line's.** `ikigai-web`
+  issues every request under ROOT and the socket door admits root, so `/sparql` will read every
+  named graph gonk holds — the browse graph AND the work ledger — where the dev server held only
+  the browse archive. Measured 2026-10-07, though: that exposure **is already live**. The
+  `mount = "prefer urn:iki:store:=…/gonk.sock"` and `urn:iki:ledger:` lines are composed by
+  `ikigai-web` too, and `web.bind = "0.0.0.0:8642"`, so `GET /urn:iki:ledger:items` and
+  `GET /urn:iki:store:select?query=…` already answer the whole ledger on the LAN interface. The
+  rewrite adds a friendlier door onto data that is already exposed. Narrowing it — a capability
+  ceiling on `ikigai-web`, or a narrower gonk door for it — is a decision for before or with the
+  cutover, and is not made here.
 - `web.bind` stays: it is the 8642 door's own, and whether that door outlives the dev server is
   its own decision ([#411](http://localhost:1060/l/default/item/411)).
 - Two comment paragraphs above the `gonk.browse.root` lines stop being true at the same moment —
@@ -1023,6 +1097,12 @@ ikigai --plain -c 'source urn:iki:annotation:00000000-0000-0000-0000-00000000000
 #    expect "no annotation …" (browse answered); "no endpoint resolved" means the line is wrong
 curl -s 'http://127.0.0.1:8642/urn:repo:ikigai-gonk:tree'
 #    ikigai-web, restarted in step 4: a tree listing (today it says "no endpoint resolved")
+curl -s -G 'http://127.0.0.1:8642/sparql' -H 'Accept: text/csv' --data-urlencode 'query=
+  PREFIX oa: <http://www.w3.org/ns/oa#> PREFIX dct: <http://purl.org/dc/terms/>
+  SELECT ?creator (COUNT(?a) AS ?notes) WHERE { ?a a oa:Annotation .
+  OPTIONAL { ?a dct:creator ?creator } } GROUP BY ?creator'
+#    review-queries.md §3, through web.mount: gonk answers SEVERAL creator rows (the dev server
+#    answered one, `qwen3-coder:30b,14`). "no endpoint resolved" means web.mount is wrong
 
 # 6. stop the dev server, and keep it from coming back at the next login. Typed as two
 #    commands on purpose — never `bootout … && …` (CLAUDE.md 9h).
@@ -1030,7 +1110,8 @@ launchctl bootout gui/$(id -u)/dev.ikigai-rs.dev
 mkdir -p ~/Library/LaunchAgents-retired
 mv ~/Library/LaunchAgents/dev.ikigai-rs.dev.plist ~/Library/LaunchAgents-retired/
 launchctl print gui/$(id -u)/dev.ikigai-rs.dev     # expect an error: no such service
-#    then step 5 again: every answer is the same, because nothing was routed there.
+#    then step 5 again, the /sparql probe included: every answer is the same, because
+#    nothing was routed there.
 ```
 
 The dev server's store, `~/.ikigai/browse-store`, stays on disk: it is the rollback, and it holds
@@ -1405,6 +1486,7 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `--browse read`, or `--browse-graph read` alone | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
+| `urn:sparql:{select,ask,construct,describe}` (`urn:cap:store:read:graph:*`, then each graph's token) — by default the UNION of the graphs the caller may read | its ledgers' graphs | + the graphs the passkey's grant names | every named graph (root) | the graphs the grant names |
 | `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`; ⚠ the two reviews no longer require `urn:cap:annotate` — browse 0.5.0 — so a pass writes pending findings and cannot publish) | **no** | only if the grant names it — `--browse derive` | yes (root) | only if the grant names it |
 | `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 
@@ -1920,8 +2002,10 @@ What it is NOT narrower in: reaching the peer at all is a capability question no
 line the explanation families are not bound either, because an action no kernel in this
 process can satisfy is an over-offer.
 
-`tests/conformance.rs` pins the socket and QUIC catalog to the store's thirteen resources and the
-ledger's fourteen, pins the HTTP door's to those plus its ten pages, and walks
+`tests/conformance.rs` pins the socket and QUIC catalog to the store's thirteen resources, the
+ledger's fourteen and gonk's own five (the chunk renderer and the four `urn:sparql:*` forms,
+which are a mapping onto the store and link nothing new), pins the HTTP door's to those plus its
+pages, and walks
 `ikigai-conformance` over the hub, a door, and the HTTP door. `tests/browse.rs` pins the
 browse composition's twenty more, in the hub and through a door, pins the five the mount adds
 (and their absence without one), and pins the spend gate per capability. `tests/backup.rs`

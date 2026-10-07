@@ -63,7 +63,11 @@ fn hub() -> Arc<Kernel> {
             request(
                 Verb::Sink,
                 "urn:iki:store:load",
-                &[("content", ttl), ("format", "text/turtle"), ("graph", graph)],
+                &[
+                    ("content", ttl),
+                    ("format", "text/turtle"),
+                    ("graph", graph),
+                ],
             ),
             &Capability::root(),
         ))
@@ -140,7 +144,10 @@ fn a_one_graph_caller_reads_only_its_graph_by_every_route() {
         &cap,
         "select",
         &[
-            ("query", "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }"),
+            (
+                "query",
+                "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
+            ),
             ("as", "text/csv"),
         ],
     )
@@ -166,15 +173,24 @@ fn a_named_graph_the_caller_cannot_read_is_denied_whether_or_not_it_exists() {
     let hub = hub();
     let cap = browse_only();
     for graph in [LEDGER, NOWHERE, &format!("{BROWSE} {LEDGER}")] {
-        match ask(&hub, &cap, "select", &[("query", SUBJECTS), ("graph", graph)]) {
+        match ask(
+            &hub,
+            &cap,
+            "select",
+            &[("query", SUBJECTS), ("graph", graph)],
+        ) {
             Err(Error::Denied(why)) => assert!(why.contains("urn:cap:store:read:graph:"), "{why}"),
             other => panic!("graph={graph}: expected Denied, got {other:?}"),
         }
     }
     // The existing graph and the absent one are refused in the same words, so the refusal
     // says nothing about which of them is there.
-    let words = |graph: &str| match ask(&hub, &cap, "select", &[("query", SUBJECTS), ("graph", graph)])
-    {
+    let words = |graph: &str| match ask(
+        &hub,
+        &cap,
+        "select",
+        &[("query", SUBJECTS), ("graph", graph)],
+    ) {
         Err(Error::Denied(why)) => why.replace(graph, "<G>"),
         other => panic!("{other:?}"),
     };
@@ -193,8 +209,14 @@ fn root_reads_the_union_of_every_named_graph() {
     )
     .unwrap();
     let all = rows(&all);
-    assert!(all.contains(&"urn:iki:ledger:default:item:x".to_string()), "{all:?}");
-    assert!(all.contains(&"urn:iki:annotation:a1".to_string()), "{all:?}");
+    assert!(
+        all.contains(&"urn:iki:ledger:default:item:x".to_string()),
+        "{all:?}"
+    );
+    assert!(
+        all.contains(&"urn:iki:annotation:a1".to_string()),
+        "{all:?}"
+    );
 
     // Comma-separated, as `urn:sparql:*` has always taken it.
     let both = ask(
@@ -237,7 +259,12 @@ fn a_caller_that_reads_no_graph_is_refused_not_answered_empty() {
         other => panic!("{other:?}"),
     }
     // A caller with no store grant at all is stopped by the declared floor.
-    match ask(&hub, &Capability::scoped(Vec::<String>::new()), "select", &[("query", SUBJECTS)]) {
+    match ask(
+        &hub,
+        &Capability::scoped(Vec::<String>::new()),
+        "select",
+        &[("query", SUBJECTS)],
+    ) {
         Err(Error::Denied(_)) => {}
         other => panic!("{other:?}"),
     }
@@ -283,11 +310,7 @@ fn no_write_is_reachable_under_urn_sparql() {
     // No update IRI is bound.
     match block_on(Kernel::issue(
         &hub,
-        request(
-            Verb::Sink,
-            "urn:sparql:update",
-            &[("content", "DROP ALL")],
-        ),
+        request(Verb::Sink, "urn:sparql:update", &[("content", "DROP ALL")]),
         &root,
     )) {
         Err(Error::Unresolved(_)) => {}
@@ -296,11 +319,7 @@ fn no_write_is_reachable_under_urn_sparql() {
     // A Sink on a query form is refused.
     assert!(block_on(Kernel::issue(
         &hub,
-        request(
-            Verb::Sink,
-            "urn:sparql:select",
-            &[("content", "DROP ALL")],
-        ),
+        request(Verb::Sink, "urn:sparql:select", &[("content", "DROP ALL")],),
         &root,
     ))
     .is_err());
@@ -338,7 +357,10 @@ fn the_default_dataset_is_stated_in_the_meta() {
             text.contains(sparql::DEFAULT_DATASET),
             "{form}: the default dataset is not stated: {text}"
         );
-        assert!(text.contains("urn:cap:store:read:graph:*"), "{form}: {text}");
+        assert!(
+            text.contains("urn:cap:store:read:graph:*"),
+            "{form}: {text}"
+        );
     }
 }
 

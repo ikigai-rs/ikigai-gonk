@@ -164,8 +164,8 @@ impl Endpoint for Form {
             &RESULT_FACES
         };
         let face = optional(inv, "as")?.unwrap_or(faces[0]);
-        let target = Iri::parse(format!("urn:iki:store:graph-{}", self.form))
-            .expect("a constant store IRI");
+        let target =
+            Iri::parse(format!("urn:iki:store:graph-{}", self.form)).expect("a constant store IRI");
         let mut request = Request::new(Verb::Source, target)
             .with_arg("query", inline(query))
             .with_arg("graph", inline(&graph))
@@ -188,7 +188,9 @@ impl Endpoint for Form {
             &RESULT_FACES
         };
         let desc = Description::new(self.id)
-            .title(format!("SPARQL {form} over the graphs this capability may read"))
+            .title(format!(
+                "SPARQL {form} over the graphs this capability may read"
+            ))
             .summary(format!(
                 "{DEFAULT_DATASET} Evaluate a SPARQL {form} against this server's store, \
                  read-only. With `graph`, the dataset is exactly the graphs named, each needing \
