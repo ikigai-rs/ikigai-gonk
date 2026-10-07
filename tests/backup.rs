@@ -64,9 +64,16 @@ const LEDGER_IDS: [&str; 14] = [
     "ledger-reopen",
 ];
 
-/// gonk's own hub resource: the page renderer's chunk transform, in every composition
-/// (`tests/conformance.rs` walks and pins it; here it is only counted).
-const HUB_IDS: [&str; 1] = ["gonk-render"];
+/// gonk's own hub resources: the page renderer's chunk transform and the four `urn:sparql:*`
+/// forms, in every composition (`tests/conformance.rs` walks and pins them; here they are
+/// only counted).
+const HUB_IDS: [&str; 5] = [
+    "gonk-render",
+    "sparql-select",
+    "sparql-ask",
+    "sparql-construct",
+    "sparql-describe",
+];
 
 const BACKUP_IDS: [&str; 4] = [
     "gonk-backup",
@@ -335,8 +342,8 @@ fn the_backup_composition_conforms() {
         suite = suite.opt_out(
             id,
             None,
-            "walked with a chunk document, and declared pure, by tests/conformance.rs over \
-             this same composition; this file walks the backup family",
+            "walked with real fixtures by tests/conformance.rs over this same composition; \
+             this file walks the backup family",
         );
     }
     let suite = suite

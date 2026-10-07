@@ -177,7 +177,7 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
 
     assert_eq!(g.kind(spaces::HUB), "Fallback");
     let layers = g.layers(spaces::HUB);
-    assert_eq!(layers.len(), 3, "store, ledger, render: {layers:?}");
+    assert_eq!(layers.len(), 4, "store, ledger, render, sparql: {layers:?}");
     for layer in &layers {
         assert_eq!(g.kind(layer), "EndpointSpace", "{layer}");
     }
@@ -205,6 +205,18 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
         .any(|p| p.starts_with("urn:iki:ledger:")));
     assert_eq!(layers[2], spaces::RENDER);
     assert_eq!(g.strs(spaces::RENDER, &pattern), ["urn:iki:gonk:render"]);
+    assert_eq!(layers[3], spaces::SPARQL);
+    let mut forms = g.strs(spaces::SPARQL, &pattern);
+    forms.sort();
+    assert_eq!(
+        forms,
+        [
+            "urn:sparql:ask",
+            "urn:sparql:construct",
+            "urn:sparql:describe",
+            "urn:sparql:select"
+        ]
+    );
 
     assert!(
         g.of_kind("OpaqueSpace").is_empty(),
@@ -256,7 +268,7 @@ fn the_http_door_is_pages_then_the_hub() {
 
     // The hub inside the door is the hub: same node, same layers as it reports for itself.
     assert_eq!(g.kind(spaces::HUB), "Fallback");
-    assert_eq!(g.layers(spaces::HUB).len(), 3);
+    assert_eq!(g.layers(spaces::HUB).len(), 4);
 
     assert!(
         g.of_kind("Limit").is_empty(),

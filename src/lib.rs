@@ -52,6 +52,7 @@ pub mod quic;
 pub mod render;
 pub mod roborev;
 pub mod rules;
+pub mod sparql;
 pub mod trigger;
 pub mod verdict;
 pub mod walk;
@@ -98,6 +99,8 @@ pub mod spaces {
     pub const RENDER: &str = "urn:iki:gonk:space:render";
     /// The backup family ([`backup::space`](crate::backup::space)).
     pub const BACKUP: &str = "urn:iki:gonk:space:backup";
+    /// The `urn:sparql:*` query face over the store ([`sparql::space`](crate::sparql::space)).
+    pub const SPARQL: &str = "urn:iki:gonk:space:sparql";
     /// The repository browse family AS GONK COMPOSES IT — `ikigai-browse`'s doors with
     /// this server's cacheable overlay in front ([`browse::cached_reads`](crate::browse::cached_reads)).
     pub const BROWSE: &str = "urn:iki:gonk:space:browse";
@@ -214,6 +217,11 @@ pub fn compose_with(
     // poll. It is the one `gonk-` id the socket and QUIC doors serve — a render of the
     // caller's own bytes, gated by nothing because it reads nothing.
     spaces.push(Arc::new(render::space()));
+    // ★ `urn:sparql:*` (ledger #836): the query face clients already speak, as a mapping onto
+    // the store's graph-scoped forms with the caller's readable graphs as the default dataset
+    // (`crate::sparql`). Bound with the store, always — it reaches nothing the store's own
+    // scoped doors do not, and it is what lets `web.mount` prefer this socket.
+    spaces.push(Arc::new(sparql::space()));
     // The root to read the verdict set through, kept before the family is moved in.
     let verdict_root = browse
         .as_ref()
