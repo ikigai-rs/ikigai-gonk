@@ -2,9 +2,9 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write. And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` before dispatch for a foreign `Host` or a cross-site write ([`crate::admit`]). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway |
-//! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none |
+//! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. A write naming another identity as its `author` is refused ([`crate::admit`]) |
 //!
 //! # ★ One cache for the whole process
 //!
@@ -260,15 +260,36 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
 }
 
 /// [`door_kernel`], writing one access line per request when `access` is given — what `main`
-/// builds for the socket and QUIC doors ([`crate::access`]).
+/// builds for the socket door ([`crate::access`]). The socket's caller is the owner, so
+/// nothing is refused at this door before dispatch.
 pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
-    over(Arc::new(HubSpace::over_wire(hub)), access)
+    over(Arc::new(HubSpace::over_wire(hub)), None, access)
 }
 
-/// The kernel every door gets: a Meta renderer, the system clock, [`NoCache`], and the access
-/// log over the root when one is on. The log is an overlay with no identity of its own, so
-/// the arrangement at `urn:kernel:topology` is the same either way.
-fn over(space: Arc<dyn Space>, access: Option<AccessLog>) -> Kernel {
+/// The QUIC door's kernel: [`door_kernel_with`] behind [`crate::admit::Admitting`], so a
+/// write naming another identity as its `author` is refused before it runs (ledger #864, R4).
+pub fn quic_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
+    over(
+        Arc::new(HubSpace::over_wire(hub)),
+        Some(crate::access::Door::Quic),
+        access,
+    )
+}
+
+/// The kernel every door gets: a Meta renderer, the system clock, [`NoCache`], the door's
+/// admission ([`crate::admit::Admitting`]) when it is a network door, and the access log
+/// over that when one is on — outside the admission, so a refusal is a line too. Both are
+/// overlays with no identity of their own, so the arrangement at `urn:kernel:topology` is the
+/// same either way.
+fn over(
+    space: Arc<dyn Space>,
+    door: Option<crate::access::Door>,
+    access: Option<AccessLog>,
+) -> Kernel {
+    let space = match door {
+        Some(door) => Arc::new(crate::admit::Admitting::new(space, door)) as Arc<dyn Space>,
+        None => space,
+    };
     let space = match access {
         Some(log) => Arc::new(log.over(space)) as Arc<dyn Space>,
         None => space,
@@ -314,7 +335,7 @@ pub fn http_kernel_with(
         Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
     ])
     .named(spaces::iri(spaces::HTTP_DOOR));
-    over(Arc::new(space), access)
+    over(Arc::new(space), Some(crate::access::Door::Http), access)
 }
 
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —
@@ -338,10 +359,18 @@ pub struct HttpDoor {
 /// The HTTP door's capability: a function of the REQUEST, not a constant.
 ///
 /// ```text
-/// Host not this server's loopback name?        → nothing  (DNS rebinding)
-/// a write from another origin or site?         → nothing  (cross-site request forgery)
+/// Host not this server's loopback name?        → REFUSED  (DNS rebinding)
+/// a write from another origin or site?         → REFUSED  (cross-site request forgery)
 /// otherwise  (loopback peer ? anonymous : ∅)  ∪  (a live passkey session ? its grant : ∅)
 /// ```
+///
+/// ★ **REFUSED, not nothing** (ledger #864, R2, and PENDING item 2). Through 0.1.x both
+/// browser checks computed an EMPTY capability, and an empty capability is still offered
+/// every action that requires nothing — gonk's pages and the passkey ceremonies among them —
+/// so a cross-site page could fill the passkey challenge table and lock sign-in out. A
+/// refusal is a marker scope ([`crate::admit::REFUSED_FOREIGN_HOST`],
+/// [`crate::admit::REFUSED_CROSS_SITE`]) that the door's admission overlay
+/// ([`crate::admit::Admitting`]) answers with `Denied` — a `403` — before anything runs.
 ///
 /// ★ **An anonymous caller is strictly weaker than any identity**, because an identity's
 /// capability is the anonymous one PLUS its grant, and `ikigai-gonk passkey invite` refuses a
@@ -395,11 +424,11 @@ pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Op
 /// [`http_cap`]'s scope list, with the clock as an argument.
 pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<String> {
     if !host_is_ours(request.header("host"), door.port) {
-        return Vec::new();
+        return vec![crate::admit::REFUSED_FOREIGN_HOST.to_string()];
     }
     let safe = matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS");
     if !safe && !same_origin(request, door.port) {
-        return Vec::new();
+        return vec![crate::admit::REFUSED_CROSS_SITE.to_string()];
     }
     let mut scopes: Vec<String> = match request.peer {
         Some(peer) if is_loopback(peer) => door.anonymous.clone(),

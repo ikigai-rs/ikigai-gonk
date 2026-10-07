@@ -498,6 +498,18 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
     if let Some(refusal) = wildcard_refusal(name, scopes) {
         return Some(refusal);
     }
+    let markers: Vec<&str> = scopes
+        .iter()
+        .map(String::as_str)
+        .filter(|scope| scope.starts_with(crate::admit::REFUSED_PREFIX))
+        .collect();
+    if !markers.is_empty() {
+        return Some(format!(
+            "grant `{name}` names {} — a door's REFUSAL marker, which only the door computes. \
+             As a grant it would refuse every request the identity makes",
+            markers.join(" and ")
+        ));
+    }
     let admin = crate::grants::gonk_admin_scopes(scopes);
     if !admin.is_empty() {
         return Some(format!(

@@ -2818,7 +2818,7 @@ fn a_cross_site_post_cannot_annotate_through_the_adapter() {
     );
     assert_eq!(
         status, 403,
-        "a cross-site write computes an EMPTY capability: {body}"
+        "a cross-site write is refused before dispatch: {body}"
     );
     assert!(
         !listed().contains("a note from another site"),
@@ -2831,7 +2831,7 @@ fn a_cross_site_post_cannot_annotate_through_the_adapter() {
         &k("source urn:repo:demo:tree as=text/html"),
         "gonk.evil.example",
     );
-    assert_eq!(status, 403, "a foreign Host holds nothing: {body}");
+    assert_eq!(status, 403, "a foreign Host is refused: {body}");
 }
 
 /// ⚠ **The reason `web/gonk.js` folds the path spelling, as an assertion rather than a

@@ -2468,7 +2468,9 @@ impl Endpoint for PasskeyDoor {
                  against a one-time invite; `login` verifies an assertion and opens a session \
                  whose capability is its grant in gonk/grants.json; `session` and `logout` take \
                  the session token as the body. Public by design — this is how a caller with no \
-                 grant gets one — so it declares no capability.",
+                 grant gets one — so it declares no capability. The HTTP door refuses a foreign \
+                 Host or a cross-site POST before it reaches this resource (crate::admit), \
+                 which is what keeps another site from filling the challenge table.",
             )
             .verb(Verb::Sink)
             .verb(Verb::Meta)

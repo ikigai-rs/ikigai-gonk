@@ -419,7 +419,7 @@ fn serve(flags: &config::Flags) -> ! {
             enrolled,
         } => {
             let (door, minter) = (
-                doors::door_kernel_with(Arc::clone(&hub), access(access::Door::Quic)),
+                doors::quic_kernel_with(Arc::clone(&hub), access(access::Door::Quic)),
                 quic::minter(layout.clone()),
             );
             let line = format!(
