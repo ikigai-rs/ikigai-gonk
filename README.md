@@ -858,6 +858,204 @@ caller carried across. A host that wants the facades local and only the roots re
 say so with a prefix mount. (`urn:system:exec` is outside that prefix and stays wherever the
 calling host binds it, unless mounted by name.)
 
+★ **A mounting client caches nothing it gets from here, and that is deliberate.** Golden
+threads are kernel-local and do not cross a wire (ledger
+[#92](http://localhost:1060/l/default/item/92)), while an answer's expiry does. So an answer
+that left the socket or QUIC door cacheable would arrive with nothing that could ever cut it,
+and a long-lived client — `ikigai mcp`, the daemon, `ikigai serve`, `ikigai-web` — would serve
+it until it restarted. Measured on plasma before the fix: a watched `urn:repo:{root}:tree` read
+through a `prefer` mount of this socket came back `[cached]` and went on listing the tree as it
+was after a file was added under the root, while gonk itself answered fresh. Every answer that
+rests on a thread now crosses those two doors uncacheable (`doors::for_the_wire`); the hub
+keeps its own entry, its expiry and its threads, so a mounted read costs one round trip to a
+hub cache hit and never a recompute. The HTTP door is unchanged — it turns an expiry into
+`Cache-Control` and an `ETag` a browser revalidates. `tests/doors.rs` and
+`the_retirement_mount_lines_reach_gonk_fresh_and_mint` in `tests/browse.rs` drive a real
+mounting client and fail without it.
+
+## Retiring `ikigai-dev-server`: the cutover
+
+gonk serves the browse family for every ikigai repository, and since 2026-10-07 nothing a
+dev-server client relied on is missing here except what is listed below. The retirement is a
+change to four config-home lines, a restart of the processes that read them, and stopping one
+LaunchAgent — **not a data migration** (ledger [#244](http://localhost:1060/l/default/item/244),
+[#411](http://localhost:1060/l/default/item/411), [#312](http://localhost:1060/l/default/item/312)).
+
+### What was measured, and what differs
+
+The same commands over both sockets, read-only, on 2026-10-07 — dev server `ikigai-dev`
+(browse 0.3.2) at `~/.ikigai/dev.sock`, gonk (browse 0.18.0) at `~/.ikigai/gonk.sock`. Per
+root: `tree`, `tree:{dir}`, `file:{path}`, `hash`, `hash:{path}`, `state`,
+`explain-versions[:{path}]`, `annotations[:{path}]`, `explain:{path} version={tag}` and a
+contract (`describe`); then `urn:repo:style`, `prs`, `pr:{n}`, the facades with and without
+`dir=`, the annotation family, and SPARQL. The bytes are compared after dropping the REPL's
+cache trailer.
+
+| shape | gonk vs the dev server | why |
+| --- | --- | --- |
+| `tree`, `file`, `hash`, `state`, `prs`, `pr:{n}`, `style` on the six shared roots | identical bytes | the same working trees, read the same way |
+| `explain:{path} version={tag}`, `pr:{n}:explain version={tag}` | identical bytes | the archive entries are identical (below) |
+| `explain-versions`, `annotations` | gonk lists MORE | every dev entry is present, plus what gonk derived and reviewed since |
+| `describe` on browse rows | gonk's contract is larger | browse 0.18.0 against 0.3.2: new arguments, none removed |
+| `urn:repo:style:layout` | gonk only | added after browse 0.3.2 |
+| facades (`urn:repo:status`, `log`, `branch`, `list`, `pr:list`) | identical | both run in a working directory that is not a repository, so both need `dir=` and both refuse without it the same way |
+| a capability narrowed to the `claude` grant's scopes, or to none | identical answers and identical denials | the caller's capability crosses either socket |
+| `urn:iki:annotation:{id}` read, Meta | identical | the same endpoint |
+| **cacheability** | **dev: every read uncacheable. gonk: watched reads cacheable** | gonk watches its roots; that is why the wire fix above had to land first |
+| **`urn:repo:folio:*`** | **dev only** | a third party's codebase, deliberately not a gonk root — a disclosure decision. Its 82 archived explanations are not carried |
+| **`explain provider=`** | **dev allows `big`, `ollama`, `qwen`, `rapid` besides its tiers; gonk allows its two tiers only** | `browse.allow_model` in `dev.toml`; gonk deliberately passes no allowlist (`src/browse.rs`, `explain_config`) |
+| **review ceiling** | **dev 1600 tokens; gonk 800** | `browse.review_max_tokens = 1600` in `dev.toml`; `gonk.explain.review.max_tokens` is unset |
+| **`urn:sparql:*`** | **dev only** | gonk binds the store's own faces, `urn:iki:store:{select,…}` and `graph-{select,…}`, which read the DEFAULT graph unless a graph is named (ledger [#378](http://localhost:1060/l/default/item/378)) |
+| `urn:annotation`, `urn:annotation:{id}` | bound by NEITHER | browse 0.3.0 renamed the namespace to `urn:iki:annotation`; the config line that mounts it routes nothing today |
+| `urn:rdf:*`, `urn:llm:*`, `urn:system:exec` | dev binds them | no config-home line routes any of them to the dev server, so the cutover does not move them: a cli host keeps its own |
+
+The archive needs no migration. Every dev-server quad outside `folio` and the vocabulary —
+1,147 of them: 96 explanations, 3 reviews and 14 annotations with their selectors, over
+`ikigai-browse`, `ikigai-cli`, `ikigai-core`, `ikigai-devtools`, `ikigai-emacs` and
+`ikigai-web` — is already in `urn:iki:browse:graph:default`. Their N-Triples matched one for one
+(1,147 against 1,147, none on either side alone). The dev store's 2,374 default-graph quads are
+those 1,147, `folio`'s 738 and the vocabulary's 489. Its 6 MB on disk is RocksDB's, not the
+archive's. The root names agree because of the 2026-09-17 rename, so every carried IRI is
+already the IRI a gonk read builds.
+
+### The procedure
+
+Each step is the hub's, typed by an operator, in this order. **Repoint before stopping**:
+a `prefer` mount to a server that is gone falls back quietly, so the other order shows up as a
+REPL and an `ikigai-web` that have lost `urn:repo:` with nothing saying why.
+
+```sh
+# 0. gonk WITH the wire fix above — before any line moves. From a checkout at origin/main:
+cargo install --locked --force --path ~/git-personal/ikigai-gonk
+just -f ~/git-personal/ikigai-devtools/justfile reregister --only gonk
+#    a mounted read must now be uncacheable at the client — the old binary says `cached`:
+ikigai --prefer "urn:repo:=$HOME/.ikigai/gonk.sock" --plain \
+  -c 'source urn:repo:ikigai-gonk:state' -c 'cache urn:repo:ikigai-gonk:state'
+#    expect the last line: not cached
+
+# 1. a backup, through the running server
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup'
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup:status'
+
+# 2. nothing left behind: every subject the dev archive holds, outside folio and the
+#    vocabulary, that gonk's browse graph does not. Read-only on both live servers.
+#    ⚠ CSV lines end in CRLF: without the `tr` every IRI differs and the answer is "all of them".
+ikigai --connect ~/.ikigai/dev.sock --plain -c 'source urn:sparql:select as=text/csv query="SELECT DISTINCT ?s WHERE { ?s ?p ?o FILTER(isIRI(?s) && !CONTAINS(STR(?s), \":folio:\") && !STRSTARTS(STR(?s), \"https://ikigai-rs.dev/ns\")) }"' \
+  | tr -d '\r' | grep '^urn:' | sort -u > /tmp/retire-dev.s
+ikigai --connect ~/.ikigai/gonk.sock --plain -c 'source urn:iki:store:select as=text/csv query="SELECT DISTINCT ?s WHERE { GRAPH <urn:iki:browse:graph:default> { ?s ?p ?o } }"' \
+  | tr -d '\r' | grep '^urn:' | sort -u > /tmp/retire-gonk.s
+wc -l < /tmp/retire-dev.s                          # 141 on 2026-10-07
+comm -23 /tmp/retire-dev.s /tmp/retire-gonk.s      # expect NOTHING
+
+# 3. the config home: a copy first, then the edit below
+cp ~/.config/ikigai/config.toml ~/.config/ikigai/config.toml.bak-$(date +%Y%m%d-%H%M%S)-retire-dev
+```
+
+If step 2 prints anything, the dev server derived or annotated something after 2026-10-07.
+Everything it holds is machine-generated and regenerable — Brian, 2026-09-19, ledger
+[#433](http://localhost:1060/l/default/item/433) — so the choice is to let gonk re-derive it on
+demand, or to carry it with *Importing an archive from another host's store* above, which
+stops gonk for the copy. Decide before step 6; after it the source is offline.
+
+**The edit.** These lines, today:
+
+```toml
+# The dev server (ikigai-dev, dev.toml) serves the browse family; the
+# annotation family spans a second URN prefix, hence two lines.
+mount = "prefer urn:repo:=/Users/brian/.ikigai/dev.sock"
+# no trailing colon on urn:annotation: covers the bare mint IRI AND the slug family
+mount = "prefer urn:annotation=/Users/brian/.ikigai/dev.sock"
+mount = "prefer urn:iki:annotation=/Users/brian/.ikigai/dev.sock"
+# The web process's own sparql route to the shared browse store (web.mount
+# is read only by ikigai-web - cli hosts keep their local sparql space).
+web.mount = "prefer urn:sparql:=/Users/brian/.ikigai/dev.sock"
+```
+
+become:
+
+```toml
+# gonk (dev.ikigai-rs.gonk) serves the browse family; the dev server retired
+# 2026-10 (ledger #244, #411). The annotation family spans a second URN prefix,
+# hence two lines. No trailing colon on urn:iki:annotation: it covers the bare
+# mint IRI AND the slug family.
+mount = "prefer urn:repo:=/Users/brian/.ikigai/gonk.sock"
+mount = "prefer urn:iki:annotation=/Users/brian/.ikigai/gonk.sock"
+```
+
+- `urn:repo:` and `urn:iki:annotation` move to `gonk.sock`, unchanged otherwise. The second
+  keeps **no trailing colon**: `urn:iki:annotation:=` would not claim the bare IRI a Sink mints
+  under, and every new annotation would fail to route, silently.
+- `urn:annotation` is **deleted, not repointed**: neither server binds anything under it, so it
+  routes nothing today and would route nothing tomorrow.
+- `web.mount` is **deleted, and `ikigai-web`'s `/sparql` page stops answering.** gonk binds no
+  `urn:sparql:*`, so pointing that line at `gonk.sock` would route nothing; the live SPARQL face
+  is gonk's own `/sparql` at 1060, which reads one ledger's graph, and the browse archive is
+  readable as quads through `urn:iki:store:graph-select` with
+  `graph=urn:iki:browse:graph:default`. `ikigai-web` still starts: it composes the remaining
+  `mount` lines, and fails only on zero. Keeping 8642's `/sparql` alive means binding a
+  `urn:sparql:` face here, which is a decision about two SPARQL faces with different default
+  datasets ([#378](http://localhost:1060/l/default/item/378)) and is not made by this change.
+- `web.bind` stays: it is the 8642 door's own, and whether that door outlives the dev server is
+  its own decision ([#411](http://localhost:1060/l/default/item/411)).
+- Two comment paragraphs above the `gonk.browse.root` lines stop being true at the same moment —
+  the one beginning "⚠ The `mount = "prefer urn:repo:=…/dev.sock"` line above still points the
+  REPL at the DEV SERVER" and the one beginning "⚠ gonk starts with an EMPTY explanation
+  archive". Delete both.
+
+```sh
+# 4. restart what reads the `mount` lines. Not gonk (it reads only gonk.* keys, and step 0
+#    restarted it), not dev.ikigai-rs.inference (it runs with --no-config-mounts), not the cms
+#    (it reads no `mount` key).
+#    ⚠ personal is the EventKit host: be at the screen.
+just -f ~/git-personal/ikigai-devtools/justfile reregister --only web personal
+#    and every running `ikigai mcp` (each Claude Code session's: /mcp, then reconnect ikigai),
+#    and an `ikigai --daemon` if one is running. A REPL or a one-shot reads the file at start.
+
+# 5. verify through the config home's own mounts — no --connect, no --prefer
+ikigai --plain -c 'source urn:repo:ikigai-gonk:state'
+#    a root only gonk serves: the dev server answers "no endpoint resolved", so success here
+#    means the line moved
+ikigai --plain -c 'source urn:repo:ikigai-core:state' -c 'cache urn:repo:ikigai-core:state'
+#    expect: a commit hash, `clean`, and then `not cached`
+ikigai --plain -c 'source urn:repo:ikigai-core:explain-versions:crates/ikigai-core/src/verb.rs'
+#    expect a code-v1@qwen3-coder:30b row: an entry the dev server derived, served from gonk
+ikigai --plain -c 'source urn:iki:annotation:00000000-0000-0000-0000-000000000000'
+#    expect "no annotation …" (browse answered); "no endpoint resolved" means the line is wrong
+curl -s 'http://127.0.0.1:8642/urn:repo:ikigai-gonk:tree'
+#    ikigai-web, restarted in step 4: a tree listing (today it says "no endpoint resolved")
+
+# 6. stop the dev server, and keep it from coming back at the next login. Typed as two
+#    commands on purpose — never `bootout … && …` (CLAUDE.md 9h).
+launchctl bootout gui/$(id -u)/dev.ikigai-rs.dev
+mkdir -p ~/Library/LaunchAgents-retired
+mv ~/Library/LaunchAgents/dev.ikigai-rs.dev.plist ~/Library/LaunchAgents-retired/
+launchctl print gui/$(id -u)/dev.ikigai-rs.dev     # expect an error: no such service
+#    then step 5 again: every answer is the same, because nothing was routed there.
+```
+
+The dev server's store, `~/.ikigai/browse-store`, stays on disk: it is the rollback, and it holds
+`folio`'s archive, which nothing else does.
+
+⚠ After the config edit, `reregister --check` — and so the health watcher — reports
+`stale-config` for every unit started before it that was not restarted (the cms, inference). They
+read nothing that changed. Either restart them too with `--only cms inference`, or expect that
+mail once.
+
+### Rollback
+
+```sh
+cp ~/.config/ikigai/config.toml.bak-<the stamp from step 3>-retire-dev ~/.config/ikigai/config.toml
+mv ~/Library/LaunchAgents-retired/dev.ikigai-rs.dev.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.ikigai-rs.dev.plist
+just -f ~/git-personal/ikigai-devtools/justfile reregister --only web personal
+#    and reconnect every `ikigai mcp`, as in step 4
+```
+
+Nothing is lost going back — gonk keeps everything it derived — but anything explained or
+annotated through the new lines is in gonk's archive and not the dev server's, so the REPL stops
+seeing it until the next cutover. Step 0's gonk does not need rolling back: an uncacheable
+answer is never wrong, only one round trip slower.
+
 ## From another machine, over QUIC
 
 The QUIC door opens once a client **certificate** is enrolled. Passkeys never open it: they

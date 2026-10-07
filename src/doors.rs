@@ -36,9 +36,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Fallback,
-    Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result, Scope, Space,
-    SpaceEntry, SystemClock, Topology,
+    Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Expiry,
+    Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result,
+    Scope, Space, SpaceEntry, SystemClock, Topology,
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{CapFn, EdgeConfig, HttpRequest, PrincipalFn, Route, RouteTable};
@@ -71,13 +71,30 @@ pub struct HubSpace {
     hub: Arc<Kernel>,
     /// The hub's root space's own identity, read once.
     id: Option<Iri>,
+    /// Whether answers leave this process over a WIRE (the socket and QUIC doors), where
+    /// [`for_the_wire`] decides what a mounting client may cache.
+    wire: bool,
 }
 
 impl HubSpace {
-    /// Forward to `hub`.
+    /// Forward to `hub`, handing answers back as the hub made them — for the HTTP door, whose
+    /// transport turns an expiry into `Cache-Control` and an `ETag` a browser revalidates.
     pub fn new(hub: Arc<Kernel>) -> Self {
         let id = hub_root(&hub).id;
-        HubSpace { hub, id }
+        HubSpace {
+            hub,
+            id,
+            wire: false,
+        }
+    }
+
+    /// Forward to `hub` for a door whose answers cross a wire to another KERNEL — the socket
+    /// and QUIC doors. Every answer passes through [`for_the_wire`].
+    pub fn over_wire(hub: Arc<Kernel>) -> Self {
+        HubSpace {
+            wire: true,
+            ..HubSpace::new(hub)
+        }
     }
 }
 
@@ -106,6 +123,7 @@ impl Space for HubSpace {
                     Arc::new(Forward {
                         hub: Arc::clone(&self.hub),
                         description,
+                        wire: self.wire,
                     }),
                     Bindings::new(),
                 );
@@ -147,6 +165,8 @@ impl Space for HubSpace {
 struct Forward {
     hub: Arc<Kernel>,
     description: Description,
+    /// [`HubSpace::over_wire`]'s flag, carried to the one place an answer passes.
+    wire: bool,
 }
 
 #[async_trait]
@@ -155,7 +175,12 @@ impl Endpoint for Forward {
         // The CALLER's capability, unchanged: the door kernel has already checked the
         // declared floor against the same description, and the hub checks it again along
         // with everything the endpoint enforces inside.
-        self.hub.issue(inv.request.clone(), inv.capability).await
+        let answer = self.hub.issue(inv.request.clone(), inv.capability).await?;
+        Ok(if self.wire {
+            for_the_wire(answer)
+        } else {
+            answer
+        })
     }
 
     fn name(&self) -> &str {
@@ -164,6 +189,52 @@ impl Endpoint for Forward {
 
     fn describe(&self) -> Description {
         self.description.clone()
+    }
+}
+
+/// An answer as a MOUNTING client may hold it: uncacheable whenever its freshness rests on a
+/// golden thread, because the thread cannot go with it.
+///
+/// A representation's threads are kernel-local — `#[serde(skip)]` in core, with no reply
+/// variant on the wire that carries them (ledger [#92](http://localhost:1060/l/default/item/92))
+/// — while its expiry DOES cross. So a cacheable answer arrives at the client cacheable with an
+/// EMPTY thread set: nothing there can ever cut it, and a long-lived client (`ikigai mcp`, the
+/// daemon, `ikigai serve`, `ikigai-web`) serves the first answer it got until it restarts. Every
+/// config-home `mount` line that names this server's socket builds exactly that client. Since
+/// core 0.1.73 every cacheable `Source`/`Exists` answer carries at least its own target's
+/// thread, so in practice nothing that leaves by the socket or QUIC door is cacheable at the
+/// far end.
+///
+/// ★ **The hub still caches.** This rewrites what crosses the wire and nothing in the hub: the
+/// hub's entry keeps its expiry and its threads, and a write or a watcher cut still reaches
+/// it. What a mounted read costs is one round trip to a hub cache hit — never a recompute, and
+/// never a stale answer. Measured before the change on plasma (2026-10-07): a watched
+/// `urn:repo:{root}:tree` read through a `prefer` mount of the socket came back `[cached]` and
+/// went on listing the tree as it was after a file was added under the root.
+///
+/// When the wire carries threads, this is the line to delete.
+///
+/// ```
+/// use ikigai_core::{Expiry, ReprType, Representation};
+/// use ikigai_gonk::doors::for_the_wire;
+///
+/// let watched = Representation::new(ReprType::new("text/plain"), "a\tfile\t1\n")
+///     .cacheable()
+///     .depends_on("urn:iki:gonk:browse:root:demo");
+/// assert_eq!(for_the_wire(watched).expiry, Expiry::Always);
+///
+/// let live = Representation::new(ReprType::new("text/plain"), "now");
+/// assert_eq!(for_the_wire(live).expiry, Expiry::Always);
+///
+/// // Cacheable and resting on nothing — no thread to lose, so nothing to correct.
+/// let pure = Representation::new(ReprType::new("text/plain"), "42").cacheable();
+/// assert_eq!(for_the_wire(pure).expiry, Expiry::Never);
+/// ```
+pub fn for_the_wire(answer: Representation) -> Representation {
+    if answer.threads().is_empty() {
+        answer
+    } else {
+        answer.with_expiry(Expiry::Always)
     }
 }
 
@@ -191,7 +262,7 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
 /// [`door_kernel`], writing one access line per request when `access` is given — what `main`
 /// builds for the socket and QUIC doors ([`crate::access`]).
 pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
-    over(Arc::new(HubSpace::new(hub)), access)
+    over(Arc::new(HubSpace::over_wire(hub)), access)
 }
 
 /// The kernel every door gets: a Meta renderer, the system clock, [`NoCache`], and the access
