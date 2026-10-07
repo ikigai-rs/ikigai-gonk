@@ -169,8 +169,9 @@ usage:
                                    file each finding of ONE roborev review as a ledger item over
                                    the HTTP door — what a roborev `[[hooks]]` entry on
                                    `review.completed` runs (README, \"Filing roborev findings\").
-                                   A finding already filed is skipped; low ones are skipped
-                                   unless --min-severity low
+                                   Each finding is ONE keyed append, so a finding already filed
+                                   (or filed by a concurrent hook) is not filed again; low ones
+                                   are skipped unless --min-severity low
   ikigai-gonk checkout [<name>=]<git-url>... [--dir DIR] [--write-config] [--config PATH]
                                    clone each repository into ~/.ikigai/checkouts/<name> (or
                                    --dir), or fetch and FAST-FORWARD the clone already there;
@@ -190,8 +191,16 @@ usage:
                                    file a `kata export` file's issues as ledger items over the
                                    HTTP door: labels, priority, comments, closes, then links.
                                    Lossy (kata's ids and times survive as text) and idempotent:
-                                   each item is `about urn:kata:issue:<uid>`, and a re-run
-                                   adds only what is missing (README, \"Importing from kata\")
+                                   each item is filed `key=urn:kata:issue:<uid>` (one atomic
+                                   append), and a re-run adds only what is missing. --dry-run
+                                   reads the ledger and writes nothing (README, \"Importing
+                                   from kata\")
+  ikigai-gonk ledger backfill-keys [--ledger default] [--socket PATH] [--config PATH] [--dry-run]
+                                   give the items roborev and kata filed BEFORE keyed appends
+                                   their `ledger:key` (from their bridge `about` IRI), and list
+                                   the duplicates the old race made, over a RUNNING gonk's
+                                   owner-only socket. Idempotent; --dry-run writes nothing
+                                   (README, \"Upgrading the bridges: backfill the keys\")
   ikigai-gonk grants <ledger> [read|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
@@ -305,6 +314,8 @@ pub enum Command {
     Checkout(crate::checkout::Args),
     /// Import a `kata export` file into a ledger over the HTTP door.
     KataImport(crate::kata::ImportArgs),
+    /// Give the items the bridges filed before keys existed their key, over the socket.
+    BackfillKeys(crate::keys::BackfillArgs),
     /// Print the usage.
     Help,
 }
@@ -694,6 +705,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("kata") => {
             args.next();
             return crate::kata::parse_args(args).map(Command::KataImport);
+        }
+        Some("ledger") => {
+            args.next();
+            return crate::keys::parse_args(args).map(Command::BackfillKeys);
         }
         Some("grants") => {
             args.next();

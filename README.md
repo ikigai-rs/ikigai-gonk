@@ -632,12 +632,11 @@ roborev replaces each `{…}` with a single-quoted value before `sh -c` runs the
 nothing in a finding can escape into the shell. `--root` is the **browse root name** gonk
 serves the repository under (`gonk.browse.root = "<name>=<path>"`); `{repo_name}` is right
 when the two match, and otherwise write the name in. `--dry-run` prints what would be filed
-and touches nothing.
+(each append's arguments, the key among them) and touches nothing.
 
 **The grant.** The command speaks to the HTTP door, whose anonymous loopback caller holds the
 read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and nothing
-else. Filing needs both: write to append, read to check first whether a finding is already
-filed. To file into a ledger of its own, list it:
+else; filing runs under them. To file into a ledger of its own, list it:
 
 ```toml
 gonk.http.ledger = "default"
@@ -660,20 +659,25 @@ roborev logs a hook's failure and output in its daemon log; it never retries.
 | the commit | `revision`, and `commit:` in the body |
 | the job | `roborev job: N (roborev show N)` in the body |
 | a panel's reviewers | `reported by:` in the body |
-| — | `about urn:roborev:finding:{hash}`, the idempotence key, and `author roborev` |
+| — | `key urn:roborev:finding:{hash}`, the idempotence key — also filed as an `about`, so items from before keys existed join the same way — and `author roborev` |
 
 **Low findings are skipped by default** (`--min-severity medium`): roborev renders them on a
 passing review too, and one ledger item per nit buries the findings worth a person's time.
 `--min-severity low` files them; `high` files less.
 
-**Filed once.** The key hashes the root, the file's path and the problem's text with its
-whitespace collapsed, and an item, open or closed, already about that key is not filed
-again. So the same hook payload run twice files once, and roborev carrying a finding forward
-verbatim (a rerun, or a later commit's review) files nothing new. ⚠ Two limits, both stated:
-the same defect described in **different words** is a new key and a second item, and the key
-is deliberately not roborev's job id, because a rerun keeps its job id and produces new
-findings, so (job, index) would skip a real one. And the check and the append are two
-requests, so two hooks filing the same finding at the same instant can both file it.
+**Filed once, race-free.** The key hashes the root, the file's path and the problem's text with
+its whitespace collapsed, and each finding is ONE keyed append (`append key=…`,
+`ikigai-ledger` 0.4.0): the ledger checks the key and files in the same store update, and a key
+already taken — by an open, closed or deleted item — answers that item (`already` here) and
+files nothing. So the same hook payload run twice files once, roborev carrying a finding
+forward verbatim (a rerun, or a later commit's review) files nothing new, and **two hooks filing
+the same finding at the same instant file it once** (eight concurrent hooks, one item:
+`tests/roborev.rs`). The answer is read through the ledger's JSON face, never its plain text.
+⚠ Two limits, both stated: the same defect described in **different words** is a new key and
+a second item, and the key is deliberately not roborev's job id, because a rerun keeps its job
+id and produces new findings, so (job, index) would skip a real one. Items filed before the
+keyed append carry the key only as an `about`; [backfill their keys](#upgrading-the-bridges-backfill-the-keys)
+once, or the first keyed run files them again.
 
 **What it files nothing for.** `review.completed` also fires for roborev's `fix` and `task`
 jobs, whose output is prose rather than a review: the command says so and exits 0. A review
@@ -682,9 +686,8 @@ parse back to it exactly (format drift in a new roborev) is refused with exit 1 
 filed, rather than filed as a guess.
 
 **Concurrent hooks are safe.** roborev runs every hook in its own goroutine, so two reviews
-can file at once. gonk links `ikigai-ledger` 0.3.0 (since PR #81), which gives two appends
-landing in the same millisecond distinct item ids; the 0.2.x line could give them the same one
-(ledger #768). ⚠ **A panel still files more than once:** each member's completion fires
+can file at once, and the keyed append files each finding once however many race (above).
+⚠ **A panel still files more than once:** each member's completion fires
 `review.completed` (only the bookkeeping events are hook-suppressed), and the synthesis fires
 once more with the findings merged and reworded. A hook cannot tell a member from a synthesis
 (there is no job-type variable), so a panel files every member's findings and the
@@ -715,13 +718,21 @@ linked    #3 parent #1
 ```
 
 `--gonk` defaults to `http://127.0.0.1:1060` and `--ledger` to `default`; `--project NAME`
-imports one kata project's issues; `--dry-run` prints what would be filed and touches nothing.
+imports one kata project's issues.
+
+**`--dry-run` reads for real and writes nothing.** It asks the ledger for each issue's key, as
+the real run does, so it says `already` for an issue that is there, reports exactly the
+comments, closes and links a real run would add (`would commented`, `would closed`, `would
+linked`, and a tally that says `would be`), and is refused on a ledger the door does not grant,
+exit 1, like the real run. ⚠ The one thing a read cannot tell: an issue whose item was DELETED
+answers like one never filed, so the dry run says `would file` where the real run leaves it
+alone.
 
 **The grant** is `roborev file`'s: the door's anonymous loopback caller holds the read and
 write tokens of the ledgers in `gonk.http.ledger`, and an import needs both (write to file,
-read to check what is already there). To import into a ledger of its own, list it there
+read to converge on what is already there). To import into a ledger of its own, list it there
 (`gonk.http.ledger = "kata"`) and restart. A ledger the door does not grant answers `403`, and
-the import stops with exit 1 and names the setting.
+the import (or the dry run) stops with exit 1 and names the setting.
 
 **The mapping.** `ikigai-ledger` took its model from kata, so most of this is one to one:
 
@@ -735,7 +746,7 @@ the import stops with exit 1 and names the setting.
 | comments | `comment`, with the comment's author, ending `(kata comment <uid>, <created_at>, for <teammate>)` |
 | `status` closed, `closed_reason` | `close` with the same reason (`done`, `wontfix`, `duplicate`, `superseded`, `audit-no-change`), and `Closed in kata at <closed_at>.` as its note |
 | links `parent`, `blocks`, `related` | `link` with the same type, same direction (`parent` from the child, `blocks` from the prerequisite), made after every issue has an item |
-| `uid` | `about urn:kata:issue:<uid>`, the idempotence key |
+| `uid` | `key urn:kata:issue:<uid>`, the idempotence key, and the same IRI as an `about` |
 | `deleted_at` set (soft-deleted) | not imported, nor its comments, labels or links |
 
 kata has no item kind, so none is filed.
@@ -748,15 +759,64 @@ expiry, recurrences, who added a label or a link and when, kata's event history,
 other export kind (sync bindings, federation state, claims, purge logs), which are counted
 on the last line instead.
 
-**Running it again.** Before filing, the ledger is asked for an item, open or closed, about
-the issue's key, and an issue already there is not filed again. The run then CONVERGES on
-that item: a comment whose `kata comment <uid>` marker is not on it is added, an issue closed
-in kata whose item is open is closed, and a link the item does not show is made. So the same
-export imported twice changes nothing, and a later export adds the comments, closes and links
-that are new. ⚠ An issue's title, body, labels and priority are written once, when it is
-filed; a later edit in kata does not reach the item. And the check and the append are two
-requests, so two imports of one export at the same instant can both file an issue (ledger
-[#779](http://localhost:1060/l/default/item/779) is the atomic append that closes that).
+**Running it again, or twice at once.** Each issue is ONE keyed append: the ledger checks the
+key and files in the same store update, so an issue already there is not filed again, and two
+imports of one export at the same instant file each issue once (eight concurrent imports, one
+item: `tests/kata.rs`). The run then reads the item by its key (`item:key:urn:kata:issue:<uid>`,
+in the ledger's JSON face) and CONVERGES on it, addressing every write `item=key:…`: a comment
+whose `kata comment <uid>` marker is in none of its comments is added, an issue closed in kata
+whose item is open is closed, and a link the item does not carry is made. So the same export
+imported twice changes nothing, and a later export adds the comments, closes and links that
+are new. An issue whose item was deleted in the ledger is left alone (`deleted … left alone`):
+its tombstone keeps the key, and an import does not undo a deletion. ⚠ An issue's title, body,
+labels and priority are written once, when it is filed; a later edit in kata does not reach the
+item. And only the FILING is atomic: the convergence reads the item and then writes, and the
+ledger has no keyed comment, so two imports racing on the same new comment can both add it.
+Items imported before the keyed append carry the key only as an `about`;
+[backfill their keys](#upgrading-the-bridges-backfill-the-keys) once, or the next import files
+them again.
+
+## Upgrading the bridges: backfill the keys
+
+`roborev file` and `kata import` have filed through the keyed append since `ikigai-ledger`
+0.4.0 (ledger [#810](http://localhost:1060/l/default/item/810)). An item either filed BEFORE
+that carries its key only as an `about` IRI (`urn:roborev:finding:…`, `urn:kata:issue:…`) and
+no `ledger:key`, so the keyed append cannot see it and the first keyed run would file it again.
+The ledger sets a key only at filing (it has no resource that sets one later), so this command
+writes them, over a RUNNING gonk's owner-only socket (root; the store has one writer, the
+server, so nothing can open it beside a live gonk):
+
+```sh
+ikigai-gonk ledger backfill-keys --ledger default --dry-run   # read and plan; writes nothing
+ikigai-gonk ledger backfill-keys --ledger default             # write the keys
+```
+
+`--socket PATH` names the socket; unset, it is the one `config.toml` (or `--config`) names,
+else `~/.ikigai/gonk.sock`. Per bridge IRI, the **lowest-numbered** item about it without a key
+gets it (the first filing); every other unkeyed item about the same IRI is a **duplicate** —
+what the old check-then-append race made — and is listed with the line that closes it, never
+closed for you:
+
+```text
+would key  #12  urn:roborev:finding:0f3c…
+duplicate #19 of #12  urn:roborev:finding:0f3c…
+    close it: sink urn:iki:ledger:close item=19 reason=duplicate
+
+dry run, nothing written: 41 key(s) would be written, 0 item(s) already keyed, 1 duplicate(s) listed, 0 skipped
+```
+
+Each key is ONE conditional update (`FILTER NOT EXISTS` on the item already having a key and
+on the key being taken), so it never puts two keys on an item or one key on two, even against
+a bridge filing at the same moment; the run reads the keys back and reports any it lost that
+way instead of claiming them. If some other subject already holds an IRI's key (a keyed run
+filed it again after the upgrade, or a deleted item's tombstone), nothing is keyed and the
+unkeyed items are listed as its duplicates. An item about two bridge IRIs is skipped and named.
+It does not touch `modified`, and it does not key a deleted item's tombstone. A second run
+writes nothing (`0 key(s) written`).
+
+**The order, at an upgrade:** dry run, read the duplicates, run it, then let the bridges run
+again. Running it after a keyed run is safe too — that run's re-filings are listed as the
+duplicates' holders rather than keyed twice — but it is the order that files nothing extra.
 
 ## From another ikigai process on this machine
 

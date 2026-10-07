@@ -98,6 +98,7 @@ fn main() {
         Command::KataImport(args) => {
             ikigai_gonk::kata::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
         }
+        Command::BackfillKeys(args) => backfill_keys(&args),
         Command::Serve(flags) => serve(&flags),
     }
 }
@@ -878,6 +879,25 @@ fn scopes_for(
 
 /// This server's settings, for a command that mints against them — the same read `serve`
 /// makes, so a role is computed against the roots and the mount the server will run with.
+/// `ikigai-gonk ledger backfill-keys` — over the socket of the gonk this config describes.
+fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
+    let socket = match &args.socket {
+        Some(path) => path.clone(),
+        None => {
+            let flags = config::Flags {
+                config: args.config.clone(),
+                ..config::Flags::default()
+            };
+            read_settings(&flags).socket
+        }
+    };
+    let ledger =
+        ikigai_ledger::Ledger::parse(&args.ledger).unwrap_or_else(|e| fail(&e.to_string()));
+    let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
+    ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
+        .unwrap_or_else(|e| fail(&e));
+}
+
 fn read_settings(flags: &config::Flags) -> config::Settings {
     let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
     let (_, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
