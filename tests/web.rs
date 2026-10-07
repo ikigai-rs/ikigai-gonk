@@ -44,6 +44,8 @@ const CHROME_ACCEPT: &str =
 struct Server {
     addr: SocketAddr,
     layout: quic::Layout,
+    /// The hub behind the door, for a test that must seed what no door may write.
+    hub: Arc<ikigai_core::Kernel>,
     _config: tempfile::TempDir,
 }
 
@@ -73,7 +75,7 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
         });
-        let http = Arc::new(doors::http_kernel(hub, web::space(face)));
+        let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).unwrap(),
             port: addr.port(),
@@ -90,6 +92,7 @@ impl Server {
         Server {
             addr,
             layout,
+            hub,
             _config: config,
         }
     }
@@ -1880,5 +1883,164 @@ fn a_hostile_search_term_comes_back_escaped_not_as_markup() {
     assert!(
         page.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
         "the term is echoed into the search box, escaped: {page:?}"
+    );
+}
+
+/// Load `turtle` into `graph` as root, through the hub — a graph no door's caller may write.
+fn load(server: &Server, graph: &str, turtle: &str) {
+    let request = [
+        ("content", turtle),
+        ("format", "text/turtle"),
+        ("graph", graph),
+    ]
+    .iter()
+    .fold(
+        ikigai_core::Request::new(
+            ikigai_core::Verb::Sink,
+            ikigai_core::Iri::parse("urn:iki:store:load").unwrap(),
+        ),
+        |request, (name, value)| {
+            request.with_arg(
+                *name,
+                ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()),
+            )
+        },
+    );
+    futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("loading {graph}: {e}"));
+}
+
+const TITLES: &str =
+    "PREFIX dcterms: <http://purl.org/dc/terms/> SELECT ?t WHERE { ?s dcterms:title ?t }";
+
+/// ★ **`/sparql` is the SPARQL 1.1 Protocol over `urn:sparql:*`** (ledger #836): asked for a
+/// results type and naming no ledger, it reads the UNION of the graphs the caller may read —
+/// the anonymous caller its ledger's, a signed-in passkey that plus what its grant names —
+/// by GET and by both POST forms, and it refuses what it cannot honor rather than answering
+/// a different question.
+#[test]
+fn the_sparql_protocol_reads_the_union_the_callers_grant_allows() {
+    let server = Server::start();
+    file(&server, "A ledger title");
+    load(
+        &server,
+        "urn:iki:browse:graph:default",
+        "<urn:iki:annotation:p1> <http://purl.org/dc/terms/title> \"A browse title\" .",
+    );
+    let json = || vec![("Accept", "application/sparql-results+json".to_string())];
+
+    // Anonymous: the ledger's graph is all its grant reads.
+    let anonymous = server.raw(
+        "GET",
+        &format!("/sparql?query={}", encode(TITLES)),
+        &json(),
+        "",
+    );
+    assert_eq!(anonymous.status, 200, "{anonymous:?}");
+    assert!(anonymous.body.contains("A ledger title"), "{anonymous:?}");
+    assert!(!anonymous.body.contains("A browse title"), "{anonymous:?}");
+
+    // Signed in under a grant that adds the browse graph: the union is both.
+    let (token, _) = sign_in(
+        &server,
+        "reader",
+        &ikigai_gonk::grants::browse_graph_grants(Authority::Read).unwrap(),
+    );
+    let mut headers = json();
+    headers.push(("Cookie", format!("{}={token}", identity::SESSION_COOKIE)));
+    let signed = server.raw(
+        "GET",
+        &format!("/sparql?query={}", encode(TITLES)),
+        &headers,
+        "",
+    );
+    assert_eq!(signed.status, 200, "{signed:?}");
+    assert!(signed.body.contains("A ledger title"), "{signed:?}");
+    assert!(signed.body.contains("A browse title"), "{signed:?}");
+    // …and `graph` narrows it, to a graph the grant names.
+    let narrowed = server.raw(
+        "GET",
+        &format!(
+            "/sparql?graph=urn:iki:browse:graph:default&query={}",
+            encode(TITLES)
+        ),
+        &headers,
+        "",
+    );
+    assert!(narrowed.body.contains("A browse title"), "{narrowed:?}");
+    assert!(!narrowed.body.contains("A ledger title"), "{narrowed:?}");
+    // Anonymously, naming the browse graph is a 403, not an empty answer.
+    let refused = server.raw(
+        "GET",
+        &format!(
+            "/sparql?graph=urn:iki:browse:graph:default&query={}",
+            encode(TITLES)
+        ),
+        &json(),
+        "",
+    );
+    assert_eq!(refused.status, 403, "{refused:?}");
+
+    // POST, both protocol forms: the same answer as the GET.
+    let mut sparql_query = json();
+    sparql_query.push(("Content-Type", "application/sparql-query".to_string()));
+    let posted = server.raw("POST", "/sparql", &sparql_query, TITLES);
+    assert_eq!(posted.status, 200, "{posted:?}");
+    assert_eq!(posted.body, anonymous.body);
+    let mut form = json();
+    form.push((
+        "Content-Type",
+        "application/x-www-form-urlencoded".to_string(),
+    ));
+    let formed = server.raw(
+        "POST",
+        "/sparql",
+        &form,
+        &format!("query={}", encode(TITLES)),
+    );
+    assert_eq!(formed.status, 200, "{formed:?}");
+    assert_eq!(formed.body, anonymous.body);
+
+    // What it cannot honor, it refuses.
+    let mut plain = json();
+    plain.push(("Content-Type", "text/plain".to_string()));
+    assert_eq!(server.raw("POST", "/sparql", &plain, TITLES).status, 400);
+    let dataset = server.raw(
+        "GET",
+        &format!(
+            "/sparql?default-graph-uri=urn:iki:ledger:graph:default&query={}",
+            encode(TITLES)
+        ),
+        &json(),
+        "",
+    );
+    assert_eq!(dataset.status, 400, "{dataset:?}");
+    assert!(dataset.body.contains("default-graph-uri"), "{dataset:?}");
+    // A POST is a read: an update in the body is not a query, and nothing is written.
+    let update = server.raw(
+        "POST",
+        "/sparql",
+        &sparql_query,
+        "INSERT DATA { <urn:x> <http://purl.org/dc/terms/title> \"injected\" }",
+    );
+    assert_eq!(update.status, 400, "{update:?}");
+    let after = server.raw(
+        "GET",
+        &format!("/sparql?query={}", encode(TITLES)),
+        &json(),
+        "",
+    );
+    assert_eq!(after.body, anonymous.body);
+
+    // The editor page still reads one ledger, and says so.
+    let page = server.page(&format!("/sparql/results?query={}", encode(TITLES)), None);
+    assert!(
+        page.body
+            .contains("1 row(s) from urn:iki:ledger:graph:default"),
+        "{page:?}"
     );
 }

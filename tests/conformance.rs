@@ -524,6 +524,13 @@ fn the_http_door_conforms() {
         .fixture(
             Fixture::new("gonk-sparql", Verb::Source).arg("query", "CONSTRUCT WHERE { ?s ?p ?o }"),
         )
+        // The SPARQL 1.1 Protocol's POST (ledger #836): the transport maps every POST to Sink,
+        // so this Sink is a read whose query is the body.
+        .fixture(
+            Fixture::new("gonk-sparql", Verb::Sink)
+                .arg("content", "CONSTRUCT WHERE { ?s ?p ?o }")
+                .arg("content-type", "application/sparql-query"),
+        )
         .fixture(
             Fixture::new("gonk-fragment-sparql", Verb::Source)
                 .arg("query", "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"),

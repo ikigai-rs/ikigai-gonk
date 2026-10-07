@@ -174,7 +174,37 @@ away:
 - a request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` gets **nothing**, reads
   included. That is the DNS-rebinding defence.
 
-### SPARQL, confined by construction
+### SPARQL: the editor page, and the SPARQL 1.1 Protocol
+
+`/sparql` is two faces of one resource, chosen by what the caller asks for.
+
+**Asked for a results or RDF type** (`Accept: application/sparql-results+json`, or `as=`), it
+is the **SPARQL 1.1 Protocol** over [`urn:sparql:*`](#sparql-as-resources-urnsparql), under the
+request's own capability — the anonymous grant, or the signed-in passkey's. Naming no ledger,
+the dataset is the union of every graph that capability may read: an anonymous caller's
+ledgers, plus whatever a passkey's grant names (the browse graph, for `--browse read` or
+`--browse-graph read`). `ledger=` narrows it to one ledger's graph, `graph=` to the graphs
+named.
+
+```sh
+curl -s -G http://127.0.0.1:1060/sparql -H 'Accept: text/csv' \
+  --data-urlencode 'query=SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g'
+curl -s http://127.0.0.1:1060/sparql -H 'Accept: application/sparql-results+json' \
+  -H 'Content-Type: application/sparql-query' --data-binary 'ASK { ?s ?p ?o }'
+```
+
+- **GET** `?query=`, **POST** form-encoded (`query=`) and **POST** `application/sparql-query`
+  all answer alike; any other POST body is a 400.
+- ⚠ **A POST is a read, declared as a Sink.** `ikigai-web` maps every POST to `Sink` and has no
+  seam for a host to route one to a Source, so the protocol's POST forms arrive at this
+  resource's Sink action, which reads the query from the body and writes nothing. The manifold
+  shows that action and says so. (The standalone `ikigai-web` answers its own `/sparql` POST
+  outside that mapping.)
+- `default-graph-uri` and `named-graph-uri` are **refused, not ignored**: the store's dataset is
+  one set of graphs that is the default graph and the named graphs at once, so the two cannot
+  be honored separately. Use `graph=`, or `GRAPH <iri>` in the query.
+
+**Asked for HTML**, it is the editor page, and the rest of this section is about that.
 
 `/sparql` never touches the store's whole-dataset doors. A query runs at
 `urn:iki:store:graph-{select,ask,construct,describe}` with `graph=` set to the chosen
@@ -199,7 +229,7 @@ run it (`web::CROSS_GRAPH`).
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
-| `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | query |
+| `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | the editor page and its results; with a results `Accept`, the SPARQL 1.1 Protocol (GET, and POST as a read) over `urn:sparql:*` |
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
 | `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
@@ -212,7 +242,8 @@ run it (`web::CROSS_GRAPH`).
 | `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
-the ledger, as before, plus one resource of gonk's own — `urn:iki:gonk:render`, the page
+the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
+`urn:iki:gonk:render`, the page
 renderer's chunk transform (one `<view:page view="chunk">` document in, its HTML out; a pure
 function of its input, cached by the hub on the content-addressed request, which is what
 makes a poll of the Queue a cache hit and a decision a one-chunk miss). It is bound in the
