@@ -7,7 +7,7 @@
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
 //! /l/{ledger}/item/{id}/card urn:iki:gonk:fragment:item:{…}:{id}    Source  the same, as a fragment
 //! /act                       urn:iki:gonk:act                       Sink    a form → one ledger action
-//! /sparql                    urn:iki:gonk:sparql                    Source  editor, or results by conneg
+//! /sparql                    urn:iki:gonk:sparql                    Source/Sink  editor, or the SPARQL 1.1 Protocol by conneg
 //! /sparql/results            urn:iki:gonk:fragment:sparql           Source  results as a fragment
 //! /auth/{op}                 urn:iki:gonk:passkey:{op}              Sink    passkey ceremonies, sessions
 //! /static/{name}             urn:iki:gonk:asset:{name}              Source  css, js, htmx
@@ -52,8 +52,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, InputSource, Invocation,
-    Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate, Verb,
+    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, InputSource,
+    Invocation, Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
 use ikigai_ledger::Ledger;
 use oxigraph::model::NamedOrBlankNode;
@@ -2020,51 +2020,191 @@ async fn sparql_results(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> S
     )
 }
 
+/// The faces `/sparql` answers in besides HTML — the SPARQL 1.1 Protocol's, as the store
+/// serves them.
+const PROTOCOL_FACES: [&str; 6] = [
+    "application/sparql-results+json",
+    "application/sparql-results+xml",
+    "text/csv",
+    "text/tab-separated-values",
+    "text/turtle",
+    "application/n-triples",
+];
+
+/// What one `/sparql` request asks, read from its arguments (`GET`) or from its body as well
+/// (`POST`).
+///
+/// ★ **A POST is a READ here, and the transport cannot say so.** `ikigai-web` maps every POST
+/// to `Sink` and hands the body over as `content`, with no seam for a host to route a POST to
+/// a Source — so the SPARQL 1.1 Protocol's two POST forms (§2.1.2 form-encoded, §2.1.3
+/// `application/sparql-query`) arrive at this endpoint's Sink action, which reads the query out
+/// of the body and answers exactly as the GET would. It writes nothing: every hop it makes is a
+/// Source. The standalone `ikigai-web` server answers its own `/sparql` POST outside that
+/// library mapping, which is the seam this door does not have.
+struct Asked {
+    ledger: Option<String>,
+    query: Option<String>,
+    face: Option<String>,
+    graph: Option<String>,
+}
+
+impl Asked {
+    fn read(inv: &Invocation<'_>) -> Result<Asked> {
+        let mut asked = Asked {
+            ledger: optional(inv, "ledger"),
+            query: optional(inv, "query"),
+            face: inv.inline_str("as").ok().map(bare).map(str::to_string),
+            graph: optional(inv, "graph"),
+        };
+        let mut dataset_params: Vec<String> = DATASET_PARAMS
+            .iter()
+            .filter(|name| inv.request.args.contains_key(**name))
+            .map(|name| name.to_string())
+            .collect();
+        if inv.request.verb == Verb::Sink {
+            let body = inv.inline_str("content").unwrap_or("");
+            let kind = optional(inv, "content-type").map(|t| bare(&t).to_ascii_lowercase());
+            match kind.as_deref() {
+                Some("application/sparql-query") => {
+                    asked.query = Some(body.to_string()).filter(|q| !q.trim().is_empty());
+                }
+                Some("application/x-www-form-urlencoded") => {
+                    for (name, value) in form_pairs(body) {
+                        let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                        match name.as_str() {
+                            "query" => asked.query = value,
+                            "ledger" => asked.ledger = value,
+                            "graph" => asked.graph = value,
+                            "as" => asked.face = value.map(|v| bare(&v).to_string()),
+                            other if DATASET_PARAMS.contains(&other) => {
+                                dataset_params.push(other.to_string())
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                other => {
+                    return Err(Error::InvalidArgument {
+                        name: "content-type".to_string(),
+                        detail: format!(
+                            "a POST to /sparql carries its query as `application/sparql-query` \
+                             or as a form field (`application/x-www-form-urlencoded`), as the \
+                             SPARQL 1.1 Protocol has it; this one is {}",
+                            other.map_or("unlabeled".to_string(), |t| format!("`{t}`"))
+                        ),
+                    })
+                }
+            }
+        }
+        if let Some(name) = dataset_params.first() {
+            return Err(Error::InvalidArgument {
+                name: name.clone(),
+                detail: "is not served. This store's dataset is a SET of graphs that is the \
+                         default graph and the named graphs at once, so `default-graph-uri` \
+                         and `named-graph-uri` cannot be honored separately — and answering \
+                         over a different dataset than the one asked for would look right and \
+                         be wrong. Name the graphs in `graph` (commas or whitespace between \
+                         them), or address one with `GRAPH <iri> { … }` in the query"
+                    .to_string(),
+            });
+        }
+        Ok(asked)
+    }
+}
+
+/// The SPARQL 1.1 Protocol's dataset parameters, refused rather than ignored — see
+/// [`Asked::read`].
+const DATASET_PARAMS: [&str; 2] = ["default-graph-uri", "named-graph-uri"];
+
 #[async_trait]
 impl Endpoint for Sparql {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let ledgers = readable_ledgers(&self.web, inv);
-        let ledger = match optional(inv, "ledger") {
-            Some(name) => Ledger::parse(&name)?,
-            None => ledgers.first().cloned().unwrap_or_else(Ledger::default),
-        };
-        // ★ The exact grant, checked before anything runs: the declared family is "some
-        // graph", and this names THE graph — the one the query will be confined to.
-        let scope = ikigai_store::cap_read_graph(&ledger.graph());
-        if !inv.capability.allows(&scope) {
-            return Err(Error::Denied(format!(
-                "this capability does not hold `{scope}`, so it cannot query `{}`",
-                ledger.graph()
-            )));
+        if self.fragment && inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(
+                "`urn:iki:gonk:fragment:sparql` answers Source only".to_string(),
+            ));
         }
-        let query = optional(inv, "query");
-        let asked = inv.inline_str("as").ok().map(bare).map(str::to_string);
+        let asked = Asked::read(inv)?;
 
-        // Conneg: a caller asking for anything but HTML gets the store's own answer.
+        // ★ The PROTOCOL face (ledger #836): a caller asking for anything but HTML, and naming
+        // no ledger, gets `urn:sparql:{form}` — the default dataset is the UNION of every graph
+        // its capability may read, the same face the socket and QUIC doors serve, under the
+        // same (here: the session's) grant. Naming a ledger keeps this page's own meaning: that
+        // ledger's graph and nothing else.
         if !self.fragment {
-            if let (Some(query), Some(asked)) = (&query, &asked) {
-                if asked != HTML {
+            if let (Some(query), Some(face)) = (&asked.query, &asked.face) {
+                if face != HTML {
                     let form = query_form(query).ok_or_else(|| Error::InvalidArgument {
                         name: "query".to_string(),
                         detail: "not a SELECT, ASK, CONSTRUCT or DESCRIBE query".to_string(),
                     })?;
-                    let run = with(
-                        with(
+                    let run = match (&asked.ledger, &asked.graph) {
+                        (None, graph) => {
+                            let run = with(
+                                with(
+                                    request(Verb::Source, &format!("urn:sparql:{form}"))?,
+                                    "query",
+                                    query,
+                                ),
+                                "as",
+                                face,
+                            );
+                            match graph {
+                                Some(graph) => with(run, "graph", graph),
+                                None => run,
+                            }
+                        }
+                        (Some(_), Some(_)) => {
+                            return Err(Error::InvalidArgument {
+                                name: "graph".to_string(),
+                                detail: "name a `ledger` or a `graph`, not both: a ledger IS one \
+                                         graph"
+                                    .to_string(),
+                            })
+                        }
+                        (Some(name), None) => {
+                            let ledger = Ledger::parse(name)?;
+                            require_graph(inv, &ledger)?;
                             with(
-                                request(Verb::Source, &format!("urn:iki:store:graph-{form}"))?,
-                                "graph",
-                                &ledger.graph(),
-                            ),
-                            "query",
-                            query,
-                        ),
-                        "as",
-                        asked,
-                    );
+                                with(
+                                    with(
+                                        request(
+                                            Verb::Source,
+                                            &format!("urn:iki:store:graph-{form}"),
+                                        )?,
+                                        "graph",
+                                        &ledger.graph(),
+                                    ),
+                                    "query",
+                                    query,
+                                ),
+                                "as",
+                                face,
+                            )
+                        }
+                    };
                     return inv.issue(run).await;
                 }
             }
         }
+
+        // The editor page and its fragment read ONE ledger, which the page names.
+        if asked.graph.is_some() {
+            return Err(Error::InvalidArgument {
+                name: "graph".to_string(),
+                detail: "the editor page reads one ledger, chosen with `ledger`; `graph` belongs \
+                         to the protocol face — ask for a SPARQL results or RDF type (Accept, or \
+                         `as=`)"
+                    .to_string(),
+            });
+        }
+        let ledgers = readable_ledgers(&self.web, inv);
+        let ledger = match &asked.ledger {
+            Some(name) => Ledger::parse(name)?,
+            None => ledgers.first().cloned().unwrap_or_else(Ledger::default),
+        };
+        require_graph(inv, &ledger)?;
+        let query = asked.query;
 
         if self.fragment {
             html_only(inv)?;
@@ -2102,67 +2242,121 @@ impl Endpoint for Sparql {
     }
 
     fn describe(&self) -> Description {
-        let desc = Description::new(self.name())
-            .title(if self.fragment {
-                "SPARQL results, as an htmx fragment"
-            } else {
-                "SPARQL over one ledger's graph (this page's limit, not the store's)"
-            })
-            .summary(
-                "A read-only SPARQL query. THIS page sends exactly one graph — the named \
-                 ledger's — as the whole dataset: it runs at \
-                 `urn:iki:store:graph-{select,ask,construct,describe}` with `graph=<that \
-                 ledger's graph>`, under the caller's capability, so a grant naming one ledger \
-                 cannot see another's. That store endpoint itself accepts a SET of graphs in \
-                 one read (`graph=` is whitespace-separated), so a caller holding a read token \
-                 for each can join across them — a ledger and the browse graph, say — by \
-                 calling it directly; this page has no graph selector yet. FROM / FROM NAMED \
-                 are refused by the store either way, over a set as much as over one graph. \
-                 HTML when the caller asks for it; otherwise the store's own result format, by \
-                 Accept.",
-            )
-            .verb(Verb::Source)
-            .verb(Verb::Meta)
-            .requires(ikigai_store::CAP_READ_GRAPH)
-            .input(
-                arg(
-                    "ledger",
-                    "Which ledger's graph to query; the first readable one when omitted.",
-                )
-                .optional(),
-            );
         if self.fragment {
-            desc.input(arg("query", "A SELECT, ASK, CONSTRUCT or DESCRIBE query."))
+            return Description::new(self.name())
+                .title("SPARQL results, as an htmx fragment")
+                .summary(
+                    "The editor page's results, as a fragment: a read-only SPARQL query over \
+                     exactly one ledger's graph — the named ledger's, or the first readable \
+                     one — at `urn:iki:store:graph-{select,ask,construct,describe}`, under the \
+                     caller's capability.",
+                )
+                .verb(Verb::Source)
+                .verb(Verb::Meta)
+                .requires(ikigai_store::CAP_READ_GRAPH)
+                .input(
+                    arg(
+                        "ledger",
+                        "Which ledger's graph to query; the first readable one when omitted.",
+                    )
+                    .optional(),
+                )
+                .input(arg("query", "A SELECT, ASK, CONSTRUCT or DESCRIBE query."))
                 .input(as_html_arg())
-                .output(HTML)
-        } else {
-            desc.input(arg("query", "A SELECT, ASK, CONSTRUCT or DESCRIBE query.").optional())
+                .output(HTML);
+        }
+        let inputs = |action: ActionSpec| {
+            action
+                .requires(ikigai_store::CAP_READ_GRAPH)
+                .input(
+                    arg(
+                        "ledger",
+                        "The editor page: which ledger's graph to query (the first readable \
+                         one when omitted). The protocol face: when named, that ledger's \
+                         graph is the whole dataset instead of the union.",
+                    )
+                    .optional(),
+                )
+                .input(
+                    arg(
+                        "graph",
+                        "The protocol face only: the named graphs to read instead of the \
+                         union — commas or whitespace between them, each needing its read \
+                         grant, as `urn:sparql:*` takes it.",
+                    )
+                    .optional(),
+                )
                 .input(
                     arg(
                         "as",
                         "text/html for the editor page; otherwise a SPARQL results or RDF \
-                         serialization the store serves.",
+                         serialization the store serves, which is the protocol face.",
                     )
-                    .one_of([
-                        HTML,
-                        "application/sparql-results+json",
-                        "application/sparql-results+xml",
-                        "text/csv",
-                        "text/tab-separated-values",
-                        "text/turtle",
-                        "application/n-triples",
-                    ])
+                    .one_of(std::iter::once(HTML).chain(PROTOCOL_FACES))
                     .default_value(HTML)
                     .optional(),
                 )
-                .output(HTML)
-                .output("application/sparql-results+json")
-                .output("application/sparql-results+xml")
-                .output("text/csv")
-                .output("text/tab-separated-values")
-                .output("text/turtle")
-                .output("application/n-triples")
-        }
+        };
+        let faces = |action: ActionSpec| {
+            PROTOCOL_FACES
+                .iter()
+                .fold(action.output(HTML), |action, face| action.output(*face))
+        };
+        Description::new(self.name())
+            .title("SPARQL: the editor page, and the SPARQL 1.1 Protocol")
+            .summary(format!(
+                "A read-only SPARQL query, two ways. As HTML it is the editor page, which \
+                 reads exactly one ledger's graph (the named ledger's, or the first readable \
+                 one) at `urn:iki:store:graph-{{form}}`. Asked for any other face (Accept, or \
+                 `as=`) it is the SPARQL 1.1 Protocol over `urn:sparql:{{form}}`, under the \
+                 caller's capability. {} A `ledger` narrows the protocol face to that ledger's \
+                 graph, and `graph` to the graphs named. `default-graph-uri` and \
+                 `named-graph-uri` are refused rather than ignored: the store's dataset is one \
+                 set of graphs, both default and named. FROM / FROM NAMED are refused by the \
+                 store. A POST (form-encoded, or `application/sparql-query`) answers exactly as \
+                 the GET would and writes nothing: the transport maps every POST to Sink, so \
+                 this Sink is a read.",
+                crate::sparql::DEFAULT_DATASET
+            ))
+            .action(faces(inputs(
+                ActionSpec::new(Verb::Source)
+                    .summary("the editor page, or a query over the protocol face")
+                    .input(arg("query", "A SELECT, ASK, CONSTRUCT or DESCRIBE query.").optional()),
+            )))
+            .action(faces(inputs(
+                ActionSpec::new(Verb::Sink)
+                    .summary(
+                        "the SPARQL 1.1 Protocol's POST: the query in the body, answered as \
+                         the GET would be. Writes nothing",
+                    )
+                    .input(arg(
+                        "content",
+                        "The request body: the query itself (`application/sparql-query`), \
+                             or form fields (`query`, and optionally `ledger`, `graph`, `as`).",
+                    ))
+                    .input(
+                        arg(
+                            "content-type",
+                            "The body's media type, as the transport read it.",
+                        )
+                        .optional(),
+                    ),
+            )))
+            .verb(Verb::Meta)
+    }
+}
+
+/// The exact read grant for `ledger`'s graph, checked before anything runs: the declared
+/// family is "some graph", and this names THE graph the query will be confined to.
+fn require_graph(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
+    let scope = ikigai_store::cap_read_graph(&ledger.graph());
+    if inv.capability.allows(&scope) {
+        Ok(())
+    } else {
+        Err(Error::Denied(format!(
+            "this capability does not hold `{scope}`, so it cannot query `{}`",
+            ledger.graph()
+        )))
     }
 }
 
