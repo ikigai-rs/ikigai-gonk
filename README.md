@@ -194,13 +194,16 @@ into a **refusal** — a `403` before the request reaches anything it names:
 computed an EMPTY capability, and an empty capability is still offered every action that
 requires nothing: the pages, and the passkey ceremonies. Audit round 4 used that to fill the
 passkey challenge table from another site with 256 form posts and lock every real sign-in
-out for five minutes, renewable. The door now hands those requests a refusal marker that its
-admission overlay (`crate::admit`) answers with `Denied` before any endpoint runs.
-
-⚠ Two answers `ikigai-web` gives without dispatching, so no overlay of gonk's sees them:
-`OPTIONS` and the `?description` face, which for a refused request still describe the
-capability-free actions. Both disclose a contract and change nothing; closing them needs a
-pre-dispatch admission hook in the library.
+out for five minutes, renewable. Those requests are now REFUSED with a `403` at the edge
+(`EdgeConfig::admit_fn`, `doors::http_admit`, ledger #879), before `ikigai-web` answers
+anything — so a refused request no longer learns the declared verbs from `OPTIONS` or the
+contract of the capability-free actions from `?description`, which the library answers
+without dispatching. The capability carries the same refusal as a marker that the admission
+overlay (`crate::admit`) answers with `Denied`, one decision in two places. A cross-site
+`OPTIONS` counts as a write: a browser sends one only as the preflight of a cross-site write,
+which would be refused. A cross-site `GET` (a link followed from another site, a `?description`)
+is a read and is answered; this door grants no cross-origin read, so another site's page
+cannot see the response.
 
 ⚠ **The challenge table has no per-origin or per-IP bound, on purpose.** With cross-site posts
 refused, every caller that can still mint a challenge is on THIS machine and arrives from
@@ -218,7 +221,13 @@ plain-text author (`chris`, `roborev`) renders as text and is kept. ⚠ The rule
 `urn:iki:store:graph-update` can still write a `ledger:author` triple directly — measured: an
 anonymous loopback `INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { … ledger:author
 "urn:iki:gonk:passkey:…" } }` is accepted and the item page renders that passkey's label.
-Closing that needs the face to trust only door-stamped authors (R4's option (b)), not this rule.
+Closing that needs a face that trusts only door-stamped authors, not this rule.
+
+**A write that names no author is attributed by the door** (R4 option (b), 2026-10-08). On the
+HTTP door the form adapter fills `author` from a signed-in session's passkey; on the QUIC door
+every write that names none is filled with the client's `urn:iki:gonk:client:<fingerprint>`,
+wherever the target declares `author`. An author given explicitly is kept when it is plain
+text or the request's own principal, and refused when it names another principal.
 
 ### SPARQL: the editor page, and the SPARQL 1.1 Protocol
 
@@ -1274,12 +1283,18 @@ stayed enrolled beside the new one. `--rotate` is the explicit replacement, with
 import a certificate the client generated itself. An enrolment left behind by the old
 behavior shows in `client list` as `enrolled, NO bundle`; remove it by fingerprint.
 
-**Every QUIC request is attributed.** The connection's capability carries the client's name,
-`urn:iki:gonk:client:<fingerprint>` (`client add` prints it), and the access log writes it as
-the `principal` of every QUIC request, writes included. A write through that connection may
-name it as its `author`, and no other principal (`crate::admit`). ⚠ A client that carries a
-narrower capability of its own (an `ikigai serve` forwarding an agent's attenuated grant) has
-it clamped to the intersection, which drops the name: those requests log `principal=-`.
+**Every QUIC request is attributed.** The server names each connection's client
+`urn:iki:gonk:client:<fingerprint>` (`client add` prints it) on its session, and `ikigai-quic`
+stamps that name on every request as the argument `principal`, after removing any a client
+sent. The access log writes it as the `principal` of every QUIC request, reads included; a
+write that names no `author` is attributed to it; and a write may name it as its `author`, and
+no other principal (`crate::admit`). The name is NOT part of the capability, so a client that
+carries a narrower capability of its own — `ikigai mcp --grant …`, or an `ikigai serve`
+forwarding an agent's attenuated grant — is named all the same. (Through ikigai-quic 0.1.40
+the name rode in the capability and the intersection dropped it: every such request logged
+`principal=-` and its writes recorded no author, ledger #879.) One cost, stated by the
+transport: the stamped name is part of the cache key, so two clients reading one resource
+under one grant do not share a cached answer.
 
 What admission means today: a client holding a trusted certificate and an enrolment is
 admitted until it is removed (`client remove`, or its entry deleted from `clients.json`),
@@ -1565,9 +1580,14 @@ gonk still refuses to start beside a `cap` file, and refuses to **arm** beside o
 now ignore — under the host seam such a file does nothing, and an operator who wrote one
 believes they have bounded a reviewer they have not.
 
-The `handler` file in that same directory is gonk's: it is written when this server is armed,
-rewritten at every startup, and removed when it is not. It decides what a dropped tuple
-fires, so an unarmed gonk must leave nothing behind for a later armed one to run.
+**Nor will it fire what the `handler` file names.** That file sits in the same directory, and
+by default the reactor fires whatever IRI it names, under the reviewer's authority. Since
+`ikigai-intray` 0.1.41 gonk decides that itself too (`with_host_handler`, ledger #887): the
+review space fires `urn:iki:gonk:review:pass` and nothing else, a `handler` file naming any
+other IRI gets the tuple REFUSED — dead-lettered into `error/` with a note naming the target,
+and a line on the server's stderr — and no other space fires at all. The file is still
+written when this server is armed and removed when it is not, as the marker other readers of
+the tree use to tell a reactive space from a plain one.
 
 ## The three doors
 
@@ -1575,7 +1595,7 @@ fires, so an unarmed gonk must leave nothing behind for a later armed one to run
 | --- | --- | --- |
 | **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`); signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 | **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files |
-| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none |
+| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:gonk:client:<fingerprint>` |
 
 **Anonymously, the HTTP door is loopback only and grants little.** It can list, file,
 comment, close, claim, label and link in its ledgers. It cannot delete or purge, cannot reach
@@ -2522,10 +2542,12 @@ the HTTP status**, which `ikigai-web` decides after the kernel returns and does 
 back. An HTTP read's `principal` is `-` for the same reason: the library tells a door who a
 WRITE is from, never a read — and a `?principal=` a reader types is never written as one
 (ledger #864, R6). A QUIC line names the client the connection authenticated,
-`urn:iki:gonk:client:<fingerprint>` (ledger #816). A refusal the door kernel makes before
-dispatch (a capability floor, a name nothing binds) writes no line; a foreign `Host` or a
-cross-site write is refused one step later, by the door's admission, and does write one
-(`outcome=denied`). No line ever carries a cookie, a token or a form
+`urn:iki:gonk:client:<fingerprint>` (ledger #816), on every verb and whatever capability the
+client carries (ledger #879). A refusal the door kernel makes before dispatch (a capability
+floor, a name nothing binds) writes no line. ⚠ Nor, since ledger #879, does a foreign `Host` or
+a cross-site write: those are refused at the EDGE, before the kernel and so before this log —
+which is what keeps `OPTIONS` and `?description` from answering them — where they used to be
+refused one step later, by the door's admission, with an `outcome=denied` line. No line ever carries a cookie, a token or a form
 body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
 
 ## Upgrading past audit round 4 (ledger #864)

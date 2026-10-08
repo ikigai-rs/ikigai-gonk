@@ -1179,9 +1179,11 @@ fn arming_beside_an_ignored_cap_file_is_refused() {
 
 /// The `handler` file is gonk's, written when armed and REMOVED when not.
 ///
-/// ⚠ It is a control surface in the tree a dropper writes into: `SpaceReactor` reads it per
-/// tuple and fires whatever IRI it names, under the reviewer's authority. An unarmed gonk
-/// that left one behind would be loading the gun for the next process that is armed.
+/// Under this server's own reactor the file decides nothing any more
+/// ([`a_retargeted_handler_file_is_dead_lettered_never_fired`]); it is the marker other
+/// readers of the tree use to tell a reactive space from a plain one. Removed when unarmed
+/// anyway, because a reactor some other host runs over the same tree would not have gonk's
+/// seam, and would fire whatever the file names.
 #[test]
 fn the_handler_file_is_this_servers_and_goes_away_when_it_is_not_armed() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -1633,5 +1635,65 @@ fn the_depth_reports_the_serious_share_of_what_this_run_minted() {
     assert!(
         sentence.contains("3 findings minted this run, 1 serious (33%)"),
         "{sentence}"
+    );
+}
+
+/// ★ **A retargeted `handler` file does not fire its target** (ledger #887, from the Hermes
+/// audit's `handler-retarget`, ledger #877).
+///
+/// The file lives in the directory a dropper writes into. Here it is rewritten to name the
+/// review itself — a resource the reviewer's capability CAN reach, so nothing but the handler
+/// decision stands between the rewrite and a call. Through ikigai-intray 0.1.40 the reactor
+/// fired whatever the file named; under `with_host_handler` ([`trigger::fires`]) the tuple is
+/// refused and dead-lettered with a note naming the target, and nothing is called.
+#[test]
+fn a_retargeted_handler_file_is_dead_lettered_never_fired() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut q = queue(dir.path());
+    q.arm = true;
+    trigger::prepare(&q).expect("prepare");
+    let review = "urn:repo:demo:review:a.rs";
+    let (kernel, seen) = kernel_with_recorder(&q, review);
+    let hub = Arc::new(kernel);
+    let scopes = trigger::reviewer_grant_shape(&hub, review, "localhost").expect("a bound review");
+    trigger::arm(&q, Arc::clone(&hub), &scopes).expect("arming");
+
+    // Someone with the drop tree retargets the handler, then drops.
+    std::fs::write(q.dir().join("handler"), format!("{review}\n")).expect("a retarget");
+    let tuple = Tuple {
+        repo: "demo".to_string(),
+        path: "a.rs".to_string(),
+    };
+    trigger::drop_tuple(&q, &tuple).expect("a drop");
+
+    let settled = |depth: &trigger::Depth| matches!(depth, trigger::Depth::Counted { outbox, error, .. } if outbox + error > 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !settled(&trigger::depth(Some(&q))) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        trigger::depth(Some(&q)),
+        trigger::Depth::Counted {
+            inbox: 0,
+            processing: 0,
+            outbox: 0,
+            error: 1
+        },
+        "the tuple is dead-lettered, not handled"
+    );
+    assert!(
+        seen.lock().expect("not poisoned").is_empty(),
+        "the retargeted handler's target must never be called: {:?}",
+        seen.lock().expect("not poisoned")
+    );
+    let note = std::fs::read_dir(q.dir().join("error"))
+        .expect("an error directory")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .find(|path| path.extension().is_some_and(|ext| ext == "err"))
+        .map(|path| std::fs::read_to_string(path).expect("a note"))
+        .expect("a dead-letter note");
+    assert!(
+        note.contains("refused") && note.contains(review),
+        "the note names the refused target: {note}"
     );
 }

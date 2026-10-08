@@ -2,9 +2,9 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` before dispatch for a foreign `Host` or a cross-site write ([`crate::admit`]). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` at the edge, before `OPTIONS`, `?description` or dispatch, for a foreign `Host` or a cross-site write ([`http_admit`]). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway |
-//! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. A write naming another identity as its `author` is refused ([`crate::admit`]) |
+//! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME beside the authority — the session's `principal`, `urn:iki:gonk:client:<fingerprint>` ([`crate::quic::minter`]), stamped on every request: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
 //! # ★ One cache for the whole process
 //!
@@ -41,7 +41,9 @@ use ikigai_core::{
     Scope, Space, SpaceEntry, SystemClock, Topology,
 };
 use ikigai_vocab::TurtleRenderer;
-use ikigai_web::{CapFn, EdgeConfig, HttpRequest, PrincipalFn, Route, RouteTable};
+use ikigai_web::{
+    AdmitFn, CapFn, EdgeConfig, HttpRequest, PrincipalFn, Refusal, Route, RouteTable,
+};
 
 use crate::access::AccessLog;
 use crate::identity::{self, Passkeys};
@@ -370,7 +372,9 @@ pub struct HttpDoor {
 /// so a cross-site page could fill the passkey challenge table and lock sign-in out. A
 /// refusal is a marker scope ([`crate::admit::REFUSED_FOREIGN_HOST`],
 /// [`crate::admit::REFUSED_CROSS_SITE`]) that the door's admission overlay
-/// ([`crate::admit::Admitting`]) answers with `Denied` — a `403` — before anything runs.
+/// ([`crate::admit::Admitting`]) answers with `Denied` — a `403` — before anything runs. Since
+/// ledger #879 the edge refuses the same requests even earlier ([`http_admit`], one decision in
+/// [`http_refusal`]), so on the served door the marker is a second line, not the first.
 ///
 /// ★ **An anonymous caller is strictly weaker than any identity**, because an identity's
 /// capability is the anonymous one PLUS its grant, and `ikigai-gonk passkey invite` refuses a
@@ -421,14 +425,62 @@ pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Op
     Some(identity::passkey_iri(&identity.enrolled.credential_id))
 }
 
+/// The refusal marker for a request this door does not answer at all, or `None` — THE one
+/// decision behind both [`http_admit`] (the edge, ahead of every answer) and [`http_cap`]
+/// (the capability, which [`crate::admit::Admitting`] answers with `Denied`).
+///
+/// ```text
+/// Host not this server's loopback name?          → REFUSED_FOREIGN_HOST  (any method)
+/// not GET or HEAD, from another origin or site?  → REFUSED_CROSS_SITE
+/// ```
+///
+/// ⚠ `OPTIONS` counts as a write here, and it did not until the edge hook (ledger #879): a
+/// browser sends one cross-site only as the PREFLIGHT of a write it is about to make, and the
+/// write would be refused, so the preflight is refused with it rather than answered with the
+/// resource's declared verbs. A same-origin page never preflights, and a local process sends
+/// no `Origin`, so neither is affected.
+///
+/// A cross-site `GET` stays a read: following a link to an item from another site is the
+/// ordinary case, and what a cross-site page can do with the response is the edge's CORS
+/// policy's decision (gonk's grants no cross-origin read). So `?description` — a `GET` — is
+/// refused under a foreign `Host` and answered to a cross-site reader exactly as the page
+/// itself is.
+pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static str> {
+    if !host_is_ours(request.header("host"), door.port) {
+        return Some(crate::admit::REFUSED_FOREIGN_HOST);
+    }
+    let read = matches!(request.method.as_str(), "GET" | "HEAD");
+    if !read && !same_origin(request, door.port) {
+        return Some(crate::admit::REFUSED_CROSS_SITE);
+    }
+    None
+}
+
+/// The HTTP door's admission hook ([`EdgeConfig::admit_fn`], `ikigai-web` 0.1.41): a `403`
+/// with [`crate::admit::refusal`]'s sentence for every request [`http_refusal`] refuses,
+/// answered BEFORE the push stream, `OPTIONS`, the `?description` face and dispatch.
+///
+/// ★ Ledger [#879](http://localhost:1060/l/default/item/879), item 1. Until this hook the
+/// refusal existed only as a capability, and the library answers `OPTIONS` (the declared
+/// verbs) and `?description` (the contract of the capability-free actions) without
+/// dispatching, so a request this door refused still learned what was behind it.
+pub fn http_admit(door: HttpDoor) -> AdmitFn {
+    Arc::new(move |request: &HttpRequest| {
+        let marker = http_refusal(&door, request)?;
+        let capability = Capability::scoped([marker.to_string()]);
+        Some(Refusal {
+            status: 403,
+            reason: crate::admit::refusal(&capability)
+                .unwrap_or("this door refused the request")
+                .to_string(),
+        })
+    })
+}
+
 /// [`http_cap`]'s scope list, with the clock as an argument.
 pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<String> {
-    if !host_is_ours(request.header("host"), door.port) {
-        return vec![crate::admit::REFUSED_FOREIGN_HOST.to_string()];
-    }
-    let safe = matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS");
-    if !safe && !same_origin(request, door.port) {
-        return vec![crate::admit::REFUSED_CROSS_SITE.to_string()];
+    if let Some(marker) = http_refusal(door, request) {
+        return vec![marker.to_string()];
     }
     let mut scopes: Vec<String> = match request.peer {
         Some(peer) if is_loopback(peer) => door.anonymous.clone(),
@@ -553,6 +605,10 @@ pub fn edge_config(door: HttpDoor) -> EdgeConfig {
             .collect(),
         ),
         routes_only: false,
+        // Ahead of every answer the edge gives (ledger #879): a foreign `Host` and a
+        // cross-site write never reach the push stream, `OPTIONS`, `?description` or
+        // dispatch. Over the same `door` as the two seams below, so the three agree.
+        admit_fn: Some(http_admit(door.clone())),
         principal_fn: Some(http_principal(door)),
         ..EdgeConfig::default()
     }

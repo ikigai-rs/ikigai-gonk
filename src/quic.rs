@@ -696,9 +696,11 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
         .collect();
     if !names.is_empty() {
         return Some(format!(
-            "grant `{name}` names {} — a QUIC client's NAME, which the door attaches to the \
-             connection it authenticated. As a grant it would let every identity under \
-             `{name}` write as that client",
+            "grant `{name}` names {} — a QUIC client's NAME, which the door stamps on every \
+             request of the connection it authenticated, as the `principal` argument. A name \
+             is not authority: no resource requires it, so as a grant it would hand out \
+             nothing while reading as though it let every identity under `{name}` act as \
+             that client",
             names.join(" and ")
         ));
     }
@@ -756,16 +758,16 @@ fn broad_refusal(grant: &str, broad: &[String]) -> String {
 
 /// The authority one authenticated fingerprint runs under, or the reason it is refused.
 ///
-/// ★ **The capability also carries the client's NAME** ([`client_iri`]), as one scope no
-/// resource requires and no grant may hold ([`grant_refusal`]). `ikigai-quic` hands an
-/// endpoint the session's capability and nothing else about who connected, so this is the
-/// only channel by which a QUIC request can say who it is from — the access log's
-/// `principal` (ledger #816) and the author rule (`crate::admit`, ledger #864 R4) both read
-/// it there. It is unforgeable: a client cannot add a scope its session lacks (a carried
-/// capability is CLAMPED to the session). ⚠ And it is LOST when a client carries a scoped
-/// capability of its own, because the clamp intersects — such a request is anonymous to the
-/// log (`principal=-`). Reported up: `ikigai_quic::Session` wants a principal the transport
-/// stamps on each request, as `ikigai-web` does.
+/// ★ **Authority only — the client's NAME is not in it** (ledger
+/// [#879](http://localhost:1060/l/default/item/879)). Through ikigai-quic 0.1.40 the session
+/// capability was the only thing an endpoint learned about a connection, so this function
+/// added [`client_iri`] to it as a scope no resource requires. That channel failed exactly
+/// when it mattered: a client carrying a scoped capability of its own (`ikigai mcp --grant
+/// …`, every Hermes write) is answered at the INTERSECTION of the two, which drops a scope
+/// the client never names — so the log read `principal=-` and the write recorded no author.
+/// Since 0.1.41 the name travels beside the authority, as `Session::principal`, which
+/// [`minter`] sets and the transport stamps on every request; [`crate::admit::principal`]
+/// reads it there.
 pub fn authority(
     enrolment: &Enrolment,
     grants: &BTreeMap<String, Vec<String>>,
@@ -774,8 +776,7 @@ pub fn authority(
     let grant = enrolment
         .grant_for(fingerprint)
         .ok_or("no grant is configured for this certificate")?;
-    let mut scopes = scopes_for_grant(grants, grant)?;
-    scopes.push(client_iri(fingerprint));
+    let scopes = scopes_for_grant(grants, grant)?;
     Ok((grant.to_string(), Capability::scoped(scopes)))
 }
 
@@ -950,6 +951,12 @@ pub fn put_grant(
 
 /// The per-connection minter: re-reads both files, and refuses — logging the full
 /// fingerprint and the fix — whenever [`authority`] does.
+///
+/// An admitted connection's [`Session`] carries the grant's capability AND the client's name
+/// ([`client_iri`]) as its `principal`. `ikigai-quic` stamps that name on every request of the
+/// connection as the argument `principal`, after removing any a client sent, so it is the
+/// door's word and never the caller's — and, unlike a scope inside the capability, no
+/// capability the client carries can intersect it away.
 pub fn minter(layout: Layout) -> Minter {
     Arc::new(move |peer: &PeerIdentity| {
         let decided = read_enrolment(&layout.clients_json())
@@ -971,6 +978,7 @@ pub fn minter(layout: Layout) -> Minter {
                 Some(Session {
                     capability,
                     file_segment: peer.segment_id.clone(),
+                    principal: Some(client_iri(&peer.fingerprint)),
                 })
             }
             Err(why) => {

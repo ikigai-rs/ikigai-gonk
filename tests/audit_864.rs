@@ -601,6 +601,69 @@ fn a_foreign_host_and_a_cross_site_write_are_refused_on_every_path() {
 }
 
 // ------------------------------------------------------------------------------------------
+// Ledger #879, item 1: a request this door refuses is refused at the EDGE, before `OPTIONS`
+// and the `?description` face — which `ikigai-web` answers without dispatching, so a refusal
+// made only in the kernel still told a rebinding page the declared verbs and the contract of
+// every capability-free action. With `EdgeConfig::admit_fn` unset (gonk through ikigai-web
+// 0.1.40), the foreign-`Host` `OPTIONS` below answered `204` and its `?description` `200`.
+// ------------------------------------------------------------------------------------------
+#[test]
+fn a_refused_request_gets_no_options_and_no_description() {
+    let server = Server::start();
+    let port = server.addr.port();
+    let rebound = [("Host", format!("evil.example:{port}"))];
+    let cross_site = [
+        ("Origin", "http://evil.example".to_string()),
+        ("Sec-Fetch-Site", "cross-site".to_string()),
+    ];
+    for path in [
+        "/l/default",
+        "/iki/ledger/append",
+        "/auth/login-options",
+        "/",
+    ] {
+        for (method, query) in [
+            ("OPTIONS", ""),
+            ("GET", "?description"),
+            ("HEAD", "?description"),
+        ] {
+            let (status, body) = server.raw(method, &format!("{path}{query}"), &rebound, "");
+            assert_eq!(
+                status, 403,
+                "{method} {path}{query} under a foreign Host: {body}"
+            );
+            assert!(
+                method == "HEAD" || body.contains("loopback name"),
+                "{method} {path}{query}: {body}"
+            );
+            assert!(!body.contains("openapi"), "no contract leaks: {body}");
+        }
+        // A cross-site preflight is the first half of a cross-site write, refused with it.
+        let (status, body) = server.raw("OPTIONS", path, &cross_site, "");
+        assert_eq!(status, 403, "a cross-site OPTIONS {path}: {body}");
+        assert!(body.contains("another site"), "{body}");
+        // And a cross-site write that asks for a description is a write, refused at the edge.
+        let (status, body) = server.raw("POST", &format!("{path}?description"), &cross_site, "x");
+        assert_eq!(status, 403, "a cross-site POST {path}?description: {body}");
+    }
+    // The door's own callers are untouched: a same-origin sign-in, a local process's OPTIONS,
+    // and the description of a resource read from this server's own name.
+    let same_origin = [
+        ("Origin", format!("http://localhost:{port}")),
+        ("Sec-Fetch-Site", "same-origin".to_string()),
+    ];
+    let (status, body) = server.raw("POST", "/auth/login-options", &same_origin, "{}");
+    assert_eq!(status, 200, "same-origin sign-in: {body}");
+    let (status, body) = server.raw("OPTIONS", "/iki/ledger/append", &[], "");
+    assert_eq!(status, 204, "a local process's OPTIONS: {body}");
+    let (status, body) = server.raw("GET", "/l/default?description", &[], "");
+    assert_eq!(
+        status, 200,
+        "a local description of the page refused above: {body}"
+    );
+}
+
+// ------------------------------------------------------------------------------------------
 // R4, both directions and every route. A free-text author is text and stays allowed; an
 // author shaped like a principal is refused unless it is the request's own — on the
 // mechanical route, on the form adapter's own query string, and through the QUIC door.
@@ -829,12 +892,15 @@ fn the_connect_line_names_the_port_the_server_listens_on() {
 }
 
 // ------------------------------------------------------------------------------------------
-// Ledger #816 (4): a QUIC write is attributed. The connection's capability carries the
-// client's name (`quic::authority`), the access log writes it as `principal`, and the author
-// rule lets that client name itself and nobody else.
+// Ledger #816 (4), #879 and R4 option (b): a QUIC write is attributed. The session names the
+// client (`quic::minter`, never the capability), `ikigai-quic` stamps that name on every
+// request as `principal`, the access log writes it, and the author rule lets that client name
+// itself and nobody else — and a write that names NO author is attributed to it by the door.
+// The stamp is written here by hand, as the transport writes it; `tests/doors.rs` drives the
+// real transport end to end.
 // ------------------------------------------------------------------------------------------
 #[test]
-fn a_quic_write_is_logged_and_may_name_only_its_own_client() {
+fn a_quic_write_is_logged_attributed_and_may_name_only_its_own_client() {
     const FP: &str = "6f1c00000000000000000000000000000000000000000000000000000000abcd";
     let mut scopes = grants_for("default", Authority::Write).unwrap();
     let grants: BTreeMap<String, Vec<String>> =
@@ -842,7 +908,10 @@ fn a_quic_write_is_logged_and_may_name_only_its_own_client() {
     let enrolment = quic::parse_enrolment(&format!(r#"{{"clients": {{"{FP}": "rw"}}}}"#)).unwrap();
     let (_, capability) = quic::authority(&enrolment, &grants, FP).unwrap();
     let me = quic::client_iri(FP);
-    assert!(capability.allows(&me), "the session names its client");
+    assert!(
+        !capability.allows(&me),
+        "the name is not authority: it rides beside the capability, never inside it (ledger #879)"
+    );
     // A grant cannot hand out a client's name.
     scopes.push(me.clone());
     assert!(quic::grant_refusal("rw", &scopes).is_some());
@@ -857,23 +926,73 @@ fn a_quic_write_is_logged_and_may_name_only_its_own_client() {
             Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
         )),
     );
-    let append = |author: &str| {
+    let append = |author: Option<&str>| {
+        let mut args: Vec<(&str, &[u8])> =
+            vec![("principal", me.as_bytes()), ("content", b"over quic")];
+        if let Some(author) = author {
+            args.push(("author", author.as_bytes()));
+        }
         block_on(Kernel::issue(
             &door,
-            request(
-                Verb::Sink,
-                "urn:iki:ledger:append",
-                &[("author", author.as_bytes()), ("content", b"over quic")],
-            ),
+            request(Verb::Sink, "urn:iki:ledger:append", &args),
             &capability,
         ))
     };
-    assert!(append(&me).is_ok(), "a client may name itself");
-    assert!(matches!(
-        append(&quic::client_iri("00")),
-        Err(ikigai_core::Error::Denied(_))
-    ));
+    let author_of = |answer: Result<ikigai_core::Representation, ikigai_core::Error>| {
+        let filed = String::from_utf8_lossy(&answer.expect("filed").bytes).into_owned();
+        let number = filed
+            .trim_start_matches('#')
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_string();
+        let read = block_on(Kernel::issue(
+            &hub,
+            request(
+                Verb::Source,
+                &format!("urn:iki:ledger:item:{number}"),
+                &[("as", b"application/json")],
+            ),
+            &Capability::root(),
+        ))
+        .expect("the item");
+        let item: serde_json::Value = serde_json::from_slice(&read.bytes).unwrap();
+        item["item"]["author"].as_str().map(str::to_string)
+    };
+    // Absent: filled from the door's principal.
+    assert_eq!(
+        author_of(append(None)),
+        Some(me.clone()),
+        "absent -> filled"
+    );
+    // Its own principal: accepted.
+    assert_eq!(
+        author_of(append(Some(&me))),
+        Some(me.clone()),
+        "own -> accepted"
+    );
+    // Free text: kept as written.
+    assert_eq!(
+        author_of(append(Some("hermes"))),
+        Some("hermes".to_string()),
+        "free text -> kept"
+    );
+    // Another principal: refused, a client or a passkey alike.
+    for other in [
+        quic::client_iri("00"),
+        "urn:iki:gonk:passkey:Q1JFRC1CUklBTg".to_string(),
+    ] {
+        assert!(
+            matches!(append(Some(&other)), Err(ikigai_core::Error::Denied(_))),
+            "another principal -> refused: {other}"
+        );
+    }
     let logged = lines.lock().unwrap().clone();
+    assert_eq!(
+        logged.len(),
+        5,
+        "one line per request, the filled ones included: {logged:#?}"
+    );
     assert!(
         logged
             .iter()

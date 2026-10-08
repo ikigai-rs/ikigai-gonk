@@ -95,17 +95,24 @@
 //! to go live beside one. A file that does nothing, that an operator believes is doing
 //! something, is the failure the seam introduced while fixing the other.
 //!
-//! # ⚠ The `handler` file IS a control surface, and it lives in the dropper's tree
+//! # ★ What fires is this server's decision; the `handler` file can only agree with it
 //!
-//! `SpaceReactor` reads `<root>/{space}/handler` **per tuple** and fires whatever IRI it
-//! names, under the capability the host supplied. So anything that can write that directory
-//! can retarget the reviewer's authority at another resource — narrower than the old `cap`
-//! hazard (it cannot ADD a scope) and the same shape. gonk owns this tree `0700` and is its
-//! only writer outside `inbox/`, so the boundary today is the unix user; [`set_handler`]
-//! re-asserts gonk's own value at every startup and removes the file when this server is not
-//! armed, so an unarmed gonk leaves nothing behind that a later armed one would fire.
-//! Reported up: the seam `with_host_authority` is for authority wants an exact analogue for
-//! the HANDLER, so a host can say what fires as well as what it fires as.
+//! `SpaceReactor` reads `<root>/{space}/handler` per tuple, and by default fires whatever IRI
+//! it names, under the capability the host supplied. That file lives in the directory a
+//! dropper writes into, so anything that could write there could retarget the reviewer's
+//! authority at another resource — narrower than the old `cap` hazard (it cannot ADD a scope)
+//! and the same shape, and the Hermes audit's `handler-retarget` (ledger
+//! [#877](http://localhost:1060/l/default/item/877)).
+//!
+//! Since `ikigai-intray` 0.1.41 a host can say what fires as well as what it fires as:
+//! `SpaceReactor::with_host_handler`, the handler's analogue of `with_host_authority`, which
+//! [`arm`] installs ([`fires`]; ledger [#887](http://localhost:1060/l/default/item/887)). The
+//! review space fires [`PASS`] and nothing else; a `handler` file naming any other IRI is
+//! REFUSED — the tuple is claimed and dead-lettered into `error/` with a note naming the
+//! target, and the server prints it — never fired; and no other space fires at all. The
+//! boundary is no longer the unix user who can write the tree but this server's own
+//! configuration. [`set_handler`] still writes the file, as the marker other readers of the
+//! tree use to tell a reactive space from a plain one, and still removes it when unarmed.
 //!
 //! # The tuple
 //!
@@ -1230,6 +1237,7 @@ pub fn arm(
 ) -> std::result::Result<String, String> {
     set_handler(trigger, true)?;
     let space = trigger.space.clone();
+    let ours = trigger.space.clone();
     let reviewer = Capability::scoped(scopes.to_vec());
     let reactor = ikigai_intray::SpaceReactor::new(
         trigger.root.clone(),
@@ -1245,6 +1253,14 @@ pub fn arm(
             // the only way to say "this space gets nothing".
             Some(Capability::scoped(Vec::<String>::new()))
         }
+    })
+    // ★ What fires is this server's decision, not the `handler` file's (ledger #887, from the
+    // Hermes audit's `handler-retarget`, ledger #877). See [`fires`].
+    .with_host_handler(move |name, file| fires(&ours, name, file))
+    // A refused handler is dead-lettered by the reactor; this makes it LOUD as it happens,
+    // in the server's own log, rather than only a file in `error/` that nobody is reading.
+    .on_dead_letter(|space, tuple, reason| {
+        eprintln!("ikigai-gonk: review queue `{space}` dead-lettered {tuple}: {reason}");
     })
     .on_interrupted(ikigai_intray::Interrupted::Requeue);
     let ignored = reactor.ignored_cap_files();
@@ -1271,13 +1287,39 @@ pub fn arm(
     // looking exactly like a hang. So the catch-up goes on a thread of its own and startup
     // continues. ⚠ The refusals above stay SYNCHRONOUS: a `cap` file or an unwritable
     // handler must stop this server, and a refusal on a background thread would not.
-    // Reported up: the crate's doc says "returns immediately", and for any host with a
-    // non-empty inbox that is not true.
+    // (Since ikigai-intray 0.1.41 the crate's own doc says so: "Returns once the catch-up is
+    // done". It now establishes the watch FIRST, so a drop during the catch-up is not lost.)
     // ⚠ After the refusals, never before: a server that will not start must not have moved
     // anything.
     let recovered = recovery_sentence(reactor.recover_interrupted());
     std::thread::spawn(move || Arc::new(reactor).watch());
     Ok(recovered)
+}
+
+/// What a tuple dropped into `space` fires, given what that space's `handler` file names
+/// (`file`) — the decision [`arm`] installs as `SpaceReactor::with_host_handler`.
+///
+/// - **The review space** (`ours`) fires [`PASS`], and only [`PASS`]: with the file naming it,
+///   or with no file at all, because the trigger being armed is THIS server's configuration
+///   (`gonk.review.arm`), not a file in the drop tree.
+/// - **A file naming anything else is REFUSED** — `None` with a file present, which the
+///   reactor turns into a claimed, dead-lettered tuple with a note naming the target (and
+///   [`arm`]'s dead-letter hook prints it). Never fired: the file sits in the directory a
+///   dropper writes into, so a retarget is exactly what an attacker with that directory would
+///   write, and the reviewer's authority is what it would aim.
+/// - **Any other space** fires nothing: refused when it carries a file, not reactive when it
+///   does not. gonk creates only its own space, so a second one is someone else's.
+///
+/// ```
+/// use ikigai_gonk::trigger::{fires, PASS};
+/// assert_eq!(fires("reviews", "reviews", Some(PASS)).as_deref(), Some(PASS));
+/// assert_eq!(fires("reviews", "reviews", None).as_deref(), Some(PASS));
+/// assert_eq!(fires("reviews", "reviews", Some("urn:system:exec")), None);
+/// assert_eq!(fires("reviews", "other", Some(PASS)), None);
+/// assert_eq!(fires("reviews", "other", None), None);
+/// ```
+pub fn fires(ours: &str, space: &str, file: Option<&str>) -> Option<String> {
+    (space == ours && file.is_none_or(|named| named == PASS)).then(|| PASS.to_string())
 }
 
 /// What the reactor's startup recovery did, as the banner says it.
@@ -1330,14 +1372,18 @@ fn recovery_sentence(report: std::result::Result<&[ikigai_intray::Recovered], &s
     said.join(" ")
 }
 
-/// Write (or remove) the `handler` file that makes this space reactive.
+/// Write (or remove) the `handler` file that marks this space reactive.
 ///
-/// ⚠ **Rewritten at every startup, and REMOVED when this server is not armed.** The file is
-/// read per tuple by `SpaceReactor` and names what fires, so it is a control surface living
-/// in the tree a dropper writes into (see the module doc). gonk owns this tree and is its
-/// only writer outside `inbox/`, so the honest posture is that gonk's value is the value:
-/// an unarmed gonk leaves nothing behind for a later armed one to fire, and an armed one does
-/// not inherit whatever was there.
+/// ★ **Since ledger #887 the file DECIDES nothing in this process**: [`arm`] installs
+/// [`fires`] as the reactor's host handler, so the review space fires [`PASS`] whatever the
+/// file says, and a file naming anything else is refused. It is still written, because it is
+/// how everything else reading the tree tells a reactive space from a plain one —
+/// `ikigai_intray::dead_letters` (the heartbeat's report) counts a space only when it carries
+/// one — and an armed space that read as not reactive there would hide its dead letters.
+///
+/// ⚠ **Rewritten at every startup, and REMOVED when this server is not armed**, as before: an
+/// unarmed gonk leaves nothing behind that another host's reactor over the same tree, which
+/// would not have gonk's seam, could fire.
 ///
 /// # Errors
 ///
