@@ -1752,29 +1752,55 @@ struct Sparql {
     fragment: bool,
 }
 
-/// The query form — `select`, `ask`, `construct` or `describe` — read past comments, `BASE`
-/// and `PREFIX`. A wrong guess costs nothing: the store refuses a query of the wrong shape at
-/// the wrong IRI, and says which IRI to use.
+/// The query form — `select`, `ask`, `construct` or `describe` — of `query`, as the store's
+/// own parser reads it (`spargebra`, the crate `oxigraph` runs). The protocol face and the
+/// editor page both route on it.
+///
+/// ★ **The parser, because the hand-rolled reader was wrong about valid SPARQL** (ledger
+/// #864, R3). It skipped `PREFIX` by consuming two whitespace-separated words and matched the
+/// form as a whole word, and SPARQL needs no whitespace between a prefix and its IRI
+/// (`PREFIX ex:<urn:x#>`) or after the form (`SELECT*{…}`): the store ran both and this face
+/// answered 400.
+///
+/// A query that does not parse is read LEXICALLY instead (`lexical_form`), so that it still
+/// reaches the store and the caller is shown the store's own syntax error rather than "not a
+/// query" — a wrong guess costs nothing, because the store refuses a query of the wrong shape
+/// at the wrong IRI and says which IRI to use.
+///
+/// ```
+/// use ikigai_gonk::web::query_form;
+/// assert_eq!(query_form("PREFIX ex:<urn:x#> SELECT ?s WHERE { ?s ?p ?o }"), Some("select"));
+/// assert_eq!(query_form("SELECT*{ ?s ?p ?o }"), Some("select"));
+/// assert_eq!(query_form("ASK{}"), Some("ask"));
+/// assert_eq!(query_form("SELECT ?s WHERE { ?s ?p"), Some("select"), "unparseable: lexical");
+/// assert_eq!(query_form("INSERT DATA { <a:b> <a:b> <a:b> }"), None);
+/// ```
 pub fn query_form(query: &str) -> Option<&'static str> {
-    let mut words = query
-        .lines()
-        .map(|line| match line.find('#') {
-            // A `#` inside an IRI (`<…#>`) is not a comment; only strip one that is not
-            // inside angle brackets on this line.
-            Some(at) if line[..at].matches('<').count() == line[..at].matches('>').count() => {
-                &line[..at]
-            }
-            _ => line,
-        })
-        .flat_map(str::split_whitespace);
-    while let Some(word) = words.next() {
+    match spargebra::SparqlParser::new().parse_query(query) {
+        Ok(spargebra::Query::Select { .. }) => Some("select"),
+        Ok(spargebra::Query::Ask { .. }) => Some("ask"),
+        Ok(spargebra::Query::Construct { .. }) => Some("construct"),
+        Ok(spargebra::Query::Describe { .. }) => Some("describe"),
+        Err(_) => lexical_form(query),
+    }
+}
+
+/// The form keyword after the prologue, read without a grammar — for a query the parser
+/// refused. Skips comments, and `BASE`/`PREFIX` up to the `>` that closes their IRI, then
+/// takes the next run of letters, so neither `PREFIX ex:<urn:x#>SELECT` nor `SELECT*` needs
+/// whitespace the language does not require.
+fn lexical_form(query: &str) -> Option<&'static str> {
+    let mut rest = query;
+    loop {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix('#') {
+            rest = comment.split_once('\n').map_or("", |(_, after)| after);
+            continue;
+        }
+        let word: String = rest.chars().take_while(char::is_ascii_alphabetic).collect();
         match word.to_ascii_lowercase().as_str() {
-            "prefix" => {
-                words.next();
-                words.next();
-            }
-            "base" => {
-                words.next();
+            "prefix" | "base" => {
+                rest = rest.split_once('>').map_or("", |(_, after)| after);
             }
             "select" => return Some("select"),
             "ask" => return Some("ask"),
@@ -1783,7 +1809,6 @@ pub fn query_form(query: &str) -> Option<&'static str> {
             _ => return None,
         }
     }
-    None
 }
 
 /// The local name of a `ledger:` IRI — `…/ledger#open` → `open` — or `None` for anything
@@ -2624,5 +2649,17 @@ mod tests {
             Some("construct")
         );
         assert_eq!(query_form("INSERT DATA { <a:b> <a:b> <a:b> }"), None);
+        // The lexical fallback, for a query the parser refuses: the same prologue rules,
+        // with no whitespace the language does not require.
+        assert_eq!(
+            lexical_form("# c\nPREFIX ex:<urn:x#>SELECT ?s WHERE { ?s"),
+            Some("select")
+        );
+        assert_eq!(
+            lexical_form("BASE <urn:x#> describe <a:b"),
+            Some("describe")
+        );
+        assert_eq!(lexical_form("DELETE WHERE {"), None);
+        assert_eq!(lexical_form(""), None);
     }
 }

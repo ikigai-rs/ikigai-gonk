@@ -41,6 +41,21 @@ certificate is needed until another machine has to reach it.
 
 `ikigai-gonk --help` prints every flag and file.
 
+**A second, scratch gonk** beside a live one is named by flags — no `HOME` or
+`XDG_CONFIG_HOME` override (ledger #799):
+
+```sh
+ikigai-gonk client add laptop --ledger default=write --config-home ./cfg --data-home ./data
+ikigai-gonk --port 1070 --config-home ./cfg --data-home ./data --socket ./g.sock --no-backup
+```
+
+`--config-home` moves `config.toml`, `store.toml` and `gonk/` (clients, grants, certificates);
+`--data-home` moves the socket, the store, the backups and the review queue; `--store` names the
+dataset's directory outright. `client`, `passkey invite`, `review request` and `grants
+--browse` take the two home flags too, so the command that provisions a scratch server writes
+where that server reads. `--port 1070` moves the QUIC door to UDP 1070 as well. (`checkout`
+still reads the process's homes.)
+
 ## In a browser
 
 Open **<http://localhost:1060/>** — `localhost`, not `127.0.0.1`: a passkey is bound to a
@@ -2513,6 +2528,44 @@ cross-site write is refused one step later, by the door's admission, and does wr
 (`outcome=denied`). No line ever carries a cookie, a token or a form
 body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
 
+## Upgrading past audit round 4 (ledger #864)
+
+What changed for an operator, in one place (ledger #864, #805, #816, #799):
+
+**Now refused at startup**
+
+- a `grants.json` grant naming a door's refusal marker (`urn:iki:gonk:door:refused:*`) or a
+  QUIC client's name (`urn:iki:gonk:client:*`) — both are computed by a door, never granted;
+- an ARMED reviewer (`gonk.review.arm = true`) whose net grant names a host other than the
+  one `gonk.mount` dials — `urn:cap:net:localhost` for a `quic://127.0.0.1:…` peer is the
+  usual case. Write `urn:cap:net:<the mount's host>` (the refusal prints the stanza).
+
+**Now refused at use, where it used to work**
+
+- ⚠ **a net grant for another host.** A passkey or certificate whose grant holds
+  `urn:cap:net:localhost` while the mount is `quic://127.0.0.1:4433` could explain and review
+  through the kernel's prefix match on browse's wildcard; the mount now refuses it by name.
+  Re-mint the role (`passkey invite <name> --browse derive --force`, which names this server's
+  mount host and prints what it replaced) or edit the token in `grants.json` — it is re-read
+  per request, no restart;
+- the backup family on any grant, per connection and per request, not only at startup;
+- a foreign `Host` (any method) and a cross-site write: a `403` before anything runs, the pages
+  and the passkey ceremonies included;
+- a write whose `author` names another principal (`urn:iki:gonk:passkey:*`,
+  `urn:iki:gonk:client:*`), on every route.
+
+**Moved**
+
+- the QUIC door's default port follows the HTTP port. A server started with `--port N` (or
+  `gonk.port = N`) and an enrolled certificate now listens on UDP `N`, not 1060 — clients of
+  such a server connect to `N`. A server on the default port is unchanged;
+- `client add --force` keeps the client's identity (it replaces the grant); `--rotate`
+  replaces the identity.
+
+**New surface**: `client list`, `client remove <name> | --fingerprint <fp>`, `client add
+--rotate | --port | --quic-bind`, and `--config-home`, `--data-home`, `--store` (see [Install
+and run](#install-and-run)). The access log names a QUIC request's client as its `principal`.
+
 ## Not built
 
 - **No identity reaches a write.** A form filed while signed in is not attributed to the
@@ -2524,7 +2577,8 @@ body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) h
   load), and no page without JavaScript for the in-place forms.
 - **No passkey management commands** beyond `invite`: list and revoke by editing
   `clients.json`.
-- **No certificate lifecycle.** No CA, expiry, rotation or distribution; see the QUIC
+- **No certificate lifecycle beyond the commands.** `client list`, `client remove` and
+  `client add --rotate` exist; there is no CA, no expiry and no distribution. See the QUIC
   section for what admission means.
 - **No live reload of trusted certificates.** Grants and enrolments are re-read per QUIC
   connection; the certificate set is read at startup.
