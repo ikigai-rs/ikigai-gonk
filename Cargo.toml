@@ -55,7 +55,7 @@ path = "src/main.rs"
 # ⚠ `"0.1.84"` is also a ceiling (`<0.2.0`); when core reaches 0.2 this line must move.
 # 0.1.85 since cli 0.1.39 (whose transports pin it): the capability floor covers every verb
 # and a verbless requires is enforced (ledger #750). gonk's own endpoints declare their verbs.
-ikigai-core = "0.1.85"
+ikigai-core = "0.1.86" # 0.1.86: deny-shaped scopes survive attenuate/clamp (ledger #858)
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -107,7 +107,7 @@ ikigai-store = { version = "0.2.6", features = ["persistent"] }
 # update, a taken key answers the existing item) and the JSON face (`ikigai_ledger::json`,
 # schema 1). The roborev and kata bridges are built on both — before it they checked
 # `items?about=` and then appended, which raced, and parsed the plain face.
-ikigai-ledger = "0.4.1"
+ikigai-ledger = "0.4.2" # 0.4.2: a malformed timestamp no longer drops an item from items/next (ledger #866)
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
@@ -358,7 +358,7 @@ ikigai-repo = "0.1.6"
 # cli-workspace line here moved to 0.1.37 together (ikigai-web's strict route variables are the
 # change gonk needed, ledger #740), so the graph holds one release of that workspace again.
 # 0.1.37 requires core `^0.1.84` (unchanged) and resolve `^0.1.37`.
-ikigai-intray = "0.1.39"
+ikigai-intray = "0.1.40"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -373,7 +373,7 @@ ikigai-intray = "0.1.39"
 # workspace on a single shared version — so a lower pin here is a floor this build can never
 # resolve. The pin states the minimum that COMPILES with everything else here, and it moves
 # when a sibling moves it.
-ikigai-resolve = "0.1.39"
+ikigai-resolve = "0.1.40"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -403,7 +403,7 @@ ikigai-resolve = "0.1.39"
 # 0.1.37 is the pin now for the one-release reason (see `ikigai-intray` above); nothing in the
 # socket transport moved between 0.1.30 and 0.1.37 that this binary calls by name, and the
 # wire is still v8.
-ikigai-ipc = "0.1.39"
+ikigai-ipc = "0.1.40"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -430,7 +430,7 @@ ikigai-ipc = "0.1.39"
 # its request went out, so the first Sink after an unnoticed peer restart fails TRANSIENT
 # instead of possibly landing twice. The end-to-end QUIC door test in `tests/doors.rs` passes
 # unchanged on 0.1.37.
-ikigai-quic = "0.1.39"
+ikigai-quic = "0.1.40"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -479,7 +479,7 @@ ikigai-quic = "0.1.39"
 # closes the hostile ledger link at the edge rather than at the page (`tests/web.rs`). Also in
 # 0.1.36/0.1.37 and not relied on: a CORS preflight answers under the route's own policy, and
 # `If-Match` is a strong comparison.
-ikigai-web = "0.1.39"
+ikigai-web = "0.1.40"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -552,7 +552,7 @@ ikigai-xslt = "0.1.3"
 # (its last change is ikigai-cli PR #296), so this is not an API floor: 0.1.30 is what is built
 # and tested, and it is the cli workspace's shared version, which every other line from that
 # workspace here now names (0.1.37: the verifier is unchanged since 0.1.30).
-ikigai-passkey = "0.1.39"
+ikigai-passkey = "0.1.40"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
