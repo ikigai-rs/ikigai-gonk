@@ -51,9 +51,10 @@
 //! - **who a READ is from.** `ikigai-web` hands the principal to writes only, so an HTTP
 //!   read's `principal` is `-` — and a `?principal=` a reader typed is never taken for one
 //!   ([`crate::admit::principal`]; ledger #864, R6). A QUIC line names the client the door
-//!   authenticated (`urn:iki:gonk:client:<fingerprint>`, ledger #816), read from the
-//!   connection's capability — `-` only when a client carried a narrower capability of its
-//!   own, which the clamp intersects away.
+//!   authenticated (`urn:iki:gonk:client:<fingerprint>`, ledger #816) on every verb, read from
+//!   the `principal` argument `ikigai-quic` stamps from the connection's session — whatever
+//!   capability the client carries (ledger #879; through ikigai-quic 0.1.40 the name rode in
+//!   the capability and a narrowed client was logged `-`).
 //! - **a refusal the door kernel makes before dispatch** — a capability floor's denial, a name
 //!   nothing binds (`404`), a nesting refusal — and the kernel's own `urn:kernel:*`
 //!   operations and Meta answers, which no endpoint of this server's spaces handles.
@@ -68,8 +69,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, Capability, Description, Endpoint, Error, Invocation, Iri, Representation, Request,
-    Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Description, Endpoint, Error, Invocation, Iri, Representation, Request, Resolution,
+    Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 /// The line's class, in `ikigai-log`'s CURIE column.
@@ -210,11 +211,10 @@ impl Endpoint for Timed {
         let started = SystemTime::now();
         let clock = Instant::now();
         let answer = self.inner.invoke(inv).await;
-        let line = line_as(
+        let line = line(
             millis(started),
             self.log.door,
             inv.request,
-            inv.capability,
             answer.as_ref().map(|r| r.bytes.len()),
             clock.elapsed().as_millis(),
         );
@@ -255,40 +255,24 @@ fn millis(at: SystemTime) -> u64 {
 ///      outcome=ok bytes=4096 dur=17 principal=- q=c=source%20urn:repo:x:tree%20as%3Dtext/html"
 /// );
 /// ```
+///
+/// A QUIC request names the client its connection authenticated, from the `principal`
+/// argument the transport stamps (ledger #816, #879):
+///
+/// ```
+/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_gonk::access::{line, Door};
+///
+/// let laptop = ikigai_gonk::quic::client_iri("ab12");
+/// let request = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+///     .with_arg("principal", ArgRef::Inline(laptop.into_bytes()));
+/// assert!(line(0, Door::Quic, &request, Ok(1), 1)
+///     .contains(" principal=urn:iki:gonk:client:ab12 "));
+/// ```
 pub fn line(
     at_ms: u64,
     door: Door,
     request: &Request,
-    answer: std::result::Result<usize, &Error>,
-    dur_ms: u128,
-) -> String {
-    line_as(
-        at_ms,
-        door,
-        request,
-        &Capability::scoped(Vec::<String>::new()),
-        answer,
-        dur_ms,
-    )
-}
-
-/// [`line()`] for a request that arrived under `capability` — which is where a QUIC request's
-/// principal is ([`crate::admit::principal`]; ledger #816).
-///
-/// ```
-/// use ikigai_core::{Capability, Iri, Request, Verb};
-/// use ikigai_gonk::access::{line_as, Door};
-///
-/// let request = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap());
-/// let laptop = Capability::scoped([ikigai_gonk::quic::client_iri("ab12")]);
-/// assert!(line_as(0, Door::Quic, &request, &laptop, Ok(1), 1)
-///     .contains(" principal=urn:iki:gonk:client:ab12 "));
-/// ```
-pub fn line_as(
-    at_ms: u64,
-    door: Door,
-    request: &Request,
-    capability: &Capability,
     answer: std::result::Result<usize, &Error>,
     dur_ms: u128,
 ) -> String {
@@ -302,7 +286,7 @@ pub fn line_as(
         cut(request.target.as_str().to_string()),
         door.as_str(),
         verb(request.verb),
-        principal(door, request, capability),
+        principal(door, request),
         query(door, request),
     )
 }
@@ -344,15 +328,16 @@ fn verb(verb: Verb) -> &'static str {
 /// ikigai-cli's, filed separately). So an anonymous `GET /l/default?principal=urn:…` was
 /// logged as that person. The column now comes from [`crate::admit::principal`], which takes
 /// the door's own stamp and nothing else.
-fn principal(door: Door, request: &Request, capability: &Capability) -> String {
+fn principal(door: Door, request: &Request) -> String {
     match door {
         // The socket's peer UID is checked against this process's own: it is the owner.
         Door::Socket => "owner".to_string(),
-        // The client the door authenticated, when the connection's capability still names it.
-        Door::Quic => crate::admit::principal(door, request, capability)
+        // The client the door authenticated, stamped by the transport; `-` only on a session
+        // the minter named nobody for, which this server's minter never mints.
+        Door::Quic => crate::admit::principal(door, request)
             .map(cut)
             .unwrap_or_else(|| "-".to_string()),
-        Door::Http => match crate::admit::principal(door, request, capability) {
+        Door::Http => match crate::admit::principal(door, request) {
             // Written only when it is bare — an IRI is — so a value cannot break the line.
             Some(value) => cut(value),
             // A write with no principal is an anonymous one; a read is never told.

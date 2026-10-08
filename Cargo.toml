@@ -358,7 +358,14 @@ ikigai-repo = "0.1.6"
 # cli-workspace line here moved to 0.1.37 together (ikigai-web's strict route variables are the
 # change gonk needed, ledger #740), so the graph holds one release of that workspace again.
 # 0.1.37 requires core `^0.1.84` (unchanged) and resolve `^0.1.37`.
-ikigai-intray = "0.1.40"
+# ★ 0.1.41 is the pin now, and for the intray it is a reason this binary USES (ledger #877, #887;
+# ikigai-cli PRs 410-414): `SpaceReactor::with_host_handler` lets the HOST decide what a space's
+# handler fires, so the `handler` file in the dropper's tree can no longer retarget the reviewer's
+# authority. `crate::trigger::arm` installs it: the review space fires `urn:iki:gonk:review:pass`
+# and nothing else, and a `handler` file naming anything else is refused and dead-lettered.
+# `tests/trigger.rs::a_retargeted_handler_file_is_dead_lettered_never_fired` is the FLOOR TEST:
+# 0.1.40 has no such method. (0.1.38 to 0.1.40 moved this line for the one-release reason only.)
+ikigai-intray = "0.1.41"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -373,7 +380,9 @@ ikigai-intray = "0.1.40"
 # workspace on a single shared version — so a lower pin here is a floor this build can never
 # resolve. The pin states the minimum that COMPILES with everything else here, and it moves
 # when a sibling moves it.
-ikigai-resolve = "0.1.40"
+# 0.1.37 -> 0.1.41 for the same reason: intray, ipc and quic at 0.1.41 require
+# `ikigai-resolve ^0.1.41`.
+ikigai-resolve = "0.1.41"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -403,7 +412,9 @@ ikigai-resolve = "0.1.40"
 # 0.1.37 is the pin now for the one-release reason (see `ikigai-intray` above); nothing in the
 # socket transport moved between 0.1.30 and 0.1.37 that this binary calls by name, and the
 # wire is still v8.
-ikigai-ipc = "0.1.40"
+# 0.1.41 is the pin now for the one-release reason: nothing in the socket transport moved that
+# this binary calls by name, and the wire is still v8.
+ikigai-ipc = "0.1.41"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -430,7 +441,20 @@ ikigai-ipc = "0.1.40"
 # its request went out, so the first Sink after an unnoticed peer restart fails TRANSIENT
 # instead of possibly landing twice. The end-to-end QUIC door test in `tests/doors.rs` passes
 # unchanged on 0.1.37.
-ikigai-quic = "0.1.40"
+# ★★ 0.1.41 is the floor now, and it is the reason a QUIC write is ATTRIBUTED (ledger #879,
+# ikigai-cli PR #415). `Session` carries a `principal` the minter derives — never authority —
+# and `dispatch` stamps it on EVERY request of the connection as the inline argument
+# `PRINCIPAL_ARG` (`principal`), after removing whatever a client sent under that name. Through
+# 0.1.40 the only channel was a scope gonk added to the session capability, and the per-call
+# clamp of 0.1.37 INTERSECTED it away whenever a client carried a narrower capability of its own
+# (`ikigai mcp --grant …`, the Hermes shape): every such write logged `principal=-` and recorded
+# no author. `crate::quic::minter` sets the principal, the capability no longer names the client,
+# and `crate::admit::principal` reads the stamped argument. Source-breaking: a `Session` literal
+# without `principal` does not compile, so nothing below 0.1.41 can even be typed.
+# `tests/doors.rs::a_narrowed_quic_client_is_still_named_and_authors_its_writes` is the FLOOR TEST.
+# ⚠ The cost, stated by the crate: the argument is part of the cache key, so two clients reading
+# one resource under one capability no longer share a cached answer.
+ikigai-quic = "0.1.41"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -479,7 +503,14 @@ ikigai-quic = "0.1.40"
 # closes the hostile ledger link at the edge rather than at the page (`tests/web.rs`). Also in
 # 0.1.36/0.1.37 and not relied on: a CORS preflight answers under the route's own policy, and
 # `If-Match` is a strong comparison.
-ikigai-web = "0.1.40"
+# ★ 0.1.41 is the floor now (ledger #879, ikigai-cli PR #416): `EdgeConfig::admit_fn`, an
+# admission hook that runs BEFORE the push stream, `OPTIONS`, the `?description` face and
+# dispatch. gonk's foreign-`Host` and cross-site refusals moved into it (`doors::admit_fn`), so a
+# request this door refuses no longer learns the declared verbs or the contract of the
+# capability-free actions behind it. Also in 0.1.41 and relied on: a `?principal=` is dropped on
+# READS too, so no query string can name a principal on any verb.
+# `tests/audit_864.rs::a_refused_request_gets_no_options_and_no_description` is the FLOOR TEST.
+ikigai-web = "0.1.41"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -552,7 +583,8 @@ ikigai-xslt = "0.1.3"
 # (its last change is ikigai-cli PR #296), so this is not an API floor: 0.1.30 is what is built
 # and tested, and it is the cli workspace's shared version, which every other line from that
 # workspace here now names (0.1.37: the verifier is unchanged since 0.1.30).
-ikigai-passkey = "0.1.40"
+# 0.1.41: the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.41"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).

@@ -564,3 +564,124 @@ fn the_http_door_takes_the_librarys_edge_bounds() {
         "the badge poll is the reasoning above"
     );
 }
+
+/// ★ Ledger #879: a QUIC client that carries a capability NARROWER than its grant — the shape
+/// `ikigai mcp --grant …` sends, and so every write Hermes makes — is still NAMED, and its
+/// writes are attributed to it.
+///
+/// Through ikigai-quic 0.1.40 the only channel for the client's name was a scope gonk added to
+/// the session capability, and the per-call clamp intersected it away: the access log read
+/// `principal=-` and the item and comment recorded no author (verified live on item 885).
+/// From 0.1.41 the session carries a `principal` the minter names and the transport stamps on
+/// every request, so the name never travels through the capability at all.
+#[test]
+fn a_narrowed_quic_client_is_still_named_and_authors_its_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = quic::Layout::in_config_home(dir.path());
+    let (server, _) = quic::server_identity(&layout).unwrap();
+    let hermes = quic::add_client(&layout, "hermes", None, false).unwrap();
+    // Enrolled under DELETE; the client carries only WRITE — narrower than its grant.
+    quic::enrol(
+        &layout,
+        "hermes",
+        &hermes.fingerprint,
+        &grants_for("default", Authority::Delete).unwrap(),
+        false,
+    )
+    .unwrap();
+    let trusted: Vec<String> = quic::trusted_client_certs(&layout)
+        .unwrap()
+        .into_iter()
+        .map(|(_, pem)| pem)
+        .collect();
+    let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let sink = Arc::clone(&lines);
+    let door = doors::quic_kernel_with(
+        hub(),
+        Some(ikigai_gonk::access::AccessLog::to(
+            ikigai_gonk::access::Door::Quic,
+            Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
+        )),
+    );
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let minter = quic::minter(layout.clone());
+    let server_identity = ikigai_quic::Identity {
+        cert_pem: server.cert_pem.clone(),
+        key_pem: server.key_pem,
+    };
+    std::thread::spawn(move || ikigai_quic::serve(door, addr, &server_identity, &trusted, minter));
+    let identity = ikigai_quic::Identity {
+        cert_pem: std::fs::read_to_string(hermes.dir.join("client.crt")).unwrap(),
+        key_pem: std::fs::read_to_string(hermes.dir.join("client.key")).unwrap(),
+    };
+    let mut connected = None;
+    wait_for("the QUIC door", || {
+        connected = ikigai_quic::connect(addr, &identity, &server.cert_pem).ok();
+        connected.is_some()
+    });
+    let client = connected.unwrap();
+    let narrowed = Capability::scoped(grants_for("default", Authority::Write).unwrap());
+    let me = quic::client_iri(&hermes.fingerprint);
+
+    let (filed, _) = client
+        .issue_as(
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:append",
+                &[("content", "from hermes")],
+            ),
+            &narrowed,
+        )
+        .expect("a narrowed client may still write its ledger");
+    let filed = String::from_utf8_lossy(&filed.bytes).into_owned();
+    assert!(filed.starts_with("#1 "), "{filed}");
+    client
+        .issue_as(
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:comment",
+                &[("item", "1"), ("content", "a comment from hermes")],
+            ),
+            &narrowed,
+        )
+        .expect("and comment on it");
+
+    let (read, _) = client
+        .issue_as(
+            request(
+                Verb::Source,
+                "urn:iki:ledger:item:1",
+                &[("as", "application/json")],
+            ),
+            &narrowed,
+        )
+        .expect("and read it back");
+    let item: serde_json::Value = serde_json::from_slice(&read.bytes).expect("the JSON face");
+    assert_eq!(
+        item["item"]["author"].as_str(),
+        Some(me.as_str()),
+        "the item's author is the client the door authenticated: {item:#}"
+    );
+    assert_eq!(
+        item["item"]["comments"][0]["author"].as_str(),
+        Some(me.as_str()),
+        "and so is the comment's: {item:#}"
+    );
+
+    let logged = lines.lock().unwrap().clone();
+    assert_eq!(logged.len(), 3, "{logged:#?}");
+    for line in &logged {
+        assert!(
+            line.contains(" door=quic ") && line.contains(&format!(" principal={me} ")),
+            "every QUIC line names the client: {logged:#?}"
+        );
+    }
+    // The exact line a narrowed client's append produces, for the record.
+    eprintln!("access line: {}", logged[0]);
+    eprintln!("item author: {}", item["item"]["author"]);
+}
