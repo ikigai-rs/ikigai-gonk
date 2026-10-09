@@ -216,12 +216,12 @@ anonymous grant names, so it is inside the boundary this door draws.
 like a principal this server names — `urn:iki:gonk:passkey:<id>`, which the item page renders
 as that passkey's label — is refused unless it is the request's own principal, on every route
 (the mechanical `POST /iki/ledger/append?author=…`, the form adapter, the QUIC door). A
-plain-text author (`chris`, `roborev`) renders as text and is kept. ⚠ The rule binds the
-`author` ARGUMENT: a ledger writer also holds that ledger's per-graph store write token, so
-`urn:iki:store:graph-update` can still write a `ledger:author` triple directly — measured: an
-anonymous loopback `INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { … ledger:author
-"urn:iki:gonk:passkey:…" } }` is accepted and the item page renders that passkey's label.
-Closing that needs a face that trusts only door-stamped authors, not this rule.
+plain-text author (`chris`, `roborev`) renders as text and is kept. The rule binds the
+`author` ARGUMENT, and a raw store write passes none: through 1d02e53 a ledger writer could
+`INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { … ledger:author "urn:iki:gonk:passkey:…" } }`
+through `urn:iki:store:graph-update` and the item page rendered that passkey's label. Since
+ledger #878 the door refuses a raw store write to a ledger graph — see
+[Raw store writes](#raw-store-writes).
 
 **A write that names no author is attributed by the door** (R4 option (b), 2026-10-08). On the
 HTTP door the form adapter fills `author` from a signed-in session's passkey; on the QUIC door
@@ -1615,6 +1615,7 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `--browse read`, or `--browse-graph read` alone | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
+| RAW writes to a LEDGER graph — `urn:iki:store:graph-update` naming `urn:iki:ledger:graph:*` (`urn:cap:gonk:raw-write:graph:<graph>`, ledger #878) | **no** — `403`, though its ledgers' own writes work | only if the grant names it — `--ledger-graph <ledger>` | yes (root) | only if the grant names it — `--ledger-graph <ledger>` |
 | `urn:sparql:{select,ask,construct,describe}` (`urn:cap:store:read:graph:*`, then each graph's token) — by default the UNION of the graphs the caller may read | its ledgers' graphs | + the graphs the passkey's grant names | every named graph (root) | the graphs the grant names |
 | `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`; ⚠ the two reviews no longer require `urn:cap:annotate` — browse 0.5.0 — so a pass writes pending findings and cannot publish) | **no** | only if the grant names it — `--browse derive` | yes (root) | only if the grant names it |
 | `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
@@ -1734,6 +1735,56 @@ graph as a path query. (It used to end in a third, a not-found catch-all rendere
 unbound name with a 500, and it is gone now that the library answers 404.) The one `ik:OpaqueSpace` this server can render is a
 `gonk.mount`: a remote whose arrangement lives in another process, which `ikigai-resolve` does
 not yet forward. `tests/topology.rs` sources the resource through every door and walks it.
+
+### Raw store writes
+
+A ledger grant carries its ledger graph's store WRITE token
+(`urn:cap:store:write:graph:urn:iki:ledger:graph:{name}`), and it has to: `ikigai-ledger`
+writes every append, comment and close as a `urn:iki:store:graph-update` sub-request under
+the CALLER's capability, so without the token the ledger itself fails. That one token was
+therefore two authorities — "may use the ledger" and "may write the graph's triples" — and
+every door treated it as both. Any ledger writer, the anonymous loopback grant included,
+could write any triple into its ledger's graph: an `author` naming someone else's passkey,
+which the item page renders as that person (ledger #878, the residual of #864 R4).
+
+**The rule** (Brian's option (b), 2026-10-09): **a network door refuses a raw store write to
+a ledger graph** unless the caller's grant carries the explicit raw grant for that graph,
+`urn:cap:gonk:raw-write:graph:<graph>`. The refusal is a `403` on the HTTP door and `Denied`
+on the QUIC door, and its access line names the stamped principal like any other. What
+counts:
+
+- `urn:iki:store:graph-update` whose `graph` is `urn:iki:ledger:graph:{name}` or its
+  graveyard `urn:iki:ledger:graph:{name}:deleted` (the prefix compared ignoring case);
+- `urn:iki:store:update` and `urn:iki:store:load`, which write the whole dataset: refused at
+  a network door outright. They need the store's broad token, which no grant here may carry,
+  so this changes nothing observable — it keeps the rule from being stated wrong.
+
+**What is unchanged.** The ledger's own writes — `append`, `comment`, `close`, `link`,
+`label`, editing an item — work for the same caller with the same grant, because the ledger
+issues its `graph-update`s inside the hub kernel, which this check never sees. Reads
+(`urn:iki:store:graph-select`, `graph-ask`, `urn:sparql:*`) are not writes. The BROWSE
+graph's write token (`--browse-graph write`, the reviewer grant's shape) is minted only as raw
+quad authority, so it is not ambiguous and still writes raw.
+
+**Who can still write a ledger graph raw**
+
+| who | how |
+| --- | --- |
+| the owner | over the socket (`~/.ikigai/gonk.sock`), whose capability is root. Migrations and repairs run here: `ikigai-gonk ledger backfill-keys`, a restore, the gonk Book's socket examples. ⚠ The socket has no admission layer, so this is true of ANY process on it — including one of the owner's that narrowed itself to a ledger grant (`cap seal`, `ikigai mcp --grant` mounted on the socket). Open, and reported (ledger #878) |
+| an identity an operator names | `--ledger-graph <ledger>` on `client add` or `passkey invite`, which adds the raw grant for that ledger's graph (not its graveyard — that stays the socket's) |
+
+```
+ikigai-gonk grants --ledger-graph default     # print the three tokens
+ikigai-gonk client add ops --ledger default=write --ledger-graph default
+```
+
+**If something now answers `403` or `Denied`** on a raw write it used to make: write through
+the ledger's endpoints (`urn:iki:ledger:*`) if the change is one they express; otherwise run
+it over the socket; and only if it must come over a network door, re-mint that identity's
+grant with `--ledger-graph <ledger>` (`--force` rewrites an existing grant, naming what it
+adds). Nothing in this repository, the bridges (`roborev file`, `kata import`, which append
+through the ledger) or the devtools scripts wrote a ledger graph raw over a network door when
+this landed.
 
 ## Remote access, later — what it will take
 

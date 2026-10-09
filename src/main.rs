@@ -36,6 +36,13 @@ fn main() {
                 serde_json::to_string_pretty(&tokens).expect("strings serialize")
             );
         }
+        Command::GrantsLedgerGraph { ledger } => {
+            let tokens = grants::ledger_graph_grants(&ledger).unwrap_or_else(|e| fail(&e));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tokens).expect("strings serialize")
+            );
+        }
         Command::GrantsBrowse { browse, flags } => {
             let settings = read_settings(&flags);
             let tokens = browse_tokens(Some(&browse), &settings);
@@ -50,6 +57,7 @@ fn main() {
             cert,
             ledgers,
             browse_graph,
+            ledger_graphs,
             browse,
             force,
             rotate,
@@ -65,7 +73,14 @@ fn main() {
             client_add(
                 &name,
                 cert.as_deref(),
-                &scopes_for(&ledgers, browse_graph, &browse_scopes),
+                &scopes_for(
+                    &Subjects {
+                        ledgers: &ledgers,
+                        browse_graph,
+                        ledger_graphs: &ledger_graphs,
+                    },
+                    &browse_scopes,
+                ),
                 Rewrite { force, rotate },
                 &flags,
             )
@@ -80,14 +95,18 @@ fn main() {
             name,
             ledgers,
             browse_graph,
+            ledger_graphs,
             browse,
             force,
             minutes,
             flags,
         } => passkey_invite(
             &name,
-            &ledgers,
-            browse_graph,
+            &Subjects {
+                ledgers: &ledgers,
+                browse_graph,
+                ledger_graphs: &ledger_graphs,
+            },
             browse.as_ref(),
             force,
             minutes,
@@ -858,32 +877,48 @@ fn read_render_rules(layout: &quic::Layout) -> Result<Arc<str>, String> {
         .map(|_| turtle)
 }
 
+/// What a minting command line named besides a `--browse` role: `--ledger`s, `--browse-graph`
+/// and `--ledger-graph`s — the subjects whose tokens need no server settings to compute.
+struct Subjects<'a> {
+    ledgers: &'a [(String, Authority)],
+    browse_graph: Option<Authority>,
+    ledger_graphs: &'a [String],
+}
+
+impl Subjects<'_> {
+    fn is_empty(&self) -> bool {
+        self.ledgers.is_empty() && self.browse_graph.is_none() && self.ledger_graphs.is_empty()
+    }
+}
+
 /// Every token an enrolment asks for: the ledgers' grants, plus — when `--browse-graph` was
-/// given — the browse graph's store doors, plus a `--browse` role's tokens (already computed
-/// against this server's roots and mount by [`browse_tokens`]), in first-seen order.
+/// given — the browse graph's store doors, plus each `--ledger-graph`'s raw store grant
+/// (ledger #878), plus a `--browse` role's tokens (already computed against this server's
+/// roots and mount by [`browse_tokens`]), in first-seen order.
 ///
 /// ★ One function for both minting paths, because a grant that means different things on a
 /// certificate and on a passkey would be a difference nothing in this server could justify.
 /// Every name is checked here, before anything is written: a typo refused at mint time is a
 /// grant that never exists, and a typo written is a silent denial at first use.
-fn scopes_for(
-    ledgers: &[(String, Authority)],
-    browse_graph: Option<Authority>,
-    browse: &[String],
-) -> Vec<String> {
+fn scopes_for(subjects: &Subjects<'_>, browse: &[String]) -> Vec<String> {
     let mut scopes: Vec<String> = Vec::new();
     let mut add = |token: String| {
         if !scopes.contains(&token) {
             scopes.push(token);
         }
     };
-    for (ledger, authority) in ledgers {
+    for (ledger, authority) in subjects.ledgers {
         for token in grants::grants_for(ledger, *authority).unwrap_or_else(|e| fail(&e)) {
             add(token);
         }
     }
-    if let Some(authority) = browse_graph {
+    if let Some(authority) = subjects.browse_graph {
         for token in grants::browse_graph_grants(authority).unwrap_or_else(|e| fail(&e)) {
+            add(token);
+        }
+    }
+    for ledger in subjects.ledger_graphs {
+        for token in grants::ledger_graph_grants(ledger).unwrap_or_else(|e| fail(&e)) {
             add(token);
         }
     }
@@ -1108,8 +1143,7 @@ fn client_remove(key: &str, by_name: bool, flags: &config::Flags) {
 
 fn passkey_invite(
     name: &str,
-    ledgers: &[(String, Authority)],
-    browse_graph: Option<Authority>,
+    subjects: &Subjects<'_>,
     browse: Option<&BrowseGrant>,
     force: bool,
     minutes: u64,
@@ -1118,14 +1152,14 @@ fn passkey_invite(
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let settings = read_settings(flags);
     let layout = quic::Layout::in_config_home(&homes.config);
-    if ledgers.is_empty() && browse_graph.is_none() && browse.is_none() {
+    if subjects.is_empty() && browse.is_none() {
         fail(&format!(
             "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`, \
              `--browse read` (or `derive`) for the repositories, or `--browse-graph read` for \
              the browse graph alone"
         ));
     }
-    let scopes = scopes_for(ledgers, browse_graph, &browse_tokens(browse, &settings));
+    let scopes = scopes_for(subjects, &browse_tokens(browse, &settings));
     // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
     // in would be a ceremony that changes nothing — and a grant that looked like it limited
     // someone would not.

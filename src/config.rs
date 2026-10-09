@@ -129,6 +129,7 @@ ikigai-gonk — a standalone ikigai work-ledger server
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
   ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
+                     [--ledger-graph <ledger>]...
                      [--browse <read|derive> [--root <root>]...] [--cert <client.crt>] [--force] [--rotate]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
@@ -149,6 +150,7 @@ usage:
                                    grant name may be shared. Effective at its next connection;
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
+                     [--ledger-graph <ledger>]...
                      [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
@@ -223,6 +225,12 @@ usage:
                                    annotations, archived explanations and review findings as
                                    quads, through urn:iki:store:graph-*. Not the browse
                                    endpoints: no file contents, no gh, and no deriving
+  ikigai-gonk grants --ledger-graph <ledger>
+                                   print the tokens for one ledger's graph as a STORE grant:
+                                   raw SPARQL UPDATE of its triples through
+                                   urn:iki:store:graph-update at a network door. A --ledger
+                                   grant cannot: it writes through the ledger's endpoints only
+                                   (README, \"Raw store writes\"). Not the graveyard
   ikigai-gonk grants --browse <read|derive> [--root <root>]... [--config PATH]
                                    print the tokens a --browse role mints on THIS server
                                    (its roots, its mount's host) — what `client add` and
@@ -285,6 +293,9 @@ pub enum Command {
         ledgers: Vec<(String, Authority)>,
         /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
         browse_graph: Option<Authority>,
+        /// `--ledger-graph`: also grant RAW writes to each named ledger's graph
+        /// ([`crate::grants::ledger_graph_grants`], ledger #878).
+        ledger_graphs: Vec<String>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
         /// Replace an existing GRANT (or an enrolment under another grant). Never the key
@@ -328,6 +339,9 @@ pub enum Command {
         ledgers: Vec<(String, Authority)>,
         /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
         browse_graph: Option<Authority>,
+        /// `--ledger-graph`: also grant RAW writes to each named ledger's graph
+        /// ([`crate::grants::ledger_graph_grants`], ledger #878).
+        ledger_graphs: Vec<String>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
         /// Replace an existing grant of that name with different scopes.
@@ -343,6 +357,11 @@ pub enum Command {
         ledger: Option<String>,
         /// The authority.
         authority: Authority,
+    },
+    /// Print the tokens of one ledger's graph as a STORE grant (`grants --ledger-graph …`).
+    GrantsLedgerGraph {
+        /// The ledger whose graph the raw grant names.
+        ledger: String,
     },
     /// Print the tokens a browse ROLE mints on this server (`grants --browse …`).
     GrantsBrowse {
@@ -824,6 +843,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             if subject == "--browse" {
                 return parse_grants_browse(args);
             }
+            if subject == "--ledger-graph" {
+                let ledger = args
+                    .next()
+                    .filter(|ledger| !ledger.starts_with('-'))
+                    .ok_or("grants --ledger-graph: expected <ledger>")?;
+                if let Some(extra) = args.next() {
+                    return Err(format!("grants: unexpected argument `{extra}`"));
+                }
+                return Ok(Command::GrantsLedgerGraph { ledger });
+            }
             // ★ A FLAG, not a reserved ledger name. `grants browse …` would have read
             // better and would have been a trap: `browse` is a name `Ledger::parse`
             // accepts, so a server with a ledger called that could never print its tokens.
@@ -976,6 +1005,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         .ok_or("client add: expected <name>")?;
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
     let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
+    let mut ledger_graphs = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
@@ -1002,6 +1032,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
             "--browse-graph" => {
                 browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
             }
+            "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
             "--force" => force = true,
             "--rotate" => rotate = true,
             other => return Err(format!("client add: unknown argument `{other}`")),
@@ -1012,6 +1043,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         cert,
         ledgers,
         browse_graph,
+        ledger_graphs,
         browse: browse_grant(role, roots)?,
         force,
         rotate,
@@ -1040,7 +1072,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         crate::identity::INVITE_MINUTES,
         Flags::default(),
     );
-    let (mut role, mut roots) = (None, Vec::new());
+    let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
@@ -1055,6 +1087,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             "--browse-graph" => {
                 browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
             }
+            "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
             "--force" => force = true,
             "--minutes" => {
                 let spelled = value(&mut args, "--minutes")?;
@@ -1081,6 +1114,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         name,
         ledgers,
         browse_graph,
+        ledger_graphs,
         browse: browse_grant(role, roots)?,
         force,
         minutes,
@@ -2092,6 +2126,7 @@ mod tests {
                 name,
                 ledgers,
                 browse_graph,
+                ledger_graphs,
                 browse,
                 cert,
                 force,
@@ -2099,6 +2134,7 @@ mod tests {
                 flags,
             } => {
                 assert_eq!(name, "laptop");
+                assert!(ledger_graphs.is_empty(), "no raw grant unless named");
                 assert!(!rotate);
                 assert!(browse.is_none() && flags.config.is_none());
                 assert_eq!(
@@ -2220,6 +2256,41 @@ mod tests {
             Command::Grants { ledger: Some(name), .. } if name == "browse"
         ));
         assert!(parse_args(args("client add x --browse-graph nonsense")).is_err());
+    }
+
+    /// ★ A ledger's graph as a STORE grant (ledger #878), on all three paths: printed, put on
+    /// a certificate, put on a passkey — repeatable, and refused without its ledger.
+    #[test]
+    fn a_ledger_graph_is_grantable_on_every_minting_path() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert!(matches!(
+            parse_args(args("grants --ledger-graph acme")).unwrap(),
+            Command::GrantsLedgerGraph { ledger } if ledger == "acme"
+        ));
+        assert!(parse_args(args("grants --ledger-graph")).is_err());
+        assert!(parse_args(args("grants --ledger-graph acme write")).is_err());
+        match parse_args(args(
+            "client add ops --ledger default=write --ledger-graph default --ledger-graph acme",
+        ))
+        .unwrap()
+        {
+            Command::ClientAdd {
+                ledgers,
+                ledger_graphs,
+                ..
+            } => {
+                assert_eq!(ledgers, [("default".to_string(), Authority::Write)]);
+                assert_eq!(ledger_graphs, ["default", "acme"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(args("passkey invite ops --ledger-graph default")).unwrap() {
+            Command::PasskeyInvite { ledger_graphs, .. } => {
+                assert_eq!(ledger_graphs, ["default"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse_args(args("client add x --ledger-graph")).is_err());
     }
 
     /// ★ The browse family as a ROLE (ledger #435), on all three paths that mint or print it,

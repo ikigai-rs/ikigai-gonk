@@ -98,6 +98,71 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
     Ok(grants)
 }
 
+/// The prefix every ledger's graphs share: `urn:iki:ledger:graph:{name}` and its graveyard
+/// `urn:iki:ledger:graph:{name}:deleted` (`ikigai_ledger::Ledger::graph`, `deleted_graph`).
+/// A test pins it against both, so a change in how the ledger names its graphs fails here.
+pub const LEDGER_GRAPH_PREFIX: &str = "urn:iki:ledger:graph:";
+
+/// Every raw-write grant starts here; [`cap_raw_write_graph`] appends the graph.
+pub const CAP_RAW_WRITE_PREFIX: &str = "urn:cap:gonk:raw-write:graph:";
+
+/// The token that makes a ledger graph's store write token RAW authority at a network door
+/// (ledger [#878](http://localhost:1060/l/default/item/878)) — required by the door's admission
+/// ([`crate::admit::raw_write_refusal`]) and by no endpoint.
+///
+/// ```
+/// use ikigai_gonk::grants::cap_raw_write_graph;
+/// assert_eq!(
+///     cap_raw_write_graph("urn:iki:ledger:graph:default"),
+///     "urn:cap:gonk:raw-write:graph:urn:iki:ledger:graph:default"
+/// );
+/// ```
+pub fn cap_raw_write_graph(graph: &str) -> String {
+    format!("{CAP_RAW_WRITE_PREFIX}{graph}")
+}
+
+/// ★ **A ledger's graph as a STORE grant**: raw SPARQL UPDATE over the triples of one ledger's
+/// graph, through `urn:iki:store:graph-update` at a network door — the operator role that
+/// `--ledger-graph <ledger>` mints, and the only thing that does.
+///
+/// ```
+/// use ikigai_gonk::grants::ledger_graph_grants;
+/// assert_eq!(
+///     ledger_graph_grants("acme").unwrap(),
+///     [
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:gonk:raw-write:graph:urn:iki:ledger:graph:acme",
+///     ]
+/// );
+/// ```
+///
+/// # Why it is not [`grants_for`] at any authority
+///
+/// A ledger grant carries the same store write token, because `ikigai-ledger` issues its own
+/// writes through the store under the caller's capability (`append` fails without it). So
+/// that token, on its own, means "may use the ledger" as often as "may write its triples",
+/// and through 1d02e53 a door treated it as the second: any ledger writer, the anonymous
+/// loopback grant included, could insert a `ledger:author` naming someone else's passkey. The
+/// last token here is what says "raw" — the door refuses a raw write to a ledger graph
+/// without it, and nothing else requires it, so it adds no authority anywhere else.
+///
+/// ⚠ **One graph, not the graveyard.** A raw repair of a deleted item's archive is rare enough
+/// to belong to the owner's socket, whose root reaches every graph.
+///
+/// # Errors
+///
+/// When `ledger` cannot be a ledger name, as [`grants_for`].
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn ledger_graph_grants(ledger: &str) -> Result<Vec<String>, String> {
+    let graph = Ledger::parse(ledger).map_err(|e| e.to_string())?.graph();
+    Ok(vec![
+        ikigai_store::cap_read_graph(&graph),
+        ikigai_store::cap_write_graph(&graph),
+        cap_raw_write_graph(&graph),
+    ])
+}
+
 /// ★ **Obligation 2 of the graph decision: the browse graph's tokens, computed from the
 /// choice.**
 ///
@@ -655,6 +720,32 @@ mod tests {
         ));
         let refused = browse_role_for(&rootless, BrowseRole::Derive, &[]).unwrap_err();
         assert!(refused.contains("no gonk.browse.root"), "{refused}");
+    }
+
+    /// ★ The prefix the door's raw-write rule reads is the ledger's own spelling of both its
+    /// graphs, and no authority of a LEDGER grant carries the raw token — that is the whole
+    /// difference between the two kinds of grant (ledger #878).
+    #[test]
+    fn the_ledger_graph_prefix_is_the_ledgers_own_and_no_ledger_grant_is_raw() {
+        let acme = Ledger::parse("acme").unwrap();
+        assert!(acme.graph().starts_with(LEDGER_GRAPH_PREFIX));
+        assert!(acme.deleted_graph().starts_with(LEDGER_GRAPH_PREFIX));
+        for authority in [
+            Authority::Read,
+            Authority::Write,
+            Authority::Delete,
+            Authority::Purge,
+        ] {
+            let grants = grants_for("acme", authority).unwrap();
+            assert!(
+                grants.iter().all(|g| !g.starts_with(CAP_RAW_WRITE_PREFIX)),
+                "{authority:?}: {grants:?}"
+            );
+        }
+        let raw = ledger_graph_grants("acme").unwrap();
+        assert!(broad_store_scopes(&raw).is_empty());
+        assert!(gonk_admin_scopes(&raw).is_empty());
+        assert!(ledger_graph_grants("items").is_err(), "reserved");
     }
 
     #[test]
