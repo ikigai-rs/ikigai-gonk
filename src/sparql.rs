@@ -496,14 +496,10 @@ pub fn nesting_depth(text: &[u8]) -> usize {
             b')' | b'}' | b']' if states == CODE => level = level.saturating_sub(1),
             _ => {}
         }
-        let mut next = 0;
-        let mut rest = states;
-        while rest != 0 {
-            let state = rest & rest.wrapping_neg();
-            rest &= rest - 1;
-            next |= step(state, b, at(i + 1), at(i + 2));
-        }
-        states = next;
+        states = (0..STATES)
+            .map(|bit| 1u32 << bit)
+            .filter(|state| states & state != 0)
+            .fold(0, |next, state| next | step(state, b, at(i + 1), at(i + 2)));
     }
     deepest
 }
@@ -529,6 +525,8 @@ mod lex {
     const ENTER2_1: u32 = 1 << 15;
     const EXIT_2: u32 = 1 << 16; // the 2nd and 3rd quote of a closing ''' or """
     const EXIT_1: u32 = 1 << 17;
+    /// How many states there are: the bits above.
+    pub const STATES: u32 = 18;
 
     /// The states after `state` reads byte `b`, with the two bytes after it for lookahead. An
     /// empty set is a reading that cannot parse past here.

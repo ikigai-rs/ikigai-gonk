@@ -307,6 +307,15 @@ fn refused(answer: Result<Representation, Error>, what: &str) {
 #[test]
 fn the_http_door_refuses_a_nested_query_and_keeps_serving() {
     let mut gonk = Gonk::start();
+    // One item, so the default ledger's graph is readable and `urn:sparql:select`'s default
+    // dataset is not empty: with nothing written, that face refuses before any parse, and on
+    // `b16f79c` `/sparql/select` aborted only once a graph existed.
+    gonk.over_socket(request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "one item")],
+    ))
+    .expect("append over the socket");
     let bomb = encoded(&bomb());
     let html = "text/html";
     for (path, accept) in [
@@ -453,15 +462,42 @@ fn a_query_past_the_length_bound_is_refused() {
     refused(answer, "a query past the length bound");
 }
 
-/// The bound must never refuse what gonk itself offers: the SPARQL editor's sample queries and
-/// its cross-graph example. (`tests/web.rs::every_sample_query_returns_rows` RUNS the samples
+/// The queries the gonk Book sends gonk, copied from `ikigai-tutorial/books/gonk/src` as of
+/// 2026-10-09 (`ledger/browser.md`'s three `curl`s, `embedding/own-kernel.md`'s join).
+const BOOK_QUERIES: [(&str, &str); 4] = [
+    (
+        "browser.md titles",
+        "PREFIX dcterms: <http://purl.org/dc/terms/> SELECT ?title WHERE { ?item dcterms:title ?title }",
+    ),
+    (
+        "browser.md census",
+        "SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g",
+    ),
+    ("browser.md one ledger", "SELECT ?s WHERE { ?s ?p ?o }"),
+    (
+        "own-kernel.md join",
+        "
+    PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+    PREFIX ik: <https://ikigai-rs.dev/ns#>
+    PREFIX oa: <http://www.w3.org/ns/oa#>
+    SELECT ?item ?line WHERE {
+      ?i ledger:about ?file ; ledger:number ?item .
+      ?a a oa:Annotation ; ik:annotates ?file ; oa:hasSelector ?s .
+      ?s oa:exact ?line .
+    }",
+    ),
+];
+
+/// The bound must never refuse what gonk itself offers — the SPARQL editor's sample queries and
+/// its cross-graph example — or what the gonk Book sends it. (`tests/web.rs::every_sample_query_returns_rows` RUNS the samples
 /// through the bounded hub, so a refusal would fail there too.)
 #[test]
 fn every_sample_query_is_within_the_bound() {
     let samples = ikigai_gonk::web::SAMPLES
         .iter()
         .map(|(id, _, query)| (*id, *query))
-        .chain([("cross-graph", ikigai_gonk::web::CROSS_GRAPH)]);
+        .chain([("cross-graph", ikigai_gonk::web::CROSS_GRAPH)])
+        .chain(BOOK_QUERIES);
     for (id, query) in samples {
         ikigai_gonk::sparql::admit("query", query.as_bytes(), ikigai_gonk::sparql::Text::Query)
             .unwrap_or_else(|e| panic!("sample `{id}`: {e}"));

@@ -151,8 +151,9 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// binds none of them ([`crate::config::Settings::explains`]).
 ///
 /// ★ **The store space is never wrapped FOR FRESHNESS, whichever way the store was opened.**
-/// (One overlay observes its writes for the header badge and changes no answer — see the
-/// body.) A shared
+/// (Two overlays are in front of it, and neither decides freshness: one observes its writes
+/// for the header badge, and one refuses a SPARQL text past [`sparql::admit`]'s bound before
+/// the store parses it — see the body.) A shared
 /// store used to make every `ikigai-store` read `Expiry::Always` — which propagates into
 /// every ledger read — and this server recovered the scoped reads from outside, in a
 /// `freshness` module that re-declared four IRIs it had transcribed by hand. `ikigai-store`

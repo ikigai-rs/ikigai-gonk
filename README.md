@@ -303,6 +303,54 @@ graph, and `GRAPH <g>` for a `g` outside the issued set matches nothing rather t
 This page has no graph selector yet, so it shows that join as an example and does not offer to
 run it (`web::CROSS_GRAPH`).
 
+### How deep and how long a SPARQL text may be
+
+Through `b16f79c`, one GET of `/sparql/results?query=SELECT * WHERE { FILTER(((…3000 parentheses…1…))) }`
+**aborted gonk** (ledger #915): the SPARQL parser reads nesting by recursion, and a stack overflow
+in Rust is not a panic, it ends the process. Every door reached it — the editor page and its
+fragment, the protocol face, `/iki/store/graph-*`, `/sparql/select`, `/k`, the socket, QUIC, and
+the review space's `match` — and so did a query with no nesting at all: `{} UNION {} UNION …`,
+`1+1+…` or a path `a/a/…` is a left-deep tree the store walks by recursion, and 6.5 KB of `+1`s was
+enough. gonk now holds two bounds and one size, all measured with
+`cargo run --release --example sparql-depth` (which runs each probe in a child process):
+
+- **Nesting: 64** (`sparql::MAX_NESTING`). `(`, `{`, `[` and `<<`, mixed, outside strings and
+  comments. On a 2 MiB thread a release build aborted past 885 parentheses and a debug build
+  past 99 nested blank-node lists; gonk's own queries, its sample queries and the gonk Book's nest
+  under 10. The count is an UPPER bound by construction: the parser may read `<` as an IRI or as
+  less-than, so the scan runs every reading at once and counts a closer only where every reading
+  is in code — `FILTER(?a <(((…)))> 2)` cannot hide its parentheses inside an "IRI".
+- **Length: 32 KiB for a query** (`sparql::MAX_QUERY_BYTES`), because no bracket count sees a
+  chain. Not applied to an update: the ledger and the browse family write long literals through
+  `urn:iki:store:graph-update` themselves.
+- **Thread stacks: 64 MiB** (`stack::THREAD_STACK_BYTES`), for every thread that serves a request:
+  the HTTP runtime's workers and blocking pool, the socket's thread per connection, and the QUIC
+  runtime's workers. The last two are spawned inside `ikigai-ipc` and `ikigai-quic`, which take no
+  size, so `main` sets the process's default for a thread spawned without one before any thread
+  exists. The densest chain measured (a path, two bytes a step) costs a release build about 1.5 KB
+  of stack a step, so a query at the length bound needs about 24 MiB.
+
+A refusal is `400` at the HTTP door and `InvalidArgument` everywhere else, and comes before any
+parse. Both bounds are enforced in the hub, around the store and the review space
+(`sparql::bounded`), so they hold for every door; the editor page also refuses before its own
+`spargebra` parse, and `urn:sparql:*` before it reads the caller's readable graphs.
+
+**What it costs.** A stack is reserved address space, not memory: an idle 64 MiB thread costs what
+an idle 2 MiB one does. A deep request leaves the pages it touched with its thread, so the worst
+case is 64 MiB times the threads serving at once — one tokio worker per core, the blocking threads
+in use, one thread per open socket connection — and a request inside both bounds touches well under
+half of it.
+
+⚠ **What this does not cover.** The 64 MiB arithmetic is a release build's; a debug build's frames
+are several times larger and only the nesting bound protects it. A chain inside the length bound is
+answered — but a PATH chain costs the store cubic time (2,000 steps took 168 s in a release
+build), so a 4 KB query can still hold a core for minutes. And any other recursion over caller
+input that neither bound names is only made to need a longer input, not prevented.
+
+★ **When `ikigai-store` releases its own pre-parse bound** (ledger #915), it supersedes this
+scan for the store's doors. The scan stays: it is one linear pass at the edge, and it also covers
+the two parses that are not the store's (the editor's, and the review space's `match`).
+
 ### Routes
 
 | path | resource | |
