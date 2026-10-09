@@ -201,9 +201,36 @@ contract of the capability-free actions from `?description`, which the library a
 without dispatching. The capability carries the same refusal as a marker that the admission
 overlay (`crate::admit`) answers with `Denied`, one decision in two places. A cross-site
 `OPTIONS` counts as a write: a browser sends one only as the preflight of a cross-site write,
-which would be refused. A cross-site `GET` (a link followed from another site, a `?description`)
-is a read and is answered; this door grants no cross-origin read, so another site's page
-cannot see the response.
+which would be refused.
+
+★ **A GET from another page is not "just a read" either** (ledger #880). A site ignores the port,
+so a page on `http://localhost:8090` is SAME-SITE with gonk: the browser sends gonk's
+`SameSite=Strict` session cookie with every request it makes. Through `ed43af3` such a page
+could GET `/k?c=source urn:repo:R:explain:P` (or `:review:`, or `/llm/coder/ask?prompt=…`)
+from an `<img>` or a `fetch` and spend the signed-in identity's inference, archiving the
+answer. The line is now ORIGIN, port included, read off `Sec-Fetch-Site` (`same-origin` and
+`none` are gonk's own), `Origin`, and — only from a browser that sends no `Sec-Fetch-Site` —
+`Referer`:
+
+| who sent a GET | what it gets |
+| --- | --- |
+| gonk's own page (htmx: the Explain and Review buttons), an address a person typed, a client with no browser (`curl`, a script) | the caller's whole capability, as before |
+| another page NAVIGATING here (a link from the CMS, GitHub or a chat; a `method=get` form; `location = …`) | the READ half of the caller's capability (`admit::FOREIGN_PAGE_KEEPS`): the ledger, store-read and browse-read tokens, and `urn:cap:annotate`; never `urn:cap:net:*`, `urn:cap:exec:*` or anything not on that list. A page renders, with its forms; a derivation answers `403` and says why |
+| another page LOADING this (an image, a script, a `fetch`, a frame) | a `403` at the edge: nothing gonk serves is meant to be embedded in another page |
+
+★ **Why authority, and not a list of routes or of resources.** A side effect is reached by more
+than one path (the `/k` adapter, the mechanical `/repo/R/explain/P` mapping, a page's own
+sub-request), and a resource added tomorrow is on no list. The capability travels with every
+sub-request into the hub unchanged, so a GET that cannot carry net authority cannot derive by
+ANY path, and the kernel's own `requires` checks enforce it. Every GET with a side effect found
+on 2026-10-09 needs a dropped token: `urn:repo:{root}:explain[:{path}]`, `:review:{path}`,
+`:judge:{path}`, `:judge-finding:{id}` (Source and Exists), `:pr:{n}:explain`, `:pr:{n}:review`,
+`urn:iki:gonk:review:pass` and the `urn:llm:` mount itself (net: inference, and the archive and
+findings writes that ride on it); `urn:repo:{status,log,branch}`, `urn:repo:pr:*` (and browse's
+PR rows, which resolve them) and `urn:system:exec` (exec: programs, and `gh`'s calls to
+GitHub). One write is left to a navigation on purpose: a browse READ re-anchors annotations
+whose file drifted, a deterministic repair any reader triggers. `urn:iki:gonk:render` needs no
+token at all, and is bounded on its own (see the hub resources below).
 
 ⚠ **The challenge table has no per-origin or per-IP bound, on purpose.** With cross-site posts
 refused, every caller that can still mint a challenge is on THIS machine and arrives from
@@ -361,7 +388,7 @@ never overwritten. It is a hook on browse's own selection, not a new one: with s
 
 **What a browser may do here is entirely its grant.** `/k` runs every request under the
 per-request capability above — so a cross-site `POST` mints nothing, a rebound `Host` reads
-nothing, and the anonymous loopback caller, which holds ledger tokens only, cannot read a
+nothing, another page's link reads and never derives (ledger #880), and the anonymous loopback caller, which holds ledger tokens only, cannot read a
 repository at all, let alone spend inference on explaining one. A signed-in identity can do
 exactly what its grant names, and browsing needs a role beyond a ledger's grant.
 
@@ -2617,7 +2644,8 @@ WRITE is from, never a read — and a `?principal=` a reader types is never writ
 `urn:iki:gonk:client:<fingerprint>` (ledger #816), on every verb and whatever capability the
 client carries (ledger #879). A refusal the door kernel makes before dispatch (a capability
 floor, a name nothing binds) writes no line. ⚠ Nor, since ledger #879, does a foreign `Host` or
-a cross-site write: those are refused at the EDGE, before the kernel and so before this log —
+a cross-site write, or (ledger #880) a GET another page loads: those are refused at the EDGE,
+before the kernel and so before this log —
 which is what keeps `OPTIONS` and `?description` from answering them — where they used to be
 refused one step later, by the door's admission, with an `outcome=denied` line. No line ever carries a cookie, a token or a form
 body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
@@ -2628,7 +2656,8 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
 
 **Now refused at startup**
 
-- a `grants.json` grant naming a door's refusal marker (`urn:iki:gonk:door:refused:*`) or a
+- a `grants.json` grant naming a door's marker (`urn:iki:gonk:door:*`: a refusal, or the
+  other-page label of ledger #880) or a
   QUIC client's name (`urn:iki:gonk:client:*`) — both are computed by a door, never granted;
 - an ARMED reviewer (`gonk.review.arm = true`) whose net grant names a host other than the
   one `gonk.mount` dials — `urn:cap:net:localhost` for a `quic://127.0.0.1:…` peer is the
@@ -2645,6 +2674,10 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
 - the backup family on any grant, per connection and per request, not only at startup;
 - a foreign `Host` (any method) and a cross-site write: a `403` before anything runs, the pages
   and the passkey ceremonies included;
+- (ledger #880) a GET another page LOADS (an image, a `fetch`, a frame) from another site or
+  another localhost port: a `403` at the edge. A GET another page NAVIGATES to gets only the
+  read half of the caller's grant, so a link to an explanation from another page answers
+  `403` and says why; open it from gonk's own page or type the address;
 - a write whose `author` names another principal (`urn:iki:gonk:passkey:*`,
   `urn:iki:gonk:client:*`), on every route.
 

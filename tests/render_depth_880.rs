@@ -71,12 +71,14 @@ fn server() -> Server {
 }
 
 impl Server {
-    /// A GET the way an `<img>` on a page at another localhost port sends it.
-    fn get_from_another_page(&self, path: &str) -> (u16, String) {
+    /// A GET the way a page at another localhost port sends it: as an `<img>` (`no-cors`,
+    /// `image`), or by navigating the window there (`navigate`, `document`) — which, since the
+    /// rest of ledger #880, is the only way such a page reaches gonk at all.
+    fn get_from_another_page(&self, path: &str, mode: &str, dest: &str) -> (u16, String) {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
         let head = format!(
             "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nSec-Fetch-Site: same-site\r\n\
-             Sec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: image\r\n\
+             Sec-Fetch-Mode: {mode}\r\nSec-Fetch-Dest: {dest}\r\n\
              Referer: http://localhost:8090/innocent.html\r\nConnection: close\r\n\r\n",
             self.addr.port()
         );
@@ -105,19 +107,25 @@ fn encoded(text: &str) -> String {
         .collect()
 }
 
-/// The reproduction. On `77ac767` the first request aborted the process.
+/// The reproduction. On `77ac767` the first request — sent then as an `<img>` — aborted the
+/// process. An image load from another page is now refused at the edge before anything runs
+/// (`admit::REFUSED_FOREIGN_LOAD`), so the bound is exercised here by the path that is still
+/// open to such a page: navigating the window there (`location = …`, no click needed).
 #[test]
 fn a_deeply_nested_document_from_another_page_is_refused_and_the_server_lives() {
     let server = server();
     let bomb = format!("<view:page>{}", "<a>".repeat(400));
-    let (status, body) = server.get_from_another_page(&format!(
+    let path = format!(
         "/k?c={}",
         encoded(&format!("source urn:iki:gonk:render content={bomb}"))
-    ));
+    );
+    let (status, body) = server.get_from_another_page(&path, "no-cors", "image");
+    assert_eq!(status, 403, "an image load is refused at the edge: {body}");
+    let (status, body) = server.get_from_another_page(&path, "navigate", "document");
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("nest"), "{body}");
     // Still serving.
-    let (status, body) = server.get_from_another_page("/static/gonk.css");
+    let (status, body) = server.get_from_another_page("/static/gonk.css", "navigate", "document");
     assert_eq!(status, 200, "{body}");
 }
 

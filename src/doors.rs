@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` at the edge, before `OPTIONS`, `?description` or dispatch, for a foreign `Host` or a cross-site write ([`http_admit`]). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` at the edge, before `OPTIONS`, `?description` or dispatch, for a foreign `Host`, a cross-site write, or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME beside the authority — the session's `principal`, `urn:iki:gonk:client:<fingerprint>` ([`crate::quic::minter`]), stamped on every request: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
@@ -375,7 +375,9 @@ pub struct HttpDoor {
 /// ```text
 /// Host not this server's loopback name?        → REFUSED  (DNS rebinding)
 /// a write from another origin or site?         → REFUSED  (cross-site request forgery)
-/// otherwise  (loopback peer ? anonymous : ∅)  ∪  (a live passkey session ? its grant : ∅)
+/// a read another page LOADS?                   → REFUSED  (ledger #880)
+/// otherwise  (loopback peer ? anonymous : ∅)  ∪  (a live passkey session ? its grant : ∅),
+///            and only its READ half when another page NAVIGATED here (ledger #880)
 /// ```
 ///
 /// ★ **REFUSED, not nothing** (ledger #864, R2, and PENDING item 2). Through 0.1.x both
@@ -444,6 +446,7 @@ pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Op
 /// ```text
 /// Host not this server's loopback name?          → REFUSED_FOREIGN_HOST  (any method)
 /// not GET or HEAD, from another origin or site?  → REFUSED_CROSS_SITE
+/// GET or HEAD that another page LOADS?           → REFUSED_FOREIGN_LOAD  (ledger #880)
 /// ```
 ///
 /// ⚠ `OPTIONS` counts as a write here, and it did not until the edge hook (ledger #879): a
@@ -452,11 +455,15 @@ pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Op
 /// resource's declared verbs. A same-origin page never preflights, and a local process sends
 /// no `Origin`, so neither is affected.
 ///
-/// A cross-site `GET` stays a read: following a link to an item from another site is the
-/// ordinary case, and what a cross-site page can do with the response is the edge's CORS
-/// policy's decision (gonk's grants no cross-origin read). So `?description` — a `GET` — is
-/// refused under a foreign `Host` and answered to a cross-site reader exactly as the page
-/// itself is.
+/// ★ **A GET from another page is admitted only as a NAVIGATION** ([`page_of`], ledger
+/// [#880](http://localhost:1060/l/default/item/880)). Following a link to an item from another
+/// site is the ordinary case and stays answered — under the read half of the caller's
+/// authority ([`http_scopes`]), because a navigation can name a resource that spends. A read
+/// another page LOADS (an image, a script, a `fetch`, a frame) has no ordinary case at all —
+/// nothing gonk serves is meant to be embedded, and gonk grants no cross-origin read — and it is
+/// how a page spends without anyone clicking anything, so it is refused here. Through `ed43af3`
+/// both were answered under the whole grant: SameSite ignores the port, so a page on another
+/// localhost port rode the signed-in session into `explain` and `review`.
 pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static str> {
     if !host_is_ours(request.header("host"), door.port) {
         return Some(crate::admit::REFUSED_FOREIGN_HOST);
@@ -465,7 +472,110 @@ pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static s
     if !read && !same_origin(request, door.port) {
         return Some(crate::admit::REFUSED_CROSS_SITE);
     }
+    if read && page_of(request, door.port) == Page::ForeignLoad {
+        return Some(crate::admit::REFUSED_FOREIGN_LOAD);
+    }
     None
+}
+
+/// Which page a request came from, as the browser labels it — the second half of ledger
+/// [#880](http://localhost:1060/l/default/item/880)'s line (the first is [`http_refusal`]'s
+/// cross-site write).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    /// gonk's own page, an address a person typed (`Sec-Fetch-Site: none`), or a client with
+    /// no browser at all (no fetch metadata): the caller's whole authority.
+    Ours,
+    /// Another page NAVIGATED here — a link, a `method=get` form, `location = …` — on another
+    /// site or another localhost port: admitted, under the READ half of the caller's authority
+    /// ([`crate::admit::foreign_page_scopes`]).
+    ForeignNavigation,
+    /// Another page LOADED this — an image, a script, a `fetch`, a frame: refused at the edge
+    /// ([`crate::admit::REFUSED_FOREIGN_LOAD`]).
+    ForeignLoad,
+}
+
+/// [`Page`] for `request`, read off `Sec-Fetch-Site`, `Origin` and — only when a browser sent
+/// no `Sec-Fetch-Site` — `Referer`.
+///
+/// ★ **Why a page on another PORT counts, and why `SameSite=Strict` did not stop it.** A site is
+/// a scheme and a registrable domain; the port is not part of it. So a page on
+/// `http://localhost:8090` is SAME-SITE with gonk on `http://localhost:1060`, the browser sends
+/// gonk's `Strict` session cookie with every request it makes, and it labels them
+/// `Sec-Fetch-Site: same-site` — not `cross-site`. The line here is ORIGIN, which includes the
+/// port: only `same-origin` and `none` are gonk's own.
+///
+/// ```
+/// use ikigai_gonk::doors::{page_of, Page};
+/// use ikigai_web::HttpRequest;
+/// let get = |headers: &[(&str, &str)]| HttpRequest {
+///     method: "GET".to_string(),
+///     headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+///     path: "/".to_string(),
+///     query: Vec::new(),
+///     body: Vec::new(),
+///     peer: None,
+/// };
+/// assert_eq!(page_of(&get(&[]), 1060), Page::Ours);
+/// assert_eq!(page_of(&get(&[("sec-fetch-site", "same-origin")]), 1060), Page::Ours);
+/// assert_eq!(page_of(&get(&[("sec-fetch-site", "none")]), 1060), Page::Ours);
+/// let other = |mode: &str, dest: &str| {
+///     get(&[("sec-fetch-site", "same-site"), ("sec-fetch-mode", mode), ("sec-fetch-dest", dest)])
+/// };
+/// assert_eq!(page_of(&other("navigate", "document"), 1060), Page::ForeignNavigation);
+/// assert_eq!(page_of(&other("no-cors", "image"), 1060), Page::ForeignLoad);
+/// assert_eq!(page_of(&other("cors", "empty"), 1060), Page::ForeignLoad);
+/// assert_eq!(page_of(&other("navigate", "iframe"), 1060), Page::ForeignLoad);
+/// // A browser that sends no fetch metadata still sends a Referer.
+/// let referred = |from: &str| get(&[("referer", from)]);
+/// assert_eq!(page_of(&referred("http://localhost:8090/x"), 1060), Page::ForeignNavigation);
+/// assert_eq!(page_of(&referred("http://localhost:1060/l/default"), 1060), Page::Ours);
+/// ```
+pub fn page_of(request: &HttpRequest, port: u16) -> Page {
+    let site = request.header("sec-fetch-site").map(str::trim);
+    let ours = |origin: &str| {
+        let origin = origin.trim().trim_end_matches('/');
+        ["localhost", "127.0.0.1", "[::1]"]
+            .iter()
+            .any(|name| origin == format!("http://{name}:{port}"))
+    };
+    let foreign = match site {
+        Some(site) => !matches!(site, "same-origin" | "none"),
+        // ⚠ Only without `Sec-Fetch-Site`: a `Referer` is the page a navigation LEFT, and a
+        // same-origin request names gonk there anyway, so it adds nothing when the browser
+        // says more; it is what an older browser leaves to go on.
+        None => request
+            .header("referer")
+            .is_some_and(|referer| !ours(&origin_of(referer))),
+    } || request.header("origin").is_some_and(|origin| !ours(origin));
+    if !foreign {
+        return Page::Ours;
+    }
+    let navigation = match request.header("sec-fetch-mode").map(str::trim) {
+        // No mode: a browser too old to say, which is the Referer case above.
+        None => true,
+        Some(mode) => {
+            mode == "navigate"
+                && request
+                    .header("sec-fetch-dest")
+                    .is_none_or(|dest| dest.trim() == "document")
+        }
+    };
+    if navigation {
+        Page::ForeignNavigation
+    } else {
+        Page::ForeignLoad
+    }
+}
+
+/// `scheme://host[:port]` of an absolute URL — the part of a `Referer` an origin compares.
+fn origin_of(url: &str) -> String {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    format!("{scheme}://{authority}")
 }
 
 /// The HTTP door's admission hook ([`EdgeConfig::admit_fn`], `ikigai-web` 0.1.41): a `403`
@@ -506,6 +616,12 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
                 }
             }
         }
+    }
+    // ★ Ledger #880: another page's navigation carries the READ half, whatever it names — so
+    // `<a href="/k?c=source urn:repo:R:explain:P">` on a page at another localhost port, which
+    // rides the signed-in session, cannot spend inference or archive an answer.
+    if page_of(request, door.port) == Page::ForeignNavigation {
+        return crate::admit::foreign_page_scopes(&scopes);
     }
     scopes
 }

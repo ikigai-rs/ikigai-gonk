@@ -27,6 +27,12 @@
 //!    one decision ([`crate::doors::http_refusal`]), two places that act on it, so a kernel
 //!    served without the edge hook refuses exactly what the edge refuses.
 //!
+//!    ★ Since ledger [#880](http://localhost:1060/l/default/item/880) the same decision refuses
+//!    a READ another page loads ([`REFUSED_FOREIGN_LOAD`]), and a read another page navigates
+//!    to is answered under the READ half of the caller's authority ([`foreign_page_scopes`],
+//!    marked [`FOREIGN_PAGE`]): a page on another localhost port is same-site, so it carried the
+//!    signed-in session into `explain` and `review` through `ed43af3`.
+//!
 //! 2. **May this request name that author?** Brian's decision (a) on R4: a door refuses an
 //!    `author` that is shaped like a principal this server names ([`is_principal_iri`]) unless
 //!    it is the request's OWN principal ([`principal`]). A free-text author (`chris`,
@@ -94,6 +100,93 @@ pub const REFUSED_FOREIGN_HOST: &str = "urn:iki:gonk:door:refused:foreign-host";
 /// The HTTP door's answer to a write whose `Origin` or `Sec-Fetch-Site` names another site.
 pub const REFUSED_CROSS_SITE: &str = "urn:iki:gonk:door:refused:cross-site";
 
+/// The HTTP door's answer to a read that a page which is not this server's own LOADS rather
+/// than navigates to — an image, a script, a `fetch`, a frame (ledger
+/// [#880](http://localhost:1060/l/default/item/880)). Nothing gonk serves is meant to be
+/// embedded in or fetched by another page.
+pub const REFUSED_FOREIGN_LOAD: &str = "urn:iki:gonk:door:refused:foreign-load";
+
+/// Every door marker starts here: the refusals ([`REFUSED_PREFIX`]) and [`FOREIGN_PAGE`]. A
+/// grant naming a scope under it is refused (`quic::grant_refusal`), so only a door computes one.
+pub const DOOR_PREFIX: &str = "urn:iki:gonk:door:";
+
+/// Carried by a request a page that is not this server's own NAVIGATED to (a link on another
+/// site or another localhost port, a form with `method=get`, `location = …`), beside the READ
+/// half of the caller's authority ([`foreign_page_scopes`]) — so the door can say why a
+/// derivation was refused. Not a refusal: nothing requires it and nothing refuses on it alone.
+pub const FOREIGN_PAGE: &str = "urn:iki:gonk:door:foreign-page";
+
+/// What a request from a page that is not this server's own keeps of the caller's authority:
+/// scopes in these families and nothing else (ledger
+/// [#880](http://localhost:1060/l/default/item/880)).
+///
+/// ★ **An allowlist, so a family added later is dropped until someone decides otherwise.** Kept
+/// is what a READ needs — the ledgers (whose writes need a mutating verb, which such a page
+/// cannot send: [`REFUSED_CROSS_SITE`]), the store's per-graph READ tokens, the browse family's
+/// read tokens, and `urn:cap:annotate` (exercised only by Sinks; kept so the queue renders its
+/// controls). Dropped is everything whose USE is a spend or an act: `urn:cap:net:*` (every
+/// derivation, and the `urn:llm:` mount itself, which checks it before it dials), `urn:cap:exec:*`
+/// (programs), `urn:cap:fs:*`, the store's per-graph WRITE tokens, the raw-write grant, and
+/// `urn:cap:kernel:inspect`.
+pub const FOREIGN_PAGE_KEEPS: [&str; 4] = [
+    "urn:cap:ledger:",
+    "urn:cap:store:read:graph:",
+    "urn:cap:browse:read:",
+    "urn:cap:annotate",
+];
+
+/// `scopes`, as a page that is not this server's own may use them: the [`FOREIGN_PAGE_KEEPS`]
+/// families, then the [`FOREIGN_PAGE`] marker.
+///
+/// ```
+/// use ikigai_gonk::admit::{foreign_page_scopes, FOREIGN_PAGE};
+/// let derive = [
+///     "urn:cap:ledger:read:default",
+///     "urn:cap:ledger:write:default",
+///     "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+///     "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
+///     "urn:cap:browse:read:*",
+///     "urn:cap:annotate",
+///     "urn:cap:net:localhost",
+///     "urn:cap:exec:git",
+/// ]
+/// .map(String::from);
+/// assert_eq!(
+///     foreign_page_scopes(&derive),
+///     [
+///         "urn:cap:ledger:read:default",
+///         "urn:cap:ledger:write:default",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+///         "urn:cap:browse:read:*",
+///         "urn:cap:annotate",
+///         FOREIGN_PAGE,
+///     ]
+/// );
+/// ```
+pub fn foreign_page_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| {
+            FOREIGN_PAGE_KEEPS.iter().any(|kept| {
+                if kept.ends_with(':') {
+                    scope.starts_with(kept)
+                } else {
+                    scope.as_str() == *kept
+                }
+            })
+        })
+        .cloned()
+        .chain(std::iter::once(FOREIGN_PAGE.to_string()))
+        .collect()
+}
+
+/// The sentence a refusal under [`FOREIGN_PAGE`] ends with.
+pub const FOREIGN_PAGE_SENTENCE: &str =
+    "This request came from a page that is not this server's own (a link or form on another \
+     site, or on another program's localhost port), and such a request carries only the READ \
+     half of your authority: it may not spend inference, run a program or write. Open it from \
+     gonk's own page, or type the address";
+
 /// The sentence a refusal is answered with, when `capability` carries a refusal marker.
 ///
 /// ```
@@ -116,6 +209,12 @@ pub fn refusal(capability: &Capability) -> Option<&'static str> {
         Some(
             "a write from another site is refused: its Origin or Sec-Fetch-Site names a page \
              that is not this server's own",
+        )
+    } else if held.contains(REFUSED_FOREIGN_LOAD) {
+        Some(
+            "a page that is not this server's own may only NAVIGATE here (a link, or a typed \
+             address); it may not load this server's resources as an image, script, frame or \
+             fetch",
         )
     } else {
         held.iter()
@@ -454,7 +553,22 @@ impl Endpoint for Admitted {
             }
         }
         if !inv.request.verb.is_mutating() {
-            return self.inner.invoke(inv).await;
+            let answer = self.inner.invoke(inv).await;
+            // A derivation refused because the request came from another page reads, from
+            // the kernel, as "does not grant `urn:cap:net:*`" — to a person whose grant does.
+            // Say which half of the authority went missing, and why.
+            return match answer {
+                Err(Error::Denied(why))
+                    if arrived
+                        && inv
+                            .capability
+                            .scopes()
+                            .is_some_and(|held| held.contains(FOREIGN_PAGE)) =>
+                {
+                    Err(Error::Denied(format!("{why}. {FOREIGN_PAGE_SENTENCE}")))
+                }
+                other => other,
+            };
         }
         // ★ At EVERY depth, unlike the checks around it (ledger #878). Nothing inside a door
         // kernel has a reason to write the store raw — the ledger's own `graph-update`s run
