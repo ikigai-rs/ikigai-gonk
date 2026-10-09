@@ -546,8 +546,10 @@ ikigai-compress = "0.1.0"
 ikigai-time = "0.4.0"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
-# The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic).
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net"] }
+# The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic). `sync` is the
+# Queue's one-read-per-root lock (`queue::Reads`, ledger #947): an async mutex, so a request
+# waiting for another's read parks instead of holding a worker thread.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync"] }
 # `clients.json` and `grants.json` — the same two files, in the same shapes, that
 # `ikigai serve quic://…` reads.
 serde_json = "1"

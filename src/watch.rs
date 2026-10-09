@@ -79,8 +79,9 @@
 //! The header badge counts pending findings across every root on every poll, and a findings
 //! read is not cacheable by the kernel (it reads a graph the sharer writes, so the store
 //! answers it `Expiry::Always`, and that propagates into anything composed over it). So the
-//! badge keeps its own per-root memo ([`crate::queue::Badge`]), and [`Epochs`] is what tells it
-//! a root's count may have moved: this watch bumps a root whenever it cuts that root's narrow
+//! Queue keeps its own per-root memo of the rows ([`crate::queue::Reads`], held here and read
+//! by both the header badge and the Queue page since ledger #947), and [`Epochs`] is what tells
+//! it a root's rows may have moved: this watch bumps a root whenever it cuts that root's narrow
 //! thread, and the browse overlay bumps one root (or every root, when a write does not say
 //! which) after any write to the browse family.
 
@@ -299,7 +300,8 @@ pub struct Unwatched {
     pub reason: String,
 }
 
-/// Per-root counters the header badge reads to know whether a memoized count may have moved.
+/// Per-root counters the Queue reads to know whether memoized rows may have moved — and the
+/// memo itself ([`crate::queue::Reads`]).
 ///
 /// A root's epoch rises when the watch cuts its narrow thread, when a browse write names it,
 /// and when a write that names no root ([`Epochs::touch_all`]) or a finding decision this
@@ -312,6 +314,9 @@ pub struct Epochs {
     /// Finding id → root, learned from the rows the badge counted: a decision posts
     /// `urn:iki:finding:{id}`, which does not say which repository it belongs to.
     owners: Mutex<HashMap<String, String>>,
+    /// The findings rows read at each root's epoch, shared by the Queue page and the badge
+    /// (ledger #947, [`crate::queue::Reads`]).
+    pub(crate) reads: crate::queue::Reads,
 }
 
 impl Epochs {
@@ -320,6 +325,7 @@ impl Epochs {
         Epochs {
             roots: roots.into_iter().map(|r| (r, AtomicU64::new(0))).collect(),
             owners: Mutex::default(),
+            reads: crate::queue::Reads::default(),
         }
     }
 

@@ -605,13 +605,46 @@ so on its row, in words. The mark travels only with a publish: a box ticked befo
 Decline is dropped, as a reason word picked before pressing Publish is. A refused submit keeps the
 tick and the note, and a refused reproduction comes back open with its note.
 
-★ **The badge counts each root once per change, not once per poll** (ledger #667). It keeps
-the last count per root and per caller's grant, and re-reads a root only when that root has
-moved since: the watch cut its narrow thread (a file changed), a write through the browse family
-named it (a review pass, an annotation), a decision named one of its findings, or a write through
-the store's door could have reached the browse graph (that one moves every root). A poll after
-no change reads no findings at all. At 47 roots the old badge took ~1.9 s a poll and held a core
-near 100% for one page polling every two seconds.
+★ **The Queue reads each root once per change, not once per view or poll** (ledger #667, and
+ledger [#947](http://localhost:1060/l/default/item/947) for the page). The header badge, the Queue
+page and its batch and walk views read every root's findings through ONE memo
+(`queue::Reads`, held beside the watch's epochs): per root, per caller's grant and per view, what
+the last read answered. A root is read again only when it has moved since: the watch cut its
+narrow thread (a file changed), a write through the browse family named it (a review pass, a
+judge's verdict, an annotation), a decision named one of its findings, or a write through the
+store's door could have reached the browse graph (that one moves every root). A poll or a page
+after no change reads no findings at all, and a page opened after a poll reads only what moved.
+When several roots must be read they are read eight at a time (`queue::PARALLEL_READS`), and a
+request that needs a read another request is already making waits for it and takes its answer
+rather than starting a second.
+
+Why it matters, measured 2026-10-09 on a copy of the live dataset (a backup restored into a
+scratch store, 48 roots, 3,600 pending findings, a signed-in grant with `urn:cap:browse:read:*`):
+
+| | before | after |
+|---|---|---|
+| `/queue`, the first after a badge poll | 50.8–51.9 s | 1.6–2.0 s (the rows' first render) |
+| `/queue`, again | 50.8 s | 68 ms |
+| the badge, cold (after a restart) | 49.4 s | 13.3–13.6 s |
+| the badge, after no change | 5 ms | 5 ms |
+
+⚠ **What still costs.** One root's findings read costs ~0.85 s on that dataset whatever the root
+holds, 0 findings or 855, because `ikigai-browse` 0.18.0's listing loads every finding in the
+archive and keeps one repository's. So a cold badge is still ~13 s, the first view of a tab
+(published, declined, a batch kind) is seconds, and each root that moves costs its 0.85 s on the
+next poll. A listing that reads one repository's findings is browse's to offer, and would make
+every one of those numbers small.
+
+⚠ **What an operator sees.** The page is as fresh as the epochs: a finding written to the store
+by something that is none of this server's doors is not listed until its root moves (in
+production nothing else holds the store), and a PR finding's supersession, which browse decides
+from `gh pr diff` on every read, is as fresh as its root's last move. Both were already true of
+the badge. The page still bounds what it DRAWS: the first 50 rows, saying "showing the first 50
+of N" with a link to all of them (up to 500); the cost was never the drawing.
+
+★ **The badge never polls over itself.** Its span carries `hx-sync="this:drop"`: a tick while
+the last poll is still in flight is dropped. htmx's default queues the last tick instead, so a
+poll slower than its ten-second interval ran back to back for as long as the page was open.
 
 ⚠ **Severity is self-reported by the model**, and a gate on the word makes the word
 load-bearing: [#449](http://localhost:1060/l/default/item/449) measured a prompt asking for

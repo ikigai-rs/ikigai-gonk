@@ -646,25 +646,276 @@ fn rows_wanted(limit: Option<&str>) -> Result<usize> {
     }
 }
 
-/// Read one root's findings at `state`, under the CALLER's capability — the page's rows and
-/// the badge's counts come from this one read.
-async fn read_findings(inv: &Invocation<'_>, root: &str, state: &str) -> Rows {
+/// The request for one root's findings with one narrowing argument (`state=…`, `group=…`,
+/// `summary=…`), in the machine face.
+fn findings_request(
+    root: &str,
+    (name, value): (&str, &str),
+) -> std::result::Result<Request, String> {
     let iri = findings_iri(root);
-    let Ok(target) = Iri::parse(&iri) else {
-        return Rows::Failed(format!("`{iri}` is not an IRI"));
-    };
-    let request = Request::new(Verb::Source, target)
-        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()))
-        .with_arg("state", ArgRef::Inline(state.as_bytes().to_vec()));
-    match inv.issue(request).await {
-        Err(e) => Rows::Failed(format!("{e}")),
-        Ok(answer) => match serde_json::from_slice::<Value>(&answer.bytes) {
-            Ok(Value::Array(rows)) => Rows::Got(rows),
-            Ok(_) | Err(_) => Rows::Failed(format!(
-                "`{iri}` answered something that is not a JSON array of findings"
-            )),
-        },
+    let target = Iri::parse(&iri).map_err(|_| format!("`{iri}` is not an IRI"))?;
+    Ok(Request::new(Verb::Source, target)
+        .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec()))
+        .with_arg(name, ArgRef::Inline(value.as_bytes().to_vec())))
+}
+
+// ------------------------------------------------------------------ the shared reads
+
+/// How many roots' findings are read AT ONCE when several must be read (ledger
+/// [#947](http://localhost:1060/l/default/item/947)).
+///
+/// ⚠ Each read is CPU work in the store, not waiting: `ikigai-browse` 0.18.0's findings listing
+/// loads every finding in the archive and keeps one repository's (`list_findings`), so on the
+/// live dataset a read cost ~0.85 s whether the root had 855 findings or none, and 48 roots
+/// read one after another took 41 s. Eight at a time took a cold read of all 48 to 13 s; the
+/// reads share the store, so more workers buy less each.
+pub const PARALLEL_READS: usize = 8;
+
+/// One memo slot: `(root, the capability's scopes, the narrowing argument as name=value)`.
+type Slot = (String, String, String);
+
+/// What a slot holds: the root's epoch when the read started, and what it answered.
+type Held = (u64, Arc<Value>);
+
+/// What one root's read answered: the parsed JSON, shared with [`Reads`], or why not.
+pub(crate) type Answer = std::result::Result<Arc<Value>, String>;
+
+/// ★ **The Queue's findings reads, shared by every view of it and the header badge** (ledger
+/// [#947](http://localhost:1060/l/default/item/947)) — held in [`crate::watch::Epochs`], so it
+/// exists exactly where something says when a root moved.
+///
+/// Per root, capability and narrowing argument, what the last read answered and the root's
+/// epoch when it STARTED. A read is answered from here while that epoch has not moved — no
+/// file change the watch cut, no write through the browse family or the store's door that could
+/// reach browse's graph (ledger [#667](http://localhost:1060/l/default/item/667), which this
+/// generalizes from the badge's counts to the answers themselves). So the page, its batch and
+/// walk views and the badge are views of one memo: a page opened after a poll reads nothing
+/// that has not moved.
+///
+/// ★ **Why a memo and not the kernel's cache.** A findings read reads a graph the browse
+/// family writes, so the store answers it `Expiry::Always` and that propagates into anything
+/// composed over it ([`crate::watch`]'s header): the kernel cannot hold it under a golden
+/// thread without this crate re-declaring a dependency's freshness. The epochs ARE this
+/// server's thread for these answers — moved by every event that cuts what a findings listing
+/// depends on — and the memo is what hangs from them.
+///
+/// ★ **One read per slot at a time.** A request that needs a slot another request is reading
+/// waits for that read and takes its answer, so a poll arriving during a page render — or two
+/// tabs, or a page left loading after the person navigated away — never starts a second copy
+/// of the same read.
+///
+/// ⚠ What it cannot see, stated: a write to the dataset by something that is none of this
+/// server's doors (there is none in production — gonk is the one process holding the store),
+/// and a PR finding's supersession, which `ikigai-browse` decides from `gh pr diff` on every
+/// read: that is a network fact no watch reports, so a PR finding's state is as fresh as its
+/// root's last epoch move. Both were already true of the badge's counts.
+#[derive(Default)]
+pub struct Reads {
+    memo: Mutex<HashMap<Slot, Held>>,
+    flights: Mutex<HashMap<Slot, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl std::fmt::Debug for Reads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let held = self.memo.lock().map(|m| m.len()).unwrap_or(0);
+        f.debug_struct("Reads").field("held", &held).finish()
     }
+}
+
+impl Reads {
+    /// What `slot` holds when it was read at `epoch`.
+    fn hit(&self, slot: &Slot, epoch: u64) -> Option<Arc<Value>> {
+        let memo = self.memo.lock().ok()?;
+        memo.get(slot)
+            .filter(|(read_at, _)| *read_at == epoch)
+            .map(|(_, answer)| Arc::clone(answer))
+    }
+
+    fn keep(&self, slot: Slot, epoch: u64, answer: Arc<Value>) {
+        if let Ok(mut memo) = self.memo.lock() {
+            memo.insert(slot, (epoch, answer));
+        }
+    }
+
+    /// The lock one slot's read holds.
+    fn flight(&self, slot: &Slot) -> Arc<tokio::sync::Mutex<()>> {
+        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(flights.entry(slot.clone()).or_default())
+    }
+}
+
+/// The capability as a memo key: its scopes in order, or `*` for an unscoped one.
+///
+/// ★ Keyed on the capability's SCOPES as well as the root, as the kernel's own cache is keyed
+/// on its fingerprint: a root one caller may read and another may not must never answer the
+/// second from the first's read. Bounded in practice by the grants this server mints.
+fn scopes_key(inv: &Invocation<'_>) -> String {
+    match inv.capability.scopes() {
+        Some(scopes) => scopes.iter().cloned().collect::<Vec<_>>().join("\n"),
+        None => "*".to_string(),
+    }
+}
+
+/// Read `roots`' findings narrowed by `arg` under the CALLER's capability — every view of the
+/// Queue and the badge read through here. In `roots`' order.
+///
+/// A root whose epoch has not moved since this capability last read it with this argument is
+/// answered from [`Reads`]; the rest are read [`PARALLEL_READS`] at a time, each under its
+/// slot's lock. With no [`crate::watch::Epochs`] (an unwatched server) nothing is held and
+/// every root is read, as before — the only honest thing when nothing would say a root moved.
+///
+/// ⚠ The reads go to the hub directly — `web.hub.issue(…, inv.capability)`, which is exactly
+/// what the HTTP door's forwarding space does with a page's sub-request — so that each can run
+/// on a runtime worker of its own. What that costs: they are not recorded as dependencies of
+/// the page's invocation, and they do not appear under it in a trace. No Queue view caches
+/// (the door admits nothing to a cache), so the first costs nothing today.
+pub(crate) async fn read_answers(
+    web: &Web,
+    inv: &Invocation<'_>,
+    roots: &[String],
+    arg: (&str, &str),
+) -> Vec<(String, Answer)> {
+    let key = scopes_key(inv);
+    let narrowed = format!("{}={}", arg.0, arg.1);
+    let slot = |root: &str| (root.to_string(), key.clone(), narrowed.clone());
+    let epochs = web.epochs.clone();
+    let mut out: Vec<Option<Answer>> = roots
+        .iter()
+        .map(|root| {
+            let epochs = epochs.as_deref()?;
+            epochs.reads.hit(&slot(root), epochs.stamp(root)?).map(Ok)
+        })
+        .collect();
+    let missing: Vec<usize> = (0..roots.len()).filter(|&i| out[i].is_none()).collect();
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    for batch in missing.chunks(PARALLEL_READS) {
+        let reads = batch.iter().map(|&i| {
+            read_through(
+                Arc::clone(&web.hub),
+                inv.capability.clone(),
+                epochs.clone(),
+                slot(&roots[i]),
+                findings_request(&roots[i], arg),
+            )
+        });
+        match &runtime {
+            // ★ Spawned, so the reads run on different workers at once: each is synchronous
+            // CPU work inside the store, and futures joined on one task would take turns.
+            Some(runtime) => {
+                let spawned: Vec<_> = reads.map(|read| runtime.spawn(read)).collect();
+                for (&i, handle) in batch.iter().zip(spawned) {
+                    out[i] =
+                        Some(handle.await.unwrap_or_else(|e| {
+                            Err(format!("the findings read did not finish: {e}"))
+                        }));
+                }
+            }
+            // No runtime (an embedding that drives the kernel with its own executor, and the
+            // in-process tests): one at a time, the same reads.
+            None => {
+                for (&i, read) in batch.iter().zip(reads) {
+                    out[i] = Some(read.await);
+                }
+            }
+        }
+    }
+    roots
+        .iter()
+        .cloned()
+        .zip(
+            out.into_iter()
+                .map(|answer| answer.expect("every root read or held")),
+        )
+        .collect()
+}
+
+/// [`read_answers`] for one root.
+pub(crate) async fn read_answer(
+    web: &Web,
+    inv: &Invocation<'_>,
+    root: &str,
+    arg: (&str, &str),
+) -> Answer {
+    let roots = [root.to_string()];
+    let mut answers = read_answers(web, inv, &roots, arg).await;
+    answers
+        .pop()
+        .map(|(_, answer)| answer)
+        .expect("one root, one answer")
+}
+
+/// The rows of `roots`' findings at `state` — the page's listing.
+async fn read_rows(
+    web: &Web,
+    inv: &Invocation<'_>,
+    roots: &[String],
+    state: &str,
+) -> Vec<(String, Rows)> {
+    read_answers(web, inv, roots, ("state", state))
+        .await
+        .into_iter()
+        .map(|(root, answer)| {
+            let rows = match answer.as_deref() {
+                // A copy the page may narrow; the memo keeps what the resource answered.
+                Ok(Value::Array(rows)) => Rows::Got(rows.clone()),
+                Ok(_) => Rows::Failed(format!(
+                    "`{}` answered something that is not a JSON array of findings",
+                    findings_iri(&root)
+                )),
+                Err(why) => Rows::Failed(why.clone()),
+            };
+            (root, rows)
+        })
+        .collect()
+}
+
+/// One slot's read: under the slot's lock, answered from the memo if the read another request
+/// was making when this one arrived is still current, else read from the hub and kept.
+///
+/// ★ The epoch is taken BEFORE the read, so a write that lands during it leaves the answer
+/// stamped stale and the next request reads again. A refused or failed read is never kept:
+/// refusal is a fact about the caller, and it is cheap.
+async fn read_through(
+    hub: Arc<Kernel>,
+    capability: ikigai_core::Capability,
+    epochs: Option<Arc<crate::watch::Epochs>>,
+    slot: Slot,
+    request: std::result::Result<Request, String>,
+) -> Answer {
+    let request = request?;
+    let root = slot.0.clone();
+    let parse = |answer: Result<Representation>| -> Answer {
+        let answer = answer.map_err(|e| format!("{e}"))?;
+        serde_json::from_slice::<Value>(&answer.bytes)
+            .map(Arc::new)
+            .map_err(|_| {
+                format!(
+                    "`{}` answered something that is not JSON",
+                    findings_iri(&root)
+                )
+            })
+    };
+    let Some(epochs) = epochs.filter(|e| e.stamp(&root).is_some()) else {
+        return parse(hub.issue(request, &capability).await);
+    };
+    let flight = epochs.reads.flight(&slot);
+    let _reading = flight.lock().await;
+    let stamp = epochs.stamp(&root).expect("a root the epochs hold");
+    if let Some(answer) = epochs.reads.hit(&slot, stamp) {
+        return Ok(answer);
+    }
+    let answer = parse(hub.issue(request, &capability).await)?;
+    // A listing teaches the epochs which root a finding id belongs to, so a decision that
+    // names only the id moves only its root.
+    if let Value::Array(rows) = answer.as_ref() {
+        epochs.learn(
+            &root,
+            rows.iter()
+                .filter_map(|row| row.get("id").and_then(Value::as_str)),
+        );
+    }
+    epochs.reads.keep(slot, stamp, Arc::clone(&answer));
+    Ok(answer)
 }
 
 /// Whether a human has already answered this row — a published or declined finding carries
@@ -729,41 +980,15 @@ impl Counts {
     }
 }
 
-/// One root's pending count, as one capability read it, and the epoch it was read at.
-#[derive(Debug, Clone, Copy)]
-struct Counted {
-    epoch: u64,
-    serious: usize,
-    judged_out: usize,
-    other: usize,
-    verdicts: usize,
-}
-
-/// The badge's memo: `(root, capability)` → what that read counted.
-///
-/// ★ Keyed on the capability's SCOPES as well as the root, as the kernel's own cache is keyed
-/// on its fingerprint: a root one caller may read and another may not must never answer the
-/// second from the first's read. Unbounded in principle, bounded in practice by the grants
-/// this server mints (one entry per root per distinct grant that polls).
-type Memo = Mutex<HashMap<(String, String), Counted>>;
-
-/// The capability as a memo key: its scopes in order, or `*` for an unscoped one.
-fn scopes_key(inv: &Invocation<'_>) -> String {
-    match inv.capability.scopes() {
-        Some(scopes) => scopes.iter().cloned().collect::<Vec<_>>().join("\n"),
-        None => "*".to_string(),
-    }
-}
-
 /// Count the pending findings this caller may read, under the configured policy.
 ///
-/// With a memo and the watch's [`crate::watch::Epochs`], a root whose epoch has not moved
-/// since this caller last counted it is answered from the memo — a poll after no change reads
-/// nothing — and a root that has moved is re-read alone (ledger
-/// [#667](http://localhost:1060/l/default/item/667)). The epoch is taken BEFORE the read, so a
-/// write that lands during it leaves the count stamped stale and the next poll recounts. A
-/// refused read is never memoized: refusal is a fact about the caller, and it is cheap.
-async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) -> Counts {
+/// The rows come from [`read_answers`], so a poll after no change reads nothing and a root that
+/// moved is re-read alone (ledger [#667](http://localhost:1060/l/default/item/667)) — and the
+/// Queue page reads the same memo, so the badge and the page never read one root twice for
+/// one change (ledger [#947](http://localhost:1060/l/default/item/947)). The counting itself
+/// is a filter over rows already in hand: microseconds, so it is redone per poll rather than
+/// held beside the rows as a second copy of the same fact.
+async fn pending_counts(web: &Web, inv: &Invocation<'_>) -> Counts {
     let mut counts = Counts {
         serious: 0,
         judged_out: 0,
@@ -771,66 +996,26 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>, memo: Option<&Memo>) ->
         verdicts: 0,
         refused: 0,
     };
-    let epochs = web.epochs.as_deref();
-    let memo = memo.filter(|_| epochs.is_some());
-    let key = memo.map(|_| scopes_key(inv));
-    for root in crate::k::readable_roots(web, inv) {
-        let stamp = epochs.and_then(|e| e.stamp(&root));
-        let slot = key.as_ref().map(|key| (root.clone(), key.clone()));
-        if let (Some(stamp), Some(memo), Some(slot)) = (stamp, memo, slot.as_ref()) {
-            let hit = memo.lock().ok().and_then(|m| m.get(slot).copied());
-            if let Some(hit) = hit.filter(|hit| hit.epoch == stamp) {
-                counts.serious += hit.serious;
-                counts.judged_out += hit.judged_out;
-                counts.other += hit.other;
-                counts.verdicts += hit.verdicts;
-                continue;
-            }
-        }
-        match read_findings(inv, &root, "pending").await {
-            Rows::Got(rows) => {
-                let queued: Vec<&Value> = rows
-                    .iter()
-                    .filter(|row| web.queue.queues(rated(row)))
-                    .collect();
-                let other = rows.len() - queued.len();
-                // ★ The verdict filter (ledger #704) on the rows this read already holds —
-                // a read-side split, so the memo below holds it like the rest.
-                let judged_out = queued
-                    .iter()
-                    .filter(|row| crate::verdict::hidden_by_default(row, decided(row)))
-                    .count();
-                let serious = queued.len() - judged_out;
-                // Every pending row, not only the queued: `severity=all` lists the rest.
-                let verdicts = rows.iter().map(crate::verdict::verdicts_on).sum();
-                counts.serious += serious;
-                counts.judged_out += judged_out;
-                counts.other += other;
-                counts.verdicts += verdicts;
-                if let (Some(epoch), Some(memo), Some(slot), Some(epochs)) =
-                    (stamp, memo, slot, epochs)
-                {
-                    epochs.learn(
-                        &root,
-                        rows.iter()
-                            .filter_map(|row| row.get("id").and_then(Value::as_str)),
-                    );
-                    if let Ok(mut memo) = memo.lock() {
-                        memo.insert(
-                            slot,
-                            Counted {
-                                epoch,
-                                serious,
-                                judged_out,
-                                other,
-                                verdicts,
-                            },
-                        );
-                    }
-                }
-            }
-            Rows::Failed(_) => counts.refused += 1,
-        }
+    let roots = crate::k::readable_roots(web, inv);
+    for (_, answer) in read_answers(web, inv, &roots, ("state", "pending")).await {
+        let Some(rows) = answer.as_deref().ok().and_then(Value::as_array) else {
+            counts.refused += 1;
+            continue;
+        };
+        let queued: Vec<&Value> = rows
+            .iter()
+            .filter(|row| web.queue.queues(rated(row)))
+            .collect();
+        // ★ The verdict filter (ledger #704) on the rows this read already holds.
+        let judged_out = queued
+            .iter()
+            .filter(|row| crate::verdict::hidden_by_default(row, decided(row)))
+            .count();
+        counts.serious += queued.len() - judged_out;
+        counts.judged_out += judged_out;
+        counts.other += rows.len() - queued.len();
+        // Every pending row, not only the queued: `severity=all` lists the rest.
+        counts.verdicts += rows.iter().map(crate::verdict::verdicts_on).sum::<usize>();
     }
     counts
 }
@@ -968,11 +1153,9 @@ impl QueuePage {
             .await;
         }
 
-        let mut read: Vec<(String, Rows)> = Vec::new();
-        for root in &chosen {
-            let rows = read_findings(inv, root, &state).await;
-            read.push((root.clone(), rows));
-        }
+        // ★ Through the memo the header badge polls (ledger #947): a root nothing has moved
+        // since its last read is not read again, and the rest are read several at once.
+        let mut read: Vec<(String, Rows)> = read_rows(&self.web, inv, &chosen, &state).await;
 
         // ★★ THE GATE (ledger #496): by default the page asks a human only about the SERIOUS
         // rows. Every other row was still minted, stored and anchored, and it is still
@@ -2056,18 +2239,13 @@ fn depth_rev(status: &Value) -> String {
 /// every ten seconds regardless.
 pub struct Badge {
     pub web: Arc<Web>,
-    /// Per root and capability, the last count and the epoch it was read at — see
-    /// [`pending_counts`].
-    memo: Memo,
 }
 
 impl Badge {
-    /// The badge over `web`, with an empty memo.
+    /// The badge over `web`. What it remembers between polls lives in `web`'s epochs
+    /// ([`Reads`]), shared with the Queue page.
     pub fn new(web: Arc<Web>) -> Badge {
-        Badge {
-            web,
-            memo: Memo::default(),
-        }
+        Badge { web }
     }
 }
 
@@ -2108,11 +2286,15 @@ impl Endpoint for Badge {
         // ⚠ The cost, stated: one findings read per readable root per poll was ~40ms a root
         // (measured 2026-09-21), fine at seven roots and ~1.9 s a poll at 47 (ledger #667,
         // measured 2026-10-01: one core held near 100% by a page polling every two seconds).
-        // So a root is re-read only when its epoch has moved — a file change the watch cut,
-        // or a write through the browse family — and a poll after no change reads nothing.
-        // A count face on the findings resource would still be cheaper per miss; that is
+        // By 2026-10-09 it was ~0.85 s a root whatever the root held (ledger #947: browse's
+        // listing loads every finding in the archive to keep one repository's), so a cold
+        // badge took 49 s. So a root is re-read only when its epoch has moved — a file change
+        // the watch cut, or a write through the browse family — a poll after no change reads
+        // nothing, the misses are read several at once, and the Queue page reads the same
+        // memo ([`read_answers`]). A count face on the findings resource, and a listing that
+        // reads one repository's findings, would still be cheaper per miss; both are
         // browse's to offer.
-        let counts = pending_counts(&self.web, inv, Some(&self.memo)).await;
+        let counts = pending_counts(&self.web, inv).await;
         // An idle, empty request queue with serious findings waiting is not `empty`: the
         // dim style says "nothing for anyone", and there is something for someone.
         let kind = if kind == "empty" && counts.serious > 0 {
