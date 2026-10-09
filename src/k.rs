@@ -56,13 +56,19 @@
 //! authority of its own and declares none: what a reader may read and whether a click may
 //! spend inference is decided by the browse resources' own `requires`, one hop in.
 //!
-//! Three consequences worth naming, because each is a test in `tests/browse.rs`:
+//! The consequences worth naming, each a test (in `tests/browse.rs`, and the #880 one in
+//! `tests/cross_site_gets_880.rs`):
 //!
 //! - **an anonymous loopback caller cannot derive.** `gonk.http.ledger`'s anonymous grant is
 //!   ledger tokens only; every browse row declares `urn:cap:browse:read:*` and every
 //!   derivation also `urn:cap:net:*`, which gonk mints only for a named identity
 //!   (`--browse derive`), never for the anonymous grant. The refusal is the
 //!   kernel's typed `Denied`, before dispatch, naming the token;
+//! - **another page cannot derive** (ledger #880). A GET it LOADS is refused at the edge, and
+//!   one it navigates to carries only the read half of the caller's authority
+//!   ([`crate::admit::foreign_page_scopes`]) — no `urn:cap:net:*` — so the explain and review
+//!   rows this adapter forwards to refuse it by their own `requires`. gonk's own Explain and
+//!   Review buttons are same-origin and unaffected;
 //! - **a cross-site POST cannot annotate.** `/k?c=sink …` is a POST like any other, so it
 //!   goes through the same [`crate::doors::http_scopes`] check that closed the first arc's
 //!   hole: a foreign `Origin`/`Sec-Fetch-Site` (or a foreign `Host`, on any method) is
