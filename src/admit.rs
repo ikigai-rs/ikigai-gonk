@@ -1,8 +1,9 @@
 //! What a network door refuses BEFORE a request reaches anything it names — and who a request
 //! is from, as far as the door itself can say.
 //!
-//! Three decisions live here, made once per host-issued request at the outermost endpoint of a
-//! door's kernel ([`Admitting`]), and none of them is a capability question:
+//! Four decisions live here, made at the outermost endpoint of a door's kernel
+//! ([`Admitting`]). The first three are made once per host-issued request and none of them is
+//! a capability question; the fourth reads the capability for a token no endpoint requires:
 //!
 //! 1. **Is this request one the door answers at all?** The HTTP door used to answer a foreign
 //!    `Host` (DNS rebinding) and a cross-site write (a form on another site posting here) by
@@ -39,11 +40,27 @@
 //!    adapter (`crate::web`'s `Act`), and the socket's caller is the owner, who is no
 //!    principal this server names, so it fills nothing.
 //!
-//! ⚠ **What the author rule cannot reach, stated so nobody believes otherwise.** It binds the
-//! AUTHOR ARGUMENT. A ledger writer also holds that ledger's per-graph store write token, so
-//! `urn:iki:store:graph-update` can still insert a `ledger:author` triple directly; a face that
-//! trusted only door-stamped authors would close that, and filling the author from the door is
-//! not that face — it attributes the writes that name nobody, and leaves the rest to the rule.
+//! 4. **May this request write the store RAW?** (ledger
+//!    [#878](http://localhost:1060/l/default/item/878), option (b), Brian, 2026-10-09.) The
+//!    author rule binds the AUTHOR ARGUMENT, and a raw store write passes none: a ledger
+//!    writer holds that ledger's per-graph store write token, so through 1d02e53
+//!    `urn:iki:store:graph-update` inserted a `ledger:author` triple naming anyone's passkey,
+//!    and the item page rendered that person. A door now refuses a raw store write against a
+//!    LEDGER graph unless the capability carries the explicit raw grant for that graph
+//!    ([`raw_write_refusal`]). The ledger's own writes are untouched, structurally rather than
+//!    by a depth test: `ikigai-ledger` issues its `graph-update` sub-requests inside the HUB
+//!    kernel, under the caller's capability, and the hub has no admission layer — this one
+//!    wraps only what arrives at a door.
+//!
+//! ⚠ **What the door cannot reach, stated so nobody believes otherwise.** The socket door has
+//! no admission layer: its caller is the owner (`0600`, peer UID checked), holds root, and can
+//! read and write the dataset's files directly, so a raw write there is the operator's, and it
+//! is where migrations and repairs run (`ikigai-gonk ledger backfill-keys`). The same is true
+//! of an owner's process that NARROWED itself to a ledger grant on the socket (`cap seal`,
+//! `ikigai mcp --grant`): the transport passes its capability through, and nothing here sees
+//! it — the one door #878's rule does not cover, pinned in `tests/raw_store_write_878.rs`. And
+//! a holder of the raw grant ([`crate::grants::ledger_graph_grants`]) can still write any
+//! triple into that graph — that is what the grant says, and only an operator mints it.
 
 use std::sync::Arc;
 
@@ -262,6 +279,108 @@ pub fn fill_author(door: Door, request: &Request, description: &Description) -> 
     })
 }
 
+/// The description ids of `ikigai-store`'s raw write doors: `urn:iki:store:update` (any
+/// SPARQL UPDATE over the whole dataset), `urn:iki:store:graph-update` (any SPARQL UPDATE,
+/// confined to one graph) and `urn:iki:store:load` (a bulk load into any graph).
+///
+/// Matched on the RESOLVED endpoint's id, not on the target's spelling, so the rule follows
+/// what actually answers. `tests/raw_store_write_878.rs` pins that the hub describes each of
+/// the three IRIs with these ids, so a rename in the store fails there rather than silently
+/// switching the rule off.
+pub const RAW_WRITE_IDS: [&str; 3] = ["store-update", "store-graph-update", "store-load"];
+
+/// Why `request`, resolved to the endpoint described as `id`, may not write the store raw
+/// under `capability`, or `None` when it may.
+///
+/// ```text
+/// not a write, or not a raw store write door            → admitted (the store decides)
+/// urn:iki:store:graph-update naming a LEDGER graph G    → refused unless the capability holds
+///                                                          grants::cap_raw_write_graph(G)
+/// urn:iki:store:graph-update naming any other graph     → admitted (the store decides)
+/// urn:iki:store:update, urn:iki:store:load              → refused unless root
+/// ```
+///
+/// ★ **Why a token beside the store's, and not "drop the store token from the ledger grant".**
+/// `ikigai-ledger` writes through `urn:iki:store:graph-update` under the CALLER's capability,
+/// so a ledger writer must hold the per-graph store write token or `append` itself fails.
+/// The same token was therefore two authorities — the ledger's sub-request authority and raw
+/// quad authority — and no check on it alone can tell them apart. The raw grant says which:
+/// only [`crate::grants::ledger_graph_grants`] mints it, and only an operator naming
+/// `--ledger-graph` asks for that.
+///
+/// ⚠ A ledger graph is named by [`crate::grants::LEDGER_GRAPH_PREFIX`], compared ignoring
+/// ASCII case — wider than the store, which matches its own token exactly, so a variant
+/// spelling is refused here rather than argued about there. Another graph (the browse graph,
+/// whose write token is minted ONLY as raw quad authority, `--browse-graph write`) is not this
+/// rule's: the ambiguity it resolves exists only where a ledger grant carries the token.
+///
+/// `urn:iki:store:update` and `urn:iki:store:load` need the store's broad write token, which
+/// [`crate::quic::grant_refusal`] refuses on every grant, so no identity at a network door can
+/// reach them anyway. They are refused here too, because each reaches every ledger graph, and
+/// a rule about ledger graphs that two of the three raw doors walked around would be stated
+/// wrong.
+///
+/// ```
+/// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
+/// use ikigai_gonk::{admit, grants};
+/// let update = |graph: &str| {
+///     Request::new(Verb::Sink, Iri::parse("urn:iki:store:graph-update").unwrap())
+///         .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec()))
+/// };
+/// let ledger = grants::grants_for("default", grants::Authority::Write).unwrap();
+/// let writer = Capability::scoped(ledger.clone());
+/// let ledger_graph = "urn:iki:ledger:graph:default";
+/// // A ledger writer may not write its ledger's graph raw...
+/// assert!(admit::raw_write_refusal(&update(ledger_graph), "store-graph-update", &writer)
+///     .is_some());
+/// // ...an operator's raw grant may...
+/// let raw = ledger.into_iter().chain(grants::ledger_graph_grants("default").unwrap());
+/// assert!(admit::raw_write_refusal(&update(ledger_graph), "store-graph-update",
+///     &Capability::scoped(raw)).is_none());
+/// // ...the browse graph is not this rule's, and the whole-dataset doors need root.
+/// let browse = "urn:iki:browse:graph:default";
+/// assert!(admit::raw_write_refusal(&update(browse), "store-graph-update", &writer).is_none());
+/// let load = Request::new(Verb::Sink, Iri::parse("urn:iki:store:load").unwrap());
+/// assert!(admit::raw_write_refusal(&load, "store-load", &writer).is_some());
+/// assert!(admit::raw_write_refusal(&load, "store-load", &Capability::root()).is_none());
+/// ```
+pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -> Option<String> {
+    if !request.verb.is_mutating() || !RAW_WRITE_IDS.contains(&id) {
+        return None;
+    }
+    if id != "store-graph-update" {
+        return (!capability.is_root()).then(|| {
+            format!(
+                "`{}` writes the WHOLE dataset, every ledger graph included, and no grant this \
+                 server admits may carry its token: it is the owner's, over the socket. A \
+                 ledger is written through its own endpoints (`urn:iki:ledger:*`)",
+                request.target.as_str()
+            )
+        });
+    }
+    // Not inline, or not UTF-8: the store refuses it on its own, naming the argument.
+    let Some(ArgRef::Inline(bytes)) = request.args.get("graph") else {
+        return None;
+    };
+    let graph = std::str::from_utf8(bytes).ok()?;
+    let prefix = crate::grants::LEDGER_GRAPH_PREFIX;
+    let is_ledger = graph.len() >= prefix.len()
+        && graph.is_char_boundary(prefix.len())
+        && graph[..prefix.len()].eq_ignore_ascii_case(prefix);
+    if !is_ledger || capability.allows(&crate::grants::cap_raw_write_graph(graph)) {
+        return None;
+    }
+    Some(format!(
+        "a raw store write to the ledger graph <{graph}> is refused at this door. A ledger \
+         grant carries that graph's store token for the ledger's OWN writes, which it issues \
+         itself; it is not authority to write the graph's triples directly — that is how an \
+         `author` naming someone else would get in. Write through the ledger's endpoints \
+         (`urn:iki:ledger:*`). Raw writes are the owner's, over the socket, or an identity's \
+         whose grant an operator minted with `--ledger-graph <ledger>` (`{}`)",
+        crate::grants::cap_raw_write_graph(graph)
+    ))
+}
+
 /// A space that answers a door's refusals before anything it binds runs: an overlay with no
 /// identity or structure of its own (it forwards [`Space::id`], [`Space::topology`] and
 /// [`Space::entries`], so `urn:kernel:topology` reads the same with it or without it).
@@ -310,22 +429,36 @@ struct Admitted {
 impl Endpoint for Admitted {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         // A sub-request is the work of a request this already admitted, under the same
-        // capability; the checks are about what arrived at the door.
-        if inv.depth() == 0 {
+        // capability; the door's refusals and the author rule are about what arrived at it.
+        let arrived = inv.depth() == 0;
+        if arrived {
             if let Some(why) = refusal(inv.capability) {
                 return Err(Error::Denied(why.to_string()));
             }
-            if inv.request.verb.is_mutating() {
-                if let Some(why) = author_refusal(self.door, inv.request) {
-                    return Err(Error::Denied(why));
-                }
-                // Attributed by the door: the same request with `author` filled in, issued as
-                // this request's own sub-request, so it resolves to this same endpoint one
-                // level down (where nothing is checked twice) under the same capability. The
-                // access log is outside and counts it once, as the request that arrived.
-                if let Some(filled) = fill_author(self.door, inv.request, &self.inner.describe()) {
-                    return inv.issue(filled).await;
-                }
+        }
+        if !inv.request.verb.is_mutating() {
+            return self.inner.invoke(inv).await;
+        }
+        // ★ At EVERY depth, unlike the checks around it (ledger #878). Nothing inside a door
+        // kernel has a reason to write the store raw — the ledger's own `graph-update`s run
+        // inside the hub, out of this overlay's sight — so a raw write that reaches this point
+        // below depth 0 came from one of gonk's page adapters, and an adapter that forwarded
+        // one would otherwise be a way round the door.
+        let description = self.inner.describe();
+        if let Some(why) = raw_write_refusal(inv.request, &description.id, inv.capability) {
+            return Err(Error::Denied(why));
+        }
+        if arrived {
+            if let Some(why) = author_refusal(self.door, inv.request) {
+                return Err(Error::Denied(why));
+            }
+            // Attributed by the door: the same request with `author` filled in, issued as
+            // this request's own sub-request, so it resolves to this same endpoint one level
+            // down (where only the raw-write rule runs again, and passes as it did here) under
+            // the same capability. The access log is outside and counts it once, as the request
+            // that arrived.
+            if let Some(filled) = fill_author(self.door, inv.request, &description) {
+                return inv.issue(filled).await;
             }
         }
         self.inner.invoke(inv).await
