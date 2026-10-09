@@ -66,10 +66,12 @@
 //! computed from, which hangs on the same threads. Over the socket and QUIC doors it crosses
 //! as `Expiry::Always` like every other threaded answer ([`crate::doors::for_the_wire`]).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ikigai_core::{
     ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Iri,
-    Representation, Request, Result, Verb,
+    Representation, Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 /// The default dataset of every form, in one sentence — what [`Description::summary`] says
@@ -154,6 +156,10 @@ impl Endpoint for Form {
             )));
         }
         let query = inv.inline_str("query")?;
+        // Refused here, before the readable set is read, as well as at the store: the store's
+        // overlay ([`bounded`]) is what makes the bound hold for every door, and this is only
+        // the earlier, cheaper place to say so.
+        admit("query", query.as_bytes(), Text::Query)?;
         let graph = match optional(inv, "graph")? {
             Some(named) if !named.trim().is_empty() => graph_list(named),
             _ => self.readable(inv).await?,
@@ -336,4 +342,471 @@ fn optional<'a>(inv: &Invocation<'a>, name: &str) -> Result<Option<&'a str>> {
 
 fn inline(value: &str) -> ArgRef {
     ArgRef::Inline(value.as_bytes().to_vec())
+}
+
+// ------------------------------------------------------------------------- the bound
+
+/// The deepest nesting gonk lets reach a SPARQL parser: `(`, `{`, `[`, `<<` and the negation `!`,
+/// mixed, counted by [`nesting_depth`] (ledger [#915](http://localhost:1060/l/default/item/915)).
+///
+/// ★ **Why a bound at all.** `spargebra` — the parser behind `oxigraph`, the store, and
+/// [`crate::web::query_form`] — reads a bracketed expression by recursion, and a stack overflow
+/// is not a panic: Rust ABORTS the process. On `b16f79c` one GET of
+/// `/sparql/results?query=SELECT * WHERE { FILTER(((…3000 parens…1…))) }` killed gonk. Measured
+/// with `cargo run --release --example sparql-depth` on a 2 MiB thread (the size every tokio
+/// worker and every `std::thread` got before [`crate::stack`]): a release build aborts past
+/// 885 parentheses, 846 braces or 606 brackets; a DEBUG build past 184, 178 and 99 — the last
+/// one through the store, which nests blank-node lists more expensively than the parser alone.
+///
+/// 64 is under every one of those, so a test at the bound runs in a debug test thread, and it
+/// is far above anything gonk's own queries, its sample queries or the gonk Book write (the
+/// deepest is under 10). ★ **The store's own pre-parse bound** (ledger #915, `ikigai-store`)
+/// supersedes this one for the store's doors when it lands; this scan stays, because it is
+/// one linear pass at the edge and it also covers the parses that are not the store's (the
+/// HTML editor's [`crate::web::query_form`], the review space's `match`).
+pub const MAX_NESTING: usize = 64;
+
+/// The longest SPARQL QUERY text gonk admits: 32 KiB.
+///
+/// ⚠ **Nesting is not the only way to build a deep tree.** `1+1+1+…`, `true&&true&&…`,
+/// `{} UNION {} UNION …`, `{} OPTIONAL {} …` and a path `a/a/a/…` contain no brackets at all,
+/// and each becomes a left-deep tree that the store's optimizer and evaluator walk by
+/// recursion. On a 2 MiB stack (release) the store aborted on 3,270 `+1`s — 6.5 KB of query —
+/// and on 1,127 `UNION`s. No bracket scan sees those. So the bound is in two parts: the stacks
+/// are larger ([`crate::stack::THREAD_STACK_BYTES`]) and the text is bounded, and the pair is
+/// chosen so that the densest chain measured cannot fill a stack inside the length.
+///
+/// Applied to QUERIES only — the four read forms and the review space's `match`. An UPDATE is
+/// not length-bounded, because the ledger and the browse family write long literals through
+/// `urn:iki:store:graph-update` themselves (an explanation is kilobytes of Markdown); an update
+/// is nesting-bounded like a query, and reaches the store only under a raw write token.
+pub const MAX_QUERY_BYTES: usize = 32 * 1024;
+
+/// What a SPARQL text is, for [`admit`]: a query (nesting and length bounded) or an update
+/// (nesting bounded).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Text {
+    /// SELECT, ASK, CONSTRUCT or DESCRIBE.
+    Query,
+    /// An update request.
+    Update,
+}
+
+/// Refuse a SPARQL text that is past [`MAX_NESTING`] or (a query) past [`MAX_QUERY_BYTES`],
+/// as `InvalidArgument` on `name` — `400` at the HTTP door, never cached, nothing parsed.
+/// Refused, never truncated: a shortened query is a different question.
+///
+/// ```
+/// use ikigai_core::Error;
+/// use ikigai_gonk::sparql::{admit, Text, MAX_NESTING};
+///
+/// // `{` and `FILTER(` are two levels; the rest are parentheses.
+/// let nested = |n: usize| format!("SELECT * WHERE {{ FILTER({}1{}) }}", "(".repeat(n), ")".repeat(n));
+/// assert!(admit("query", nested(MAX_NESTING - 2).as_bytes(), Text::Query).is_ok());
+/// assert!(matches!(
+///     admit("query", nested(MAX_NESTING - 1).as_bytes(), Text::Query),
+///     Err(Error::InvalidArgument { name, .. }) if name == "query"
+/// ));
+/// ```
+pub fn admit(name: &str, text: &[u8], kind: Text) -> Result<()> {
+    if kind == Text::Query && text.len() > MAX_QUERY_BYTES {
+        return Err(Error::InvalidArgument {
+            name: name.to_string(),
+            detail: format!(
+                "is {} bytes; this server parses a SPARQL query of at most {MAX_QUERY_BYTES} \
+                 bytes (ledger #915: a long enough chain of `+`, `&&`, `UNION` or `/` with no \
+                 brackets at all overflows the evaluator's stack and aborts the server)",
+                text.len()
+            ),
+        });
+    }
+    let depth = nesting_depth(text);
+    if depth > MAX_NESTING {
+        return Err(Error::InvalidArgument {
+            name: name.to_string(),
+            detail: format!(
+                "nests {depth} brackets deep; this server parses SPARQL nested at most \
+                 {MAX_NESTING} deep (ledger #915: the parser reads nesting by recursion, and \
+                 deep enough nesting overflows its stack and aborts the server). Counted are \
+                 `(`, `{{`, `[`, `<<` and a negating `!` outside strings and comments"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// How deep `text` can nest brackets when a SPARQL parser reads it — an UPPER bound, never an
+/// under-count, measured lexically in one pass with no grammar.
+///
+/// ```
+/// use ikigai_gonk::sparql::nesting_depth;
+///
+/// assert_eq!(nesting_depth(b"SELECT * WHERE { FILTER((1)) }"), 3);
+/// // Brackets in a string or a comment are not structure.
+/// assert_eq!(nesting_depth(b"SELECT * WHERE { FILTER(REGEX(?x, \"^((((a\")) } # ((((("), 3);
+/// // Nor in an http(s) IRI.
+/// assert_eq!(nesting_depth(b"SELECT * WHERE { <https://en.wikipedia.org/wiki/A_(b)> ?p ?o }"), 1);
+/// // ★ But a `<` the parser may read as LESS-THAN is not skipped as an IRI: this is nested
+/// // 4 deep as `?a < (((1)))`, and an IRI reading alone would have said 1.
+/// assert_eq!(nesting_depth(b"FILTER(?a <(((1)))> 2)"), 4);
+/// ```
+///
+/// # ★ Why this is an automaton and not "skip strings, IRIs and comments"
+///
+/// `spargebra` reads `<` two ways: as an IRI (`<` then anything up to the next `>`, checked
+/// afterwards) and, after an expression, as the less-than operator — and a PEG parser TRIES
+/// readings, so a reading that fails later has already recursed. A scanner that skipped
+/// `<…>` as an IRI would miss `FILTER(?a <((((…1…))))> 2)` entirely, and an IRI that holds a
+/// `#` or a quote makes the two readings disagree about where a comment or a string is for
+/// the REST of the line or text — which is enough to hide unbounded nesting behind closers
+/// the other reading never sees. So this runs every lexical reading at once (a set of
+/// states, as an NFA is run: linear in the text) and counts
+///
+/// - an OPEN bracket when ANY reading is in code there — it might be structure;
+/// - a CLOSE bracket only when EVERY reading is in code there — only then is it certainly
+///   structure.
+///
+/// That is an upper bound on every reading's depth at every point, so on the parser's. What
+/// it costs is an over-count where readings disagree: an open bracket inside a non-`http`
+/// IRI (`<urn:x(>`) counts, and a closer on the rest of a line after an IRI like `<urn:a#b>`
+/// does not. Two facts keep that rare: a reading in code dies at `//`, which nothing in
+/// SPARQL accepts outside a string, IRI or comment, so the less-than reading of every
+/// `<http://…>` and `<https://…>` ends at its second character; and every reading converges
+/// again at the IRI's `>` when nothing in between opened a string or a comment.
+pub fn nesting_depth(text: &[u8]) -> usize {
+    use lex::*;
+    let at = |i: usize| text.get(i).copied();
+    let mut states: u32 = CODE;
+    let (mut level, mut deepest) = (0usize, 0usize);
+    // The `!`s counted inside each open group, innermost last. A negation's level lasts until
+    // the expression it applies to ends, which no lexer can see, so it is released with the
+    // group that holds it — later than the parser releases it, never earlier. One outside every
+    // group is never released.
+    let mut groups: Vec<usize> = Vec::new();
+    for (i, &b) in text.iter().enumerate() {
+        if states == 0 {
+            // Every reading has failed to parse; nothing past here is read by anyone.
+            break;
+        }
+        let code = states & CODE != 0;
+        match b {
+            b'(' | b'{' | b'[' if code => {
+                level += 1;
+                deepest = deepest.max(level);
+                groups.push(0);
+            }
+            b'<' if code && at(i + 1) == Some(b'<') => {
+                level += 1;
+                deepest = deepest.max(level);
+                groups.push(0);
+            }
+            // ★ `!` is the one prefix operator spargebra reads by recursion (`"!" _
+            // UnaryExpression()`, refused as double negation only AFTER the recursion), so
+            // `!!!!…1` nests with no bracket at all. `!=` is a comparison, not a negation.
+            b'!' if code && at(i + 1) != Some(b'=') => {
+                level += 1;
+                deepest = deepest.max(level);
+                if let Some(bangs) = groups.last_mut() {
+                    *bangs += 1;
+                }
+            }
+            b')' | b'}' | b']' if states == CODE => {
+                let bangs = groups.pop().unwrap_or(0);
+                level = level.saturating_sub(1 + bangs);
+            }
+            _ => {}
+        }
+        states = (0..STATES)
+            .map(|bit| 1u32 << bit)
+            .filter(|state| states & state != 0)
+            .fold(0, |next, state| next | step(state, b, at(i + 1), at(i + 2)));
+    }
+    deepest
+}
+
+/// The lexical states [`nesting_depth`] runs, one bit each, and the step between them. Only
+/// the distinctions that decide whether a byte is code are kept.
+mod lex {
+    pub const CODE: u32 = 1 << 0;
+    const CODE_ESC: u32 = 1 << 1; // after `\` in code (PN_LOCAL_ESC): the next byte is a name
+    const COMMENT: u32 = 1 << 2;
+    const IRI: u32 = 1 << 3; // `<` … up to the next `>`, newlines included, as spargebra reads it
+    const SHORT1: u32 = 1 << 4; // '…'
+    const SHORT1_ESC: u32 = 1 << 5;
+    const SHORT2: u32 = 1 << 6; // "…"
+    const SHORT2_ESC: u32 = 1 << 7;
+    const LONG1: u32 = 1 << 8; // '''…'''
+    const LONG1_ESC: u32 = 1 << 9;
+    const LONG2: u32 = 1 << 10; // """…"""
+    const LONG2_ESC: u32 = 1 << 11;
+    const ENTER1_2: u32 = 1 << 12; // the 2nd and 3rd quote of an opening '''
+    const ENTER1_1: u32 = 1 << 13;
+    const ENTER2_2: u32 = 1 << 14; // … of an opening """
+    const ENTER2_1: u32 = 1 << 15;
+    const EXIT_2: u32 = 1 << 16; // the 2nd and 3rd quote of a closing ''' or """
+    const EXIT_1: u32 = 1 << 17;
+    /// How many states there are: the bits above.
+    pub const STATES: u32 = 18;
+
+    /// The states after `state` reads byte `b`, with the two bytes after it for lookahead. An
+    /// empty set is a reading that cannot parse past here.
+    pub fn step(state: u32, b: u8, b1: Option<u8>, b2: Option<u8>) -> u32 {
+        let newline = b == b'\n' || b == b'\r';
+        match state {
+            CODE => match b {
+                b'#' => COMMENT,
+                // An opening ''' is a long string, or an empty short string and then the
+                // start of another: both are kept, and the lexing the parser chose is one.
+                b'\'' if b1 == Some(b'\'') && b2 == Some(b'\'') => SHORT1 | ENTER1_2,
+                b'"' if b1 == Some(b'"') && b2 == Some(b'"') => SHORT2 | ENTER2_2,
+                b'\'' => SHORT1,
+                b'"' => SHORT2,
+                // An IRI, or less-than (`<`, `<=`, `<<`) and code goes on.
+                b'<' => CODE | IRI,
+                b'\\' => CODE_ESC,
+                // `//` is no SPARQL production outside a string, IRI or comment.
+                b'/' if b1 == Some(b'/') => 0,
+                _ => CODE,
+            },
+            CODE_ESC => CODE,
+            COMMENT if newline => CODE,
+            COMMENT => COMMENT,
+            IRI if b == b'>' => CODE,
+            IRI => IRI,
+            SHORT1 | SHORT2 => {
+                let (quote, esc) = if state == SHORT1 {
+                    (b'\'', SHORT1_ESC)
+                } else {
+                    (b'"', SHORT2_ESC)
+                };
+                match b {
+                    b'\\' => esc,
+                    _ if b == quote => CODE,
+                    // A short string cannot hold a line break: this reading fails.
+                    _ if newline => 0,
+                    _ => state,
+                }
+            }
+            SHORT1_ESC => SHORT1,
+            SHORT2_ESC => SHORT2,
+            LONG1 | LONG2 => {
+                let (quote, esc) = if state == LONG1 {
+                    (b'\'', LONG1_ESC)
+                } else {
+                    (b'"', LONG2_ESC)
+                };
+                match b {
+                    b'\\' => esc,
+                    _ if b == quote && b1 == Some(quote) && b2 == Some(quote) => EXIT_2,
+                    _ => state,
+                }
+            }
+            LONG1_ESC => LONG1,
+            LONG2_ESC => LONG2,
+            ENTER1_2 => ENTER1_1,
+            ENTER1_1 => LONG1,
+            ENTER2_2 => ENTER2_1,
+            ENTER2_1 => LONG2,
+            EXIT_2 => EXIT_1,
+            EXIT_1 => CODE,
+            _ => 0,
+        }
+    }
+}
+
+/// `inner` with [`admit`] in front of every endpoint that parses caller SPARQL: for each
+/// `(endpoint, argument, kind)` in `rules`, a request to an endpoint whose
+/// [`Endpoint::name`] is `endpoint` (any endpoint in `inner`, for `None`) carrying an inline
+/// `argument` is refused before the endpoint runs when that text is past the bound.
+///
+/// An overlay with no identity or structure of its own, like [`crate::admit::Admitting`]: it
+/// forwards `id`, `topology` and `entries`, so `urn:kernel:topology` reads the same with it
+/// or without it. Composed in the HUB, around the store and the review space, so it holds
+/// for every door and every depth — the socket, QUIC, HTTP's `/iki/…` and `/k`, and
+/// `urn:sparql:*`, which reaches the store through the hub.
+pub fn bounded(inner: Arc<dyn Space>, rules: &'static [Rule]) -> Arc<dyn Space> {
+    Arc::new(Bounded { inner, rules })
+}
+
+/// One [`bounded`] rule: `(endpoint name, or any; argument; kind)`.
+pub type Rule = (Option<&'static str>, &'static str, Text);
+
+/// The store's SPARQL-parsing endpoints, by `ikigai-store`'s own ids: the eight read forms take
+/// `query`, the two update forms take `content` (the engine routes a pipe there). `load`
+/// parses RDF, not SPARQL, and is not listed.
+pub const STORE_RULES: &[Rule] = &[
+    (Some("store-select"), "query", Text::Query),
+    (Some("store-ask"), "query", Text::Query),
+    (Some("store-construct"), "query", Text::Query),
+    (Some("store-describe"), "query", Text::Query),
+    (Some("store-graph-select"), "query", Text::Query),
+    (Some("store-graph-ask"), "query", Text::Query),
+    (Some("store-graph-construct"), "query", Text::Query),
+    (Some("store-graph-describe"), "query", Text::Query),
+    (Some("store-update"), "content", Text::Update),
+    (Some("store-graph-update"), "content", Text::Update),
+];
+
+/// The review space's (`ikigai-intray`'s `urn:space:{name}`): `rd` and `take` filter by an ASK
+/// in `match`, which it parses with `spargebra`.
+pub const SPACE_RULES: &[Rule] = &[(None, "match", Text::Query)];
+
+struct Bounded {
+    inner: Arc<dyn Space>,
+    rules: &'static [Rule],
+}
+
+impl Space for Bounded {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let rules = self.rules;
+        self.inner
+            .resolve(request, scope)
+            .map_endpoint(|endpoint| Arc::new(Guarded { endpoint, rules }) as Arc<dyn Endpoint>)
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
+    }
+}
+
+struct Guarded {
+    endpoint: Arc<dyn Endpoint>,
+    rules: &'static [Rule],
+}
+
+#[async_trait]
+impl Endpoint for Guarded {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let name = self.endpoint.name();
+        for &(endpoint, argument, kind) in self.rules {
+            if endpoint.is_some_and(|e| e != name) {
+                continue;
+            }
+            // Only an inline value is ever parsed: every endpoint listed refuses any other.
+            if let Some(ArgRef::Inline(text)) = inv.request.args.get(argument) {
+                admit(argument, text, kind)?;
+            }
+        }
+        self.endpoint.invoke(inv).await
+    }
+
+    fn name(&self) -> &str {
+        self.endpoint.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.endpoint.describe()
+    }
+
+    fn is_limiter(&self) -> bool {
+        self.endpoint.is_limiter()
+    }
+
+    fn confinement(&self) -> Option<Topology> {
+        self.endpoint.confinement()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn depth(text: &str) -> usize {
+        nesting_depth(text.as_bytes())
+    }
+
+    #[test]
+    fn strings_comments_and_http_iris_hold_no_structure() {
+        assert_eq!(depth("SELECT * WHERE { ?s ?p '''((((((''' }"), 1);
+        assert_eq!(depth(r#"SELECT * WHERE { ?s ?p "a\"((((((" }"#), 1);
+        assert_eq!(depth("SELECT * WHERE { ?s ?p ?o } # don't (((((("), 1);
+        // A comment's apostrophe opens no string: the nesting after it is still seen.
+        let after = format!(
+            "# don't\nSELECT * WHERE {{ FILTER({}1{}) }}",
+            "(".repeat(5),
+            ")".repeat(5)
+        );
+        assert_eq!(depth(&after), 7);
+        // One line, an `https` namespace with a `#`: the less-than reading dies at `//`, so
+        // nothing after it is held back.
+        let one_line =
+            "PREFIX l: <https://ikigai-rs.dev/ns/ledger#> SELECT * WHERE { FILTER((1)) } \
+                        SELECT * WHERE { FILTER((1)) }";
+        assert_eq!(depth(one_line), 3);
+    }
+
+    /// `<` read as less-than: the parser recurses into what an IRI reading would skip.
+    #[test]
+    fn an_iri_that_may_be_less_than_is_counted() {
+        let text = format!(
+            "SELECT * WHERE {{ FILTER(?a <{}1{}> 2) }}",
+            "(".repeat(100),
+            ")".repeat(100)
+        );
+        assert_eq!(depth(&text), 102);
+        assert!(admit("query", text.as_bytes(), Text::Query).is_err());
+    }
+
+    /// ★ Readings that disagree about a comment or a string cannot cancel nesting: a closer is
+    /// counted only where EVERY reading is in code. Each of these is 80 deep under the
+    /// less-than reading of its `<…>`, and 40 under the IRI reading a naive scanner would take.
+    #[test]
+    fn readings_that_disagree_cannot_hide_nesting() {
+        let (open, close) = ("(".repeat(40), ")".repeat(40));
+        // `#` in the IRI is a comment to the end of the line under the less-than reading, so
+        // the closers after the IRI are inside it.
+        let comment = format!("{open} ?a <urn:x#y> {close}\n{open}1");
+        assert_eq!(depth(&comment), 80);
+        // `'` in the IRI opens a string under the less-than reading, closed after the closers.
+        let string = format!("{open} ?a <urn:it's> {close} '{open}1");
+        assert_eq!(depth(&string), 80);
+    }
+
+    #[test]
+    fn a_negation_counts_until_its_group_closes_and_a_comparison_never() {
+        let bangs = format!("SELECT * WHERE {{ FILTER({}1) }}", "!".repeat(100));
+        assert_eq!(depth(&bangs), 102);
+        // Whitespace between them changes nothing: the grammar skips it.
+        assert_eq!(depth(&format!("FILTER({}1)", "! ".repeat(100))), 101);
+        // Released with the group: a hundred negated FILTERs in sequence stay shallow.
+        let many = "FILTER(!BOUND(?a)) ".repeat(100);
+        assert_eq!(depth(&format!("SELECT * WHERE {{ {many} }}")), 4);
+        let unequal = format!(
+            "SELECT * WHERE {{ FILTER(?a != ?b{}) }}",
+            " && ?a != ?b".repeat(100)
+        );
+        assert_eq!(depth(&unequal), 2);
+    }
+
+    #[test]
+    fn a_reified_triple_counts_as_nesting() {
+        let text = format!(
+            "SELECT * WHERE {{ {}?s ?p ?o{} ?q ?r }}",
+            "<< ".repeat(70),
+            " >>".repeat(70)
+        );
+        assert!(depth(&text) > MAX_NESTING);
+    }
+
+    #[test]
+    fn the_length_bound_is_for_queries_only() {
+        let long = format!(
+            "SELECT * WHERE {{ ?s ?p \"{}\" }}",
+            "x".repeat(MAX_QUERY_BYTES)
+        );
+        assert!(admit("query", long.as_bytes(), Text::Query).is_err());
+        let update = format!(
+            "INSERT DATA {{ <urn:s> <urn:p> \"{}\" }}",
+            "x".repeat(MAX_QUERY_BYTES)
+        );
+        assert!(admit("content", update.as_bytes(), Text::Update).is_ok());
+    }
 }

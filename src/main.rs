@@ -21,6 +21,9 @@ use ikigai_store::{DurableStore, StoreConfig};
 use ikigai_time::{JobRegistry, Schedule, ThreadTimer};
 
 fn main() {
+    // First, before any thread exists: the stack every request-serving thread gets, including
+    // the ones the socket and QUIC transports spawn themselves (ledger #915, `stack`).
+    ikigai_gonk::stack::enlarge_default();
     let command = config::parse_args(std::env::args().skip(1))
         .unwrap_or_else(|e| fail(&format!("{e}\n\n{}", config::USAGE)));
     match command {
@@ -469,8 +472,13 @@ fn serve(flags: &config::Flags) -> ! {
         }
     };
 
-    let runtime =
-        tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
+    // The HTTP door's workers and blocking pool, sized explicitly rather than through the
+    // default `stack::enlarge_default` set: a request recurses on these threads (ledger #915).
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(ikigai_gonk::stack::THREAD_STACK_BYTES)
+        .build()
+        .unwrap_or_else(|e| fail(&format!("tokio runtime: {e}")));
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind(settings.http)
             .await
