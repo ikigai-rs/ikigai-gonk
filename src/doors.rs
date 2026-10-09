@@ -3,7 +3,7 @@
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
 //! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` at the edge, before `OPTIONS`, `?description` or dispatch, for a foreign `Host` or a cross-site write ([`http_admit`]). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
-//! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway |
+//! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME beside the authority — the session's `principal`, `urn:iki:gonk:client:<fingerprint>` ([`crate::quic::minter`]), stamped on every request: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
 //! # ★ One cache for the whole process
@@ -254,18 +254,30 @@ impl CachePolicy for NoCache {
     }
 }
 
-/// A kernel for a transport that takes one by value: a [`HubSpace`] over `hub`, a Meta
-/// renderer (a mounting client reads contracts through this kernel's JSON Meta face), and
-/// [`NoCache`].
+/// The socket door's kernel, for a transport that takes one by value: a [`HubSpace`] over
+/// `hub`, a Meta renderer (a mounting client reads contracts through this kernel's JSON Meta
+/// face), [`NoCache`], and the socket's one admission rule ([`door_kernel_with`]).
 pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
     door_kernel_with(hub, None)
 }
 
 /// [`door_kernel`], writing one access line per request when `access` is given — what `main`
-/// builds for the socket door ([`crate::access`]). The socket's caller is the owner, so
-/// nothing is refused at this door before dispatch.
+/// builds for the socket door ([`crate::access`]).
+///
+/// The socket's caller is the owner, so its admission ([`crate::admit::Admitting`] for
+/// [`crate::access::Door::Socket`]) runs ONE rule: a raw store write to a ledger graph is
+/// refused unless the capability is root or carries the operator's raw grant for that graph
+/// ([`crate::admit::raw_write_refusal`]). The owner at root passes it, so migrations and
+/// repairs run as before; an owner process that NARROWED itself to a ledger grant (`cap seal`,
+/// `ikigai mcp --grant` mounted here) is held to it exactly as a network door holds a client
+/// (ledger [#899](http://localhost:1060/l/default/item/899)). Nothing else is refused here:
+/// no refusal markers and no author rules, because the socket names no principal.
 pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
-    over(Arc::new(HubSpace::over_wire(hub)), None, access)
+    over(
+        Arc::new(HubSpace::over_wire(hub)),
+        Some(crate::access::Door::Socket),
+        access,
+    )
 }
 
 /// The QUIC door's kernel: [`door_kernel_with`] behind [`crate::admit::Admitting`], so a
@@ -279,8 +291,8 @@ pub fn quic_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
 }
 
 /// The kernel every door gets: a Meta renderer, the system clock, [`NoCache`], the door's
-/// admission ([`crate::admit::Admitting`]) when it is a network door, and the access log
-/// over that when one is on — outside the admission, so a refusal is a line too. Both are
+/// admission ([`crate::admit::Admitting`]; at the socket, the raw-write rule alone), and the
+/// access log over that when one is on — outside the admission, so a refusal is a line too. Both are
 /// overlays with no identity of their own, so the arrangement at `urn:kernel:topology` is the
 /// same either way.
 fn over(
