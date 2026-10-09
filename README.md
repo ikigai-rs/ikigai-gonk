@@ -322,9 +322,13 @@ and 6.5 KB of `+1`s was enough. gonk now holds two bounds and one size, all meas
   under 10. The count is an UPPER bound by construction: the parser may read `<` as an IRI or as
   less-than, so the scan runs every reading at once and counts a closer only where every reading
   is in code — `FILTER(?a <(((…)))> 2)` cannot hide its parentheses inside an "IRI".
-- **Length: 32 KiB for a query** (`sparql::MAX_QUERY_BYTES`), because no bracket count sees a
-  chain. Not applied to an update: the ledger and the browse family write long literals through
-  `urn:iki:store:graph-update` themselves.
+- **Length: 32 KiB for a CALLER's query** (`sparql::MAX_QUERY_BYTES`), because no bracket count
+  sees a chain. Not applied to an update: the ledger and the browse family write long literals
+  through `urn:iki:store:graph-update` themselves. ★ And not applied to gonk's OWN sub-requests
+  (ledger #965): `ikigai-ledger` reads every open item's labels, links and comments in one
+  `VALUES` at about 51 bytes an item, so past some 650 open items that query is over 32 KiB, and
+  with the bound at every depth the home page, `/l/default` and `urn:iki:ledger:next` all
+  answered `400`. A flat `VALUES` builds no deep tree, and the 64 MiB stacks are the margin.
 - **Thread stacks: 64 MiB** (`stack::THREAD_STACK_BYTES`), for every thread that serves a request:
   the HTTP runtime's workers and blocking pool, the socket's thread per connection, and the QUIC
   runtime's workers. The last two are spawned inside `ikigai-ipc` and `ikigai-quic`, which take no
@@ -334,8 +338,10 @@ and 6.5 KB of `+1`s was enough. gonk now holds two bounds and one size, all meas
 
 A refusal is `400` at the HTTP door and `InvalidArgument` everywhere else, and comes before any
 parse. Both bounds are enforced in the hub, around the store and the review space
-(`sparql::bounded`), so they hold for every door; the editor page also refuses before its own
-`spargebra` parse, and `urn:sparql:*` before it reads the caller's readable graphs.
+(`sparql::bounded`), so they hold for every door: nesting at every depth, length at depth 0 — a
+request a door issued, since every door reaches the hub at the hub's depth 0. An endpoint that
+forwards a caller's text in a sub-request checks the length itself: the editor page refuses before
+its own `spargebra` parse, and `urn:sparql:*` before it reads the caller's readable graphs.
 
 **What it costs.** A stack is reserved address space, not memory: an idle 64 MiB thread costs what
 an idle 2 MiB one does. A deep request leaves the pages it touched with its thread, so the worst

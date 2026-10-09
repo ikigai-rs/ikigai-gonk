@@ -156,9 +156,9 @@ impl Endpoint for Form {
             )));
         }
         let query = inv.inline_str("query")?;
-        // Refused here, before the readable set is read, as well as at the store: the store's
-        // overlay ([`bounded`]) is what makes the bound hold for every door, and this is only
-        // the earlier, cheaper place to say so.
+        // Refused here, before the readable set is read. ★ For LENGTH this is the only check
+        // on the caller's query: the store's overlay ([`bounded`]) sees it at depth 1, where it
+        // checks nesting only (ledger #965), so this line is load-bearing, not an early copy.
         admit("query", query.as_bytes(), Text::Query)?;
         let graph = match optional(inv, "graph")? {
             Some(named) if !named.trim().is_empty() => graph_list(named),
@@ -409,7 +409,15 @@ pub enum Text {
 /// ));
 /// ```
 pub fn admit(name: &str, text: &[u8], kind: Text) -> Result<()> {
-    if kind == Text::Query && text.len() > MAX_QUERY_BYTES {
+    if kind == Text::Query {
+        admit_length(name, text)?;
+    }
+    admit_nesting(name, text)
+}
+
+/// The length half of [`admit`]: a query past [`MAX_QUERY_BYTES`] is refused.
+fn admit_length(name: &str, text: &[u8]) -> Result<()> {
+    if text.len() > MAX_QUERY_BYTES {
         return Err(Error::InvalidArgument {
             name: name.to_string(),
             detail: format!(
@@ -420,6 +428,22 @@ pub fn admit(name: &str, text: &[u8], kind: Text) -> Result<()> {
             ),
         });
     }
+    Ok(())
+}
+
+/// The nesting half of [`admit`], for any SPARQL text at any depth: past [`MAX_NESTING`] is
+/// refused. This is the half [`bounded`] applies to a sub-request (ledger
+/// [#965](http://localhost:1060/l/default/item/965)).
+///
+/// ```
+/// use ikigai_gonk::sparql::{admit_nesting, MAX_QUERY_BYTES};
+///
+/// // Long and flat is not this half's business: gonk's own ledger query is.
+/// let values = format!("SELECT * WHERE {{ VALUES ?i {{ {} }} }}", "<urn:x> ".repeat(MAX_QUERY_BYTES));
+/// assert!(admit_nesting("query", values.as_bytes()).is_ok());
+/// assert!(admit_nesting("query", "(".repeat(100).as_bytes()).is_err());
+/// ```
+pub fn admit_nesting(name: &str, text: &[u8]) -> Result<()> {
     let depth = nesting_depth(text);
     if depth > MAX_NESTING {
         return Err(Error::InvalidArgument {
@@ -622,8 +646,28 @@ mod lex {
 /// An overlay with no identity or structure of its own, like [`crate::admit::Admitting`]: it
 /// forwards `id`, `topology` and `entries`, so `urn:kernel:topology` reads the same with it
 /// or without it. Composed in the HUB, around the store and the review space, so it holds
-/// for every door and every depth — the socket, QUIC, HTTP's `/iki/…` and `/k`, and
-/// `urn:sparql:*`, which reaches the store through the hub.
+/// for every door — the socket, QUIC, HTTP's `/iki/…` and `/k`, and `urn:sparql:*`, which
+/// reaches the store through the hub.
+///
+/// # ★ Nesting at every depth; length only for a CALLER's text (ledger #965)
+///
+/// The NESTING bound holds at every depth: no text nested past [`MAX_NESTING`] reaches a
+/// parser, whoever wrote it. The LENGTH bound applies only at depth 0 — a request a door
+/// issued, which is a caller's own text: every door reaches the hub through
+/// [`crate::doors::HubSpace`], which issues at the hub's depth 0 — and `urn:sparql:*` checks
+/// its caller's query itself before it issues anything.
+///
+/// A sub-request's text was written by an endpoint in this process, and gonk's own are long
+/// and flat: `ikigai-ledger` reads labels, links and comments for every open item in one
+/// `VALUES`, about 51 bytes an item, so a ledger of some 650 open items crossed 32 KiB. With
+/// the length bound at every depth (PR 101, `eeeeeaf`) the home page, `/l/default` and
+/// `urn:iki:ledger:next` all answered `400`. A flat `VALUES` builds no deep tree; the chains
+/// the length bound exists for (`+`, `&&`, `UNION`, `/`) are not what an endpoint here
+/// writes, and the 64 MiB request stacks ([`crate::stack`]) are the margin under them.
+///
+/// ⚠ So an endpoint that forwards a CALLER's text to the store in a sub-request must run
+/// [`admit`] on it itself before it issues, as `urn:sparql:*` and the SPARQL page do — this
+/// overlay sees that text at depth 1 and checks only its nesting.
 pub fn bounded(inner: Arc<dyn Space>, rules: &'static [Rule]) -> Arc<dyn Space> {
     Arc::new(Bounded { inner, rules })
 }
@@ -692,7 +736,11 @@ impl Endpoint for Guarded {
             }
             // Only an inline value is ever parsed: every endpoint listed refuses any other.
             if let Some(ArgRef::Inline(text)) = inv.request.args.get(argument) {
-                admit(argument, text, kind)?;
+                if inv.depth() == 0 {
+                    admit(argument, text, kind)?;
+                } else {
+                    admit_nesting(argument, text)?;
+                }
             }
         }
         self.endpoint.invoke(inv).await

@@ -200,7 +200,8 @@ pub fn compose_with(
 ) -> Kernel {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
-    // process. In the hub, so it holds for every door and every depth (`crate::sparql::bounded`).
+    // process. In the hub, so it holds for every door: nesting at every depth, length for a
+    // caller's own text only, at depth 0 (ledger #965, `crate::sparql::bounded`).
     let store = crate::sparql::bounded(
         Arc::new(ikigai_store::space(store)),
         crate::sparql::STORE_RULES,
