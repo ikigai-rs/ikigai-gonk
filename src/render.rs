@@ -367,6 +367,75 @@ pub const RENDER_IRI: &str = "urn:iki:gonk:render";
 /// it (the resource is reachable by any caller with a door).
 pub const MAX_CHUNK_BYTES: usize = 1 << 20;
 
+/// The deepest a chunk document's elements may nest, counted by [`nesting_depth`] — the page
+/// envelope is level 1.
+///
+/// # ★ Why there is a depth bound at all (ledger [#880](http://localhost:1060/l/default/item/880), S2)
+///
+/// xrust parses and transforms by RECURSION, one stack frame chain per level, so stack use
+/// grows with nesting, not with size. Measured 2026-10-09 on a 2 MiB thread — the stack every
+/// tokio worker gets, and the one this resource runs on: a document nested 250 levels
+/// overflowed it in a release build, and 24 levels in a debug one. An overflow is not an
+/// error a caller sees: it ABORTS THE PROCESS. And this resource requires nothing, so on
+/// `77ac767` one GET of `/k?c=source urn:iki:gonk:render content=<view:page><a><a>…` — about
+/// 1 KB, from any page in a browser on this machine, with no session — took gonk down.
+///
+/// gonk's own chunk documents nest a handful of levels (page, group, finding, decide,
+/// option). Sixteen is several times that and below the DEBUG overflow, so the test suite can
+/// render a document at the bound on an ordinary test thread; a release build has roughly ten
+/// times the margin. ⚠ The real fix is one layer down (`ikigai-xslt` handing xrust input it
+/// cannot survive), reported to the hub; this bound protects this resource, not every caller
+/// of that crate.
+pub const MAX_CHUNK_DEPTH: usize = 16;
+
+/// How deeply `document`'s elements nest, read from its tags alone — before any parser sees
+/// it, which is the point. A self-closed element counts as a level and closes it; a closing tag
+/// ends one. Quotes inside a tag are honored, so a `>` in an attribute value does not end it.
+///
+/// It may count MORE than a parser would (a `<` inside a comment, which [`Render`] refuses
+/// anyway) and never less for a document without declarations, so as a bound it fails closed.
+///
+/// ```
+/// use ikigai_gonk::render::nesting_depth;
+/// assert_eq!(nesting_depth("<a><b/><c><d>x</d></c></a>"), 3);
+/// assert_eq!(nesting_depth("<a t=\"1>2\"><b></b></a>"), 2);
+/// assert_eq!(nesting_depth(&"<a>".repeat(400)), 400);
+/// assert_eq!(nesting_depth("text, no tags"), 0);
+/// ```
+pub fn nesting_depth(document: &str) -> usize {
+    let bytes = document.as_bytes();
+    let (mut depth, mut deepest, mut at) = (0usize, 0usize, 0usize);
+    while let Some(open) = bytes[at..].iter().position(|&b| b == b'<').map(|i| at + i) {
+        let mut end = open + 1;
+        let mut quote: Option<u8> = None;
+        while end < bytes.len() {
+            match (quote, bytes[end]) {
+                (Some(q), b) if b == q => quote = None,
+                (Some(_), _) => {}
+                (None, b @ (b'"' | b'\'')) => quote = Some(b),
+                (None, b'>') => break,
+                (None, _) => {}
+            }
+            end += 1;
+        }
+        let tag = &bytes[open + 1..end.min(bytes.len())];
+        match tag.first() {
+            Some(b'/') => depth = depth.saturating_sub(1),
+            Some(b'!' | b'?') => {}
+            _ if tag.last() == Some(&b'/') => deepest = deepest.max(depth + 1),
+            _ => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+        }
+        at = end + 1;
+        if at >= bytes.len() {
+            break;
+        }
+    }
+    deepest
+}
+
 /// Render each of `documents` (see [`chunk`]) through the kernel and concatenate the HTML.
 ///
 /// # ★ Why through the kernel (ledger #519, step 2)
@@ -429,6 +498,30 @@ impl Endpoint for Render {
                 detail: format!(
                     "{} bytes is more than the {MAX_CHUNK_BYTES} a chunk document may be",
                     document.len()
+                ),
+            });
+        }
+        // ★ Before any parser sees it (see [`MAX_CHUNK_DEPTH`]): a declaration can carry
+        // nesting the tag count cannot see — an entity whose replacement text is markup — and
+        // gonk's chunk documents carry no declaration, comment or CDATA section, so `<!` is
+        // refused outright rather than parsed around.
+        if document.contains("<!") {
+            return Err(Error::InvalidArgument {
+                name: "content".to_string(),
+                detail: "a chunk document carries no `<!` (declaration, comment or CDATA): \
+                         gonk builds none, and a declaration can nest what the depth bound \
+                         cannot count"
+                    .to_string(),
+            });
+        }
+        let depth = nesting_depth(document);
+        if depth > MAX_CHUNK_DEPTH {
+            return Err(Error::InvalidArgument {
+                name: "content".to_string(),
+                detail: format!(
+                    "the document nests {depth} levels deep, more than the {MAX_CHUNK_DEPTH} \
+                     a chunk document may: the renderer recurses once per level, and a deep \
+                     enough document overflows its stack"
                 ),
             });
         }

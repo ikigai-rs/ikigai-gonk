@@ -303,6 +303,12 @@ renderer's chunk transform (one `<view:page view="chunk">` document in, its HTML
 function of its input, cached by the hub on the content-addressed request, which is what
 makes a poll of the Queue a cache hit and a decision a one-chunk miss). It is bound in the
 hub because the hub holds the process's one cache. `tests/conformance.rs` pins both catalogs.
+⚠ It requires nothing, so every caller reaches it — the `/k` adapter forwards a `content=` from
+a GET — and its renderer recurses once per level of nesting: through `77ac767` a ~1 KB document
+nested a few hundred levels deep overflowed the worker's stack and **aborted gonk** (ledger
+#880, S2). It now refuses, before any parser sees it, a document nested more than 16 levels
+(`render::MAX_CHUNK_DEPTH`) or carrying any `<!` (a declaration can nest what a tag count
+cannot see); gonk's own chunks nest a handful of levels and carry neither.
 
 **Every form issues an action the ledger already declares.** `/act` builds the target from
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
