@@ -451,6 +451,69 @@ fn a_chain_with_no_nesting_is_answered_over_http() {
     a_chain_is_answered_through("http");
 }
 
+/// `!` is the one prefix operator spargebra reads by recursion, so a run of them nests with no
+/// bracket at all: 6,000 abort a 2 MiB release parse (measured by the sibling `ikigai-store` arc
+/// at 5,229 bytes, and here with `examples/sparql-depth.rs`, shape `not`). Counted as nesting.
+#[test]
+fn a_run_of_negations_is_refused_and_the_server_lives() {
+    let mut gonk = Gonk::start();
+    let query = format!("SELECT*{{FILTER({}1)}}", "!".repeat(6_000));
+    let (status, body) = gonk.get(&format!(
+        "/iki/store/graph-select?graph={GRAPH}&query={}",
+        encoded(&query)
+    ));
+    gonk.assert_serving("a run of negations over HTTP");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("deep"), "{body}");
+}
+
+/// `1*1*1*…`: a chain the PARSER reads by recursion (4,092 terms abort a 2 MiB release parse,
+/// the sibling arc measured; 5,000 abort the whole read here) with no nesting. Answered on the
+/// larger stacks — release 10,000 terms in about 1.3 s, debug 1,000 (which abort a 2 MiB debug
+/// thread).
+#[test]
+fn a_multiplication_chain_is_answered_over_http() {
+    let mut gonk = Gonk::start();
+    let n = if cfg!(debug_assertions) {
+        1_000
+    } else {
+        10_000
+    };
+    let query = format!("SELECT*{{FILTER(1{})}}", "*1".repeat(n));
+    assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
+    let (status, body) = gonk.get(&format!(
+        "/iki/store/graph-select?graph={GRAPH}&query={}",
+        encoded(&query)
+    ));
+    gonk.assert_serving("a multiplication chain over HTTP");
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A property path `?s a/a/a/… ?o`: 6,000 steps (12 KB) abort a 2 MiB release PARSE, and the
+/// store's own walk aborts far sooner. On the larger stacks the parse and the walk both finish —
+/// and then the store EVALUATES the path in time that grows with the cube of its length (2,000
+/// steps took 168 s in release), which is not an abort and not this arc's to bound (reported). So
+/// the request is sent and left running, and what is asserted is that gonk survives the part
+/// that used to kill it and keeps serving beside it.
+#[test]
+fn a_path_chain_does_not_abort_the_server() {
+    let mut gonk = Gonk::start();
+    let n = if cfg!(debug_assertions) { 2_000 } else { 6_000 };
+    let query = format!("SELECT*{{?s a{} ?o}}", "/a".repeat(n));
+    assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
+    // Left running, over the SOCKET (a thread of its own per connection); the child is killed
+    // when `gonk` drops.
+    let socket = gonk.socket.clone();
+    std::thread::spawn(move || {
+        if let Ok(client) = ikigai_ipc::connect(&socket) {
+            let _ = client.issue(select(&query));
+        }
+    });
+    // Release aborts in milliseconds on a 2 MiB stack; a debug parse of 2,000 steps is slower.
+    std::thread::sleep(Duration::from_secs(3));
+    gonk.assert_serving("a path chain over the socket, still being evaluated");
+}
+
 /// One element past what the length bound admits is refused, never parsed.
 #[test]
 fn a_query_past_the_length_bound_is_refused() {

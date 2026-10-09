@@ -29,8 +29,9 @@ use ikigai_store::DurableStore;
 use std::process::Command;
 use std::sync::Arc;
 
-const SHAPES: [&str; 10] = [
-    "paren", "brace", "bracket", "plus", "and", "union", "optional", "path", "apath", "alt",
+const SHAPES: [&str; 12] = [
+    "paren", "brace", "bracket", "not", "plus", "mul", "and", "union", "optional", "path", "apath",
+    "alt",
 ];
 const CEILING: usize = 200_000;
 
@@ -48,7 +49,10 @@ fn query(shape: &str, n: usize) -> String {
             "[ <urn:p> ".repeat(n),
             " ]".repeat(n)
         ),
+        // `!` is the one prefix operator the grammar reads by recursion.
+        "not" => format!("SELECT * WHERE {{ FILTER({}1) }}", "!".repeat(n)),
         "plus" => format!("SELECT * WHERE {{ FILTER(1{}) }}", "+1".repeat(n)),
+        "mul" => format!("SELECT * WHERE {{ FILTER(1{}) }}", "*1".repeat(n)),
         "and" => format!("SELECT * WHERE {{ FILTER(true{}) }}", "&&true".repeat(n)),
         "union" => format!("SELECT * WHERE {{ {{}}{} }}", " UNION {}".repeat(n)),
         "optional" => format!("SELECT * WHERE {{ {{}}{} }}", " OPTIONAL {}".repeat(n)),

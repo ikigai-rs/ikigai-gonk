@@ -346,8 +346,8 @@ fn inline(value: &str) -> ArgRef {
 
 // ------------------------------------------------------------------------- the bound
 
-/// The deepest bracket nesting gonk lets reach a SPARQL parser: `(`, `{`, `[` and `<<`, mixed,
-/// counted by [`nesting_depth`] (ledger [#915](http://localhost:1060/l/default/item/915)).
+/// The deepest nesting gonk lets reach a SPARQL parser: `(`, `{`, `[`, `<<` and the negation `!`,
+/// mixed, counted by [`nesting_depth`] (ledger [#915](http://localhost:1060/l/default/item/915)).
 ///
 /// ★ **Why a bound at all.** `spargebra` — the parser behind `oxigraph`, the store, and
 /// [`crate::web::query_form`] — reads a bracketed expression by recursion, and a stack overflow
@@ -428,7 +428,7 @@ pub fn admit(name: &str, text: &[u8], kind: Text) -> Result<()> {
                 "nests {depth} brackets deep; this server parses SPARQL nested at most \
                  {MAX_NESTING} deep (ledger #915: the parser reads nesting by recursion, and \
                  deep enough nesting overflows its stack and aborts the server). Counted are \
-                 `(`, `{{`, `[` and `<<` outside strings and comments"
+                 `(`, `{{`, `[`, `<<` and a negating `!` outside strings and comments"
             ),
         });
     }
@@ -478,6 +478,11 @@ pub fn nesting_depth(text: &[u8]) -> usize {
     let at = |i: usize| text.get(i).copied();
     let mut states: u32 = CODE;
     let (mut level, mut deepest) = (0usize, 0usize);
+    // The `!`s counted inside each open group, innermost last. A negation's level lasts until
+    // the expression it applies to ends, which no lexer can see, so it is released with the
+    // group that holds it — later than the parser releases it, never earlier. One outside every
+    // group is never released.
+    let mut groups: Vec<usize> = Vec::new();
     for (i, &b) in text.iter().enumerate() {
         if states == 0 {
             // Every reading has failed to parse; nothing past here is read by anyone.
@@ -488,12 +493,27 @@ pub fn nesting_depth(text: &[u8]) -> usize {
             b'(' | b'{' | b'[' if code => {
                 level += 1;
                 deepest = deepest.max(level);
+                groups.push(0);
             }
             b'<' if code && at(i + 1) == Some(b'<') => {
                 level += 1;
                 deepest = deepest.max(level);
+                groups.push(0);
             }
-            b')' | b'}' | b']' if states == CODE => level = level.saturating_sub(1),
+            // ★ `!` is the one prefix operator spargebra reads by recursion (`"!" _
+            // UnaryExpression()`, refused as double negation only AFTER the recursion), so
+            // `!!!!…1` nests with no bracket at all. `!=` is a comparison, not a negation.
+            b'!' if code && at(i + 1) != Some(b'=') => {
+                level += 1;
+                deepest = deepest.max(level);
+                if let Some(bangs) = groups.last_mut() {
+                    *bangs += 1;
+                }
+            }
+            b')' | b'}' | b']' if states == CODE => {
+                let bangs = groups.pop().unwrap_or(0);
+                level = level.saturating_sub(1 + bangs);
+            }
             _ => {}
         }
         states = (0..STATES)
@@ -748,6 +768,22 @@ mod tests {
         // `'` in the IRI opens a string under the less-than reading, closed after the closers.
         let string = format!("{open} ?a <urn:it's> {close} '{open}1");
         assert_eq!(depth(&string), 80);
+    }
+
+    #[test]
+    fn a_negation_counts_until_its_group_closes_and_a_comparison_never() {
+        let bangs = format!("SELECT * WHERE {{ FILTER({}1) }}", "!".repeat(100));
+        assert_eq!(depth(&bangs), 102);
+        // Whitespace between them changes nothing: the grammar skips it.
+        assert_eq!(depth(&format!("FILTER({}1)", "! ".repeat(100))), 101);
+        // Released with the group: a hundred negated FILTERs in sequence stay shallow.
+        let many = "FILTER(!BOUND(?a)) ".repeat(100);
+        assert_eq!(depth(&format!("SELECT * WHERE {{ {many} }}")), 4);
+        let unequal = format!(
+            "SELECT * WHERE {{ FILTER(?a != ?b{}) }}",
+            " && ?a != ?b".repeat(100)
+        );
+        assert_eq!(depth(&unequal), 2);
     }
 
     #[test]

@@ -47,7 +47,10 @@
 
 /// The stack every request-serving thread gets: 64 MiB, 32 times the 2 MiB default.
 ///
-/// Chosen against the measurement, not rounded up from a guess: the densest chain measured
+/// Chosen against the measurement, not rounded up from a guess. Every serving thread gets it,
+/// rather than a scoped thread spawned per parse, because the recursion that aborts is not only
+/// gonk's own parse (`web::query_form`) but the store's parse, its graph-confinement walk and its
+/// evaluation, which run inside `ikigai-store` on whatever thread issued the request: the densest chain measured
 /// (`?s a/a/a/… ?o`, two bytes an element) costs the store about 1.5 KB of stack an element in a
 /// release build, so a query at [`crate::sparql::MAX_QUERY_BYTES`] needs about 24 MiB. 64 MiB
 /// leaves more than twice that.

@@ -310,12 +310,14 @@ Through `b16f79c`, one GET of `/sparql/results?query=SELECT * WHERE { FILTER(((�
 in Rust is not a panic, it ends the process. Every door reached it — the editor page and its
 fragment, the protocol face, `/iki/store/graph-*`, `/sparql/select`, `/k`, the socket, QUIC, and
 the review space's `match` — and so did a query with no nesting at all: `{} UNION {} UNION …`,
-`1+1+…` or a path `a/a/…` is a left-deep tree the store walks by recursion, and 6.5 KB of `+1`s was
-enough. gonk now holds two bounds and one size, all measured with
+`1*1*…`, `1+1+…` or a path `a/a/…` is a left-deep tree the parser or the store walks by recursion,
+and 6.5 KB of `+1`s was enough. gonk now holds two bounds and one size, all measured with
 `cargo run --release --example sparql-depth` (which runs each probe in a child process):
 
-- **Nesting: 64** (`sparql::MAX_NESTING`). `(`, `{`, `[` and `<<`, mixed, outside strings and
-  comments. On a 2 MiB thread a release build aborted past 885 parentheses and a debug build
+- **Nesting: 64** (`sparql::MAX_NESTING`). `(`, `{`, `[`, `<<` and a negating `!`, mixed,
+  outside strings and comments. `!` is the one prefix operator the parser reads by recursion, so
+  `!!!…1` nests with no bracket (6,000 aborted a 2 MiB release parse); each one counts until the
+  group holding it closes, and `!=` is not one. On a 2 MiB thread a release build aborted past 885 parentheses and a debug build
   past 99 nested blank-node lists; gonk's own queries, its sample queries and the gonk Book's nest
   under 10. The count is an UPPER bound by construction: the parser may read `<` as an IRI or as
   less-than, so the scan runs every reading at once and counts a closer only where every reading
@@ -344,7 +346,9 @@ half of it.
 ⚠ **What this does not cover.** The 64 MiB arithmetic is a release build's; a debug build's frames
 are several times larger and only the nesting bound protects it. A chain inside the length bound is
 answered — but a PATH chain costs the store cubic time (2,000 steps took 168 s in a release
-build), so a 4 KB query can still hold a core for minutes. And any other recursion over caller
+build), so a 4 KB query can still hold a core for minutes, and operator chains are quadratic. No
+door has a timeout: the store evaluates synchronously on the request's thread, so a timeout at the
+door would answer the caller and leave the thread burning, which is not a bound. And any other recursion over caller
 input that neither bound names is only made to need a longer input, not prevented.
 
 ★ **When `ikigai-store` releases its own pre-parse bound** (ledger #915), it supersedes this
