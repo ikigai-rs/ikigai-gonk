@@ -1,5 +1,5 @@
-//! What a network door refuses BEFORE a request reaches anything it names — and who a request
-//! is from, as far as the door itself can say.
+//! What a door refuses BEFORE a request reaches anything it names — and who a request is
+//! from, as far as the door itself can say.
 //!
 //! Four decisions live here, made at the outermost endpoint of a door's kernel
 //! ([`Admitting`]). The first three are made once per host-issued request and none of them is
@@ -41,7 +41,8 @@
 //!    principal this server names, so it fills nothing.
 //!
 //! 4. **May this request write the store RAW?** (ledger
-//!    [#878](http://localhost:1060/l/default/item/878), option (b), Brian, 2026-10-09.) The
+//!    [#878](http://localhost:1060/l/default/item/878), option (b), Brian, 2026-10-09; the
+//!    socket since ledger [#899](http://localhost:1060/l/default/item/899).) The
 //!    author rule binds the AUTHOR ARGUMENT, and a raw store write passes none: a ledger
 //!    writer holds that ledger's per-graph store write token, so through 1d02e53
 //!    `urn:iki:store:graph-update` inserted a `ledger:author` triple naming anyone's passkey,
@@ -52,15 +53,26 @@
 //!    kernel, under the caller's capability, and the hub has no admission layer — this one
 //!    wraps only what arrives at a door.
 //!
-//! ⚠ **What the door cannot reach, stated so nobody believes otherwise.** The socket door has
-//! no admission layer: its caller is the owner (`0600`, peer UID checked), holds root, and can
-//! read and write the dataset's files directly, so a raw write there is the operator's, and it
-//! is where migrations and repairs run (`ikigai-gonk ledger backfill-keys`). The same is true
-//! of an owner's process that NARROWED itself to a ledger grant on the socket (`cap seal`,
-//! `ikigai mcp --grant`): the transport passes its capability through, and nothing here sees
-//! it — the one door #878's rule does not cover, pinned in `tests/raw_store_write_878.rs`. And
-//! a holder of the raw grant ([`crate::grants::ledger_graph_grants`]) can still write any
-//! triple into that graph — that is what the grant says, and only an operator mints it.
+//! ★ **The socket runs rule 4 and nothing else** (ledger
+//! [#899](http://localhost:1060/l/default/item/899)). Its caller is the owner (`0600`, peer UID
+//! checked) and normally holds root, which passes; but the transport passes the caller's
+//! capability through, so an owner process that NARROWED itself to a ledger grant (`cap seal`,
+//! `ikigai mcp --grant` mounted on the socket) carried that grant's store token to the raw doors
+//! and, through `ed43af3`, forged an author there. [`Admitting`] over [`Door::Socket`] holds it
+//! to rule 4 exactly as a network door holds a client. Rules 1–3 stay off at the socket: no door computes a refusal marker there,
+//! and the socket names no principal, so rule 2 would refuse the owner's every principal-shaped
+//! author.
+//!
+//! ⚠ **What the doors cannot reach, stated so nobody believes otherwise.** With rule 2 off, an
+//! owner process sealed to a ledger grant can still FILE an item whose `author` argument names
+//! a principal — the ledger's own argument on a new item, never a triple on someone else's
+//! (pinned in `tests/raw_store_write_878.rs`, `the_socket_keeps_no_author_rule`). An agent that
+//! must not claim a person needs an identity of its own on the QUIC door. The owner at root
+//! writes anything over the socket — that is where migrations and repairs run (`ikigai-gonk
+//! ledger backfill-keys`), and the owner can read and write the dataset's files directly
+//! anyway. And a holder of the raw grant ([`crate::grants::ledger_graph_grants`]) can still
+//! write any triple into that graph — that is what the grant says, and only an operator mints
+//! it.
 
 use std::sync::Arc;
 
@@ -352,7 +364,7 @@ pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -
         return (!capability.is_root()).then(|| {
             format!(
                 "`{}` writes the WHOLE dataset, every ledger graph included, and no grant this \
-                 server admits may carry its token: it is the owner's, over the socket. A \
+                 server admits may carry its token: it is the owner's, at root over the socket. A \
                  ledger is written through its own endpoints (`urn:iki:ledger:*`)",
                 request.target.as_str()
             )
@@ -375,7 +387,7 @@ pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -
          grant carries that graph's store token for the ledger's OWN writes, which it issues \
          itself; it is not authority to write the graph's triples directly — that is how an \
          `author` naming someone else would get in. Write through the ledger's endpoints \
-         (`urn:iki:ledger:*`). Raw writes are the owner's, over the socket, or an identity's \
+         (`urn:iki:ledger:*`). Raw writes are the owner's, at root over the socket, or an identity's \
          whose grant an operator minted with `--ledger-graph <ledger>` (`{}`)",
         crate::grants::cap_raw_write_graph(graph)
     ))
@@ -419,7 +431,8 @@ impl Space for Admitting {
     }
 }
 
-/// The endpoint [`Admitting`] resolves to: the real one, behind the two checks.
+/// The endpoint [`Admitting`] resolves to: the real one, behind the door's checks — all of
+/// them at a network door, only [`raw_write_refusal`] at the socket.
 struct Admitted {
     inner: Arc<dyn Endpoint>,
     door: Door,
@@ -431,7 +444,11 @@ impl Endpoint for Admitted {
         // A sub-request is the work of a request this already admitted, under the same
         // capability; the door's refusals and the author rule are about what arrived at it.
         let arrived = inv.depth() == 0;
-        if arrived {
+        // ★ The socket runs the raw-write rule and NOTHING else (ledger #899): its caller is
+        // the owner, no door computes a refusal marker there, and it names no principal, so
+        // the author rule would refuse the owner's every principal-shaped author.
+        let network = self.door != Door::Socket;
+        if arrived && network {
             if let Some(why) = refusal(inv.capability) {
                 return Err(Error::Denied(why.to_string()));
             }
@@ -448,7 +465,7 @@ impl Endpoint for Admitted {
         if let Some(why) = raw_write_refusal(inv.request, &description.id, inv.capability) {
             return Err(Error::Denied(why));
         }
-        if arrived {
+        if arrived && network {
             if let Some(why) = author_refusal(self.door, inv.request) {
                 return Err(Error::Denied(why));
             }

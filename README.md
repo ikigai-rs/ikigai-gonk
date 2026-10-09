@@ -1594,7 +1594,7 @@ the tree use to tell a reactive space from a plain one.
 | door | reaches it | runs under |
 | --- | --- | --- |
 | **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`); signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
-| **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files |
+| **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule here, the raw-write rule below; no `Host`/cross-site checks and no author rules |
 | **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:gonk:client:<fingerprint>` |
 
 **Anonymously, the HTTP door is loopback only and grants little.** It can list, file,
@@ -1747,17 +1747,22 @@ every door treated it as both. Any ledger writer, the anonymous loopback grant i
 could write any triple into its ledger's graph: an `author` naming someone else's passkey,
 which the item page renders as that person (ledger #878, the residual of #864 R4).
 
-**The rule** (Brian's option (b), 2026-10-09): **a network door refuses a raw store write to
-a ledger graph** unless the caller's grant carries the explicit raw grant for that graph,
-`urn:cap:gonk:raw-write:graph:<graph>`. The refusal is a `403` on the HTTP door and `Denied`
-on the QUIC door, and its access line names the stamped principal like any other. What
-counts:
+**The rule** (Brian's option (b), 2026-10-09): **every door refuses a raw store write to a
+ledger graph** unless the caller's capability is root or carries the explicit raw grant for
+that graph, `urn:cap:gonk:raw-write:graph:<graph>`. The refusal is a `403` on the HTTP door and
+`Denied` on the QUIC door and the socket, and its access line names the stamped principal like
+any other (`owner` on the socket). The socket joined on 2026-10-09 (ledger #899): its owner is
+root and passes, but an owner process that NARROWED itself to a ledger grant (`cap seal`,
+`ikigai mcp --grant` mounted on the socket) carries that grant's store token and nothing
+more, and through `ed43af3` it could write its ledger graph raw there. What counts:
 
 - `urn:iki:store:graph-update` whose `graph` is `urn:iki:ledger:graph:{name}` or its
   graveyard `urn:iki:ledger:graph:{name}:deleted` (the prefix compared ignoring case);
-- `urn:iki:store:update` and `urn:iki:store:load`, which write the whole dataset: refused at
-  a network door outright. They need the store's broad token, which no grant here may carry,
-  so this changes nothing observable — it keeps the rule from being stated wrong.
+- `urn:iki:store:update` and `urn:iki:store:load`, which write the whole dataset: refused
+  outright unless the capability is root. At a network door they need the store's broad
+  token, which no grant here may carry, so there this changes nothing observable — it keeps
+  the rule from being stated wrong. On the socket an owner process COULD seal itself to that
+  token, and is refused like any narrowed capability.
 
 **What is unchanged.** The ledger's own writes — `append`, `comment`, `close`, `link`,
 `label`, editing an item — work for the same caller with the same grant, because the ledger
@@ -1770,8 +1775,8 @@ quad authority, so it is not ambiguous and still writes raw.
 
 | who | how |
 | --- | --- |
-| the owner | over the socket (`~/.ikigai/gonk.sock`), whose capability is root. Migrations and repairs run here: `ikigai-gonk ledger backfill-keys`, a restore, the gonk Book's socket examples. ⚠ The socket has no admission layer, so this is true of ANY process on it — including one of the owner's that narrowed itself to a ledger grant (`cap seal`, `ikigai mcp --grant` mounted on the socket). Open, and reported (ledger #878) |
-| an identity an operator names | `--ledger-graph <ledger>` on `client add` or `passkey invite`, which adds the raw grant for that ledger's graph (not its graveyard — that stays the socket's) |
+| the owner | over the socket (`~/.ikigai/gonk.sock`) at ROOT, the capability a plain `ikigai --connect` carries. Migrations and repairs run here: `ikigai-gonk ledger backfill-keys`, a restore, the gonk Book's socket examples. A process of the owner's that narrowed itself on the socket is held to the rule like a network client (ledger #899) |
+| an identity an operator names | `--ledger-graph <ledger>` on `client add` or `passkey invite`, which adds the raw grant for that ledger's graph (not its graveyard — that stays root's, over the socket). On the socket, an owner process sealed to the same tokens (`ikigai-gonk grants --ledger-graph <ledger>`) |
 
 ```
 ikigai-gonk grants --ledger-graph default     # print the three tokens
@@ -1780,11 +1785,21 @@ ikigai-gonk client add ops --ledger default=write --ledger-graph default
 
 **If something now answers `403` or `Denied`** on a raw write it used to make: write through
 the ledger's endpoints (`urn:iki:ledger:*`) if the change is one they express; otherwise run
-it over the socket; and only if it must come over a network door, re-mint that identity's
-grant with `--ledger-graph <ledger>` (`--force` rewrites an existing grant, naming what it
-adds). Nothing in this repository, the bridges (`roborev file`, `kata import`, which append
+it over the socket at root (not from a sealed session); and only if it must come over a
+network door, re-mint that identity's grant with `--ledger-graph <ledger>` (`--force`
+rewrites an existing grant, naming what it adds). Nothing in this repository, the bridges (`roborev file`, `kata import`, which append
 through the ledger) or the devtools scripts wrote a ledger graph raw over a network door when
 this landed.
+
+⚠ **What the socket still allows a narrowed process, stated so nobody believes otherwise.**
+The socket runs the raw-write rule and none of the author rules: it names no principal (every
+request is `principal=owner`), so "a principal-shaped `author` must be the caller's own" would
+refuse the owner's every principal-shaped author. So an owner process sealed to a ledger grant
+can still FILE an item whose `author` argument names a passkey — the ledger's own argument on
+a new item, the same claim as `author=agent-7`, never a triple on someone else's item.
+`tests/raw_store_write_878.rs` pins it (`the_socket_keeps_no_author_rule`). An agent that
+should not be able to claim a person needs its own identity on the QUIC door, where the author
+rule runs.
 
 ## Remote access, later — what it will take
 

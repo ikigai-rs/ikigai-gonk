@@ -13,6 +13,9 @@
 //! enrolled under a ledger write grant — the Hermes shape), because the forged write was
 //! accepted and rendered.
 //!
+//! The socket section is ledger [#899](http://localhost:1060/l/default/item/899), the residual
+//! this arc left: its reproduction FAILED on `ed43af3` the same way, over a real socket.
+//!
 //! Nothing here touches a live gonk: every server binds `127.0.0.1:0` over a tempdir config
 //! home.
 
@@ -584,36 +587,285 @@ fn the_browse_graph_write_grant_still_writes_raw() {
     .expect("the browse graph's write grant writes it raw");
 }
 
-/// The socket door has no admission layer: its caller is the owner, and that is where
-/// migrations and repairs run (`ledger backfill-keys`, under root). Pinned so a change to it is
-/// a decision, not a side effect.
-///
-/// ⚠ **Both halves pinned, the second deliberately.** The socket passes the caller's
-/// capability (the transport clamps root to whatever the caller carries), so an owner process
-/// that NARROWED itself to a ledger grant — `cap seal`, `ikigai mcp --grant` mounted on the
-/// socket — can still write its ledger graph raw there. That is the #878 forgery on the one
-/// door this arc left alone; closing it means giving the socket an admission layer that runs
-/// this rule and none of the author rules (the owner may name any author). Reported to the
-/// hub rather than decided here.
-#[test]
-fn the_socket_door_is_the_owners_raw_write() {
+// ------------------------------------------------------------------------------------------
+// The socket door (ledger #899). Its caller is the owner, and the transport passes the
+// caller's capability through unchanged: root for the owner's terminal, but whatever an owner
+// process NARROWED itself to — `cap seal`, `ikigai mcp --grant` mounted on the socket — for
+// that process. Through `ed43af3` the socket had no admission layer, so a narrowed ledger
+// grant wrote its graph raw there: `the_socket_door_is_the_owners_raw_write` PINNED the
+// forgery succeeding, and `a_narrowed_owner_process_cannot_forge_an_author_over_the_socket`
+// is that test flipped — it failed on `ed43af3` with the forged author read back.
+//
+// Every test here serves a REAL `ikigai_ipc` socket in a tempdir under `$TMPDIR` (short
+// enough for `sun_path`), as `main` serves `~/.ikigai/gonk.sock`.
+// ------------------------------------------------------------------------------------------
+struct SocketDoor {
+    client: ikigai_ipc::IpcResolver,
+    hub: Arc<Kernel>,
+    _dir: tempfile::TempDir,
+}
+
+fn socket_door(access: Option<AccessLog>) -> SocketDoor {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("g.sock");
     let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-    let socket = doors::door_kernel(Arc::clone(&hub));
-    let forge = || {
+    let (door, path) = (
+        doors::door_kernel_with(Arc::clone(&hub), access),
+        socket.clone(),
+    );
+    std::thread::spawn(move || ikigai_ipc::serve(door, &path));
+    wait_for("the socket", || socket.exists());
+    SocketDoor {
+        client: ikigai_ipc::connect(&socket).expect("connect"),
+        hub,
+        _dir: dir,
+    }
+}
+
+impl SocketDoor {
+    fn issue(&self, request: Request, capability: &Capability) -> Result<Representation, Error> {
+        self.client
+            .issue_as(request, capability)
+            .map(|(answer, _)| answer)
+    }
+
+    fn append(&self, text: &str, capability: &Capability) -> String {
+        let filed = self
+            .issue(
+                request(Verb::Sink, "urn:iki:ledger:append", &[("content", text)]),
+                capability,
+            )
+            .expect("append over the socket");
+        item_iri(&String::from_utf8_lossy(&filed.bytes))
+    }
+}
+
+fn graph_update(graph: &str, update: &str) -> Request {
+    request(
+        Verb::Sink,
+        "urn:iki:store:graph-update",
+        &[("graph", graph), ("content", update)],
+    )
+}
+
+/// The reproduction, socket: an owner process sealed to the default ledger's WRITE grant (the
+/// book's `cap seal` shape, and `ikigai mcp --grant` mounted on the socket) files an item, then
+/// inserts an author naming Brian's passkey through the store's graph door. On `ed43af3` the
+/// insert succeeded and the item's author read back as Brian's passkey.
+#[test]
+fn a_narrowed_owner_process_cannot_forge_an_author_over_the_socket() {
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = Arc::clone(&lines);
+    let door = socket_door(Some(AccessLog::to(
+        Door::Socket,
+        Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
+    )));
+    let sealed = Capability::scoped(grants_for("default", Authority::Write).unwrap());
+    let item = door.append("Ship it", &sealed);
+
+    let forged = door.issue(graph_update(LEDGER_GRAPH, &forged_author(&item)), &sealed);
+    let author = author_of(&door.hub, 1);
+    assert!(
+        matches!(&forged, Err(Error::Denied(why)) if why.contains("--ledger-graph"))
+            && author.is_none(),
+        "a raw store write by a sealed ledger writer over the socket answered {forged:?}; the \
+         item's author reads {author:?}"
+    );
+    // Logged as the socket logs everything: the owner, refused.
+    let logged = lines.lock().unwrap().clone();
+    let refused = logged
+        .iter()
+        .find(|line| line.contains("graph-update"))
+        .unwrap_or_else(|| panic!("no access line for the refused write: {logged:#?}"));
+    assert!(
+        refused.contains(" door=socket ")
+            && refused.contains(" outcome=denied")
+            && refused.contains(" principal=owner "),
+        "{refused}"
+    );
+}
+
+/// The rest of the rule, over the socket for a narrowed process, exactly as at a network door:
+/// the graveyard (a DELETE grant carries its token) and the two whole-dataset doors (a process
+/// sealed to the store's broad write token, which no network grant may carry but an owner can
+/// seal to).
+#[test]
+fn every_raw_write_door_refuses_a_narrowed_capability_over_the_socket() {
+    let door = socket_door(None);
+    let graveyard = "urn:iki:ledger:graph:default:deleted";
+    let delete = Capability::scoped(grants_for("default", Authority::Delete).unwrap());
+    let forged = door.issue(
+        graph_update(
+            graveyard,
+            &format!("INSERT DATA {{ GRAPH <{graveyard}> {{ <urn:x> <urn:y> \"z\" }} }}"),
+        ),
+        &delete,
+    );
+    assert!(matches!(forged, Err(Error::Denied(_))), "{forged:?}");
+
+    let broad = Capability::scoped([ikigai_store::CAP_WRITE, ikigai_store::CAP_READ]);
+    for (iri, args) in [
+        (
+            "urn:iki:store:update",
+            vec![("content", forged_author("urn:x"))],
+        ),
+        (
+            "urn:iki:store:load",
+            vec![
+                ("content", "<urn:x> <urn:y> \"z\" .".to_string()),
+                ("graph", LEDGER_GRAPH.to_string()),
+            ],
+        ),
+    ] {
+        let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        match door.issue(request(Verb::Sink, iri, &args), &broad) {
+            Err(Error::Denied(why)) => assert!(why.contains("WHOLE dataset"), "{iri}: {why}"),
+            other => panic!("{iri}: {other:?}"),
+        }
+    }
+}
+
+/// The owner at ROOT still writes anything raw over the socket — every ledger graph, the
+/// graveyard, and both whole-dataset doors. That is where migrations and repairs run
+/// (`ledger backfill-keys`, pinned end to end in `tests/backfill_keys.rs` over a real socket).
+#[test]
+fn the_owner_at_root_still_writes_raw_over_the_socket() {
+    let door = socket_door(None);
+    let root = Capability::root();
+    let item = door.append("Ship it", &root);
+    door.issue(graph_update(LEDGER_GRAPH, &forged_author(&item)), &root)
+        .expect("the owner writes the ledger graph raw");
+    assert_eq!(author_of(&door.hub, 1).as_deref(), Some(BRIAN_PASSKEY));
+    let graveyard = "urn:iki:ledger:graph:default:deleted";
+    door.issue(
+        graph_update(
+            graveyard,
+            &format!("INSERT DATA {{ GRAPH <{graveyard}> {{ <urn:x> <urn:y> \"z\" }} }}"),
+        ),
+        &root,
+    )
+    .expect("the owner writes the graveyard raw");
+    door.issue(
         request(
             Verb::Sink,
-            "urn:iki:store:graph-update",
+            "urn:iki:store:update",
+            &[(
+                "content",
+                "INSERT DATA { GRAPH <urn:example:scratch> { <urn:x> <urn:y> \"z\" } }",
+            )],
+        ),
+        &root,
+    )
+    .expect("the owner runs a whole-dataset update");
+    door.issue(
+        request(
+            Verb::Sink,
+            "urn:iki:store:load",
             &[
-                ("graph", LEDGER_GRAPH),
-                ("content", &forged_author("urn:x")),
+                ("content", "<urn:x> <urn:y> \"loaded\" ."),
+                ("graph", "urn:example:scratch"),
             ],
+        ),
+        &root,
+    )
+    .expect("the owner bulk-loads");
+}
+
+/// An owner process sealed to a grant that carries the operator's raw token for one ledger
+/// graph (`ikigai-gonk grants … --ledger-graph`) writes that graph raw, as it would at a
+/// network door — and still not the graveyard, which the token does not name.
+#[test]
+fn a_ledger_graph_grant_writes_raw_over_the_socket() {
+    let door = socket_door(None);
+    let mut grant = grants_for("default", Authority::Write).unwrap();
+    grant.extend(ledger_graph_grants("default").unwrap());
+    let operator = Capability::scoped(grant);
+    let item = door.append("First", &operator);
+    door.issue(
+        graph_update(
+            LEDGER_GRAPH,
+            &format!(
+                "INSERT DATA {{ GRAPH <{LEDGER_GRAPH}> {{ <{item}> <{}> \"migrated\" . }} }}",
+                v::AUTHOR
+            ),
+        ),
+        &operator,
+    )
+    .expect("the raw grant writes the ledger graph over the socket");
+    let graveyard = "urn:iki:ledger:graph:default:deleted";
+    let refused = door.issue(
+        graph_update(graveyard, &format!("CLEAR GRAPH <{graveyard}>")),
+        &operator,
+    );
+    assert!(matches!(refused, Err(Error::Denied(_))), "{refused:?}");
+}
+
+/// The ledger works over the socket for the same sealed grant: append, comment, link, edit,
+/// close — the ledger's own `graph-update`s run inside the hub, out of the door's sight.
+#[test]
+fn the_ledger_still_works_over_the_socket_for_a_sealed_grant() {
+    let door = socket_door(None);
+    let sealed = Capability::scoped(grants_for("default", Authority::Write).unwrap());
+    for (iri, args) in [
+        ("urn:iki:ledger:append", vec![("content", "First")]),
+        ("urn:iki:ledger:append", vec![("content", "Second")]),
+        (
+            "urn:iki:ledger:comment",
+            vec![("item", "1"), ("content", "a comment")],
+        ),
+        (
+            "urn:iki:ledger:link",
+            vec![("item", "1"), ("content", "2"), ("type", "blocks")],
+        ),
+        (
+            "urn:iki:ledger:item:1",
+            vec![("content", "First, edited"), ("priority", "1")],
+        ),
+        ("urn:iki:ledger:close", vec![("item", "2")]),
+    ] {
+        door.issue(request(Verb::Sink, iri, &args), &sealed)
+            .unwrap_or_else(|e| panic!("{iri}: {e}"));
+    }
+    // ★ No author filled: the socket names no principal (the owner), so an unnamed write
+    // stays unattributed, exactly as before.
+    assert_eq!(author_of(&door.hub, 1), None);
+    // And a raw READ of the ledger graph is not the rule's.
+    door.issue(
+        request(
+            Verb::Source,
+            "urn:iki:store:graph-ask",
+            &[("graph", LEDGER_GRAPH), ("query", "ASK { ?s ?p ?o }")],
+        ),
+        &sealed,
+    )
+    .expect("graph-ask");
+}
+
+/// ⚠ **The author rules stay OFF at the socket, and this pins what that leaves.** The socket
+/// names no principal, so the rule "a principal-shaped author must be the caller's own" would
+/// refuse the owner's every principal-shaped author. So the owner — and an owner process
+/// sealed to a ledger grant — may still FILE an item whose `author` argument names a passkey.
+/// That is the ledger's own argument on a new item (`author=agent-7` in the gonk Book is the
+/// same claim), not a raw triple on someone else's item; it is a residual stated in
+/// `crate::admit`'s doc and reported to the hub, pinned so a change to it is a decision.
+#[test]
+fn the_socket_keeps_no_author_rule() {
+    let door = socket_door(None);
+    for capability in [
+        Capability::root(),
+        Capability::scoped(grants_for("default", Authority::Write).unwrap()),
+    ] {
+        door.issue(
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:append",
+                &[("content", "Named"), ("author", BRIAN_PASSKEY)],
+            ),
+            &capability,
         )
-    };
-    block_on(Kernel::issue(&socket, forge(), &Capability::root()))
-        .expect("the owner writes any graph raw over the socket");
-    let narrowed = Capability::scoped(grants_for("default", Authority::Write).unwrap());
-    block_on(Kernel::issue(&socket, forge(), &narrowed))
-        .expect("and so does an owner process narrowed to a ledger grant (see the doc)");
+        .expect("the socket names any author");
+    }
+    assert_eq!(author_of(&door.hub, 2).as_deref(), Some(BRIAN_PASSKEY));
 }
 
 /// The whole-dataset doors need the store's broad token, which no grant may carry — so this
