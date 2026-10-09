@@ -1049,7 +1049,12 @@ pub fn space(
                     },
                 ),
         ) as Arc<dyn Space>,
-        Arc::new(ikigai_intray::space(trigger.root.clone())) as Arc<dyn Space>,
+        // `rd` and `take` parse a caller's `match` ASK with spargebra: bounded as the store's
+        // queries are (ledger #915, `crate::sparql::bounded`).
+        crate::sparql::bounded(
+            Arc::new(ikigai_intray::space(trigger.root.clone())),
+            crate::sparql::SPACE_RULES,
+        ),
     ]
 }
 

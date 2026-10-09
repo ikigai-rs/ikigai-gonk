@@ -54,6 +54,7 @@ pub mod render;
 pub mod roborev;
 pub mod rules;
 pub mod sparql;
+pub mod stack;
 pub mod trigger;
 pub mod verdict;
 pub mod walk;
@@ -196,7 +197,13 @@ pub fn compose_with(
     trigger: Vec<Arc<dyn Space>>,
     backups: Option<crate::backup::Backups>,
 ) -> Kernel {
-    let store: Arc<dyn Space> = Arc::new(ikigai_store::space(store));
+    // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
+    // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
+    // process. In the hub, so it holds for every door and every depth (`crate::sparql::bounded`).
+    let store = crate::sparql::bounded(
+        Arc::new(ikigai_store::space(store)),
+        crate::sparql::STORE_RULES,
+    );
     // ★ Observed, not wrapped for freshness: a write through the store that can reach
     // browse's graph touches the header badge's epochs after it runs (ledger #667,
     // [`crate::browse::CachedReads::observe_store_writes`]). Every answer is the store's own.

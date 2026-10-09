@@ -1774,8 +1774,18 @@ struct Sparql {
 /// assert_eq!(query_form("ASK{}"), Some("ask"));
 /// assert_eq!(query_form("SELECT ?s WHERE { ?s ?p"), Some("select"), "unparseable: lexical");
 /// assert_eq!(query_form("INSERT DATA { <a:b> <a:b> <a:b> }"), None);
+/// // Past the bound (ledger #915): never handed to the parser, read lexically.
+/// let deep = format!("SELECT * WHERE {{ FILTER({}1{}) }}", "(".repeat(3000), ")".repeat(3000));
+/// assert_eq!(query_form(&deep), Some("select"));
 /// ```
+///
+/// ⚠ The parser recurses on nesting, and a stack overflow aborts the process, so a text past
+/// [`crate::sparql::admit`]'s bound is read lexically and never parsed here — the callers in
+/// this module refuse it first anyway; this keeps the function safe for any other.
 pub fn query_form(query: &str) -> Option<&'static str> {
+    if crate::sparql::admit("query", query.as_bytes(), crate::sparql::Text::Query).is_err() {
+        return lexical_form(query);
+    }
     match spargebra::SparqlParser::new().parse_query(query) {
         Ok(spargebra::Query::Select { .. }) => Some("select"),
         Ok(spargebra::Query::Ask { .. }) => Some("ask"),
@@ -2150,6 +2160,12 @@ impl Endpoint for Sparql {
             ));
         }
         let asked = Asked::read(inv)?;
+        // ★ Before `query_form`, which parses the text with spargebra on THIS thread: a query
+        // past the bound is a `400`, not a parse (ledger #915). On `b16f79c` one GET of
+        // `/sparql/results` nested 3000 parentheses deep aborted the process here.
+        if let Some(query) = &asked.query {
+            crate::sparql::admit("query", query.as_bytes(), crate::sparql::Text::Query)?;
+        }
 
         // ★ The PROTOCOL face (ledger #836): a caller asking for anything but HTML, and naming
         // no ledger, gets `urn:sparql:{form}` — the default dataset is the UNION of every graph
