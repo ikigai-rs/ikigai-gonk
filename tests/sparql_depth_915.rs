@@ -48,25 +48,20 @@ fn at_the_bound() -> String {
     nested(ikigai_gonk::sparql::MAX_NESTING - 2)
 }
 
-/// A chain of `n` path steps (`?s a/a/a/… ?o`): no brackets at all, a left-deep tree the store
-/// walks by recursion — the densest shape `examples/sparql-depth.rs` measured.
+/// A chain of `n` UNIONs (`{}UNION{}UNION…`): no nesting past 2, a left-deep tree the store
+/// walks by recursion, and — unlike a path chain, whose cost the store grows CUBICALLY (2,000
+/// steps took 168 s in a release build) — answered in a fraction of a second.
 fn chain(n: usize) -> String {
-    format!("SELECT*{{?s a{} ?o}}", "/a".repeat(n))
+    format!("SELECT*{{{{}}{}}}", "UNION{}".repeat(n))
 }
 
-/// A chain long enough to abort a 2 MiB stack in this build, and short enough to be answered
-/// on [`ikigai_gonk::stack::THREAD_STACK_BYTES`]. Measured with `examples/sparql-depth.rs`
-/// (store): a release build aborts past 1,406 steps at 2 MiB, a debug build past far fewer, and
-/// 64 MiB holds 32 times either. In release the chain is as long as the length bound admits —
-/// the claim [`ikigai_gonk::stack`] makes; in debug, where every frame is several times larger,
-/// 2,000 steps still abort the old stack and fit the new one.
+/// A chain long enough to abort a 2 MiB stack in this build and short enough to be answered on
+/// [`ikigai_gonk::stack::THREAD_STACK_BYTES`]. Measured with `examples/sparql-depth.rs`
+/// (store, `union`): a release build aborts past 1,127 at 2 MiB, a debug build past 163, and
+/// 64 MiB holds 32 times either. Release: 3,500 (28 KB, under the length bound); debug: 1,000.
+/// Both were checked to ABORT a 2 MiB thread and to be answered on a 64 MiB one, in 0.2 s.
 fn deep_chain() -> String {
-    if cfg!(debug_assertions) {
-        chain(2_000)
-    } else {
-        // `SELECT*{?s a` + ` ?o}` is 16 bytes; each step 2.
-        chain((ikigai_gonk::sparql::MAX_QUERY_BYTES - 16) / 2)
-    }
+    chain(if cfg!(debug_assertions) { 1_000 } else { 3_500 })
 }
 
 /// A scratch gonk in a child process. Killed and reaped on drop.
@@ -109,6 +104,12 @@ impl Gonk {
         let data = home.path().join("data");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::create_dir_all(&data).unwrap();
+        // The review space, so its `match` door is bound (no grant, not armed: nothing runs).
+        std::fs::write(
+            config.join("config.toml"),
+            "gonk.review.space = \"reviews\"\n",
+        )
+        .unwrap();
 
         // One QUIC client, enrolled for the default ledger — what `client add` writes.
         let layout = quic::Layout::in_config_home(&config);
@@ -193,11 +194,16 @@ impl Gonk {
     /// A GET the way any page can send one: by navigating the window here (ledger #880).
     /// `(0, …)` when the connection was refused or closed with no status line.
     fn get(&self, path: &str) -> (u16, String) {
+        self.get_as(path, "*/*")
+    }
+
+    /// [`Gonk::get`] with an `Accept` — `text/html` for the editor's page and fragment.
+    fn get_as(&self, path: &str, accept: &str) -> (u16, String) {
         let Ok(mut stream) = TcpStream::connect(self.http) else {
             return (0, "connection refused".to_string());
         };
         let head = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nAccept: text/html\r\n\
+            "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nAccept: {accept}\r\n\
              Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\
              Referer: http://localhost:8090/innocent.html\r\nConnection: close\r\n\r\n",
             self.http.port()
@@ -302,22 +308,32 @@ fn refused(answer: Result<Representation, Error>, what: &str) {
 fn the_http_door_refuses_a_nested_query_and_keeps_serving() {
     let mut gonk = Gonk::start();
     let bomb = encoded(&bomb());
-    for path in [
-        format!("/sparql/results?ledger=default&query={bomb}"),
-        format!("/sparql?ledger=default&query={bomb}"),
-        format!("/sparql?as=application%2Fsparql-results%2Bjson&query={bomb}"),
-        format!("/iki/store/graph-select?graph={GRAPH}&query={bomb}"),
-        format!("/iki/sparql/select?query={bomb}"),
-        format!(
-            "/k?c={}",
-            encoded(&format!(
-                "source urn:iki:store:graph-select graph={GRAPH} query={}",
-                self::bomb()
-            ))
+    let html = "text/html";
+    for (path, accept) in [
+        (format!("/sparql/results?ledger=default&query={bomb}"), html),
+        (format!("/sparql?ledger=default&query={bomb}"), html),
+        (
+            format!("/sparql?as=application%2Fsparql-results%2Bjson&query={bomb}"),
+            "*/*",
+        ),
+        (
+            format!("/iki/store/graph-select?graph={GRAPH}&query={bomb}"),
+            "*/*",
+        ),
+        (format!("/sparql/select?query={bomb}"), "*/*"),
+        (
+            format!(
+                "/k?c={}",
+                encoded(&format!(
+                    "source urn:iki:store:graph-select graph={GRAPH} query={}",
+                    self::bomb()
+                ))
+            ),
+            "*/*",
         ),
     ] {
         let shown: String = path.chars().take(60).collect();
-        let (status, body) = gonk.get(&path);
+        let (status, body) = gonk.get_as(&path, accept);
         gonk.assert_serving(&format!("GET {shown}…"));
         assert_eq!(status, 400, "GET {shown}…: {body}");
         assert!(body.contains("deep"), "GET {shown}…: {body}");
@@ -327,37 +343,36 @@ fn the_http_door_refuses_a_nested_query_and_keeps_serving() {
 #[test]
 fn the_socket_door_refuses_a_nested_query_or_update_and_keeps_serving() {
     let mut gonk = Gonk::start();
-    refused(gonk.over_socket(select(&bomb())), "graph-select");
+    let answer = gonk.over_socket(select(&bomb()));
     gonk.assert_serving("graph-select over the socket");
-    refused(
-        gonk.over_socket(sparql_select(&bomb())),
-        "urn:sparql:select",
-    );
+    refused(answer, "graph-select");
+    let answer = gonk.over_socket(sparql_select(&bomb()));
     gonk.assert_serving("urn:sparql:select over the socket");
+    refused(answer, "urn:sparql:select");
     // An update parses with the same recursion; the owner at root may send one.
     let update = format!(
         "INSERT {{ GRAPH <urn:g> {{ <urn:a> <urn:b> <urn:c> }} }} WHERE {{ FILTER({}1{}) }}",
         "(".repeat(3000),
         ")".repeat(3000)
     );
-    refused(
-        gonk.over_socket(request(
-            Verb::Sink,
-            "urn:iki:store:graph-update",
-            &[("content", &update), ("graph", "urn:g")],
-        )),
-        "graph-update",
-    );
+    let answer = gonk.over_socket(request(
+        Verb::Sink,
+        "urn:iki:store:graph-update",
+        &[("content", &update), ("graph", "urn:g")],
+    ));
     gonk.assert_serving("graph-update over the socket");
+    refused(answer, "graph-update");
 }
 
 #[test]
 fn the_quic_door_refuses_a_nested_query_and_keeps_serving() {
     let mut gonk = Gonk::start();
-    refused(gonk.over_quic(select(&bomb())), "graph-select");
+    let answer = gonk.over_quic(select(&bomb()));
     gonk.assert_serving("graph-select over QUIC");
-    refused(gonk.over_quic(sparql_select(&bomb())), "urn:sparql:select");
+    refused(answer, "graph-select");
+    let answer = gonk.over_quic(sparql_select(&bomb()));
     gonk.assert_serving("urn:sparql:select over QUIC");
+    refused(answer, "urn:sparql:select");
 }
 
 /// A query AT the bound is answered — through every door, by a server whose stacks the
@@ -383,36 +398,59 @@ fn a_query_at_the_bound_is_answered_at_every_door() {
 }
 
 /// ★ The half of #915 no bracket scan sees: a chain with no nesting at all, which the store
-/// walks by recursion. Answered, because the threads serving it are larger than 2 MiB — on the
-/// socket's per-connection thread and the QUIC runtime (both spawned inside their transport
-/// crates, reached only through `stack::enlarge_default`) and the HTTP runtime (`main`'s
-/// builder). And one byte past the length bound is refused.
-#[test]
-fn a_chain_with_no_nesting_is_answered_on_the_larger_stacks() {
+/// walks by recursion, sent through one door to a fresh gonk. Answered, because the thread
+/// serving it is larger than 2 MiB: the socket's per-connection thread and the QUIC runtime are
+/// spawned inside their transport crates and reached only through `stack::enlarge_default`;
+/// the HTTP runtime is `main`'s builder. One test per door, so each one is proven on its own —
+/// with `THREAD_STACK_BYTES` set back to 2 MiB, all three abort the child.
+fn a_chain_is_answered_through(door: &str) {
     let mut gonk = Gonk::start();
     let query = deep_chain();
     assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
-    assert!(ikigai_gonk::sparql::nesting_depth(query.as_bytes()) <= 1);
-    gonk.over_socket(select(&query))
-        .unwrap_or_else(|e| panic!("a chain over the socket: {e}"));
-    gonk.assert_serving("a chain over the socket");
-    gonk.over_quic(select(&query))
-        .unwrap_or_else(|e| panic!("a chain over QUIC: {e}"));
-    gonk.assert_serving("a chain over QUIC");
-    let (status, body) = gonk.get(&format!(
-        "/iki/store/graph-select?graph={GRAPH}&query={}",
-        encoded(&query)
-    ));
-    gonk.assert_serving("a chain over HTTP");
-    assert_eq!(status, 200, "a chain over HTTP: {body}");
+    assert_eq!(ikigai_gonk::sparql::nesting_depth(query.as_bytes()), 2);
+    let answer = match door {
+        "socket" => gonk.over_socket(select(&query)).map(|_| ()),
+        "quic" => gonk.over_quic(select(&query)).map(|_| ()),
+        _ => {
+            let (status, body) = gonk.get(&format!(
+                "/iki/store/graph-select?graph={GRAPH}&query={}",
+                encoded(&query)
+            ));
+            if status == 200 {
+                Ok(())
+            } else {
+                Err(Error::Endpoint(format!("{status} {body}")))
+            }
+        }
+    };
+    gonk.assert_serving(&format!("a chain over {door}"));
+    answer.unwrap_or_else(|e| panic!("a chain over {door}: {e}"));
+}
 
-    let past = chain(ikigai_gonk::sparql::MAX_QUERY_BYTES / 2);
+#[test]
+fn a_chain_with_no_nesting_is_answered_over_the_socket() {
+    a_chain_is_answered_through("socket");
+}
+
+#[test]
+fn a_chain_with_no_nesting_is_answered_over_quic() {
+    a_chain_is_answered_through("quic");
+}
+
+#[test]
+fn a_chain_with_no_nesting_is_answered_over_http() {
+    a_chain_is_answered_through("http");
+}
+
+/// One element past what the length bound admits is refused, never parsed.
+#[test]
+fn a_query_past_the_length_bound_is_refused() {
+    let mut gonk = Gonk::start();
+    let past = chain(ikigai_gonk::sparql::MAX_QUERY_BYTES / 7);
     assert!(past.len() > ikigai_gonk::sparql::MAX_QUERY_BYTES);
-    refused(
-        gonk.over_socket(select(&past)),
-        "a query past the length bound",
-    );
+    let answer = gonk.over_socket(select(&past));
     gonk.assert_serving("a query past the length bound");
+    refused(answer, "a query past the length bound");
 }
 
 /// The bound must never refuse what gonk itself offers: the SPARQL editor's sample queries and
@@ -434,24 +472,19 @@ fn every_sample_query_is_within_the_bound() {
     }
 }
 
-/// The review space (`urn:space:{name}`, bound when `gonk.review.space` is configured) parses a
-/// caller's `match` ASK with spargebra: bounded as the store is. In process, because the
-/// refusal comes before any parse — were it ever to regress, this binary aborting is the
-/// failure.
+/// The review space (`urn:space:{name}`, bound because this scratch config names one) parses
+/// a caller's `match` ASK with spargebra: bounded as the store is. Reachable by the owner over
+/// the socket; no network grant carries `urn:cap:space:read`.
 #[test]
-fn the_review_space_refuses_a_nested_match() {
-    let root = tempfile::tempdir().unwrap();
-    let space = ikigai_gonk::sparql::bounded(
-        std::sync::Arc::new(ikigai_intray::space(root.path().to_path_buf())),
-        ikigai_gonk::sparql::SPACE_RULES,
-    );
-    let kernel = ikigai_core::Kernel::new(space);
+fn the_review_space_refuses_a_nested_match_and_keeps_serving() {
+    let mut gonk = Gonk::start();
     let ask = format!("ASK{{FILTER({}1{})}}", "(".repeat(3000), ")".repeat(3000));
-    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
-        &kernel,
-        request(Verb::Source, "urn:space:review", &[("match", &ask)]),
-        &ikigai_core::Capability::root(),
+    let answer = gonk.over_socket(request(
+        Verb::Source,
+        "urn:space:reviews",
+        &[("match", &ask)],
     ));
+    gonk.assert_serving("a nested match over the socket");
     match answer {
         Err(Error::InvalidArgument { name, detail }) => {
             assert_eq!(name, "match");
