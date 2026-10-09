@@ -261,20 +261,15 @@ pub(crate) struct Frame<'a> {
 
 /// One root's groups of one kind, as the findings face's JSON answers them — `groups` only;
 /// the `kinds` counts are browse's and are not shown (see [`kind_nav`]).
-async fn read_groups(
-    inv: &Invocation<'_>,
+fn groups_of(
     root: &str,
     kind: &str,
+    answer: queue::Answer,
 ) -> std::result::Result<Vec<Value>, String> {
     let iri = findings_iri(root);
-    let target = Iri::parse(&iri).map_err(|_| format!("`{iri}` is not an IRI"))?;
-    let request = Request::new(Verb::Source, target)
-        .with_arg("as", ArgRef::Inline(queue::JSON.as_bytes().to_vec()))
-        .with_arg(GROUP_ARG, ArgRef::Inline(kind.as_bytes().to_vec()));
-    let answer = inv.issue(request).await.map_err(|e| format!("{e}"))?;
-    match serde_json::from_slice::<Value>(&answer.bytes) {
-        Ok(Value::Object(mut body)) => match body.remove("groups") {
-            Some(Value::Array(groups)) => Ok(groups),
+    match answer?.as_ref() {
+        Value::Object(body) => match body.get("groups") {
+            Some(Value::Array(groups)) => Ok(groups.clone()),
             _ => Err(format!(
                 "`{iri}` {GROUP_ARG}={kind} answered no `groups` array"
             )),
@@ -283,6 +278,20 @@ async fn read_groups(
             "`{iri}` {GROUP_ARG}={kind} answered something that is not a JSON object"
         )),
     }
+}
+
+/// [`groups_of`] one root's read, through the Queue's shared reads ([`queue::read_answer`]).
+async fn read_groups(
+    web: &Web,
+    inv: &Invocation<'_>,
+    root: &str,
+    kind: &str,
+) -> std::result::Result<Vec<Value>, String> {
+    groups_of(
+        root,
+        kind,
+        queue::read_answer(web, inv, root, (GROUP_ARG, kind)).await,
+    )
 }
 
 fn is_null_or_absent(group: &Value, key: &str) -> bool {
@@ -301,13 +310,14 @@ type Proposal = (String, BTreeSet<String>);
 /// Every target-only proposal of the given kinds on one root, each with its suggested word —
 /// one grouped read per kind; a kind that cannot be read proposes nothing here.
 async fn target_only_proposals(
+    web: &Web,
     inv: &Invocation<'_>,
     root: &str,
     kinds: &[String],
 ) -> Vec<(Proposal, Option<String>)> {
     let mut found = Vec::new();
     for kind in kinds {
-        if let Ok(theirs) = read_groups(inv, root, kind).await {
+        if let Ok(theirs) = read_groups(web, inv, root, kind).await {
             found.extend(
                 theirs
                     .iter()
@@ -366,6 +376,7 @@ fn suggested(group: &Value) -> Option<&str> {
 /// no word (the one case an earlier group can win). A view whose groups all carry a twin or
 /// a kept row pays nothing.
 async fn fold_repeats(
+    web: &Web,
     inv: &Invocation<'_>,
     root: &str,
     earlier: &[String],
@@ -375,12 +386,12 @@ async fn fold_repeats(
     if !groups.iter().any(by_target_only) {
         return 0;
     }
-    let elsewhere_later = target_only_proposals(inv, root, later).await;
+    let elsewhere_later = target_only_proposals(web, inv, root, later).await;
     let elsewhere_earlier = if groups
         .iter()
         .any(|g| by_target_only(g) && suggested(g).is_none())
     {
-        target_only_proposals(inv, root, earlier).await
+        target_only_proposals(web, inv, root, earlier).await
     } else {
         Vec::new()
     };
@@ -445,12 +456,14 @@ pub(crate) async fn section(
     // The reads, one grouped read per chosen root (and the other kinds' only to fold).
     let mut read: Vec<(String, std::result::Result<Vec<Value>, String>)> = Vec::new();
     let mut folded = 0usize;
-    for root in chosen {
-        let mut answer = read_groups(inv, root, kind).await;
+    // ★ Every root's groups at once, through the Queue's shared reads (ledger #947): a root
+    // nothing has moved is not read again, and the rest are read several at a time.
+    for (root, answer) in queue::read_answers(web, inv, chosen, (GROUP_ARG, kind)).await {
+        let mut answer = groups_of(&root, kind, answer);
         if let Ok(groups) = &mut answer {
-            folded += fold_repeats(inv, root, &earlier, &later, groups).await;
+            folded += fold_repeats(web, inv, &root, &earlier, &later, groups).await;
         }
-        read.push((root.clone(), answer));
+        read.push((root, answer));
     }
 
     // ★★ THE GATE, as on the rows (ledger #496): under the serious scope a member is shown

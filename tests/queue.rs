@@ -1519,6 +1519,9 @@ fn the_header_badge_renders_the_depth_and_polls_for_it() {
         )),
         "{rendered}"
     );
+    // ★ And a tick during a poll still in flight is dropped, never queued behind it (ledger
+    // #947): a slow poll must not become back-to-back polls.
+    assert!(rendered.contains("hx-sync='this:drop'"), "{rendered}");
 
     // …and the fragment it polls.
     let answer = issue(
@@ -2229,6 +2232,102 @@ fn the_badge_rereads_a_root_only_when_something_says_it_moved() {
         "the watcher never reported {thread} within its deadline"
     );
     assert_eq!(serious_count(&badge(door)), 5, "the cut re-read the root");
+}
+
+/// ★★ **The Queue page reads the badge's memo, and the badge reads the page's** (ledger
+/// [#947](http://localhost:1060/l/default/item/947)). On the live dataset one root's findings
+/// read cost ~0.85 s whatever its size, and the page read all 48 roots on every load — 52 s —
+/// while the badge beside it held the same rows' counts. The proof of a shared read is the
+/// same as #667's: a write no epoch sees leaves BOTH faces stale, and a write one does moves
+/// both.
+#[test]
+fn the_page_and_the_badge_share_one_read_per_root() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = Trigger {
+        space: "reviews".to_string(),
+        grant: None,
+        root: spaces.path().to_path_buf(),
+        arm: false,
+    };
+    ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
+    let counting = door_counting(&dir, trigger);
+    let (door, reviewer) = (&counting.door, reviewer());
+    let (serious, _) = a_serious_and_an_other_word(door);
+    let id = |n: u32| format!("aaaabbbbccccddddeeee{n:04}");
+
+    plant_finding(door, &reviewer, &id(1), Some(&serious), "The first claim.");
+    // The PAGE reads first, then the badge counts from what the page read.
+    assert!(page(door, &[], &reviewer).contains("The first claim."));
+    plant_finding(
+        &counting.elsewhere,
+        &reviewer,
+        &id(2),
+        Some(&serious),
+        "The unseen claim.",
+    );
+    assert_eq!(
+        serious_count(&badge(door)),
+        1,
+        "the badge counted the page's read: nothing said the root moved"
+    );
+    let stale = page(door, &[], &reviewer);
+    assert!(
+        stale.contains("The first claim.") && !stale.contains("The unseen claim."),
+        "and the page read nothing either — the stale list is the proof"
+    );
+
+    // A write the epochs see moves both, and a decision is one.
+    decide_by_form(door, &format!("id={}&decision=decline", id(1)));
+    let fresh = page(door, &[], &reviewer);
+    assert!(
+        fresh.contains("The unseen claim.") && !fresh.contains("The first claim."),
+        "the decision touched the root: the page re-read it"
+    );
+    assert_eq!(
+        serious_count(&badge(door)),
+        1,
+        "one pending, the other decided"
+    );
+
+    // ★ Another STATE is another read, never an answer from the pending one.
+    let declined = page(door, &[("state", "declined")], &reviewer);
+    assert!(declined.contains("The first claim."), "{declined}");
+
+    // ★ On a runtime — the HTTP door's case — the reads a page needs are SPAWNED, each on a
+    // worker of its own. The same rows, through the same memo: a write the epochs see is read,
+    // and the answer is held for the next caller off the runtime.
+    plant_finding(
+        door,
+        &reviewer,
+        &id(3),
+        Some(&serious),
+        "The spawned claim.",
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("a runtime");
+    let request = Request::new(Verb::Source, Iri::parse(queue::QUEUE_IRI).expect("an IRI"));
+    let spawned = runtime
+        .block_on(door.issue(request, &reviewer))
+        .expect("the page on a runtime");
+    let spawned = String::from_utf8(spawned.bytes).expect("utf-8");
+    assert!(
+        spawned.contains("The spawned claim.") && spawned.contains("The unseen claim."),
+        "{spawned}"
+    );
+    plant_finding(
+        &counting.elsewhere,
+        &reviewer,
+        &id(4),
+        Some(&serious),
+        "Unseen again.",
+    );
+    assert!(
+        !page(door, &[], &reviewer).contains("Unseen again."),
+        "the spawned read was kept: the next page read nothing"
+    );
 }
 
 /// One judge verdict on one finding, the shape browse's `judge::store_verdict` writes (as

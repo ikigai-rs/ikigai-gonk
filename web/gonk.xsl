@@ -120,10 +120,15 @@
        observes, so a depth that stops falling is the whole symptom of a dead watcher. It
        polls rather than blinking — the web-demo nav clock's shape, at the interval
        src/queue.rs::BADGE_EVERY names, so the number and the cadence are the Rust side's
-       and not this file's. -->
+       and not this file's.
+
+       ★ `hx-sync="this:drop"` (ledger #947): a tick that comes while this badge's last poll
+       is still in flight is DROPPED, not queued. htmx's default queues the last one, so a poll
+       slower than the interval ran back to back forever, and every one of them was work the
+       server did again. -->
   <xsl:template match="view:queue">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Queue<xsl:if test="@depth-url">
-      <span class="queue-badge" hx-swap="innerHTML">
+      <span class="queue-badge" hx-swap="innerHTML" hx-sync="this:drop">
         <xsl:attribute name="hx-get"><xsl:value-of select="@depth-url"/></xsl:attribute>
         <xsl:attribute name="hx-trigger">load, every <xsl:value-of select="@every"/></xsl:attribute>
       </span>

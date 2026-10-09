@@ -38,7 +38,7 @@
 
 use serde_json::Value;
 
-use ikigai_core::{ArgRef, Error, Invocation, Iri, Kernel, Representation, Request, Result, Verb};
+use ikigai_core::{Error, Invocation, Kernel, Representation, Result, Verb};
 
 use crate::queue::{
     self, browse_url, can_decide, decision_words, finding_iri, findings_iri, flag, one_of,
@@ -145,16 +145,11 @@ pub(crate) struct Frame<'a> {
 }
 
 /// One root's walk, as the findings face's JSON answers it: the `unconfirmed` object.
-async fn read_walk(inv: &Invocation<'_>, root: &str) -> std::result::Result<Value, String> {
+fn walk_of(root: &str, answer: queue::Answer) -> std::result::Result<Value, String> {
     let iri = findings_iri(root);
-    let target = Iri::parse(&iri).map_err(|_| format!("`{iri}` is not an IRI"))?;
-    let request = Request::new(Verb::Source, target)
-        .with_arg("as", ArgRef::Inline(queue::JSON.as_bytes().to_vec()))
-        .with_arg(SUMMARY_ARG, ArgRef::Inline(WALK.as_bytes().to_vec()));
-    let answer = inv.issue(request).await.map_err(|e| format!("{e}"))?;
-    match serde_json::from_slice::<Value>(&answer.bytes) {
-        Ok(Value::Object(mut body)) => match body.remove(WALK) {
-            Some(walk @ Value::Object(_)) => Ok(walk),
+    match answer?.as_ref() {
+        Value::Object(body) => match body.get(WALK) {
+            Some(walk @ Value::Object(_)) => Ok(walk.clone()),
             _ => Err(format!(
                 "`{iri}` {SUMMARY_ARG}={WALK} answered no `{WALK}` object"
             )),
@@ -202,8 +197,9 @@ pub(crate) async fn section(
     let mut groups: Vec<Group> = Vec::new();
     let mut refused: Vec<(String, String)> = Vec::new();
     let (mut count, mut steered) = (0u64, 0u64);
-    for root in chosen {
-        match read_walk(inv, root).await {
+    // Every root at once, through the Queue's shared reads (ledger #947).
+    for (root, answer) in queue::read_answers(web, inv, chosen, (SUMMARY_ARG, WALK)).await {
+        match walk_of(&root, answer) {
             Err(why) => refused.push((root.clone(), why)),
             Ok(walk) => {
                 count += walk.get("count").and_then(Value::as_u64).unwrap_or(0);
