@@ -619,8 +619,8 @@ serde = "1"
 # anyone building without our lockfile, which `cargo install` without `--locked` is (rule 9d).
 # ★ 0.2.1 (ledger #916, #1040, #1047): caller XML is bounded in depth and runs on a sized stack,
 # and EVERY transform is answered within a time budget — 5 s unless the host names its own.
-# gonk names its own (`render::RENDER_BUDGET`, 60 s): the 5 s default refused ordinary pages in a
-# debug build on a loaded machine. `^0.1.3` was `<0.2.0`.
+# gonk names its own (`render::RENDER_BUDGET`, 60 s in release, 10 min in debug): the 5 s
+# default refused ordinary pages in a debug build on a loaded machine. `^0.1.3` was `<0.2.0`.
 ikigai-xslt = "0.2.1"
 # The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
 # only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so

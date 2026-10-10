@@ -52,7 +52,7 @@ const STORE_IDS: [&str; 13] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 20] = [
+const LEDGER_IDS: [&str; 21] = [
     "ledger-append",
     "ledger-claim",
     "ledger-close",
@@ -60,6 +60,7 @@ const LEDGER_IDS: [&str; 20] = [
     "ledger-defer",
     "ledger-doctor",
     "ledger-item",
+    "ledger-item-about",
     "ledger-item-closed",
     "ledger-item-holder-is",
     "ledger-item-state",
@@ -247,6 +248,17 @@ fn fixtures(a: &str, b: &str, c: &str) -> Suite {
                 .binding("holder", "none"),
         )
         .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", a))
+        // 0.6.x (ledger #398): what an item is about, added and removed on its own.
+        .fixture(
+            Fixture::new("ledger-item-about", Verb::Sink)
+                .binding("id", a)
+                .arg("content", &target),
+        )
+        .fixture(
+            Fixture::new("ledger-item-about", Verb::Delete)
+                .binding("id", a)
+                .arg("content", &target),
+        )
         .fixture(Fixture::new("ledger-lifecycle", Verb::Source).binding("name", "kata-flight"))
         .fixture(Fixture::new("ledger-lifecycle", Verb::Exists).binding("name", "kata-flight"))
 }
@@ -258,6 +270,10 @@ fn suite(a: &str, b: &str, c: &str) -> Suite {
         .cacheable("ledger-item")
         .cacheable("ledger-next")
         .pure("ledger-policy")
+        // A built-in lifecycle is compiled in: pure, as ikigai-ledger's own suite declares it
+        // (conformance 0.6's CACHEABLE rule asks a cacheable read with no thread but its own
+        // name to say so).
+        .pure("ledger-lifecycle")
         // A chunk's HTML is a function of the document alone; the content-addressed
         // request is the cache key and nothing needs a thread to cut.
         .pure("gonk-render")
