@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; a `403` at the edge, before `OPTIONS`, `?description` or dispatch, for a foreign `Host`, a cross-site write, or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME beside the authority — the session's `principal`, `urn:iki:gonk:client:<fingerprint>` ([`crate::quic::minter`]), stamped on every request: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
@@ -426,7 +426,8 @@ pub struct HttpDoor {
 /// [`crate::admit::REFUSED_CROSS_SITE`]) that the door's admission overlay
 /// ([`crate::admit::Admitting`]) answers with `Denied` — a `403` — before anything runs. Since
 /// ledger #879 the edge refuses the same requests even earlier ([`http_admit`], one decision in
-/// [`http_refusal`]), so on the served door the marker is a second line, not the first.
+/// [`http_refusal`]), so on the served door the marker is a second line, not the first — and
+/// the edge answers a foreign `Host` `421`, not `403` ([`refusal_status`], ledger #2).
 ///
 /// ★ **An anonymous caller is strictly weaker than any identity**, because an identity's
 /// capability is the anonymous one PLUS its grant, and `ikigai-gonk passkey invite` refuses a
@@ -616,9 +617,10 @@ fn origin_of(url: &str) -> String {
     format!("{scheme}://{authority}")
 }
 
-/// The HTTP door's admission hook ([`EdgeConfig::admit_fn`], `ikigai-web` 0.1.41): a `403`
+/// The HTTP door's admission hook ([`EdgeConfig::admit_fn`], `ikigai-web` 0.1.41): a refusal
 /// with [`crate::admit::refusal`]'s sentence for every request [`http_refusal`] refuses,
-/// answered BEFORE the push stream, `OPTIONS`, the `?description` face and dispatch.
+/// answered BEFORE the push stream, `OPTIONS`, the `?description` face and dispatch — with
+/// the status [`refusal_status`] names: `421` for a foreign `Host`, `403` for the rest.
 ///
 /// ★ Ledger [#879](http://localhost:1060/l/default/item/879), item 1. Until this hook the
 /// refusal existed only as a capability, and the library answers `OPTIONS` (the declared
@@ -629,12 +631,37 @@ pub fn http_admit(door: HttpDoor) -> AdmitFn {
         let marker = http_refusal(&door, request)?;
         let capability = Capability::scoped([marker.to_string()]);
         Some(Refusal {
-            status: 403,
+            status: refusal_status(marker),
             reason: crate::admit::refusal(&capability)
                 .unwrap_or("this door refused the request")
                 .to_string(),
         })
     })
+}
+
+/// The HTTP status [`http_admit`] answers a refusal marker with.
+///
+/// ★ **`421 Misdirected Request` for a foreign `Host`** (ledger
+/// [#2](http://localhost:1060/l/default/item/2)), because that is what it is: the request
+/// names a server this one is not (RFC 9110 §15.5.20), and a `403` would say this server is
+/// the authority for that name and declines. A DNS-rebinding page learns nothing more from
+/// either — the refusal comes before `OPTIONS`, `?description` and dispatch alike — but a
+/// person reading a log or a status line can tell "wrong name" from "not allowed" without
+/// opening the body. Everything else this door refuses is a `403`: the name was right and the
+/// request was not allowed (a cross-site write, a read another page loads).
+///
+/// ```
+/// use ikigai_gonk::{admit, doors::refusal_status};
+/// assert_eq!(refusal_status(admit::REFUSED_FOREIGN_HOST), 421);
+/// assert_eq!(refusal_status(admit::REFUSED_CROSS_SITE), 403);
+/// assert_eq!(refusal_status(admit::REFUSED_FOREIGN_LOAD), 403);
+/// ```
+pub fn refusal_status(marker: &str) -> u16 {
+    if marker == crate::admit::REFUSED_FOREIGN_HOST {
+        421
+    } else {
+        403
+    }
 }
 
 /// [`http_cap`]'s scope list, with the clock as an argument.

@@ -562,7 +562,8 @@ fn a_foreign_host_and_a_cross_site_write_are_refused_on_every_path() {
         ("POST", "/auth/session"),
     ] {
         let (status, body) = server.raw(method, path, std::slice::from_ref(&rebound), "");
-        assert_eq!(status, 403, "{method} {path} under a foreign Host: {body}");
+        // `421 Misdirected Request`, not `403` (ledger #2): the request named another server.
+        assert_eq!(status, 421, "{method} {path} under a foreign Host: {body}");
     }
     for path in [
         "/auth/login-options",
@@ -630,7 +631,7 @@ fn a_refused_request_gets_no_options_and_no_description() {
         ] {
             let (status, body) = server.raw(method, &format!("{path}{query}"), &rebound, "");
             assert_eq!(
-                status, 403,
+                status, 421,
                 "{method} {path}{query} under a foreign Host: {body}"
             );
             assert!(
