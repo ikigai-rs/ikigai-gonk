@@ -732,6 +732,63 @@ fn our_names(bind: SocketAddr) -> Vec<String> {
     names
 }
 
+/// The URL that reaches an HTTP door bound at `bind`, as the startup banner prints it.
+///
+/// `localhost` only for `127.0.0.1`, the one address `localhost` is sure to reach and the
+/// one a passkey can be used at (WebAuthn refuses an IP address as a relying party). Any other
+/// loopback bind — `127.0.0.2`, `[::1]` — gets its own IP literal, which is the name the door
+/// answers to there ([`http_refusal`], ledger #1045): before this the banner printed `localhost`
+/// for every bind, and for `127.0.0.2` that names an address where nothing listens.
+///
+/// ```
+/// use ikigai_gonk::doors::http_url;
+/// assert_eq!(http_url("127.0.0.1:1060".parse().unwrap()), "http://localhost:1060/");
+/// assert_eq!(http_url("127.0.0.2:1070".parse().unwrap()), "http://127.0.0.2:1070/");
+/// assert_eq!(http_url("[::1]:1060".parse().unwrap()), "http://[::1]:1060/");
+/// ```
+pub fn http_url(bind: SocketAddr) -> String {
+    match bind.ip() {
+        IpAddr::V4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => {
+            format!("http://localhost:{}/", bind.port())
+        }
+        IpAddr::V4(ip) => format!("http://{ip}:{}/", bind.port()),
+        IpAddr::V6(ip) => format!("http://[{ip}]:{}/", bind.port()),
+    }
+}
+
+/// Why passkeys cannot be used at [`http_url`]'s address, or `None` when they can.
+///
+/// The relying party is always `localhost` ([`crate::identity::Passkeys::new`]), because
+/// WebAuthn refuses an IP address as one. So a door bound anywhere but `127.0.0.1` cannot use
+/// a passkey from its own URL — and `localhost` reaches it only where the name resolves to
+/// the bound address, which for `[::1]` depends on the client and for `127.0.0.2` never holds.
+///
+/// ```
+/// use ikigai_gonk::doors::passkey_caveat;
+/// assert_eq!(passkey_caveat("127.0.0.1:1060".parse().unwrap()), None);
+/// assert!(passkey_caveat("127.0.0.2:1070".parse().unwrap())
+///     .unwrap()
+///     .starts_with("passkeys cannot work on this bind"));
+/// assert!(passkey_caveat("[::1]:1060".parse().unwrap())
+///     .unwrap()
+///     .contains("http://localhost:1060/"));
+/// ```
+pub fn passkey_caveat(bind: SocketAddr) -> Option<String> {
+    match bind.ip() {
+        IpAddr::V4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => None,
+        IpAddr::V6(ip) if ip == std::net::Ipv6Addr::LOCALHOST => Some(format!(
+            "passkeys need http://localhost:{}/ (WebAuthn refuses an IP address as a relying \
+             party), which reaches this bind only where localhost resolves to ::1",
+            bind.port()
+        )),
+        _ => Some(format!(
+            "passkeys cannot work on this bind: WebAuthn refuses an IP address as a relying \
+             party, and localhost names 127.0.0.1, not {}",
+            bind.ip()
+        )),
+    }
+}
+
 /// This door's names, with or without its port ([`our_names`]).
 fn host_is_ours(host: Option<&str>, bind: SocketAddr) -> bool {
     let Some(host) = host else {

@@ -527,15 +527,23 @@ fn serve(flags: &config::Flags) -> ! {
             env!("CARGO_PKG_VERSION"),
             store_path.display()
         );
-        // ★ The `localhost` form, never the bound IP: WebAuthn refuses an IP address as a
-        // relying party, so a page opened at 127.0.0.1 cannot use a passkey at all.
+        // ★ The URL that REACHES this bind (`doors::http_url`): `localhost` for 127.0.0.1,
+        // because WebAuthn refuses an IP address as a relying party and a page opened at
+        // 127.0.0.1 cannot use a passkey at all; the bound IP for any other loopback address,
+        // where `localhost` would name a port nothing listens on — and then the banner says
+        // passkeys cannot work there.
+        let bound = std::net::SocketAddr::new(settings.http.ip(), port);
         eprintln!(
-            "  http    http://localhost:{port}/ — loopback ({}); anonymous read+write: {}; {} passkey(s); anonymous SPARQL budget {} ms",
+            "  http    {} — loopback ({}); anonymous read+write: {}; {} passkey(s); anonymous SPARQL budget {} ms",
+            doors::http_url(bound),
             settings.http,
             settings.http_ledgers.join(", "),
             passkeys.enrolled_count(),
             settings.anonymous_sparql_budget_ms
         );
+        if let Some(caveat) = doors::passkey_caveat(bound) {
+            eprintln!("          ⚠ {caveat}");
+        }
         eprintln!("  browse  {browse_line}");
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
@@ -565,7 +573,7 @@ fn serve(flags: &config::Flags) -> ! {
             // The address actually bound: the configured IP, with the port the listener got
             // (a config may ask for 0). Its IP is one of the names the door answers to
             // (ledger #1045).
-            bind: std::net::SocketAddr::new(settings.http.ip(), port),
+            bind: bound,
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: settings.anonymous_sparql_budget_ms,
         };

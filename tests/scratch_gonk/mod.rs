@@ -222,14 +222,13 @@ impl Gonk {
     }
 }
 
-/// The port the banner's `http` line names: `  http    http://localhost:{port}/ — …`.
+/// The port the banner's `http` line names: `  http    http://{host}:{port}/ — …`, where the
+/// host is `localhost` for a `127.0.0.1` bind and the bound IP otherwise (`doors::http_url`).
 fn banner_port(log: &str) -> Option<u16> {
-    let at = log.find("http://localhost:")? + "http://localhost:".len();
-    log[at..]
-        .split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()
+    let line = log.lines().find(|l| l.trim_start().starts_with("http "))?;
+    let at = line.find("http://")? + "http://".len();
+    let authority = line[at..].split('/').next()?;
+    authority.rsplit_once(':')?.1.parse().ok()
 }
 
 impl Drop for Gonk {

@@ -4723,3 +4723,52 @@ fn verdict_triage() -> [&'static str; 3] {
 fn verdict_arg() -> &'static str {
     ikigai_gonk::verdict::refuted_arg().expect("a verdict set is adopted")
 }
+
+/// ★ **Ledger [#480](http://localhost:1060/l/default/item/480): one row bound, one rule, on
+/// both pages.** The queue used to REFUSE `?limit=1000` while the ledger listing drew it at
+/// the cap, so one number in one server's URLs meant two things. The rule both pages now
+/// share (`ikigai_gonk::rows`): a count past the cap is drawn at the cap and the count
+/// sentence says what was drawn out of what, exactly as `limit=all` always has been; a value
+/// that is not a positive count is refused, naming the cap.
+#[test]
+fn a_limit_past_the_cap_is_drawn_at_the_cap_like_the_ledger_page() {
+    let dir = scratch_root();
+    let (door, _config) = door(&dir, None);
+    let reviewer = reviewer();
+    plant_pending_finding(&door, &reviewer);
+
+    let past = ikigai_gonk::rows::MAX_ROWS + 500;
+    let drawn = issue(
+        &door,
+        Verb::Source,
+        queue::QUEUE_IRI,
+        &[("limit", &past.to_string())],
+        &reviewer,
+    )
+    .unwrap_or_else(|e| panic!("`limit={past}` is drawn at the cap, not refused: {e}"));
+    let drawn = String::from_utf8(drawn.bytes).expect("utf-8");
+    assert!(
+        drawn.contains("The bound truncates instead of refusing.")
+            && drawn.contains("1 serious pending finding in demo"),
+        "{drawn}"
+    );
+
+    for bad in ["0", "none", "-3"] {
+        match issue(
+            &door,
+            Verb::Source,
+            queue::QUEUE_IRI,
+            &[("limit", bad)],
+            &reviewer,
+        ) {
+            Err(ikigai_core::Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "limit");
+                assert!(
+                    detail.contains(&ikigai_gonk::rows::MAX_ROWS.to_string()),
+                    "the refusal names the cap: {detail}"
+                );
+            }
+            other => panic!("`limit={bad}` must be refused: {other:?}"),
+        }
+    }
+}

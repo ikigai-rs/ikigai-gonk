@@ -61,6 +61,7 @@ use serde_json::{json, Value};
 
 use crate::identity::{self, Passkeys, Purpose};
 use crate::render::{self, element, envelope, Graph};
+use crate::rows;
 use crate::rules::{self, Rules};
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -68,21 +69,8 @@ const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
 const DCTERMS: &str = "http://purl.org/dc/terms/";
 pub(crate) const HTML: &str = "text/html";
 
-/// How many rows a ledger listing RENDERS unless the caller asks for more.
-///
-/// ★ **This is a latency bound and the number is measured, not chosen.** `xrust` builds the
-/// result tree node by node and the cost is in what it WRITES, not what it reads: the list
-/// page costs ~150 ms of chrome plus ~6 ms per row at fifty rows and ~15 ms per row at four
-/// hundred — 410 rows measured 6.5 s, which is the whole of the ~6 s page (parsing the
-/// Turtle, adding the view triples and serializing RDF/XML together cost 70 ms of it).
-/// Handing the stylesheet a SMALLER GRAPH does not help — a 3.4× smaller input moved the
-/// same render by 3% — so the only lever is fewer rows. `examples/render-cost.rs` is how to
-/// take those numbers again; ledger #443 carries the first set.
-const ROWS: usize = 50;
-
-/// The ceiling on one render, whatever `limit` asks for — about eight seconds' worth.
-/// A caller who wants the whole ledger wants the Turtle face, not this page.
-const MAX_ROWS: usize = 500;
+// The row bound — `ROWS`, `MAX_ROWS`, `rows_wanted` — is `crate::rows`, shared with the
+// review queue so one `?limit` means one thing on both pages (ledger #480).
 
 /// How many items the listing READS in order to count them.
 ///
@@ -807,7 +795,7 @@ struct Listing<'a> {
     status: &'a str,
     /// A case-insensitive substring of the title.
     text: Option<&'a str>,
-    /// How many rows to render — see [`rows_wanted`]. The filter above is what gets
+    /// How many rows to render — see [`rows::rows_wanted`]. The filter above is what gets
     /// COUNTED; this is only what gets drawn.
     limit: Option<&'a str>,
 }
@@ -832,7 +820,7 @@ async fn ledger_listing(
             detail: format!("`{status}` is not one of open, closed, all"),
         });
     }
-    let rows = rows_wanted(limit)?;
+    let wanted = rows::rows_wanted(limit)?;
     let mut items = with(
         with(
             request(Verb::Source, &format!("{}items", ledger.prefix()))?,
@@ -847,7 +835,7 @@ async fn ledger_listing(
         items = with(items, "text", text);
     }
     let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
-    let (count, order) = newest_rows(&mut graph, rows);
+    let (count, order) = newest_rows(&mut graph, wanted);
     enrich_items(&mut graph, ledger, inv, status);
     enrich_authors(&mut graph, &web.passkeys);
     let ledgers = readable_ledgers(web, inv);
@@ -917,24 +905,6 @@ async fn ledger_listing(
     ))
 }
 
-/// How many rows the caller asked to see: [`ROWS`] by default, `all` for as many as one
-/// render is allowed, and anything above [`MAX_ROWS`] clamped down to it rather than
-/// refused — a bound that refuses a number a person typed into a URL helps nobody, and the
-/// page SAYS what it rendered.
-fn rows_wanted(limit: Option<&str>) -> Result<usize> {
-    match limit {
-        None => Ok(ROWS),
-        Some("all") => Ok(MAX_ROWS),
-        Some(other) => match other.parse::<usize>() {
-            Ok(n) if n > 0 => Ok(n.min(MAX_ROWS)),
-            _ => Err(Error::InvalidArgument {
-                name: "limit".to_string(),
-                detail: format!("`{other}` is not a positive number of rows, or `all`"),
-            }),
-        },
-    }
-}
-
 /// What a listing rendered, and out of what.
 struct Count {
     /// Rows left in the graph.
@@ -961,10 +931,14 @@ impl Count {
         if self.shown >= self.total && !self.capped {
             format!("{total} {kind}")
         } else {
-            format!(
+            let sentence = format!(
                 "showing the {} most recently updated of {total} {kind}",
                 self.shown
-            )
+            );
+            match rows::cap_clause(self.shown, self.total) {
+                Some(clause) => format!("{sentence} ({clause})"),
+                None => sentence,
+            }
         }
     }
 
@@ -973,16 +947,14 @@ impl Count {
     }
 
     fn next_rows(&self) -> usize {
-        self.total.min(MAX_ROWS)
+        self.total.min(rows::MAX_ROWS)
     }
 
     /// The query string of the "show more" link, or `None` when there is nothing more this
     /// page can render.
     fn more_query(&self, status: &str, text: Option<&str>) -> Option<String> {
-        if self.shown >= self.total || self.next_rows() <= self.shown {
-            return None;
-        }
-        let mut query = format!("?status={status}&limit={}", self.next_rows());
+        let next = rows::more(self.shown, self.total)?;
+        let mut query = format!("?status={status}&limit={next}");
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             query.push_str(&format!("&text={}", percent_encode(text)));
         }
@@ -1144,14 +1116,9 @@ impl Endpoint for LedgerView {
         )
         .input(arg("text", "A case-insensitive substring of the title.").optional())
         .input(
-            arg(
-                "limit",
-                "How many rows to render: a number, or `all` for as many as one render is \
-                 allowed. The page counts the whole filtered set either way and says what \
-                 it rendered.",
-            )
-            .default_value(ROWS.to_string())
-            .optional(),
+            arg("limit", &rows::limit_summary())
+                .default_value(rows::ROWS.to_string())
+                .optional(),
         )
         .input(as_html_arg())
         .output(HTML)
@@ -2791,6 +2758,41 @@ impl Endpoint for Asset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger #480: a page the CAP stopped says so, beside what it drew and out of what; a
+    /// page the reader's own smaller `limit` stopped needs no such clause, and the "show more"
+    /// link never asks for more than one page draws.
+    #[test]
+    fn a_listing_the_cap_stopped_names_the_cap() {
+        let capped = Count {
+            shown: rows::MAX_ROWS,
+            total: 700,
+            capped: false,
+        };
+        assert_eq!(
+            capped.sentence("open"),
+            format!(
+                "showing the {0} most recently updated of 700 open items (one page draws at \
+                 most {0} rows)",
+                rows::MAX_ROWS
+            )
+        );
+        assert_eq!(capped.more_query("open", None), None);
+
+        let chosen = Count {
+            shown: 50,
+            total: 700,
+            capped: false,
+        };
+        assert_eq!(
+            chosen.sentence("open"),
+            "showing the 50 most recently updated of 700 open items"
+        );
+        assert_eq!(
+            chosen.more_query("open", None).as_deref(),
+            Some(format!("?status=open&limit={}", rows::MAX_ROWS).as_str())
+        );
+    }
 
     #[test]
     fn a_form_body_decodes_plus_percent_and_repeats() {

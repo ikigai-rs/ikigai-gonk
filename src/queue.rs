@@ -315,15 +315,8 @@ pub(crate) const JSON: &str = "application/json";
 /// The shell's slot for the rows — see [`render::chunk`].
 const ROWS_SLOT: &str = "rows";
 
-/// How many rows a page draws before it stops and says so.
-///
-/// The ledger listing's bound and its reason (`README`, ledger #419): the server-side XSLT
-/// costs milliseconds per row, and a page slow enough to read as a hung server is worse than
-/// a page that admits what it left out. `?limit=` asks for more.
-const ROWS: usize = 50;
-
-/// The ceiling `?limit=all` means. Past this the bound REFUSES rather than truncating.
-const MAX_ROWS: usize = 500;
+// The row bound — `ROWS`, `MAX_ROWS`, `rows_wanted` — is `crate::rows`, shared with the
+// ledger listing so one `?limit` means one thing on both pages (ledger #480).
 
 /// The argument that widens the page: `?severity=all`. ⚠ Its VALUES are not severity words
 /// — they name a scope — so the contract's own set is never retyped here.
@@ -626,23 +619,6 @@ pub(crate) fn scope_wanted(asked: Option<&str>) -> Result<&'static str> {
                  page asks a human about) or `{SCOPE_ALL}` (every severity)"
             ),
         }),
-    }
-}
-
-/// How many rows to draw: `?limit=<n>` or `?limit=all`.
-fn rows_wanted(limit: Option<&str>) -> Result<usize> {
-    match limit {
-        None => Ok(ROWS),
-        Some("all") => Ok(MAX_ROWS),
-        Some(other) => match other.parse::<usize>() {
-            Ok(n) if n > 0 && n <= MAX_ROWS => Ok(n),
-            _ => Err(Error::InvalidArgument {
-                name: "limit".to_string(),
-                detail: format!(
-                    "`{other}`: a row count between 1 and {MAX_ROWS}, or `all` for {MAX_ROWS}"
-                ),
-            }),
-        },
     }
 }
 
@@ -1044,7 +1020,7 @@ impl QueuePage {
         echo: Echo<'_>,
     ) -> Result<Representation> {
         let roots = crate::k::readable_roots(&self.web, inv);
-        let wanted = rows_wanted(params.limit.as_deref())?;
+        let wanted = crate::rows::rows_wanted(params.limit.as_deref())?;
         let scope = scope_wanted(params.scope.as_deref())?;
         // ★ Whether the undecided rows the judge refuted are listed (ledger #704): hidden by
         // default, one click away. Checked here, before any branch, so a bad value is refused
@@ -1517,7 +1493,7 @@ impl QueuePage {
                 "count-text",
                 count_sentence(matched, drawn, &state, &chosen, scope),
             ));
-            if drawn < matched {
+            if let Some(next) = crate::rows::more(drawn, matched) {
                 attributes.push(("more", "true".to_string()));
                 attributes.push((
                     "more-url",
@@ -1533,7 +1509,16 @@ impl QueuePage {
                         query(&state, only.as_deref(), scope, shown)
                     )),
                 ));
-                attributes.push(("more-label", format!("show all {matched}")));
+                // ⚠ "show all" only when it is true: past the cap the link draws the cap
+                // (`rows::more`), and a label promising more would be the silent clamp.
+                attributes.push((
+                    "more-label",
+                    if next == matched {
+                        format!("show all {matched}")
+                    } else {
+                        format!("show {next}")
+                    },
+                ));
             }
         }
         if !decide && !roots.is_empty() {
@@ -2397,7 +2382,12 @@ fn count_sentence(
         ""
     };
     if drawn < matched {
-        format!("showing the first {drawn} of {matched} {serious}{state} findings in {where_}")
+        let sentence =
+            format!("showing the first {drawn} of {matched} {serious}{state} findings in {where_}");
+        match crate::rows::cap_clause(drawn, matched) {
+            Some(clause) => format!("{sentence} ({clause})"),
+            None => sentence,
+        }
     } else {
         format!(
             "{matched} {serious}{state} finding{} in {where_}",
@@ -2564,10 +2554,7 @@ impl Endpoint for QueuePage {
                 ArgSpec::new("limit")
                     .optional()
                     .class(XSD_STRING)
-                    .summary(format!(
-                        "how many rows to draw: 1–{MAX_ROWS}, or `all` for {MAX_ROWS} \
-                         (default {ROWS})"
-                    )),
+                    .summary(crate::rows::limit_summary()),
             )
             .input(
                 ArgSpec::new(SCOPE_ARG)
@@ -2856,7 +2843,25 @@ impl Endpoint for Decide {
 
 #[cfg(test)]
 mod tests {
-    use super::{meaning, split_decision_words};
+    use super::{count_sentence, meaning, split_decision_words, SCOPE_ALL};
+
+    /// ★ Ledger #480: the queue's count sentence names the cap when the cap is what stopped it.
+    #[test]
+    fn a_queue_the_cap_stopped_names_the_cap() {
+        let max = crate::rows::MAX_ROWS;
+        let roots = ["demo".to_string()];
+        assert_eq!(
+            count_sentence(700, max, "pending", &roots, SCOPE_ALL),
+            format!(
+                "showing the first {max} of 700 pending findings in demo (one page draws at \
+                 most {max} rows)"
+            )
+        );
+        assert_eq!(
+            count_sentence(700, 50, "pending", &roots, SCOPE_ALL),
+            "showing the first 50 of 700 pending findings in demo"
+        );
+    }
 
     /// ★ The decision split, over the summary SHAPE browse 0.14.0 writes — sentences, each
     /// `word: meaning.`, the revision-only one naming `revises=` inside its own meaning. Made-up

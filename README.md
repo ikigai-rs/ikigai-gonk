@@ -71,7 +71,8 @@ name, and a browser refuses an IP address as one.
 - **A listing renders fifty rows and says so.** The line above the list is the count the
   filter matched, not the count the page drew — "showing the 50 most recently updated of 411
   open items", with a link for the rest. `?limit=<n>` or `?limit=all` asks for more, up to
-  500 in one render. ⚠ The bound is latency, and the number is measured: the server-side
+  500 in one render; a larger number is drawn at 500 and the line names the cap, and the
+  Queue page follows the same rule (one `src/rows.rs`, ledger #480). ⚠ The bound is latency, and the number is measured: the server-side
   XSLT costs about 6 ms per row at fifty rows and about 16 ms at four hundred in ONE
   document, so a page of 410 items cost **6.5 seconds** — slow enough to read as a hung
   server rather than a slow page. Reading the ledger is not the expensive part (0.09 s for
@@ -197,7 +198,10 @@ Request` for the second:
   `421`: the request names a server this one is not, which is a different fact from "not
   allowed" (ledger #2). The bound IP counts because a `gonk.bind` of another loopback address
   (`127.0.0.2:1070`) is admitted, and `localhost` does not reach it (ledger #1045). Only the
-  bound one joins: a door on `127.0.0.1` still refuses `127.0.0.2`.
+  bound one joins: a door on `127.0.0.1` still refuses `127.0.0.2`. The startup banner prints
+  the URL that reaches the bind — `http://localhost:1060/` for `127.0.0.1`, the IP literal
+  otherwise (`http://127.0.0.2:1070/`, `http://[::1]:1060/`) — and says when passkeys cannot
+  work there, since WebAuthn refuses an IP address as a relying party.
 
 ★ **Refused, not "given nothing"** (ledger #864, R2; PENDING item 2). Until then both cases
 computed an EMPTY capability, and an empty capability is still offered every action that
@@ -2879,8 +2883,9 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
   mount host and prints what it replaced) or edit the token in `grants.json` — it is re-read
   per request, no restart;
 - the backup family on any grant, per connection and per request, not only at startup;
-- a foreign `Host` (any method) and a cross-site write: a `403` before anything runs, the pages
-  and the passkey ceremonies included;
+- a foreign `Host` (any method) and a cross-site write, before anything runs, the pages and
+  the passkey ceremonies included: a `421 Misdirected Request` for the foreign `Host` (since
+  ledger #2) and a `403` for the cross-site write;
 - (ledger #880) a GET another page LOADS (an image, a `fetch`, a frame) from another site or
   another localhost port: a `403` at the edge. A GET another page NAVIGATES to gets only the
   read half of the caller's grant, so a link to an explanation from another page answers

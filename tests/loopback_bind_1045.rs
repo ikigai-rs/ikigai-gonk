@@ -196,6 +196,16 @@ fn a_scratch_gonk_bound_on_127_0_0_2_is_reachable_there() {
     let port = gonk.http.port();
     let host = format!("127.0.0.2:{port}");
 
+    // The banner names the URL that reaches THIS bind, not `localhost` (which is 127.0.0.1,
+    // where nothing listens), and says passkeys cannot work here.
+    let log = banner(&gonk);
+    assert!(
+        log.contains(&format!("  http    http://127.0.0.2:{port}/ — ")),
+        "{log}"
+    );
+    assert!(log.contains("passkeys cannot work on this bind"), "{log}");
+    assert!(!log.contains("http://localhost:"), "{log}");
+
     for target in ["/", "/l/default", "/iki/ledger/items", "/static/gonk.css"] {
         let (status, body) = raw(gonk.http, "GET", target, &[("Host", &host)]);
         assert_eq!(status, 200, "GET {target} under Host {host}: {body}");
@@ -221,5 +231,62 @@ fn a_scratch_gonk_bound_on_127_0_0_2_is_reachable_there() {
     for foreign in [format!("127.0.0.3:{port}"), format!("evil.example:{port}")] {
         let (status, body) = raw(gonk.http, "GET", "/l/default", &[("Host", &foreign)]);
         assert_eq!(status, 421, "Host {foreign}: {body}");
+    }
+}
+
+/// The banner of a DEFAULT bind is unchanged: `localhost`, which a passkey can be used at, and
+/// no caveat.
+#[test]
+fn a_scratch_gonk_on_127_0_0_1_prints_localhost_and_no_passkey_caveat() {
+    let gonk = scratch_gonk::Gonk::start("");
+    let port = gonk.http.port();
+    let log = banner(&gonk);
+    assert!(
+        log.contains(&format!("  http    http://localhost:{port}/ — ")),
+        "{log}"
+    );
+    assert!(!log.contains("passkeys"), "{log}");
+}
+
+/// A `[::1]` bind prints the bracketed literal, which reaches it from any client, and says
+/// where a passkey would have to be used instead.
+#[test]
+fn a_scratch_gonk_on_ipv6_loopback_prints_its_bracketed_url() {
+    let ip: IpAddr = "::1".parse().unwrap();
+    if let Err(e) = std::net::TcpListener::bind((ip, 0)) {
+        eprintln!("SKIPPED: this machine will not bind {ip} ({e})");
+        return;
+    }
+    let gonk = scratch_gonk::Gonk::start_bound("gonk.bind = \"[::1]:0\"\n", ip);
+    let port = gonk.http.port();
+    let log = banner(&gonk);
+    assert!(
+        log.contains(&format!("  http    http://[::1]:{port}/ — ")),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!("passkeys need http://localhost:{port}/")),
+        "{log}"
+    );
+    let (status, body) = raw(
+        gonk.http,
+        "GET",
+        "/l/default",
+        &[("Host", &format!("[::1]:{port}"))],
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// The whole banner. Ready means the doors answer, which the harness can see before the
+/// banner's last lines are written (each is its own unbuffered write), so wait for the last
+/// one — `mount` — rather than reading a half-written banner as an absent line.
+fn banner(gonk: &scratch_gonk::Gonk) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let log = gonk.log();
+        if log.contains("\n  mount   ") || std::time::Instant::now() > deadline {
+            return log;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
