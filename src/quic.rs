@@ -739,15 +739,17 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
     let names: Vec<&str> = scopes
         .iter()
         .map(String::as_str)
-        .filter(|scope| scope.starts_with(CLIENT_IRI_PREFIX))
+        .filter(|scope| {
+            scope.starts_with(CLIENT_IRI_PREFIX)
+                || scope.starts_with(ikigai_core::PRINCIPAL_SCOPE_PREFIX)
+        })
         .collect();
     if !names.is_empty() {
         return Some(format!(
-            "grant `{name}` names {} — a QUIC client's NAME, which the door stamps on every \
-             request of the connection it authenticated, as the `principal` argument. A name \
-             is not authority: no resource requires it, so as a grant it would hand out \
-             nothing while reading as though it let every identity under `{name}` act as \
-             that client",
+            "grant `{name}` names {} — an identity's NAME, which only a door mints, into the \
+             capability of a request it authenticated (`urn:cap:principal:<iri>`). A name is \
+             not authority, and as a grant it would read as though it let every identity \
+             under `{name}` act as someone else; the door replaces it with the caller's own",
             names.join(" and ")
         ));
     }
@@ -803,18 +805,23 @@ fn broad_refusal(grant: &str, broad: &[String]) -> String {
     )
 }
 
-/// The authority one authenticated fingerprint runs under, or the reason it is refused.
+/// The authority one authenticated fingerprint runs under, or the reason it is refused —
+/// with the client's NAME minted into it ([`client_iri`], as `urn:cap:principal:<iri>`).
 ///
-/// ★ **Authority only — the client's NAME is not in it** (ledger
-/// [#879](http://localhost:1060/l/default/item/879)). Through ikigai-quic 0.1.40 the session
-/// capability was the only thing an endpoint learned about a connection, so this function
-/// added [`client_iri`] to it as a scope no resource requires. That channel failed exactly
-/// when it mattered: a client carrying a scoped capability of its own (`ikigai mcp --grant
-/// …`, every Hermes write) is answered at the INTERSECTION of the two, which drops a scope
-/// the client never names — so the log read `principal=-` and the write recorded no author.
-/// Since 0.1.41 the name travels beside the authority, as `Session::principal`, which
-/// [`minter`] sets and the transport stamps on every request; [`crate::admit::principal`]
-/// reads it there.
+/// ★ **The name is in the capability again, and this time it survives** (ledger
+/// [#1077](http://localhost:1060/l/default/item/1077)). Through ikigai-quic 0.1.40 this
+/// function added [`client_iri`] as an ordinary scope, and a client carrying a scoped capability
+/// of its own (`ikigai mcp --grant …`, every Hermes write) was answered at the INTERSECTION of
+/// the two, which dropped it: the log read `principal=-` and the write recorded no author
+/// (ledger [#879](http://localhost:1060/l/default/item/879)). The fix then was a name BESIDE
+/// the authority (`Session::principal`, stamped as an argument). Core 0.1.93 makes a principal
+/// a capability scope with its own rule: `clamp` keeps the CEILING's principal and never takes
+/// one from the carried capability, so the session's name reaches every endpoint at every
+/// depth, and a client cannot shed it or substitute another. [`crate::admit::principal`] reads
+/// it there. The minter still sets `Session::principal` too, because `ikigai-quic` stamps that
+/// argument and the ledger's claim kind reads it ([`crate::admit::claim_kind`]).
+///
+/// It is not authority: `allows(<client iri>)` stays false, and no resource requires it.
 pub fn authority(
     enrolment: &Enrolment,
     grants: &BTreeMap<String, Vec<String>>,
@@ -824,7 +831,10 @@ pub fn authority(
         .grant_for(fingerprint)
         .ok_or("no grant is configured for this certificate")?;
     let scopes = scopes_for_grant(grants, grant)?;
-    Ok((grant.to_string(), Capability::scoped(scopes)))
+    let capability = Capability::scoped(scopes)
+        .with_principal(&client_iri(fingerprint))
+        .map_err(|e| format!("the client's name cannot be minted into its capability: {e}"))?;
+    Ok((grant.to_string(), capability))
 }
 
 /// A grant name's scopes, **fail closed** — the one rule both identity doors apply: a grant
@@ -999,11 +1009,12 @@ pub fn put_grant(
 /// The per-connection minter: re-reads both files, and refuses — logging the full
 /// fingerprint and the fix — whenever [`authority`] does.
 ///
-/// An admitted connection's [`Session`] carries the grant's capability AND the client's name
-/// ([`client_iri`]) as its `principal`. `ikigai-quic` stamps that name on every request of the
-/// connection as the argument `principal`, after removing any a client sent, so it is the
-/// door's word and never the caller's — and, unlike a scope inside the capability, no
-/// capability the client carries can intersect it away.
+/// An admitted connection's [`Session`] carries the grant's capability with the client's name
+/// ([`client_iri`]) minted into it ([`authority`], core 0.1.93's `urn:cap:principal:`), and the
+/// same name as its `principal`, which `ikigai-quic` stamps on every request as an argument
+/// after removing any a client sent. The capability is what gonk reads
+/// ([`crate::admit::principal`]): `clamp` keeps the session's principal whatever capability the
+/// client carries.
 pub fn minter(layout: Layout) -> Minter {
     Arc::new(move |peer: &PeerIdentity| {
         let decided = read_enrolment(&layout.clients_json())

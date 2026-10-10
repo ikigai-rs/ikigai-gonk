@@ -574,8 +574,12 @@ fn the_http_door_takes_the_librarys_edge_bounds() {
 /// Through ikigai-quic 0.1.40 the only channel for the client's name was a scope gonk added to
 /// the session capability, and the per-call clamp intersected it away: the access log read
 /// `principal=-` and the item and comment recorded no author (verified live on item 885).
-/// From 0.1.41 the session carries a `principal` the minter names and the transport stamps on
-/// every request, so the name never travels through the capability at all.
+/// 0.1.41 carried the name beside the capability, as a stamped argument. Since core 0.1.93
+/// (ledger #1077) the name is back IN the capability — `urn:cap:principal:<client iri>`, minted
+/// by `quic::authority` — and survives, because `clamp` keeps the ceiling's principal; every
+/// reader (the author fill, the author rule, the access log) now reads it there. So this test
+/// is the proof: the client below carries a capability narrower than its grant, AND one that
+/// names a different principal, and it is still attributed to itself.
 #[test]
 fn a_narrowed_quic_client_is_still_named_and_authors_its_writes() {
     let dir = tempfile::tempdir().unwrap();
@@ -627,8 +631,11 @@ fn a_narrowed_quic_client_is_still_named_and_authors_its_writes() {
         connected.is_some()
     });
     let client = connected.unwrap();
-    let narrowed = Capability::scoped(grants_for("default", Authority::Write).unwrap());
     let me = quic::client_iri(&hermes.fingerprint);
+    // Narrower than its grant, and naming someone else: a carried principal never enters.
+    let narrowed = Capability::scoped(grants_for("default", Authority::Write).unwrap())
+        .with_principal("urn:iki:gonk:passkey:Q1JFRC1CUklBTg")
+        .unwrap();
 
     let (filed, _) = client
         .issue_as(

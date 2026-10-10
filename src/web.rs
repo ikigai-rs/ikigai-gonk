@@ -1561,11 +1561,10 @@ impl Endpoint for Act {
                 name: "_verb".to_string(),
                 detail: format!("`{target}` does not declare {verb:?}"),
             })?;
-        // ★ The door names the author; a form may not. The transport stamps every write
-        // with `principal` — the signed-in passkey's IRI, computed by
-        // `doors::http_principal` from the session cookie and never from a body or a query
-        // string — and this adapter forwards it as the ledger's `author` wherever the target
-        // declares one. A form field of that name is refused outright, before the contract
+        // ★ The door names the author; a form may not. The door mints the signed-in passkey's
+        // IRI into the request's capability (`doors::http_cap`, from the session cookie and
+        // never from a body or a query string) — and this adapter forwards it as the ledger's
+        // `author` wherever the target declares one. A form field of that name is refused outright, before the contract
         // is even consulted: the ledger declares `author` as an ordinary optional string,
         // so without this line a browser could attribute a comment to anyone, and the same
         // rule the transport applies to `client` and `principal` applies here.
@@ -1580,8 +1579,13 @@ impl Endpoint for Act {
             .iter()
             .any(|input| input.name == "author" && input.source != InputSource::Binding);
         let mut request = Request::new(verb, target_iri);
-        if let (true, Ok(principal)) = (declares_author, inv.inline_str("principal")) {
-            request = with(request, "author", principal);
+        // The door's word is the principal it minted into the capability (ledger #1077) —
+        // the same passkey the transport stamps as `principal` on this write.
+        if let (true, Some(principal)) = (
+            declares_author,
+            crate::admit::principal(crate::access::Door::Http, inv.capability),
+        ) {
+            request = with(request, "author", &principal);
         }
         // ★ And the door's principal itself, unchanged, on every action (ledger #775): the
         // ledger stamps a claim's KIND from it ([`crate::admit::claim_kind`]), so a signed-in

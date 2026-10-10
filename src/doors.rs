@@ -2,9 +2,9 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME beside the authority — [`http_principal`]: the signed-in passkey's stable IRI, stamped on every write as `principal` |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
-//! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME beside the authority — the session's `principal`, `urn:iki:gonk:client:<fingerprint>` ([`crate::quic::minter`]), stamped on every request: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
+//! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME in the authority — `urn:iki:gonk:client:<fingerprint>`, minted into the session capability ([`crate::quic::authority`], ledger #1077), which core's clamp keeps whatever capability the client carries: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
 //! # ★ One cache for the whole process
 //!
@@ -445,9 +445,25 @@ pub struct HttpDoor {
 /// `curl`, a script — does not send, so refusing a foreign one costs those callers nothing.
 /// And a rebinding attack reaches loopback under a foreign `Host`, which is refused on every
 /// method, reads included.
+///
+/// ★ **And the signed-in passkey's NAME is minted into it** ([`http_principal_of`], as core
+/// 0.1.93's `urn:cap:principal:<iri>`; ledger [#1077](http://localhost:1060/l/default/item/1077)),
+/// so every endpoint the request reaches, at every depth, can read who it serves from the
+/// capability ([`crate::admit::principal`]) — on reads as well as writes. It is not authority:
+/// no resource requires it, and an anonymous caller carries none. ⚠ The cost core states: a
+/// principal partitions the cache, so a signed-in reader's pages are cached apart from the
+/// anonymous ones and from every other person's.
 pub fn http_cap(door: HttpDoor) -> CapFn {
     Arc::new(move |request: &HttpRequest| {
-        Capability::scoped(http_scopes(&door, request, identity::now_seconds()))
+        let now = identity::now_seconds();
+        let capability = Capability::scoped(http_scopes(&door, request, now));
+        match http_principal_of(&door, request, now) {
+            // A passkey IRI is always an absolute IRI with no `*`, so this cannot fail; if it
+            // ever did, the request keeps its authority and names nobody, which is the
+            // anonymous reading, never a wider one.
+            Some(who) => capability.with_principal(&who).unwrap_or(capability),
+            None => capability,
+        }
     })
 }
 
