@@ -2264,6 +2264,95 @@ fn the_browse_page_links_the_layout_stylesheet_and_it_resolves() {
     );
 }
 
+/// The fake secret a scratch repository's `.git/config` carries. Every assertion in
+/// [`git_metadata_is_absent_through_both_doors`] is, at bottom, "this string never leaves gonk".
+const GIT_SECRET: &str = "FAKE-TOKEN-GONK-1126";
+
+/// [`scratch_root`] plus a hand-made `.git` holding a FAKE credentialed remote: no `git`
+/// process runs and no real credential exists, so the fixture is hermetic.
+fn scratch_root_with_git() -> TempDir {
+    let dir = scratch_root();
+    std::fs::create_dir_all(dir.path().join(".git/refs/heads")).expect(".git/");
+    std::fs::write(
+        dir.path().join(".git/config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\t\
+             url = https://x-access-token:{GIT_SECRET}@example.invalid/owner/demo.git\n"
+        ),
+    )
+    .expect(".git/config");
+    std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect(".git/HEAD");
+    dir
+}
+
+/// ★ **`.git` is not part of any browsed root, through either of gonk's doors** (ledger #1126).
+///
+/// gonk runs `ikigai-browse` IN-PROCESS, so the fix reaches this server only through the
+/// manifest's pin: on 0.18.1 `list_entries` was a raw `read_dir` and the jail only kept a path
+/// inside its root, so an ordinary browse read served `.git/config` byte for byte, credentialed
+/// remote URL included, and the root tree offered `.git` to click into. 0.18.2 makes any path
+/// with a `.git` component a NotFound under every capability and drops `.git` from the listing.
+/// This test is that floor, asked the two ways a caller reaches browse here: the kernel `main`
+/// composes, under the ROOT capability (no grant opens it, so the strongest one must not), and
+/// the loopback HTTP door under a signed-in browsing grant, which is what a person holds. It is
+/// red on 0.18.1 (checked against a scratch copy resolved at `=0.18.1`, not by moving the lock).
+#[test]
+fn git_metadata_is_absent_through_both_doors() {
+    let dir = scratch_root_with_git();
+    let (hub, _watch) = served(&dir);
+
+    // 1. The kernel, under the root capability.
+    for iri in [
+        "urn:repo:demo:file:.git/config",
+        "urn:repo:demo:file:.git/HEAD",
+        "urn:repo:demo:tree:.git",
+    ] {
+        let answer = block_on(Kernel::issue(
+            &hub,
+            request(Verb::Source, iri, &[]),
+            &Capability::root(),
+        ));
+        match answer {
+            Err(ikigai_core::Error::NotFound(_)) => {}
+            Err(other) => panic!("{iri}: absent is a NotFound, not {other:?}"),
+            Ok(repr) => panic!(
+                "{iri} was served under the root capability: {}",
+                String::from_utf8_lossy(&repr.bytes)
+            ),
+        }
+    }
+    let listing = text(&hub, Verb::Source, "urn:repo:demo:tree", &[]);
+    assert!(
+        listing.contains("README.md") && listing.contains("src"),
+        "the root tree still lists the source: {listing}"
+    );
+    assert!(
+        !listing.lines().any(|line| line.starts_with(".git")),
+        "the root tree does not offer `.git`, so the listing and the resolver agree: {listing}"
+    );
+
+    // 2. The HTTP door, under a grant that can browse.
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    for iri in ["urn:repo:demo:file:.git/config", "urn:repo:demo:tree:.git"] {
+        for face in ["", " as=text/html"] {
+            let (status, body) = door.get_html(&k(&format!("source {iri}{face}")), Some(&token));
+            assert!(
+                !body.contains(GIT_SECRET),
+                "{iri}{face} carried the credentialed remote over HTTP ({status}): {body}"
+            );
+            assert_eq!(status, 404, "{iri}{face} is absent over HTTP too: {body}");
+        }
+    }
+    let (status, tree) = door.get_html(&k("source urn:repo:demo:tree as=text/html"), Some(&token));
+    assert_eq!(status, 200, "{tree}");
+    assert!(tree.contains("README.md"), "{tree}");
+    assert!(
+        !tree.contains("urn:repo:demo:tree:.git") && !tree.contains(".git/"),
+        "the tree face offers no `.git` affordance: {tree}"
+    );
+}
+
 /// ★ **The line hook's contract with browse's file view** (ledger #658). `web/gonk.js` fills
 /// the annotate form's quote from a line selected by its gutter number — so it leans on four
 /// things `ikigai-browse` emits and gonk does not: the line wrapper (`browse-line`, `id="L{n}"`),
