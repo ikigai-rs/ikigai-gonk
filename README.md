@@ -153,7 +153,7 @@ What you will see:
 
 The second click is deliberate. When the creation sheet closes it still holds the window's
 focus, and a browser refuses a sign-in prompt from a page without focus, so gonk waits for
-the click rather than chaining the two. If a sheet is cancelled or times out, the page says so
+the click rather than chaining the two. If a sheet is canceled or times out, the page says so
 and names the button to click again. A creation that did not finish leaves the invite unused,
 good until it expires.
 
@@ -2314,8 +2314,7 @@ browse roots:
   added      gonk.browse.root = "kata=~/.ikigai/checkouts/kata"
   backup     /Users/you/.config/ikigai/config.toml.1791302400.bak
 
-gonk reads gonk.browse.root at startup only: restart it to serve the new root(s). Under launchd:
-  launchctl kickstart -k gui/$(id -u)/dev.ikigai-rs.gonk
+gonk reads gonk.browse.root at startup only: restart gonk to serve the new root(s).
 ```
 
 - **Where.** Each URL is cloned into `~/.ikigai/checkouts/<name>` (`--dir` for another
@@ -2341,14 +2340,12 @@ gonk reads gonk.browse.root at startup only: restart it to serve the new root(s)
 It is a command, like `review request`: it opens no store and binds no door, and the server
 itself has no code that fetches anything.
 
-**Why `kickstart` and not a re-registration.** Adding a root changes only `config.toml`, which
-gonk reads when it starts, so restarting the process is the whole fix and `launchctl kickstart
--k` does exactly that. A re-registration (`bootout`, then `bootstrap`) is what a REPLACED
-binary or plist needs, because `kickstart` respawns inside the old registration; gonk holds no
-macOS privacy grant (no calendar, contacts or Keychain prompt), so there is nothing a fresh
-registration would re-attribute either. If you already run a tool that re-registers agents
-whose config changed (the ikigai devtools' `just reregister --only dev.ikigai-rs.gonk`, for
-one), that works too; it is the same restart with a staleness check in front.
+**Restarting is the whole fix, and how is yours.** Adding a root changes only `config.toml`,
+which gonk reads when it starts, so a restart of the process is all it takes. The command does
+not print a supervisor's command: a launchd label (or a systemd unit, or a terminal) is the
+operator's own choice, and one machine's restart line is the wrong one on the next. Under
+launchd a config-only change needs only the process restarted; a REPLACED binary or plist is
+what needs a re-registration (`bootout`, then `bootstrap`).
 
 ### Keeping them current
 

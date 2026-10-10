@@ -1206,6 +1206,23 @@ pub fn read_config(flags: &Flags, homes: &Homes) -> Result<(PathBuf, String), St
     }
 }
 
+/// Refuse a socket path the kernel cannot bind: `sun_path` bounds it — 104 bytes on macOS,
+/// 108 on Linux, the terminator included. `serve` calls this before the store is opened,
+/// rather than finding out from a door that dies a moment after the banner says it is
+/// serving. A command that only reads [`Settings`] does not: a path it never opens is no
+/// reason to refuse it (ledger #1093).
+pub fn check_socket_path(socket: &Path) -> Result<(), String> {
+    let socket_bytes = socket.as_os_str().len();
+    if socket_bytes >= SOCKET_PATH_LIMIT {
+        return Err(format!(
+            "socket path {} is {socket_bytes} bytes; a Unix socket path must be shorter than \
+             {SOCKET_PATH_LIMIT} — set `gonk.socket` (or --socket) to a shorter path",
+            socket.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Merge flags over the config text into validated [`Settings`].
 pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, String> {
     check_keys(text)?;
@@ -1218,17 +1235,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         .map(|spelled| expand_home(&spelled, &homes.home))
         .unwrap_or_else(|| homes.data.join(SOCKET_NAME));
     let quic = quic_bind(flags, text, http)?;
-    // A Unix socket path is bounded by `sun_path` — 104 bytes on macOS, 108 on Linux, the
-    // terminator included. Refused here, before the store is opened, rather than as a door
-    // that dies a moment after the banner says it is serving.
-    let socket_bytes = socket.as_os_str().len();
-    if socket_bytes >= SOCKET_PATH_LIMIT {
-        return Err(format!(
-            "socket path {} is {socket_bytes} bytes; a Unix socket path must be shorter than \
-             {SOCKET_PATH_LIMIT} — set `gonk.socket` (or --socket) to a shorter path",
-            socket.display()
-        ));
-    }
+    // ⚠ The socket's LENGTH is not checked here (ledger #1093): every subcommand reads these
+    // settings, and one that never opens the socket (`passkey invite`, which has no --socket
+    // flag at all) was refused over a long --data-home. `serve` checks it with
+    // [`check_socket_path`] before the store is opened.
     let http_ledgers = if !flags.http_ledgers.is_empty() {
         flags.http_ledgers.clone()
     } else {
@@ -2016,8 +2026,12 @@ mod tests {
             socket: Some(long),
             ..Flags::default()
         };
-        let refused = settings(&flags, "", &homes()).unwrap_err();
+        let read = settings(&flags, "", &homes()).expect(
+            "reading the settings does not refuse a socket the caller may never open (ledger #1093)",
+        );
+        let refused = check_socket_path(&read.socket).unwrap_err();
         assert!(refused.contains("shorter than 104"), "{refused}");
+        assert!(check_socket_path(Path::new("/tmp/g.sock")).is_ok());
     }
 
     #[test]

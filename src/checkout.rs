@@ -312,13 +312,13 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         let _ = writeln!(out, "  backup     {}", backup.display());
     }
     if added {
-        // `kickstart -k`, not a re-registration: only config.toml changed, which gonk reads at
-        // startup, and gonk holds no TCC grant a fresh registration would re-attribute. A
-        // replaced BINARY is what needs bootout + bootstrap (README, "Why `kickstart`").
+        // ⚠ No supervisor command (ledger #1093): it used to print a `launchctl kickstart` of
+        // a launchd label that is one operator's private choice, on a machine where gonk may
+        // run under something else entirely or in a terminal. How to restart is theirs.
         let _ = writeln!(
             out,
-            "\ngonk reads gonk.browse.root at startup only: restart it to serve the new \
-             root(s). Under launchd:\n  launchctl kickstart -k gui/$(id -u)/dev.ikigai-rs.gonk"
+            "\ngonk reads gonk.browse.root at startup only: restart gonk to serve the new \
+             root(s)."
         );
     }
     Ok(all_ok)
