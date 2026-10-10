@@ -6,7 +6,8 @@
 //! `/sparql/results?query=SELECT*{FILTER(((…3000…1…)))}` killed the server.
 //!
 //! ★ **Every test here runs a REAL gonk in a CHILD process** — the binary this crate builds,
-//! over a scratch config home, data home, store and socket, on ports picked at random — and
+//! over a scratch config home, data home, store and socket, on an HTTP port the child picks
+//! itself (and a QUIC port this file picks, for the tests that need that door) — and
 //! asserts it is still serving after the request. A reproduction that aborts must not take the
 //! test binary with it, and only the binary has the stacks `main` sets (`ikigai_gonk::stack`),
 //! which is half of what is under test. Nothing here touches a live gonk.
@@ -68,7 +69,8 @@ fn deep_chain() -> String {
 struct Gonk {
     child: Child,
     http: SocketAddr,
-    quic: SocketAddr,
+    /// `None` when the child was started with `--no-quic` ([`Gonk::start`]).
+    quic: Option<SocketAddr>,
     socket: PathBuf,
     stderr: PathBuf,
     layout: quic::Layout,
@@ -76,24 +78,48 @@ struct Gonk {
     _dirs: (tempfile::TempDir, tempfile::TempDir),
 }
 
-fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn free_udp_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// What [`Gonk::launch`] says when the child did not come up.
+enum Launch {
+    /// The child died because its QUIC port was taken: worth another pick.
+    PortTaken(String),
+    /// Anything else, which a retry would only hide.
+    Failed(String),
 }
 
 impl Gonk {
+    /// A gonk with its QUIC door OFF: HTTP and the socket only, so nothing here picks a port.
     fn start() -> Gonk {
+        Gonk::launch(false).unwrap_or_else(|launch| match launch {
+            Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
+        })
+    }
+
+    /// A gonk with its QUIC door open on loopback, for the tests that send over it.
+    ///
+    /// ⚠ **The one port this file still picks, and why it is retried rather than avoided**
+    /// (ledger [#1004](http://localhost:1060/l/default/item/1004)). The HTTP door binds port 0
+    /// and the banner names the port it got, so it cannot race. The QUIC door cannot do the
+    /// same: `ikigai_quic::serve` binds inside the transport crate and never reports its
+    /// address, so a child told `127.0.0.1:0` would listen where nobody can find it. So the
+    /// port is picked here, and a pick another process takes before the child binds it
+    /// (`AddrInUse` — 3 of 160 runs of this file at 8 concurrent copies) is detected by the
+    /// child's death and its log, and picked again. Every other failure still fails.
+    fn with_quic() -> Gonk {
+        let mut taken = Vec::new();
+        for _ in 0..5 {
+            match Gonk::launch(true) {
+                Ok(gonk) => return gonk,
+                Err(Launch::PortTaken(why)) => taken.push(why),
+                Err(Launch::Failed(why)) => panic!("{why}"),
+            }
+        }
+        panic!(
+            "five QUIC ports were taken before the child bound them:\n{}",
+            taken.join("\n")
+        )
+    }
+
+    fn launch(with_quic: bool) -> Result<Gonk, Launch> {
         let home = tempfile::tempdir().unwrap();
         // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir does not.
         let short = tempfile::Builder::new()
@@ -124,19 +150,32 @@ impl Gonk {
         )
         .unwrap();
 
-        let (port, quic_port) = (free_tcp_port(), free_udp_port());
+        let quic: Option<SocketAddr> = with_quic.then(|| {
+            UdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+        });
         let socket = short.path().join("s");
         let stderr = home.path().join("stderr.log");
-        let child = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+        command
             .arg("--config-home")
             .arg(&config)
             .arg("--data-home")
             .arg(&data)
             .arg("--socket")
             .arg(&socket)
-            .args(["--port", &port.to_string()])
-            .args(["--quic-bind", &format!("127.0.0.1:{quic_port}")])
-            .arg("--no-backup")
+            // ★ Port 0: the child binds whatever is free and the banner names it. Picking a
+            // free port here and handing it over raced every other socket on the machine for
+            // the time it takes the child to open its store (ledger #1004).
+            .args(["--port", "0"])
+            .arg("--no-backup");
+        match quic {
+            Some(addr) => command.args(["--quic-bind", &addr.to_string()]),
+            None => command.arg("--no-quic"),
+        };
+        let child = command
             .env("HOME", home.path())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -145,25 +184,60 @@ impl Gonk {
             .expect("spawn ikigai-gonk");
         let mut gonk = Gonk {
             child,
-            http: format!("127.0.0.1:{port}").parse().unwrap(),
-            quic: format!("127.0.0.1:{quic_port}").parse().unwrap(),
+            // Unknown until the banner says; nothing reads it before then.
+            http: "127.0.0.1:0".parse().unwrap(),
+            quic,
             socket,
             stderr,
             layout,
             client,
             _dirs: (home, short),
         };
+        gonk.until_ready()?;
+        Ok(gonk)
+    }
+
+    /// Wait until every door this child opened ANSWERS — not until its files exist.
+    ///
+    /// ⚠ The socket's file appearing is not the socket listening: under load a connect in
+    /// between was refused, and the same connect half a second later was answered (29 of 80
+    /// runs at 8 concurrent copies, ledger #1004). So each door is asked: the banner for the
+    /// HTTP port (printed once that listener is bound), a connection on the socket, and a
+    /// QUIC handshake with this test's own client when that door is open.
+    fn until_ready(&mut self) -> Result<(), Launch> {
         let deadline = Instant::now() + Duration::from_secs(60);
-        while !(gonk.socket.exists() && TcpStream::connect(gonk.http).is_ok()) {
-            gonk.assert_alive("starting");
-            assert!(
-                Instant::now() < deadline,
-                "gonk never came up: {}",
-                gonk.log()
-            );
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                let log = self.log();
+                let why = format!("gonk exited while starting ({status}):\n{log}");
+                return Err(
+                    if log.contains("QUIC door") && log.contains("Address already in use") {
+                        Launch::PortTaken(why)
+                    } else {
+                        Launch::Failed(why)
+                    },
+                );
+            }
+            if Instant::now() > deadline {
+                return Err(Launch::Failed(format!(
+                    "gonk never came up:\n{}",
+                    self.log()
+                )));
+            }
+            if self.http.port() == 0 {
+                if let Some(port) = banner_port(&self.log()) {
+                    self.http = SocketAddr::from(([127, 0, 0, 1], port));
+                }
+            }
+            if self.http.port() != 0
+                && std::os::unix::net::UnixStream::connect(&self.socket).is_ok()
+                && TcpStream::connect(self.http).is_ok()
+                && (self.quic.is_none() || self.dial_quic().is_ok())
+            {
+                return Ok(());
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
-        gonk
     }
 
     fn log(&self) -> String {
@@ -229,22 +303,34 @@ impl Gonk {
         client.issue(request).map(|(repr, _)| repr)
     }
 
-    fn over_quic(&self, request: Request) -> Result<Representation, Error> {
+    /// One QUIC connection as this test's enrolled client. Only for a child with the door open.
+    fn dial_quic(&self) -> std::io::Result<ikigai_quic::QuicResolver> {
         let identity = ikigai_quic::Identity {
             cert_pem: std::fs::read_to_string(self.client.dir.join("client.crt")).unwrap(),
             key_pem: std::fs::read_to_string(self.client.dir.join("client.key")).unwrap(),
         };
         let (server, _) = quic::server_identity(&self.layout).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let client = loop {
-            match ikigai_quic::connect(self.quic, &identity, &server.cert_pem) {
-                Ok(client) => break client,
-                Err(e) if Instant::now() > deadline => panic!("QUIC connect: {e}"),
-                Err(_) => std::thread::sleep(Duration::from_millis(100)),
-            }
-        };
+        let addr = self.quic.expect("a gonk started with_quic");
+        ikigai_quic::connect(addr, &identity, &server.cert_pem)
+    }
+
+    fn over_quic(&self, request: Request) -> Result<Representation, Error> {
+        // The door answered a handshake before `with_quic` returned; this is one more.
+        let client = self
+            .dial_quic()
+            .unwrap_or_else(|e| panic!("QUIC connect: {e}"));
         client.issue(request).map(|(repr, _)| repr)
     }
+}
+
+/// The port the banner's `http` line names: `  http    http://localhost:{port}/ — …`.
+fn banner_port(log: &str) -> Option<u16> {
+    let at = log.find("http://localhost:")? + "http://localhost:".len();
+    log[at..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
 }
 
 impl Drop for Gonk {
@@ -375,7 +461,7 @@ fn the_socket_door_refuses_a_nested_query_or_update_and_keeps_serving() {
 
 #[test]
 fn the_quic_door_refuses_a_nested_query_and_keeps_serving() {
-    let mut gonk = Gonk::start();
+    let mut gonk = Gonk::with_quic();
     let answer = gonk.over_quic(select(&bomb()));
     gonk.assert_serving("graph-select over QUIC");
     refused(answer, "graph-select");
@@ -388,7 +474,7 @@ fn the_quic_door_refuses_a_nested_query_and_keeps_serving() {
 /// binary set.
 #[test]
 fn a_query_at_the_bound_is_answered_at_every_door() {
-    let mut gonk = Gonk::start();
+    let mut gonk = Gonk::with_quic();
     let query = at_the_bound();
     assert_eq!(
         ikigai_gonk::sparql::nesting_depth(query.as_bytes()),
@@ -413,7 +499,11 @@ fn a_query_at_the_bound_is_answered_at_every_door() {
 /// the HTTP runtime is `main`'s builder. One test per door, so each one is proven on its own —
 /// with `THREAD_STACK_BYTES` set back to 2 MiB, all three abort the child.
 fn a_chain_is_answered_through(door: &str) {
-    let mut gonk = Gonk::start();
+    let mut gonk = if door == "quic" {
+        Gonk::with_quic()
+    } else {
+        Gonk::start()
+    };
     let query = deep_chain();
     assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
     assert_eq!(ikigai_gonk::sparql::nesting_depth(query.as_bytes()), 2);
