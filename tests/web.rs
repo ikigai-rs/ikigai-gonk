@@ -2050,3 +2050,57 @@ fn the_sparql_protocol_reads_the_union_the_callers_grant_allows() {
         "{page:?}"
     );
 }
+
+/// Ledger [#989](http://localhost:1060/l/default/item/989): an item's and a comment's body
+/// render their http(s) URLs and `ledger #N` references as links — and nothing else. The
+/// trailing `)` and `.` of the sentence stay outside the link, a `javascript:` URL stays text,
+/// and a `<` in the body stays escaped text (`render::linkify`).
+#[test]
+fn urls_and_ledger_references_in_bodies_are_links_and_nothing_else_is() {
+    let server = Server::start();
+    let body = "A link (see https://example.com/a(b)c). Then http://x.example/y?p=1&q=2. \
+                Not javascript:alert(1), not <script>alert(2)</script>, and ledger #12, \
+                but not ledger #12a.";
+    let (iri, id) = file(&server, &format!("Links in the body\n\n{body}"));
+    let commented = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &iri),
+            ("content", "Comment: https://example.org/c."),
+        ],
+        None,
+    );
+    assert_eq!(commented.status, 200, "{commented:?}");
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let html = &page.body;
+    assert!(
+        html.contains("<a href='https://example.com/a(b)c'>https://example.com/a(b)c</a>). Then"),
+        "a URL followed by `).`: {html}"
+    );
+    assert!(
+        html.contains(
+            "<a href='http://x.example/y?p=1&amp;q=2'>http://x.example/y?p=1&amp;q=2</a>. Not"
+        ),
+        "a URL followed by `.`, its `&` escaped once: {html}"
+    );
+    assert!(
+        html.contains("Not javascript:alert(1),") && !html.contains("href='javascript"),
+        "a javascript: URL stays text: {html}"
+    );
+    assert!(
+        html.contains("&lt;script&gt;alert(2)&lt;/script&gt;") && !html.contains("<script>alert"),
+        "a `<` stays escaped text: {html}"
+    );
+    assert!(
+        html.contains("and <a href='/l/default/item/12'>ledger #12</a>, but not ledger #12a."),
+        "`ledger #12` links to the item: {html}"
+    );
+    assert!(
+        html.contains("Comment: <a href='https://example.org/c'>https://example.org/c</a>."),
+        "a comment's body is linked too: {html}"
+    );
+}
