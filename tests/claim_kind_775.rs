@@ -16,121 +16,22 @@
 //! | HTTP, signed in, mechanical | `ikigai-web` replaces it with the session's passkey | person |
 //! | HTTP, signed in, the item page's form | the form adapter forwards the door's | person |
 
-use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::net::TcpStream;
 
 mod common;
+mod scratch_gonk;
 
 use common::Authenticator;
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
-use ikigai_gonk::{identity, quic};
+use ikigai_gonk::identity;
 use ikigai_resolve::Resolver;
+use scratch_gonk::Gonk;
 
 const FORGED: &str = "urn:iki:gonk:passkey:Rk9SR0VE";
 
-struct Gonk {
-    child: Child,
-    http: SocketAddr,
-    quic: SocketAddr,
-    socket: PathBuf,
-    stderr: PathBuf,
-    layout: quic::Layout,
-    client: quic::Bundle,
-    _dirs: (tempfile::TempDir, tempfile::TempDir),
-}
-
-fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn free_udp_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 impl Gonk {
-    fn start() -> Gonk {
-        let home = tempfile::tempdir().unwrap();
-        // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir does not.
-        let short = tempfile::Builder::new()
-            .prefix("gk")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let config = home.path().join("config");
-        let data = home.path().join("data");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::create_dir_all(&data).unwrap();
-        let layout = quic::Layout::in_config_home(&config);
-        quic::server_identity(&layout).unwrap();
-        let client = quic::add_client(&layout, "alpha", None, false).unwrap();
-        quic::enrol(
-            &layout,
-            "alpha",
-            &client.fingerprint,
-            &grants_for("default", Authority::Write).unwrap(),
-            false,
-        )
-        .unwrap();
-        let (port, quic_port) = (free_tcp_port(), free_udp_port());
-        let socket = short.path().join("s");
-        let stderr = home.path().join("stderr.log");
-        let child = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
-            .arg("--config-home")
-            .arg(&config)
-            .arg("--data-home")
-            .arg(&data)
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--port", &port.to_string()])
-            .args(["--quic-bind", &format!("127.0.0.1:{quic_port}")])
-            .arg("--no-backup")
-            .env("HOME", home.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .expect("spawn ikigai-gonk");
-        let mut gonk = Gonk {
-            child,
-            http: format!("127.0.0.1:{port}").parse().unwrap(),
-            quic: format!("127.0.0.1:{quic_port}").parse().unwrap(),
-            socket,
-            stderr,
-            layout,
-            client,
-            _dirs: (home, short),
-        };
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while !(gonk.socket.exists() && TcpStream::connect(gonk.http).is_ok()) {
-            if let Some(status) = gonk.child.try_wait().unwrap() {
-                panic!("gonk DIED starting ({status}):\n{}", gonk.log());
-            }
-            assert!(
-                Instant::now() < deadline,
-                "gonk never came up: {}",
-                gonk.log()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        gonk
-    }
-
-    fn log(&self) -> String {
-        std::fs::read_to_string(&self.stderr).unwrap_or_default()
-    }
-
     fn origin(&self) -> String {
         format!("http://localhost:{}", self.http.port())
     }
@@ -235,19 +136,10 @@ impl Gonk {
     }
 
     fn over_quic(&self, request: Request) -> Result<Representation, Error> {
-        let identity = ikigai_quic::Identity {
-            cert_pem: std::fs::read_to_string(self.client.dir.join("client.crt")).unwrap(),
-            key_pem: std::fs::read_to_string(self.client.dir.join("client.key")).unwrap(),
-        };
-        let (server, _) = quic::server_identity(&self.layout).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let client = loop {
-            match ikigai_quic::connect(self.quic, &identity, &server.cert_pem) {
-                Ok(client) => break client,
-                Err(e) if Instant::now() > deadline => panic!("QUIC connect: {e}"),
-                Err(_) => std::thread::sleep(Duration::from_millis(100)),
-            }
-        };
+        // The door answered a handshake before `with_quic` returned; this is one more.
+        let client = self
+            .dial_quic()
+            .unwrap_or_else(|e| panic!("QUIC connect: {e}"));
         client.issue(request).map(|(repr, _)| repr)
     }
 
@@ -274,13 +166,6 @@ impl Gonk {
             .expect("the item");
         let doc: serde_json::Value = serde_json::from_slice(&read.bytes).unwrap();
         doc["item"]["claim"].clone()
-    }
-}
-
-impl Drop for Gonk {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -318,7 +203,7 @@ fn forged_claim(item: usize, holder: &str) -> Request {
 
 #[test]
 fn no_door_lets_a_caller_choose_its_claim_kind() {
-    let gonk = Gonk::start();
+    let gonk = Gonk::with_quic("");
     gonk.file(5);
     let token = gonk.sign_in();
 

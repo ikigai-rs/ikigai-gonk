@@ -10,95 +10,25 @@
 //! The length bound is for a CALLER's text: a request a door issued (depth 0 at the hub), and
 //! `urn:sparql:*`'s own early check. The nesting bound stays at every depth.
 //!
-//! ★ A REAL gonk in a child process, as `tests/sparql_depth_915.rs` runs one: over a scratch
-//! config home, data home, store and socket, on a random port. Nothing here touches a live gonk.
-//! On `eeeeeaf` the first test fails at its first page.
+//! ★ A REAL gonk in a child process, `tests/scratch_gonk/mod.rs`, as `tests/sparql_depth_915.rs`
+//! runs one: over a scratch config home, data home, store and socket, on a port the child binds.
+//! Nothing here touches a live gonk. On `eeeeeaf` the first test fails at its first page.
 
-use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::net::TcpStream;
+
+mod scratch_gonk;
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
 use ikigai_resolve::Resolver;
+use scratch_gonk::Gonk;
 
 /// More open items than fit one 32 KiB `VALUES` at ~51 bytes an IRI (642 do).
 const ITEMS: usize = 750;
 
 const GRAPH: &str = "urn:iki:ledger:graph:default";
 
-/// A scratch gonk in a child process. Killed and reaped on drop.
-struct Gonk {
-    child: Child,
-    http: SocketAddr,
-    socket: PathBuf,
-    stderr: PathBuf,
-    _dirs: (tempfile::TempDir, tempfile::TempDir),
-}
-
 impl Gonk {
-    fn start() -> Gonk {
-        let home = tempfile::tempdir().unwrap();
-        // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir does not.
-        let short = tempfile::Builder::new()
-            .prefix("gk")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let config = home.path().join("config");
-        let data = home.path().join("data");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::create_dir_all(&data).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let socket = short.path().join("s");
-        let stderr = home.path().join("stderr.log");
-        let child = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
-            .arg("--config-home")
-            .arg(&config)
-            .arg("--data-home")
-            .arg(&data)
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--port", &port.to_string()])
-            .arg("--no-quic")
-            .arg("--no-backup")
-            .env("HOME", home.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .expect("spawn ikigai-gonk");
-        let mut gonk = Gonk {
-            child,
-            http: format!("127.0.0.1:{port}").parse().unwrap(),
-            socket,
-            stderr,
-            _dirs: (home, short),
-        };
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while !(gonk.socket.exists() && TcpStream::connect(gonk.http).is_ok()) {
-            if let Some(status) = gonk.child.try_wait().unwrap() {
-                panic!("gonk DIED starting ({status}):\n{}", gonk.log());
-            }
-            assert!(
-                Instant::now() < deadline,
-                "gonk never came up: {}",
-                gonk.log()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        gonk
-    }
-
-    fn log(&self) -> String {
-        std::fs::read_to_string(&self.stderr).unwrap_or_default()
-    }
-
     /// A same-origin GET, as gonk's own pages send one. `(0, …)` when nothing answered.
     fn get(&self, path: &str) -> (u16, String) {
         let Ok(mut stream) = TcpStream::connect(self.http) else {
@@ -146,13 +76,6 @@ impl Gonk {
     }
 }
 
-impl Drop for Gonk {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {
     args.iter().fold(
         Request::new(verb, Iri::parse(iri).unwrap()),
@@ -185,7 +108,7 @@ fn refused_for_length(answer: Result<Representation, Error>, what: &str) {
 /// pages and answers `next`, through the HTTP door and the socket.
 #[test]
 fn a_ledger_past_the_length_bound_still_renders_and_answers_next() {
-    let gonk = Gonk::start();
+    let gonk = Gonk::start("");
     gonk.fill(ITEMS);
     for path in ["/", "/l/default", "/iki/ledger/next"] {
         let (status, body) = gonk.get(path);
@@ -206,7 +129,7 @@ fn a_ledger_past_the_length_bound_still_renders_and_answers_next() {
 /// reached directly at depth 0, and `urn:sparql:*`, which checks before it reads anything.
 #[test]
 fn a_callers_query_past_the_length_bound_is_still_refused() {
-    let gonk = Gonk::start();
+    let gonk = Gonk::start("");
     // One item, so the default dataset `urn:sparql:select` reads is not empty.
     gonk.fill(1);
     let query = past_the_length_bound();

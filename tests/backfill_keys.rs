@@ -10,7 +10,8 @@
 use std::path::Path;
 use std::process::Output;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+
+mod ready;
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
@@ -123,11 +124,7 @@ fn old_filings_gain_their_keys_once_and_duplicates_are_listed() {
     let door = doors::door_kernel(Arc::clone(&hub));
     let path = socket.clone();
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "the socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    ready::socket(&socket);
 
     // A dry run plans and writes nothing.
     let dry = stdout(&backfill(&socket, &["--dry-run"]));

@@ -16,7 +16,8 @@
 //!   real Unix socket, through the `MountedRemote` a `web.mount` line builds.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+
+mod ready;
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
@@ -373,12 +374,7 @@ fn a_class_query_runs_end_to_end_through_a_mounted_socket() {
     let socket = dir.path().join("gonk.sock");
     let (door, path) = (doors::door_kernel(hub()), socket.clone());
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "the socket never appeared");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let resolver = ikigai_ipc::connect(&socket).expect("connect");
+    let resolver = ready::socket(&socket);
     let client = Kernel::with_meta_renderer(
         Arc::new(ikigai_resolve::MountedRemote::overriding(
             Arc::new(resolver),

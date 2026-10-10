@@ -24,6 +24,8 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod ready;
+
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Representation, Request, Verb};
 use ikigai_gonk::access::{AccessLog, Door};
@@ -615,9 +617,8 @@ fn socket_door(access: Option<AccessLog>) -> SocketDoor {
         socket.clone(),
     );
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    wait_for("the socket", || socket.exists());
     SocketDoor {
-        client: ikigai_ipc::connect(&socket).expect("connect"),
+        client: ready::socket(&socket),
         hub,
         _dir: dir,
     }
