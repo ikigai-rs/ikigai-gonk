@@ -93,7 +93,7 @@ fn door_with(
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let roots: Vec<(String, PathBuf)> = vec![(ROOT.to_string(), dir.path().to_path_buf())];
-    let wired = browse::wire(roots, handle, None, Some(tiers), &graph);
+    let wired = browse::wire(roots, handle, None, Some(tiers), &graph, None);
     let space = match reviews {
         Some(activity) => wired.space.observing_reviews(activity),
         None => wired.space,

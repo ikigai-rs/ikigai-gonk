@@ -60,6 +60,12 @@ pub struct Args {
     /// `--all`: update every checkout already under the managed directory instead of the
     /// repositories named here (which must then be none).
     pub all: bool,
+    /// `--config-home`: the config home whose `config.toml` this reads and appends to, as
+    /// `serve` takes it (ledger #918: through `642a265` checkout read the process's only).
+    pub config_home: Option<PathBuf>,
+    /// `--data-home`: the data home the managed directory defaults under
+    /// (`<data home>/checkouts`), as `serve` takes it.
+    pub data_home: Option<PathBuf>,
 }
 
 /// One repository to check out.
@@ -79,6 +85,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
         write_config: false,
         config: None,
         all: false,
+        config_home: None,
+        data_home: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
@@ -88,6 +96,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String
         match arg.as_str() {
             "--dir" => out.dir = Some(PathBuf::from(value("--dir")?)),
             "--config" => out.config = Some(PathBuf::from(value("--config")?)),
+            "--config-home" => out.config_home = Some(PathBuf::from(value("--config-home")?)),
+            "--data-home" => out.data_home = Some(PathBuf::from(value("--data-home")?)),
             "--write-config" => out.write_config = true,
             "--all" => out.all = true,
             flag if flag.starts_with('-') => {
@@ -856,6 +866,24 @@ mod tests {
             .contains("reserved"));
         assert!(parse(&["--bogus"]).unwrap_err().contains("unknown"));
         assert!(parse(&["https://example.com/"]).is_err());
+    }
+
+    /// Ledger #918 (4): `checkout` takes both homes, as `serve` does.
+    #[test]
+    fn the_homes_are_flags_as_on_serve() {
+        let args = parse(&[
+            "https://a/x.git",
+            "--config-home",
+            "/srv/cfg",
+            "--data-home",
+            "/srv/data",
+        ])
+        .unwrap();
+        assert_eq!(args.config_home.as_deref(), Some(Path::new("/srv/cfg")));
+        assert_eq!(args.data_home.as_deref(), Some(Path::new("/srv/data")));
+        assert!(parse(&["https://a/x.git", "--config-home"])
+            .unwrap_err()
+            .contains("needs a value"));
     }
 
     #[test]

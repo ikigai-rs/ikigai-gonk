@@ -106,7 +106,7 @@ fn door_and_hub(
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store that declares where its sharer writes");
-    let wired = browse::wire(roots(dir), handle, None, None, &graph);
+    let wired = browse::wire(roots(dir), handle, None, None, &graph, None);
     let trigger_spaces = match &review {
         Some(t) => ikigai_gonk::trigger::space(t, activity, armed, QueuePolicy::default()),
         None => Vec::new(),
@@ -2080,7 +2080,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
     let elsewhere = Kernel::new(Arc::new(ikigai_store::space(store.clone())));
     let (watch, refused) = ikigai_gonk::watch::RootWatch::start(&roots(dir));
     assert!(refused.is_empty(), "{refused:?}");
-    let wired = browse::wire(roots(dir), handle, Some(&watch), None, &graph);
+    let wired = browse::wire(roots(dir), handle, Some(&watch), None, &graph, None);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),

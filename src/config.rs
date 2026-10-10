@@ -191,14 +191,15 @@ usage:
                                    (or filed by a concurrent hook) is not filed again; low ones
                                    are skipped unless --min-severity low
   ikigai-gonk checkout [<name>=]<git-url>... [--dir DIR] [--write-config] [--config PATH]
+                     [--config-home DIR] [--data-home DIR]
                                    clone each repository into ~/.ikigai/checkouts/<name> (or
-                                   --dir), or fetch and FAST-FORWARD the clone already there;
+                                   --dir, or <--data-home>/checkouts), or fetch and FAST-FORWARD the clone already there;
                                    a checkout with local changes, on another branch, or
                                    diverged is refused and left alone. Prints each
                                    `gonk.browse.root` line; --write-config appends the missing
                                    ones to config.toml (a backup beside it). No store, no door.
                                    gonk reads its roots at startup: restart it after adding one
-  ikigai-gonk checkout --all [--dir DIR] [--config PATH]
+  ikigai-gonk checkout --all [--dir DIR] [--config PATH] [--config-home DIR] [--data-home DIR]
                                    fetch and fast-forward EVERY checkout already under the
                                    managed directory, each from its own `origin`, with the same
                                    refusals; then say which checkouts no gonk.browse.root uses
@@ -783,6 +784,16 @@ impl Homes {
                     .to_string())
             }
         };
+        // ★ Absolute, from the working directory the command was started in (ledger #918):
+        // every path derived from a home — the socket, the store, the backups, `grants.json` —
+        // is printed for an operator to paste and handed to a server that may not share this
+        // working directory, so a relative `--config-home ./cfg` printed `mount = "… ./data/…"`.
+        let absolute = |dir: PathBuf, flag: &str| {
+            std::path::absolute(&dir)
+                .map_err(|e| format!("{flag} {}: cannot make it absolute: {e}", dir.display()))
+        };
+        let config = absolute(config, "--config-home")?;
+        let data = absolute(data, "--data-home")?;
         let home = match process {
             Some(process) => process.home,
             None => data
@@ -1787,6 +1798,24 @@ mod tests {
                 budget(&format!("gonk.http.anonymous_sparql_budget_ms = {bad}")).unwrap_err();
             assert!(refused.contains("from 1 to 5000"), "{bad}: {refused}");
         }
+    }
+
+    #[test]
+    fn relative_homes_are_made_absolute() {
+        let flags = Flags {
+            config_home: Some("scratch/cfg".into()),
+            data_home: Some("./scratch/data".into()),
+            ..Flags::default()
+        };
+        let homes = Homes::resolve(&flags).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(homes.config, cwd.join("scratch/cfg"));
+        assert!(homes.data.is_absolute(), "{}", homes.data.display());
+        assert!(
+            homes.data.ends_with("scratch/data"),
+            "{}",
+            homes.data.display()
+        );
     }
 
     #[test]

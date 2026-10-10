@@ -143,6 +143,7 @@ fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Serve
         Some(&watch),
         mount.is_some().then_some(&tiers),
         &graph,
+        None,
     );
     let mounted = mount.iter().map(mount::space).collect();
     let hub = Arc::new(compose_with(
@@ -178,7 +179,14 @@ fn naive(dir: &TempDir) -> Arc<Kernel> {
     let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // No watcher either: a host that accepts the blanket has no reason to run one, and
     // `ikigai-browse`'s reads are live and uncacheable exactly as it declares them.
-    let wired = browse::wire(roots(dir), handle, None, None, &browse::Graph::chosen());
+    let wired = browse::wire(
+        roots(dir),
+        handle,
+        None,
+        None,
+        &browse::Graph::chosen(),
+        None,
+    );
     let space = Fallback::new(vec![
         Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
         Arc::new(ikigai_ledger::space()) as Arc<dyn Space>,
@@ -1988,7 +1996,7 @@ fn an_unwatched_roots_reads_are_not_cached() {
         .expect("a shared in-memory store");
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
-    let wired = browse::wire(roots(&dir), handle, None, None, &graph);
+    let wired = browse::wire(roots(&dir), handle, None, None, &graph, None);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
@@ -3184,7 +3192,14 @@ fn the_pass_requires_exactly_what_the_real_review_requires() {
     let (watch, refused) = RootWatch::start(&roots(&dir));
     assert!(refused.is_empty(), "{refused:?}");
     let tiers = ExplainTiers::default();
-    let wired = browse::wire(roots(&dir), handle, Some(&watch), Some(&tiers), &graph);
+    let wired = browse::wire(
+        roots(&dir),
+        handle,
+        Some(&watch),
+        Some(&tiers),
+        &graph,
+        None,
+    );
     let spaces = tempfile::tempdir().expect("a spaces tree");
     let queue = ikigai_gonk::trigger::Trigger {
         space: "reviews".to_string(),
@@ -3403,4 +3418,43 @@ fn the_trigger_encodes_a_path_exactly_as_browse_does() {
             "browse lists `{name}` under some IRI other than `{as_file}`:\n{listing}"
         );
     }
+}
+
+/// Ledger [#918](http://localhost:1060/l/default/item/918) (2): the browse family's `a11y.toml`
+/// layers — what `urn:repo:style` reads and what `Wired::style` watches — live in the config home
+/// the SERVER was given, never the process's. Through `642a265` `wire` left the mount to read
+/// `$XDG_CONFIG_HOME` / `$HOME/.config`, so `ikigai-gonk serve --config-home X` watched the
+/// operator's real file.
+#[test]
+fn the_style_watch_is_over_the_config_home_the_server_was_given() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = TempDir::new().expect("a config home");
+    let wire = |config_home: Option<std::path::PathBuf>| {
+        let (_store, handle) = DurableStore::in_memory_shared().expect("a shared store");
+        browse::wire(
+            roots(&dir),
+            handle,
+            None,
+            None,
+            &browse::Graph::chosen(),
+            config_home,
+        )
+    };
+    let stated = wire(Some(home.path().to_path_buf()));
+    assert_eq!(stated.style.home(), Some(home.path()));
+    assert!(
+        !stated.style.threads().is_empty(),
+        "a stated home has candidates"
+    );
+    assert!(
+        stated
+            .style
+            .threads()
+            .iter()
+            .all(|thread| thread.contains(&home.path().display().to_string())),
+        "every watched candidate is under the stated home: {:?}",
+        stated.style.threads()
+    );
+    let none = wire(None);
+    assert_eq!(none.style.home(), None, "a stated absence watches nothing");
 }

@@ -310,6 +310,52 @@ pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
     Ok(removed)
 }
 
+/// Move `old`'s enrolment in `clients.json` to `new`, in ONE write: the same grant, the same
+/// label, nothing in `grants.json` touched. `Ok(Some(grant))` names the grant the new
+/// certificate is now enrolled under; `Ok(None)` when `old` had no entry of its own (a
+/// certificate admitted only through the shared `default` grant, or not at all), in which case
+/// nothing is written.
+///
+/// ★ This is what `client add <name> --rotate` does when it is given no scopes (ledger
+/// [#918](http://localhost:1060/l/default/item/918)): a rotation replaces a client's IDENTITY,
+/// and its authority goes with it. Through 0.1.x it unenrolled the old certificate and left the
+/// new one enrolled under nothing, so the rotated client was refused at its next connection
+/// while `grants.json` still held its grant — and the printed fix named a fixed
+/// `--ledger default=write`, which against a broader grant is a NARROWING.
+pub fn rotate_enrolment(layout: &Layout, old: &str, new: &str) -> Result<Option<String>, String> {
+    let mut doc = read_object(&layout.clients_json())?;
+    let mut clients = match doc.remove("clients") {
+        None => return Ok(None),
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err("`clients` must be an object".to_string()),
+    };
+    let Some(entry) = clients.remove(&normalize(old)) else {
+        return Ok(None);
+    };
+    let grant = entry
+        .as_str()
+        .or_else(|| entry.get("grant").and_then(Value::as_str))
+        .ok_or("the old certificate's enrolment names no grant")?
+        .to_string();
+    if let Some(existing) = clients.get(&normalize(new)) {
+        let current = existing
+            .as_str()
+            .or_else(|| existing.get("grant").and_then(Value::as_str));
+        if current != Some(grant.as_str()) {
+            return Err(format!(
+                "the new certificate is already enrolled under grant `{}` — nothing was written",
+                current.unwrap_or("?")
+            ));
+        }
+    }
+    clients.insert(normalize(new), entry);
+    doc.insert("clients".to_string(), Value::Object(clients));
+    let text = pretty(&Value::Object(doc))?;
+    parse_enrolment(&text)?;
+    write_private(&layout.clients_json(), &text)?;
+    Ok(Some(grant))
+}
+
 /// One row of `client list`: a bundle, an enrolled fingerprint, or both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientRow {

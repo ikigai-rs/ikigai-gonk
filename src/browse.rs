@@ -366,12 +366,21 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 /// (`proposals=`, the complement of `gonk.queue.serious`) is a per-request argument, not a
 /// mount setting. The seam is where gonk forwards a file-page command —
 /// [`crate::k::KAdapter`]'s `source`, ledger [#496](http://localhost:1060/l/default/item/496).
+///
+/// ★ `config_home` is the server's OWN config home, stated (ledger
+/// [#918](http://localhost:1060/l/default/item/918)): the one `urn:repo:style` layers its
+/// `a11y.toml` within and `Wired::style` watches. Through `642a265` the mount was left to read
+/// the PROCESS's (`$XDG_CONFIG_HOME` or `$HOME/.config`), so a scratch gonk started with
+/// `--config-home X` styled its pages from, and watched, the operator's real `a11y.toml`.
+/// `None` states that this process has none — built-in themes, no watch — which is what a
+/// hermetic test wants.
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
     store: Arc<Store>,
     watch: Option<&RootWatch>,
     explain: Option<&ExplainTiers>,
     graph: &Graph,
+    config_home: Option<PathBuf>,
 ) -> Wired {
     let first = roots.first().map(|(name, _)| name.clone());
     let mount = graph.on(Mount::new(roots)
@@ -379,7 +388,8 @@ pub fn wire(
         // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style`
         // reads its themes and its contrast floor from. Without it that file would sit
         // on disk doing nothing — the quietest kind of wrong.
-        .app("gonk"));
+        .app("gonk")
+        .config_home(config_home));
     let mount = match explain {
         Some(tiers) => mount.explain(explain_config(store, tiers)),
         None => mount,

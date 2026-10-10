@@ -119,7 +119,13 @@ fn main() {
             ikigai_gonk::roborev::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
         }
         Command::Checkout(args) => {
-            let homes = Homes::from_process().unwrap_or_else(|e| fail(&e));
+            // The same two homes `serve` takes (ledger #918), resolved by the same function.
+            let homes = Homes::resolve(&config::Flags {
+                config_home: args.config_home.clone(),
+                data_home: args.data_home.clone(),
+                ..config::Flags::default()
+            })
+            .unwrap_or_else(|e| fail(&e));
             let all_ok = ikigai_gonk::checkout::run(&args, &homes, &mut std::io::stdout())
                 .unwrap_or_else(|e| fail(&e));
             if !all_ok {
@@ -244,6 +250,7 @@ fn serve(flags: &config::Flags) -> ! {
             // The SAME value the declaration above was derived from — not a second
             // `Graph::chosen()`, which would be a second decision.
             &browse_graph,
+            Some(homes.config.clone()),
         )
     });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched(), &browse_graph);
@@ -1050,9 +1057,37 @@ fn client_add(
     println!("client `{name}`  {}", bundle.dir.display());
     println!("  fingerprint  {}", bundle.fingerprint);
     println!("  principal    {}", quic::client_iri(&bundle.fingerprint));
-    if scopes.is_empty() {
+    // ★ A rotation with no scopes keeps the client's AUTHORITY and replaces only its identity
+    // (ledger #918): the old certificate's enrolment moves to the new one, same grant, and
+    // `grants.json` is not touched. Without this the new certificate was enrolled under
+    // nothing and the client was refused at its next connection.
+    let mut carried = None;
+    if let (true, Some(old)) = (scopes.is_empty(), &bundle.replaced) {
+        carried =
+            quic::rotate_enrolment(&layout, old, &bundle.fingerprint).unwrap_or_else(|e| fail(&e));
+    }
+    if let Some(grant) = &carried {
+        println!(
+            "  enrolled     under grant `{grant}`, unchanged — the old certificate's enrolment \
+             moved to this one"
+        );
+    } else if scopes.is_empty() {
         println!("  NOT enrolled — a trusted certificate with no grant is refused. Enrol it:");
-        println!("    ikigai-gonk client add {name} --ledger default=write");
+        let existing = quic::read_grants(&layout.grants_json())
+            .ok()
+            .and_then(|grants| grants.get(name).map(Vec::len));
+        match existing {
+            // A grant of this name already exists, and a fixed `--ledger` line would REWRITE
+            // it (refused without --force, a narrowing with it). Say what is there instead.
+            Some(n) => println!(
+                "    grant `{name}` already holds {n} scope(s) in {}: re-run with the --ledger / \
+                 --browse flags that grant names (a different set is refused without --force)",
+                layout.grants_json().display()
+            ),
+            None => println!(
+                "    ikigai-gonk client add {name} --ledger <ledger>=<read|write|delete|purge>"
+            ),
+        }
     } else {
         quic::enrol(&layout, name, &bundle.fingerprint, scopes, rewrite.force)
             .unwrap_or_else(|e| fail(&e));
@@ -1068,7 +1103,9 @@ fn client_add(
     // ★ A rotation says what it REPLACED (ledger #864, R7): the old certificate is no longer
     // enrolled, so the deployed bundle stops working at its next connection — on purpose.
     if let Some(old) = &bundle.replaced {
-        let unenrolled = quic::unenrol(&layout, old).unwrap_or_else(|e| fail(&e));
+        // Already moved to the new certificate when the enrolment was carried over.
+        let unenrolled =
+            carried.is_some() || quic::unenrol(&layout, old).unwrap_or_else(|e| fail(&e));
         println!(
             "  ROTATED      the old certificate {old} {} — a client still holding the old \
              bundle is refused from its next connection; give it this one",

@@ -820,6 +820,59 @@ fn rotate_replaces_the_identity_and_unenrols_the_old_one() {
     assert!(!cli.root.join("xdg/ikigai/gonk/quic/clients/ghost").exists());
 }
 
+/// Ledger [#918](http://localhost:1060/l/default/item/918) (1): `--rotate` ALONE replaces the
+/// client's identity and keeps its authority. Through `642a265` it unenrolled the old
+/// certificate and left the new one enrolled under nothing — refused at its next connection —
+/// while `grants.json` still held the grant, and its printed fix (`--ledger default=write`)
+/// would have NARROWED this broader grant.
+#[test]
+fn a_rotate_with_no_scopes_enrols_the_new_certificate_under_the_same_grant() {
+    let cli = Cli::new("");
+    let (ok, first, err) = cli.run(&[
+        "client",
+        "add",
+        "laptop",
+        "--ledger",
+        "default=delete",
+        "--ledger",
+        "acme=read",
+    ]);
+    assert!(ok, "{err}");
+    let grants = || std::fs::read_to_string(cli.root.join("xdg/ikigai/gonk/grants.json")).unwrap();
+    let before = grants();
+    let (ok, rotated, err) = cli.run(&["client", "add", "laptop", "--rotate"]);
+    assert!(ok, "{err}");
+    let (old, new) = (fingerprint_in(&first), fingerprint_in(&rotated));
+    assert_ne!(old, new, "--rotate mints a new identity");
+    assert_eq!(
+        cli.enrolled(),
+        [new.as_str()],
+        "the NEW certificate is enrolled, the old one is not: {rotated}"
+    );
+    let clients: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cli.root.join("xdg/ikigai/gonk/clients.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(clients["clients"][&new]["grant"], "laptop");
+    assert_eq!(grants(), before, "the grant itself is untouched");
+    assert!(
+        rotated.contains("under grant `laptop`, unchanged"),
+        "{rotated}"
+    );
+    assert!(
+        !rotated.contains("NOT enrolled") && !rotated.contains("default=write"),
+        "no narrowing hint: {rotated}"
+    );
+    // A client that was never enrolled is not enrolled by a rotation, and the hint names the
+    // grant that exists rather than a fixed scope list.
+    let (ok, _, err) = cli.run(&["client", "add", "spare"]);
+    assert!(ok, "{err}");
+    let (ok, rotated, err) = cli.run(&["client", "add", "spare", "--rotate"]);
+    assert!(ok, "{err}");
+    assert!(rotated.contains("NOT enrolled"), "{rotated}");
+    assert!(!rotated.contains("default=write"), "{rotated}");
+}
+
 #[test]
 fn client_list_and_remove_show_and_revoke_what_is_enrolled() {
     let cli = Cli::new("");

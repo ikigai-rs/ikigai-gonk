@@ -53,8 +53,12 @@ ikigai-gonk --port 1070 --config-home ./cfg --data-home ./data --socket ./g.sock
 `--data-home` moves the socket, the store, the backups and the review queue; `--store` names the
 dataset's directory outright. `client`, `passkey invite`, `review request` and `grants
 --browse` take the two home flags too, so the command that provisions a scratch server writes
-where that server reads. `--port 1070` moves the QUIC door to UDP 1070 as well. (`checkout`
-still reads the process's homes.)
+where that server reads, and so does `checkout` (its managed directory defaults to
+`<data home>/checkouts`). A relative home is made absolute from the working directory the
+command started in, so every path the banner prints can be pasted from anywhere; `--socket` is
+left as given, because a Unix socket path must stay under 104 bytes. `--port 1070` moves the
+QUIC door to UDP 1070 as well. The browse family's `a11y.toml` layers are read and watched in
+the config home the server was given, not the process's (ledger #918).
 
 ## In a browser
 
@@ -1438,7 +1442,7 @@ default=write`; then copy the bundle's `server.crt` back over the one in `~/gonk
 ```sh
 ikigai-gonk client list                      # every bundle and enrolled fingerprint, its grant, and whether it is admitted
 ikigai-gonk client add laptop --ledger default=delete --force   # a NEW GRANT; the identity is kept
-ikigai-gonk client add laptop --rotate       # a NEW IDENTITY; the old fingerprint is unenrolled, and it says so
+ikigai-gonk client add laptop --rotate       # a NEW IDENTITY under the SAME grant; the old fingerprint's enrolment moves to it
 ikigai-gonk client remove laptop             # the bundle and its enrolment (grants.json is left alone)
 ikigai-gonk client remove --fingerprint <fp> # an enrolment with no bundle
 ```
@@ -1447,8 +1451,13 @@ ikigai-gonk client remove --fingerprint <fp> # an enrolment with no bundle
 both: the operator ran the `--force` the grant refusal told them to, the client's deployed
 certificate silently stopped being trusted at the next restart, and its old fingerprint
 stayed enrolled beside the new one. `--rotate` is the explicit replacement, with `--cert` to
-import a certificate the client generated itself. An enrolment left behind by the old
-behavior shows in `client list` as `enrolled, NO bundle`; remove it by fingerprint.
+import a certificate the client generated itself. With no `--ledger`/`--browse` flags it keeps
+the client's authority: the old certificate's enrolment moves to the new one, same grant, and
+`grants.json` is not touched. Through `642a265` it left the new certificate enrolled under
+nothing, so the rotated client was refused at its next connection (ledger #918). With scope
+flags, the grant is rewritten as for any `client add` (refused without `--force` if it
+changes). An enrolment left behind by the old behavior shows in `client list` as
+`enrolled, NO bundle`; remove it by fingerprint.
 
 **Every QUIC request is attributed.** The server names each connection's client
 `urn:iki:gonk:client:<fingerprint>` (`client add` prints it) on its session, and `ikigai-quic`
