@@ -590,10 +590,23 @@ pub fn splice(shell: String, slots: &[(String, String)]) -> Result<String, Strin
     Ok(page)
 }
 
+/// How long one render may take before it is answered as an error: **60 seconds**.
+///
+/// ★ Since ikigai-xslt 0.2.1 every transform is answered within a time budget (ledger
+/// #1040), and the crate's default is 5 s: about seven times one of this stylesheet's cold
+/// 10-row chunks in a RELEASE build on an idle machine. A debug build runs xrust roughly an
+/// order of magnitude slower, so on a loaded machine the default refused ordinary pages with
+/// a 500 (three `tests/audit_864.rs` page reads failed that way on the re-pin, and passed
+/// alone). Through 0.2.0 a render was unbounded. The stylesheet is this binary's own and the
+/// documents are built here, so the budget is not a defense against a hostile stylesheet; it
+/// bounds a pathological page, and is set where no page this server draws on purpose reaches
+/// it in either build.
+pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Transform an envelope through [`STYLESHEET`] and serialize the result as HTML. A full
 /// page gets its doctype here, because xrust does not write one.
 pub fn render(document: &str, full_page: bool) -> Result<String, String> {
-    let xml = ikigai_xslt::transform_xml(document, STYLESHEET, false)?;
+    let xml = ikigai_xslt::transform_xml_within(document, STYLESHEET, false, RENDER_BUDGET)?;
     let body = linkify(&html(&xml));
     Ok(if full_page {
         format!("<!DOCTYPE html>\n{body}")

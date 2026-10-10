@@ -3,6 +3,13 @@ use std::time::Instant;
 
 use ikigai_gonk::render::STYLESHEET;
 
+/// One render, under a budget no row count here reaches: a benchmark measures the slow
+/// shapes rather than refusing them (ikigai-xslt 0.2.1's default is 5 s, and 400 rows in one
+/// document took 23.6 s before the pages were chunked).
+fn transform(doc: &str) -> Result<String, String> {
+    ikigai_xslt::transform_xml_within(doc, STYLESHEET, false, std::time::Duration::from_secs(600))
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -103,7 +110,7 @@ fn main() {
         .nth(2)
         .unwrap_or_else(|| "full".to_string());
     // warm the stylesheet compile cache
-    let _ = ikigai_xslt::transform_xml(&page(1, &container, &shape), STYLESHEET, false)
+    let _ = transform(&page(1, &container, &shape))
         .expect("render");
     println!("shape: {shape}");
     println!(
@@ -113,7 +120,7 @@ fn main() {
     for n in [10usize, 25, 50, 100, 200, 400] {
         let doc = page(n, &container, &shape);
         let t = Instant::now();
-        let out = ikigai_xslt::transform_xml(&doc, STYLESHEET, false).expect("render");
+        let out = transform(&doc).expect("render");
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         let kb = doc.len() as f64 / 1024.0;
         println!(
@@ -132,7 +139,7 @@ fn main() {
         let t = Instant::now();
         let mut total = 0usize;
         for _ in 0..(400 / k) {
-            let out = ikigai_xslt::transform_xml(&doc, STYLESHEET, false).expect("render");
+            let out = transform(&doc).expect("render");
             total += out.len();
         }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
