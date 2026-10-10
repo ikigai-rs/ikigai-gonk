@@ -277,7 +277,9 @@ fn serve(flags: &config::Flags) -> ! {
     });
     // ★ The backup fires under exactly `backup::JOB_SCOPES` and nothing else, so a scheduled
     // backup has the authority to read every graph and write the rotation — and no authority
-    // to write a single quad. Since ikigai-time 0.4.0 (ledger #79) the registry's capability
+    // to write a single quad. The list also carries the store's budget grant
+    // (`backup::JOB_BUDGET`, ledger #979): scoped callers get the store's 5 s base, and the
+    // whole-dataset query takes several times that. Since ikigai-time 0.4.0 (ledger #79) the registry's capability
     // is a CEILING and each job records its own; a tick fires under `ceiling.clamp(job)`.
     // Both are `JOB_SCOPES` here, so the clamp is exactly `JOB_SCOPES`. `Capability::root()`
     // is still the registry's default ceiling and would be silently broader than anything this

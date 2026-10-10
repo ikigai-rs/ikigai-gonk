@@ -947,3 +947,101 @@ fn the_stopgap_archive_the_hub_took_actually_restores() {
     );
     println!("restored {total} quads in {} graph(s)", counts.len());
 }
+
+// ------------------------------------------------------------------ the time budget
+
+/// A hub over `store` with the backup family bound, rotating into `dir`.
+fn hub_over(store: DurableStore, dir: &Path) -> Arc<Kernel> {
+    Arc::new(compose_with(
+        store,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Some(Backups {
+            settings: Arc::new(backup::Settings {
+                dir: dir.to_path_buf(),
+                keep: 5,
+                every: Some(std::time::Duration::from_secs(86_400)),
+                store_path: PathBuf::from("/nonexistent/live/store"),
+            }),
+            jobs: None,
+        }),
+    ))
+}
+
+/// Twenty thousand quads in two named graphs: enough that the backup's sorted whole-dataset
+/// SELECT cannot finish inside a 1 ms budget on any machine CI runs on.
+fn bulk_nquads() -> Vec<u8> {
+    let mut out = String::new();
+    for n in 0..20_000 {
+        let graph = if n % 2 == 0 { "default" } else { "acme" };
+        out.push_str(&format!(
+            "<urn:item:{n}> <urn:ik:title> \"item {n}\" <urn:iki:ledger:graph:{graph}> .\n"
+        ));
+    }
+    out.into_bytes()
+}
+
+/// ★ Ledger [#979](http://localhost:1060/l/default/item/979): since `ikigai-store` 0.2.8 every
+/// SPARQL evaluation runs within a time budget, and a caller holding no budget grant gets the
+/// store's BASE. The scheduled backup fires under exactly [`backup::JOB_SCOPES`] — scoped, not
+/// root — and its whole-dataset query takes 15–25 s on the live dataset (RocksDB) against a
+/// 5 s base, so a lock move without a grant would have refused every backup from then on.
+///
+/// The base is made small here (1 ms) instead of the dataset large, so the test is fast. The
+/// first half is the reproduction: the job's scopes WITHOUT the grant are refused with the
+/// typed `Timeout`, and nothing is written. The second is the fix: the same backup under
+/// `JOB_SCOPES` — the list the registry fires under — completes and verifies.
+#[test]
+fn the_scheduled_backup_holds_a_budget_grant_and_completes_past_the_base() {
+    let rotation = tempfile::tempdir().expect("tempdir");
+    let store = DurableStore::in_memory()
+        .expect("an in-memory store")
+        .with_time_budget(
+            ikigai_store::budget::TimeBudget::new(std::time::Duration::from_millis(1))
+                // The refused run below goes on evaluating after its caller is answered (an
+                // `ORDER BY` does not check the cancellation token), and the store refuses new
+                // work while `max_overdue` runs are overdue — a quarter of the cores, which is
+                // ONE on a CI runner. So the cap is lifted here, or the second backup would be
+                // refused `Unavailable` for the first one's sake.
+                .with_max_overdue(64),
+        );
+    let hub = hub_over(store, rotation.path());
+    issue(
+        &hub,
+        Verb::Sink,
+        "urn:iki:store:load",
+        &[
+            ("content", &bulk_nquads()),
+            ("format", b"application/n-quads"),
+        ],
+    );
+
+    let without_grant: Vec<&str> = backup::JOB_SCOPES
+        .iter()
+        .copied()
+        .filter(|scope| *scope != backup::JOB_BUDGET)
+        .collect();
+    assert_eq!(without_grant.len(), backup::JOB_SCOPES.len() - 1);
+    let refused = block_on(hub.issue(
+        Request::new(Verb::Source, Iri::parse(backup::BACKUP).unwrap()),
+        &Capability::scoped(without_grant),
+    ));
+    match refused {
+        Err(Error::Timeout(message)) => assert!(message.contains("time budget"), "{message}"),
+        other => panic!("without the grant the backup must time out, got {other:?}"),
+    }
+    assert!(
+        backup::archives(rotation.path()).is_empty(),
+        "a refused backup writes no archive"
+    );
+
+    let report = block_on(hub.issue(
+        Request::new(Verb::Source, Iri::parse(backup::BACKUP).unwrap()),
+        &Capability::scoped(backup::JOB_SCOPES),
+    ))
+    .map(|repr| String::from_utf8_lossy(&repr.bytes).into_owned())
+    .expect("under JOB_SCOPES the backup completes");
+    assert!(report.contains("20000 quads in 2 graph(s)"), "{report}");
+    assert_eq!(backup::archives(rotation.path()).len(), 1);
+}

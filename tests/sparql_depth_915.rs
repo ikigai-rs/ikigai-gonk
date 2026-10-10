@@ -468,17 +468,22 @@ fn a_run_of_negations_is_refused_and_the_server_lives() {
 }
 
 /// `1*1*1*…`: a chain the PARSER reads by recursion (4,092 terms abort a 2 MiB release parse,
-/// the sibling arc measured; 5,000 abort the whole read here) with no nesting. Answered on the
-/// larger stacks — release 10,000 terms in about 1.3 s, debug 1,000 (which abort a 2 MiB debug
-/// thread).
+/// the sibling arc measured; 5,000 abort the whole read here) with no nesting.
+///
+/// ★ Re-sized for `ikigai-store` 0.2.8 (ledger #979), which changed two things under this test.
+/// The store now refuses an expression of more than `MAX_ALGEBRA_NODES` (1024) operators before
+/// planning it, so the 10,000-term release chain this used to send is REFUSED, cleanly, rather
+/// than answered (the second request below). And the evaluation runs on the store's OWN
+/// sized thread (16 MiB plus 512 bytes per byte of query), not on gonk's 64 MiB request
+/// thread — which in a DEBUG build holds 405 terms of this chain and aborts the process at 406
+/// (`examples/sparql-depth.rs`, shape `mul`, `store`; release holds every size up to the
+/// algebra bound). So the answered chain is 1,000 terms in release, inside the bound, and 400
+/// in debug, inside what the store's thread holds there. The debug abort is the store's, and
+/// is reported to its arc rather than routed around here: a release build cannot reach it.
 #[test]
 fn a_multiplication_chain_is_answered_over_http() {
     let mut gonk = Gonk::start();
-    let n = if cfg!(debug_assertions) {
-        1_000
-    } else {
-        10_000
-    };
+    let n = if cfg!(debug_assertions) { 400 } else { 1_000 };
     let query = format!("SELECT*{{FILTER(1{})}}", "*1".repeat(n));
     assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
     let (status, body) = gonk.get(&format!(
@@ -487,6 +492,16 @@ fn a_multiplication_chain_is_answered_over_http() {
     ));
     gonk.assert_serving("a multiplication chain over HTTP");
     assert_eq!(status, 200, "{body}");
+
+    // Past the store's algebra bound: refused before it is planned, and gonk lives.
+    let past = format!("SELECT*{{FILTER(1{})}}", "*1".repeat(2_000));
+    let (status, body) = gonk.get(&format!(
+        "/iki/store/graph-select?graph={GRAPH}&query={}",
+        encoded(&past)
+    ));
+    gonk.assert_serving("a multiplication chain past the algebra bound over HTTP");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("1024"), "names the bound: {body}");
 }
 
 /// A property path `?s a/a/a/… ?o`: 6,000 steps (12 KB) abort a 2 MiB release PARSE, and the

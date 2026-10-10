@@ -142,7 +142,32 @@ pub const RESTORE: &str = "urn:iki:gonk:restore";
 /// could have this server issue any request under this list. The list is narrow, but the
 /// principle is that the target set is fixed at startup by this server, not chosen at call
 /// time by a caller.
-pub const JOB_SCOPES: [&str; 2] = [CAP_BACKUP, ikigai_store::CAP_READ];
+pub const JOB_SCOPES: [&str; 3] = [CAP_BACKUP, ikigai_store::CAP_READ, JOB_BUDGET];
+
+/// How long the scheduled backup's whole-dataset query may run, in milliseconds: **120 s**,
+/// which is also `ikigai-store`'s ceiling (ledger [#979](http://localhost:1060/l/default/item/979)).
+///
+/// ★ Since store 0.2.8 every SPARQL evaluation runs within a time budget, and a capability
+/// with no `urn:cap:store:budget:<ms>` grant gets the store's 5 s BASE. The job fires under
+/// [`JOB_SCOPES`] — scoped, not root — so without this grant it got 5 s, and its query (every
+/// quad, sorted, as SPARQL JSON) does not fit: measured 2026-10-09 on a RocksDB store restored
+/// from the live dataset's archive (361,607 quads; `examples/backup-cost.rs`, release build),
+/// a whole backup took 14.7–15.4 s on a quiet machine and 27 s beside three runaway
+/// evaluations, and the store arc measured the query alone at 24.6 s. Without the grant every
+/// run was refused at 5.0 s with a typed `Timeout`.
+///
+/// Why 120 s and not a tighter multiple: the dataset grows (almost all of it is the browse
+/// graph, which grows with every explained file), the backup is the only export this dataset
+/// has, and a refused backup is a silent loss of the one guarantee it exists for — while a
+/// slow one costs a core for two minutes once a day. The store clamps every grant to its
+/// ceiling, so asking for more would buy nothing; this is the most a scoped caller can hold,
+/// about five times the slowest measured run.
+pub const JOB_BUDGET_MS: u64 = 120_000;
+
+/// The store's budget grant for [`JOB_BUDGET_MS`]:
+/// `ikigai_store::budget::cap_budget(JOB_BUDGET_MS)`, spelled as a literal because a `const`
+/// cannot call it (a unit test pins that the two agree).
+pub const JOB_BUDGET: &str = "urn:cap:store:budget:120000";
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const N_QUADS: &str = "application/n-quads";
@@ -1098,7 +1123,11 @@ impl Restore {
             )
             .await?;
 
-        let read = Capability::scoped([ikigai_store::CAP_READ]);
+        // ★ The verifier's count is a whole-dataset query too, so it holds the backup's
+        // budget grant (ledger #979): on the restored store's 5 s base, a dataset that grew
+        // past it would fail the verification of a restore that succeeded. Measured
+        // 2026-10-09: the whole restore of the live dataset, count included, took 2.9 s.
+        let read = Capability::scoped([ikigai_store::CAP_READ, JOB_BUDGET]);
         let actual = blank_graphs_by_shape(graph_counts(&restored, &read).await?);
         let actual_total: u64 = actual.values().sum();
         // Drop the store so the RocksDB lock is released before the caller is told the
@@ -1462,6 +1491,20 @@ fn civil(millis: u64) -> (i64, u32, u32, u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The literal grant is the store's own spelling of [`JOB_BUDGET_MS`], and the job's scope
+    /// list holds it (ledger #979).
+    #[test]
+    fn the_job_budget_grant_is_the_stores_spelling_of_its_milliseconds() {
+        assert_eq!(JOB_BUDGET, ikigai_store::budget::cap_budget(JOB_BUDGET_MS));
+        assert!(JOB_SCOPES.contains(&JOB_BUDGET));
+        let job = Capability::scoped(JOB_SCOPES);
+        assert_eq!(
+            ikigai_store::budget::TimeBudget::default().for_capability(&job),
+            Duration::from_millis(JOB_BUDGET_MS),
+            "the store gives the job exactly its grant: at or below the default ceiling"
+        );
+    }
 
     /// ★ The stamp is a file name an operator reads and a sort key the rotation depends
     /// on, so it is pinned at literals rather than round-tripped against itself.
