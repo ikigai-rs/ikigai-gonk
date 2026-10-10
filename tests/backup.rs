@@ -112,6 +112,7 @@ fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
                 store_path: PathBuf::from("/nonexistent/live/store"),
             }),
             jobs: None,
+            next: Default::default(),
         }),
     ))
 }
@@ -543,6 +544,7 @@ fn restoring_over_the_live_store_is_refused() {
                 store_path: PathBuf::from("/Users/nobody/.ikigai/store"),
             }),
             jobs: None,
+            next: Default::default(),
         }),
     ));
     let error = try_issue(
@@ -776,6 +778,72 @@ fn the_status_answers_from_what_is_actually_on_disk() {
     assert!(value["timer"].is_null(), "{json}");
 }
 
+/// ★ Ledger [#1087](http://localhost:1060/l/default/item/1087): the live gonk restarted at
+/// 23:21Z with its newest archive taken at 12:27Z, and its 1-day timer first fired one day
+/// after the RESTART — a ~35 h gap, and every restart before an archive was a day old moved
+/// the next backup again. The first run is now due one cadence after the newest archive, and
+/// the status says when. A scratch store, a real archive, and a fixed clock 11 hours later.
+#[test]
+fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_due() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let first_hub = hub(backups.path(), 5);
+    seed(&first_hub);
+    issue(&first_hub, Verb::Source, backup::BACKUP, &[]);
+    let taken = backup::newest_taken_at_ms(backups.path()).expect("recorded");
+
+    const HOUR: u64 = 3_600_000;
+    let day = std::time::Duration::from_secs(86_400);
+    // The server restarts 11 hours after that archive.
+    let next =
+        backup::NextRun::with_clock(Arc::new(ikigai_core::FixedClock::at(taken + 11 * HOUR)));
+    let settings = Arc::new(backup::Settings {
+        dir: backups.path().to_path_buf(),
+        keep: 5,
+        every: Some(day),
+        store_path: PathBuf::from("/nonexistent/live/store"),
+    });
+    let (jobs, first) = backup::registry(&settings, day, &next);
+    assert_eq!(
+        first,
+        std::time::Duration::from_millis(13 * HOUR),
+        "the first run is one cadence after the newest archive, not one after the restart"
+    );
+    let restarted: Arc<Kernel> = Arc::new(compose_with(
+        DurableStore::in_memory().expect("an in-memory store"),
+        None,
+        Vec::new(),
+        Vec::new(),
+        Some(Backups {
+            settings: Arc::clone(&settings),
+            jobs: Some(jobs.clone()),
+            next: next.clone(),
+        }),
+    ));
+    backup::start(
+        &jobs,
+        day,
+        Arc::clone(&restarted) as Arc<dyn ikigai_resolve::Resolver>,
+    )
+    .expect("scheduled");
+
+    let due = backup::stamp_iso(taken + 24 * HOUR);
+    let status = issue(&restarted, Verb::Source, backup::STATUS, &[]);
+    assert!(
+        status.contains(&format!("next run            {due} (in 13h0m)")),
+        "{status}"
+    );
+    let json = issue(
+        &restarted,
+        Verb::Source,
+        backup::STATUS,
+        &[("as", b"application/json")],
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).expect("the JSON face parses");
+    assert_eq!(value["timer"]["next_run_due"], due.as_str(), "{json}");
+    assert_eq!(value["timer"]["runs"], 0, "{json}");
+    jobs.cancel_target(backup::BACKUP);
+}
+
 /// Startup asks the rotation directory when the last backup was, so a daily job on a daemon
 /// that restarts nightly is not a job that never fires.
 #[test]
@@ -972,6 +1040,7 @@ fn hub_over(store: DurableStore, dir: &Path) -> Arc<Kernel> {
                 store_path: PathBuf::from("/nonexistent/live/store"),
             }),
             jobs: None,
+            next: Default::default(),
         }),
     ))
 }

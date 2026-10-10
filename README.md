@@ -2234,16 +2234,19 @@ backup, "gonk is down" also means "nothing is being written", and a missed backu
 Two things make the schedule trustworthy rather than merely present:
 
 - **A recurring timer's first tick is one whole interval away.** A daily job on a
-  `KeepAlive` daemon whose machine reboots nightly never reaches it — silently, with a
-  schedule that looks correct in every readout. So startup reads the rotation directory's
-  newest sidecar and, if the last backup is older than the cadence (or there is none),
-  schedules a one-shot catch-up a minute out.
+  `KeepAlive` daemon restarted more often than daily never reaches it — silently, with a
+  schedule that looks correct in every readout — and even one restart puts the next backup
+  off by up to a day. So the timer is phased to the ROTATION, not the process: startup reads
+  the newest sidecar and the first run is due one cadence after that archive was taken, a
+  minute out at the soonest (at once, in effect, when there is none or it is already
+  overdue). A restart costs a backup nothing.
 - **`urn:iki:gonk:backup:status` answers from both sides.** A scheduled job that *hangs*
   reads stale forever and never reads failing, and gonk is not heartbeat-watched. The status
   reports the newest archive actually on disk with its per-graph counts and digests, the
   whole rotation, and the timer's own health — runs, time since the last run, time since the
-  last **success**, failures in a row. A job that never fired shows as a growing "since last
-  run"; a job that fires and fails shows as "failures in a row". `as=application/json` gives
+  last **success**, failures in a row, and when the **next run** is due. A next run that is
+  past due says OVERDUE, which is a wedged timer; a job that fires and fails shows as
+  "failures in a row". `as=application/json` gives
   the same thing to a machine.
 
 ## Configuration

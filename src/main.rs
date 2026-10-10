@@ -18,7 +18,7 @@ use ikigai_gonk::{
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
 use ikigai_store::{DurableStore, StoreConfig};
-use ikigai_time::{JobRegistry, Schedule, ThreadTimer};
+use ikigai_time::JobRegistry;
 
 fn main() {
     // First, before any thread exists: the stack every request-serving thread gets, including
@@ -294,10 +294,17 @@ fn serve(flags: &config::Flags) -> ! {
     // Both are `JOB_SCOPES` here, so the clamp is exactly `JOB_SCOPES`. `Capability::root()`
     // is still the registry's default ceiling and would be silently broader than anything this
     // server hands any caller, which is why the ceiling is set as well as the job's own.
-    let jobs = settings.backup.every.map(|_| {
-        JobRegistry::new(Arc::new(ThreadTimer), Arc::new(ikigai_core::SystemClock))
-            .with_capability(ikigai_core::Capability::scoped(backup::JOB_SCOPES))
-    });
+    // ★ Ledger #1087: the registry's timer is phased to the ROTATION, so its first tick comes
+    // when the newest archive is one cadence old rather than one cadence after this start —
+    // see `backup::first_delay`.
+    let backup_next = backup::NextRun::default();
+    let (jobs, first_backup) = match settings.backup.every {
+        Some(every) => {
+            let (jobs, first) = backup::registry(&backup_settings, every, &backup_next);
+            (Some(jobs), Some(first))
+        }
+        None => (None, None),
+    };
     // The review queue, when one is configured. `prepare` creates the tree 0700 up front for
     // the reason `ikigai-intray`'s own watcher does: a directory that appears later races
     // whatever writes into it, and `review request` writes with no server running.
@@ -354,6 +361,7 @@ fn serve(flags: &config::Flags) -> ! {
         Some(Backups {
             settings: Arc::clone(&backup_settings),
             jobs: jobs.clone(),
+            next: backup_next.clone(),
         }),
     ));
 
@@ -422,7 +430,13 @@ fn serve(flags: &config::Flags) -> ! {
         backfill.attach(&hub, reviewer.is_some());
     }
 
-    let backup_line = start_backups(&hub, &jobs, &backup_settings, &settings.socket);
+    let backup_line = start_backups(
+        &hub,
+        &jobs,
+        first_backup,
+        &backup_settings,
+        &settings.socket,
+    );
 
     // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
     // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
@@ -595,17 +609,18 @@ fn serve(flags: &config::Flags) -> ! {
 /// backup line.
 ///
 /// ★★ **A recurring timer's FIRST tick is one whole interval away, and that is the trap a
-/// 24-hour backup on a supervised daemon falls into.** `ThreadTimer` sleeps the interval
-/// before it fires, `KeepAlive` restarts this process on any exit, and a machine that
-/// reboots (or a binary that is reinstalled) nightly therefore never reaches the first
-/// tick — silently, with a schedule that looks correct in every readout. So startup asks
-/// the rotation directory when the last backup actually happened and, if that is longer ago
-/// than the cadence (or never), schedules a one-shot catch-up a minute out. A restart does
-/// not cost a backup, and a restart loop does not spam one either: the catch-up fires only
-/// while the newest archive is overdue.
+/// 24-hour backup on a supervised daemon falls into.** `KeepAlive` restarts this process on
+/// any exit, so a server restarted (or reinstalled) more often than daily would put its
+/// backup off with every start. Until ledger #1087 startup only caught up an archive that was
+/// ALREADY a cadence old; one 11 hours old at a restart waited the full day after the
+/// restart, a 35-hour gap. The registry's timer is now phased to the rotation
+/// (`backup::first_delay`): the first run is due one cadence after the newest archive, a
+/// minute out at the soonest, so a restart costs a backup nothing and a restart loop does not
+/// spam one either.
 fn start_backups(
     hub: &Arc<ikigai_core::Kernel>,
     jobs: &Option<JobRegistry>,
+    first: Option<std::time::Duration>,
     settings: &Arc<backup::Settings>,
     socket: &std::path::Path,
 ) -> String {
@@ -616,16 +631,13 @@ fn start_backups(
             backup::BACKUP
         );
     };
-    let Some(jobs) = jobs else {
+    let (Some(jobs), Some(first)) = (jobs, first) else {
         return "no schedule — the registry was not built (this is a bug)".to_string();
     };
-    jobs.set_resolver(Arc::clone(hub) as Arc<dyn ikigai_resolve::Resolver>);
-    if let Err(e) = jobs.schedule_persistent(
-        backup::BACKUP.to_string(),
-        ikigai_core::Verb::Source,
-        Schedule::Every(every),
-        true,
-        ikigai_core::Capability::scoped(backup::JOB_SCOPES),
+    if let Err(e) = backup::start(
+        jobs,
+        every,
+        Arc::clone(hub) as Arc<dyn ikigai_resolve::Resolver>,
     ) {
         // Not fatal: the ledger is served either way, and refusing to start would take the
         // system of record offline over its backup. Loud, because a server that says it is
@@ -633,22 +645,8 @@ fn start_backups(
         eprintln!("ikigai-gonk: THE BACKUP IS NOT SCHEDULED: {e}");
         return format!("NOT SCHEDULED: {e}");
     }
-    let overdue = overdue_by(settings, every);
-    let catch_up = if overdue {
-        match jobs.schedule(
-            backup::BACKUP.to_string(),
-            ikigai_core::Verb::Source,
-            Schedule::Every(CATCH_UP),
-            false,
-            ikigai_core::Capability::scoped(backup::JOB_SCOPES),
-        ) {
-            Ok(_) => ", one due now (catching up in 1m)",
-            Err(_) => "",
-        }
-    } else {
-        ""
-    };
-    scheduled_line(every, &settings.dir, settings.keep, catch_up, socket)
+    let first_line = format!(", the first in {}", humanize(first));
+    scheduled_line(every, &settings.dir, settings.keep, &first_line, socket)
 }
 
 /// The banner's backup line once the schedule is in — separate so a test can read it,
@@ -663,37 +661,17 @@ fn scheduled_line(
     every: std::time::Duration,
     dir: &std::path::Path,
     keep: usize,
-    catch_up: &str,
+    first: &str,
     socket: &std::path::Path,
 ) -> String {
     format!(
-        "every {} into {} — keep {keep}{catch_up}. \
+        "every {} into {} — keep {keep}{first}. \
          `ikigai --connect {} -c 'source {}'` says when the last good one was",
         humanize(every),
         dir.display(),
         socket.display(),
         backup::STATUS,
     )
-}
-
-/// How long after startup the catch-up backup fires. Long enough that a restart loop does
-/// not take one per restart, short enough that an operator watching a deploy sees it.
-const CATCH_UP: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Whether the newest archive on disk is older than one cadence — or there is none.
-///
-/// Read from the SIDECAR's timestamp rather than the file's mtime: a rotation directory
-/// copied or restored from elsewhere keeps the archive's name and contents and loses its
-/// mtime, and the name is what the sidecar agrees with.
-fn overdue_by(settings: &backup::Settings, every: std::time::Duration) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    match backup::newest_taken_at_ms(&settings.dir) {
-        None => true,
-        Some(taken) => now.saturating_sub(taken) >= every.as_millis() as u64,
-    }
 }
 
 /// A duration as the banner reads it.

@@ -434,6 +434,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
                 store_path: backups.path().join("nonexistent-store"),
             }),
             jobs: None,
+            next: Default::default(),
         }),
     ));
     let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(

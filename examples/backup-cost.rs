@@ -123,6 +123,7 @@ fn hub(store: DurableStore, rotation: &Path) -> Arc<Kernel> {
                 store_path: PathBuf::from("/nonexistent/live/store"),
             }),
             jobs: None,
+            next: Default::default(),
         }),
     ))
 }
