@@ -1133,8 +1133,25 @@ fn an_armed_trigger_reviews_what_was_already_waiting() {
     // ⚠ Polled rather than slept: `arm` puts the catch-up on a thread of its own (the crate's
     // `watch()` runs it in the CALLING thread, which would hold a real server's doors shut
     // for one model call per waiting tuple).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && seen.lock().expect("not poisoned").is_empty() {
+    //
+    // ⚠⚠ **Polled on the tuple LANDING, not on the review being CALLED** (ledger #1004). The
+    // reactor claims the tuple into `.processing/`, runs the pass, and only THEN moves it to
+    // `outbox/` — so the recorder has already seen the call while the tuple is still in
+    // `.processing/`, and a test that stopped waiting at the call read `processing: 1,
+    // outbox: 0` (2 runs in 400, under 24 concurrent copies of this test). The depth is the
+    // condition every assertion below is about, so it is the one waited for.
+    //
+    // The bound is generous because it only matters on a failure: under that same load the
+    // catch-up started anywhere from 0 to 12.5 s after `arm` (8 runs in 400 past the old 10 s),
+    // the watch it waits behind being established one process at a time by the OS.
+    let handled = trigger::Depth::Counted {
+        inbox: 0,
+        processing: 0,
+        outbox: 1,
+        error: 0,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline && trigger::depth(Some(&q)) != handled {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let calls = seen.lock().expect("not poisoned").clone();
@@ -1147,12 +1164,7 @@ fn an_armed_trigger_reviews_what_was_already_waiting() {
     assert_eq!(trigger::pending(&q), 0, "and leave the inbox");
     assert_eq!(
         trigger::depth(Some(&q)),
-        trigger::Depth::Counted {
-            inbox: 0,
-            processing: 0,
-            outbox: 1,
-            error: 0
-        },
+        handled,
         "a handled tuple lands in the outbox, which is what `handled` counts"
     );
 }
