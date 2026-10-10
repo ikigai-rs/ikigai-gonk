@@ -76,6 +76,9 @@ pub struct HubSpace {
     /// Whether answers leave this process over a WIRE (the socket and QUIC doors), where
     /// [`for_the_wire`] decides what a mounting client may cache.
     wire: bool,
+    /// Whether this door names no principal, so a `principal` argument a caller sent must
+    /// not reach the hub ([`HubSpace::naming_nobody`]).
+    nobody: bool,
 }
 
 impl HubSpace {
@@ -87,6 +90,7 @@ impl HubSpace {
             hub,
             id,
             wire: false,
+            nobody: false,
         }
     }
 
@@ -96,6 +100,21 @@ impl HubSpace {
         HubSpace {
             wire: true,
             ..HubSpace::new(hub)
+        }
+    }
+
+    /// For a door that names no principal — the owner's socket: every request reaches the hub
+    /// WITHOUT a `principal` argument, whatever the caller sent (ledger #775).
+    ///
+    /// ★ The other two doors OVERWRITE `principal` (the transports stamp it after removing
+    /// a caller's), and the hub relies on that: the ledger's claim kind is stamped from it
+    /// ([`crate::admit::claim_kind`]), so a passkey-shaped principal makes a claim a
+    /// PERSON's. Nothing stamps one on the socket, so a value there would be the caller's own
+    /// choice — and the socket's claims are a machine's (Brian, 2026-10-09).
+    pub fn naming_nobody(self) -> Self {
+        HubSpace {
+            nobody: true,
+            ..self
         }
     }
 }
@@ -126,6 +145,7 @@ impl Space for HubSpace {
                         hub: Arc::clone(&self.hub),
                         description,
                         wire: self.wire,
+                        nobody: self.nobody,
                     }),
                     Bindings::new(),
                 );
@@ -169,6 +189,8 @@ struct Forward {
     description: Description,
     /// [`HubSpace::over_wire`]'s flag, carried to the one place an answer passes.
     wire: bool,
+    /// [`HubSpace::naming_nobody`]'s flag.
+    nobody: bool,
 }
 
 #[async_trait]
@@ -182,8 +204,11 @@ impl Endpoint for Forward {
         // budget (ledger #964/#979, [`crate::budget`]). Here because every request any door
         // sends the hub passes through this line, and only those: the hub's own sub-requests
         // (the ledger's queries) never do, so they are never stamped.
-        let request =
+        let mut request =
             crate::budget::stamp(inv.request.clone(), &self.description.id, inv.capability);
+        if self.nobody {
+            request.args.remove(crate::admit::PRINCIPAL_ARG);
+        }
         let answer = self.hub.issue(request, inv.capability).await?;
         Ok(if self.wire {
             for_the_wire(answer)
@@ -281,7 +306,7 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
 /// no refusal markers and no author rules, because the socket names no principal.
 pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
     over(
-        Arc::new(HubSpace::over_wire(hub)),
+        Arc::new(HubSpace::over_wire(hub).naming_nobody()),
         Some(crate::access::Door::Socket),
         access,
     )
@@ -717,6 +742,8 @@ pub fn edge_config(door: HttpDoor) -> EdgeConfig {
                 route("/", "urn:iki:gonk:page:home"),
                 route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
                 route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
+                // Ledger #775: the doctor, read-only (`web::DoctorView`).
+                route("/l/{ledger}/doctor", "urn:iki:gonk:page:doctor:{ledger}"),
                 route(
                     "/l/{ledger}/item/{id}",
                     "urn:iki:gonk:page:item:{ledger}:{id}",

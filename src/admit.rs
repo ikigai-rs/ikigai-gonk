@@ -284,6 +284,60 @@ pub fn principal(door: Door, request: &Request) -> Option<String> {
     }
 }
 
+/// The ledger's claim-kind stamper (ledger [#775](http://localhost:1060/l/default/item/775),
+/// step 3): a claim whose request carries a PASSKEY principal is a `person`'s, every other a
+/// `machine`'s. Brian, 2026-10-09: **passkey = person; a QUIC client, an agent grant, or none =
+/// machine; the local socket = machine.**
+///
+/// ★ It reads the `principal` argument, and that is sound ONLY because every door OVERWRITES
+/// that argument before the hub sees the request — so a caller can neither pose as a person
+/// nor choose its kind (the ledger declares no `kind` input and ignores one):
+///
+/// | door | `principal` the hub sees |
+/// | --- | --- |
+/// | HTTP | stamped by `ikigai-web` on every WRITE from the session cookie; a `?principal=` a caller sends is dropped on every verb. The form adapter ([`crate::web`]'s `/act`) forwards the door's to the ledger action it issues |
+/// | QUIC | stamped by `ikigai-quic` on every request, the connection's client IRI, after removing any the client sent |
+/// | socket | REMOVED: nothing stamps one there, so a value would be the caller's own ([`crate::doors::HubSpace::naming_nobody`]) |
+///
+/// `tests/claim_kind_775.rs` proves each row against a real server: a caller-supplied
+/// principal and `kind=` do not survive any door.
+///
+/// ```
+/// use ikigai_core::{ArgRef, Bindings, Capability, Invocation, Iri, Request, Verb};
+/// use ikigai_ledger::claim::ClaimKind;
+/// let stamp = ikigai_gonk::admit::claim_kind();
+/// let kind = |principal: Option<&str>| {
+///     let mut request = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:claim").unwrap());
+///     if let Some(p) = principal {
+///         request = request.with_arg("principal", ArgRef::Inline(p.as_bytes().to_vec()));
+///     }
+///     let (bindings, cap) = (Bindings::new(), Capability::root());
+///     stamp(&Invocation::detached(&request, &bindings, &cap))
+/// };
+/// assert_eq!(kind(Some("urn:iki:gonk:passkey:Q1JFRC1CUklBTg")), ClaimKind::Person);
+/// assert_eq!(kind(Some("urn:iki:gonk:client:6f1c")), ClaimKind::Machine);
+/// assert_eq!(kind(None), ClaimKind::Machine);
+/// ```
+pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
+    Arc::new(|inv: &Invocation<'_>| {
+        let person = match inv.request.args.get(PRINCIPAL_ARG) {
+            Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).is_ok_and(|p| {
+                let prefix = crate::identity::PASSKEY_IRI_PREFIX;
+                let p = p.trim();
+                p.len() > prefix.len()
+                    && p.is_char_boundary(prefix.len())
+                    && p[..prefix.len()].eq_ignore_ascii_case(prefix)
+            }),
+            _ => false,
+        };
+        if person {
+            ikigai_ledger::claim::ClaimKind::Person
+        } else {
+            ikigai_ledger::claim::ClaimKind::Machine
+        }
+    })
+}
+
 /// Why `request` may not name the `author` it carries, or `None` when it may.
 ///
 /// An author shaped like a principal ([`is_principal_iri`]) must BE the request's own

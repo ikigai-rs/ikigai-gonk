@@ -112,7 +112,12 @@ ikigai-store = { version = "0.2.8", features = ["persistent"] }
 # update, a taken key answers the existing item) and the JSON face (`ikigai_ledger::json`,
 # schema 1). The roborev and kata bridges are built on both — before it they checked
 # `items?about=` and then appended, which raced, and parsed the plain face.
-ikigai-ledger = "0.4.2" # 0.4.2: a malformed timestamp no longer drops an item from items/next (ledger #866)
+# ★ 0.5.0 is the floor now (ledger #775 step 3): lifecycle state as a compare-and-set atom,
+# leased claims with a HOST-stamped kind (`SpaceConfig::claim_kind`, which this server sets
+# from the door's principal: `crate::kind`), takeover of an expired lease, assertions, and the
+# read-only doctor this server renders as a page. The doctor's JSON (`json::DoctorDocument`)
+# and the claim's `kind`/`expires`/`lease` are read here.
+ikigai-ledger = "0.5.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,

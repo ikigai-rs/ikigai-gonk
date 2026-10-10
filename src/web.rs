@@ -176,6 +176,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             },
         )
         .bind(
+            template("urn:iki:gonk:page:doctor:{ledger}"),
+            DoctorView {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
             Exact::new("urn:iki:gonk:act"),
             Act {
                 web: Arc::clone(&web),
@@ -666,6 +672,27 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
         graph.view(&item, "canWrite", flag(can_write));
         graph.view(&item, "canDelete", flag(can_delete));
         graph.view(&item, "canPurge", flag(can_purge));
+        // ★ Ledger #775 (ikigai-ledger 0.5.0): the lifecycle state, and the claim's kind and
+        // lease, as words. The state is stored as its lifecycle's IRI
+        // (`urn:iki:ledger:lifecycle:{lc}:{state}`); no state is the named state `filed`.
+        let state = graph
+            .value(&item, &format!("{LEDGER_NS}state"))
+            .map(|iri| ikigai_ledger::lifecycle::state_name(&iri))
+            .unwrap_or_else(|| ikigai_ledger::lifecycle::FILED.to_string());
+        graph.view(&item, "state", state);
+        if let Some(kind) = graph.value(&item, &format!("{LEDGER_NS}claimKind")) {
+            graph.view(
+                &item,
+                "claimKind",
+                kind.strip_prefix(LEDGER_NS).unwrap_or(&kind).to_string(),
+            );
+        }
+        if let Some(expires) = graph.value(&item, &format!("{LEDGER_NS}leaseExpires")) {
+            graph.view(&item, "leaseExpires", when(&expires));
+        }
+        if let Some(lease) = graph.value(&item, &format!("{LEDGER_NS}lease")) {
+            graph.view(&item, "lease", lease);
+        }
 
         // Links and about-targets become view nodes, because a repeated sub-element that needs
         // its item's IRI cannot reach it in xrust (no parent axis worth trusting, no variable).
@@ -1131,6 +1158,117 @@ impl Endpoint for LedgerView {
     }
 }
 
+// ------------------------------------------------------------------------ the doctor
+
+/// `/l/{ledger}/doctor`: the ledger's doctor (ikigai-ledger 0.5.0, ledger #775) as a page —
+/// its five stored checks (orphaned, abandoned, lease-expired, unknown-state, two-states), every
+/// problem with the remedy the ledger names, and nothing repaired. It is a READ of
+/// `urn:iki:ledger:{ledger}:doctor` under the caller's own capability, rendered from its JSON
+/// face (`ikigai_ledger::json::DoctorDocument`); the page offers no action, because the doctor
+/// never repairs and a remedy is a judgment for whoever reads it.
+struct DoctorView {
+    web: Arc<Web>,
+}
+
+#[async_trait]
+impl Endpoint for DoctorView {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
+        require_read(inv, &ledger)?;
+        let read = with(
+            request(Verb::Source, &format!("{}doctor", ledger.prefix()))?,
+            "as",
+            "application/json",
+        );
+        let doc: ikigai_ledger::json::DoctorDocument =
+            serde_json::from_slice(&fetch(inv, read).await?).map_err(|e| {
+                Error::Endpoint(format!(
+                    "the ledger's doctor answered no DoctorDocument: {e}"
+                ))
+            })?;
+        let mut children = nav(
+            &self.web,
+            inv,
+            &readable_ledgers(&self.web, inv),
+            Some(ledger.name()),
+        );
+        let mut problems = String::new();
+        for problem in &doc.problems {
+            let number = problem.item.display.clone().unwrap_or_default();
+            let id = problem
+                .item
+                .iri
+                .rsplit_once(":item:")
+                .map(|(_, id)| id.to_string())
+                .unwrap_or_default();
+            problems.push_str(&render::wrap(
+                "problem",
+                &[
+                    ("check", &problem.check),
+                    ("item", &number),
+                    ("href", &format!("/l/{}/item/{id}", ledger.name())),
+                ],
+                &format!(
+                    "{}{}",
+                    element("detail", &[], &problem.detail),
+                    element("remedy", &[], &problem.remedy)
+                ),
+            ));
+        }
+        children.push_str(&render::wrap(
+            "doctor",
+            &[
+                ("ledger", ledger.name()),
+                ("lifecycle", &doc.lifecycle),
+                ("checked", &when(&doc.checked_at)),
+                ("checks", &doc.checks.join(", ")),
+                ("count", &doc.problems.len().to_string()),
+                ("ledger-href", &format!("/l/{}", ledger.name())),
+            ],
+            &problems,
+        ));
+        let page = envelope(
+            "page",
+            &[
+                ("view", "doctor"),
+                ("full", flag(true)),
+                ("title", &format!("doctor · {}", ledger.name())),
+                ("ledger", ledger.name()),
+                ("page-url", &format!("/l/{}/doctor", ledger.name())),
+            ],
+            &children,
+        );
+        Ok(html(render::render(&page, true).map_err(render_err)?))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-page-doctor"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title("A ledger's doctor, as a page")
+            .summary(
+                "Everything wrong with a ledger at once — an orphaned machine claim, an \
+                 abandoned in-flight item, an expired lease, a state outside the lifecycle, two \
+                 states — with the remedy for each. Read-only: the doctor never repairs.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_ledger::CAP_READ)
+            .requires(ikigai_store::CAP_READ_GRAPH)
+            .input(
+                arg("ledger", "Which ledger.")
+                    .binding()
+                    .default_value("default")
+                    .optional(),
+            )
+            .input(as_html_arg())
+            .output(HTML)
+    }
+}
+
 // -------------------------------------------------------------------------- item pages
 
 struct ItemView {
@@ -1375,6 +1513,14 @@ impl Endpoint for Act {
         let mut request = Request::new(verb, target_iri);
         if let (true, Ok(principal)) = (declares_author, inv.inline_str("principal")) {
             request = with(request, "author", principal);
+        }
+        // ★ And the door's principal itself, unchanged, on every action (ledger #775): the
+        // ledger stamps a claim's KIND from it ([`crate::admit::claim_kind`]), so a signed-in
+        // person's claim through this form is a person's. It is the transport's value — a form
+        // field of that name is refused below as undeclared — and the ledger ignores it
+        // everywhere else.
+        if let Ok(principal) = inv.inline_str(crate::admit::PRINCIPAL_ARG) {
+            request = with(request, crate::admit::PRINCIPAL_ARG, principal);
         }
         for (name, value) in fields {
             if name.starts_with('_') || value.trim().is_empty() {
