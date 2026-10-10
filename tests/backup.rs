@@ -47,7 +47,7 @@ const STORE_IDS: [&str; 13] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 20] = [
+const LEDGER_IDS: [&str; 21] = [
     "ledger-append",
     "ledger-claim",
     "ledger-close",
@@ -55,6 +55,7 @@ const LEDGER_IDS: [&str; 20] = [
     "ledger-defer",
     "ledger-doctor",
     "ledger-item",
+    "ledger-item-about",
     "ledger-item-closed",
     "ledger-item-holder-is",
     "ledger-item-state",

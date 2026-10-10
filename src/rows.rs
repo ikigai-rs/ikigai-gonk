@@ -67,6 +67,19 @@ pub fn rows_wanted(limit: Option<&str>) -> Result<usize> {
     }
 }
 
+/// How many matching items a page skips: `0` when `offset` is absent, the count otherwise.
+/// Anything that is not a non-negative count is refused, never read as the first page
+/// (`offset=ten` quietly answering page one would be a different question's answer).
+pub fn offset_wanted(offset: Option<&str>) -> Result<usize> {
+    match offset {
+        None => Ok(0),
+        Some(other) => other.parse::<usize>().map_err(|_| Error::InvalidArgument {
+            name: "offset".to_string(),
+            detail: format!("`{other}` is not a number of items to skip (0 or more)"),
+        }),
+    }
+}
+
 /// The row count a "show more" link should ask for, or `None` when this page cannot draw
 /// more than it already has: every row is shown, or the cap is.
 ///
@@ -125,6 +138,19 @@ mod tests {
                 }
                 other => panic!("`{bad}` must be refused: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_offset_is_a_count_or_refused() {
+        assert_eq!(offset_wanted(None).unwrap(), 0);
+        assert_eq!(offset_wanted(Some("0")).unwrap(), 0);
+        assert_eq!(offset_wanted(Some("2300")).unwrap(), 2300);
+        for bad in ["-1", "ten", "", "1.5"] {
+            assert!(
+                matches!(offset_wanted(Some(bad)), Err(Error::InvalidArgument { ref name, .. }) if name == "offset"),
+                "`{bad}` must be refused"
+            );
         }
     }
 

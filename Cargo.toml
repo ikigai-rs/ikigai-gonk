@@ -55,14 +55,22 @@ path = "src/main.rs"
 # ⚠ `"0.1.84"` is also a ceiling (`<0.2.0`); when core reaches 0.2 this line must move.
 # 0.1.85 since cli 0.1.39 (whose transports pin it): the capability floor covers every verb
 # and a verbless requires is enforced (ledger #750). gonk's own endpoints declare their verbs.
-ikigai-core = "0.1.86" # 0.1.86: deny-shaped scopes survive attenuate/clamp (ledger #858)
+# 0.1.86: deny-shaped scopes survive attenuate/clamp (ledger #858).
+# ★ 0.1.93 is the pin now (ledger #1087's re-pin): every ikigai pin moved to its published head
+# on 2026-10-10. Between them: `urn:kernel:explain`/`dependents` (0.1.87), spaces named
+# `urn:iki:space:*` and a bound door dropping a space's name (0.1.89, ledger #987), an action
+# match with its own identity (0.1.91, ledger #948), a failed invocation as a trace node
+# (0.1.92), and principals as capability scopes (0.1.93, ledger #1077) — which gonk's doors
+# adopt (`Capability::with_principal`), so 0.1.93 is also an API floor.
+ikigai-core = "0.1.93"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
 # `ikigai-conformance` 0.3 requires `^0.1.69` and cargo unifies a package across normal
 # and dev dependencies — one lock serves `build` and `test`, so it is the version the
 # shipped binary links.
-ikigai-vocab = "0.1.69"
+# 0.1.93: the published head, beside core (they ship from one workspace).
+ikigai-vocab = "0.1.93"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
 # 0.2.4 is where the freshness half of this pin comes from, and it is the whole of what
@@ -105,7 +113,11 @@ ikigai-vocab = "0.1.69"
 # rows and 1 GiB — and the backup's answer is every quad, so `backup::JOB_SCOPES` carries both
 # grants, spelled through `budget::cap_answer{,_bytes}` in its tests. As a caret this is
 # `>=0.2.9, <0.3.0`: a 0.3 store is a deliberate move, not a `cargo update`.
-ikigai-store = { version = "0.2.9", features = ["persistent"] }
+# ★ 0.2.10 is the floor now (ledger #1083, #992, #1085): SPARQL `SERVICE` is refused by every
+# door and by the evaluator in every build, and `LOAD` is refused, so a grant to the store is no
+# network egress. Nothing in gonk sends either (a SPARQL page or a socket caller that did now
+# gets a refusal naming it). Also: the SPARQL thread is sized for the build (ledger #1003).
+ikigai-store = { version = "0.2.10", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -122,7 +134,12 @@ ikigai-store = { version = "0.2.9", features = ["persistent"] }
 # from the door's principal: `crate::kind`), takeover of an expired lease, assertions, and the
 # read-only doctor this server renders as a page. The doctor's JSON (`json::DoctorDocument`)
 # and the claim's `kind`/`expires`/`lease` are read here.
-ikigai-ledger = "0.5.0"
+# ★ 0.6.2 is the floor now (ledger #419, #987, #1085): `urn:iki:ledger:items` pages by ITEM with
+# `offset=`, and its JSON face carries `total`, a COUNT over the filter — the ledger page reads
+# both (`crate::web`'s listing) instead of reading 2000 items to count them. 0.6.0 names its
+# space `urn:iki:space:ledger`; 0.6.1 draws the id nonce from getrandom on wasm; 0.6.2 takes
+# store 0.2.10 as a security floor. `^0.5.0` was `<0.6.0`: a ceiling, so this had to move.
+ikigai-ledger = "0.6.2"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
@@ -310,15 +327,18 @@ ikigai-ledger = "0.5.0"
 # red on 0.16.1, where `urn:cap:annotate` alone deletes. `^0.17.0` is `<0.18.0`. Minor: a
 # narrowed Delete (it refuses calls that used to succeed). 0.18.0: the explain and review
 # controls say what a click will cost (archived, or a live model call) and show a polite live
-# region while it runs; additive.
-ikigai-browse = "0.18.0"
+# region while it runs; additive. 0.18.1 (ledger #818): a review answer's last finding is kept
+# when it cannot have been cut.
+ikigai-browse = "0.18.1"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
 # it is what makes those rows work. Every resource here enforces `urn:cap:exec:{tool}` —
 # `urn:system:exec` included, per tool, not under the offering wildcard — so a grant naming
 # `urn:cap:exec:git` cannot run `gh`, and `grants.rs` refuses the wildcard as a GRANT.
-ikigai-repo = "0.1.6"
+# 0.2.0 (ledger #987): the space names itself `urn:iki:space:repo`; nothing else changed, and
+# `^0.1.6` was `<0.2.0`, a ceiling.
+ikigai-repo = "0.2.0"
 # The tuplespace behind the git-event review trigger (`crate::trigger`, ledger #261):
 # `urn:space:{name}` — `out` drops a tuple, `rd` reads without consuming, `take` claims one
 # with an atomic rename compare-and-swap. Linked for ONE property that is not a
@@ -380,7 +400,8 @@ ikigai-repo = "0.1.6"
 # and nothing else, and a `handler` file naming anything else is refused and dead-lettered.
 # `tests/trigger.rs::a_retargeted_handler_file_is_dead_lettered_never_fired` is the FLOOR TEST:
 # 0.1.40 has no such method. (0.1.38 to 0.1.40 moved this line for the one-release reason only.)
-ikigai-intray = "0.1.41"
+# 0.1.44: the published head (the intray's `match=` SPARQL is bounded, ledger #963).
+ikigai-intray = "0.1.44"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -396,8 +417,8 @@ ikigai-intray = "0.1.41"
 # resolve. The pin states the minimum that COMPILES with everything else here, and it moves
 # when a sibling moves it.
 # 0.1.37 -> 0.1.41 for the same reason: intray, ipc and quic at 0.1.41 require
-# `ikigai-resolve ^0.1.41`.
-ikigai-resolve = "0.1.41"
+# `ikigai-resolve ^0.1.41`. 0.1.41 -> 0.1.44: the one-release reason.
+ikigai-resolve = "0.1.44"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -429,7 +450,7 @@ ikigai-resolve = "0.1.41"
 # wire is still v8.
 # 0.1.41 is the pin now for the one-release reason: nothing in the socket transport moved that
 # this binary calls by name, and the wire is still v8.
-ikigai-ipc = "0.1.41"
+ikigai-ipc = "0.1.44"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -469,7 +490,7 @@ ikigai-ipc = "0.1.41"
 # `tests/doors.rs::a_narrowed_quic_client_is_still_named_and_authors_its_writes` is the FLOOR TEST.
 # ⚠ The cost, stated by the crate: the argument is part of the cache key, so two clients reading
 # one resource under one capability no longer share a cached answer.
-ikigai-quic = "0.1.41"
+ikigai-quic = "0.1.44"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -525,7 +546,8 @@ ikigai-quic = "0.1.41"
 # capability-free actions behind it. Also in 0.1.41 and relied on: a `?principal=` is dropped on
 # READS too, so no query string can name a principal on any verb.
 # `tests/audit_864.rs::a_refused_request_gets_no_options_and_no_description` is the FLOOR TEST.
-ikigai-web = "0.1.41"
+# 0.1.44: the one-release reason.
+ikigai-web = "0.1.44"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -539,7 +561,8 @@ ikigai-web = "0.1.41"
 # server asks for `as=application/gzip` except `crate::backup`, so the planner gains a
 # route no page can reach; `tests/conformance.rs` pins the four ids so a version that
 # binds more is a red test.
-ikigai-compress = "0.1.0"
+# 0.2.0 (ledger #987): the space names itself `urn:iki:space:compress`; `^0.1.0` was `<0.2.0`.
+ikigai-compress = "0.2.0"
 # The timer that fires the backup. gonk holds the store, so gonk schedules the backup:
 # an external scheduler's failure mode is "gonk healthy, data changing, backups stopped,
 # nobody knows", and a backup job must not be able to outlive the thing it protects.
@@ -558,7 +581,8 @@ ikigai-compress = "0.1.0"
 # ⚠ Only `JobRegistry` + `ThreadTimer` are used. The `urn:time:*` CONTROL PLANE is still
 # deliberately NOT bound: the backup's target set is fixed at startup by `main`, nothing here
 # needs a caller to schedule, and every bound endpoint is surface. See `crate::backup`.
-ikigai-time = "0.4.0"
+# 0.4.1: the published head.
+ikigai-time = "0.4.1"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
 # The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic). `sync` is the
@@ -593,15 +617,19 @@ serde = "1"
 # and 0.1.2 still compiles. The pin states what is built and tested, which is what this
 # manifest's pins have always meant — and stating it is what makes the property reachable for
 # anyone building without our lockfile, which `cargo install` without `--locked` is (rule 9d).
-ikigai-xslt = "0.1.3"
+# ★ 0.2.1 (ledger #916, #1040, #1047): caller XML is bounded in depth and runs on a sized stack,
+# and EVERY transform is answered within a time budget — 5 s unless the host names its own.
+# gonk names its own (`render::RENDER_BUDGET`, 60 s in release, 10 min in debug): the 5 s
+# default refused ordinary pages in a debug build on a loaded machine. `^0.1.3` was `<0.2.0`.
+ikigai-xslt = "0.2.1"
 # The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
 # only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so
 # nothing here needs a CBOR decoder. Present from 0.1.14; the verifier has not changed since
 # (its last change is ikigai-cli PR #296), so this is not an API floor: 0.1.30 is what is built
 # and tested, and it is the cli workspace's shared version, which every other line from that
 # workspace here now names (0.1.37: the verifier is unchanged since 0.1.30).
-# 0.1.41: the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.41"
+# 0.1.41, 0.1.44: the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.44"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
@@ -645,12 +673,14 @@ ignore = "0.4.33"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
-# PRODUCTION floor too: see the vocab note above.
-ikigai-conformance = "0.3"
+# PRODUCTION floor too: see the vocab note above. 0.6.1 (SPACE-NAME, a purity rule that fires,
+# an `Expiry::At` deadline read as a bound): `"0.3"` was `<0.4.0`, so gonk was held to an old
+# definition of "done".
+ikigai-conformance = "0.6.1"
 futures = "0.3"
 tempfile = "3"
 # A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path
 # is exercised end to end over HTTP — the same key type `ikigai-passkey` verifies.
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # The WCAG contrast floor the page's palette is held to, in both color schemes.
-ikigai-a11y = "0.2"
+ikigai-a11y = "0.2.1"

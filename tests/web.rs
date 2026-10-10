@@ -324,6 +324,47 @@ fn a_listing_renders_a_bounded_number_of_rows_and_says_what_it_left_out() {
             && past.body.contains("6 open items"),
         "{past:?}"
     );
+
+    // ★ Ledger #419, gonk's half: the page reads only the rows it draws, from `offset=`, and
+    // states the ledger's own total — so every item is reachable a page at a time, and the
+    // count is never a floor of what one read held.
+    let second = server.page("/l/default?limit=2&offset=2", None);
+    assert_eq!(second.status, 200, "{second:?}");
+    assert_eq!(
+        second.body.matches("<li class='row open'>").count(),
+        2,
+        "{second:?}"
+    );
+    assert!(
+        second.body.contains("Item number 4")
+            && second.body.contains("Item number 3")
+            && !second.body.contains("Item number 5")
+            && !second.body.contains("Item number 2"),
+        "the third and fourth most recently updated: {second:?}"
+    );
+    assert!(
+        second
+            .body
+            .contains("showing 3–4 of 6 open items, most recently updated first"),
+        "{second:?}"
+    );
+    assert!(
+        second
+            .body
+            .contains("href='/l/default?status=open&amp;limit=4&amp;offset=2'"),
+        "it can grow to the four that remain from its start: {second:?}"
+    );
+    for (bad, says) in [
+        (
+            "offset=6",
+            "offset=6 is past the last of the 6 matching item(s)",
+        ),
+        ("offset=ten", "`ten` is not a number of items to skip"),
+    ] {
+        let refused = server.page(&format!("/l/default?{bad}"), None);
+        assert_eq!(refused.status, 400, "{bad}: {refused:?}");
+        assert!(refused.body.contains(says), "{bad}: {refused:?}");
+    }
 }
 
 #[test]
