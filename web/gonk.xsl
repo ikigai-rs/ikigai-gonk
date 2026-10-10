@@ -1329,6 +1329,16 @@
               <xsl:value-of select="@more-label"/>
             </a>
           </xsl:if>
+          <!-- A page that cannot grow pages ON, by `offset=` (#419): every item is reachable,
+               whatever the ledger holds. -->
+          <xsl:if test="@next = 'true'">
+            <a class="more" hx-target="#ledger" hx-swap="outerHTML">
+              <xsl:attribute name="href"><xsl:value-of select="@next-url"/></xsl:attribute>
+              <xsl:attribute name="hx-get"><xsl:value-of select="@next-items-url"/></xsl:attribute>
+              <xsl:attribute name="hx-push-url"><xsl:value-of select="@next-url"/></xsl:attribute>
+              <xsl:value-of select="@next-label"/>
+            </a>
+          </xsl:if>
         </p>
         <ol class="items">
           <xsl:apply-templates select="rdf:RDF/ledger:Item">

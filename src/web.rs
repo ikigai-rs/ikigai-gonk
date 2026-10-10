@@ -65,6 +65,7 @@ use crate::rows;
 use crate::rules::{self, Rules};
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
 const LEDGER_NS: &str = "https://ikigai-rs.dev/ns/ledger#";
 const DCTERMS: &str = "http://purl.org/dc/terms/";
 pub(crate) const HTML: &str = "text/html";
@@ -72,14 +73,14 @@ pub(crate) const HTML: &str = "text/html";
 // The row bound — `ROWS`, `MAX_ROWS`, `rows_wanted` — is `crate::rows`, shared with the
 // review queue so one `?limit` means one thing on both pages (ledger #480).
 
-/// How many items the listing READS in order to count them.
-///
-/// The read is cheap — 411 items is 0.09 s, two orders off the render — so the page reads
-/// the whole filtered set and counts it, and bounds only the rendering. That is what lets
-/// the banner say "the 50 most recently updated of 411" instead of reporting a page as a
-/// total, which is the mistake ledger #419 records on the text face. A set that fills this
-/// cap is reported as a floor (`411+`), never as a total.
-const COUNT_CAP: usize = 2000;
+/// ★ **The listing reads only the rows it draws, and asks the ledger how many there are**
+/// (ledger #419). It used to read up to 2000 items through the Turtle face and count the
+/// graph, so a page of fifty paid for two thousand, and a set past that cap could only be
+/// reported as a floor (`2000+`). Since ikigai-ledger 0.6.1 the ledger answers both halves
+/// itself: `offset=` pages by ITEM, and its JSON face carries `total`, a COUNT query over the
+/// same filter. So the page draws `limit` rows from `offset`, states the ledger's total, and
+/// a set of any size is reachable a page at a time.
+const TOTAL_FACE: &str = "application/json";
 
 /// The listing shell's slot for its rows — see [`render::chunk`].
 const ITEMS_SLOT: &str = "items";
@@ -798,6 +799,8 @@ struct Listing<'a> {
     /// How many rows to render — see [`rows::rows_wanted`]. The filter above is what gets
     /// COUNTED; this is only what gets drawn.
     limit: Option<&'a str>,
+    /// How many matching items to skip — see [`rows::offset_wanted`].
+    offset: Option<&'a str>,
 }
 
 async fn ledger_listing(
@@ -812,6 +815,7 @@ async fn ledger_listing(
         status,
         text,
         limit,
+        offset,
     } = *listing;
     require_read(inv, ledger)?;
     if !matches!(status, "open" | "closed" | "all") {
@@ -821,21 +825,50 @@ async fn ledger_listing(
         });
     }
     let wanted = rows::rows_wanted(limit)?;
-    let mut items = with(
-        with(
-            request(Verb::Source, &format!("{}items", ledger.prefix()))?,
-            "as",
-            "text/turtle",
-        ),
-        "status",
-        status,
-    );
-    items = with(items, "limit", &COUNT_CAP.to_string());
-    if let Some(text) = text {
-        items = with(items, "text", text);
+    let offset = rows::offset_wanted(offset)?;
+    let filtered = |face: &str, limit: usize| -> Result<Request> {
+        let mut read = with(
+            with(
+                with(
+                    request(Verb::Source, &format!("{}items", ledger.prefix()))?,
+                    "as",
+                    face,
+                ),
+                "status",
+                status,
+            ),
+            "limit",
+            &limit.to_string(),
+        );
+        if let Some(text) = text {
+            read = with(read, "text", text);
+        }
+        Ok(read)
+    };
+    // The total first: an offset past it is refused before anything is drawn.
+    let total = ledger_total(&fetch(inv, filtered(TOTAL_FACE, 1)?).await?)?;
+    if offset > 0 && offset >= total {
+        return Err(Error::InvalidArgument {
+            name: "offset".to_string(),
+            detail: format!(
+                "offset={offset} is past the last of the {total} matching item(s); the last \
+                 page starts at offset={}",
+                total.saturating_sub(1) / wanted * wanted
+            ),
+        });
     }
-    let mut graph = Graph::from_turtle(&fetch(inv, items).await?).map_err(render_err)?;
-    let (count, order) = newest_rows(&mut graph, wanted);
+    let rows_read = with(
+        filtered("text/turtle", wanted)?,
+        "offset",
+        &offset.to_string(),
+    );
+    let mut graph = Graph::from_turtle(&fetch(inv, rows_read).await?).map_err(render_err)?;
+    let (shown, order) = newest_rows(&mut graph, wanted);
+    let count = Count {
+        shown,
+        total,
+        offset,
+    };
     enrich_items(&mut graph, ledger, inv, status);
     enrich_authors(&mut graph, &web.passkeys);
     let ledgers = readable_ledgers(web, inv);
@@ -860,6 +893,7 @@ async fn ledger_listing(
     let page_url = format!("/l/{}", ledger.name());
     let items_url = format!("/l/{}/items", ledger.name());
     let query = count.more_query(status, text);
+    let next = count.next_query(status, text);
     let doc = envelope(
         "page",
         &[
@@ -888,6 +922,22 @@ async fn ledger_listing(
                     .map(|q| format!("{items_url}{q}"))
                     .unwrap_or_default(),
             ),
+            ("next", flag(next.is_some())),
+            ("next-label", &count.next_label()),
+            (
+                "next-url",
+                &next
+                    .as_ref()
+                    .map(|q| format!("{page_url}{q}"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "next-items-url",
+                &next
+                    .as_ref()
+                    .map(|q| format!("{items_url}{q}"))
+                    .unwrap_or_default(),
+            ),
             (
                 "can-write",
                 flag(inv.capability.allows(&ledger.cap_write())),
@@ -909,10 +959,11 @@ async fn ledger_listing(
 struct Count {
     /// Rows left in the graph.
     shown: usize,
-    /// Items the ledger returned for this filter.
+    /// Items the filter matches: the ledger's own COUNT (its JSON face's `total`), never the
+    /// length of a read.
     total: usize,
-    /// The read filled [`COUNT_CAP`], so `total` is a floor and not a total.
-    capped: bool,
+    /// How many matching items come before this page.
+    offset: usize,
 }
 
 impl Count {
@@ -923,43 +974,85 @@ impl Count {
             "all" => "items".to_string(),
             other => format!("{other} items"),
         };
-        let total = if self.capped {
-            format!("{}+", self.total)
-        } else {
-            self.total.to_string()
-        };
-        if self.shown >= self.total && !self.capped {
-            format!("{total} {kind}")
-        } else {
-            let sentence = format!(
+        let total = self.total;
+        let sentence = if self.offset == 0 && self.shown >= total {
+            return format!("{total} {kind}");
+        } else if self.offset == 0 {
+            format!(
                 "showing the {} most recently updated of {total} {kind}",
                 self.shown
-            );
-            match rows::cap_clause(self.shown, self.total) {
-                Some(clause) => format!("{sentence} ({clause})"),
-                None => sentence,
-            }
+            )
+        } else {
+            format!(
+                "showing {}–{} of {total} {kind}, most recently updated first",
+                self.offset + 1,
+                self.offset + self.shown
+            )
+        };
+        match rows::cap_clause(self.shown, self.remaining()) {
+            Some(clause) => format!("{sentence} ({clause})"),
+            None => sentence,
         }
+    }
+
+    /// The matching items from this page's first row on.
+    fn remaining(&self) -> usize {
+        self.total.saturating_sub(self.offset)
     }
 
     fn more_label(&self) -> String {
-        format!("Show {}", self.next_rows())
+        format!("Show {}", self.remaining().min(rows::MAX_ROWS))
     }
 
-    fn next_rows(&self) -> usize {
-        self.total.min(rows::MAX_ROWS)
-    }
-
-    /// The query string of the "show more" link, or `None` when there is nothing more this
-    /// page can render.
+    /// The query string of the "show more" link — the same page start, more rows — or `None`
+    /// when this page cannot draw more than it already has.
     fn more_query(&self, status: &str, text: Option<&str>) -> Option<String> {
-        let next = rows::more(self.shown, self.total)?;
-        let mut query = format!("?status={status}&limit={next}");
+        let next = rows::more(self.shown, self.remaining())?;
+        Some(self.query(status, text, self.offset, next))
+    }
+
+    /// How many rows the "next" link asks for: as many as this page drew.
+    fn next_label(&self) -> String {
+        let after = self.total.saturating_sub(self.offset + self.shown);
+        format!("Next {}", after.min(self.shown))
+    }
+
+    /// The query string of the "next" link — the rows after this page — or `None` while the
+    /// page can still grow ("show more" is the way on) or when nothing follows it.
+    fn next_query(&self, status: &str, text: Option<&str>) -> Option<String> {
+        if rows::more(self.shown, self.remaining()).is_some() {
+            return None;
+        }
+        let after = self.offset + self.shown;
+        (self.shown > 0 && after < self.total).then(|| self.query(status, text, after, self.shown))
+    }
+
+    fn query(&self, status: &str, text: Option<&str>, offset: usize, limit: usize) -> String {
+        let mut query = format!("?status={status}&limit={limit}");
+        if offset > 0 {
+            query.push_str(&format!("&offset={offset}"));
+        }
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             query.push_str(&format!("&text={}", percent_encode(text)));
         }
-        Some(query)
+        query
     }
+}
+
+/// The `total` of a ledger's JSON listing face: how many items its filter matches, counted by
+/// the ledger (ikigai-ledger 0.6.1+). A face without one is an error, never a guess.
+fn ledger_total(json: &[u8]) -> Result<usize> {
+    let doc: Value = serde_json::from_slice(json)
+        .map_err(|e| Error::Endpoint(format!("the ledger's JSON listing: {e}")))?;
+    doc.get("total")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| {
+            Error::Endpoint(
+                "the ledger's JSON listing carries no `total` (ikigai-ledger 0.6.1+ does)"
+                    .to_string(),
+            )
+        })
 }
 
 /// Percent-encode a query-string VALUE. Nothing here builds a URL from anything but a
@@ -978,7 +1071,8 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-/// Cut `graph` down to the `rows` most recently updated items, and report what it held.
+/// Cut `graph` down to the `rows` most recently updated items, and say how many it kept and
+/// in what order.
 ///
 /// ★ **The order is the STYLESHEET's order**, `dcterms:modified` descending — an ISO-8601
 /// instant sorts lexically, which is why `xsl:sort` and this agree without a date type.
@@ -987,7 +1081,7 @@ fn percent_encode(value: &str) -> String {
 ///
 /// It also drops every subject that is not a kept item: a listing renders rows, and a
 /// comment or a link node is input the row templates never look at.
-fn newest_rows(graph: &mut Graph, rows: usize) -> (Count, Vec<String>) {
+fn newest_rows(graph: &mut Graph, rows: usize) -> (usize, Vec<String>) {
     let mut items: Vec<(String, String)> = graph
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
         .into_iter()
@@ -998,7 +1092,6 @@ fn newest_rows(graph: &mut Graph, rows: usize) -> (Count, Vec<String>) {
             (modified, iri)
         })
         .collect();
-    let total = items.len();
     // Newest first; a tie keeps the RDF/XML's own order (subject ascending), which is what
     // the stylesheet's stable sort kept when one document held every row.
     items.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -1008,14 +1101,7 @@ fn newest_rows(graph: &mut Graph, rows: usize) -> (Count, Vec<String>) {
     graph.retain(
         |t| matches!(&t.subject, NamedOrBlankNode::NamedNode(s) if keep.contains(s.as_str())),
     );
-    (
-        Count {
-            shown,
-            total,
-            capped: total >= COUNT_CAP,
-        },
-        order,
-    )
+    (shown, order)
 }
 
 #[async_trait]
@@ -1025,6 +1111,7 @@ impl Endpoint for LedgerView {
         let status = optional(inv, "status").unwrap_or_else(|| "open".to_string());
         let text = optional(inv, "text");
         let limit = optional(inv, "limit");
+        let offset = optional(inv, "offset");
         let ledger = match self.shape {
             Shape::Home => match readable_ledgers(&self.web, inv).into_iter().next() {
                 Some(ledger) => ledger,
@@ -1058,6 +1145,7 @@ impl Endpoint for LedgerView {
                 status: &status,
                 text: text.as_deref(),
                 limit: limit.as_deref(),
+                offset: offset.as_deref(),
             },
             self.shape != Shape::Fragment,
             None,
@@ -1119,6 +1207,16 @@ impl Endpoint for LedgerView {
             arg("limit", &rows::limit_summary())
                 .default_value(rows::ROWS.to_string())
                 .optional(),
+        )
+        .input(
+            arg(
+                "offset",
+                "How many matching items to skip, most recently updated first: the page \
+                 starts at the next one. Default 0; an offset past the last match is refused.",
+            )
+            .class(XSD_NON_NEGATIVE_INTEGER)
+            .default_value("0")
+            .optional(),
         )
         .input(as_html_arg())
         .output(HTML)
@@ -1547,6 +1645,7 @@ impl Endpoint for Act {
                     status: &list_status,
                     text: None,
                     limit: None,
+                    offset: None,
                 };
                 ledger_listing(&self.web, inv, &ledger, &listing, false, flash).await
             }
@@ -2767,7 +2866,7 @@ mod tests {
         let capped = Count {
             shown: rows::MAX_ROWS,
             total: 700,
-            capped: false,
+            offset: 0,
         };
         assert_eq!(
             capped.sentence("open"),
@@ -2782,7 +2881,7 @@ mod tests {
         let chosen = Count {
             shown: 50,
             total: 700,
-            capped: false,
+            offset: 0,
         };
         assert_eq!(
             chosen.sentence("open"),
@@ -2792,6 +2891,56 @@ mod tests {
             chosen.more_query("open", None).as_deref(),
             Some(format!("?status=open&limit={}", rows::MAX_ROWS).as_str())
         );
+        // A page that cannot grow offers the rows after it instead (ledger #419).
+        assert_eq!(chosen.next_query("open", None), None);
+        assert_eq!(
+            capped.next_query("open", Some("a b")).as_deref(),
+            Some(
+                format!(
+                    "?status=open&limit={0}&offset={0}&text=a%20b",
+                    rows::MAX_ROWS
+                )
+                .as_str()
+            )
+        );
+    }
+
+    /// ★ Ledger #419, gonk's half: past the first page the sentence says WHERE in the set the
+    /// page is, against the ledger's own total, and the last page offers nothing after it.
+    #[test]
+    fn a_page_past_the_first_says_where_it_is_and_what_follows() {
+        let middle = Count {
+            shown: 50,
+            total: 2400,
+            offset: 2300,
+        };
+        assert_eq!(
+            middle.sentence("all"),
+            "showing 2301–2350 of 2400 items, most recently updated first"
+        );
+        // It can still grow to the 100 that remain from its start…
+        assert_eq!(
+            middle.more_query("all", None).as_deref(),
+            Some("?status=all&limit=100&offset=2300")
+        );
+        assert_eq!(middle.more_label(), "Show 100");
+        let last = Count {
+            shown: 100,
+            total: 2400,
+            offset: 2300,
+        };
+        // …and once it has, nothing follows it.
+        assert_eq!(last.more_query("all", None), None);
+        assert_eq!(last.next_query("all", None), None);
+        assert_eq!(
+            last.sentence("open"),
+            "showing 2301–2400 of 2400 open items, most recently updated first"
+        );
+        assert_eq!(
+            ledger_total(br#"{"total": 2400, "count": 1}"#).unwrap(),
+            2400
+        );
+        assert!(ledger_total(br#"{"count": 1}"#).is_err());
     }
 
     #[test]
