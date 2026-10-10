@@ -22,9 +22,9 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 mod common;
+mod ready;
 
 use async_trait::async_trait;
 use futures::executor::block_on;
@@ -126,11 +126,7 @@ fn stub_peer() -> Peer {
     let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer));
     let path = socket.clone();
     std::thread::spawn(move || ikigai_ipc::serve(kernel, &path));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "the stub peer never bound");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    ready::socket(&socket);
     let mount = mount::parse(
         &format!("prefer urn:llm:={}", socket.display()),
         std::path::Path::new("/home/nobody"),

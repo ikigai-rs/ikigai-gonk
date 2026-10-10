@@ -16,6 +16,8 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod ready;
+
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
@@ -98,9 +100,7 @@ fn the_socket_door_serves_the_hub() {
     let hub = hub();
     let (door, path) = (doors::door_kernel(Arc::clone(&hub)), socket.clone());
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    wait_for("the socket", || socket.exists());
-
-    let client = ikigai_ipc::connect(&socket).expect("connect");
+    let client = ready::socket(&socket);
     let (filed, _) = client
         .issue(request(
             Verb::Sink,
@@ -138,11 +138,9 @@ fn a_mounting_client_never_caches_what_only_the_hub_can_cut() {
     let hub = hub();
     let (door, path) = (doors::door_kernel(Arc::clone(&hub)), socket.clone());
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    wait_for("the socket", || socket.exists());
-
     // The client: a default-cache kernel whose `urn:iki:ledger:` is the socket, mounted the
     // way the cli composes an `override`/`prefer` line.
-    let resolver = ikigai_ipc::connect(&socket).expect("connect");
+    let resolver = ready::socket(&socket);
     let client = Kernel::with_meta_renderer(
         Arc::new(ikigai_resolve::MountedRemote::overriding(
             Arc::new(resolver),

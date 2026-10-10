@@ -7,6 +7,8 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod ready;
+
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::access::{AccessLog, Door};
 use ikigai_gonk::grants::{grants_for, Authority};
@@ -226,13 +228,7 @@ fn the_socket_door_writes_one_line_per_call() {
     let door = doors::door_kernel_with(hub(), Some(AccessLog::to(Door::Socket, sink)));
     let path = socket.clone();
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "the socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-
-    let client = ikigai_ipc::connect(&socket).expect("connect");
+    let client = ready::socket(&socket);
     let iri = |s: &str| Iri::parse(s).unwrap();
     client
         .issue(

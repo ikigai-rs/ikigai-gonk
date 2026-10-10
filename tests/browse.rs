@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod common;
+mod ready;
 
 use futures::executor::block_on;
 use ikigai_core::{
@@ -1816,11 +1817,7 @@ fn the_retirement_mount_lines_reach_gonk_fresh_and_mint() {
     let socket = sockets.path().join("gonk.sock");
     let (door, path) = (doors::door_kernel(Arc::clone(&hub)), socket.clone());
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "the socket never appeared");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    ready::socket(&socket);
     let mounted = |prefix: &str| {
         Arc::new(ikigai_resolve::MountedRemote::overriding(
             Arc::new(ikigai_ipc::connect(&socket).expect("connect")),
