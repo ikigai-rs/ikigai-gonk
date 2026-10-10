@@ -61,9 +61,31 @@
 //!
 //! The seam that closes the first two for HTTP is an `ikigai-web` hook called once per request
 //! after the response is written; the report for ledger #739 states its shape.
+//!
+//! # ★ A poll is sampled, not logged every time (ledger [#767](http://localhost:1060/l/default/item/767))
+//!
+//! Every other line is a person doing something; a POLL is a timer, and it writes whether
+//! anyone is looking or not. The Queue badge ([`crate::queue::BADGE_IRI`]) is fetched every
+//! ten seconds by every open gonk page that shows it, so one forgotten tab wrote 360 lines an
+//! hour into a file launchd never rotates. Measured on the live `/tmp/ikigai-gonk.log` on
+//! 2026-10-10, 3.75 days after the log began: 9,609 access lines, **6,198 of them (64%; 850 KB
+//! of 1.45 MB) the badge poll** — about 1.2 MB a day per open page, forever, with nobody
+//! doing anything.
+//!
+//! So a subject named by [`AccessLog::sampling_polls`] writes its line only when the line says
+//! something: when it FAILED, when it took [`POLL_SLOW_MS`] or more (the same second
+//! `grep ' dur=[0-9]\{4,\} '` finds — the reason this log exists, ledger #739), or once every
+//! [`POLL_SAMPLE`] polls (one line per ten minutes per open page), so a quiet poll still shows
+//! it is alive. A sampled line is an ordinary line: the grammar does not change.
+//!
+//! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
+//! what an access log is for, and a server that is slow for a long time logs every slow poll
+//! for as long as it is slow — on purpose: that is the incident. Rotation of the file is
+//! launchd's (or `newsyslog`'s) and is not this module's to do.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -78,6 +100,13 @@ pub const CLASS: &str = "gonk:Access";
 
 /// The longest subject or `q` written whole, in characters.
 pub const MAX_FIELD: usize = 200;
+
+/// A polled subject ([`AccessLog::sampling_polls`]) writes one line in this many — once per ten
+/// minutes per open page, for the Queue badge's ten-second poll.
+pub const POLL_SAMPLE: u64 = 60;
+
+/// A polled subject's request that took this many milliseconds or more always writes its line.
+pub const POLL_SLOW_MS: u128 = 1000;
 
 /// The arguments a line never carries: the body of a write and the transport's own stamps.
 const UNLOGGED: [&str; 5] = ["content", "content-type", "received", "client", "principal"];
@@ -112,6 +141,14 @@ pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct AccessLog {
     door: Door,
     sink: Sink,
+    polls: Arc<Polls>,
+}
+
+/// The subjects a page polls on a timer, and how many of their requests this log has seen.
+#[derive(Default)]
+struct Polls {
+    subjects: Vec<String>,
+    seen: AtomicU64,
 }
 
 impl AccessLog {
@@ -135,7 +172,39 @@ impl AccessLog {
 
     /// Lines to `sink` — a test's collector, or anything else.
     pub fn to(door: Door, sink: Sink) -> AccessLog {
-        AccessLog { door, sink }
+        AccessLog {
+            door,
+            sink,
+            polls: Arc::default(),
+        }
+    }
+
+    /// Sample the lines of `subjects` — resources a page polls on a timer — instead of writing
+    /// one per request: a polled request writes its line when it fails, when it took
+    /// [`POLL_SLOW_MS`] or more, or once every [`POLL_SAMPLE`] polls (the first included). Every
+    /// other subject is unaffected. See the module docs for why (ledger #767).
+    pub fn sampling_polls<S: Into<String>>(
+        self,
+        subjects: impl IntoIterator<Item = S>,
+    ) -> AccessLog {
+        AccessLog {
+            polls: Arc::new(Polls {
+                subjects: subjects.into_iter().map(Into::into).collect(),
+                seen: AtomicU64::new(0),
+            }),
+            ..self
+        }
+    }
+
+    /// Whether a request for `subject` that ended `ok` (or not) after `dur_ms` writes a line.
+    fn writes(&self, subject: &str, ok: bool, dur_ms: u128) -> bool {
+        if !self.polls.subjects.iter().any(|polled| polled == subject) {
+            return true;
+        }
+        // Counted whether or not it is written, so the sample is one in N POLLS, not one in N
+        // quiet ones.
+        let nth = self.polls.seen.fetch_add(1, Ordering::Relaxed);
+        !ok || dur_ms >= POLL_SLOW_MS || nth.is_multiple_of(POLL_SAMPLE)
     }
 
     /// The door this log describes.
@@ -211,14 +280,20 @@ impl Endpoint for Timed {
         let started = SystemTime::now();
         let clock = Instant::now();
         let answer = self.inner.invoke(inv).await;
-        let line = line(
-            millis(started),
-            self.log.door,
-            inv.request,
-            answer.as_ref().map(|r| r.bytes.len()),
-            clock.elapsed().as_millis(),
-        );
-        (self.log.sink)(&line);
+        let dur_ms = clock.elapsed().as_millis();
+        if self
+            .log
+            .writes(inv.request.target.as_str(), answer.is_ok(), dur_ms)
+        {
+            let line = line(
+                millis(started),
+                self.log.door,
+                inv.request,
+                answer.as_ref().map(|r| r.bytes.len()),
+                dur_ms,
+            );
+            (self.log.sink)(&line);
+        }
         answer
     }
 
@@ -420,6 +495,33 @@ mod tests {
             request = request.with_arg(*k, ArgRef::Inline(v.as_bytes().to_vec()));
         }
         request
+    }
+
+    /// Ledger #767: a polled subject writes the first poll and one in [`POLL_SAMPLE`] after it,
+    /// every failure and every slow one; any other subject writes every request.
+    #[test]
+    fn a_poll_is_sampled_and_nothing_else_is() {
+        const BADGE: &str = "urn:iki:gonk:fragment:queue-depth";
+        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).sampling_polls([BADGE]);
+        let quiet = (0..POLL_SAMPLE * 2)
+            .filter(|_| log.writes(BADGE, true, 3))
+            .count();
+        assert_eq!(quiet, 2, "two quiet lines in {} polls", POLL_SAMPLE * 2);
+        assert!(
+            log.writes(BADGE, false, 3),
+            "a failed poll is always written"
+        );
+        assert!(
+            log.writes(BADGE, true, POLL_SLOW_MS),
+            "a slow poll is always written"
+        );
+        assert!(
+            (0..POLL_SAMPLE * 2).all(|_| log.writes("urn:iki:gonk:page:home", true, 3)),
+            "a page is never sampled"
+        );
+        // Without `sampling_polls`, nothing is sampled — the badge included.
+        let plain = AccessLog::to(Door::Http, Arc::new(|_: &str| {}));
+        assert!((0..POLL_SAMPLE * 2).all(|_| plain.writes(BADGE, true, 3)));
     }
 
     #[test]

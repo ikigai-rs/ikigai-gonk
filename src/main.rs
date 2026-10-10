@@ -443,8 +443,13 @@ fn serve(flags: &config::Flags) -> ! {
             .unwrap_or_else(|e| fail(&format!("creating {}: {e}", parent.display())));
     }
     // One access line per request at every door (ledger #739), unless `gonk.log.access`
-    // turns it off — off means not wrapped at all, not wrapped and silent.
-    let access = |door: access::Door| settings.access_log.then(|| access::AccessLog::stderr(door));
+    // turns it off — off means not wrapped at all, not wrapped and silent. The Queue badge,
+    // which every open page polls every ten seconds, is sampled (ledger #767).
+    let access = |door: access::Door| {
+        settings.access_log.then(|| {
+            access::AccessLog::stderr(door).sampling_polls([ikigai_gonk::queue::BADGE_IRI])
+        })
+    };
     let (socket, door) = (
         settings.socket.clone(),
         doors::door_kernel_with(Arc::clone(&hub), access(access::Door::Socket)),
@@ -542,7 +547,8 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!(
             "  log     {}",
             if settings.access_log {
-                "one `gonk:Access` line per request at each door, on stderr \
+                "one `gonk:Access` line per request at each door, on stderr; the Queue \
+                 badge's poll only when it fails, takes a second, or is the 60th \
                  (`gonk.log.access = false` turns it off)"
             } else {
                 "no access lines (`gonk.log.access = false`)"
