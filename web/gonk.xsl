@@ -498,7 +498,7 @@
           <xsl:text>the finding</xsl:text>
         </a>
       </div>
-      <p class="finding-body"><xsl:value-of select="view:body"/></p>
+      <p class="finding-body" data-linkify="default"><xsl:value-of select="view:body"/></p>
       <xsl:if test="view:quote">
         <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
       </xsl:if>
@@ -864,7 +864,7 @@
         <xsl:otherwise><span class="finding-where"><xsl:value-of select="@where"/></span></xsl:otherwise>
       </xsl:choose>
     </div>
-    <p class="finding-body"><xsl:value-of select="view:body"/></p>
+    <p class="finding-body" data-linkify="default"><xsl:value-of select="view:body"/></p>
     <xsl:if test="view:quote">
       <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
     </xsl:if>
@@ -982,7 +982,7 @@
           </xsl:otherwise>
         </xsl:choose>
       </div>
-      <p class="finding-body"><xsl:value-of select="view:body"/></p>
+      <p class="finding-body" data-linkify="default"><xsl:value-of select="view:body"/></p>
       <xsl:if test="view:quote">
         <pre class="finding-quote"><xsl:value-of select="view:quote"/></pre>
       </xsl:if>
@@ -1467,7 +1467,9 @@
       <h1 class="item-title"><xsl:value-of select="dcterms:title"/></h1>
       <p class="badges"><xsl:call-template name="badges"/></p>
     </header>
-    <xsl:if test="ledger:body"><div class="body"><xsl:value-of select="ledger:body"/></div></xsl:if>
+    <!-- data-linkify: src/render.rs::linkify links this text's http(s) URLs and `ledger #N`
+         references after the transform (ledger #989); the value is the ledger they resolve in. -->
+    <xsl:if test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:if>
     <dl class="meta">
       <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/></xsl:if></dd>
       <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
@@ -1530,7 +1532,7 @@
           <xsl:otherwise>unattributed</xsl:otherwise>
         </xsl:choose>
       </p>
-      <div class="body"><xsl:value-of select="ledger:body"/></div>
+      <div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div>
     </li>
   </xsl:template>
 

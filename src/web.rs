@@ -1293,6 +1293,10 @@ async fn item_card(
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, "open");
     enrich_authors(&mut graph, &web.passkeys);
+    // The ledger a comment's `ledger #N` references resolve in (`render::linkify`, ledger #989).
+    for comment in graph.subjects_of_type(&format!("{LEDGER_NS}Comment")) {
+        graph.view(&comment, "ledger", ledger.name());
+    }
     let title = graph
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
         .first()

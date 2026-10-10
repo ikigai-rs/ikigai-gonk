@@ -448,6 +448,18 @@ cannot see); gonk's own chunks nest a handful of levels and carry neither.
 verb the target does not describe, and refuses any field that the verb's contract does not
 name. It runs under the caller's capability, so the ledger's checks decide.
 
+### Links in prose (ledger #989)
+
+An item's body, a comment's body and a finding's body are plain text. Their `http://` and
+`https://` URLs become links (the `href` is exactly the URL, and a trailing `.`, `,`, `;`, `:`,
+`!`, `?` or unbalanced `)` stays with the sentence), and so does `ledger #N`, linked to
+`/l/<ledger>/item/N`. Nothing else changes: no markdown, no HTML, and a `javascript:` URL stays
+text. This is done after the transform (`render::linkify`), on elements the stylesheet marks
+`data-linkify`. xrust supports neither `xsl:analyze-string` nor the `xsl:variable` and
+`string-length()` that a recursive template would need to trim a URL. xrust's text escaping is
+what makes the pass safe: a `<` in a body arrives as `&lt;`, so a URL can neither open a tag nor
+leave its attribute.
+
 ### Claims, lifecycle state and the doctor (ledger #775)
 
 `ikigai-ledger` 0.5.0 gives every item a **lifecycle state** (one value, moved by a

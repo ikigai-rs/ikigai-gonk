@@ -594,12 +594,201 @@ pub fn splice(shell: String, slots: &[(String, String)]) -> Result<String, Strin
 /// page gets its doctype here, because xrust does not write one.
 pub fn render(document: &str, full_page: bool) -> Result<String, String> {
     let xml = ikigai_xslt::transform_xml(document, STYLESHEET, false)?;
-    let body = html(&xml);
+    let body = linkify(&html(&xml));
     Ok(if full_page {
         format!("<!DOCTYPE html>\n{body}")
     } else {
         body
     })
+}
+
+/// The attribute the stylesheet puts on an element whose TEXT is prose a person wrote — an
+/// item's body, a comment's, a finding's — naming the ledger its `ledger #N` references
+/// resolve in. [`linkify`] finds it in the rendered HTML.
+pub const LINKIFY_ATTR: &str = "data-linkify";
+
+/// Make the http(s) URLs and the `ledger #N` references in prose clickable, and NOTHING else
+/// (ledger [#989](http://localhost:1060/l/default/item/989)).
+///
+/// # Why here and not in the stylesheet
+///
+/// A link inside a text node is a tokenizer: find a scheme, find where the URL ends, give back
+/// the trailing `)`, `.` and `,` that belong to the sentence. XSLT 2.0 would do it with
+/// `xsl:analyze-string`; xrust is a subset of 1.0 (the module docs' table) and refuses both
+/// `xsl:variable` and `string-length()`, so even a recursive `substring-before` template could
+/// not hold the URL it is trimming. And xrust's cost is quadratic in the nodes a transform
+/// creates, so a node per word would be the slow way to do it. So the stylesheet MARKS the
+/// element (`data-linkify='<ledger>'` on the element holding the text), and this pass rewrites
+/// that element's text in the HTML the transform produced.
+///
+/// # Why it is safe on that HTML
+///
+/// It runs on xrust's serialization, where every `<` in text arrives as `&lt;`, `'` as
+/// `&apos;` and `"` as `&quot;` ([`html`]'s docs say so and its tests pin it). So the marked
+/// element's text runs to the next `<` and contains no markup; a URL stops at whitespace or
+/// at any of those entities, so it can neither close the `href` attribute nor open a tag;
+/// and the link text is the same escaped bytes, unchanged. A marker can only come from the
+/// stylesheet: in text, the `'` it needs is `&apos;`.
+///
+/// - **Only `http://` and `https://`** become links; `javascript:`, `data:` and the rest stay
+///   text.
+/// - **A trailing `.` `,` `;` `:` `!` `?` and an unbalanced `)` stay outside the link**:
+///   `(see https://a.example/x).` links `https://a.example/x`.
+/// - **`ledger #N`** links to `/l/<ledger>/item/N` (gonk's convention for an item reference in
+///   prose, field guide 9i).
+/// - Everything else is text: no markdown, no HTML.
+///
+/// ```
+/// use ikigai_gonk::render::linkify;
+/// let html = "<div data-linkify='default' class='body'>see https://a.example/x?y=1&amp;z=2). \
+///             and ledger #12, not javascript:alert(1) or &lt;b&gt;</div>";
+/// assert_eq!(
+///     linkify(html),
+///     "<div data-linkify='default' class='body'>see \
+///      <a href='https://a.example/x?y=1&amp;z=2'>https://a.example/x?y=1&amp;z=2</a>). \
+///      and <a href='/l/default/item/12'>ledger #12</a>, not javascript:alert(1) or \
+///      &lt;b&gt;</div>"
+/// );
+/// // Text outside a marked element is never touched.
+/// assert_eq!(linkify("<p>https://a.example</p>"), "<p>https://a.example</p>");
+/// ```
+pub fn linkify(html: &str) -> String {
+    let marker = format!("{LINKIFY_ATTR}='");
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find(&marker) {
+        let value_start = at + marker.len();
+        let Some(value_len) = rest[value_start..].find('\'') else {
+            break;
+        };
+        let ledger = &rest[value_start..value_start + value_len];
+        // The end of this tag: the attributes after the marker are quoted, so track quotes.
+        let mut quote: Option<char> = None;
+        let mut tag_end = None;
+        for (i, c) in rest[value_start + value_len + 1..].char_indices() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '"') | (None, '\'') => quote = Some(c),
+                (None, '>') => {
+                    tag_end = Some(value_start + value_len + 1 + i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(tag_end) = tag_end else { break };
+        let text_start = tag_end + 1;
+        let text_len = rest[text_start..]
+            .find('<')
+            .unwrap_or(rest.len() - text_start);
+        out.push_str(&rest[..text_start]);
+        out.push_str(&linkify_text(
+            &rest[text_start..text_start + text_len],
+            ledger,
+        ));
+        rest = &rest[text_start + text_len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One run of escaped text, linked. See [`linkify`].
+fn linkify_text(text: &str, ledger: &str) -> String {
+    let ledger_ok = !ledger.is_empty()
+        && ledger
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let boundary = |at: usize| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric())
+    };
+    while i < text.len() {
+        let here = &text[i..];
+        if boundary(i) {
+            if let Some(len) = url_at(here) {
+                let url = &here[..len];
+                out.push_str(&format!("<a href='{url}'>{url}</a>"));
+                i += len;
+                continue;
+            }
+            if ledger_ok {
+                if let Some(len) = ledger_ref_at(here) {
+                    let number = here[..len].rsplit('#').next().unwrap_or("");
+                    out.push_str(&format!(
+                        "<a href='/l/{ledger}/item/{number}'>{}</a>",
+                        &here[..len]
+                    ));
+                    i += len;
+                    continue;
+                }
+            }
+        }
+        let c = here.chars().next().expect("not at the end");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// The length of the http(s) URL that `text` starts with, trailing punctuation given back to
+/// the sentence; `None` when it starts with none.
+fn url_at(text: &str) -> Option<usize> {
+    let scheme = ["https://", "http://"].into_iter().find(|scheme| {
+        text.len() >= scheme.len() && text[..scheme.len()].eq_ignore_ascii_case(scheme)
+    })?;
+    // Where the URL ends: whitespace, markup (never present here), or an entity for a
+    // character no URL in prose carries unescaped (`<`, `>`, `"`, `'`). `&amp;` stays: it is
+    // a query string's `&`, and it is already the attribute's escaping of one.
+    let mut end = text.len();
+    for (i, c) in text.char_indices() {
+        let tail = &text[i..];
+        if c.is_whitespace()
+            || c == '<'
+            || c == '"'
+            || c == '\''
+            || ["&lt;", "&gt;", "&quot;", "&apos;", "&#"]
+                .iter()
+                .any(|entity| tail.starts_with(entity))
+        {
+            end = i;
+            break;
+        }
+    }
+    let mut url = &text[..end];
+    loop {
+        let trimmed = match url.chars().next_back() {
+            Some('.' | ',' | ';' | ':' | '!' | '?') => &url[..url.len() - 1],
+            Some(')') if url.matches(')').count() > url.matches('(').count() => {
+                &url[..url.len() - 1]
+            }
+            _ => break,
+        };
+        url = trimmed;
+    }
+    (url.len() > scheme.len()).then_some(url.len())
+}
+
+/// The length of the `ledger #N` reference that `text` starts with, if it does.
+fn ledger_ref_at(text: &str) -> Option<usize> {
+    const WORD: &str = "ledger #";
+    if text.len() < WORD.len() || !text[..WORD.len()].eq_ignore_ascii_case(WORD) {
+        return None;
+    }
+    let digits = text[WORD.len()..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    let end = WORD.len() + digits;
+    let after_ok = text[end..]
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric());
+    (digits > 0 && digits <= 12 && after_ok).then_some(end)
 }
 
 /// XML serialization → HTML serialization: every self-closed NON-void element becomes an
