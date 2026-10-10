@@ -55,6 +55,7 @@ fn serve(ledger: &str) -> (Arc<Kernel>, SocketAddr, tempfile::TempDir) {
         anonymous: grants,
         port: addr.port(),
         passkeys: Some(passkeys),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     let cap = doors::http_cap(door.clone());
     let edge = doors::edge_config(door);

@@ -179,6 +179,13 @@ impl Endpoint for Form {
         if let Some(bindings) = optional(inv, "bindings")? {
             request = request.with_arg("bindings", inline(bindings));
         }
+        // ★ The caller's time budget goes with the query (ledger #964/#979): it can only lower
+        // what the store gives this capability, and it is how an ANONYMOUS HTTP caller's
+        // stamped budget ([`crate::budget`]) reaches the store through this face. Dropping it
+        // here would hand that caller the store's 5 s base instead of the door's.
+        if let Some(budget) = optional(inv, "budget")? {
+            request = request.with_arg("budget", inline(budget));
+        }
         inv.issue(request).await
     }
 
@@ -241,6 +248,17 @@ impl Endpoint for Form {
                          `urn:iki:store:graph-select` has the term shapes.",
                     )
                     .class(XSD_STRING)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("budget")
+                    .summary(
+                        "Optional: a time budget in milliseconds for this evaluation, passed to \
+                         the store. It can only LOWER the budget this capability gets there, \
+                         never raise it; past it the request is refused with a typed timeout, \
+                         never a partial answer. An anonymous HTTP caller's is set by the door.",
+                    )
+                    .class("http://www.w3.org/2001/XMLSchema#integer")
                     .optional(),
             )
             .input(
