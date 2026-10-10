@@ -2846,6 +2846,14 @@ which is what keeps `OPTIONS` and `?description` from answering them — where t
 refused one step later, by the door's admission, with an `outcome=denied` line. No line ever carries a cookie, a token or a form
 body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
 
+★ **The Queue badge's poll is sampled** (ledger #767). Every open page fetches
+`/queue/depth` every ten seconds, so one forgotten tab wrote 360 lines an hour into a file
+launchd never rotates — 64% of the live log's lines on 2026-10-10. A poll now writes its line
+only when it fails, when it takes a second or more (so the `dur=[0-9]\{4,\}` grep above still
+finds every slow one), or once in 60 polls (one line per ten minutes per open page, to show the
+poll is alive). Every other request is still one line. The file itself is still unrotated:
+that is the launchd install's to do (`newsyslog`), not gonk's.
+
 ## Upgrading past audit round 4 (ledger #864)
 
 What changed for an operator, in one place (ledger #864, #805, #816, #799):
