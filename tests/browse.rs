@@ -2951,7 +2951,7 @@ impl HttpDoorHarness {
         // It does NOT include the browse graph, which is the whole of assertion 1.
         let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).expect("the ledger's tokens"),
-            port: addr.port(),
+            bind: addr,
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };

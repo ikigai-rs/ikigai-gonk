@@ -85,7 +85,7 @@ impl Server {
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous,
-            port: addr.port(),
+            bind: addr,
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };

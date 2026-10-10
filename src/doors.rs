@@ -31,7 +31,7 @@
 //! `ikigai_resolve::issue_traced_as`'s own `block_on`, and futures' executor panics when
 //! entered twice on one thread. [`HubSpace`] awaits the hub instead.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -396,8 +396,11 @@ pub struct HttpDoor {
     /// What an ANONYMOUS loopback caller holds — the first arc's grant, unchanged: read and
     /// write on the ledgers in `gonk.http.ledger`.
     pub anonymous: Vec<String>,
-    /// The port the door is bound to, which the `Host` and `Origin` checks require.
-    pub port: u16,
+    /// The address the door is bound to, its port resolved (never the `0` a config may ask
+    /// for), which the `Host` and `Origin` checks require: the loopback names, and this
+    /// address's own IP, each with this port ([`http_refusal`], ledger
+    /// [#1045](http://localhost:1060/l/default/item/1045)).
+    pub bind: SocketAddr,
     /// The passkey sessions, when passkeys are on.
     pub passkeys: Option<Arc<Passkeys>>,
     /// The SPARQL time budget an ANONYMOUS caller's evaluations run under, in milliseconds
@@ -504,14 +507,14 @@ pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Op
 /// both were answered under the whole grant: SameSite ignores the port, so a page on another
 /// localhost port rode the signed-in session into `explain` and `review`.
 pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static str> {
-    if !host_is_ours(request.header("host"), door.port) {
+    if !host_is_ours(request.header("host"), door.bind) {
         return Some(crate::admit::REFUSED_FOREIGN_HOST);
     }
     let read = matches!(request.method.as_str(), "GET" | "HEAD");
-    if !read && !same_origin(request, door.port) {
+    if !read && !same_origin(request, door.bind) {
         return Some(crate::admit::REFUSED_CROSS_SITE);
     }
-    if read && page_of(request, door.port) == Page::ForeignLoad {
+    if read && page_of(request, door.bind) == Page::ForeignLoad {
         return Some(crate::admit::REFUSED_FOREIGN_LOAD);
     }
     None
@@ -555,29 +558,31 @@ pub enum Page {
 ///     body: Vec::new(),
 ///     peer: None,
 /// };
-/// assert_eq!(page_of(&get(&[]), 1060), Page::Ours);
-/// assert_eq!(page_of(&get(&[("sec-fetch-site", "same-origin")]), 1060), Page::Ours);
-/// assert_eq!(page_of(&get(&[("sec-fetch-site", "none")]), 1060), Page::Ours);
+/// let door: std::net::SocketAddr = "127.0.0.1:1060".parse().unwrap();
+/// assert_eq!(page_of(&get(&[]), door), Page::Ours);
+/// assert_eq!(page_of(&get(&[("sec-fetch-site", "same-origin")]), door), Page::Ours);
+/// assert_eq!(page_of(&get(&[("sec-fetch-site", "none")]), door), Page::Ours);
 /// let other = |mode: &str, dest: &str| {
 ///     get(&[("sec-fetch-site", "same-site"), ("sec-fetch-mode", mode), ("sec-fetch-dest", dest)])
 /// };
-/// assert_eq!(page_of(&other("navigate", "document"), 1060), Page::ForeignNavigation);
-/// assert_eq!(page_of(&other("no-cors", "image"), 1060), Page::ForeignLoad);
-/// assert_eq!(page_of(&other("cors", "empty"), 1060), Page::ForeignLoad);
-/// assert_eq!(page_of(&other("navigate", "iframe"), 1060), Page::ForeignLoad);
+/// assert_eq!(page_of(&other("navigate", "document"), door), Page::ForeignNavigation);
+/// assert_eq!(page_of(&other("no-cors", "image"), door), Page::ForeignLoad);
+/// assert_eq!(page_of(&other("cors", "empty"), door), Page::ForeignLoad);
+/// assert_eq!(page_of(&other("navigate", "iframe"), door), Page::ForeignLoad);
 /// // A browser that sends no fetch metadata still sends a Referer.
 /// let referred = |from: &str| get(&[("referer", from)]);
-/// assert_eq!(page_of(&referred("http://localhost:8090/x"), 1060), Page::ForeignNavigation);
-/// assert_eq!(page_of(&referred("http://localhost:1060/l/default"), 1060), Page::Ours);
+/// assert_eq!(page_of(&referred("http://localhost:8090/x"), door), Page::ForeignNavigation);
+/// assert_eq!(page_of(&referred("http://localhost:1060/l/default"), door), Page::Ours);
+/// // A door bound to another loopback IP counts that IP's origin as its own (ledger #1045);
+/// // a door that is not bound there does not.
+/// let own: std::net::SocketAddr = "127.0.0.2:1070".parse().unwrap();
+/// let from_own = referred("http://127.0.0.2:1070/l/default");
+/// assert_eq!(page_of(&from_own, own), Page::Ours);
+/// assert_eq!(page_of(&from_own, door), Page::ForeignNavigation);
 /// ```
-pub fn page_of(request: &HttpRequest, port: u16) -> Page {
+pub fn page_of(request: &HttpRequest, bind: SocketAddr) -> Page {
     let site = request.header("sec-fetch-site").map(str::trim);
-    let ours = |origin: &str| {
-        let origin = origin.trim().trim_end_matches('/');
-        ["localhost", "127.0.0.1", "[::1]"]
-            .iter()
-            .any(|name| origin == format!("http://{name}:{port}"))
-    };
+    let ours = |origin: &str| is_our_origin(origin.trim().trim_end_matches('/'), bind);
     let foreign = match site {
         Some(site) => !matches!(site, "same-origin" | "none"),
         // ⚠ Only without `Sec-Fetch-Site`: a `Referer` is the page a navigation LEFT, and a
@@ -687,7 +692,7 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
     // ★ Ledger #880: another page's navigation carries the READ half, whatever it names — so
     // `<a href="/k?c=source urn:repo:R:explain:P">` on a page at another localhost port, which
     // rides the signed-in session, cannot spend inference or archive an answer.
-    if page_of(request, door.port) == Page::ForeignNavigation {
+    if page_of(request, door.bind) == Page::ForeignNavigation {
         scopes = crate::admit::foreign_page_scopes(&scopes);
     }
     // ★ Ledger #964/#979: a caller with no live passkey session is ANONYMOUS, and its SPARQL
@@ -703,19 +708,53 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
     scopes
 }
 
-/// The loopback names this door answers to, with or without the port.
-fn host_is_ours(host: Option<&str>, port: u16) -> bool {
+/// The names this door answers to: the three loopback names, and the bound address's own IP
+/// in its `Host` spelling (`127.0.0.2`, `[::1]`) when it is not one of them.
+///
+/// ★ Ledger [#1045](http://localhost:1060/l/default/item/1045). [`crate::config::refuse_non_loopback`]
+/// admits any loopback bind — `127.0.0.2:1070` among them — and through `716b34b` its own IP
+/// literal was then answered `421` as a foreign `Host`, while `localhost` resolves to
+/// `127.0.0.1`, where nothing listens: a server that started and could not be reached over HTTP
+/// at all. The bound IP is ours for the same reason `127.0.0.1` is — no DNS answer names it, so
+/// a rebinding page cannot arrive under it. Every other spelling stays foreign.
+fn our_names(bind: SocketAddr) -> Vec<String> {
+    let mut names: Vec<String> = ["localhost", "127.0.0.1", "[::1]"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    let own = match bind.ip() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    if !names.contains(&own) {
+        names.push(own);
+    }
+    names
+}
+
+/// This door's names, with or without its port ([`our_names`]).
+fn host_is_ours(host: Option<&str>, bind: SocketAddr) -> bool {
     let Some(host) = host else {
         return false;
     };
     let host = host.trim().to_ascii_lowercase();
-    ["localhost", "127.0.0.1", "[::1]"]
+    let port = bind.port();
+    our_names(bind)
         .iter()
         .any(|name| host == *name || host == format!("{name}:{port}"))
 }
 
+/// `origin` is `http://` one of this door's names with its port ([`our_names`]).
+fn is_our_origin(origin: &str, bind: SocketAddr) -> bool {
+    let origin = origin.trim();
+    let port = bind.port();
+    our_names(bind)
+        .iter()
+        .any(|name| origin == format!("http://{name}:{port}"))
+}
+
 /// A browser's `Origin` and `Sec-Fetch-Site`, when present, name this server.
-fn same_origin(request: &HttpRequest, port: u16) -> bool {
+fn same_origin(request: &HttpRequest, bind: SocketAddr) -> bool {
     if let Some(site) = request.header("sec-fetch-site") {
         if !matches!(site.trim(), "same-origin" | "none") {
             return false;
@@ -723,9 +762,7 @@ fn same_origin(request: &HttpRequest, port: u16) -> bool {
     }
     match request.header("origin") {
         None => true,
-        Some(origin) => ["localhost", "127.0.0.1", "[::1]"]
-            .iter()
-            .any(|name| origin.trim() == format!("http://{name}:{port}")),
+        Some(origin) => is_our_origin(origin, bind),
     }
 }
 

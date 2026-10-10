@@ -192,9 +192,12 @@ Request` for the second:
 - a write whose `Origin` or `Sec-Fetch-Site` names another site (`same-site` included: a page
   on another port of `localhost` is another origin). A local process such as `curl` or a
   script sends neither header, so it is unaffected;
-- a request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` (with this port), reads
-  included. That is the DNS-rebinding defense, and it answers `421`: the request names a
-  server this one is not, which is a different fact from "not allowed" (ledger #2).
+- a request whose `Host` is not `localhost`, `127.0.0.1`, `[::1]` or the bound address's own
+  IP (with this port), reads included. That is the DNS-rebinding defense, and it answers
+  `421`: the request names a server this one is not, which is a different fact from "not
+  allowed" (ledger #2). The bound IP counts because a `gonk.bind` of another loopback address
+  (`127.0.0.2:1070`) is admitted, and `localhost` does not reach it (ledger #1045). Only the
+  bound one joins: a door on `127.0.0.1` still refuses `127.0.0.2`.
 
 ★ **Refused, not "given nothing"** (ledger #864, R2; PENDING item 2). Until then both cases
 computed an EMPTY capability, and an empty capability is still offered every action that
