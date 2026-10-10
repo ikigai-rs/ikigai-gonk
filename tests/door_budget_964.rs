@@ -73,6 +73,11 @@ struct Server {
 impl Server {
     /// A server whose anonymous SPARQL budget is `door_ms`, over a store whose base is [`BASE`].
     fn start(door_ms: u64) -> Server {
+        Server::start_with_base(door_ms, BASE)
+    }
+
+    /// [`Server::start`] over a store whose time base is `base`.
+    fn start_with_base(door_ms: u64, base: Duration) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -86,7 +91,7 @@ impl Server {
         // behavior, not the door's, and is not what this file tests.
         let store = DurableStore::in_memory()
             .unwrap()
-            .with_time_budget(TimeBudget::new(BASE).with_max_overdue(64));
+            .with_time_budget(TimeBudget::new(base).with_max_overdue(64));
         let hub = Arc::new(compose(store));
         // One item, so the default ledger's graph exists: `urn:sparql:*` refuses an EMPTY
         // default dataset before evaluating anything.
@@ -539,9 +544,16 @@ fn wide_answer() -> String {
 /// data, and the base already caps what one request can hold in memory (an answer is refused at
 /// the write that crosses the bound, so the buffer never exceeds it). The base binds signed-in
 /// callers too; a passkey's grant can carry `urn:cap:store:answer:*` to lift it.
+///
+/// ⚠ The clock is taken out of play: the store's time base and the door's budget are both a
+/// minute here. On CI, beside this file's other cross products, writing the first 16 MiB took
+/// longer than the 2.5 s base the other tests use, and the refusal came on TIME. The door value is
+/// past what `gonk.http.anonymous_sparql_budget_ms` accepts (5000), which only the config refuses;
+/// the field is set directly so the size bound is the only one that can answer.
 #[test]
 fn an_anonymous_answer_past_the_stores_base_is_refused_on_every_route() {
-    let server = Server::start(budget::MAX_ANONYMOUS_SPARQL_BUDGET_MS);
+    const UNHURRIED_MS: u64 = 60_000;
+    let server = Server::start_with_base(UNHURRIED_MS, Duration::from_millis(UNHURRIED_MS));
     let query = wide_answer();
     let bound = format!(
         "the answer exceeds {} bytes",
@@ -569,9 +581,7 @@ fn an_anonymous_answer_past_the_stores_base_is_refused_on_every_route() {
         grants_for("default", Authority::Write)
             .unwrap()
             .into_iter()
-            .chain([budget::anonymous_marker(
-                budget::MAX_ANONYMOUS_SPARQL_BUDGET_MS,
-            )]),
+            .chain([budget::anonymous_marker(UNHURRIED_MS)]),
     );
     for target in ["urn:iki:store:graph-select", "urn:sparql:select"] {
         let request = Request::new(Verb::Source, Iri::parse(target).unwrap())
