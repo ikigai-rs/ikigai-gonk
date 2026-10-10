@@ -171,7 +171,7 @@ fn gonk() -> Gonk {
         .expect("a shared in-memory store");
     let roots: Vec<(String, PathBuf)> = vec![(ROOT.to_string(), root.path().to_path_buf())];
     let tiers = ExplainTiers::default();
-    let wired = browse::wire(roots, handle, None, Some(&tiers), &graph);
+    let wired = browse::wire(roots, handle, None, Some(&tiers), &graph, None);
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),

@@ -79,7 +79,14 @@ fn main() {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
-    let wired = browse::wire(roots.clone(), handle, None, None, &graph);
+    let wired = browse::wire(
+        roots.clone(),
+        handle,
+        None,
+        None,
+        &graph,
+        ikigai_core::config::config_home(),
+    );
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),

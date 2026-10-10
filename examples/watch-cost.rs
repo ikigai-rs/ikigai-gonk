@@ -99,7 +99,14 @@ fn main() {
     let graph = browse::Graph::chosen();
     let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
-    let wired = browse::wire(roots.clone(), handle, Some(&watch), None, &graph);
+    let wired = browse::wire(
+        roots.clone(),
+        handle,
+        Some(&watch),
+        None,
+        &graph,
+        ikigai_core::config::config_home(),
+    );
     let spaces = tempfile::tempdir().expect("a scratch spaces tree");
     let review = Trigger {
         space: "reviews".to_string(),
