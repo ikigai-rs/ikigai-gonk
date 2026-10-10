@@ -220,7 +220,12 @@ pub fn compose_with(
     // mount may claim is decided.
     let mut spaces: Vec<Arc<dyn Space>> = mounted;
     spaces.push(store);
-    spaces.push(Arc::new(ikigai_ledger::space()));
+    // ★ Ledger #775 step 3: every claim's KIND is stamped from the door's principal
+    // ([`crate::admit::claim_kind`]) — a passkey is a person, anything else a machine — never
+    // from the caller. Sound because every door OVERWRITES `principal` before the hub sees it.
+    spaces.push(Arc::new(ikigai_ledger::space_with(
+        ikigai_ledger::SpaceConfig::default().claim_kind(crate::admit::claim_kind()),
+    )));
     // ★ The page renderer's chunk resource (`urn:iki:gonk:render`, ledger #519) lives HERE
     // and not in the HTTP door's page space, because the hub holds the one cache in the
     // process (`crate::doors`): a chunk is a pure, cacheable function of its document, and

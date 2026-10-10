@@ -415,6 +415,7 @@ there.
 | `/` | `urn:iki:gonk:page:home` | the first readable ledger |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
+| `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
 | `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | the editor page and its results; with a results `Accept`, the SPARQL 1.1 Protocol (GET, and POST as a read) over `urn:sparql:*` |
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
@@ -446,6 +447,32 @@ cannot see); gonk's own chunks nest a handful of levels and carry neither.
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
 verb the target does not describe, and refuses any field that the verb's contract does not
 name. It runs under the caller's capability, so the ledger's checks decide.
+
+### Claims, lifecycle state and the doctor (ledger #775)
+
+`ikigai-ledger` 0.5.0 gives every item a **lifecycle state** (one value, moved by a
+compare-and-set; no state is `filed`), **leased claims** (`lease=30m`; an expired lease is not
+freed, it is taken over), and a read-only **doctor** of five stored checks. The item page shows the
+state and the claim: its holder, its kind, and its lease and expiry. The claim form takes an
+optional lease. `/l/{ledger}/doctor` lists what the doctor found (orphaned, abandoned,
+lease-expired, unknown-state, two-states), with each remedy as text. It repairs nothing.
+
+**A claim's kind is this server's to stamp, never the caller's** (`admit::claim_kind`). A claim
+whose request carries a passkey principal is a `person`'s. A QUIC client's, an agent's, an
+anonymous caller's and the owner socket's are a `machine`'s (Brian, 2026-10-09). The ledger
+reports a machine claim on an item that is not in flight as orphaned, and leaves a person's hold
+alone. The stamp reads the request's `principal`, which is sound only because every door
+OVERWRITES that argument:
+
+- `ikigai-web` stamps HTTP writes from the session cookie and drops a caller's `?principal=`. The
+  `/act` form adapter forwards the door's principal to the action it issues.
+- `ikigai-quic` stamps the connection's client IRI after removing a client's own.
+- The socket stamps nothing, so its door now REMOVES any `principal` a caller sends
+  (`doors::HubSpace::naming_nobody`). Before this, an owner process could have posed a claim as a
+  person's.
+
+`tests/claim_kind_775.rs` sends a forged passkey principal and `kind=person` through each door of
+a real server and reads back what was stored.
 
 ### Browsing a repository at this port
 

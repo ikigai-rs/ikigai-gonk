@@ -52,16 +52,22 @@ const STORE_IDS: [&str; 13] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 14] = [
+const LEDGER_IDS: [&str; 20] = [
     "ledger-append",
     "ledger-claim",
     "ledger-close",
     "ledger-comment",
     "ledger-defer",
+    "ledger-doctor",
     "ledger-item",
+    "ledger-item-closed",
+    "ledger-item-holder-is",
+    "ledger-item-state",
+    "ledger-item-state-is",
     "ledger-items",
     "ledger-label",
     "ledger-ledgers",
+    "ledger-lifecycle",
     "ledger-link",
     "ledger-next",
     "ledger-policy",
@@ -220,6 +226,29 @@ fn fixtures(a: &str, b: &str, c: &str) -> Suite {
                 .arg("content", "conformance"),
         )
         .fixture(Fixture::new("ledger-purge", Verb::Delete).arg("content", &purge_target))
+        // 0.5.0 (ledger #775): the state atom, the assertions, the lifecycle and the doctor.
+        // The state Sink is `filed → filed`, answered `unchanged` without a write, so the walk
+        // can run it as often as it likes without a compare-and-set losing to itself.
+        .fixture(Fixture::new("ledger-item-state", Verb::Source).binding("id", a))
+        .fixture(
+            Fixture::new("ledger-item-state", Verb::Sink)
+                .binding("id", a)
+                .arg("from", "filed")
+                .arg("to", "filed"),
+        )
+        .fixture(
+            Fixture::new("ledger-item-state-is", Verb::Exists)
+                .binding("id", a)
+                .binding("value", "filed"),
+        )
+        .fixture(
+            Fixture::new("ledger-item-holder-is", Verb::Exists)
+                .binding("id", a)
+                .binding("holder", "none"),
+        )
+        .fixture(Fixture::new("ledger-item-closed", Verb::Exists).binding("id", a))
+        .fixture(Fixture::new("ledger-lifecycle", Verb::Source).binding("name", "kata-flight"))
+        .fixture(Fixture::new("ledger-lifecycle", Verb::Exists).binding("name", "kata-flight"))
 }
 
 /// The fixtures plus what the reads PROMISE about caching — for a kernel that caches.
@@ -303,8 +332,14 @@ fn the_hub_conforms() {
 
 /// The reads whose representations are cacheable — cached by the HUB. The chunk renderer
 /// is one: a pure function of its document, keyed by the content-addressed request.
-const CACHED_READS: [&str; 10] = [
+const CACHED_READS: [&str; 16] = [
     "ledger-ledgers",
+    "ledger-lifecycle",
+    "ledger-doctor",
+    "ledger-item-state",
+    "ledger-item-state-is",
+    "ledger-item-holder-is",
+    "ledger-item-closed",
     "ledger-policy",
     "ledger-items",
     "ledger-item",
@@ -343,7 +378,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 19] = [
+const WEB_IDS: [&str; 20] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -357,6 +392,7 @@ const WEB_IDS: [&str; 19] = [
     "gonk-fragment-items",
     "gonk-page-item",
     "gonk-fragment-item",
+    "gonk-page-doctor",
     "gonk-act",
     "gonk-sparql",
     "gonk-fragment-sparql",

@@ -212,6 +212,7 @@
     <xsl:choose>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
+      <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
@@ -1262,6 +1263,9 @@
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'open'"/></xsl:call-template>
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'closed'"/></xsl:call-template>
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'all'"/></xsl:call-template>
+          <xsl:if test="@ledger != ''">
+            <a class="doctor-link"><xsl:attribute name="href">/l/<xsl:value-of select="@ledger"/>/doctor</xsl:attribute>doctor</a>
+          </xsl:if>
         </nav>
         <form class="search" method="get" role="search" hx-target="#ledger" hx-swap="outerHTML">
           <xsl:attribute name="action"><xsl:value-of select="@page-url"/></xsl:attribute>
@@ -1389,6 +1393,40 @@
     <xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each>
   </xsl:template>
 
+  <!-- ============================================================ the doctor -->
+
+  <!-- Ledger #775: the doctor's five checks and what they found, read-only. Each problem
+       names its item, says what is wrong and gives the ledger's remedy as text; nothing on
+       this page acts, because the doctor never repairs. -->
+  <xsl:template match="view:doctor">
+    <section id="doctor" class="panel doctor" aria-labelledby="doctor-title">
+      <p class="crumbs"><a><xsl:attribute name="href"><xsl:value-of select="@ledger-href"/></xsl:attribute><xsl:value-of select="@ledger"/></a></p>
+      <h1 id="doctor-title">Doctor</h1>
+      <p class="meta">
+        <xsl:text>lifecycle </xsl:text><code><xsl:value-of select="@lifecycle"/></code>
+        <xsl:text> · checked </xsl:text><xsl:value-of select="@checked"/>
+        <xsl:text> · </xsl:text><xsl:value-of select="@checks"/>
+      </p>
+      <xsl:choose>
+        <xsl:when test="@count = '0'"><p class="empty">No problems.</p></xsl:when>
+        <xsl:otherwise>
+          <p><xsl:value-of select="@count"/><xsl:text> problem(s). Nothing here is repaired: each remedy is a judgment for whoever reads it.</xsl:text></p>
+          <ol class="plain doctor-list">
+            <xsl:for-each select="view:problem">
+              <li>
+                <span class="badge"><xsl:value-of select="@check"/></span>
+                <xsl:text> </xsl:text>
+                <a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@item"/></a>
+                <p class="detail"><xsl:value-of select="view:detail"/></p>
+                <p class="remedy"><xsl:text>remedy: </xsl:text><code><xsl:value-of select="view:remedy"/></code></p>
+              </li>
+            </xsl:for-each>
+          </ol>
+        </xsl:otherwise>
+      </xsl:choose>
+    </section>
+  </xsl:template>
+
   <!-- ============================================================ one item -->
 
   <xsl:template name="item">
@@ -1436,6 +1474,23 @@
       <xsl:if test="view:kind"><dt>Level</dt><dd><code><xsl:value-of select="view:kind"/></code></dd></xsl:if>
       <xsl:if test="ledger:revision"><dt>Revision</dt><dd><code><xsl:value-of select="ledger:revision"/></code></dd></xsl:if>
       <xsl:if test="ledger:purpose"><dt>Purpose</dt><dd><xsl:value-of select="ledger:purpose"/></dd></xsl:if>
+      <!-- Ledger #775: the lifecycle state (no state is `filed`), and the claim's holder, its
+           host-stamped kind and its lease. -->
+      <dt>State</dt><dd><xsl:value-of select="view:state"/></dd>
+      <xsl:if test="ledger:claimedBy">
+        <dt>Claim</dt>
+        <dd class="claim">
+          <xsl:text>held by </xsl:text><xsl:value-of select="ledger:claimedBy"/>
+          <xsl:if test="view:claimKind"><xsl:text> (</xsl:text><xsl:value-of select="view:claimKind"/><xsl:text>)</xsl:text></xsl:if>
+          <xsl:choose>
+            <xsl:when test="view:leaseExpires">
+              <xsl:text>, leased </xsl:text><xsl:value-of select="view:lease"/>
+              <xsl:text> until </xsl:text><xsl:value-of select="view:leaseExpires"/>
+            </xsl:when>
+            <xsl:otherwise><xsl:text>, no lease</xsl:text></xsl:otherwise>
+          </xsl:choose>
+        </dd>
+      </xsl:if>
       <dt>IRI</dt><dd><code class="iri"><xsl:value-of select="view:iri"/></code></dd>
     </dl>
   </xsl:template>
@@ -1528,6 +1583,9 @@
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'claim'"/></xsl:call-template>
                 <label for="claim-holder">Claim for</label>
                 <input id="claim-holder" type="text" name="content" required="required" autocomplete="off"/>
+                <label for="claim-lease">for</label>
+                <input id="claim-lease" type="text" name="lease" size="6" placeholder="30m" autocomplete="off" aria-describedby="claim-lease-help"/>
+                <span id="claim-lease-help" class="sr-only">Optional lease: 90s, 30m, 2h or 1d. An expired lease is not freed; it is taken over.</span>
                 <button type="submit" class="quiet">Claim</button>
               </form>
             </xsl:otherwise>
