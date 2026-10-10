@@ -461,7 +461,7 @@ mod tests {
             action.href.starts_with("/sparql?ledger=default&query="),
             "{action:?}"
         );
-        assert_eq!(action.label, "Open items labelled repo:ikigai-gonk");
+        assert_eq!(action.label, "Open items labeled repo:ikigai-gonk");
         let query = decode(action.href.split("query=").nth(1).unwrap());
         assert!(query.contains("ledger:status ledger:open"), "{query}");
         assert!(

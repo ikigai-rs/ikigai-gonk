@@ -819,7 +819,7 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
     }
     let tiers = &settings.explain;
     format!(
-        "{} (prefer; dialled on first use) — explain/review bound; file {} @{}, dir {} @{}, \
+        "{} (prefer; dialed on first use) — explain/review bound; file {} @{}, dir {} @{}, \
          review {} @{}, pr {} @{} tokens. Deriving needs urn:cap:net:{}, which \
          `--browse derive` mints and nothing else does",
         mount.target,
@@ -1068,11 +1068,11 @@ fn client_add(
     }
     if let Some(grant) = &carried {
         println!(
-            "  enrolled     under grant `{grant}`, unchanged — the old certificate's enrolment \
+            "  enrolled     under grant `{grant}`, unchanged — the old certificate's enrollment \
              moved to this one"
         );
     } else if scopes.is_empty() {
-        println!("  NOT enrolled — a trusted certificate with no grant is refused. Enrol it:");
+        println!("  NOT enrolled — a trusted certificate with no grant is refused. Enroll it:");
         let existing = quic::read_grants(&layout.grants_json())
             .ok()
             .and_then(|grants| grants.get(name).map(Vec::len));
@@ -1281,7 +1281,7 @@ fn review_request(repo: &str, path: &str, flags: &config::Flags) {
         fail(
             "no review queue is configured: add `gonk.review.space = \"reviews\"` to the \
              config home's config.toml. Binding the queue does not arm anything — that takes \
-             `gonk.review.arm = true` AND a `gonk.review.grant` grants.json can honour; see \
+             `gonk.review.arm = true` AND a `gonk.review.grant` grants.json can honor; see \
              the README's \"Arming it\" section",
         )
     };

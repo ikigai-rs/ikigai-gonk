@@ -1190,7 +1190,7 @@ fn a_repo_label_asks_the_ledger_the_next_question() {
     assert!(
         fragment
             .body
-            .contains("aria-label='Open items labelled repo:ikigai-gonk'"),
+            .contains("aria-label='Open items labeled repo:ikigai-gonk'"),
         "{fragment:?}"
     );
 
@@ -1198,7 +1198,7 @@ fn a_repo_label_asks_the_ledger_the_next_question() {
     let href = {
         let at = fragment
             .body
-            .find("aria-label='Open items labelled repo:ikigai-gonk'")
+            .find("aria-label='Open items labeled repo:ikigai-gonk'")
             .expect("the repo cell");
         let rest = &fragment.body[at..];
         let start = rest.find("href='").expect("an href") + "href='".len();

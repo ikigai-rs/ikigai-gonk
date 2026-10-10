@@ -326,7 +326,7 @@ fn a_passkey_enrolled_over_http_survives_a_restart() {
     assert!(second.banner.contains("1 passkey(s)"), "{}", second.banner);
     let quic = second.quic_line();
     assert!(
-        quic.contains("off") && quic.contains("enrols no client certificate"),
+        quic.contains("off") && quic.contains("enrolls no client certificate"),
         "the banner says why QUIC is off: {quic}"
     );
     assert!(
