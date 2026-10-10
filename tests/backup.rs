@@ -1051,3 +1051,157 @@ fn the_scheduled_backup_holds_a_budget_grant_and_completes_past_the_base() {
     assert!(report.contains("20000 quads in 2 graph(s)"), "{report}");
     assert_eq!(backup::archives(rotation.path()).len(), 1);
 }
+
+/// The backup under `capability`, from a hub over `store` writing into `rotation`.
+fn backup_under(hub: &Kernel, capability: &Capability) -> Result<String, Error> {
+    block_on(hub.issue(
+        Request::new(Verb::Source, Iri::parse(backup::BACKUP).unwrap()),
+        capability,
+    ))
+    .map(|repr| String::from_utf8_lossy(&repr.bytes).into_owned())
+}
+
+/// [`backup::JOB_SCOPES`] without the scopes `dropped` names.
+fn job_scopes_without(dropped: &[&str]) -> Capability {
+    let kept: Vec<&str> = backup::JOB_SCOPES
+        .iter()
+        .copied()
+        .filter(|scope| !dropped.contains(scope))
+        .collect();
+    assert_eq!(kept.len(), backup::JOB_SCOPES.len() - dropped.len());
+    Capability::scoped(kept)
+}
+
+/// ★ Ledger [#993](http://localhost:1060/l/default/item/993): since `ikigai-store` 0.2.9 every
+/// SPARQL answer is bounded in SIZE, and a caller holding no `urn:cap:store:answer:*` grant gets
+/// the store's BASE (100,000 rows, 16 MiB). The backup's answer is every quad in the dataset:
+/// the live one's is 361,607 rows and 121,625,465 bytes, so under the time grant alone every
+/// backup would have been refused on bytes from the lock move on.
+///
+/// The base is made small here (1,000 rows, 1 MiB) instead of the dataset large, so the test
+/// is fast; `a_full_backup_of_a_live_sized_dataset_completes_at_the_stores_own_bounds` is the
+/// same at the store's real bounds. Each half of the grant is proven necessary: without either
+/// the backup is refused, by name, on the bound that grant lifts, and nothing is written. With
+/// both — exactly `JOB_SCOPES`, the list the registry fires under — it completes.
+#[test]
+fn the_scheduled_backup_holds_both_answer_grants_and_completes_past_the_base() {
+    use ikigai_store::budget::{AnswerBound, AnswerBudget};
+    let rotation = tempfile::tempdir().expect("tempdir");
+    let store = DurableStore::in_memory()
+        .expect("an in-memory store")
+        .with_answer_budget(AnswerBudget::new(
+            AnswerBound::new(1_000, 1 << 20).expect("a valid base"),
+        ));
+    let hub = hub_over(store, rotation.path());
+    issue(
+        &hub,
+        Verb::Sink,
+        "urn:iki:store:load",
+        &[
+            ("content", &bulk_nquads()),
+            ("format", b"application/n-quads"),
+        ],
+    );
+
+    let refused_on = |capability: &Capability, bound: &str| {
+        match backup_under(&hub, capability) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "query", "{detail}");
+                assert!(
+                    detail.contains(&format!("the answer exceeds {bound}")),
+                    "refused on {bound}: {detail}"
+                );
+                assert!(detail.contains("refused, not truncated"), "{detail}");
+            }
+            other => panic!("refused on {bound}, got {other:?}"),
+        }
+        assert!(
+            backup::archives(rotation.path()).is_empty(),
+            "a refused backup writes no archive"
+        );
+    };
+    // The reproduction: the job's scopes as they were through store 0.2.8.
+    refused_on(
+        &job_scopes_without(&[backup::JOB_ANSWER_ROWS, backup::JOB_ANSWER_BYTES]),
+        "1000 rows",
+    );
+    // A row grant raises rows and nothing else: 20,000 rows of SPARQL JSON are past 1 MiB.
+    refused_on(
+        &job_scopes_without(&[backup::JOB_ANSWER_BYTES]),
+        "1048576 bytes",
+    );
+    // And a byte grant raises bytes and nothing else.
+    refused_on(&job_scopes_without(&[backup::JOB_ANSWER_ROWS]), "1000 rows");
+
+    let report = backup_under(&hub, &Capability::scoped(backup::JOB_SCOPES))
+        .expect("under JOB_SCOPES the backup completes");
+    assert!(report.contains("20000 quads in 2 graph(s)"), "{report}");
+    assert_eq!(backup::archives(rotation.path()).len(), 1);
+}
+
+/// A dataset the live one's size and shape: 361,607 quads, almost all in one graph (the
+/// browse graph) beside a ledger graph, with literals wide enough that the backup's answer is
+/// past the store's 16 MiB base several times over, as the live one's 116 MiB is.
+fn live_sized_nquads() -> Vec<u8> {
+    let filler = "x".repeat(160);
+    let mut out = String::with_capacity(361_607 * 260);
+    for n in 0..361_607u32 {
+        let graph = if n % 27 == 0 {
+            "urn:iki:ledger:graph:default"
+        } else {
+            "urn:iki:browse:graph:default"
+        };
+        out.push_str(&format!(
+            "<urn:item:{}> <urn:ik:p{}> \"{n} {filler}\" <{graph}> .\n",
+            n / 8,
+            n % 8
+        ));
+    }
+    out.into_bytes()
+}
+
+/// ★ The backup of a live-sized dataset completes at the store's OWN bounds (ledger #993):
+/// the default 100,000-row, 16 MiB base for a scoped caller, the 120 s time ceiling, and no
+/// lowered base standing in for size. Under `JOB_SCOPES` without the answer grants the same
+/// backup is refused on bytes.
+///
+/// Ignored because it is a measurement-sized run (two sorted whole-dataset answers, each past
+/// 16 MiB, over an in-memory store): measured 2026-10-10 at 4.4 s in a release build and 38 s in a
+/// debug one on an 18-core machine, which on a CI runner is minutes of a test binary that already
+/// runs the fast proof above. Run it with
+/// `cargo test --release --test backup -- --ignored a_full_backup`. The live archive's own run is
+/// `examples/backup-cost.rs`, which restores a real archive into a scratch RocksDB store.
+#[test]
+#[ignore = "measurement-sized: run in release with --ignored"]
+fn a_full_backup_of_a_live_sized_dataset_completes_at_the_stores_own_bounds() {
+    let rotation = tempfile::tempdir().expect("tempdir");
+    let hub = hub_over(
+        DurableStore::in_memory().expect("an in-memory store"),
+        rotation.path(),
+    );
+    issue(
+        &hub,
+        Verb::Sink,
+        "urn:iki:store:load",
+        &[
+            ("content", &live_sized_nquads()),
+            ("format", b"application/n-quads"),
+        ],
+    );
+    match backup_under(
+        &hub,
+        &job_scopes_without(&[backup::JOB_ANSWER_ROWS, backup::JOB_ANSWER_BYTES]),
+    ) {
+        Err(Error::InvalidArgument { detail, .. }) => {
+            assert!(
+                detail.contains("the answer exceeds 16777216 bytes"),
+                "{detail}"
+            )
+        }
+        other => panic!("without the answer grants, refused on bytes; got {other:?}"),
+    }
+    let report = backup_under(&hub, &Capability::scoped(backup::JOB_SCOPES))
+        .expect("under JOB_SCOPES a live-sized backup completes");
+    assert!(report.contains("361607 quads in 2 graph(s)"), "{report}");
+    assert_eq!(backup::archives(rotation.path()).len(), 1);
+}

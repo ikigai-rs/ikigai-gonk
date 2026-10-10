@@ -286,7 +286,10 @@ fn serve(flags: &config::Flags) -> ! {
     // backup has the authority to read every graph and write the rotation — and no authority
     // to write a single quad. The list also carries the store's budget grant
     // (`backup::JOB_BUDGET`, ledger #979): scoped callers get the store's 5 s base, and the
-    // whole-dataset query takes several times that. Since ikigai-time 0.4.0 (ledger #79) the registry's capability
+    // whole-dataset query takes several times that — and, since store 0.2.9, both of the
+    // store's ANSWER grants (`backup::JOB_ANSWER_ROWS` and `JOB_ANSWER_BYTES`, ledger #993):
+    // scoped callers' answers are bounded at 100,000 rows and 16 MiB, and the backup's is
+    // every quad in the dataset. Since ikigai-time 0.4.0 (ledger #79) the registry's capability
     // is a CEILING and each job records its own; a tick fires under `ceiling.clamp(job)`.
     // Both are `JOB_SCOPES` here, so the clamp is exactly `JOB_SCOPES`. `Capability::root()`
     // is still the registry's default ceiling and would be silently broader than anything this

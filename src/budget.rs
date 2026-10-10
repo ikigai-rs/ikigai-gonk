@@ -45,6 +45,24 @@
 //! stamp there is bypassed by sending one (ikigai-cms-web PR 98). `ikigai-store` 0.2.8 instead
 //! REFUSES a by-reference `budget=` (`InvalidArgument`, "read by value only"), which is the
 //! safer answer, but the stamp does not rely on it.
+//!
+//! # The answer's SIZE is the store's base, and nothing is stamped for it
+//!
+//! Since `ikigai-store` 0.2.9 every SPARQL answer is bounded in rows and serialized bytes too:
+//! **100,000 rows and 16 MiB** for a capability holding no `urn:cap:store:answer:*` grant,
+//! refused past either (`InvalidArgument` on `query`), never truncated (ledger
+//! [#970](http://localhost:1060/l/default/item/970), [#993](http://localhost:1060/l/default/item/993)).
+//! An anonymous caller holds no such grant, so it gets the base, and gonk stamps no `max_rows=`
+//! or `max_bytes=` below it. The reason is what an anonymous caller may legitimately ask for:
+//! the largest answer over the ledgers it can read is the whole ledger graph, measured
+//! 2026-10-10 on the 2026-10-09 archive restored into RocksDB at 13,375 rows and 4,986,073
+//! bytes of SPARQL JSON — inside the base 7.5 times over on rows and 3.4 times on bytes. A lower
+//! stamp would refuse that read sooner as the ledger grows while the ledger's pages hand out the
+//! same data, and buys little: the base already caps what one request can hold in memory, since
+//! the store refuses the write that would cross it. The time budget above is what limits how
+//! much work an anonymous caller can make, and `tests/door_budget_964.rs` pins the size refusal
+//! on every route. ⚠ The base binds gonk's own ledger reads under an anonymous caller's
+//! capability too; they are far smaller than the whole graph, but they grow with it.
 
 use ikigai_core::{ArgRef, Capability, Request};
 
