@@ -1218,6 +1218,9 @@ fn passkey_invite(
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let settings = read_settings(flags);
     let layout = quic::Layout::in_config_home(&homes.config);
+    // ★ Ledger #1067: the link names `localhost` (the relying party), so on a bind `localhost`
+    // cannot reach the invite is refused HERE, before a grant or an invite is written.
+    let (base, warning) = doors::invite_base(settings.http).unwrap_or_else(|e| fail(&e));
     if subjects.is_empty() && browse.is_none() {
         fail(&format!(
             "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`, \
@@ -1260,10 +1263,10 @@ fn passkey_invite(
     );
     print_change(name, &change);
     println!("  valid for {minutes} minutes, once");
-    println!(
-        "  open  http://localhost:{}/#invite={code}",
-        settings.http.port()
-    );
+    println!("  open  {base}#invite={code}");
+    if let Some(warning) = warning {
+        println!("  ⚠ {warning}");
+    }
     println!(
         "  in a browser on this machine (localhost, not 127.0.0.1); the passkey is enrolled in {}",
         layout.clients_json().display()

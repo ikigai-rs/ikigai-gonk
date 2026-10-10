@@ -155,7 +155,8 @@ usage:
                      [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
-                                   opens it enrolls a passkey under that grant
+                                   opens it enrolls a passkey under that grant. Refused on a
+                                   bind localhost cannot reach (127.0.0.2); warned on [::1]
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
   remove and add; --force writes it and prints the same list. A grant name is shared by every

@@ -789,6 +789,49 @@ pub fn passkey_caveat(bind: SocketAddr) -> Option<String> {
     }
 }
 
+/// Where a passkey invite for a door bound at `bind` is opened: the URL (always
+/// `localhost`, the relying party) and a warning when that name may not reach the bind — or
+/// the refusal when it cannot.
+///
+/// ★ Ledger [#1067](http://localhost:1060/l/default/item/1067). `passkey invite` used to print
+/// `http://localhost:{port}/#invite=…` whatever `gonk.bind` said. Unlike the banner
+/// ([`http_url`]), an invite cannot fall back to the bind's IP literal: enrolling is a
+/// WebAuthn ceremony, and WebAuthn refuses an IP address as a relying party. So:
+///
+/// - `127.0.0.1` — `localhost` reaches it, no warning;
+/// - `[::1]` — `localhost` reaches it only where the client resolves it to `::1`: the link,
+///   with [`passkey_caveat`] as a warning;
+/// - any other loopback address (`127.0.0.2`) — `localhost` never names it, so the link would
+///   be dead: refused, so the command mints nothing.
+///
+/// ```
+/// use ikigai_gonk::doors::invite_base;
+/// assert_eq!(
+///     invite_base("127.0.0.1:1060".parse().unwrap()),
+///     Ok(("http://localhost:1060/".to_string(), None))
+/// );
+/// let (url, warning) = invite_base("[::1]:1060".parse().unwrap()).unwrap();
+/// assert_eq!(url, "http://localhost:1060/");
+/// assert!(warning.unwrap().contains("only where localhost resolves to ::1"));
+/// assert!(invite_base("127.0.0.2:1070".parse().unwrap())
+///     .unwrap_err()
+///     .starts_with("a passkey invite cannot work on this bind"));
+/// ```
+pub fn invite_base(bind: SocketAddr) -> std::result::Result<(String, Option<String>), String> {
+    let url = format!("http://localhost:{}/", bind.port());
+    match bind.ip() {
+        IpAddr::V4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => Ok((url, None)),
+        IpAddr::V6(ip) if ip == std::net::Ipv6Addr::LOCALHOST => Ok((url, passkey_caveat(bind))),
+        ip => Err(format!(
+            "a passkey invite cannot work on this bind ({bind}): the link would be {url}, \
+             and localhost names 127.0.0.1, not {ip}, while WebAuthn refuses an IP address \
+             as a relying party. Invite against a server bound at 127.0.0.1 \
+             (`gonk.bind`, or `--bind 127.0.0.1:{}`)",
+            bind.port()
+        )),
+    }
+}
+
 /// This door's names, with or without its port ([`our_names`]).
 fn host_is_ours(host: Option<&str>, bind: SocketAddr) -> bool {
     let Some(host) = host else {
