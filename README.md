@@ -28,6 +28,11 @@ $ curl http://127.0.0.1:1060/iki/ledger/items
 
 ## Install and run
 
+**Starting from nothing?** [`docs/fresh-machine.md`](docs/fresh-machine.md) is the runbook for
+a Mac or Linux box with no ikigai on it: install, the config home, the ledger, browsing a
+repository, and (optional) explain and review through a model peer, with the certificate
+exchange spelled out.
+
 From a clone:
 
 ```sh
