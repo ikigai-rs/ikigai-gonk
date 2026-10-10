@@ -310,6 +310,20 @@ fn a_listing_renders_a_bounded_number_of_rows_and_says_what_it_left_out() {
             .contains("`none` is not a positive number of rows"),
         "{refused:?}"
     );
+
+    // ★ Ledger #480: a count past the cap is the queue page's rule too — drawn at the cap,
+    // never refused, and the page says what it drew. (The clause naming the cap when it is
+    // what stopped the page is pinned in `ikigai_gonk::rows`; six items never reach it.)
+    let past = server.page(
+        &format!("/l/default?limit={}", ikigai_gonk::rows::MAX_ROWS + 500),
+        None,
+    );
+    assert_eq!(past.status, 200, "{past:?}");
+    assert!(
+        past.body.matches("<li class='row open'>").count() == 6
+            && past.body.contains("6 open items"),
+        "{past:?}"
+    );
 }
 
 #[test]

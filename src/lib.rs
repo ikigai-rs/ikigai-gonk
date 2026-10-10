@@ -53,6 +53,7 @@ pub mod queue;
 pub mod quic;
 pub mod render;
 pub mod roborev;
+pub mod rows;
 pub mod rules;
 pub mod sparql;
 pub mod stack;
