@@ -202,6 +202,7 @@ fn gonk() -> Gonk {
         anonymous: grants_for("default", Authority::Write).expect("the ledger's tokens"),
         port: addr.port(),
         passkeys: Some(passkeys),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(

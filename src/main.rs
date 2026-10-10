@@ -518,10 +518,11 @@ fn serve(flags: &config::Flags) -> ! {
         // ★ The `localhost` form, never the bound IP: WebAuthn refuses an IP address as a
         // relying party, so a page opened at 127.0.0.1 cannot use a passkey at all.
         eprintln!(
-            "  http    http://localhost:{port}/ — loopback ({}); anonymous read+write: {}; {} passkey(s)",
+            "  http    http://localhost:{port}/ — loopback ({}); anonymous read+write: {}; {} passkey(s); anonymous SPARQL budget {} ms",
             settings.http,
             settings.http_ledgers.join(", "),
-            passkeys.enrolled_count()
+            passkeys.enrolled_count(),
+            settings.anonymous_sparql_budget_ms
         );
         eprintln!("  browse  {browse_line}");
         eprintln!("  backup  {backup_line}");
@@ -550,6 +551,7 @@ fn serve(flags: &config::Flags) -> ! {
             anonymous: http_grants,
             port,
             passkeys: Some(passkeys),
+            anonymous_sparql_budget_ms: settings.anonymous_sparql_budget_ms,
         };
         let error = ikigai_web::serve_with_listener(
             http,

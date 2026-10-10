@@ -312,6 +312,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         anonymous: grants.clone(),
         port: addr.port(),
         passkeys: Some(passkeys),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     let cap = doors::http_cap(door.clone());
     let edge = doors::edge_config(door.clone());
@@ -458,6 +459,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         anonymous: grants,
         port: addr.port(),
         passkeys: Some(passkeys),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(
@@ -547,6 +549,7 @@ fn the_http_door_takes_the_librarys_edge_bounds() {
         anonymous: grants_for("default", Authority::Write).unwrap(),
         port: 1060,
         passkeys: None,
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     });
     assert_eq!(config.header_timeout, ikigai_web::DEFAULT_HEADER_TIMEOUT);
     assert_eq!(config.body_timeout, ikigai_web::DEFAULT_BODY_TIMEOUT);

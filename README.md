@@ -352,14 +352,57 @@ half of it.
 ⚠ **What this does not cover.** The 64 MiB arithmetic is a release build's; a debug build's frames
 are several times larger and only the nesting bound protects it. A chain inside the length bound is
 answered — but a PATH chain costs the store cubic time (2,000 steps took 168 s in a release
-build), so a 4 KB query can still hold a core for minutes, and operator chains are quadratic. No
-door has a timeout: the store evaluates synchronously on the request's thread, so a timeout at the
-door would answer the caller and leave the thread burning, which is not a bound. And any other recursion over caller
-input that neither bound names is only made to need a longer input, not prevented.
+build), so a 4 KB query could hold a core for minutes, and operator chains are quadratic. Since
+`ikigai-store` 0.2.8 that is bounded in TIME as well (next section). Any other recursion over
+caller input that neither bound names is only made to need a longer input, not prevented. And since
+0.2.7 the store parses and evaluates on a thread of its own (16 MiB plus 512 bytes per byte of
+query), not on these 64 MiB stacks: a release build holds every chain up to the store's algebra
+bound there, but a DEBUG build aborts past 405 terms of `1*1*…` (reported to the store).
 
 ★ **When `ikigai-store` releases its own pre-parse bound** (ledger #915), it supersedes this
 scan for the store's doors. The scan stays: it is one linear pass at the edge, and it also covers
 the two parses that are not the store's (the editor's, and the review space's `match`).
+
+### How long a SPARQL query may run
+
+`ikigai-store` 0.2.8 evaluates every query within a time budget, and answers a caller who runs past
+it with a typed timeout (`503` here), never a partial result: **5 s** for a capability holding no
+budget grant, up to **120 s** for one holding `urn:cap:store:budget:<ms>`, 120 s for root. A
+request's own `budget=<ms>` can only lower that. The store also refuses a query of more than 32
+joined patterns or 1,024 algebra nodes before planning it, which caps the planner's cubic cost.
+
+**An anonymous caller gets 1 s** (ledger #964, #979): `gonk.http.anonymous_sparql_budget_ms`,
+from 1 to 5000, default 1000. An anonymous loopback caller can read the configured ledgers, so it
+can send a query that costs nothing to write and minutes to answer. A `VALUES` cross product
+carries its own data and needs no graph, and over the reading room's twin of this door 1.3 KB of one
+answered 272 MB after 11.2 s. So gonk stamps `budget=` onto the SPARQL an anonymous caller sends,
+on every route it can send it by: `/sparql/select` and the other `urn:sparql:*` forms, the
+store's `/iki/store/…` doors, the editor page's protocol face and its results fragment, and `/k`.
+
+- **Where**: at the one place every door's request enters the hub (`doors::HubSpace`), by the
+  endpoint it reaches (the store's ten SPARQL ids and the four `urn:sparql:*` forms), so the
+  spelling of the IRI does not matter. The hub's own sub-requests never pass there, so **gonk's
+  own queries are never capped by it**: when an anonymous caller opens a page, the ledger's queries
+  run under the store's 5 s base. Measured on a RocksDB store restored from the live archive
+  (361,607 quads, release build, `examples/door-budget-cost.rs`): the heaviest ledger read is the
+  listing at 76–87 ms cold (`items`, and `items status=all limit=100000` at 82 ms), `next` 28 ms,
+  and the SPARQL page's nine sample queries 2–8 ms each.
+- **Who**: a request with no live passkey session. The door marks its capability
+  (`urn:iki:gonk:door:anonymous-budget:<ms>`, a door marker no grant may name), and an HTTP caller
+  cannot narrow the capability the door computes, so it can neither forge the mark nor drop it.
+  A signed-in caller gets the store's base. The socket is the owner (root). QUIC callers are
+  authenticated by certificate and get their grant's budget.
+- **The stamp OVERWRITES.** A caller's own `budget=` is kept only when it is an inline whole number
+  no larger than the door's, so it can lower the budget and nothing else. A larger, zero, malformed
+  or by-reference value is replaced. (`ikigai-sparql` reads a by-reference `budget=` as no budget
+  and falls to its ceiling. `ikigai-store` refuses one. The stamp relies on neither.)
+
+⚠ **What it does not bound.** The budget answers the CALLER at 1 s. An evaluation that oxigraph
+cannot cancel partway (an aggregate, `ORDER BY`, a join's build side) keeps a core until it
+finishes, and the store refuses ALL SPARQL while a quarter of the cores are held that way. That
+cap is per store, not per caller, so an anonymous caller that keeps it full also refuses gonk's own
+ledger reads and the backup until its runaways end. That is the store's design, and is reported
+there.
 
 ### Routes
 
@@ -2152,6 +2195,7 @@ gonk.backup.every = "24h"
 # gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
 # gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
 # gonk.log.access = false             # no access lines (they are ON by default)
+# gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.

@@ -92,7 +92,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 27] = [
+const KEYS: [&str; 28] = [
     "gonk.log.access",
     "gonk.queue.serious",
     "gonk.bind",
@@ -100,6 +100,7 @@ const KEYS: [&str; 27] = [
     "gonk.socket",
     "gonk.quic.bind",
     "gonk.http.ledger",
+    "gonk.http.anonymous_sparql_budget_ms",
     "gonk.browse.root",
     "gonk.mount",
     "gonk.explain.file.provider",
@@ -458,6 +459,11 @@ pub struct Settings {
     pub quic: QuicBind,
     /// The ledgers the HTTP door may read and write.
     pub http_ledgers: Vec<String>,
+    /// The SPARQL time budget, in milliseconds, of an ANONYMOUS HTTP caller's evaluations
+    /// (`gonk.http.anonymous_sparql_budget_ms`, default
+    /// [`crate::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS`], at most the store's 5 s base):
+    /// see [`crate::budget`].
+    pub anonymous_sparql_budget_ms: u64,
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
     pub browse_roots: Vec<(String, PathBuf)>,
@@ -1226,11 +1232,15 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     let explain = explain_tiers(text)?;
     let backup = backup_policy(flags, text, homes)?;
     let review = review_trigger(text, homes)?;
+    let anonymous_sparql_budget_ms = crate::budget::anonymous_budget(
+        value_for(text, "gonk.http.anonymous_sparql_budget_ms").as_deref(),
+    )?;
     Ok(Settings {
         http,
         socket,
         quic,
         http_ledgers,
+        anonymous_sparql_budget_ms,
         browse_roots,
         mounts,
         explain,
@@ -1758,6 +1768,27 @@ mod tests {
 
     /// Ledger #739: the access log is on unless a line says `false`, and a value that is
     /// neither word is refused rather than read as either.
+    #[test]
+    fn the_anonymous_sparql_budget_defaults_to_one_second_and_is_bounded() {
+        let budget = |text: &str| {
+            settings(&Flags::default(), text, &homes()).map(|s| s.anonymous_sparql_budget_ms)
+        };
+        assert_eq!(budget(""), Ok(1000));
+        assert_eq!(
+            budget("gonk.http.anonymous_sparql_budget_ms = 250"),
+            Ok(250)
+        );
+        assert_eq!(
+            budget("gonk.http.anonymous_sparql_budget_ms = \"5000\""),
+            Ok(5000)
+        );
+        for bad in ["0", "5001", "1s", "-1"] {
+            let refused =
+                budget(&format!("gonk.http.anonymous_sparql_budget_ms = {bad}")).unwrap_err();
+            assert!(refused.contains("from 1 to 5000"), "{bad}: {refused}");
+        }
+    }
+
     #[test]
     fn the_access_log_is_on_unless_turned_off() {
         let on = |text: &str| settings(&Flags::default(), text, &homes()).map(|s| s.access_log);

@@ -177,7 +177,14 @@ impl Endpoint for Forward {
         // The CALLER's capability, unchanged: the door kernel has already checked the
         // declared floor against the same description, and the hub checks it again along
         // with everything the endpoint enforces inside.
-        let answer = self.hub.issue(inv.request.clone(), inv.capability).await?;
+        //
+        // ★ The one rewrite: an ANONYMOUS HTTP caller's SPARQL is stamped with the door's time
+        // budget (ledger #964/#979, [`crate::budget`]). Here because every request any door
+        // sends the hub passes through this line, and only those: the hub's own sub-requests
+        // (the ledger's queries) never do, so they are never stamped.
+        let request =
+            crate::budget::stamp(inv.request.clone(), &self.description.id, inv.capability);
+        let answer = self.hub.issue(request, inv.capability).await?;
         Ok(if self.wire {
             for_the_wire(answer)
         } else {
@@ -368,6 +375,12 @@ pub struct HttpDoor {
     pub port: u16,
     /// The passkey sessions, when passkeys are on.
     pub passkeys: Option<Arc<Passkeys>>,
+    /// The SPARQL time budget an ANONYMOUS caller's evaluations run under, in milliseconds
+    /// (`gonk.http.anonymous_sparql_budget_ms`, default
+    /// [`crate::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS`]): [`http_scopes`] marks a request
+    /// that carries no live passkey session with it, and the hub's front door stamps it
+    /// ([`crate::budget`]).
+    pub anonymous_sparql_budget_ms: u64,
 }
 
 /// The HTTP door's capability: a function of the REQUEST, not a constant.
@@ -608,8 +621,10 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
         Some(peer) if is_loopback(peer) => door.anonymous.clone(),
         _ => Vec::new(),
     };
+    let mut signed_in = false;
     if let (Some(passkeys), Some(token)) = (&door.passkeys, session_token(request)) {
         if let Some(identity) = passkeys.identity(&token, now) {
+            signed_in = true;
             for scope in identity.scopes {
                 if !scopes.contains(&scope) {
                     scopes.push(scope);
@@ -621,7 +636,17 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
     // `<a href="/k?c=source urn:repo:R:explain:P">` on a page at another localhost port, which
     // rides the signed-in session, cannot spend inference or archive an answer.
     if page_of(request, door.port) == Page::ForeignNavigation {
-        return crate::admit::foreign_page_scopes(&scopes);
+        scopes = crate::admit::foreign_page_scopes(&scopes);
+    }
+    // ★ Ledger #964/#979: a caller with no live passkey session is ANONYMOUS, and its SPARQL
+    // runs under the door's small time budget. Added LAST, after the foreign-page filter (an
+    // allowlist that would drop it), so every anonymous capability this door computes carries
+    // it. A door marker, so no grant may name it, and an HTTP caller cannot narrow the
+    // capability this function computes — it can neither forge it nor drop it.
+    if !signed_in {
+        scopes.push(crate::budget::anonymous_marker(
+            door.anonymous_sparql_budget_ms,
+        ));
     }
     scopes
 }
