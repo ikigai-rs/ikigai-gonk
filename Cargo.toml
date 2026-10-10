@@ -95,7 +95,12 @@ ikigai-vocab = "0.1.69"
 # `is_covered`; nothing here calls it — `read_is_covered` is a different function. 0.2.6 (the
 # audit release, ledger #751): an update with a WHERE needs the READ grant on what it reads
 # (hence purge's graveyard read token), and two live spaces over one store forfeit coverage.
-ikigai-store = { version = "0.2.6", features = ["persistent"] }
+# ★ 0.2.8 is the floor now (ledger #979, #964): every SPARQL evaluation runs within a TIME
+# budget — a 5 s base, `urn:cap:store:budget:<ms>` grants up to a 120 s ceiling, root at the
+# ceiling, and a request's `budget=` that can only lower it. This server uses the API: the
+# scheduled backup fires holding a budget grant (`backup::JOB_SCOPES`), because its
+# whole-dataset query takes longer than the base on the live dataset.
+ikigai-store = { version = "0.2.8", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied

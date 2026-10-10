@@ -2016,6 +2016,16 @@ the owner-only socket and is not one of the prefixes a `mount` line in the confi
 urn:iki:gonk:backup'` does not reach this server. By default a backup is taken **every 24
 hours**, compressed, and the **last five** are kept in `~/.ikigai/backups`.
 
+**The scheduled backup holds a time-budget grant** (ledger #979). Since `ikigai-store` 0.2.8
+every SPARQL evaluation runs within a budget, and a scoped caller with no
+`urn:cap:store:budget:<ms>` grant gets the store's 5 s base. The timer fires under
+`backup::JOB_SCOPES` — the backup and whole-dataset read tokens, not root — and the
+whole-dataset query takes longer than that: a backup of the live dataset (361,607 quads,
+RocksDB) measured 15 s on a quiet machine and 27 s beside other work, and every run without
+the grant was refused at 5.0 s. So the list carries `urn:cap:store:budget:120000`, the store's
+ceiling. A backup over the socket runs as the owner (root), which gets the ceiling anyway. To
+measure it again: `cargo run --release --example backup-cost -- <archive> <scratch-dir>`.
+
 ### The format is N-Quads, and the easy mistake is Turtle
 
 **CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named

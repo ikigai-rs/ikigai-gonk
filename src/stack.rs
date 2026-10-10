@@ -54,6 +54,14 @@
 /// (`?s a/a/a/… ?o`, two bytes an element) costs the store about 1.5 KB of stack an element in a
 /// release build, so a query at [`crate::sparql::MAX_QUERY_BYTES`] needs about 24 MiB. 64 MiB
 /// leaves more than twice that.
+///
+/// ⚠ Since `ikigai-store` 0.2.7 the store parses, plans and evaluates on a thread of ITS OWN,
+/// sized by the store (16 MiB plus 512 bytes per byte of query), so this stack no longer
+/// carries the store's recursion — it carries gonk's own parse, the render, and everything a
+/// request does on its way to the store. Measured 2026-10-09 with store 0.2.8
+/// (`examples/sparql-depth.rs`, `store`): a release build holds every chain shape up to the
+/// store's algebra bound; a DEBUG build aborts past 405 terms of `1*1*…` or `1+1+…` on the
+/// store's thread whatever this constant says (ledger #979, reported to the store).
 pub const THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Make [`THREAD_STACK_BYTES`] the default stack of every thread this process spawns without

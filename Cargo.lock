@@ -1237,15 +1237,16 @@ dependencies = [
 
 [[package]]
 name = "ikigai-store"
-version = "0.2.6"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cff2466f0bf1dd5aa7b4cf659688049b4dce8533a1df6d53d985a4d2ff4b25ac"
+checksum = "e5098addca326598099e9d08761128f498423e12b560f1fea7fda38721b90c40"
 dependencies = [
  "async-trait",
  "ikigai-core",
  "oxigraph",
  "serde",
  "serde_json",
+ "spargebra",
  "toml",
 ]
 

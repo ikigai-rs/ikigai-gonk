@@ -1265,6 +1265,27 @@ mod tests {
         assert!(check_grants(&narrow).is_ok(), "a tool grant is legitimate");
     }
 
+    /// ★ A store BUDGET grant (`urn:cap:store:budget:<ms>`, ledger #979) is accepted in
+    /// `grants.json` and carried to the identity unchanged. It is not a privilege the
+    /// startup check exists to stop: it can only raise a caller's time budget toward the
+    /// store's ceiling (120 s), never past it, and grants nothing to read or write. That is
+    /// how an operator gives a trusted client — or the backup's own [`crate::backup::JOB_SCOPES`]
+    /// — more than the 5 s base.
+    #[test]
+    fn a_store_budget_grant_is_accepted_and_carried_through() {
+        let budget = ikigai_store::budget::cap_budget(30_000);
+        let mut tokens = grants_for("default", Authority::Read).unwrap();
+        tokens.push(budget.clone());
+        let grants = BTreeMap::from([("reader".to_string(), tokens)]);
+        assert!(check_grants(&grants).is_ok());
+        let scopes = scopes_for_grant(&grants, "reader").expect("the grant is admitted");
+        assert!(scopes.contains(&budget), "{scopes:?}");
+        assert_eq!(
+            grant_refusal("reader", &[crate::backup::JOB_BUDGET.to_string()]),
+            None
+        );
+    }
+
     #[test]
     fn an_openssl_fingerprint_names_the_same_client_and_a_default_must_be_explicit() {
         let colons = "6F:1C:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:AB:CD";
