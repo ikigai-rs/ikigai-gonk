@@ -964,11 +964,18 @@ fn a_quic_write_is_logged_attributed_and_may_name_only_its_own_client() {
     let enrolment = quic::parse_enrolment(&format!(r#"{{"clients": {{"{FP}": "rw"}}}}"#)).unwrap();
     let (_, capability) = quic::authority(&enrolment, &grants, FP).unwrap();
     let me = quic::client_iri(FP);
+    assert_eq!(
+        capability.principal(),
+        Some(me.as_str()),
+        "the door mints the client's name into its capability (ledger #1077)"
+    );
     assert!(
         !capability.allows(&me),
-        "the name is not authority: it rides beside the capability, never inside it (ledger #879)"
+        "the name is not authority: no resource requires it (ledger #879)"
     );
-    // A grant cannot hand out a client's name.
+    // A grant cannot hand out a client's name, in either spelling.
+    let principal_scope = ikigai_core::principal_scope(&me).unwrap();
+    assert!(quic::grant_refusal("rw", &[principal_scope]).is_some());
     scopes.push(me.clone());
     assert!(quic::grant_refusal("rw", &scopes).is_some());
 

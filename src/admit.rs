@@ -42,8 +42,8 @@
 //!    PERSON can only be the person the door authenticated.
 //!
 //! 3. **Who wrote this, when the writer did not say?** (R4 option (b), Brian, 2026-10-08.) A
-//!    QUIC write with no `author` is attributed to the client the door authenticated: the
-//!    stamped [`principal`] is filled in as `author` wherever the target declares one
+//!    QUIC write with no `author` is attributed to the client the door authenticated: its
+//!    [`principal`] (minted into the capability) is filled in as `author` wherever the target declares one
 //!    ([`fill_author`]). The HTTP door has done the same since ikigai-web 0.1.27, in the form
 //!    adapter (`crate::web`'s `Act`), and the socket's caller is the owner, who is no
 //!    principal this server names, so it fills nothing.
@@ -257,32 +257,37 @@ pub fn is_principal_iri(author: &str) -> bool {
 pub const PRINCIPAL_ARG: &str = "principal";
 
 /// Who a request through `door` is from, as the DOOR knows it — never a value a caller
-/// submitted. Both network doors hand it over the same way: the inline argument
-/// [`PRINCIPAL_ARG`], which the TRANSPORT stamps after removing any a caller sent.
+/// submitted: the principal the door minted into the request's capability
+/// (`Capability::principal`, core 0.1.93; ledger [#1077](http://localhost:1060/l/default/item/1077)).
 ///
-/// - **HTTP**: on a WRITE, the passkey IRI `doors::http_principal` computed from the session
-///   cookie. `ikigai-web` stamps writes only, and drops a submitted `?principal=` on every verb
-///   (on reads too since 0.1.41; ledger #864 R6, #879) — so a read names nobody here, and the
-///   write-only test below is belt-and-braces over the library rather than the only guard.
-/// - **QUIC**: on every verb, the client's NAME the minter set on the connection's session
-///   ([`crate::quic::minter`], `urn:iki:gonk:client:<fingerprint>`). It does not travel
-///   through the capability, so a client carrying a narrower capability of its own is still
-///   named (ledger #879).
-/// - **socket**: `None` — the owner, who is no principal this server names. Nothing stamps
-///   the argument on that door, so a value there would be the caller's own and is ignored.
-pub fn principal(door: Door, request: &Request) -> Option<String> {
-    let stamped = || match request.args.get(PRINCIPAL_ARG) {
-        Some(ArgRef::Inline(bytes)) => {
-            let value = String::from_utf8_lossy(bytes);
-            (!value.is_empty() && value.chars().all(|c| c.is_ascii_graphic()))
-                .then(|| value.into_owned())
-        }
-        _ => None,
-    };
+/// - **HTTP**: the signed-in passkey's IRI, minted by [`crate::doors::http_cap`] from the
+///   session cookie, on every verb. An anonymous caller has none, and nothing a caller sends
+///   (a `?principal=`, a header) reaches the capability.
+/// - **QUIC**: the client's NAME ([`crate::quic::authority`], `urn:iki:gonk:client:<fingerprint>`).
+///   A client carrying a narrower capability of its own is still named: core's `clamp` keeps
+///   the session's principal and never takes the carried one's (ledger #879's failure, closed
+///   in the capability itself).
+/// - **socket**: `None` — the owner, who is no principal this server names. Its transport
+///   passes a carried capability through under a root ceiling, name included, so a name there
+///   would be the caller's own choice and is ignored.
+///
+/// Until 0.1.93 this read the `principal` ARGUMENT the transports stamp ([`PRINCIPAL_ARG`]),
+/// which `ikigai-web` stamps on writes only. The argument is still stamped, and still what
+/// [`claim_kind`] reads in the hub, where the door is not known.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_gonk::{access::Door, admit};
+/// let laptop = ikigai_gonk::quic::client_iri("ab12");
+/// let named = Capability::scoped(["urn:cap:ledger:read:default"]).with_principal(&laptop).unwrap();
+/// assert_eq!(admit::principal(Door::Quic, &named).as_deref(), Some(laptop.as_str()));
+/// assert_eq!(admit::principal(Door::Socket, &named), None);
+/// assert_eq!(admit::principal(Door::Http, &Capability::scoped(["urn:cap:ledger:read:default"])), None);
+/// ```
+pub fn principal(door: Door, capability: &Capability) -> Option<String> {
     match door {
-        Door::Quic => stamped(),
-        Door::Http if request.verb.is_mutating() => stamped(),
-        _ => None,
+        Door::Quic | Door::Http => capability.principal().map(str::to_string),
+        Door::Socket => None,
     }
 }
 
@@ -355,18 +360,23 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
 ///     )
 /// };
 /// let brian = "urn:iki:gonk:passkey:QlJJQU4";
-/// assert!(admit::author_refusal(Door::Http, &append(&[("author", brian)])).is_some());
-/// assert!(admit::author_refusal(Door::Http, &append(&[("author", "chris")])).is_none());
-/// assert!(admit::author_refusal(Door::Http, &append(&[("author", brian), ("principal", brian)]))
-///     .is_none());
+/// let anonymous = Capability::scoped(["urn:cap:ledger:write:default"]);
+/// let signed_in = anonymous.with_principal(brian).unwrap();
+/// assert!(admit::author_refusal(Door::Http, &anonymous, &append(&[("author", brian)])).is_some());
+/// assert!(admit::author_refusal(Door::Http, &anonymous, &append(&[("author", "chris")])).is_none());
+/// assert!(admit::author_refusal(Door::Http, &signed_in, &append(&[("author", brian)])).is_none());
+/// // A stamped ARGUMENT is not the door's word: only the capability's principal is.
+/// assert!(admit::author_refusal(Door::Http, &anonymous,
+///     &append(&[("author", brian), ("principal", brian)])).is_some());
 /// // A QUIC client may name itself, and nobody else.
 /// let laptop = ikigai_gonk::quic::client_iri("ab12");
-/// let stamped = |author: &str| append(&[("author", author), ("principal", &laptop)]);
-/// assert!(admit::author_refusal(Door::Quic, &stamped(&laptop)).is_none());
-/// assert!(admit::author_refusal(Door::Quic, &stamped(brian)).is_some());
-/// assert!(admit::author_refusal(Door::Quic, &stamped("hermes")).is_none());
+/// let client = anonymous.with_principal(&laptop).unwrap();
+/// let authored = |author: &str| append(&[("author", author)]);
+/// assert!(admit::author_refusal(Door::Quic, &client, &authored(&laptop)).is_none());
+/// assert!(admit::author_refusal(Door::Quic, &client, &authored(brian)).is_some());
+/// assert!(admit::author_refusal(Door::Quic, &client, &authored("hermes")).is_none());
 /// ```
-pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
+pub fn author_refusal(door: Door, capability: &Capability, request: &Request) -> Option<String> {
     let Some(ArgRef::Inline(bytes)) = request.args.get("author") else {
         return None;
     };
@@ -374,7 +384,7 @@ pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
     if !is_principal_iri(&author) {
         return None;
     }
-    let own = principal(door, request);
+    let own = principal(door, capability);
     if own.as_deref() == Some(author.trim()) {
         return None;
     }
@@ -392,8 +402,8 @@ pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
 /// `request` with its door's principal filled in as `author`, when that is what the door
 /// does: a QUIC write that names no author, whose target `description` declares one for the
 /// request's verb. `None` means "leave the request as it is" — any other door, a read, an
-/// author already given (the author rule decides that one), no stamped principal, or a target
-/// that takes no `author`.
+/// author already given (the author rule decides that one), no principal in the capability,
+/// or a target that takes no `author`.
 ///
 /// ★ R4 option (b), Brian, 2026-10-08: a write through the QUIC door is attributed to the
 /// client the door authenticated unless it names an author itself. Only where the target
@@ -401,9 +411,10 @@ pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
 /// an argument a resource does not declare is one nobody reads.
 ///
 /// ```
-/// use ikigai_core::{ArgRef, ArgSpec, Description, Iri, Request, Verb};
+/// use ikigai_core::{ArgRef, ArgSpec, Capability, Description, Iri, Request, Verb};
 /// use ikigai_gonk::{access::Door, admit};
 /// let laptop = ikigai_gonk::quic::client_iri("ab12");
+/// let client = Capability::scoped(["urn:cap:ledger:write:default"]).with_principal(&laptop).unwrap();
 /// let append = |args: &[(&str, &str)]| {
 ///     args.iter().fold(
 ///         Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap()),
@@ -413,23 +424,28 @@ pub fn author_refusal(door: Door, request: &Request) -> Option<String> {
 /// let takes_author = Description::new("append")
 ///     .verb(Verb::Sink)
 ///     .input(ArgSpec::new("author").optional());
-/// let filled = admit::fill_author(Door::Quic, &append(&[("principal", &laptop)]), &takes_author)
+/// let filled = admit::fill_author(Door::Quic, &client, &append(&[]), &takes_author)
 ///     .expect("an unnamed QUIC write is attributed");
 /// assert_eq!(filled.args.get("author"), Some(&ArgRef::Inline(laptop.clone().into_bytes())));
-/// // Named already, another door, or a target with no `author`: left alone.
-/// let named = append(&[("principal", &laptop), ("author", "hermes")]);
-/// assert!(admit::fill_author(Door::Quic, &named, &takes_author).is_none());
-/// assert!(admit::fill_author(Door::Socket, &append(&[("principal", &laptop)]), &takes_author)
-///     .is_none());
+/// // Named already, another door, nobody named, or a target with no `author`: left alone.
+/// let named = append(&[("author", "hermes")]);
+/// assert!(admit::fill_author(Door::Quic, &client, &named, &takes_author).is_none());
+/// assert!(admit::fill_author(Door::Socket, &client, &append(&[]), &takes_author).is_none());
+/// let nobody = Capability::scoped(["urn:cap:ledger:write:default"]);
+/// assert!(admit::fill_author(Door::Quic, &nobody, &append(&[]), &takes_author).is_none());
 /// let no_author = Description::new("append").verb(Verb::Sink);
-/// assert!(admit::fill_author(Door::Quic, &append(&[("principal", &laptop)]), &no_author)
-///     .is_none());
+/// assert!(admit::fill_author(Door::Quic, &client, &append(&[]), &no_author).is_none());
 /// ```
-pub fn fill_author(door: Door, request: &Request, description: &Description) -> Option<Request> {
+pub fn fill_author(
+    door: Door,
+    capability: &Capability,
+    request: &Request,
+    description: &Description,
+) -> Option<Request> {
     if door != Door::Quic || !request.verb.is_mutating() || request.args.contains_key("author") {
         return None;
     }
-    let principal = principal(door, request)?;
+    let principal = principal(door, capability)?;
     let declares = description
         .action_specs()
         .into_iter()
@@ -636,7 +652,7 @@ impl Endpoint for Admitted {
             return Err(Error::Denied(why));
         }
         if arrived && network {
-            if let Some(why) = author_refusal(self.door, inv.request) {
+            if let Some(why) = author_refusal(self.door, inv.capability, inv.request) {
                 return Err(Error::Denied(why));
             }
             // Attributed by the door: the same request with `author` filled in, issued as
@@ -644,7 +660,8 @@ impl Endpoint for Admitted {
             // down (where only the raw-write rule runs again, and passes as it did here) under
             // the same capability. The access log is outside and counts it once, as the request
             // that arrived.
-            if let Some(filled) = fill_author(self.door, inv.request, &description) {
+            if let Some(filled) = fill_author(self.door, inv.capability, inv.request, &description)
+            {
                 return inv.issue(filled).await;
             }
         }

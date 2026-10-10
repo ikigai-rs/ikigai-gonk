@@ -166,10 +166,11 @@ good until it expires.
   revoke it, with no restart.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
   grant plus its own, and `passkey invite` refuses a grant that adds nothing.
-- **A signed-in write carries its author.** The door stamps every write with the session's
-  `principal` — the passkey's stable IRI `urn:iki:gonk:passkey:<credential id>`, never the
-  label — and the form adapter forwards it as the ledger's `author` wherever the action
-  declares one (file, comment, close, reopen, delete, purge). The page renders that IRI as the
+- **A signed-in write carries its author.** The door mints the session's principal — the
+  passkey's stable IRI `urn:iki:gonk:passkey:<credential id>`, never the label — into the
+  request's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077), on
+  reads and writes alike, and the form adapter forwards it as the ledger's `author` wherever
+  the action declares one (file, comment, close, reopen, delete, purge). The page renders that IRI as the
   passkey's *current* label from `clients.json`, or its credential id once the passkey is
   gone; the store holds only the IRI, so a relabel rewrites nothing. A form field named
   `author` is refused: the door names the author, a submitter may not. An anonymous caller
@@ -1527,17 +1528,18 @@ changes). An enrolment left behind by the old behavior shows in `client list` as
 `enrolled, NO bundle`; remove it by fingerprint.
 
 **Every QUIC request is attributed.** The server names each connection's client
-`urn:iki:gonk:client:<fingerprint>` (`client add` prints it) on its session, and `ikigai-quic`
-stamps that name on every request as the argument `principal`, after removing any a client
-sent. The access log writes it as the `principal` of every QUIC request, reads included; a
-write that names no `author` is attributed to it; and a write may name it as its `author`, and
-no other principal (`crate::admit`). The name is NOT part of the capability, so a client that
-carries a narrower capability of its own — `ikigai mcp --grant …`, or an `ikigai serve`
-forwarding an agent's attenuated grant — is named all the same. (Through ikigai-quic 0.1.40
-the name rode in the capability and the intersection dropped it: every such request logged
-`principal=-` and its writes recorded no author, ledger #879.) One cost, stated by the
-transport: the stamped name is part of the cache key, so two clients reading one resource
-under one grant do not share a cached answer.
+`urn:iki:gonk:client:<fingerprint>` (`client add` prints it) and mints that name into the
+session's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077). The access
+log writes it as the `principal` of every QUIC request, reads included; a write that names no
+`author` is attributed to it; and a write may name it as its `author`, and no other principal
+(`crate::admit`). A client that carries a narrower capability of its own — `ikigai mcp --grant
+…`, or an `ikigai serve` forwarding an agent's attenuated grant — is named all the same,
+because core's `clamp` keeps the session's principal and never takes one the client carries.
+(Through ikigai-quic 0.1.40 the name rode in the capability as an ordinary scope and the
+intersection dropped it: every such request logged `principal=-` and its writes recorded no
+author, ledger #879. From 0.1.41 to core 0.1.93 it rode beside the capability, as an argument
+`ikigai-quic` still stamps.) One cost: a principal is part of the cache key at every depth, so
+two clients reading one resource under one grant do not share a cached answer.
 
 What admission means today: a client holding a trusted certificate and an enrolment is
 admitted until it is removed (`client remove`, or its entry deleted from `clients.json`),
@@ -2868,9 +2870,9 @@ time, class, subject IRI, then `key=value` columns, every key on every line in t
 `dur` is milliseconds and the time is when the request started; `grep ' dur=[0-9]\{4,\} '` is
 every request that took a second or more. `outcome` is `ok` or the kernel's error kind — **not
 the HTTP status**, which `ikigai-web` decides after the kernel returns and does not report
-back. An HTTP read's `principal` is `-` for the same reason: the library tells a door who a
-WRITE is from, never a read — and a `?principal=` a reader types is never written as one
-(ledger #864, R6). A QUIC line names the client the connection authenticated,
+back. An HTTP request's `principal` is the signed-in passkey the door minted into its
+capability, on reads as well as writes (ledger #1077); an anonymous read is `-`, and a
+`?principal=` a reader types is never written as one (ledger #864, R6). A QUIC line names the client the connection authenticated,
 `urn:iki:gonk:client:<fingerprint>` (ledger #816), on every verb and whatever capability the
 client carries (ledger #879). A refusal the door kernel makes before dispatch (a capability
 floor, a name nothing binds) writes no line. ⚠ Nor, since ledger #879, does a foreign `Host` or

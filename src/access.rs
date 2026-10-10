@@ -26,7 +26,7 @@
 //! | `outcome` | `ok`, or the kernel's error kind (`denied`, `not-found`, `invalid-argument`, …) |
 //! | `bytes` | the representation's body length; `-` on an error |
 //! | `dur` | milliseconds, from the door's issue to its answer |
-//! | `principal` | `owner` on the socket; a signed-in passkey's IRI on an HTTP write, `anon` on an anonymous one; the client's `urn:iki:gonk:client:<fingerprint>` on QUIC; `-` where the door is not told |
+//! | `principal` | `owner` on the socket; a signed-in passkey's IRI on any HTTP request, `anon` on an anonymous write; the client's `urn:iki:gonk:client:<fingerprint>` on QUIC; `-` where the door names nobody |
 //! | `q` | HTTP only: the request's query arguments, percent-encoded; `-` when none |
 //!
 //! Past [`MAX_FIELD`] characters the subject and `q` are cut and end in `…` — a character
@@ -48,13 +48,13 @@
 //!   and adds headers after the kernel returns; `outcome` is the input to that mapping. A
 //!   `304`, a `405`, a `406`, a `413` or a strict-route `400` is decided before or after the
 //!   kernel and is not logged at all.
-//! - **who a READ is from.** `ikigai-web` hands the principal to writes only, so an HTTP
-//!   read's `principal` is `-` — and a `?principal=` a reader typed is never taken for one
-//!   ([`crate::admit::principal`]; ledger #864, R6). A QUIC line names the client the door
-//!   authenticated (`urn:iki:gonk:client:<fingerprint>`, ledger #816) on every verb, read from
-//!   the `principal` argument `ikigai-quic` stamps from the connection's session — whatever
-//!   capability the client carries (ledger #879; through ikigai-quic 0.1.40 the name rode in
-//!   the capability and a narrowed client was logged `-`).
+//! - **who an anonymous request is from.** The column is the principal the DOOR minted into
+//!   the request's capability ([`crate::admit::principal`]; core 0.1.93, ledger #1077): a
+//!   signed-in passkey on every HTTP verb, reads included, and the client the QUIC door
+//!   authenticated (`urn:iki:gonk:client:<fingerprint>`, ledger #816) whatever capability it
+//!   carries — core's clamp keeps the session's name (ledger #879). An anonymous HTTP read is
+//!   `-`, and a `?principal=` a reader typed is never taken for one (ledger #864, R6): nothing
+//!   a caller sends reaches the capability.
 //! - **a refusal the door kernel makes before dispatch** — a capability floor's denial, a name
 //!   nothing binds (`404`), a nesting refusal — and the kernel's own `urn:kernel:*`
 //!   operations and Meta answers, which no endpoint of this server's spaces handles.
@@ -91,8 +91,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, Description, Endpoint, Error, Invocation, Iri, Representation, Request, Resolution,
-    Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Capability, Description, Endpoint, Error, Invocation, Iri, Representation, Request,
+    Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 /// The line's class, in `ikigai-log`'s CURIE column.
@@ -289,6 +289,7 @@ impl Endpoint for Timed {
                 millis(started),
                 self.log.door,
                 inv.request,
+                inv.capability,
                 answer.as_ref().map(|r| r.bytes.len()),
                 dur_ms,
             );
@@ -319,35 +320,38 @@ fn millis(at: SystemTime) -> u64 {
 /// One access line, without its newline.
 ///
 /// ```
-/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
 /// use ikigai_gonk::access::{line, Door};
 ///
 /// let request = Request::new(Verb::Source, Iri::parse("urn:iki:gonk:k").unwrap())
 ///     .with_arg("c", ArgRef::Inline(b"source urn:repo:x:tree as=text/html".to_vec()));
+/// let anonymous = Capability::scoped(["urn:cap:ledger:read:default"]);
 /// assert_eq!(
-///     line(1_791_201_792_345, Door::Http, &request, Ok(4096), 17),
+///     line(1_791_201_792_345, Door::Http, &request, &anonymous, Ok(4096), 17),
 ///     "2026-10-05T12:03:12.345Z gonk:Access urn:iki:gonk:k door=http verb=source \
 ///      outcome=ok bytes=4096 dur=17 principal=- q=c=source%20urn:repo:x:tree%20as%3Dtext/html"
 /// );
 /// ```
 ///
-/// A QUIC request names the client its connection authenticated, from the `principal`
-/// argument the transport stamps (ledger #816, #879):
+/// A QUIC request names the client its connection authenticated, from the principal the door
+/// minted into the session capability (ledger #816, #879, #1077) — never from an argument:
 ///
 /// ```
-/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
 /// use ikigai_gonk::access::{line, Door};
 ///
 /// let laptop = ikigai_gonk::quic::client_iri("ab12");
+/// let session = Capability::scoped(["urn:cap:ledger:write:default"]).with_principal(&laptop).unwrap();
 /// let request = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
-///     .with_arg("principal", ArgRef::Inline(laptop.into_bytes()));
-/// assert!(line(0, Door::Quic, &request, Ok(1), 1)
+///     .with_arg("principal", ArgRef::Inline(b"urn:iki:gonk:client:forged".to_vec()));
+/// assert!(line(0, Door::Quic, &request, &session, Ok(1), 1)
 ///     .contains(" principal=urn:iki:gonk:client:ab12 "));
 /// ```
 pub fn line(
     at_ms: u64,
     door: Door,
     request: &Request,
+    capability: &Capability,
     answer: std::result::Result<usize, &Error>,
     dur_ms: u128,
 ) -> String {
@@ -361,7 +365,7 @@ pub fn line(
         cut(request.target.as_str().to_string()),
         door.as_str(),
         verb(request.verb),
-        principal(door, request),
+        principal(door, request, capability),
         query(door, request),
     )
 }
@@ -403,19 +407,19 @@ fn verb(verb: Verb) -> &'static str {
 /// ikigai-cli's, filed separately). So an anonymous `GET /l/default?principal=urn:…` was
 /// logged as that person. The column now comes from [`crate::admit::principal`], which takes
 /// the door's own stamp and nothing else.
-fn principal(door: Door, request: &Request) -> String {
+fn principal(door: Door, request: &Request, capability: &Capability) -> String {
     match door {
         // The socket's peer UID is checked against this process's own: it is the owner.
         Door::Socket => "owner".to_string(),
-        // The client the door authenticated, stamped by the transport; `-` only on a session
-        // the minter named nobody for, which this server's minter never mints.
-        Door::Quic => crate::admit::principal(door, request)
+        // The client the door authenticated, minted into the session capability; `-` only on
+        // a session the minter named nobody for, which this server's minter never mints.
+        Door::Quic => crate::admit::principal(door, capability)
             .map(cut)
             .unwrap_or_else(|| "-".to_string()),
-        Door::Http => match crate::admit::principal(door, request) {
+        Door::Http => match crate::admit::principal(door, capability) {
             // Written only when it is bare — an IRI is — so a value cannot break the line.
             Some(value) => cut(value),
-            // A write with no principal is an anonymous one; a read is never told.
+            // An anonymous write; an anonymous read names nobody.
             None if request.verb.is_mutating() => "anon".to_string(),
             None => "-".to_string(),
         },
@@ -536,30 +540,43 @@ mod tests {
                 ("client", "127.0.0.1"),
             ],
         );
-        let l = line(0, Door::Http, &r, Ok(2), 1);
+        let l = line(0, Door::Http, &r, &nobody(), Ok(2), 1);
         assert!(l.ends_with("principal=anon q=-"), "{l}");
         assert!(!l.contains("secret") && !l.contains("127.0.0.1"), "{l}");
     }
 
+    /// A capability with no principal: an anonymous HTTP caller's.
+    fn nobody() -> Capability {
+        Capability::scoped(["urn:cap:ledger:read:default"])
+    }
+
     #[test]
-    fn a_signed_in_write_names_the_passkey_and_a_read_names_nobody() {
-        let r = request(
+    fn a_signed_in_request_names_the_passkey_and_an_anonymous_read_names_nobody() {
+        let brian = nobody().with_principal("urn:iki:gonk:passkey:abc").unwrap();
+        // The capability's principal is the door's word; a stamped argument is not read.
+        let w = request(
             Verb::Sink,
             "urn:iki:ledger:append",
-            &[("principal", "urn:iki:gonk:passkey:abc")],
+            &[("principal", "urn:iki:gonk:passkey:forged")],
         );
-        assert!(line(0, Door::Http, &r, Ok(0), 0).contains(" principal=urn:iki:gonk:passkey:abc "));
+        assert!(line(0, Door::Http, &w, &brian, Ok(0), 0)
+            .contains(" principal=urn:iki:gonk:passkey:abc "));
+        assert!(line(0, Door::Http, &w, &nobody(), Ok(0), 0).contains(" principal=anon "));
         let r = request(Verb::Source, "urn:iki:ledger:items", &[]);
-        assert!(line(0, Door::Http, &r, Ok(0), 0).contains(" principal=- "));
-        assert!(line(0, Door::Socket, &r, Ok(0), 0).contains(" principal=owner "));
-        assert!(line(0, Door::Quic, &r, Ok(0), 0).contains(" principal=- "));
+        // Since ledger #1077 a signed-in READ is named too: the principal is in the capability
+        // on every verb, not stamped on writes only.
+        assert!(line(0, Door::Http, &r, &brian, Ok(0), 0)
+            .contains(" principal=urn:iki:gonk:passkey:abc "));
+        assert!(line(0, Door::Http, &r, &nobody(), Ok(0), 0).contains(" principal=- "));
+        assert!(line(0, Door::Socket, &r, &brian, Ok(0), 0).contains(" principal=owner "));
+        assert!(line(0, Door::Quic, &r, &nobody(), Ok(0), 0).contains(" principal=- "));
     }
 
     #[test]
     fn a_long_field_is_cut_and_marked() {
         let long = "x".repeat(MAX_FIELD * 2);
         let r = request(Verb::Source, "urn:iki:gonk:sparql", &[("query", &long)]);
-        let l = line(0, Door::Http, &r, Ok(0), 0);
+        let l = line(0, Door::Http, &r, &nobody(), Ok(0), 0);
         let q = l.split(" q=").nth(1).expect("a q column");
         assert_eq!(q.chars().count(), MAX_FIELD + 1, "{q}");
         assert!(q.ends_with('…'), "{q}");
@@ -569,7 +586,7 @@ mod tests {
     fn an_error_is_its_kind_and_carries_no_bytes() {
         let r = request(Verb::Source, "urn:iki:ledger:default:item:9", &[]);
         let e = Error::Denied("no".to_string());
-        let l = line(0, Door::Socket, &r, Err(&e), 4);
+        let l = line(0, Door::Socket, &r, &nobody(), Err(&e), 4);
         assert!(l.contains(" outcome=denied bytes=- dur=4 "), "{l}");
     }
 
@@ -583,7 +600,7 @@ mod tests {
                 ("text", "q=\"x\"&y"),
             ],
         );
-        let l = line(0, Door::Http, &r, Ok(1), 1);
+        let l = line(0, Door::Http, &r, &nobody(), Ok(1), 1);
         assert!(!l.contains('\n') && !l.contains('"'), "{l}");
         let columns: Vec<&str> = l.split(' ').collect();
         assert_eq!(columns.len(), 10, "{l}");

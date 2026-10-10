@@ -340,3 +340,36 @@ impl Gonk {
         doc["item"]["iri"].as_str().unwrap().to_string()
     }
 }
+
+/// ★ Ledger [#1077](http://localhost:1060/l/default/item/1077): the HTTP door mints the
+/// signed-in passkey into the request's CAPABILITY (`urn:cap:principal:<passkey iri>`), so who
+/// a request is from reaches every reader on every verb — a READ included, which the stamped
+/// `principal` argument (writes only) never named. A real gonk, its access log on stderr.
+#[test]
+fn a_signed_in_read_is_logged_as_its_passkey_and_an_anonymous_one_as_nobody() {
+    let gonk = Gonk::start("");
+    let (status, _) = gonk.page(
+        "/l/default?principal=urn%3Aiki%3Agonk%3Apasskey%3AUk9HVUU",
+        None,
+    );
+    assert_eq!(status, 200);
+    let token = gonk.sign_in();
+    let (status, _) = gonk.page("/l/default?status=all", Some(&token));
+    assert_eq!(status, 200);
+    let lines: Vec<String> = gonk
+        .log()
+        .lines()
+        .filter(|l| l.contains(" gonk:Access urn:iki:gonk:page:ledger:default "))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(
+        lines[0].contains(" principal=- "),
+        "an anonymous read names nobody, whatever it typed: {lines:#?}"
+    );
+    assert!(
+        lines[1].contains(&format!(" principal={}", identity::PASSKEY_IRI_PREFIX))
+            && !lines[1].contains("Uk9HVUU"),
+        "a signed-in read is named by the door: {lines:#?}"
+    );
+}
