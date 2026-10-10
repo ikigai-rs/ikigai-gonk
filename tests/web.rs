@@ -658,8 +658,8 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
         "",
     );
     assert_eq!(
-        rebound.status, 403,
-        "a rebound Host reads nothing: {rebound:?}"
+        rebound.status, 421,
+        "a rebound Host reads nothing, and is told it named another server: {rebound:?}"
     );
     // ★ Not even the page: a rebound Host is REFUSED before dispatch (ledger #864, R2, and
     // PENDING item 2). It used to be answered with an empty capability, which still served
@@ -673,7 +673,7 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
         ],
         "",
     );
-    assert_eq!(home.status, 403, "{home:?}");
+    assert_eq!(home.status, 421, "{home:?}");
     assert!(home.body.contains("Host"), "the refusal says why: {home:?}");
 
     // A local process — no Origin, no Sec-Fetch-Site — is what the door was always for.

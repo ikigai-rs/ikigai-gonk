@@ -186,19 +186,22 @@ good until it expires.
 A door that grants writes to whatever reaches loopback also grants them to any web page open
 on the machine: a page on any site can `POST` a form to `http://127.0.0.1:1060/` without a
 preflight. So the capability is computed per request, and two browser-only signals turn it
-into a **refusal** — a `403` before the request reaches anything it names:
+into a **refusal** before the request reaches anything it names — `403`, or `421 Misdirected
+Request` for the second:
 
 - a write whose `Origin` or `Sec-Fetch-Site` names another site (`same-site` included: a page
   on another port of `localhost` is another origin). A local process such as `curl` or a
   script sends neither header, so it is unaffected;
 - a request whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` (with this port), reads
-  included. That is the DNS-rebinding defense.
+  included. That is the DNS-rebinding defense, and it answers `421`: the request names a
+  server this one is not, which is a different fact from "not allowed" (ledger #2).
 
 ★ **Refused, not "given nothing"** (ledger #864, R2; PENDING item 2). Until then both cases
 computed an EMPTY capability, and an empty capability is still offered every action that
 requires nothing: the pages, and the passkey ceremonies. Audit round 4 used that to fill the
 passkey challenge table from another site with 256 form posts and lock every real sign-in
-out for five minutes, renewable. Those requests are now REFUSED with a `403` at the edge
+out for five minutes, renewable. Those requests are now REFUSED (`403`, or `421` for the
+`Host`) at the edge
 (`EdgeConfig::admit_fn`, `doors::http_admit`, ledger #879), before `ikigai-web` answers
 anything — so a refused request no longer learns the declared verbs from `OPTIONS` or the
 contract of the capability-free actions from `?description`, which the library answers

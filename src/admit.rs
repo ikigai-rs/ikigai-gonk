@@ -20,8 +20,10 @@
 //!    `?description` face (the contract of every action offered to the capability) and the
 //!    push stream — so a refusal made inside the kernel still disclosed those. Since
 //!    `ikigai-web` 0.1.41 [`crate::doors::edge_config`] installs `EdgeConfig::admit_fn`
-//!    ([`crate::doors::http_admit`]), which runs ahead of all of them and answers `403` with
-//!    [`refusal`]'s sentence. The capability function still computes the same refusal as a
+//!    ([`crate::doors::http_admit`]), which runs ahead of all of them and answers with
+//!    [`refusal`]'s sentence — `421 Misdirected Request` for a foreign `Host` (ledger
+//!    [#2](http://localhost:1060/l/default/item/2)), `403` for the rest
+//!    ([`crate::doors::refusal_status`]). The capability function still computes the same refusal as a
 //!    marker scope ([`REFUSED_FOREIGN_HOST`], [`REFUSED_CROSS_SITE`] — scopes no resource
 //!    requires and no grant may name) and [`Admitting`] still answers a marker with `Denied`:
 //!    one decision ([`crate::doors::http_refusal`]), two places that act on it, so a kernel

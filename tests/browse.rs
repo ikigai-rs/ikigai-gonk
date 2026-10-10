@@ -2836,7 +2836,7 @@ fn a_cross_site_post_cannot_annotate_through_the_adapter() {
         &k("source urn:repo:demo:tree as=text/html"),
         "gonk.evil.example",
     );
-    assert_eq!(status, 403, "a foreign Host is refused: {body}");
+    assert_eq!(status, 421, "a foreign Host is refused: {body}");
 }
 
 /// ⚠ **The reason `web/gonk.js` folds the path spelling, as an assertion rather than a
