@@ -8,6 +8,20 @@
 //! needs no graph to be slow, and costs the store nothing it could refuse by its algebra bounds
 //! (`VALUES` rows are free there), so only the clock can stop it. Written with no whitespace
 //! outside its literals, so it also fits `/k`'s command grammar.
+//!
+//! ⚠ Since store 0.2.9 (ledger [#993](http://localhost:1060/l/default/item/993)) every answer is
+//! also bounded at 100,000 rows, and a debug build streamed this product's 100,001st row in
+//! 0.59–0.70 s — so a door budget near that could have been refused on SIZE instead. Each row now
+//! pays for a `SHA512` in a filter that keeps it, which slows the stream without widening the
+//! answer (the 100,001st row at 1.07 s on the same machine, against door budgets of 300–600 ms;
+//! a slower runner only widens that, since the budgets are wall-clock),
+//! and the signed-in caller's grant carries the store's answer grants, so the clock is the only
+//! bound in play for it. The size bound has its own test at the end of this file.
+//!
+//! Why not a `COUNT` or a filter that keeps nothing: oxigraph checks its cancellation token only
+//! where it touches the dataset, and a `VALUES` join never does, so an evaluation that emits no
+//! rows runs to its end after its caller is answered; the store's serializer checks the token
+//! on every row, so a streaming answer stops at the budget.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -32,13 +46,19 @@ const GRAPH: &str = "urn:iki:ledger:graph:default";
 /// and well above every door budget used here.
 const BASE: Duration = Duration::from_millis(2_500);
 
-/// A million solutions from 1.8 KB of query, and no graph read at all.
+/// A million solutions from 1.8 KB of query, and no graph read at all, each one paying for a
+/// hash it does not return (see the module docs).
 fn cross_product() -> String {
     let table = |var: &str| {
         let values: String = (0..100).map(|n| format!("\"{n}\"")).collect();
         format!("VALUES?{var}{{{values}}}")
     };
-    format!("SELECT*{{{}{}{}}}", table("a"), table("b"), table("c"))
+    format!(
+        "SELECT*{{{}{}{}FILTER(STRLEN(SHA512(CONCAT(?a,?b,?c)))>0)}}",
+        table("a"),
+        table("b"),
+        table("c")
+    )
 }
 
 struct Server {
@@ -178,13 +198,19 @@ impl Server {
     }
 
     /// Enrol a passkey under a grant reading the default ledger, sign in, and return the
-    /// session token.
+    /// session token. The grant carries the store's answer grants (ledger #993), which
+    /// `grants.json` accepts, so a signed-in caller's answers are bounded by time alone here.
     fn sign_in(&self) -> String {
         let authenticator = Authenticator::new();
+        let mut scopes = grants_for("default", Authority::Delete).unwrap();
+        scopes.extend([
+            ikigai_store::budget::cap_answer(ikigai_store::budget::CEILING_MAX_ROWS),
+            ikigai_store::budget::cap_answer_bytes(ikigai_store::budget::CEILING_MAX_BYTES),
+        ]);
         let invite = identity::invite(
             &self.layout,
             "reader",
-            &grants_for("default", Authority::Delete).unwrap(),
+            &scopes,
             false,
             30,
             identity::now_seconds(),
@@ -329,8 +355,8 @@ fn an_anonymous_caller_may_lower_the_door_budget_and_never_raise_it() {
 /// only ever sends inline values, so this is driven through the door's own kernel, under the
 /// capability the door computes for an anonymous request: the stamp overwrites it.
 ///
-/// And the store's own answer to one, which ledger #964 asked about: `ikigai-store` 0.2.8
-/// REFUSES a by-reference `budget=` (it is read by value only) — it does not read it as
+/// And the store's own answer to one, which ledger #964 asked about: `ikigai-store` 0.2.8 and
+/// later REFUSE a by-reference `budget=` (it is read by value only) — it does not read it as
 /// absent and fall to its ceiling the way `ikigai-sparql` does.
 #[test]
 fn a_by_reference_budget_cannot_bypass_the_door_and_the_store_refuses_one() {
@@ -366,7 +392,9 @@ fn a_by_reference_budget_cannot_bypass_the_door_and_the_store_refuses_one() {
     ) {
         Err(Error::InvalidArgument { name, detail }) => {
             assert_eq!(name, "budget");
-            assert!(detail.contains("not an inline value"), "{detail}");
+            // 0.2.8 said "not an inline value"; 0.2.9 reads every bound through
+            // `inline_bound`, which names how it was given.
+            assert!(detail.contains("by reference"), "{detail}");
         }
         other => panic!("the store refuses a by-reference budget, got {other:?}"),
     }
@@ -479,4 +507,86 @@ fn the_door_marks_exactly_the_anonymous_capability() {
     );
     // And no grant may name it: a grants.json carrying the marker stops the server.
     assert!(quic::grant_refusal("forged", &[marker]).is_some());
+}
+
+/// About 21 MB of answer from 5.6 KB of query, and no graph read: a 5,000-byte literal times a
+/// 64 × 64 `VALUES` product, so 4,096 rows of it pass the store's 16 MiB base by a quarter.
+/// Few rows, so it reaches the BYTE bound in moments and never the time budget. Written with no
+/// whitespace outside its literals, for `/k`.
+fn wide_answer() -> String {
+    let wide = "x".repeat(5_000);
+    let table = |var: &str| {
+        let values: String = (0..64).map(|n| format!("\"{n}\"")).collect();
+        format!("VALUES?{var}{{{values}}}")
+    };
+    format!(
+        "SELECT*{{VALUES?w{{\"{wide}\"}}{}{}}}",
+        table("a"),
+        table("b")
+    )
+}
+
+/// ★ Ledger [#993](http://localhost:1060/l/default/item/993): the anonymous door's answer SIZE
+/// bound is the store's base, 100,000 rows and 16 MiB, and past it an anonymous caller's query is
+/// refused with the store's typed error — `InvalidArgument` on `query`, "refused, not truncated" —
+/// on every route it can send SPARQL by, with no part of the answer in the body.
+///
+/// Why the base and not a stamp below it, as the time budget has: what an anonymous caller may
+/// read is the configured ledgers, and the largest legitimate answer over them is the whole ledger
+/// graph — measured 2026-10-10 on the 2026-10-09 archive restored into RocksDB: 13,375 rows,
+/// 4,986,073 bytes of SPARQL JSON, inside the base 7.5 times over on rows and 3.4 on bytes. A
+/// lower stamp would refuse that read sooner as the ledger grows while the pages hand out the same
+/// data, and the base already caps what one request can hold in memory (an answer is refused at
+/// the write that crosses the bound, so the buffer never exceeds it). The base binds signed-in
+/// callers too; a passkey's grant can carry `urn:cap:store:answer:*` to lift it.
+#[test]
+fn an_anonymous_answer_past_the_stores_base_is_refused_on_every_route() {
+    let server = Server::start(budget::MAX_ANONYMOUS_SPARQL_BUDGET_MS);
+    let query = wide_answer();
+    let bound = format!(
+        "the answer exceeds {} bytes",
+        ikigai_store::budget::DEFAULT_MAX_BYTES
+    );
+    for (name, path, accept) in routes(&query) {
+        let (response, took) = server.get(&path, accept, None);
+        assert!(
+            response.body.contains(&bound),
+            "{name}: refused on the store's byte base: {response:?} after {took:?}"
+        );
+        assert!(
+            !response.body.contains(&"x".repeat(5_000)),
+            "{name}: no part of the answer is sent"
+        );
+        assert!(
+            (400..500).contains(&response.status) || accept == "text/html",
+            "{name}: a refusal of the caller's query, not a server failure: {response:?}"
+        );
+    }
+
+    // And the TYPE, through the door's own kernel under the capability it computes for an
+    // anonymous request.
+    let anonymous = Capability::scoped(
+        grants_for("default", Authority::Write)
+            .unwrap()
+            .into_iter()
+            .chain([budget::anonymous_marker(
+                budget::MAX_ANONYMOUS_SPARQL_BUDGET_MS,
+            )]),
+    );
+    for target in ["urn:iki:store:graph-select", "urn:sparql:select"] {
+        let request = Request::new(Verb::Source, Iri::parse(target).unwrap())
+            .with_arg("query", ArgRef::Inline(query.clone().into_bytes()))
+            .with_arg("graph", ArgRef::Inline(GRAPH.as_bytes().to_vec()));
+        match block_on(server.http.issue(request, &anonymous)) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "query", "{target}: {detail}");
+                assert!(detail.contains(&bound), "{target}: {detail}");
+                assert!(
+                    detail.contains("refused, not truncated"),
+                    "{target}: {detail}"
+                );
+            }
+            other => panic!("{target}: refused with the typed size error, got {other:?}"),
+        }
+    }
 }

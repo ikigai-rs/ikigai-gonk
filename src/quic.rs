@@ -1332,6 +1332,33 @@ mod tests {
         );
     }
 
+    /// ★ The store's ANSWER grants (`urn:cap:store:answer:<rows>` and
+    /// `urn:cap:store:answer:bytes:<bytes>`, ledger #993) are accepted for the budget grant's
+    /// reason: each can only raise the size of a caller's answers toward the store's ceiling
+    /// (10,000,000 rows, 1 GiB), never past it, and grants nothing to read or write — the
+    /// per-graph read tokens still decide what the answer may hold. That is how an operator
+    /// lets a trusted client export more than the 100,000-row, 16 MiB base, and the backup's
+    /// own pair passes the same check.
+    #[test]
+    fn the_store_answer_grants_are_accepted_and_carried_through() {
+        let rows = ikigai_store::budget::cap_answer(1_000_000);
+        let bytes = ikigai_store::budget::cap_answer_bytes(256 << 20);
+        let mut tokens = grants_for("default", Authority::Read).unwrap();
+        tokens.extend([rows.clone(), bytes.clone()]);
+        let grants = BTreeMap::from([("exporter".to_string(), tokens)]);
+        assert!(check_grants(&grants).is_ok());
+        let scopes = scopes_for_grant(&grants, "exporter").expect("the grant is admitted");
+        assert!(
+            scopes.contains(&rows) && scopes.contains(&bytes),
+            "{scopes:?}"
+        );
+        let job = [
+            crate::backup::JOB_ANSWER_ROWS.to_string(),
+            crate::backup::JOB_ANSWER_BYTES.to_string(),
+        ];
+        assert_eq!(grant_refusal("exporter", &job), None);
+    }
+
     #[test]
     fn an_openssl_fingerprint_names_the_same_client_and_a_default_must_be_explicit() {
         let colons = "6F:1C:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:AB:CD";

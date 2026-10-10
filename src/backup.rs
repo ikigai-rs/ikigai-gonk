@@ -142,7 +142,13 @@ pub const RESTORE: &str = "urn:iki:gonk:restore";
 /// could have this server issue any request under this list. The list is narrow, but the
 /// principle is that the target set is fixed at startup by this server, not chosen at call
 /// time by a caller.
-pub const JOB_SCOPES: [&str; 3] = [CAP_BACKUP, ikigai_store::CAP_READ, JOB_BUDGET];
+pub const JOB_SCOPES: [&str; 5] = [
+    CAP_BACKUP,
+    ikigai_store::CAP_READ,
+    JOB_BUDGET,
+    JOB_ANSWER_ROWS,
+    JOB_ANSWER_BYTES,
+];
 
 /// How long the scheduled backup's whole-dataset query may run, in milliseconds: **120 s**,
 /// which is also `ikigai-store`'s ceiling (ledger [#979](http://localhost:1060/l/default/item/979)).
@@ -168,6 +174,41 @@ pub const JOB_BUDGET_MS: u64 = 120_000;
 /// `ikigai_store::budget::cap_budget(JOB_BUDGET_MS)`, spelled as a literal because a `const`
 /// cannot call it (a unit test pins that the two agree).
 pub const JOB_BUDGET: &str = "urn:cap:store:budget:120000";
+
+/// How many rows the scheduled backup's answer may hold: **10,000,000**, `ikigai-store`'s
+/// ceiling (ledger [#993](http://localhost:1060/l/default/item/993)).
+///
+/// ★ Since store 0.2.9 every SPARQL answer is bounded in SIZE as well as time, and a
+/// capability with no `urn:cap:store:answer:*` grant gets the store's BASE: 100,000 rows and
+/// 16 MiB. The backup's answer is one row per quad of the WHOLE dataset, as SPARQL JSON:
+/// measured 2026-10-10 on a RocksDB store restored from the 2026-10-09 archive (361,607 quads;
+/// `examples/backup-cost.rs`, release build), it is refused on BYTES after 13.9–23.4 s under the
+/// time grant alone — the `ORDER BY` materializes every row before the first is written, so
+/// the refusal costs the whole sort — and the store arc measured the same answer at 121,625,465
+/// bytes (ledger #970). Over the row bound too: the dataset is 3.6 times it.
+///
+/// Why the ceilings and not a measured multiple, for [`JOB_BUDGET_MS`]'s reason: the dataset
+/// grows, the backup is the only export this dataset has, and a refused backup is a silent loss
+/// of the one guarantee it exists for. The store clamps every grant to its ceiling, so asking
+/// for more would buy nothing. ⚠ The byte ceiling (1 GiB) is about nine times today's answer, so
+/// it is the first of the three bounds a growing dataset will reach; the backup's status
+/// readout names the archive's N-Quads size, which is about two thirds of the answer's.
+pub const JOB_ANSWER_ROWS_MAX: u64 = 10_000_000;
+
+/// How many serialized bytes the scheduled backup's answer may hold: **1 GiB**,
+/// `ikigai-store`'s ceiling. See [`JOB_ANSWER_ROWS_MAX`]: a row grant raises rows and nothing
+/// else, so a backup holding only it is still refused on bytes, and the job needs both.
+pub const JOB_ANSWER_BYTES_MAX: u64 = 1 << 30;
+
+/// The store's row grant for [`JOB_ANSWER_ROWS_MAX`]:
+/// `ikigai_store::budget::cap_answer(JOB_ANSWER_ROWS_MAX)`, spelled as a literal for the reason
+/// [`JOB_BUDGET`] is (a unit test pins that the two agree).
+pub const JOB_ANSWER_ROWS: &str = "urn:cap:store:answer:10000000";
+
+/// The store's byte grant for [`JOB_ANSWER_BYTES_MAX`]:
+/// `ikigai_store::budget::cap_answer_bytes(JOB_ANSWER_BYTES_MAX)`, spelled as a literal for the
+/// reason [`JOB_BUDGET`] is (a unit test pins that the two agree).
+pub const JOB_ANSWER_BYTES: &str = "urn:cap:store:answer:bytes:1073741824";
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const N_QUADS: &str = "application/n-quads";
@@ -1127,6 +1168,8 @@ impl Restore {
         // budget grant (ledger #979): on the restored store's 5 s base, a dataset that grew
         // past it would fail the verification of a restore that succeeded. Measured
         // 2026-10-09: the whole restore of the live dataset, count included, took 2.9 s.
+        // It needs no ANSWER grant (ledger #993): its answer is one row per graph, far
+        // inside the store's base of 100,000 rows and 16 MiB.
         let read = Capability::scoped([ikigai_store::CAP_READ, JOB_BUDGET]);
         let actual = blank_graphs_by_shape(graph_counts(&restored, &read).await?);
         let actual_total: u64 = actual.values().sum();
@@ -1503,6 +1546,43 @@ mod tests {
             ikigai_store::budget::TimeBudget::default().for_capability(&job),
             Duration::from_millis(JOB_BUDGET_MS),
             "the store gives the job exactly its grant: at or below the default ceiling"
+        );
+    }
+
+    /// The two answer grants are the store's own spellings of their bounds, the job's scope
+    /// list holds both, and under the store's DEFAULT answer budget they lift the job to the
+    /// ceiling on rows AND bytes (ledger #993). The store's base is the bound a job without
+    /// them gets, which the dataset is past on both.
+    #[test]
+    fn the_job_answer_grants_are_the_stores_spellings_and_reach_the_ceiling() {
+        use ikigai_store::budget::{cap_answer, cap_answer_bytes, AnswerBound, AnswerBudget};
+        assert_eq!(JOB_ANSWER_ROWS, cap_answer(JOB_ANSWER_ROWS_MAX));
+        assert_eq!(JOB_ANSWER_BYTES, cap_answer_bytes(JOB_ANSWER_BYTES_MAX));
+        assert!(JOB_SCOPES.contains(&JOB_ANSWER_ROWS));
+        assert!(JOB_SCOPES.contains(&JOB_ANSWER_BYTES));
+        let store = AnswerBudget::default();
+        assert_eq!(
+            store.for_capability(&Capability::scoped(JOB_SCOPES)),
+            AnswerBound::CEILING,
+            "the job gets the store's ceiling on both measures"
+        );
+        assert_eq!(
+            AnswerBound::new(JOB_ANSWER_ROWS_MAX, JOB_ANSWER_BYTES_MAX).ok(),
+            Some(AnswerBound::CEILING),
+            "the grants ask for exactly the ceiling: no more, which the store would clamp"
+        );
+        let without = |dropped: &str| {
+            Capability::scoped(JOB_SCOPES.iter().copied().filter(|s| *s != dropped))
+        };
+        assert_eq!(
+            store.for_capability(&without(JOB_ANSWER_BYTES)).bytes(),
+            store.base().bytes(),
+            "a row grant alone leaves the byte bound at the base"
+        );
+        assert_eq!(
+            store.for_capability(&without(JOB_ANSWER_ROWS)).rows(),
+            store.base().rows(),
+            "a byte grant alone leaves the row bound at the base"
         );
     }
 

@@ -1,6 +1,6 @@
 //! `cargo run --release --example backup-cost -- <backup.nq.gz> <scratch-dir> [runs]` — time
 //! gonk's backup and restore over a RocksDB copy of a live dataset, the measurement behind
-//! `backup::JOB_BUDGET_MS` (ledger #979).
+//! `backup::JOB_BUDGET_MS` (ledger #979) and the answer grants in `backup::JOB_SCOPES` (ledger #993).
 //!
 //! ```sh
 //! cargo run --release --example backup-cost -- ~/.ikigai/backups/gonk-store-2026-10-09T122720Z.nq.gz /tmp/bcost
@@ -10,9 +10,11 @@
 //! `urn:iki:gonk:restore`, into `<scratch-dir>/store` — a RocksDB store built from the bytes
 //! the live server wrote, so the timing is RocksDB's, as the scheduled backup's is, and not a
 //! torn `cp -r` of a directory a live process holds. Then a backup of that store is taken,
-//! `runs` times (default 3), under three capabilities: exactly `backup::JOB_SCOPES` (what the
+//! `runs` times (default 3), under four capabilities: exactly `backup::JOB_SCOPES` (what the
 //! timer fires under), the same WITHOUT the budget grant (what it fired under through store
-//! 0.2.6, and what it would get at the store's 5 s base), and root (the owner's socket).
+//! 0.2.6, and what it would get at the store's 5 s base), the same WITHOUT the two answer
+//! grants (what it fired under through gonk's move to store 0.2.9, ledger #993, and what it
+//! would get at the store's 100,000-row, 16 MiB answer base), and root (the owner's socket).
 //!
 //! `<scratch-dir>` must not exist or must be empty; it is left in place for a second look.
 
@@ -74,11 +76,20 @@ fn main() {
         .copied()
         .filter(|scope| !scope.starts_with("urn:cap:store:budget:"))
         .collect();
-    let cases: [(&str, Capability); 3] = [
+    let without_answer: Vec<&str> = backup::JOB_SCOPES
+        .iter()
+        .copied()
+        .filter(|scope| !scope.starts_with("urn:cap:store:answer:"))
+        .collect();
+    let cases: [(&str, Capability); 4] = [
         ("JOB_SCOPES", Capability::scoped(backup::JOB_SCOPES)),
         (
             "JOB_SCOPES without the grant",
             Capability::scoped(without_grant),
+        ),
+        (
+            "JOB_SCOPES without the answer grants",
+            Capability::scoped(without_answer),
         ),
         ("root", Capability::root()),
     ];
@@ -87,7 +98,7 @@ fn main() {
             let started = Instant::now();
             let outcome = issue(&kernel, Verb::Source, backup::BACKUP, &[], capability);
             println!(
-                "backup {name:<30} run {run}: {:>8.2?}  {}",
+                "backup {name:<38} run {run}: {:>8.2?}  {}",
                 started.elapsed(),
                 match outcome {
                     Ok(text) => text.lines().next().unwrap_or("").to_string(),

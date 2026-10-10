@@ -411,6 +411,19 @@ store's `/iki/store/…` doors, the editor page's protocol face and its results 
   or by-reference value is replaced. (`ikigai-sparql` reads a by-reference `budget=` as no budget
   and falls to its ceiling. `ikigai-store` refuses one. The stamp relies on neither.)
 
+**How large an answer may be** (ledger #970, #993). Since `ikigai-store` 0.2.9 every answer is
+bounded in size too: **100,000 rows and 16 MiB** of serialized answer for a capability holding no
+`urn:cap:store:answer:<rows>` / `urn:cap:store:answer:bytes:<bytes>` grant, up to 10,000,000 rows
+and 1 GiB for one that does, the ceiling for root. Past either bound the query is refused
+(`InvalidArgument` on `query`, "refused, not truncated"), never cut short, and `max_rows=` /
+`max_bytes=` can only lower it. **An anonymous caller gets the base**, and gonk stamps nothing
+lower: the largest answer it can legitimately ask for is the whole ledger graph, measured
+2026-10-10 on the 2026-10-09 archive at 13,375 rows and 4,986,073 bytes of SPARQL JSON, inside the
+base 7.5 times over on rows and 3.4 on bytes. A signed-in caller gets the base too, unless its
+grant in `gonk/grants.json` carries the answer grants, which `grants.json` accepts (they raise a
+size toward the ceiling and grant nothing to read). `tests/door_budget_964.rs` pins the refusal on
+every route.
+
 ⚠ **What it does not bound.** The budget answers the CALLER at 1 s. An evaluation that oxigraph
 cannot cancel partway (an aggregate, `ORDER BY`, a join's build side) keeps a core until it
 finishes, and the store refuses ALL SPARQL while a quarter of the cores are held that way. That
@@ -2126,6 +2139,15 @@ RocksDB) measured 15 s on a quiet machine and 27 s beside other work, and every 
 the grant was refused at 5.0 s. So the list carries `urn:cap:store:budget:120000`, the store's
 ceiling. A backup over the socket runs as the owner (root), which gets the ceiling anyway. To
 measure it again: `cargo run --release --example backup-cost -- <archive> <scratch-dir>`.
+
+**And both answer grants** (ledger #993). Since `ikigai-store` 0.2.9 a scoped caller's answer is
+bounded at 100,000 rows and 16 MiB, and the backup's answer is every quad in the dataset: the
+2026-10-09 archive's is 361,607 rows and about 116 MiB of SPARQL JSON. Under the time grant alone
+that backup was refused on bytes after 13.9–23.4 s (the `ORDER BY` sorts everything before the first
+row is written), so the list also carries `urn:cap:store:answer:10000000` and
+`urn:cap:store:answer:bytes:1073741824`, the store's ceilings, for the time grant's reason. A row
+grant raises rows and nothing else, so the job needs both. ⚠ The byte ceiling is about nine times
+today's answer, so it is the first bound a growing dataset will reach.
 
 ### The format is N-Quads, and the easy mistake is Turtle
 
