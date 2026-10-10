@@ -250,6 +250,9 @@ pub struct Backups {
     pub settings: Arc<Settings>,
     /// The registry the scheduled job lives in, for the health half of [`STATUS`].
     pub jobs: Option<JobRegistry>,
+    /// When the scheduled job fires next, as its [`BackupTimer`] records it — what
+    /// [`STATUS`] says is due (ledger #1087). Never written when nothing is scheduled.
+    pub next: NextRun,
 }
 
 /// The backup family's space: [`BACKUP`], [`STATUS`], [`ARCHIVE`] and [`RESTORE`].
@@ -513,6 +516,183 @@ pub fn newest_taken_at_ms(dir: &Path) -> Option<u64> {
         .as_deref()
         .and_then(|meta| field(meta, "taken_at_ms"))
         .and_then(|value| value.parse().ok())
+}
+
+// ---------------------------------------------------------------- when the timer fires
+
+/// The soonest the scheduled backup's first fire comes after startup: long enough that a
+/// restart loop does not take one per restart, short enough that an operator watching a
+/// deploy sees it.
+pub const CATCH_UP: Duration = Duration::from_secs(60);
+
+/// How long from `now_ms` until the scheduled backup's FIRST fire: one cadence after the
+/// newest archive on disk (`newest_ms`, from [`newest_taken_at_ms`]), never sooner than
+/// [`CATCH_UP`] and never later than one cadence; [`CATCH_UP`] when there is no archive.
+///
+/// ★★ **The phase of a daily backup belongs to the ROTATION, not to the process** (ledger
+/// #1087). A recurring timer's first tick is one interval after it starts, so a 1-day timer
+/// on a server restarted at 23:21 whose newest archive was taken at 12:27 first fires at
+/// 23:21 the next day: a 35-hour gap, and every restart before an archive is a day old moved
+/// the next backup again. Until this, startup only caught up an archive ALREADY older than
+/// the cadence; now every start schedules the first fire for when the newest archive comes
+/// due, so a restart costs a backup nothing and the gap between archives stays one cadence.
+///
+/// A newest archive stamped in the future (a clock stepped back) is answered with one
+/// cadence, not a longer wait: the bound is on how long a backup can be put off.
+///
+/// ```
+/// use std::time::Duration;
+/// use ikigai_gonk::backup::{first_delay, CATCH_UP};
+/// let day = Duration::from_secs(86_400);
+/// let hour = 3_600_000;
+/// // Restarted 11 h after the newest archive: the first fire is 13 h out, not 24.
+/// assert_eq!(first_delay(11 * hour, Some(0), day), Duration::from_secs(13 * 3_600));
+/// // Already overdue, or never taken: a catch-up a minute out.
+/// assert_eq!(first_delay(30 * hour, Some(0), day), CATCH_UP);
+/// assert_eq!(first_delay(30 * hour, None, day), CATCH_UP);
+/// ```
+pub fn first_delay(now_ms: u64, newest_ms: Option<u64>, every: Duration) -> Duration {
+    let Some(newest) = newest_ms else {
+        return CATCH_UP;
+    };
+    let every_ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
+    let due = newest.saturating_add(every_ms);
+    Duration::from_millis(due.saturating_sub(now_ms))
+        .min(every)
+        .max(CATCH_UP)
+}
+
+/// When the scheduled backup fires next, in milliseconds since the epoch on the clock that
+/// stamps it: written by [`BackupTimer`] each time it arms, read by [`STATUS`] against the same
+/// clock. `None` while a run is in progress (and before the timer starts).
+#[derive(Clone)]
+pub struct NextRun {
+    due: Arc<std::sync::Mutex<Option<u64>>>,
+    clock: Arc<dyn ikigai_core::Clock>,
+}
+
+impl Default for NextRun {
+    /// On the system wall clock — what the server runs on.
+    fn default() -> Self {
+        NextRun::with_clock(Arc::new(ikigai_core::SystemClock))
+    }
+}
+
+impl NextRun {
+    /// Stamped and read on `clock` — a fixed one in a test.
+    pub fn with_clock(clock: Arc<dyn ikigai_core::Clock>) -> Self {
+        NextRun {
+            due: Arc::default(),
+            clock,
+        }
+    }
+
+    /// When the next run is due, or `None` while one is running.
+    pub fn due_ms(&self) -> Option<u64> {
+        *self.due.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The clock's reading now, in milliseconds since the epoch.
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now().0
+    }
+
+    fn set(&self, due: Option<u64>) {
+        *self.due.lock().unwrap_or_else(|e| e.into_inner()) = due;
+    }
+
+    /// Record the next run as `wait` from now.
+    fn arm(&self, wait: Duration) {
+        let wait = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.set(Some(self.now_ms().saturating_add(wait)));
+    }
+}
+
+/// The backup registry's timer: `ikigai_time::ThreadTimer`'s sleeping thread, except that
+/// the FIRST tick comes after `first` rather than after one interval ([`first_delay`]), and
+/// that it records when each next tick is due ([`NextRun`]) so [`STATUS`] can say so.
+///
+/// ⚠ `first` applies to every job started on this backend. The backup registry holds one job
+/// (`urn:iki:gonk:backup`, scheduled by [`start`]), which is the only reason that is right;
+/// do not schedule a second job on a registry built over it.
+pub struct BackupTimer {
+    first: Duration,
+    next: NextRun,
+}
+
+impl BackupTimer {
+    /// A timer whose first tick is `first` from its start, recording each next tick in `next`.
+    pub fn new(first: Duration, next: NextRun) -> Self {
+        BackupTimer { first, next }
+    }
+}
+
+impl ikigai_time::TimerBackend for BackupTimer {
+    fn start(
+        &self,
+        interval: Duration,
+        recurring: bool,
+        on_tick: Arc<dyn Fn() + Send + Sync>,
+    ) -> ikigai_time::TimerHandle {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        let (first, next) = (self.first, self.next.clone());
+        next.arm(first);
+        std::thread::spawn(move || {
+            let mut wait = first;
+            loop {
+                std::thread::sleep(wait);
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                next.set(None);
+                on_tick();
+                if !recurring {
+                    break;
+                }
+                wait = interval;
+                next.arm(wait);
+            }
+        });
+        ikigai_time::TimerHandle::new(move || {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+}
+
+/// Build the registry the scheduled backup fires from, phased to the rotation: its timer's
+/// first tick is [`first_delay`] from now. Returns the registry (for [`Backups::jobs`]) and that
+/// delay, for the banner. Nothing is scheduled yet — [`start`] does that once the kernel the
+/// job resolves through exists.
+///
+/// The registry's ceiling is [`JOB_SCOPES`] and so is the job's own capability ([`start`]), so
+/// the clamp each tick takes (ikigai-time 0.4.0, ledger #79) is exactly `JOB_SCOPES`. `next`
+/// carries the clock everything here reads, so a test passes a fixed one.
+pub fn registry(settings: &Settings, every: Duration, next: &NextRun) -> (JobRegistry, Duration) {
+    let first = first_delay(next.now_ms(), newest_taken_at_ms(&settings.dir), every);
+    let jobs = JobRegistry::new(
+        Arc::new(BackupTimer::new(first, next.clone())),
+        Arc::clone(&next.clock),
+    )
+    .with_capability(Capability::scoped(JOB_SCOPES));
+    (jobs, first)
+}
+
+/// Install `resolver` in a [`registry`] and schedule the backup on it, every `every`, under
+/// exactly [`JOB_SCOPES`]. Returns the job's id.
+pub fn start(
+    jobs: &JobRegistry,
+    every: Duration,
+    resolver: Arc<dyn ikigai_resolve::Resolver>,
+) -> std::result::Result<u64, String> {
+    jobs.set_resolver(resolver);
+    jobs.schedule_persistent(
+        BACKUP.to_string(),
+        Verb::Source,
+        ikigai_time::Schedule::Every(every),
+        true,
+        Capability::scoped(JOB_SCOPES),
+    )
 }
 
 /// Reject anything that is not a bare file name in the rotation directory.
@@ -922,10 +1102,12 @@ impl Status {
             humanize(job.interval),
             job.runs
         );
+        out.push_str(&self.next_line());
         match job.since_last {
             None => out.push_str(
-                "    ⚠ has never fired since this server started. At a daily cadence that \
-                 is normal for the first day and a wedged timer after that.\n",
+                "    has not fired since this server started: the first run is phased to the \
+                 newest archive, so `next run` above is when it is due — past that, the timer \
+                 is wedged.\n",
             ),
             Some(since) => out.push_str(&format!("    since last run      {}\n", humanize(since))),
         }
@@ -948,6 +1130,22 @@ impl Status {
             out.push_str(&format!("    last                {}\n", job.last_output));
         }
         out
+    }
+
+    /// When the timer's next run is due, against the server's clock — or that one is running.
+    fn next_line(&self) -> String {
+        match self.backups.next.due_ms() {
+            Some(due) => {
+                let now = self.backups.next.now_ms();
+                let when = if due >= now {
+                    format!("in {}", humanize(Duration::from_millis(due - now)))
+                } else {
+                    format!("⚠ {} OVERDUE", humanize(Duration::from_millis(now - due)))
+                };
+                format!("    next run            {} ({when})\n", stamp_iso(due))
+            }
+            None => "    next run            — a run is in progress\n".to_string(),
+        }
     }
 
     /// The JSON face: the newest sidecar verbatim under `newest`, the rotation set, and the
@@ -973,12 +1171,17 @@ impl Status {
             Some(jobs) => match jobs.health().into_iter().find(|job| job.target == BACKUP) {
                 None => "null".to_string(),
                 Some(job) => format!(
-                    "{{\"id\":{},\"runs\":{},\"interval_seconds\":{},\
+                    "{{\"id\":{},\"runs\":{},\"interval_seconds\":{},\"next_run_due\":{},\
                      \"seconds_since_last_run\":{},\"seconds_since_last_success\":{},\
                      \"failures_in_a_row\":{},\"last_output\":{}}}",
                     job.id,
                     job.runs,
                     job.interval.as_secs(),
+                    self.backups
+                        .next
+                        .due_ms()
+                        .map(|due| quote(&stamp_iso(due)))
+                        .unwrap_or_else(|| "null".to_string()),
                     job.since_last
                         .map(|d| d.as_secs().to_string())
                         .unwrap_or_else(|| "null".to_string()),
@@ -1537,6 +1740,67 @@ mod tests {
 
     /// The literal grant is the store's own spelling of [`JOB_BUDGET_MS`], and the job's scope
     /// list holds it (ledger #979).
+    /// ★ Ledger #1087's numbers: an archive at 12:27, a restart at 23:21, a 1-day cadence.
+    #[test]
+    fn the_first_backup_is_due_one_cadence_after_the_newest_archive() {
+        let day = Duration::from_secs(86_400);
+        let archive = 1_760_012_820_000; // 2026-10-09T12:27:00Z
+        let restart = 1_760_052_060_000; // 2026-10-09T23:21:00Z
+        assert_eq!(
+            first_delay(restart, Some(archive), day),
+            Duration::from_millis(archive + 86_400_000 - restart),
+            "13h06m, not the 24h a timer started at the restart waits"
+        );
+        // Overdue or never taken: a catch-up, never sooner than CATCH_UP.
+        assert_eq!(
+            first_delay(restart, Some(restart - 90_000_000), day),
+            CATCH_UP
+        );
+        assert_eq!(first_delay(restart, None, day), CATCH_UP);
+        // Due in ten seconds: still a minute out, so a restart loop takes one per minute at most.
+        assert_eq!(
+            first_delay(restart, Some(restart - 86_390_000), day),
+            CATCH_UP
+        );
+        // An archive stamped in the future (a clock stepped back) waits one cadence, no more.
+        assert_eq!(
+            first_delay(restart, Some(restart + 5 * 86_400_000), day),
+            day
+        );
+    }
+
+    /// The timer's first tick comes after `first`, not after the interval, and it records
+    /// when each next tick is due on the clock it was given.
+    #[test]
+    fn the_backup_timer_fires_first_after_its_phase_and_records_the_next_run() {
+        use ikigai_time::TimerBackend;
+        let clock = Arc::new(ikigai_core::FixedClock::at(1_000_000));
+        let next = NextRun::with_clock(clock);
+        let timer = BackupTimer::new(Duration::from_millis(20), next.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = timer.start(
+            Duration::from_secs(3_600),
+            true,
+            Arc::new(move || {
+                let _ = tx.send(());
+            }),
+        );
+        assert_eq!(
+            next.due_ms(),
+            Some(1_000_020),
+            "armed for its phase, not the interval"
+        );
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("the first tick comes after 20 ms, not after an hour");
+        // Re-armed for one interval after the tick (the clock is fixed, so exactly this).
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while next.due_ms() != Some(1_000_000 + 3_600_000) {
+            assert!(std::time::Instant::now() < deadline, "{:?}", next.due_ms());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        handle.cancel();
+    }
+
     #[test]
     fn the_job_budget_grant_is_the_stores_spelling_of_its_milliseconds() {
         assert_eq!(JOB_BUDGET, ikigai_store::budget::cap_budget(JOB_BUDGET_MS));
@@ -1833,6 +2097,7 @@ mod tests {
                     store_path: PathBuf::from("/nonexistent/store"),
                 }),
                 jobs: None,
+                next: Default::default(),
             },
         };
         let text = status.text();
@@ -1852,6 +2117,7 @@ mod tests {
                     store_path: PathBuf::from("/nonexistent/store"),
                 }),
                 jobs: None,
+                next: Default::default(),
             },
         };
         let text = status.text();

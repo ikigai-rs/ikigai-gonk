@@ -89,6 +89,7 @@ fn r1_a_grant_naming_the_restore_token_is_refused_per_use_as_it_is_at_startup() 
                 store_path: PathBuf::from("/nonexistent/live/store"),
             }),
             jobs: None,
+            next: Default::default(),
         }),
     ));
     let door = doors::door_kernel(Arc::clone(&hub));
