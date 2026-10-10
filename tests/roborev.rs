@@ -50,7 +50,7 @@ fn serve(ledger: &str) -> (Arc<Kernel>, SocketAddr, tempfile::TempDir) {
     ));
     let door = doors::HttpDoor {
         anonymous: grants,
-        port: addr.port(),
+        bind: addr,
         passkeys: Some(passkeys),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };

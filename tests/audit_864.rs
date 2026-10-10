@@ -316,7 +316,7 @@ impl Server {
         ));
         let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).unwrap(),
-            port: addr.port(),
+            bind: addr,
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };

@@ -308,7 +308,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
     let kernel = Arc::new(doors::http_kernel(hub, ikigai_gonk::web::space(face)));
     let door = doors::HttpDoor {
         anonymous: grants.clone(),
-        port: addr.port(),
+        bind: addr,
         passkeys: Some(passkeys),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
@@ -455,7 +455,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
     ));
     let door = doors::HttpDoor {
         anonymous: grants,
-        port: addr.port(),
+        bind: addr,
         passkeys: Some(passkeys),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
@@ -545,7 +545,7 @@ fn a_grant_naming_the_backup_tokens_is_refused() {
 fn the_http_door_takes_the_librarys_edge_bounds() {
     let config = doors::edge_config(doors::HttpDoor {
         anonymous: grants_for("default", Authority::Write).unwrap(),
-        port: 1060,
+        bind: "127.0.0.1:1060".parse().unwrap(),
         passkeys: None,
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     });

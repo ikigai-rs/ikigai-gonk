@@ -562,7 +562,10 @@ fn serve(flags: &config::Flags) -> ! {
         // `edge_config`) are computed from the same cookie by the same `HttpDoor`.
         let door = doors::HttpDoor {
             anonymous: http_grants,
-            port,
+            // The address actually bound: the configured IP, with the port the listener got
+            // (a config may ask for 0). Its IP is one of the names the door answers to
+            // (ledger #1045).
+            bind: std::net::SocketAddr::new(settings.http.ip(), port),
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: settings.anonymous_sparql_budget_ms,
         };

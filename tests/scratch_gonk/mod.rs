@@ -18,7 +18,7 @@
 //! not call is normal here rather than dead (the same reason `tests/common/mod.rs` gives).
 
 use std::fs::File;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -54,7 +54,17 @@ impl Gonk {
     /// A gonk with its QUIC door OFF: HTTP and the socket only, so nothing picks a port.
     /// `config` is the scratch home's whole `config.toml` (empty for the defaults).
     pub fn start(config: &str) -> Gonk {
-        Gonk::launch(config, false).unwrap_or_else(|launch| match launch {
+        Gonk::launch(config, false, None).unwrap_or_else(|launch| match launch {
+            Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
+        })
+    }
+
+    /// A gonk whose HTTP door binds where `config` says (`gonk.bind = "<ip>:0"`), not where
+    /// `--port 0` would put it: no port flag, so the config home's own key decides, and `ip`
+    /// is the address the test then dials (ledger
+    /// [#1045](http://localhost:1060/l/default/item/1045)). The QUIC door is off.
+    pub fn start_bound(config: &str, ip: IpAddr) -> Gonk {
+        Gonk::launch(config, false, Some(ip)).unwrap_or_else(|launch| match launch {
             Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
         })
     }
@@ -70,7 +80,7 @@ impl Gonk {
     pub fn with_quic(config: &str) -> Gonk {
         let mut taken = Vec::new();
         for _ in 0..5 {
-            match Gonk::launch(config, true) {
+            match Gonk::launch(config, true, None) {
                 Ok(gonk) => return gonk,
                 Err(Launch::PortTaken(why)) => taken.push(why),
                 Err(Launch::Failed(why)) => panic!("{why}"),
@@ -82,7 +92,7 @@ impl Gonk {
         )
     }
 
-    fn launch(config_toml: &str, with_quic: bool) -> Result<Gonk, Launch> {
+    fn launch(config_toml: &str, with_quic: bool, bound: Option<IpAddr>) -> Result<Gonk, Launch> {
         let home = tempfile::tempdir().unwrap();
         // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir does not.
         let short = tempfile::Builder::new()
@@ -126,9 +136,12 @@ impl Gonk {
             .arg(&data)
             .arg("--socket")
             .arg(&socket)
-            // ★ Port 0: the child binds whatever is free and the banner names it.
-            .args(["--port", "0"])
             .arg("--no-backup");
+        // ★ Port 0: the child binds whatever is free and the banner names it — by flag, unless
+        // the config's own `gonk.bind` is what is under test (a flag would override it).
+        if bound.is_none() {
+            command.args(["--port", "0"]);
+        }
         match quic {
             Some(addr) => command.args(["--quic-bind", &addr.to_string()]),
             None => command.arg("--no-quic"),
@@ -142,8 +155,8 @@ impl Gonk {
             .expect("spawn ikigai-gonk");
         let mut gonk = Gonk {
             child,
-            // Unknown until the banner says; nothing reads it before then.
-            http: "127.0.0.1:0".parse().unwrap(),
+            // The port is unknown until the banner says; nothing reads it before then.
+            http: SocketAddr::new(bound.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0),
             quic,
             socket,
             stderr,
@@ -178,7 +191,7 @@ impl Gonk {
             }
             if self.http.port() == 0 {
                 if let Some(port) = banner_port(&self.log()) {
-                    self.http = SocketAddr::from(([127, 0, 0, 1], port));
+                    self.http.set_port(port);
                 }
             }
             if self.http.port() != 0
