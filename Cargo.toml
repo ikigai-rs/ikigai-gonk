@@ -117,7 +117,16 @@ ikigai-vocab = "0.1.93"
 # door and by the evaluator in every build, and `LOAD` is refused, so a grant to the store is no
 # network egress. Nothing in gonk sends either (a SPARQL page or a socket caller that did now
 # gets a refusal naming it). Also: the SPARQL thread is sized for the build (ledger #1003).
-ikigai-store = { version = "0.2.10", features = ["persistent"] }
+# ★ 0.2.12 is the floor now (ledger #1127, store PR #32): a PERFORMANCE floor for this server's
+# reads. Through 0.2.11 every update committed on a freshly spawned thread, and RocksDB seeds a
+# memtable skiplist's node heights from a hash of the thread id, which a reused thread id
+# repeats, so the skiplists stopped growing upper levels and every read after a run of writes
+# walked a long top level until the memtable flushed: 2.8x to 13.9x slower in release, 3.3x to
+# 8.4x on the ledger's own `items` read. gonk is the process that writes the store, so it is the
+# one that degraded. 0.2.12 runs every update on ONE long-lived writer thread per store (writes
+# were already serialized by the store's write lock, so nothing new is serialized). 0.2.11 on
+# the way: consumer-worded SERVICE refusals exported as `ikigai_store::service`, additive.
+ikigai-store = { version = "0.2.12", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -329,7 +338,16 @@ ikigai-ledger = "0.6.2"
 # controls say what a click will cost (archived, or a live model call) and show a polite live
 # region while it runs; additive. 0.18.1 (ledger #818): a review answer's last finding is kept
 # when it cannot have been cut.
-ikigai-browse = "0.18.1"
+# ★ 0.18.2 (ledger #1126, browse PR #86) is a SECURITY floor: `.git` is never served. On 0.18.1
+# `list_entries` was a raw `read_dir` and the jail only kept a path inside its root, so an
+# ordinary browse read (and this server's HTTP door under a browsing grant) returned
+# `.git/config` byte for byte, credentialed remote URLs included, and the root tree offered
+# `.git` as a directory. Now any path with a `.git` component (ASCII case-insensitive, judged as
+# written and canonically, so an in-tree symlink into `.git` is refused too) is a NotFound under
+# every capability, the root's included, and the listing drops it.
+# `tests/browse.rs::git_metadata_is_absent_through_both_doors` is the FLOOR TEST: red on 0.18.1.
+# `^0.18.2` is `<0.19.0`. Patch: a narrowed read (it refuses paths that used to be served).
+ikigai-browse = "0.18.2"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
