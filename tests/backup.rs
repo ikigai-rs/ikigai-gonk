@@ -997,9 +997,15 @@ fn the_scheduled_backup_holds_a_budget_grant_and_completes_past_the_base() {
     let rotation = tempfile::tempdir().expect("tempdir");
     let store = DurableStore::in_memory()
         .expect("an in-memory store")
-        .with_time_budget(ikigai_store::budget::TimeBudget::new(
-            std::time::Duration::from_millis(1),
-        ));
+        .with_time_budget(
+            ikigai_store::budget::TimeBudget::new(std::time::Duration::from_millis(1))
+                // The refused run below goes on evaluating after its caller is answered (an
+                // `ORDER BY` does not check the cancellation token), and the store refuses new
+                // work while `max_overdue` runs are overdue — a quarter of the cores, which is
+                // ONE on a CI runner. So the cap is lifted here, or the second backup would be
+                // refused `Unavailable` for the first one's sake.
+                .with_max_overdue(64),
+        );
     let hub = hub_over(store, rotation.path());
     issue(
         &hub,
