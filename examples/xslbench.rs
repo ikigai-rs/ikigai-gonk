@@ -110,8 +110,7 @@ fn main() {
         .nth(2)
         .unwrap_or_else(|| "full".to_string());
     // warm the stylesheet compile cache
-    let _ = transform(&page(1, &container, &shape))
-        .expect("render");
+    let _ = transform(&page(1, &container, &shape)).expect("render");
     println!("shape: {shape}");
     println!(
         "{:>5} {:>8} {:>9} {:>9} {:>8} {:>8}",
