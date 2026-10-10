@@ -151,6 +151,8 @@ fn serve(flags: &config::Flags) -> ! {
             config_path.display()
         ))
     });
+    // Before the store is opened: a socket the kernel cannot bind stops the server here.
+    config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
     let http_grants = grants::grants_for_all(&settings.http_ledgers, Authority::Write)
         .unwrap_or_else(|e| fail(&e));
 

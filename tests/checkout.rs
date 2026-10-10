@@ -250,8 +250,8 @@ fn write_config_appends_once_backs_up_and_never_edits_another_line() {
     let first = ok(&world.run(&[&url, "--write-config"]));
     assert!(first.contains("added      gonk.browse.root"), "{first}");
     assert!(
-        first.contains("launchctl kickstart -k"),
-        "the restart: {first}"
+        first.contains("restart gonk to serve the new root(s)") && !first.contains("launchctl"),
+        "the restart, with no supervisor's command in it (ledger #1093): {first}"
     );
     let line = format!(
         "gonk.browse.root = \"demo={}\"",
