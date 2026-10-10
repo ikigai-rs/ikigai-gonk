@@ -135,10 +135,10 @@ usage:
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
-                                   with --ledger, --browse-graph or --browse enrol its
+                                   with --ledger, --browse-graph or --browse enroll its
                                    fingerprint under a grant. An existing client KEEPS its
                                    identity: --force replaces its grant, --rotate replaces its
-                                   key pair (or, with --cert, its certificate) and unenrols the
+                                   key pair (or, with --cert, its certificate) and unenrolls the
                                    old fingerprint. --port / --quic-bind name the server's, so
                                    the printed --connect line names the right port
   ikigai-gonk client list [--config PATH]
@@ -146,7 +146,7 @@ usage:
                                    fingerprint, its grant, and whether a connection from it is
                                    admitted
   ikigai-gonk client remove <name> | --fingerprint <fp> [--config PATH]
-                                   remove a client's bundle and its enrolment (or one enrolled
+                                   remove a client's bundle and its enrollment (or one enrolled
                                    fingerprint with no bundle). grants.json is left alone: a
                                    grant name may be shared. Effective at its next connection;
                                    its certificate stays TLS-trusted until a restart
@@ -155,7 +155,7 @@ usage:
                      [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
-                                   opens it enrols a passkey under that grant
+                                   opens it enrolls a passkey under that grant
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
   remove and add; --force writes it and prints the same list. A grant name is shared by every
@@ -998,7 +998,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
                 _ => {
                     return Err(
                         "client remove: expected <name> (a bundle) or --fingerprint <fp> (an \
-                         enrolment with no bundle), not both"
+                         enrollment with no bundle), not both"
                             .to_string(),
                     )
                 }

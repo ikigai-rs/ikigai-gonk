@@ -335,7 +335,7 @@ pub fn rotate_enrolment(layout: &Layout, old: &str, new: &str) -> Result<Option<
     let grant = entry
         .as_str()
         .or_else(|| entry.get("grant").and_then(Value::as_str))
-        .ok_or("the old certificate's enrolment names no grant")?
+        .ok_or("the old certificate's enrollment names no grant")?
         .to_string();
     if let Some(existing) = clients.get(&normalize(new)) {
         let current = existing
@@ -604,7 +604,7 @@ pub fn open_door(layout: &Layout, bind: QuicBind) -> Result<QuicDoor, String> {
                 clients_json.display()
             ),
             Some(_) => format!(
-                "{} enrols no client certificate (passkeys sign in on the HTTP door only)",
+                "{} enrolls no client certificate (passkeys sign in on the HTTP door only)",
                 clients_json.display()
             ),
         };
@@ -612,7 +612,7 @@ pub fn open_door(layout: &Layout, bind: QuicBind) -> Result<QuicDoor, String> {
         return if named {
             Err(format!(
                 "the QUIC door was asked for on udp {addr} (--quic-bind or gonk.quic.bind), but \
-                 {why} — enrol one with {add}, or remove the bind (or start with --no-quic)"
+                 {why} — enroll one with {add}, or remove the bind (or start with --no-quic)"
             ))
         } else {
             Ok(QuicDoor::Off(format!(
@@ -626,7 +626,7 @@ pub fn open_door(layout: &Layout, bind: QuicBind) -> Result<QuicDoor, String> {
         .collect();
     if trusted.is_empty() {
         return Err(format!(
-            "{} enrols a client certificate but none is trusted (no client.crt under {}) — add \
+            "{} enrolls a client certificate but none is trusted (no client.crt under {}) — add \
              one with `ikigai-gonk client add <name>`, or start with --no-quic",
             clients_json.display(),
             layout.clients_dir().display()
@@ -1009,7 +1009,7 @@ pub fn minter(layout: Layout) -> Minter {
         let decided = read_enrolment(&layout.clients_json())
             .and_then(|enrolment| {
                 enrolment.ok_or_else(|| {
-                    format!("no enrolment file at {}", layout.clients_json().display())
+                    format!("no enrollment file at {}", layout.clients_json().display())
                 })
             })
             .and_then(|enrolment| {
@@ -1032,7 +1032,7 @@ pub fn minter(layout: Layout) -> Minter {
                 eprintln!(
                     "ikigai-gonk: REFUSED a trusted client certificate — {why}\n  \
                      fingerprint: {}\n  \
-                     enrol it with `ikigai-gonk client add <its name> --ledger <ledger>=<authority>`",
+                     enroll it with `ikigai-gonk client add <its name> --ledger <ledger>=<authority>`",
                     peer.fingerprint
                 );
                 None
@@ -1493,7 +1493,7 @@ mod tests {
         .unwrap();
         let passkeys = off_reason(open_door(&layout, default));
         assert!(
-            passkeys.contains("enrols no client certificate"),
+            passkeys.contains("enrolls no client certificate"),
             "{passkeys}"
         );
         assert!(passkeys.contains("ikigai-gonk client add"), "{passkeys}");

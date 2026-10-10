@@ -93,7 +93,7 @@
     render:order       30 ;
     render:matchKind   "literal" ;
     render:matchPrefix "repo:" ;
-    render:label       "Open items labelled {value}" ;
+    render:label       "Open items labeled {value}" ;
     # ⚠ ONE interpolation point on purpose: the label lands inside the string literal and
     # nowhere else. A comment is a weaker container than a literal — do not write a
     # placeholder into a comment, here or in a rule of your own. (Keep the query's own

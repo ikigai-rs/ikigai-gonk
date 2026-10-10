@@ -76,7 +76,7 @@
             </header>
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>
-              <p>This link carries a one-time invite. Creating the passkey enrols it under the grant the invite names; after that, signing in with it gives this browser that grant.</p>
+              <p>This link carries a one-time invite. Creating the passkey enrolls it under the grant the invite names; after that, signing in with it gives this browser that grant.</p>
               <form id="enrol-form" class="row">
                 <label for="enrol-label">Label</label>
                 <input id="enrol-label" name="label" type="text" autocomplete="off" placeholder="e.g. laptop Touch ID"/>

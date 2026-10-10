@@ -2655,7 +2655,7 @@ impl Endpoint for PasskeyDoor {
             .title("Passkey sign-in")
             .summary(
                 "The WebAuthn ceremonies and the session they open. `register-options` and \
-                 `login-options` mint a single-use challenge; `register` enrols a credential \
+                 `login-options` mint a single-use challenge; `register` enrolls a credential \
                  against a one-time invite; `login` verifies an assertion and opens a session \
                  whose capability is its grant in gonk/grants.json; `session` and `logout` take \
                  the session token as the body. Public by design — this is how a caller with no \
