@@ -73,8 +73,9 @@
 //!   library's `authority::holds` (ikigai-script 0.3.0). There is no "publish anything" grant
 //!   below root: `urn:cap:script:{act}:*` grants nothing.
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -126,9 +127,123 @@ pub const CEILING: [&str; 2] = [
     "urn:cap:store:read:graph:urn:iki:ledger:graph:*",
 ];
 
-/// [`CEILING`] as the library's type.
+/// [`CEILING`] as the library's type: the two families and no member.
 pub fn ceiling() -> Ceiling {
     Ceiling::scoped(CEILING)
+}
+
+/// [`CEILING`] plus the EXACT read members for each of `ledgers`:
+/// `urn:cap:ledger:read:{L}` and `urn:cap:store:read:graph:urn:iki:ledger:graph:{L}` (ledger
+/// [#1220](http://localhost:1060/l/default/item/1220)). A name that is not a ledger is skipped.
+///
+/// ```
+/// use ikigai_gonk::script::ceiling_over;
+/// let ceiling = ceiling_over(["default", "library", "Not A Ledger"]);
+/// assert!(ceiling.allows("urn:cap:ledger:read:library"));
+/// assert!(ceiling.allows("urn:cap:store:read:graph:urn:iki:ledger:graph:library"));
+/// // The families stay, so a non-root runner's exact grants are admitted as before.
+/// assert!(ceiling.allows("urn:cap:ledger:read:elsewhere"));
+/// // Still the ledgers' reads, and nothing else.
+/// assert!(!ceiling.allows("urn:cap:ledger:write:library"));
+/// assert!(!ceiling.allows("urn:cap:ledger:claim:library"));
+/// assert!(!ceiling.allows("urn:cap:store:write:graph:urn:iki:ledger:graph:library"));
+/// assert!(!ceiling.allows("urn:cap:store:read:graph:urn:iki:browse:graph:default"));
+/// assert!(!ceiling.allows("urn:cap:store:read"));
+/// assert!(!ceiling.allows("urn:cap:lisp"));
+/// ```
+///
+/// # Why the members, when the families already admit them
+///
+/// For a runner holding exact grants nothing changes: `ikigai-script` keeps each of the runner's
+/// own exact scopes the ceiling admits, and the families admit them. ROOT holds no exact grant,
+/// and a plan step's contract declares only a family (`urn:iki:ledger:next` declares
+/// `urn:cap:ledger:read:*` and `urn:cap:store:read:graph:*`; the member, `default` or `library`,
+/// is not in its IRI). So for a root run the library keeps what the ceiling NAMES under each
+/// declared family, and with only families named it kept no store scope at all: the owner's
+/// own plan over `next` was refused, `capability does not grant urn:cap:store:read:graph:*`.
+/// Naming the members gives a root run exactly the ledgers' reads, and still nothing else. The
+/// long-term fix is a core `requires` templated from the grammar's bindings (ledger #1197).
+pub fn ceiling_over<'a>(ledgers: impl IntoIterator<Item = &'a str>) -> Ceiling {
+    let mut scopes: Vec<String> = CEILING.iter().map(|s| s.to_string()).collect();
+    for name in ledgers {
+        let Ok(ledger) = ikigai_ledger::Ledger::parse(name) else {
+            continue;
+        };
+        scopes.push(ledger.cap_read());
+        scopes.push(ikigai_store::cap_read_graph(&ledger.graph()));
+    }
+    Ceiling::scoped(scopes)
+}
+
+/// The ledgers this server holds, as last read from the store: what [`ceiling_over`] names
+/// members for. Shared between the ceiling policy (synchronous, asked on every run) and the run
+/// guard, which refreshes it before a ROOT run ([`KnownLedgers::refresh`]); a run below root
+/// does not need the members and does not pay for the read.
+#[derive(Clone, Default)]
+pub struct KnownLedgers(Arc<RwLock<BTreeSet<String>>>);
+
+impl KnownLedgers {
+    /// The ceiling over the ledgers known now.
+    pub fn ceiling(&self) -> Ceiling {
+        let known = self
+            .0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ceiling_over(known.iter().map(String::as_str))
+    }
+
+    /// The names known now.
+    pub fn names(&self) -> BTreeSet<String> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Read the ledgers out of the store's graph list (`urn:iki:store:graphs`, as `inv`'s
+    /// caller) and replace the known set. A ledger exists once something is filed in it, and
+    /// there is no create or delete event to hang a refresh on, so the list is read where it
+    /// is needed: before a root run. The answer is the hub's cached one until a store write cuts
+    /// it, so a repeat costs a cache hit.
+    ///
+    /// ⚠ A failed read keeps the last known set rather than failing the run: the run then meets
+    /// the library's own refusal, which names the scope it lacked.
+    pub async fn refresh(&self, inv: &Invocation<'_>) {
+        let Ok(graphs) = Iri::parse("urn:iki:store:graphs") else {
+            return;
+        };
+        let Ok(answer) = inv.issue(Request::new(Verb::Source, graphs)).await else {
+            return;
+        };
+        let names = ledgers_in(&String::from_utf8_lossy(&answer.bytes));
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = names;
+    }
+}
+
+/// The ledger names in a newline-separated list of graph IRIs: each
+/// `urn:iki:ledger:graph:{name}` whose `{name}` is a ledger. A graveyard
+/// (`…:{name}:deleted`) and every other graph are skipped.
+///
+/// ```
+/// use ikigai_gonk::script::ledgers_in;
+/// let names = ledgers_in(
+///     "urn:iki:browse:graph:default\n\
+///      urn:iki:ledger:graph:default\n\
+///      urn:iki:ledger:graph:default:deleted\n\
+///      urn:iki:ledger:graph:library\n",
+/// );
+/// assert_eq!(names.into_iter().collect::<Vec<_>>(), ["default", "library"]);
+/// ```
+pub fn ledgers_in(graphs: &str) -> BTreeSet<String> {
+    graphs
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(crate::grants::LEDGER_GRAPH_PREFIX))
+        .filter(|name| !name.contains(':') && ikigai_ledger::Ledger::parse(name).is_ok())
+        .map(str::to_string)
+        .collect()
 }
 
 /// What the ANONYMOUS HTTP caller holds of the script family: run and read a script its
@@ -263,7 +378,11 @@ impl Scripts {
     fn over(backend: Arc<dyn Backend>, runs: AnonymousRuns) -> Scripts {
         let hub: Arc<OnceLock<Weak<Kernel>>> = Arc::new(OnceLock::new());
         let cell = Arc::clone(&hub);
-        let config = SpaceConfig::new(backend, authority::same_for_all(ceiling()))
+        // ★ The ceiling names the exact members of the ledgers this server holds (ledger
+        // #1220, [`ceiling_over`]); the guard refreshes the set before a root run.
+        let known = KnownLedgers::default();
+        let policy = known.clone();
+        let config = SpaceConfig::new(backend, Arc::new(move |_name: &str| policy.ceiling()))
             .sparql(SparqlDoor::store())
             // ★ A published query or plan is its OWN catalog entry, with its parameters as
             // arguments; the kernel caches descriptions under `urn:kernel:bindings`, which only
@@ -282,11 +401,13 @@ impl Scripts {
                 inner: library,
                 rule: Rule::Publish,
                 runs: runs.clone(),
+                known: known.clone(),
             }),
             plans: Arc::new(Guarded {
                 inner: Arc::new(ikigai_engine::plan_space::space()),
                 rule: Rule::PlanEval,
                 runs,
+                known,
             }),
             shacl: Arc::new(ikigai_shacl::space()),
             hub,
@@ -328,17 +449,20 @@ struct Guarded {
     inner: Arc<dyn Space>,
     rule: Rule,
     runs: AnonymousRuns,
+    known: KnownLedgers,
 }
 
 impl Space for Guarded {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         let rule = self.rule;
         let runs = self.runs.clone();
+        let known = self.known.clone();
         self.inner.resolve(request, scope).map_endpoint(|endpoint| {
             Arc::new(Guard {
                 inner: endpoint,
                 rule,
                 runs,
+                known,
             }) as Arc<dyn Endpoint>
         })
     }
@@ -360,6 +484,7 @@ struct Guard {
     inner: Arc<dyn Endpoint>,
     rule: Rule,
     runs: AnonymousRuns,
+    known: KnownLedgers,
 }
 
 impl Guard {
@@ -383,6 +508,15 @@ impl Endpoint for Guard {
         };
         if let Some(error) = refusal {
             return Err(error);
+        }
+        // ★ A ROOT run of a script (the owner's socket) runs under exactly what the ceiling
+        // names, so the ceiling must name the ledgers held NOW (ledger #1220): one filed since
+        // the last run is otherwise missing from it.
+        if self.rule == Rule::Publish
+            && inv.capability.is_root()
+            && is_run(inv.request.target.as_str())
+        {
+            self.known.refresh(inv).await;
         }
         // ★ An ANONYMOUS run (ledgers #1175, #1210): the caller's capability carries the HTTP
         // door's budget marker. A script run's own capability is attenuated and drops it, and a
