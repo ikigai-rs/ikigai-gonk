@@ -12,7 +12,7 @@ $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
-  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts only; a QUIC client drafts, a person publishes
+  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts only, 30 a minute, each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
@@ -275,7 +275,7 @@ ledger #878 the door refuses a raw store write to a ledger graph — see
 
 **A write that names no author is attributed by the door** (R4 option (b), 2026-10-08). On the
 HTTP door the form adapter fills `author` from a signed-in session's passkey; on the QUIC door
-every write that names none is filled with the client's `urn:iki:gonk:client:<fingerprint>`,
+every write that names none is filled with the client's `urn:iki:host:gonk:client:<fingerprint>`,
 wherever the target declares `author`. An author given explicitly is kept when it is plain
 text or the request's own principal, and refused when it names another principal.
 
@@ -415,6 +415,11 @@ store's `/iki/store/…` doors, the editor page's protocol face and its results 
   cannot narrow the capability the door computes, so it can neither forge the mark nor drop it.
   A signed-in caller gets the store's base. The socket is the owner (root). QUIC callers are
   authenticated by certificate and get their grant's budget.
+- **And inside an anonymous SCRIPT RUN** (ledger #1175): a run evaluates the script's query in a
+  sub-request under the run's attenuated capability, which no longer carries the marker, so the
+  run's wrapper (`crate::script`) carries the budget on the task and the store's overlay in the
+  hub stamps every evaluation made within the run. See
+  [Scripts](#scripts-saved-queries-and-plans-ledger-939).
 - **The stamp OVERWRITES.** A caller's own `budget=` is kept only when it is an inline whole number
   no larger than the door's, so it can lower the budget and nothing else. A larger, zero, malformed
   or by-reference value is replaced. (`ikigai-sparql` reads a by-reference `budget=` as no budget
@@ -1531,7 +1536,8 @@ changes). An enrolment left behind by the old behavior shows in `client list` as
 `enrolled, NO bundle`; remove it by fingerprint.
 
 **Every QUIC request is attributed.** The server names each connection's client
-`urn:iki:gonk:client:<fingerprint>` (`client add` prints it) and mints that name into the
+`urn:iki:host:gonk:client:<fingerprint>` (`client add` prints it; the fingerprint is the
+lowercase hex SHA-256 of the certificate's DER) and mints that name into the
 session's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077). The access
 log writes it as the `principal` of every QUIC request, reads included; a write that names no
 `author` is attributed to it; and a write may name it as its `author`, and no other principal
@@ -1543,6 +1549,15 @@ intersection dropped it: every such request logged `principal=-` and its writes 
 author, ledger #879. From 0.1.41 to core 0.1.93 it rode beside the capability, as an argument
 `ikigai-quic` still stamps.) One cost: a principal is part of the cache key at every depth, so
 two clients reading one resource under one grant do not share a cached answer.
+
+**The name follows every host's convention, `urn:iki:host:{name}:client:<fingerprint>`**
+(ledger #1183, 2026-10-10), with this host's name, `gonk`. Before that, gonk minted
+`urn:iki:gonk:client:<fingerprint>`, and that spelling is a **permanent alias**: never minted
+again, never rewritten where it is stored (ledger authors, the access log, `ikigai-log`
+segments, whose hash chain a rewrite would break), and always recognized. An `author` in
+either spelling is principal-shaped, so a client may name ITSELF either way and can name no
+other machine in either; the item page shows both spellings of one fingerprint as one actor,
+in the current form. Enrollment is unchanged: `clients.json` is keyed by fingerprint.
 
 What admission means today: a client holding a trusted certificate and an enrolment is
 admitted until it is removed (`client remove`, or its entry deleted from `clients.json`),
@@ -1930,7 +1945,7 @@ query's dataset must follow.
   drafts only root sees.
 - **The record names the door's principal.** `urn:script:{name}:run:{id}` (`as=application/json`
   or `text/turtle`, PROV-O) carries the passkey's IRI, the certificate's
-  `urn:iki:gonk:client:<fingerprint>`, or `unstamped` from the socket.
+  `urn:iki:host:gonk:client:<fingerprint>`, or `unstamped` from the socket.
 
 ### The ceiling: the ledgers' reads, and nothing else
 
@@ -1964,16 +1979,25 @@ could make one at a time.
 - **A result is cached in the hub**, under the store's write threads (and the script's own,
   which a republish cuts), so the same public read from a thousand callers is computed once.
   Measured in process: a cold `open-by-label:result` in about 1.2 ms, the next in about 30 µs.
-  A public run uses the store's base time budget rather than the anonymous door's: the caller
-  supplies parameter values, never text.
+- **An anonymous run is bounded in time and in rate** (ledger #1175). Every SPARQL evaluation
+  it makes takes the anonymous door's budget (`gonk.http.anonymous_sparql_budget_ms`, 1 s by
+  default), as the anonymous caller's own SPARQL does; a signed-in run gets the store's 5 s base.
+  The marker the door puts on an anonymous capability does not survive into the run (its
+  capability is attenuated to what the script derives), so gonk's wrapper around the run carries
+  the budget on the task, and the store's overlay stamps every evaluation made within it, a plan
+  script's ledger reads included. And anonymous runs, all of them together, are limited to **30
+  a minute** (`script::ANONYMOUS_RUNS`, an `ikigai-throttle` `RateLimit`), refused past it with
+  the time to retry; an answer from the hub's cache is not counted, and reading a script's source
+  is not a run. Before this, an anonymous run's query took the store's base and could be sent
+  without limit.
 - **The atoms are plain files** in `~/.ikigai/scripts` (`gonk.script.dir`), the library's
   `DirBackend`: one directory per script, a compare-and-set head, digest-checked versions, a
   file per run. Not in the RDF store, because the records ARE authority (a version stores what
   its publisher held) and a store graph is reachable by the per-graph grants this server mints.
-  ⚠ **So a backup does not hold the scripts**: copy the directory beside it.
+  So the backup takes them separately, beside the store's archive, and restores and verifies
+  them on their own ([Backup and restore](#backup-and-restore), ledger #1175).
 - **Not built:** triggers (ledger #937), a script as an endpoint, a stepper, signed elevation,
-  ledger writes from a script (above), rate limiting of anonymous runs, and the backup of the
-  scripts directory.
+  and ledger writes from a script (above).
 
 ## Natural language: a query drafted from a sentence (ledger #1138)
 
@@ -2106,7 +2130,7 @@ draft carries where it came from into the version a person publishes.
 | --- | --- | --- |
 | **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 | **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule here, the raw-write rule below; no `Host`/cross-site checks and no author rules |
-| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:gonk:client:<fingerprint>` |
+| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:host:gonk:client:<fingerprint>` |
 
 **Anonymously, the HTTP door is loopback only and grants little.** It can list, file,
 comment, close, claim, label and link in its ledgers, and run and read a script its publisher
@@ -2427,9 +2451,15 @@ row is written), so the list also carries `urn:cap:store:answer:10000000` and
 grant raises rows and nothing else, so the job needs both. ⚠ The byte ceiling is about nine times
 today's answer, so it is the first bound a growing dataset will reach.
 
-⚠ **A backup is the DATASET, and the scripts are not in it** (ledger #939): they are plain files
-in `~/.ikigai/scripts` (`gonk.script.dir`). Copy that directory beside a backup until the backup
-family takes it.
+**A backup holds the scripts too** (ledger #1175). They are not in the dataset: they are plain
+files in `~/.ikigai/scripts` (`gonk.script.dir`, ledger #939). So every backup writes two archives
+under one stamp, `gonk-store-<stamp>.nq.gz` and `gonk-scripts-<stamp>.json.gz` (every file of the
+scripts layout, `<name>/head.json`, `<name>/versions/<sha256>.json` and `<name>/runs/<id>.json`, as
+one JSON document, paths sorted so an unchanged directory gives identical bytes), and ONE sidecar
+recording both (`scripts_archive`, `scripts_names`, `scripts_files` and the digests). The status
+names it, `urn:iki:gonk:backup:archive:{name}` reads either archive out, and the rotation prunes
+them together. A directory that cannot be read fails the backup before anything is written. A
+backup taken before this holds the dataset alone, and the status says so.
 
 ### The format is N-Quads, and the easy mistake is Turtle
 
@@ -2475,6 +2505,23 @@ when nothing is writing.
 and per-graph counts against the archive it was built from and fails if they differ. A backup
 you have not restored is not a backup, so `tests/backup.rs` restores one on every run.
 
+The scripts archive has its own restore and verifier, `urn:iki:gonk:restore:scripts`, under the
+same `urn:cap:gonk:restore`:
+
+```
+ikigai --connect ~/.ikigai/gonk.sock -c \
+  'source urn:iki:gonk:backup:archive:gonk-scripts-2026-10-10T120000Z.json.gz \
+   | sink urn:iki:gonk:restore:scripts into=/tmp/restored-scripts'
+```
+
+It checks every path against the layout before it writes anything (a `..`, an absolute path or
+a file that is no script's is refused), writes the files into a NEW directory (never the live
+one, never one that holds something), and then reads every one back through `ikigai-script`'s own
+`DirBackend`: each head, every version it or its history names, every version file against the
+digest it is named by, every run. An edited version, or a head naming a version the archive does
+not hold, does not verify. `tests/script_backup_1175.rs` restores one on every run and runs a
+script from the copy.
+
 ### The two most dangerous grants in the system
 
 A backup reads **every** graph, which is precisely the authority the per-graph boundary
@@ -2485,7 +2532,7 @@ its own door, not a flag on the public one:
 | token | what it is | who can hold it |
 | --- | --- | --- |
 | `urn:cap:gonk:backup` | take a backup, read the status, read an archive | the socket door's root capability, and nothing else |
-| `urn:cap:gonk:restore` | build a store from an archive | the same |
+| `urn:cap:gonk:restore` | build a store from an archive, or a scripts directory from a scripts archive | the same |
 | `urn:cap:store:read` | every graph (declared by `urn:iki:gonk:backup`, because it really reads them) | the same |
 
 `gonk/grants.json` is **refused at startup, and on every use,** if it names any of them, exactly as it is for
@@ -3165,8 +3212,9 @@ the HTTP status**, which `ikigai-web` decides after the kernel returns and does 
 back. An HTTP request's `principal` is the signed-in passkey the door minted into its
 capability, on reads as well as writes (ledger #1077); an anonymous read is `-`, and a
 `?principal=` a reader types is never written as one (ledger #864, R6). A QUIC line names the client the connection authenticated,
-`urn:iki:gonk:client:<fingerprint>` (ledger #816), on every verb and whatever capability the
-client carries (ledger #879). A refusal the door kernel makes before dispatch (a capability
+`urn:iki:host:gonk:client:<fingerprint>` (ledger #816, #1183), on every verb and whatever
+capability the client carries (ledger #879); a line written before 2026-10-10 says
+`urn:iki:gonk:client:<fingerprint>`, and stays as written. A refusal the door kernel makes before dispatch (a capability
 floor, a name nothing binds) writes no line. ⚠ Nor, since ledger #879, does a foreign `Host` or
 a cross-site write, or (ledger #880) a GET another page loads: those are refused at the EDGE,
 before the kernel and so before this log —
@@ -3190,7 +3238,8 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
 
 - a `grants.json` grant naming a door's marker (`urn:iki:gonk:door:*`: a refusal, or the
   other-page label of ledger #880) or a
-  QUIC client's name (`urn:iki:gonk:client:*`) — both are computed by a door, never granted;
+  QUIC client's name (`urn:iki:host:gonk:client:*`, or the old `urn:iki:gonk:client:*`) —
+  both are computed by a door, never granted;
 - an ARMED reviewer (`gonk.review.arm = true`) whose net grant names a host other than the
   one `gonk.mount` dials — `urn:cap:net:localhost` for a `quic://127.0.0.1:…` peer is the
   usual case. Write `urn:cap:net:<the mount's host>` (the refusal prints the stanza).
@@ -3212,7 +3261,7 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
   read half of the caller's grant, so a link to an explanation from another page answers
   `403` and says why; open it from gonk's own page or type the address;
 - a write whose `author` names another principal (`urn:iki:gonk:passkey:*`,
-  `urn:iki:gonk:client:*`), on every route.
+  `urn:iki:host:gonk:client:*`, or the old `urn:iki:gonk:client:*`), on every route.
 
 **Moved**
 

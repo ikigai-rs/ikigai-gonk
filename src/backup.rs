@@ -77,6 +77,20 @@
 //! complete store directory beside the live one; swapping them is an operator's act, with
 //! the server stopped, which is the one moment when the destructive step is visible.
 //!
+//! # The scripts are in the backup too (ledger [#1175](http://localhost:1060/l/default/item/1175))
+//!
+//! `urn:script:*`'s atoms are not in the dataset: they are plain files in the scripts directory
+//! (`gonk.script.dir`, `~/.ikigai/scripts`, [`crate::script::Scripts::open`] says why). So each
+//! backup takes TWO archives under one stamp — `gonk-store-<stamp>.nq.gz` and
+//! `gonk-scripts-<stamp>.json.gz`, every file of that directory's layout (`<name>/head.json`,
+//! `<name>/versions/<sha256>.json`, `<name>/runs/<id>.json`) as one JSON document — and one
+//! sidecar describing both. They rotate, are read out and are pruned together.
+//! [`RESTORE_SCRIPTS`] is that archive's restore AND its verifier, as [`RESTORE`] is the store's:
+//! it writes the files into a NEW directory and then reads every one back through
+//! `ikigai-script`'s own `DirBackend`, which checks each version against the digest it is named
+//! by — so a snapshot whose head points at a version it does not hold, or whose bytes were
+//! altered, does not verify.
+//!
 //! # ★ The schedule is untrustworthy without [`STATUS`]
 //!
 //! gonk sits inside the accepted heartbeat-coverage gap, and a scheduled job that HANGS
@@ -133,6 +147,10 @@ pub const ARCHIVE: &str = "urn:iki:gonk:backup:archive:{name}";
 
 /// Load an archive into a new store: `Sink urn:iki:gonk:restore into=<dir>`.
 pub const RESTORE: &str = "urn:iki:gonk:restore";
+
+/// Write a scripts archive into a new directory, and verify it:
+/// `Sink urn:iki:gonk:restore:scripts into=<dir>`.
+pub const RESTORE_SCRIPTS: &str = "urn:iki:gonk:restore:scripts";
 
 /// Every scope the scheduled backup job fires under — and nothing else.
 ///
@@ -220,6 +238,14 @@ pub const ARCHIVE_SUFFIX: &str = ".nq.gz";
 /// The sidecar suffix, carrying one archive's counts and digests.
 pub const META_SUFFIX: &str = ".meta.json";
 
+/// The scripts archive's name: `gonk-scripts-<stamp>.json.gz`, the stamp of the store archive
+/// it was taken with.
+pub const SCRIPTS_PREFIX: &str = "gonk-scripts-";
+/// The scripts archive's suffix: one JSON document, gzipped.
+pub const SCRIPTS_SUFFIX: &str = ".json.gz";
+/// What a scripts archive's document says it is, under `format`.
+pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
+
 /// The ceiling handed to `urn:decompress:gzip` on a restore: 4 GiB of N-Quads, which is
 /// above the module's own 1 GiB ceiling and therefore means "the module's maximum".
 ///
@@ -240,6 +266,10 @@ pub struct Settings {
     pub every: Option<Duration>,
     /// The live store's directory, so a restore can refuse to be pointed at it.
     pub store_path: PathBuf,
+    /// The live scripts directory (`gonk.script.dir`), snapshotted with every backup and the
+    /// directory [`RESTORE_SCRIPTS`] refuses to write into; `None` for a server that binds no
+    /// script family (its backups hold the dataset alone).
+    pub scripts: Option<PathBuf>,
 }
 
 /// What the backup family is composed against: the settings, and the timer whose health
@@ -255,7 +285,8 @@ pub struct Backups {
     pub next: NextRun,
 }
 
-/// The backup family's space: [`BACKUP`], [`STATUS`], [`ARCHIVE`] and [`RESTORE`].
+/// The backup family's space: [`BACKUP`], [`STATUS`], [`ARCHIVE`], [`RESTORE`] and
+/// [`RESTORE_SCRIPTS`].
 pub fn space(backups: Backups) -> EndpointSpace {
     EndpointSpace::new()
         .bind(
@@ -276,7 +307,13 @@ pub fn space(backups: Backups) -> EndpointSpace {
                 backups: backups.clone(),
             },
         )
-        .bind(Exact::new(RESTORE), Restore { backups })
+        .bind(
+            Exact::new(RESTORE),
+            Restore {
+                backups: backups.clone(),
+            },
+        )
+        .bind(Exact::new(RESTORE_SCRIPTS), RestoreScripts { backups })
         .named(crate::spaces::iri(crate::spaces::BACKUP))
 }
 
@@ -705,13 +742,13 @@ fn archive_path(dir: &Path, name: &str) -> Result<PathBuf> {
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
-        || !name.ends_with(ARCHIVE_SUFFIX);
+        || !(name.ends_with(ARCHIVE_SUFFIX) || name.ends_with(SCRIPTS_SUFFIX));
     if bad {
         return Err(Error::InvalidArgument {
             name: "name".to_string(),
             detail: format!(
                 "`{name}` is not an archive in this server's backup directory — a bare file \
-                 name ending `{ARCHIVE_SUFFIX}`, as `{STATUS}` lists them"
+                 name ending `{ARCHIVE_SUFFIX}` or `{SCRIPTS_SUFFIX}`, as `{STATUS}` lists them"
             ),
         });
     }
@@ -759,6 +796,12 @@ impl Endpoint for TakeBackup {
 impl TakeBackup {
     async fn take(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let settings = &self.backups.settings;
+        // The scripts FIRST: a directory that cannot be read fails the backup before anything
+        // is written, rather than leaving a store archive whose sidecar says nothing of them.
+        let scripts = match &settings.scripts {
+            Some(dir) => Some(snapshot_scripts(dir)?),
+            None => None,
+        };
         let dump = dump(inv).await?;
         let quads = dump.quads();
         let nquads_digest = digest(&dump.nquads);
@@ -774,6 +817,17 @@ impl TakeBackup {
             )
             .await?;
         let archive_digest = digest(&archive.bytes);
+        let scripts_archive = match &scripts {
+            Some(snapshot) => Some(
+                inv.issue(
+                    Request::new(Verb::Source, iri("urn:compress:gzip")?)
+                        .with_arg("content", ArgRef::Inline(snapshot.json.clone())),
+                )
+                .await?
+                .bytes,
+            ),
+            None => None,
+        };
 
         // Re-count the store AFTER the dump. A SELECT is one snapshot, so this cannot
         // "fix" a torn dump — it is evidence about whether the dataset was moving while
@@ -787,6 +841,7 @@ impl TakeBackup {
             .ok_or_else(|| Error::Endpoint("no clock: a backup must be able to say when".into()))?;
         let stamp = stamp_compact(now);
         let name = format!("gonk-store-{stamp}{ARCHIVE_SUFFIX}");
+        let scripts_name = format!("{SCRIPTS_PREFIX}{stamp}{SCRIPTS_SUFFIX}");
         create_private_dir(&settings.dir)
             .map_err(|e| Error::Endpoint(format!("creating {}: {e}", settings.dir.display())))?;
 
@@ -801,6 +856,18 @@ impl TakeBackup {
             archive_bytes: archive.bytes.len(),
             archive_sha256: &archive_digest,
             store_quads_after_dump: after,
+            scripts: match (&scripts, &scripts_archive) {
+                (Some(snapshot), Some(archive)) => Some(ScriptsMeta {
+                    archive: &scripts_name,
+                    names: snapshot.names,
+                    files: snapshot.files,
+                    json_bytes: snapshot.json.len(),
+                    json_sha256: digest(&snapshot.json),
+                    archive_bytes: archive.len(),
+                    archive_sha256: digest(archive),
+                }),
+                _ => None,
+            },
         });
 
         // Write the archive first and the sidecar second, each through a temporary name.
@@ -808,6 +875,9 @@ impl TakeBackup {
         // as exactly that; the reverse order would leave a sidecar describing a file that
         // does not exist, which reads as a good backup.
         write_atomic(&settings.dir.join(&name), &archive.bytes)?;
+        if let Some(archive) = &scripts_archive {
+            write_atomic(&settings.dir.join(&scripts_name), archive)?;
+        }
         write_atomic(
             &settings.dir.join(format!("{name}{META_SUFFIX}")),
             meta.as_bytes(),
@@ -838,6 +908,15 @@ impl TakeBackup {
         }
         report.push_str(&format!("  sha256 (n-quads) {nquads_digest}\n"));
         report.push_str(&format!("  sha256 (archive) {archive_digest}\n"));
+        match (&scripts, &scripts_archive) {
+            (Some(snapshot), Some(archive)) => report.push_str(&format!(
+                "  scripts {scripts_name}: {} script(s), {} file(s), {} bytes gzipped\n",
+                snapshot.names,
+                snapshot.files,
+                archive.len()
+            )),
+            _ => report.push_str("  scripts: none bound on this server\n"),
+        }
         if after != quads {
             report.push_str(&format!(
                 "  ⚠ the store held {after} quads after the dump, not {quads} — the dataset \
@@ -914,6 +993,9 @@ fn prune(dir: &Path, keep: usize, taken: &str) -> Vec<String> {
         // The sidecar goes FIRST. A sidecar left behind describes a file that is not there,
         // which is the one state that reads like a backup and is not.
         let _ = std::fs::remove_file(dir.join(format!("{}{META_SUFFIX}", archive.name)));
+        if let Some(scripts) = scripts_archive_for(&archive.name) {
+            let _ = std::fs::remove_file(dir.join(scripts));
+        }
         if std::fs::remove_file(dir.join(&archive.name)).is_ok() {
             gone.push(archive.name.clone());
         }
@@ -1071,6 +1153,17 @@ impl Status {
                             }
                         }
                         out.push_str(&format!("    graphs         {}\n", graph_line(meta)));
+                        match field(meta, "scripts_archive") {
+                            Some(scripts) => out.push_str(&format!(
+                                "    scripts        {scripts}: {} script(s), {} file(s)\n",
+                                field(meta, "scripts_names").unwrap_or_default(),
+                                field(meta, "scripts_files").unwrap_or_default()
+                            )),
+                            None => out.push_str(
+                                "    scripts        not in this backup (no script family bound, \
+                                 or taken before ledger #1175)\n",
+                            ),
+                        }
                     }
                 }
             }
@@ -1537,6 +1630,433 @@ fn blank_graphs_by_shape(counts: BTreeMap<String, u64>) -> BTreeMap<String, u64>
     named
 }
 
+// ---------------------------------------------------------------- the scripts
+
+/// The scripts archive taken with the store archive `store_archive`, by name, or `None` for a
+/// name that is not one of this server's store archives.
+///
+/// ```
+/// use ikigai_gonk::backup::scripts_archive_for;
+/// assert_eq!(
+///     scripts_archive_for("gonk-store-2026-10-10T120000Z.nq.gz").as_deref(),
+///     Some("gonk-scripts-2026-10-10T120000Z.json.gz")
+/// );
+/// assert_eq!(scripts_archive_for("export.nq.gz"), None);
+/// ```
+pub fn scripts_archive_for(store_archive: &str) -> Option<String> {
+    let stamp = store_archive
+        .strip_prefix("gonk-store-")?
+        .strip_suffix(ARCHIVE_SUFFIX)?;
+    Some(format!("{SCRIPTS_PREFIX}{stamp}{SCRIPTS_SUFFIX}"))
+}
+
+/// One file of `ikigai-script`'s `DirBackend` layout, by its place in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScriptFile {
+    /// `<name>/head.json`.
+    Head,
+    /// `<name>/versions/<64 hex>.json`: the version `sha256:<hex>`.
+    Version(String),
+    /// `<name>/runs/<id>.json`.
+    Run(u64),
+}
+
+/// Where `path` (relative, `/`-separated) sits in the scripts layout, or `None` for anything
+/// else — a temporary (`*.json.tmp`), an editor's backup, a name that is no script's, a `..`.
+///
+/// ★ This is the ONLY gate between a caller's archive and the file system on a restore: every
+/// path a snapshot holds must be one of the three shapes, each segment checked, so no path can
+/// name a file outside `<into>/<script name>/`.
+///
+/// ```
+/// use ikigai_gonk::backup::is_script_file;
+/// let hex = "a".repeat(64);
+/// assert!(is_script_file("triage/head.json"));
+/// assert!(is_script_file(&format!("triage/versions/{hex}.json")));
+/// assert!(is_script_file("triage/runs/12.json"));
+/// assert!(!is_script_file("triage/head.json.tmp"));
+/// assert!(!is_script_file("../triage/head.json"));
+/// assert!(!is_script_file("Triage/head.json"));
+/// assert!(!is_script_file("triage/runs/012.json"));
+/// assert!(!is_script_file("triage/versions/abc.json"));
+/// assert!(!is_script_file("/etc/passwd"));
+/// ```
+pub fn is_script_file(path: &str) -> bool {
+    script_file(path).is_some()
+}
+
+fn script_file(path: &str) -> Option<(String, ScriptFile)> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let name = parts.first()?;
+    ikigai_script::name::validate(name).ok()?;
+    let file = match parts.as_slice() {
+        [_, "head.json"] => ScriptFile::Head,
+        [_, "versions", file] => {
+            let hex = file.strip_suffix(".json")?;
+            let ok = hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            if !ok {
+                return None;
+            }
+            ScriptFile::Version(hex.to_string())
+        }
+        [_, "runs", file] => {
+            let stem = file.strip_suffix(".json")?;
+            let id: u64 = stem.parse().ok()?;
+            if id.to_string() != stem {
+                return None;
+            }
+            ScriptFile::Run(id)
+        }
+        _ => return None,
+    };
+    Some((name.to_string(), file))
+}
+
+/// The scripts directory as one JSON document, with what it holds.
+struct ScriptsSnapshot {
+    json: Vec<u8>,
+    /// Scripts with a head.
+    names: usize,
+    /// Files in the document.
+    files: usize,
+}
+
+/// Every file of the scripts layout under `dir`, as `{"format": …, "files": {path: text}}`,
+/// paths sorted, so an unchanged directory gives identical bytes and the digest says so.
+///
+/// Per script the head is read BEFORE its versions: `ikigai-script` writes a version before it
+/// points a head at it, and never deletes one, so every version a head read here names is on
+/// disk by the time the versions are listed. Every write there is a rename, so a file is read
+/// whole or not at all. A file outside the layout (a temporary, an editor's backup) is left
+/// out; a file inside it that cannot be read fails the backup by name.
+fn snapshot_scripts(dir: &Path) -> Result<ScriptsSnapshot> {
+    let failed = |path: &Path, e: std::io::Error| {
+        Error::Endpoint(format!(
+            "backing up the scripts: reading {}: {e}",
+            path.display()
+        ))
+    };
+    let mut files: BTreeMap<String, String> = BTreeMap::new();
+    let mut names = 0;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // Never created: no script was ever published. An empty snapshot says exactly that.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ScriptsSnapshot {
+                json: scripts_document(&files),
+                names: 0,
+                files: 0,
+            })
+        }
+        Err(e) => return Err(failed(dir, e)),
+    };
+    let mut scripts: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| ikigai_script::name::validate(name).is_ok())
+        .collect();
+    scripts.sort();
+    for name in scripts {
+        let head = dir.join(&name).join("head.json");
+        match std::fs::read_to_string(&head) {
+            Ok(text) => {
+                files.insert(format!("{name}/head.json"), text);
+                names += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed(&head, e)),
+        }
+        for sub in ["versions", "runs"] {
+            let place = dir.join(&name).join(sub);
+            let listed = match std::fs::read_dir(&place) {
+                Ok(listed) => listed,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(failed(&place, e)),
+            };
+            for entry in listed.flatten() {
+                let Some(file) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                let relative = format!("{name}/{sub}/{file}");
+                if !is_script_file(&relative) {
+                    continue;
+                }
+                let text =
+                    std::fs::read_to_string(entry.path()).map_err(|e| failed(&entry.path(), e))?;
+                files.insert(relative, text);
+            }
+        }
+    }
+    Ok(ScriptsSnapshot {
+        json: scripts_document(&files),
+        names,
+        files: files.len(),
+    })
+}
+
+fn scripts_document(files: &BTreeMap<String, String>) -> Vec<u8> {
+    let mut document = serde_json::Map::new();
+    document.insert("format".to_string(), SCRIPTS_FORMAT.into());
+    document.insert(
+        "files".to_string(),
+        serde_json::Value::Object(
+            files
+                .iter()
+                .map(|(path, text)| (path.clone(), serde_json::Value::from(text.as_str())))
+                .collect(),
+        ),
+    );
+    let mut json = serde_json::to_vec(&serde_json::Value::Object(document))
+        .expect("a map of strings serializes");
+    json.push(b'\n');
+    json
+}
+
+/// A scripts archive's document, read back: every path checked against the layout.
+fn parse_scripts(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
+    let bad = |detail: String| Error::InvalidArgument {
+        name: "content".to_string(),
+        detail,
+    };
+    let document: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| bad(format!("not a scripts archive (not JSON): {e}")))?;
+    if document["format"].as_str() != Some(SCRIPTS_FORMAT) {
+        return Err(bad(format!(
+            "not a scripts archive: `format` is not \"{SCRIPTS_FORMAT}\" (a store archive \
+             restores at {RESTORE})"
+        )));
+    }
+    let listed = document["files"]
+        .as_object()
+        .ok_or_else(|| bad("a scripts archive's `files` must be an object".to_string()))?;
+    let mut files = BTreeMap::new();
+    for (path, text) in listed {
+        if !is_script_file(path) {
+            return Err(bad(format!(
+                "`{path}` is not a file of the scripts layout (`<name>/head.json`, \
+                 `<name>/versions/<sha256>.json`, `<name>/runs/<id>.json`); nothing was written"
+            )));
+        }
+        let text = text
+            .as_str()
+            .ok_or_else(|| bad(format!("`{path}` is not text")))?;
+        files.insert(path.clone(), text.to_string());
+    }
+    Ok(files)
+}
+
+struct RestoreScripts {
+    backups: Backups,
+}
+
+#[async_trait]
+impl Endpoint for RestoreScripts {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        match inv.request.verb {
+            Verb::Sink => self.restore(inv).await,
+            other => Err(unsupported("gonk-restore-scripts", other)),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "gonk-restore-scripts"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-restore-scripts")
+            .title("Write a scripts archive into a NEW directory, and verify it")
+            .summary(
+                "Expands the piped scripts archive (gzip or plain JSON), checks every path \
+                 against the scripts layout, writes the files into `into`, and then reads every \
+                 script back through ikigai-script's own DirBackend: each head, every version \
+                 it or its history names, every version file (checked against the digest it \
+                 is named by) and every run. `into` must not exist or must be empty, and may \
+                 not be the live scripts directory. Swapping it into place is an operator's \
+                 act with this server stopped.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_RESTORE)
+            .input(
+                ArgSpec::new("content")
+                    .summary("the scripts archive: gzip or plain JSON; filled from the pipe")
+                    .class(XSD_STRING),
+            )
+            .input(
+                ArgSpec::new("into")
+                    .summary(
+                        "the NEW scripts directory to build — absent or empty, never the live one",
+                    )
+                    .class(XSD_STRING),
+            )
+            .output("text/plain")
+    }
+}
+
+impl RestoreScripts {
+    async fn restore(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        use ikigai_script::Backend as _;
+        let into = PathBuf::from(inv.inline_str("into")?);
+        self.check_target(&into)?;
+        let content = inv.inline_arg("content")?;
+        let json = if content.starts_with(&[0x1f, 0x8b]) {
+            inv.issue(
+                Request::new(Verb::Source, iri("urn:decompress:gzip")?)
+                    .with_arg("content", ArgRef::Inline(content.to_vec()))
+                    .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec()))
+                    .with_arg(
+                        "max-bytes",
+                        ArgRef::Inline(RESTORE_MAX_BYTES.to_string().into_bytes()),
+                    ),
+            )
+            .await?
+            .bytes
+        } else {
+            content.to_vec()
+        };
+        // Every path is checked before the first byte is written.
+        let files = parse_scripts(&json)?;
+        for (path, text) in &files {
+            let target = into.join(path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| Error::Endpoint(format!("creating {}: {e}", parent.display())))?;
+            }
+            std::fs::write(&target, text)
+                .map_err(|e| Error::Endpoint(format!("writing {}: {e}", target.display())))?;
+        }
+
+        // ★ The verification reads through the library, not through what this function wrote:
+        // a head the library cannot parse, a version whose bytes do not match its digest, a
+        // head naming a version the archive does not hold all fail here, by name.
+        let backend = ikigai_script::DirBackend::open(&into)
+            .map_err(|e| Error::Endpoint(format!("opening {}: {e}", into.display())))?;
+        let mut expected: BTreeMap<String, Vec<ScriptFile>> = BTreeMap::new();
+        for path in files.keys() {
+            if let Some((name, file)) = script_file(path) {
+                expected.entry(name).or_default().push(file);
+            }
+        }
+        let with_heads: Vec<&String> = expected
+            .iter()
+            .filter(|(_, held)| held.contains(&ScriptFile::Head))
+            .map(|(name, _)| name)
+            .collect();
+        let listed = backend.names()?;
+        if listed.iter().collect::<Vec<_>>() != with_heads {
+            return Err(Error::Endpoint(format!(
+                "the restored directory lists the scripts {listed:?}, the archive holds heads \
+                 for {with_heads:?}"
+            )));
+        }
+        let (mut versions, mut runs) = (0, 0);
+        let mut problems: Vec<String> = Vec::new();
+        for (name, held) in &expected {
+            if held.contains(&ScriptFile::Head) {
+                match backend.head(name) {
+                    Ok(Some(head)) => {
+                        let named = std::iter::once(head.version.clone())
+                            .chain(head.history.iter().map(|event| event.version.clone()));
+                        for digest in named {
+                            match backend.version(name, &digest) {
+                                Ok(Some(_)) => {}
+                                Ok(None) => problems.push(format!(
+                                    "{name}: its head names {digest}, which the archive does not hold"
+                                )),
+                                Err(e) => problems.push(format!("{name}: {digest}: {e}")),
+                            }
+                        }
+                    }
+                    Ok(None) => problems.push(format!("{name}: the head did not restore")),
+                    Err(e) => problems.push(format!("{name}: {e}")),
+                }
+            }
+            for file in held {
+                match file {
+                    ScriptFile::Head => {}
+                    ScriptFile::Version(hex) => {
+                        match backend.version(name, &format!("sha256:{hex}")) {
+                            Ok(Some(_)) => versions += 1,
+                            Ok(None) => problems.push(format!("{name}: version {hex} is missing")),
+                            Err(e) => problems.push(format!("{name}: version {hex}: {e}")),
+                        }
+                    }
+                    ScriptFile::Run(id) => match backend.run(name, *id) {
+                        Ok(Some(_)) => runs += 1,
+                        Ok(None) => problems.push(format!("{name}: run {id} is missing")),
+                        Err(e) => problems.push(format!("{name}: run {id}: {e}")),
+                    },
+                }
+            }
+        }
+        if !problems.is_empty() {
+            return Err(Error::Endpoint(format!(
+                "the restored scripts do not verify:\n  {}\n  (the files are in {}; nothing \
+                 live was touched)",
+                problems.join("\n  "),
+                into.display()
+            )));
+        }
+        Ok(plain(format!(
+            "restored {} script(s) into {} (sha256 {})\n  {} file(s): {} head(s), {versions} \
+             version(s), {runs} run(s), every one read back through the script library\n  this \
+             server still holds the LIVE scripts directory; to adopt this one, stop gonk and \
+             swap the directories\n",
+            with_heads.len(),
+            into.display(),
+            digest(content),
+            files.len(),
+            with_heads.len(),
+        )))
+    }
+
+    /// `into` is not the live scripts directory, and is not a directory that holds something.
+    fn check_target(&self, into: &Path) -> Result<()> {
+        if let Some(live) = &self.backups.settings.scripts {
+            let same = into == live
+                || match (std::fs::canonicalize(into), std::fs::canonicalize(live)) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => false,
+                };
+            if same {
+                return Err(Error::InvalidArgument {
+                    name: "into".to_string(),
+                    detail: format!(
+                        "{} is the LIVE scripts directory this server holds. Restore into a new \
+                         directory and swap it in with the server stopped.",
+                        live.display()
+                    ),
+                });
+            }
+        }
+        if into.is_dir() {
+            let empty = std::fs::read_dir(into)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if !empty {
+                return Err(Error::InvalidArgument {
+                    name: "into".to_string(),
+                    detail: format!(
+                        "{} is not empty. A restore into a directory that holds scripts would \
+                         mix two histories; name a directory that does not exist yet.",
+                        into.display()
+                    ),
+                });
+            }
+        } else if into.exists() {
+            return Err(Error::InvalidArgument {
+                name: "into".to_string(),
+                detail: format!("{} exists and is not a directory", into.display()),
+            });
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------- odds and ends
 
 /// How a graph name reads in a report.
@@ -1597,6 +2117,18 @@ struct MetaFields<'a> {
     archive_bytes: usize,
     archive_sha256: &'a str,
     store_quads_after_dump: u64,
+    scripts: Option<ScriptsMeta<'a>>,
+}
+
+/// What a sidecar records of the scripts archive taken with the store's.
+struct ScriptsMeta<'a> {
+    archive: &'a str,
+    names: usize,
+    files: usize,
+    json_bytes: usize,
+    json_sha256: String,
+    archive_bytes: usize,
+    archive_sha256: String,
 }
 
 fn meta_json(fields: &MetaFields<'_>) -> String {
@@ -1605,10 +2137,26 @@ fn meta_json(fields: &MetaFields<'_>) -> String {
         .iter()
         .map(|(graph, count)| format!("{}:{count}", quote(graph)))
         .collect();
+    // Flat keys, after the store's, so `field` reads each one by name.
+    let scripts = match &fields.scripts {
+        Some(scripts) => format!(
+            ",\"scripts_archive\":{},\"scripts_names\":{},\"scripts_files\":{},\
+             \"scripts_json_bytes\":{},\"scripts_json_sha256\":{},\
+             \"scripts_archive_bytes\":{},\"scripts_archive_sha256\":{}",
+            quote(scripts.archive),
+            scripts.names,
+            scripts.files,
+            scripts.json_bytes,
+            quote(&scripts.json_sha256),
+            scripts.archive_bytes,
+            quote(&scripts.archive_sha256),
+        ),
+        None => String::new(),
+    };
     format!(
         "{{\"archive\":{},\"taken_at\":{},\"taken_at_ms\":{},\"quads\":{},\
          \"graphs\":{{{}}},\"nquads_bytes\":{},\"nquads_sha256\":{},\
-         \"archive_bytes\":{},\"archive_sha256\":{},\"store_quads_after_dump\":{}}}\n",
+         \"archive_bytes\":{},\"archive_sha256\":{},\"store_quads_after_dump\":{}{}}}\n",
         quote(fields.archive),
         quote(fields.taken_at),
         fields.taken_at_ms,
@@ -1619,6 +2167,7 @@ fn meta_json(fields: &MetaFields<'_>) -> String {
         fields.archive_bytes,
         quote(fields.archive_sha256),
         fields.store_quads_after_dump,
+        scripts,
     )
 }
 
@@ -1957,6 +2506,15 @@ mod tests {
             archive_bytes: 91_234,
             archive_sha256: "def",
             store_quads_after_dump: 2850,
+            scripts: Some(ScriptsMeta {
+                archive: "gonk-scripts-2026-09-16T172813Z.json.gz",
+                names: 3,
+                files: 11,
+                json_bytes: 4_096,
+                json_sha256: "fed".to_string(),
+                archive_bytes: 1_024,
+                archive_sha256: "cba".to_string(),
+            }),
         });
         assert_eq!(field(&json, "quads").as_deref(), Some("2850"));
         assert_eq!(
@@ -1966,6 +2524,21 @@ mod tests {
         assert_eq!(field(&json, "nquads_sha256").as_deref(), Some("abc"));
         assert_eq!(field(&json, "archive_bytes").as_deref(), Some("91234"));
         assert!(graph_line(&json).contains("urn:iki:ledger:graph:default"));
+        // The scripts' keys sit after the store's and never shadow them.
+        assert_eq!(
+            field(&json, "archive").as_deref(),
+            Some("gonk-store-2026-09-16T172813Z.nq.gz")
+        );
+        assert_eq!(
+            field(&json, "scripts_archive").as_deref(),
+            Some("gonk-scripts-2026-09-16T172813Z.json.gz")
+        );
+        assert_eq!(field(&json, "scripts_files").as_deref(), Some("11"));
+        assert_eq!(
+            field(&json, "scripts_archive_bytes").as_deref(),
+            Some("1024")
+        );
+        serde_json::from_str::<serde_json::Value>(&json).expect("a sidecar is JSON");
     }
 
     /// A ledger body carries newlines, quotation marks and trailing periods; a JSON writer
@@ -2095,6 +2668,7 @@ mod tests {
                     keep: 5,
                     every: Some(Duration::from_secs(86_400)),
                     store_path: PathBuf::from("/nonexistent/store"),
+                    scripts: None,
                 }),
                 jobs: None,
                 next: Default::default(),
@@ -2115,6 +2689,7 @@ mod tests {
                     keep: 5,
                     every: None,
                     store_path: PathBuf::from("/nonexistent/store"),
+                    scripts: None,
                 }),
                 jobs: None,
                 next: Default::default(),

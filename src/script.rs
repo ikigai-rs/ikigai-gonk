@@ -80,6 +80,7 @@ use ikigai_core::{
 use ikigai_script::authority::{self, Ceiling};
 use ikigai_script::sparql::{Form, SparqlDoor};
 use ikigai_script::{Backend, DirBackend, MemoryBackend, SpaceConfig};
+use ikigai_throttle::{Rate, RateLimit};
 
 /// The scripts directory's name under the data home: `~/.ikigai/scripts`, gonk's alone (the
 /// library's `DirBackend` takes one host process per directory).
@@ -129,12 +130,58 @@ pub fn ceiling() -> Ceiling {
 /// private script.
 ///
 /// A public run is cheap to repeat by construction: a query's `…:result` is cached under the
-/// store's write threads, so a flood of the same read is answered from the hub's cache. It runs
-/// under the store's base time budget, not the anonymous door's smaller one
-/// ([`crate::budget`]): the run's capability is attenuated to what the script derives, which
-/// drops the door's marker, and the caller supplies parameter VALUES, never text — the text is
-/// the publisher's.
+/// store's write threads, so a flood of the same read is answered from the hub's cache. What is
+/// NOT cached — new argument values, a run for effects — is bounded twice (ledger
+/// [#1175](http://localhost:1060/l/default/item/1175)):
+///
+/// - **in time**: every SPARQL evaluation of an anonymous run takes the anonymous door's budget
+///   (`gonk.http.anonymous_sparql_budget_ms`, 1 s by default), not the store's 5 s base.
+///   The run's capability is attenuated to what the script derives, which drops the door's
+///   marker, so the budget rides on the TASK instead ([`crate::budget::within_run`]);
+/// - **in rate**: anonymous runs share [`ANONYMOUS_RUNS`], an `ikigai-throttle` `RateLimit`.
 pub const ANONYMOUS: [&str; 2] = [authority::CAP_RUN_PUBLIC, authority::CAP_READ_PUBLIC];
+
+/// How often ANONYMOUS callers may run scripts, all of them together: **30 runs a minute**
+/// (ledger [#1175](http://localhost:1060/l/default/item/1175)). Past it a run is refused,
+/// naming the limit and when to retry, until the oldest run in the window ages out.
+///
+/// One window for every anonymous caller, because the door cannot tell them apart: the HTTP
+/// door is loopback-only and an anonymous request carries no identity. A signed-in person, a
+/// QUIC client and the owner's socket are not limited by it, and neither is reading a script's
+/// source or its catalog, which runs nothing.
+///
+/// Why 30 a minute: each run may hold a core for up to the anonymous budget (1 s by default),
+/// so the limit keeps anonymous runs to about half a core on average whatever is sent, while a
+/// person clicking through public scripts in a browser never meets it. A run answered from the
+/// hub's cache is never counted: the limit is consulted when the run's endpoint is entered,
+/// which a cached answer skips.
+pub const ANONYMOUS_RUNS: Rate = Rate {
+    max: 30,
+    window: std::time::Duration::from_secs(60),
+};
+
+/// Whether `target` RUNS a script: `urn:script:{name}:result` or `urn:script:{name}:runs`.
+///
+/// By the IRI and not by the endpoint's id, because a published script is its own catalog
+/// entry: its run answers as `script-{name}-result`, a name the library mints per script.
+/// A script name is one segment with no `:` (`ikigai_script::name::validate`), so the part
+/// after the first `:` is the whole suffix.
+///
+/// ```
+/// use ikigai_gonk::script::is_run;
+/// assert!(is_run("urn:script:open-by-label:result"));
+/// assert!(is_run("urn:script:triage:runs"));
+/// assert!(!is_run("urn:script:triage"));
+/// assert!(!is_run("urn:script:triage:compiled"));
+/// assert!(!is_run("urn:script:triage:run:7"));
+/// assert!(!is_run("urn:script:catalog"));
+/// ```
+pub fn is_run(target: &str) -> bool {
+    target
+        .strip_prefix(ikigai_script::name::PREFIX)
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(_, part)| part == "result" || part == "runs")
+}
 
 /// The script family, composed: the library's space behind gonk's publish rule, the plan doors
 /// behind the plan rule, and the validator the plan doors compose. Built once in `main` (and in
@@ -171,8 +218,10 @@ impl Scripts {
     ///   `DirBackend` is the backend it tests: compare-and-set heads, digest-checked versions,
     ///   a broken head failing that script alone.
     ///
-    /// ⚠ The cost, stated: **a backup does not hold the scripts** — it is the dataset's
-    /// N-Quads. Copy the directory with the backup until the backup family takes it.
+    /// The cost, and how it is paid: a store backup is the dataset's N-Quads, so it cannot hold
+    /// these files. The backup family snapshots this directory beside every store archive, under
+    /// the same stamp, and restores and verifies it on its own (`crate::backup`, ledger
+    /// [#1175](http://localhost:1060/l/default/item/1175)).
     ///
     /// # Errors
     ///
@@ -202,14 +251,22 @@ impl Scripts {
                     hub.cut(BINDINGS_THREAD);
                 }
             }));
+        let library: Arc<dyn Space> = Arc::new(ikigai_script::space(config));
+        // ★ Consulted for ANONYMOUS runs only, from inside the run's endpoint, where the
+        // caller's capability is known: a space overlay resolves before any capability exists.
+        let anonymous = Arc::new(
+            RateLimit::new(Arc::clone(&library)).limit(ikigai_script::name::PREFIX, ANONYMOUS_RUNS),
+        );
         Scripts {
             scripts: Arc::new(Guarded {
-                inner: Arc::new(ikigai_script::space(config)),
+                inner: library,
                 rule: Rule::Publish,
+                anonymous: Some(anonymous),
             }),
             plans: Arc::new(Guarded {
                 inner: Arc::new(ikigai_engine::plan_space::space()),
                 rule: Rule::PlanEval,
+                anonymous: None,
             }),
             shacl: Arc::new(ikigai_shacl::space()),
             hub,
@@ -244,20 +301,27 @@ pub enum Rule {
     PlanEval,
 }
 
+/// The [`ANONYMOUS_RUNS`] limiter over the script family.
+type AnonymousRuns = Arc<RateLimit<Arc<dyn Space>>>;
+
 /// A space whose endpoints answer gonk's [`Rule`] before they run — an overlay with no
-/// identity or structure of its own, like [`crate::admit::Admitting`].
+/// identity or structure of its own, like [`crate::admit::Admitting`] — and, on the script
+/// family, hold an anonymous run to the door's budget and [`ANONYMOUS_RUNS`].
 struct Guarded {
     inner: Arc<dyn Space>,
     rule: Rule,
+    anonymous: Option<AnonymousRuns>,
 }
 
 impl Space for Guarded {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         let rule = self.rule;
+        let anonymous = self.anonymous.clone();
         self.inner.resolve(request, scope).map_endpoint(|endpoint| {
             Arc::new(Guard {
                 inner: endpoint,
                 rule,
+                anonymous,
             }) as Arc<dyn Endpoint>
         })
     }
@@ -278,6 +342,7 @@ impl Space for Guarded {
 struct Guard {
     inner: Arc<dyn Endpoint>,
     rule: Rule,
+    anonymous: Option<AnonymousRuns>,
 }
 
 #[async_trait]
@@ -289,6 +354,23 @@ impl Endpoint for Guard {
         };
         if let Some(error) = refusal {
             return Err(error);
+        }
+        // ★ An ANONYMOUS run (ledger #1175): the caller's capability carries the HTTP door's
+        // budget marker, which the run's own attenuated capability will not. The limiter is
+        // consulted here, once per run that is not answered from the cache, and its answer is
+        // the endpoint to run: this one, or its over-the-rate stand-in, which refuses. The run
+        // then goes on inside the door's budget, which the store's overlay stamps on every
+        // evaluation it makes.
+        if let (Some(anonymous), Some(door_ms)) =
+            (&self.anonymous, crate::budget::door_budget(inv.capability))
+        {
+            if is_run(inv.request.target.as_str()) {
+                let endpoint = match anonymous.resolve(inv.request, &Scope::empty()) {
+                    Resolution::Hit(hit) => hit.endpoint,
+                    _ => Arc::clone(&self.inner),
+                };
+                return crate::budget::within_run(door_ms, endpoint.invoke(inv)).await;
+            }
         }
         self.inner.invoke(inv).await
     }

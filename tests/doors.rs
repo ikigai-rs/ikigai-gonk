@@ -432,6 +432,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
                 keep: 5,
                 every: Some(Duration::from_secs(86_400)),
                 store_path: backups.path().join("nonexistent-store"),
+                scripts: None,
             }),
             jobs: None,
             next: Default::default(),
@@ -480,6 +481,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         ("GET", "/iki/gonk/backup/status"),
         ("GET", "/iki/gonk/backup/archive/anything.nq.gz"),
         ("POST", "/iki/gonk/restore"),
+        ("POST", "/iki/gonk/restore/scripts"),
         // The posture the ledger recorded, re-checked with the family bound.
         ("GET", "/iki/store/info"),
     ] {
