@@ -81,6 +81,12 @@ pub(crate) const HTML: &str = "text/html";
 /// itself: `offset=` pages by ITEM, and its JSON face carries `total`, a COUNT query over the
 /// same filter. So the page draws `limit` rows from `offset`, states the ledger's total, and
 /// a set of any size is reachable a page at a time.
+///
+/// ★ Since ikigai-ledger 0.9.0 the total is its OWN resource, `urn:iki:ledger:{L}:count`
+/// (ledger #1128, #1198): the same filter and the same COUNT, and nothing else. Reading it
+/// through `items limit=1` as JSON also paid for that face's corpus check, two scans of the
+/// whole graph for an `unreadable` list this page never reads: seven store queries for one
+/// number on a cold render, where `count` runs one (`tests/ledger_count_1198.rs`).
 const TOTAL_FACE: &str = "application/json";
 
 /// The listing shell's slot for its rows — see [`render::chunk`].
@@ -834,19 +840,17 @@ async fn ledger_listing(
     }
     let wanted = rows::rows_wanted(limit)?;
     let offset = rows::offset_wanted(offset)?;
-    let filtered = |face: &str, limit: usize| -> Result<Request> {
+    // `count` and `items` take the same filter, so the number is the listing's for the same
+    // arguments; only the listing takes a page (`limit`, `offset`).
+    let filtered = |name: &str, face: &str| -> Result<Request> {
         let mut read = with(
             with(
-                with(
-                    request(Verb::Source, &format!("{}items", ledger.prefix()))?,
-                    "as",
-                    face,
-                ),
-                "status",
-                status,
+                request(Verb::Source, &format!("{}{name}", ledger.prefix()))?,
+                "as",
+                face,
             ),
-            "limit",
-            &limit.to_string(),
+            "status",
+            status,
         );
         if let Some(text) = text {
             read = with(read, "text", text);
@@ -854,10 +858,7 @@ async fn ledger_listing(
         Ok(read)
     };
     // The total first: an offset past it is refused before anything is drawn.
-    // ★ THE SEAM for ikigai-ledger 0.9.0 (ledger #1128, #1198): `urn:iki:ledger:count` answers
-    // this number as its own resource without the listing's corpus check. Moving to it is this
-    // one read (and `ledger_total`'s parse) after the pin moves; nothing else here counts.
-    let total = ledger_total(&fetch(inv, filtered(TOTAL_FACE, 1)?).await?)?;
+    let total = ledger_total(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
     if offset > 0 && offset >= total {
         return Err(Error::InvalidArgument {
             name: "offset".to_string(),
@@ -869,7 +870,11 @@ async fn ledger_listing(
         });
     }
     let rows_read = with(
-        filtered("text/turtle", wanted)?,
+        with(
+            filtered("items", "text/turtle")?,
+            "limit",
+            &wanted.to_string(),
+        ),
         "offset",
         &offset.to_string(),
     );
@@ -1050,20 +1055,13 @@ impl Count {
     }
 }
 
-/// The `total` of a ledger's JSON listing face: how many items its filter matches, counted by
-/// the ledger (ikigai-ledger 0.6.1+). A face without one is an error, never a guess.
+/// The `total` of a ledger's `count` JSON face (`ikigai_ledger::json::CountDocument`): how
+/// many items its filter matches, counted by the ledger. A face without one is an error, never
+/// a guess.
 fn ledger_total(json: &[u8]) -> Result<usize> {
-    let doc: Value = serde_json::from_slice(json)
-        .map_err(|e| Error::Endpoint(format!("the ledger's JSON listing: {e}")))?;
-    doc.get("total")
-        .and_then(Value::as_u64)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or_else(|| {
-            Error::Endpoint(
-                "the ledger's JSON listing carries no `total` (ikigai-ledger 0.6.1+ does)"
-                    .to_string(),
-            )
-        })
+    serde_json::from_slice::<ikigai_ledger::json::CountDocument>(json)
+        .map(|doc| doc.total)
+        .map_err(|e| Error::Endpoint(format!("the ledger's count: {e}")))
 }
 
 /// Percent-encode a query-string VALUE. Nothing here builds a URL from anything but a
@@ -2952,10 +2950,10 @@ mod tests {
             "showing 2301–2400 of 2400 open items, most recently updated first"
         );
         assert_eq!(
-            ledger_total(br#"{"total": 2400, "count": 1}"#).unwrap(),
+            ledger_total(br#"{"schema": 1, "ledger": "default", "total": 2400}"#).unwrap(),
             2400
         );
-        assert!(ledger_total(br#"{"count": 1}"#).is_err());
+        assert!(ledger_total(br#"{"schema": 1, "ledger": "default"}"#).is_err());
     }
 
     #[test]

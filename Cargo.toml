@@ -164,10 +164,14 @@ ikigai-store = { version = "0.2.14", features = ["persistent"] }
 # comments, and makes a release a compare-and-set with `from=`. 0.8.0 adds the hand-back state
 # (`comment handback=true`, `next` skips an item awaiting its dispatcher) and records a claim's
 # PRINCIPAL beside its free-text holder, so a client principal the QUIC door mints owns its claim
-# and another worker holding the same lines cannot release it. ⚠ `"0.8.0"` is `<0.9.0`, and
-# 0.9.0's `count` is the ledger page's next move (`crate::web`'s listing reads `total` off
-# `items` today): a lock bump and that one read, not this one.
-ikigai-ledger = "0.8.0"
+# and another worker holding the same lines cannot release it.
+# ★ 0.9.0 is the floor now (ledger #1128, #1198), and an API one: `urn:iki:ledger:{L}:count`,
+# the filter's total as its own resource. The ledger page reads it (`crate::web`'s listing)
+# instead of `items limit=1` as JSON, whose face always ran the corpus check: a cold render's
+# total went from seven store queries to one (`tests/ledger_count_1198.rs`). It declares the
+# same read row `items` does, so every grant that reads a ledger, the worker's included, may
+# count it. `"0.9.0"` is `<0.10.0`: a ceiling too.
+ikigai-ledger = "0.9.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the

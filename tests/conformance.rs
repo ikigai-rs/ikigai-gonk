@@ -52,11 +52,12 @@ const STORE_IDS: [&str; 13] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 21] = [
+const LEDGER_IDS: [&str; 22] = [
     "ledger-append",
     "ledger-claim",
     "ledger-close",
     "ledger-comment",
+    "ledger-count",
     "ledger-defer",
     "ledger-doctor",
     "ledger-item",
@@ -348,7 +349,7 @@ fn the_hub_conforms() {
 
 /// The reads whose representations are cacheable — cached by the HUB. The chunk renderer
 /// is one: a pure function of its document, keyed by the content-addressed request.
-const CACHED_READS: [&str; 16] = [
+const CACHED_READS: [&str; 17] = [
     "ledger-ledgers",
     "ledger-lifecycle",
     "ledger-doctor",
@@ -358,6 +359,7 @@ const CACHED_READS: [&str; 16] = [
     "ledger-item-closed",
     "ledger-policy",
     "ledger-items",
+    "ledger-count",
     "ledger-item",
     "ledger-next",
     "gonk-render",
