@@ -63,7 +63,7 @@ fn person() -> Capability {
 /// A hub as `main` composes it: the backup family rotating into `backups`, the scripts in a
 /// `DirBackend` at `scripts`, which the backup snapshots.
 fn server(backups: &Path, scripts: &Path, keep: usize) -> (Arc<Kernel>, Scripts) {
-    let family = Scripts::open(scripts).expect("the scripts directory");
+    let family = Scripts::open(scripts, Default::default()).expect("the scripts directory");
     let hub = Arc::new(compose_with(
         DurableStore::in_memory().expect("an in-memory store"),
         None,

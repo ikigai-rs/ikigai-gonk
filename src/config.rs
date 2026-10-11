@@ -36,6 +36,8 @@
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
 //! # gonk.script.dir = "~/.ikigai/scripts"   # where the scripts live (this IS the default)
+//! # gonk.script.anonymous_runs_per_minute = 30   # anonymous runs, all together (this IS the
+//!                                       # default; 0 for none): scripts, plans, draft dry runs
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
 //! # one access line per request on stderr (this IS the default; `false` for none)
@@ -95,7 +97,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 30] = [
+const KEYS: [&str; 31] = [
     "gonk.log.access",
     "gonk.queue.serious",
     "gonk.bind",
@@ -119,6 +121,7 @@ const KEYS: [&str; 30] = [
     "gonk.backup.every",
     "gonk.backup.keep",
     "gonk.script.dir",
+    "gonk.script.anonymous_runs_per_minute",
     "gonk.nl.ask",
     "gonk.review.space",
     "gonk.review.grant",
@@ -518,6 +521,11 @@ pub struct Settings {
     /// Where the scripts live (`gonk.script.dir`, default [`crate::script::DIR_NAME`] under the
     /// data home): one directory of plain files, this server's alone — see [`crate::script`].
     pub script_dir: PathBuf,
+    /// How many runs a minute ANONYMOUS callers get, all of them together
+    /// (`gonk.script.anonymous_runs_per_minute`, default
+    /// [`crate::budget::DEFAULT_ANONYMOUS_RUNS_PER_MINUTE`]; `0` for none): a script's run, an
+    /// ad hoc plan and a draft's dry run count alike — see [`crate::budget::AnonymousRuns`].
+    pub anonymous_runs_per_minute: u32,
     /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
     /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
     pub nl_ask: String,
@@ -1340,6 +1348,9 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         script_dir: value_for(text, "gonk.script.dir")
             .map(|spelled| expand_home(&spelled, &homes.home))
             .unwrap_or_else(|| homes.data.join(crate::script::DIR_NAME)),
+        anonymous_runs_per_minute: crate::budget::anonymous_runs_per_minute(
+            value_for(text, "gonk.script.anonymous_runs_per_minute").as_deref(),
+        )?,
         nl_ask: nl_ask(text)?,
     })
 }
@@ -1908,6 +1919,26 @@ mod tests {
             let refused =
                 budget(&format!("gonk.http.anonymous_sparql_budget_ms = {bad}")).unwrap_err();
             assert!(refused.contains("from 1 to 5000"), "{bad}: {refused}");
+        }
+    }
+
+    /// Ledger #1210: the anonymous run rate defaults to 30 a minute, takes any whole number
+    /// (0 for none), and refuses anything else rather than reading it as the default.
+    #[test]
+    fn the_anonymous_run_rate_defaults_to_thirty_and_is_a_whole_number() {
+        let rate = |text: &str| {
+            settings(&Flags::default(), text, &homes()).map(|s| s.anonymous_runs_per_minute)
+        };
+        assert_eq!(rate(""), Ok(30));
+        assert_eq!(rate("gonk.script.anonymous_runs_per_minute = 5"), Ok(5));
+        assert_eq!(rate("gonk.script.anonymous_runs_per_minute = \"0\""), Ok(0));
+        for bad in ["-1", "1.5", "30/min", "\"many\""] {
+            let refused =
+                rate(&format!("gonk.script.anonymous_runs_per_minute = {bad}")).unwrap_err();
+            assert!(
+                refused.contains("whole number of runs a minute"),
+                "{bad}: {refused}"
+            );
         }
     }
 

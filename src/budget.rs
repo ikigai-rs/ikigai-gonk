@@ -64,7 +64,15 @@
 //! on every route. ⚠ The base binds gonk's own ledger reads under an anonymous caller's
 //! capability too; they are far smaller than the whole graph, but they grow with it.
 
-use ikigai_core::{ArgRef, Capability, Request};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ikigai_core::{
+    ArgRef, Bindings, Capability, Endpoint, Error, Invocation, Iri, Representation, Request,
+    Resolution, Resolved, Scope, Space, Verb,
+};
+use ikigai_throttle::{Rate, RateLimit};
 
 /// What an anonymous caller's SPARQL evaluation may take, unless `gonk.http.anonymous_sparql_
 /// budget_ms` says otherwise: **1000 ms**, the reading room's choice for the same door shape
@@ -230,6 +238,13 @@ tokio::task_local! {
 /// ⚠ **Within a run, EVERY evaluation is held to it**, a plan script's ledger reads included:
 /// the anonymous caller's run is the work being bounded. Outside a run the stamp is still only
 /// [`stamp`]'s, so gonk's own queries under an anonymous PAGE keep the store's base.
+///
+/// ★ **Three kinds of run, one scope** (ledger [#1210](http://localhost:1060/l/default/item/1210)):
+/// a script's `…:result` / `…:runs`, an ad hoc plan at `urn:plan:eval`, and the dry run of
+/// `urn:nl:sparql:check`. The last two keep the caller's capability, marker and all, but their
+/// SPARQL is a SUB-request the hub's front door never sees, so [`stamp`] never applied to it:
+/// both ran a caller's own query at the store's base. Each enters here through
+/// [`AnonymousRuns::run`], which also counts it against the anonymous rate.
 pub async fn within_run<F: std::future::Future>(door_ms: u64, work: F) -> F::Output {
     RUN_BUDGET.scope(door_ms, work).await
 }
@@ -259,5 +274,139 @@ pub fn is_within(request: &Request, door_ms: u64) -> bool {
             .and_then(|text| text.trim().parse::<u64>().ok())
             .is_some_and(|ms| (1..=door_ms).contains(&ms)),
         _ => false,
+    }
+}
+
+// ------------------------------------------------------------------ the anonymous run rate
+
+/// How many runs a minute ANONYMOUS callers get, all of them together, unless
+/// `gonk.script.anonymous_runs_per_minute` says otherwise: **30** (ledger
+/// [#1175](http://localhost:1060/l/default/item/1175), configurable since
+/// [#1210](http://localhost:1060/l/default/item/1210)). [`crate::script::ANONYMOUS_RUNS`] says why.
+pub const DEFAULT_ANONYMOUS_RUNS_PER_MINUTE: u32 = 30;
+
+/// The name the anonymous rate is counted under, and the one its refusal names:
+/// `rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30/60s — retry after …`. It names
+/// no resource anyone can request; it is the window's key.
+pub const ANONYMOUS_RUNS_IRI: &str = "urn:iki:gonk:anonymous:runs";
+
+/// `gonk.script.anonymous_runs_per_minute`, checked: a whole number of runs a minute, `0` for
+/// none at all; absent means [`DEFAULT_ANONYMOUS_RUNS_PER_MINUTE`].
+///
+/// ```
+/// use ikigai_gonk::budget::anonymous_runs_per_minute;
+/// assert_eq!(anonymous_runs_per_minute(None), Ok(30));
+/// assert_eq!(anonymous_runs_per_minute(Some("120")), Ok(120));
+/// assert_eq!(anonymous_runs_per_minute(Some("0")), Ok(0));
+/// assert!(anonymous_runs_per_minute(Some("-1")).is_err());
+/// assert!(anonymous_runs_per_minute(Some("30/min")).is_err());
+/// ```
+pub fn anonymous_runs_per_minute(value: Option<&str>) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_ANONYMOUS_RUNS_PER_MINUTE);
+    };
+    value.trim().parse::<u32>().map_err(|_| {
+        format!(
+            "gonk.script.anonymous_runs_per_minute = `{value}` is not a whole number of runs a \
+             minute (0 for none: anonymous callers then run nothing)"
+        )
+    })
+}
+
+/// The anonymous runs' ONE window, shared by every kind of run ([`within_run`]): a script's
+/// run, an ad hoc plan and a SPARQL draft's dry run all count against the same rate, because
+/// the door cannot tell anonymous callers apart and they all cost the same thing, a caller's
+/// own query evaluated.
+///
+/// An `ikigai-throttle` `RateLimit` over a space holding one name ([`ANONYMOUS_RUNS_IRI`]):
+/// the limiter keys its window by the PREFIX it matched, so two families under two prefixes
+/// would be two windows. Built once in `main` and handed to both the script family and the
+/// natural-language family, so they share it; a clone shares the window.
+#[derive(Clone)]
+pub struct AnonymousRuns {
+    limiter: Arc<RateLimit<Gate>>,
+    pass: Arc<dyn Endpoint>,
+    rate: Rate,
+}
+
+impl AnonymousRuns {
+    /// A window of `max` runs a minute.
+    pub fn per_minute(max: u32) -> AnonymousRuns {
+        AnonymousRuns::new(Rate::new(max, Duration::from_secs(60)))
+    }
+
+    /// A window of `rate`.
+    pub fn new(rate: Rate) -> AnonymousRuns {
+        let pass: Arc<dyn Endpoint> = Arc::new(Pass);
+        AnonymousRuns {
+            limiter: Arc::new(
+                RateLimit::new(Gate {
+                    pass: Arc::clone(&pass),
+                })
+                .limit(ANONYMOUS_RUNS_IRI, rate),
+            ),
+            pass,
+            rate,
+        }
+    }
+
+    /// The rate this window holds.
+    pub fn rate(&self) -> Rate {
+        self.rate
+    }
+
+    /// `work`, an anonymous caller's run, counted against the window and run within the door's
+    /// budget `door_ms` ([`within_run`]) — or the limiter's refusal, naming the rate and when to
+    /// retry, without running anything.
+    pub async fn run<F>(
+        &self,
+        inv: &Invocation<'_>,
+        door_ms: u64,
+        work: F,
+    ) -> ikigai_core::Result<Representation>
+    where
+        F: std::future::Future<Output = ikigai_core::Result<Representation>>,
+    {
+        let count = Request::new(
+            Verb::Source,
+            Iri::parse(ANONYMOUS_RUNS_IRI).expect("the anonymous runs' name is an IRI"),
+        );
+        if let Resolution::Hit(hit) = self.limiter.resolve(&count, &Scope::empty()) {
+            // Over the rate the limiter answers its stand-in, which refuses whatever it is
+            // handed; under it, the gate's own endpoint, which is never invoked.
+            if !Arc::ptr_eq(&hit.endpoint, &self.pass) {
+                return hit.endpoint.invoke(inv).await;
+            }
+        }
+        within_run(door_ms, work).await
+    }
+}
+
+impl Default for AnonymousRuns {
+    fn default() -> AnonymousRuns {
+        AnonymousRuns::per_minute(DEFAULT_ANONYMOUS_RUNS_PER_MINUTE)
+    }
+}
+
+/// The space the limiter counts in: every request resolves to [`Pass`].
+struct Gate {
+    pass: Arc<dyn Endpoint>,
+}
+
+impl Space for Gate {
+    fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
+        Resolution::Hit(Resolved::new(Arc::clone(&self.pass), Bindings::default()))
+    }
+}
+
+/// The gate's answer under the rate. Only ever compared, never invoked.
+struct Pass;
+
+#[async_trait]
+impl Endpoint for Pass {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        Err(Error::Endpoint(
+            "the anonymous run gate is a counter, not a resource".to_string(),
+        ))
     }
 }

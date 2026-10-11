@@ -12,7 +12,7 @@ $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
-  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts only, 30 a minute, each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
+  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts and read-only plans, 30 a minute in all (draft checks too), each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
@@ -401,6 +401,9 @@ carries its own data and needs no graph, and over the reading room's twin of thi
 answered 272 MB after 11.2 s. So gonk stamps `budget=` onto the SPARQL an anonymous caller sends,
 on every route it can send it by: `/sparql/select` and the other `urn:sparql:*` forms, the
 store's `/iki/store/…` doors, the editor page's protocol face and its results fragment, and `/k`.
+A caller's query that travels INSIDE another request (a script's run, a step of an ad hoc plan at
+`urn:plan:eval`, the dry run of `urn:nl:sparql:check`) never passes that door, so those three are
+held to the same budget on the task instead (`budget::within_run`, ledgers #1175 and #1210).
 
 - **Where**: at the one place every door's request enters the hub (`doors::HubSpace`), by the
   endpoint it reaches (the store's ten SPARQL ids and the four `urn:sparql:*` forms), so the
@@ -1986,10 +1989,19 @@ could make one at a time.
   capability is attenuated to what the script derives), so gonk's wrapper around the run carries
   the budget on the task, and the store's overlay stamps every evaluation made within it, a plan
   script's ledger reads included. And anonymous runs, all of them together, are limited to **30
-  a minute** (`script::ANONYMOUS_RUNS`, an `ikigai-throttle` `RateLimit`), refused past it with
-  the time to retry; an answer from the hub's cache is not counted, and reading a script's source
-  is not a run. Before this, an anonymous run's query took the store's base and could be sent
-  without limit.
+  a minute** (`gonk.script.anonymous_runs_per_minute`, `0` for none; one `ikigai-throttle`
+  `RateLimit` window, `budget::AnonymousRuns`), refused past it with the time to retry; an
+  answer from the hub's cache is not counted, and reading a script's source is not a run.
+  Before this, an anonymous run's query took the store's base and could be sent without limit.
+- **An ad hoc plan and a draft's dry run are runs too** (ledger #1210). An anonymous
+  `urn:plan:eval` keeps the caller's capability, marker and all, but its steps are sub-requests
+  the hub's front door never stamps, so a read-only plan whose step sent its own query to
+  `urn:iki:store:graph-select` ran it at the store's 5 s base, and plans were not counted:
+  measured through a scratch gonk's HTTP door, an expensive query took 5.02 s through a plan
+  against 1.01 s sent straight to the store, and 45 plans in 0.9 s all passed. The dry run of
+  `urn:nl:sparql:check` (reachable anonymously as `/k?c=source urn:nl:sparql:check content=…`)
+  was the same hole: 5.05 s, 35 of 35 passed. Both now enter the same window as a script's run
+  and run within the door's budget.
 - **The atoms are plain files** in `~/.ikigai/scripts` (`gonk.script.dir`), the library's
   `DirBackend`: one directory per script, a compare-and-set head, digest-checked versions, a
   file per run. Not in the RDF store, because the records ARE authority (a version stores what
@@ -2601,6 +2613,7 @@ gonk.backup.every = "24h"
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
 # gonk.script.dir = "~/.ikigai/scripts"   # where published scripts and their runs live
+# gonk.script.anonymous_runs_per_minute = 30  # anonymous runs, all together (0 for none)
 # gonk.nl.ask = "urn:llm:coder:ask"   # the model door urn:nl:sparql drafts through (default urn:llm:ask)
 # gonk.review.space = "reviews"       # bind the git-event review QUEUE; arms nothing
 # gonk.review.grant = "reviewer"      # the grant a pass runs under; naming it arms nothing

@@ -368,11 +368,19 @@ fn serve(flags: &config::Flags) -> ! {
     }
     // ★ The script family (ledger #939): its atoms in `gonk.script.dir`, opened before the hub
     // because the hub binds it, and attached after, so a publish re-describes the catalog.
-    let scripts =
-        ikigai_gonk::script::Scripts::open(&settings.script_dir).unwrap_or_else(|e| fail(&e));
+    // ★ One anonymous run window (ledger #1210), shared by the script family (a script's run, an
+    // ad hoc plan) and the natural-language family (a draft's dry run).
+    let anonymous_runs =
+        ikigai_gonk::budget::AnonymousRuns::per_minute(settings.anonymous_runs_per_minute);
+    let scripts = ikigai_gonk::script::Scripts::open(&settings.script_dir, anonymous_runs.clone())
+        .unwrap_or_else(|e| fail(&e));
     // ★ Natural language to a draft query (ledger #1138): `urn:nl:*`, drafting through the
     // mounted model under the caller's own net grant, and no drafter at all without a mount.
-    let nl = ikigai_gonk::nl::Nl::new(&settings.nl_ask, settings.mount_host().as_deref());
+    let nl = ikigai_gonk::nl::Nl::new(
+        &settings.nl_ask,
+        settings.mount_host().as_deref(),
+        anonymous_runs,
+    );
     let hub = Arc::new(compose_with(
         store,
         browse_space,
@@ -587,10 +595,11 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  browse  {browse_line}");
         eprintln!(
             "  scripts urn:script:* in {} — sparql and plan, read-only (the ledgers' reads); \
-             anonymous runs PUBLIC scripts only, {} a minute, each held to the anonymous budget; \
-             a QUIC client drafts, a person publishes; backed up with the store",
+             anonymous runs PUBLIC scripts and read-only plans, {} a minute in all (draft checks \
+             too), each held to the anonymous budget; a QUIC client drafts, a person publishes; \
+             backed up with the store",
             settings.script_dir.display(),
-            ikigai_gonk::script::ANONYMOUS_RUNS.max
+            settings.anonymous_runs_per_minute
         );
         eprintln!(
             "  nl      urn:nl:grounding, urn:nl:sparql:check — under the caller's own grant; {}",
