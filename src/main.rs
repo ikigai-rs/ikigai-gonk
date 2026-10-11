@@ -293,6 +293,7 @@ fn serve(flags: &config::Flags) -> ! {
         keep: settings.backup.keep,
         every: settings.backup.every,
         store_path: store_path.clone(),
+        scripts: Some(settings.script_dir.clone()),
     });
     // ★ The backup fires under exactly `backup::JOB_SCOPES` and nothing else, so a scheduled
     // backup has the authority to read every graph and write the rotation — and no authority
@@ -586,8 +587,10 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  browse  {browse_line}");
         eprintln!(
             "  scripts urn:script:* in {} — sparql and plan, read-only (the ledgers' reads); \
-             anonymous runs PUBLIC scripts only; a QUIC client drafts, a person publishes",
-            settings.script_dir.display()
+             anonymous runs PUBLIC scripts only, {} a minute, each held to the anonymous budget; \
+             a QUIC client drafts, a person publishes; backed up with the store",
+            settings.script_dir.display(),
+            ikigai_gonk::script::ANONYMOUS_RUNS.max
         );
         eprintln!(
             "  nl      urn:nl:grounding, urn:nl:sparql:check — under the caller's own grant; {}",

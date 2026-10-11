@@ -82,11 +82,12 @@ const HUB_IDS: [&str; 5] = [
     "sparql-describe",
 ];
 
-const BACKUP_IDS: [&str; 4] = [
+const BACKUP_IDS: [&str; 5] = [
     "gonk-backup",
     "gonk-backup-status",
     "gonk-backup-archive",
     "gonk-restore",
+    "gonk-restore-scripts",
 ];
 
 const COMPRESS_IDS: [&str; 4] = [
@@ -110,6 +111,7 @@ fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
                 every: Some(std::time::Duration::from_secs(86_400)),
                 // Nothing in these tests opens it; it is the path a restore refuses.
                 store_path: PathBuf::from("/nonexistent/live/store"),
+                scripts: None,
             }),
             jobs: None,
             next: Default::default(),
@@ -364,6 +366,12 @@ fn the_backup_composition_conforms() {
              argument happened to point; it is walked with real archives by \
              `a_backup_restores_to_the_same_graphs_and_per_graph_counts` below",
         )
+        .opt_out(
+            "gonk-restore-scripts",
+            None,
+            "a synthesized `into` would write a scripts directory wherever the walk's argument \
+             happened to point; it is walked with real archives by `tests/script_backup_1175.rs`",
+        )
         .fixture(Fixture::new("gonk-backup-archive", Verb::Source).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-archive", Verb::Exists).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-status", Verb::Source))
@@ -544,6 +552,7 @@ fn restoring_over_the_live_store_is_refused() {
                 keep: 5,
                 every: None,
                 store_path: PathBuf::from("/Users/nobody/.ikigai/store"),
+                scripts: None,
             }),
             jobs: None,
             next: Default::default(),
@@ -805,6 +814,7 @@ fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_du
         keep: 5,
         every: Some(day),
         store_path: PathBuf::from("/nonexistent/live/store"),
+        scripts: None,
     });
     let (jobs, first) = backup::registry(&settings, day, &next);
     assert_eq!(
@@ -1044,6 +1054,7 @@ fn hub_over(store: DurableStore, dir: &Path) -> Arc<Kernel> {
                 keep: 5,
                 every: Some(std::time::Duration::from_secs(86_400)),
                 store_path: PathBuf::from("/nonexistent/live/store"),
+                scripts: None,
             }),
             jobs: None,
             next: Default::default(),

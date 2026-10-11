@@ -218,8 +218,10 @@ impl Scripts {
     ///   `DirBackend` is the backend it tests: compare-and-set heads, digest-checked versions,
     ///   a broken head failing that script alone.
     ///
-    /// ⚠ The cost, stated: **a backup does not hold the scripts** — it is the dataset's
-    /// N-Quads. Copy the directory with the backup until the backup family takes it.
+    /// The cost, and how it is paid: a store backup is the dataset's N-Quads, so it cannot hold
+    /// these files. The backup family snapshots this directory beside every store archive, under
+    /// the same stamp, and restores and verifies it on its own (`crate::backup`, ledger
+    /// [#1175](http://localhost:1060/l/default/item/1175)).
     ///
     /// # Errors
     ///

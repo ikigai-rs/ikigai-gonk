@@ -12,7 +12,7 @@ $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
-  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts only; a QUIC client drafts, a person publishes
+  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts only, 30 a minute, each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
@@ -1994,7 +1994,8 @@ could make one at a time.
   `DirBackend`: one directory per script, a compare-and-set head, digest-checked versions, a
   file per run. Not in the RDF store, because the records ARE authority (a version stores what
   its publisher held) and a store graph is reachable by the per-graph grants this server mints.
-  ⚠ **So a backup does not hold the scripts**: copy the directory beside it.
+  So the backup takes them separately, beside the store's archive, and restores and verifies
+  them on their own ([Backup and restore](#backup-and-restore), ledger #1175).
 - **Not built:** triggers (ledger #937), a script as an endpoint, a stepper, signed elevation,
   and ledger writes from a script (above).
 
@@ -2450,9 +2451,15 @@ row is written), so the list also carries `urn:cap:store:answer:10000000` and
 grant raises rows and nothing else, so the job needs both. ⚠ The byte ceiling is about nine times
 today's answer, so it is the first bound a growing dataset will reach.
 
-⚠ **A backup is the DATASET, and the scripts are not in it** (ledger #939): they are plain files
-in `~/.ikigai/scripts` (`gonk.script.dir`). Copy that directory beside a backup until the backup
-family takes it.
+**A backup holds the scripts too** (ledger #1175). They are not in the dataset: they are plain
+files in `~/.ikigai/scripts` (`gonk.script.dir`, ledger #939). So every backup writes two archives
+under one stamp, `gonk-store-<stamp>.nq.gz` and `gonk-scripts-<stamp>.json.gz` (every file of the
+scripts layout, `<name>/head.json`, `<name>/versions/<sha256>.json` and `<name>/runs/<id>.json`, as
+one JSON document, paths sorted so an unchanged directory gives identical bytes), and ONE sidecar
+recording both (`scripts_archive`, `scripts_names`, `scripts_files` and the digests). The status
+names it, `urn:iki:gonk:backup:archive:{name}` reads either archive out, and the rotation prunes
+them together. A directory that cannot be read fails the backup before anything is written. A
+backup taken before this holds the dataset alone, and the status says so.
 
 ### The format is N-Quads, and the easy mistake is Turtle
 
@@ -2498,6 +2505,23 @@ when nothing is writing.
 and per-graph counts against the archive it was built from and fails if they differ. A backup
 you have not restored is not a backup, so `tests/backup.rs` restores one on every run.
 
+The scripts archive has its own restore and verifier, `urn:iki:gonk:restore:scripts`, under the
+same `urn:cap:gonk:restore`:
+
+```
+ikigai --connect ~/.ikigai/gonk.sock -c \
+  'source urn:iki:gonk:backup:archive:gonk-scripts-2026-10-10T120000Z.json.gz \
+   | sink urn:iki:gonk:restore:scripts into=/tmp/restored-scripts'
+```
+
+It checks every path against the layout before it writes anything (a `..`, an absolute path or
+a file that is no script's is refused), writes the files into a NEW directory (never the live
+one, never one that holds something), and then reads every one back through `ikigai-script`'s own
+`DirBackend`: each head, every version it or its history names, every version file against the
+digest it is named by, every run. An edited version, or a head naming a version the archive does
+not hold, does not verify. `tests/script_backup_1175.rs` restores one on every run and runs a
+script from the copy.
+
 ### The two most dangerous grants in the system
 
 A backup reads **every** graph, which is precisely the authority the per-graph boundary
@@ -2508,7 +2532,7 @@ its own door, not a flag on the public one:
 | token | what it is | who can hold it |
 | --- | --- | --- |
 | `urn:cap:gonk:backup` | take a backup, read the status, read an archive | the socket door's root capability, and nothing else |
-| `urn:cap:gonk:restore` | build a store from an archive | the same |
+| `urn:cap:gonk:restore` | build a store from an archive, or a scripts directory from a scripts archive | the same |
 | `urn:cap:store:read` | every graph (declared by `urn:iki:gonk:backup`, because it really reads them) | the same |
 
 `gonk/grants.json` is **refused at startup, and on every use,** if it names any of them, exactly as it is for
