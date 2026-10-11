@@ -63,6 +63,7 @@ fn main() {
             ledger_graphs,
             browse,
             scripts,
+            nl_draft,
             force,
             rotate,
             flags,
@@ -70,9 +71,10 @@ fn main() {
             // The full settings are read only when a role needs this server's roots and
             // mount, so a ledger-only enrolment works exactly as before on a host with no
             // config.toml; the QUIC port for the printed line is read either way.
-            let browse_scopes = match &browse {
-                Some(_) => browse_tokens(browse.as_ref(), &read_settings(&flags)),
-                None => Vec::new(),
+            let browse_scopes = if browse.is_some() || nl_draft {
+                role_tokens(browse.as_ref(), nl_draft, &read_settings(&flags))
+            } else {
+                Vec::new()
             };
             client_add(
                 &name,
@@ -103,6 +105,7 @@ fn main() {
             ledger_graphs,
             browse,
             scripts,
+            nl_draft,
             force,
             minutes,
             flags,
@@ -115,6 +118,7 @@ fn main() {
                 scripts: &scripts,
             },
             browse.as_ref(),
+            nl_draft,
             force,
             minutes,
             &flags,
@@ -365,6 +369,9 @@ fn serve(flags: &config::Flags) -> ! {
     // because the hub binds it, and attached after, so a publish re-describes the catalog.
     let scripts =
         ikigai_gonk::script::Scripts::open(&settings.script_dir).unwrap_or_else(|e| fail(&e));
+    // ★ Natural language to a draft query (ledger #1138): `urn:nl:*`, drafting through the
+    // mounted model under the caller's own net grant, and no drafter at all without a mount.
+    let nl = ikigai_gonk::nl::Nl::new(&settings.nl_ask, settings.mount_host().as_deref());
     let hub = Arc::new(compose_with(
         store,
         browse_space,
@@ -376,6 +383,7 @@ fn serve(flags: &config::Flags) -> ! {
             next: backup_next.clone(),
         }),
         Some(&scripts),
+        Some(&nl),
     ));
     scripts.attach(&hub);
 
@@ -580,6 +588,17 @@ fn serve(flags: &config::Flags) -> ! {
             "  scripts urn:script:* in {} — sparql and plan, read-only (the ledgers' reads); \
              anonymous runs PUBLIC scripts only; a QUIC client drafts, a person publishes",
             settings.script_dir.display()
+        );
+        eprintln!(
+            "  nl      urn:nl:grounding, urn:nl:sparql:check — under the caller's own grant; {}",
+            match settings.mount_host() {
+                Some(host) => format!(
+                    "urn:nl:sparql drafts through {} for a caller holding urn:cap:net:{host} \
+                     (--nl draft), saving DRAFT scripts a person publishes",
+                    settings.nl_ask
+                ),
+                None => "no urn:nl:sparql (no gonk.mount, so no model to draft with)".to_string(),
+            }
         );
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
@@ -1001,6 +1020,26 @@ fn read_settings(flags: &config::Flags) -> config::Settings {
     config::settings(flags, &text, &homes).unwrap_or_else(|e| fail(&e))
 }
 
+/// The roles' tokens on this server: a `--browse` role's and `--nl draft`'s, both computed
+/// against this server's mount (and roots), so a grant never names a host the mount does not.
+fn role_tokens(
+    browse: Option<&BrowseGrant>,
+    nl_draft: bool,
+    settings: &config::Settings,
+) -> Vec<String> {
+    let mut tokens = browse_tokens(browse, settings);
+    if nl_draft {
+        for token in
+            grants::nl_draft_grants(settings.mount_host().as_deref()).unwrap_or_else(|e| fail(&e))
+        {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
 /// A `--browse` role's tokens on this server, or none without one.
 fn browse_tokens(browse: Option<&BrowseGrant>, settings: &config::Settings) -> Vec<String> {
     match browse {
@@ -1221,6 +1260,7 @@ fn passkey_invite(
     name: &str,
     subjects: &Subjects<'_>,
     browse: Option<&BrowseGrant>,
+    nl_draft: bool,
     force: bool,
     minutes: u64,
     flags: &config::Flags,
@@ -1231,14 +1271,14 @@ fn passkey_invite(
     // ★ Ledger #1067: the link names `localhost` (the relying party), so on a bind `localhost`
     // cannot reach the invite is refused HERE, before a grant or an invite is written.
     let (base, warning) = doors::invite_base(settings.http).unwrap_or_else(|e| fail(&e));
-    if subjects.is_empty() && browse.is_none() {
+    if subjects.is_empty() && browse.is_none() && !nl_draft {
         fail(&format!(
             "an invite needs a grant: `ikigai-gonk passkey invite {name} --ledger default=delete`, \
              `--browse read` (or `derive`) for the repositories, or `--browse-graph read` for \
              the browse graph alone"
         ));
     }
-    let scopes = scopes_for(subjects, &browse_tokens(browse, &settings));
+    let scopes = scopes_for(subjects, &role_tokens(browse, nl_draft, &settings));
     // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
     // in would be a ceremony that changes nothing — and a grant that looked like it limited
     // someone would not.

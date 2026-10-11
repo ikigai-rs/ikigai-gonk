@@ -36,6 +36,8 @@
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
 //! # gonk.script.dir = "~/.ikigai/scripts"   # where the scripts live (this IS the default)
+//! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
+//!                                       # (default urn:llm:ask, the peer's default backend)
 //! # one access line per request on stderr (this IS the default; `false` for none)
 //! # gonk.log.access = true
 //! ```
@@ -93,7 +95,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 29] = [
+const KEYS: [&str; 30] = [
     "gonk.log.access",
     "gonk.queue.serious",
     "gonk.bind",
@@ -117,6 +119,7 @@ const KEYS: [&str; 29] = [
     "gonk.backup.every",
     "gonk.backup.keep",
     "gonk.script.dir",
+    "gonk.nl.ask",
     "gonk.review.space",
     "gonk.review.grant",
     "gonk.review.root",
@@ -133,7 +136,7 @@ usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
   ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
                      [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
-                     [--browse <read|derive> [--root <root>]...] [--cert <client.crt>] [--force] [--rotate]
+                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--cert <client.crt>] [--force] [--rotate]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
@@ -154,7 +157,7 @@ usage:
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
                      [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
-                     [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
+                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrolls a passkey under that grant. Refused on a
@@ -187,6 +190,14 @@ usage:
              urn:cap:script:delete:<name>     certificate it saves DRAFTS only: the QUIC door
                                               refuses a machine's publish and retire
     `public=run` runs and reads every script its publisher marked public (anonymous HTTP has it)
+
+  --nl draft   urn:cap:net:<mount host>       draft a query from a sentence with urn:nl:sparql:
+                                              spends the mounted peer's inference (the same host
+                                              grant --browse derive carries; it also reaches
+                                              urn:llm:* directly). A draft reads only what the
+                                              --ledger / --browse-graph grant reads, and is saved
+                                              only under a --script <name>=publish name; with no
+                                              gonk.mount, refused
   ikigai-gonk review request <repo> <path> [--config PATH]
                                    drop ONE review request into the queue `gonk.review.space`
                                    names. Writes one file and exits: no store, no door, no
@@ -314,6 +325,8 @@ pub enum Command {
         browse: Option<BrowseGrant>,
         /// `--script <name>=<read|run|publish>`: scripts, each by name (ledger #939).
         scripts: Vec<(String, ScriptAuthority)>,
+        /// `--nl draft`: draft queries with `urn:nl:sparql` (ledger #1138).
+        nl_draft: bool,
         /// Replace an existing GRANT (or an enrolment under another grant). Never the key
         /// pair: that is `rotate`.
         force: bool,
@@ -362,6 +375,8 @@ pub enum Command {
         browse: Option<BrowseGrant>,
         /// `--script <name>=<read|run|publish>`: scripts, each by name (ledger #939).
         scripts: Vec<(String, ScriptAuthority)>,
+        /// `--nl draft`: draft queries with `urn:nl:sparql` (ledger #1138).
+        nl_draft: bool,
         /// Replace an existing grant of that name with different scopes.
         force: bool,
         /// How long the invite is valid.
@@ -503,6 +518,9 @@ pub struct Settings {
     /// Where the scripts live (`gonk.script.dir`, default [`crate::script::DIR_NAME`] under the
     /// data home): one directory of plain files, this server's alone — see [`crate::script`].
     pub script_dir: PathBuf,
+    /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
+    /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
+    pub nl_ask: String,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -1041,10 +1059,11 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         .ok_or("client add: expected <name>")?;
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
     let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
-    let (mut ledger_graphs, mut scripts) = (Vec::new(), Vec::new());
+    let (mut ledger_graphs, mut scripts, mut nl_draft) = (Vec::new(), Vec::new(), false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
+            "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
             "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
             "--root" => roots.push(value(&mut args, "--root")?),
@@ -1083,10 +1102,21 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         ledger_graphs,
         browse: browse_grant(role, roots)?,
         scripts,
+        nl_draft,
         force,
         rotate,
         flags,
     })
+}
+
+/// `--nl <role>`: `draft` is the one role (ledger #1138).
+fn nl_role(spelled: &str) -> Result<bool, String> {
+    match spelled {
+        "draft" => Ok(true),
+        other => Err(format!(
+            "--nl: `{other}` is not a natural-language role (draft)"
+        )),
+    }
 }
 
 /// `--script <name>=<read|run|publish>`, checked as it is parsed.
@@ -1123,10 +1153,11 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Flags::default(),
     );
     let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
-    let mut scripts = Vec::new();
+    let (mut scripts, mut nl_draft) = (Vec::new(), false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
+            "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
             "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--root" => roots.push(value(&mut args, "--root")?),
             "--ledger" => {
@@ -1169,6 +1200,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         ledger_graphs,
         browse: browse_grant(role, roots)?,
         scripts,
+        nl_draft,
         force,
         minutes,
         flags,
@@ -1308,7 +1340,37 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         script_dir: value_for(text, "gonk.script.dir")
             .map(|spelled| expand_home(&spelled, &homes.home))
             .unwrap_or_else(|| homes.data.join(crate::script::DIR_NAME)),
+        nl_ask: nl_ask(text)?,
     })
+}
+
+/// `gonk.nl.ask`: the model door a draft is asked through. Refused unless it is a provider's
+/// door under `urn:llm:`, for the reason the explain providers are: nothing else could resolve.
+///
+/// ```
+/// use ikigai_gonk::config::nl_ask;
+/// assert_eq!(nl_ask("").unwrap(), "urn:llm:ask");
+/// assert_eq!(nl_ask("gonk.nl.ask = \"urn:llm:coder:ask\"\n").unwrap(), "urn:llm:coder:ask");
+/// assert!(nl_ask("gonk.nl.ask = \"urn:llm:\"\n").is_err());
+/// assert!(nl_ask("gonk.nl.ask = \"urn:http:x\"\n").is_err());
+/// ```
+///
+/// # Errors
+///
+/// When the door is not under `urn:llm:` or names no provider.
+pub fn nl_ask(text: &str) -> Result<String, String> {
+    let Some(spelled) = value_for(text, "gonk.nl.ask") else {
+        return Ok(crate::nl::DEFAULT_ASK.to_string());
+    };
+    let spelled = spelled.trim();
+    if !spelled.starts_with(mount::LLM_PREFIX) || spelled.len() == mount::LLM_PREFIX.len() {
+        return Err(format!(
+            "gonk.nl.ask: `{spelled}` is not a model door under `{}` — the only prefix a \
+             gonk.mount line may claim, so nothing in this process could resolve it",
+            mount::LLM_PREFIX
+        ));
+    }
+    Ok(spelled.to_string())
 }
 
 /// The QUIC door's bind: off with `--no-quic`; `--quic-bind` or `gonk.quic.bind` when either
@@ -2242,6 +2304,7 @@ mod tests {
                 ledger_graphs,
                 browse,
                 scripts,
+                nl_draft,
                 cert,
                 force,
                 rotate,
@@ -2249,6 +2312,7 @@ mod tests {
             } => {
                 assert_eq!(name, "laptop");
                 assert!(scripts.is_empty(), "no script grant unless named");
+                assert!(!nl_draft, "no drafting unless named");
                 assert!(ledger_graphs.is_empty(), "no raw grant unless named");
                 assert!(!rotate);
                 assert!(browse.is_none() && flags.config.is_none());
@@ -2338,6 +2402,17 @@ mod tests {
                 authority: Authority::Write
             }
         ));
+        // `--nl draft` on both minting commands, and nothing else spelled there (ledger #1138).
+        for line in ["client add bot --nl draft", "passkey invite p --nl draft"] {
+            match parse_args(args(line)).unwrap() {
+                Command::ClientAdd { nl_draft, .. } | Command::PasskeyInvite { nl_draft, .. } => {
+                    assert!(nl_draft, "{line}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let refused = parse_args(args("passkey invite p --nl publish")).unwrap_err();
+        assert!(refused.contains("not a natural-language role"), "{refused}");
         match parse_args(args("client add laptop --browse-graph read")).unwrap() {
             Command::ClientAdd {
                 ledgers,

@@ -49,6 +49,7 @@ pub mod k;
 pub mod kata;
 pub mod keys;
 pub mod mount;
+pub mod nl;
 pub mod queue;
 pub mod quic;
 pub mod render;
@@ -137,7 +138,7 @@ pub mod spaces {
 ///   `Verb::Meta as=application/json`; without a renderer that answer degrades to an
 ///   anonymous row and named arguments stop routing, with no error anywhere.
 pub fn compose(store: DurableStore) -> Kernel {
-    compose_with(store, None, Vec::new(), Vec::new(), None, None)
+    compose_with(store, None, Vec::new(), Vec::new(), None, None, None)
 }
 
 /// [`compose`], plus the repository browse family when this server is configured for one.
@@ -200,6 +201,10 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// always passes one; `None` is the composition every test before it pinned. The caller
 /// [attaches](crate::script::Scripts::attach) the hub afterwards, so a publish re-describes
 /// the catalog.
+///
+/// `nl` is [`crate::nl::Nl`]'s family — `urn:nl:*` and the vocabulary its grounding states
+/// (ledger [#1138](http://localhost:1060/l/default/item/1138)). `main` always passes one;
+/// `None` is the composition every test before it pinned.
 pub fn compose_with(
     store: DurableStore,
     browse: Option<Arc<crate::browse::CachedReads>>,
@@ -207,6 +212,7 @@ pub fn compose_with(
     trigger: Vec<Arc<dyn Space>>,
     backups: Option<crate::backup::Backups>,
     scripts: Option<&crate::script::Scripts>,
+    nl: Option<&crate::nl::Nl>,
 ) -> Kernel {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
@@ -253,6 +259,12 @@ pub fn compose_with(
     // `urn:sparql:*`, whose grammars none of them overlaps.
     if let Some(scripts) = scripts {
         spaces.extend(scripts.spaces());
+    }
+    // ★ Natural language to a draft query (ledger #1138, [`crate::nl`]): `urn:nl:*` and
+    // `urn:ikigai:vocab`, after the scripts it saves drafts through. No grammar here overlaps
+    // another, so the order decides nothing.
+    if let Some(nl) = nl {
+        spaces.extend(nl.spaces());
     }
     // The root to read the verdict set through, kept before the family is moved in.
     let verdict_root = browse

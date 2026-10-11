@@ -115,6 +115,7 @@ fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
             next: Default::default(),
         }),
         None,
+        None,
     ))
 }
 
@@ -548,6 +549,7 @@ fn restoring_over_the_live_store_is_refused() {
             next: Default::default(),
         }),
         None,
+        None,
     ));
     let error = try_issue(
         &hub,
@@ -821,6 +823,7 @@ fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_du
             next: next.clone(),
         }),
         None,
+        None,
     ));
     backup::start(
         &jobs,
@@ -1045,6 +1048,7 @@ fn hub_over(store: DurableStore, dir: &Path) -> Arc<Kernel> {
             jobs: None,
             next: Default::default(),
         }),
+        None,
         None,
     ))
 }
