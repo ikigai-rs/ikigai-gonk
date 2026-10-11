@@ -180,6 +180,15 @@ ikigai-engine = { version = "0.1.44", features = ["plan-reader"] }
 # script library has already bounded at 1 MiB. Its SERVICE/LOAD refusals are its own (0.3.x) and
 # the store's (0.2.10+). 0.3.3 is the published head and what was built and tested.
 ikigai-shacl = "0.3.3"
+# ★ Natural language to a DRAFT query (ledger #1138, `crate::nl`): `urn:nl:grounding` (what a
+# drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
+# templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
+# `state=draft` script through `ikigai-script` above. It links no model client and no network
+# code of its own: the model is the mount, so this adds no outbound surface. 0.1.0 is the only
+# release and what was built and tested. Its own floors (core 0.1.91, vocab 0.1.91, spargebra
+# 0.4.7, oxrdf 0.3, oxttl 0.2) are all below the lines here, so it moves nothing in the lock but
+# itself. ⚠ `"0.1.0"` is `<0.2.0`.
+ikigai-nl = "0.1.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,

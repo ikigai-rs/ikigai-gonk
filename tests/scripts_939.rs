@@ -84,6 +84,7 @@ fn hub() -> (Arc<Kernel>, Scripts) {
         Vec::new(),
         None,
         Some(&scripts),
+        None,
     ));
     scripts.attach(&hub);
     (hub, scripts)

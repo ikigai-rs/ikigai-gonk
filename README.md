@@ -1975,6 +1975,131 @@ could make one at a time.
   ledger writes from a script (above), rate limiting of anonymous runs, and the backup of the
   scripts directory.
 
+## Natural language: a query drafted from a sentence (ledger #1138)
+
+gonk mounts [`ikigai-nl`](https://github.com/ikigai-rs/ikigai-nl) beside the scripts, so a
+person can ask for a query in a sentence and get a DRAFT script back. The model is a
+**drafter, never an actor**: every step runs under the caller's own grant, the draft is
+checked mechanically before it is kept, and it is saved as `state=draft`, which only its author
+sees until a person publishes it like any other script.
+
+```text
+urn:nl:grounding        Source   what a drafter may know, under the CALLER's grant: the actions it
+                                 may take, the ik: vocabulary, the shape of each graph it may read,
+                                 its published scripts as worked examples
+urn:nl:sparql:check     Source   a SPARQL text, checked as a draft is: parsed, its derived grant
+                                 against the caller's, its predicates and classes against the
+                                 graphs, a dry run under a small LIMIT
+urn:nl:prompt:{name}    Source   the drafting prompts (sparql, sparql-repair), as templates
+urn:nl:sparql           Sink     ground, draft through the mounted model, check, repair (at most 3
+                                 attempts), save a DRAFT script with its provenance
+urn:ikigai:vocab        Source   the ik: vocabulary the grounding states
+```
+
+```sh
+ikigai-gonk passkey invite brian --ledger default=write --nl draft --script titles=publish
+```
+
+```text
+$ curl -X POST -b 'gonk_session=…' --data-binary 'the titles of the open items, by number' \
+    'http://localhost:1060/nl/sparql?save=titles'
+urn:script:titles:version:sha256:… (a DRAFT of urn:script:titles: review it, then publish it with state=published)
+
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+…
+preview (LIMIT 5):
+?number	?title
+…
+
+$ curl -b 'gonk_session=…' 'http://localhost:1060/script/titles'            # review it
+$ curl -X POST -b 'gonk_session=…' --data-binary @titles.rq \
+    'http://localhost:1060/script/titles?language=sparql'                    # publish it
+$ curl -b 'gonk_session=…' 'http://localhost:1060/script/titles/result'     # run it
+```
+
+The body of the POST is the ask (`ask=` works too). `graph=<iri>` focuses the draft on one graph,
+`as=application/json` answers every attempt with what the check said of it, and
+`as=text/turtle` the drafting's PROV-O. The saved text opens with that provenance as comment
+lines (the ask, each attempt and its model, the grounding's and the prompts' digests), so the
+draft carries where it came from into the version a person publishes.
+
+### Who may do what
+
+| | anonymous HTTP | signed-in HTTP | QUIC (a machine) | socket (the owner) |
+| --- | --- | --- | --- | --- |
+| `urn:nl:grounding`, `urn:nl:sparql:check`, the prompts | **yes**, under its own grant | yes | yes | yes |
+| draft (`urn:nl:sparql`) | **no**: refused before any model call | with `--nl draft` | with `--nl draft` | yes |
+| where a draft is saved | | a `--script <name>=publish` name | the same, and a machine's draft is its own (only the owner sees it) | anywhere |
+
+- **Drafting spends the mounted model, so it takes the grant that reaches it:**
+  `urn:cap:net:{host}` for the host the `gonk.mount` line dials. `--nl draft` mints exactly
+  that token, on `passkey invite` and `client add`, and is refused on a server with no mount.
+  gonk DECLARES it on `urn:nl:sparql` (`nl::DraftGuard`), so the kernel refuses a caller
+  without it before the grounding is computed or the model is asked, and the manifold offers
+  the drafter to exactly the callers who may draft. ⚠ It is the same token `--browse derive`
+  carries, and it reaches `urn:llm:*` directly through every door, as derive's does: the
+  authority is "may spend the mounted model". No anonymous grant carries it.
+- **What a draft can READ is the caller's own grant.** The grounding lists only graphs the
+  caller may read (a graph it may not read contributes nothing, not even its name), and the
+  check's dry run reads through the store's graph-scoped door under the same grant. Drafting
+  widens nothing: the anonymous grounding is what anonymous could already read.
+- **Where a draft is SAVED is a script grant, per name.** `ikigai-script` matches
+  `urn:cap:script:write:{name}` exactly, so name the draft with `save=` and hold that name's
+  publish grant. Without one (and `ikigai-nl`'s default name, `nl-sparql-<digest>`, is never
+  grantable ahead of time) the valid draft is answered **unsaved**, the query in the answer, for
+  the person to publish by hand under a name they hold. A published script is never replaced
+  by a draft: that is refused before any model is asked.
+- **A machine drafts, a person publishes**, as for every script here: the drafter only ever
+  saves `state=draft`. A machine's draft is the machine's alone, so only the owner's socket
+  sees it to publish it.
+- **No mount, no drafter.** Without a `gonk.mount` line the grounding, the check and the prompts
+  are bound and `urn:nl:sparql` is not, the way no explain is bound without a peer.
+
+### The bounds
+
+- **The spend: at most 3 model calls per ask** (`ikigai-nl`'s default `max_attempts`): the
+  first draft, then a repair for each refusal, each repair prompt carrying exactly what the
+  check refused. Drafting also stops the first time the model repeats a draft. A draft that
+  never validates is answered as **failed**, every attempt listed, no query, nothing saved.
+- ⚠ **No `max_tokens` on a draft.** `ikigai-nl` 0.1.0 sends `prompt`, `as` and `temperature`
+  and no ceiling, and every other ask this server makes carries one, because a thinking model
+  with none can burn its budget reasoning and return nothing. Choose a non-reasoning model for
+  `gonk.nl.ask` until the library takes one (reported up).
+- **The grounding's size: it fits, measured on a ledger the size of the live one.** `ikigai-nl`
+  refuses a grounding over 1 MiB (never truncates it). `tests/nl_1138.rs` seeds 750 items and
+  composes browse as the live gonk does; the ledger graph's SHAPE is bounded by its partitions
+  and samples, not its item count, so what grows a grounding is the caller's manifold. Release
+  build, in process:
+
+  | caller | no focus, JSON | no focus, Turtle | `focus=urn:iki:ledger:graph:default` |
+  | --- | --- | --- | --- |
+  | anonymous | 249 KB | 265 KB | 3.5 KB |
+  | a person (`--ledger default=write --nl draft`) | 258 KB | 277 KB | 3.5 KB |
+  | the same with `--browse read` | 355 KB | 365 KB | 3.5 KB |
+  | root (the socket) | 431 KB | 459 KB | 3.5 KB |
+
+  Root's unfocused grounding is 42% of the bound. It is computed in about 20 to 30 ms cold;
+  the parts are cached, but the grounding itself is recomputed on every read (about 3 to 5 ms
+  for JSON, 10 to 20 ms for Turtle) because its examples come from `urn:script:catalog`, which
+  is live (the library's README says why).
+
+### What else is decided here
+
+- **Which model drafts:** `gonk.nl.ask` (default `urn:llm:ask`, the peer's default backend), a
+  door under `urn:llm:` like every provider here.
+- **Worked examples are the published SPARQL scripts the caller may read.** Publish a few
+  good queries and drafting improves for everyone who can read them.
+- **Nothing new is linked for the network.** `ikigai-nl` has no model client: the model is the
+  mount, so the outbound surface is unchanged.
+- **Proven with a stub model.** `tests/nl_1138.rs` runs the whole story through a real child
+  gonk with a deterministic `urn:llm:` peer on a socket: a sentence to a saved draft, a bad
+  first draft repaired, a hopeless one refused at the bound, the draft hidden from another
+  person, published and run, anonymous refused with the model never called, and a QUIC
+  machine drafting. A real model drafts differently; the check and the repair are the part
+  that does not.
+- **Not built:** `urn:nl:script` (a plan, then Lisp; ledger #959), a page for drafting (it is
+  the mechanical route today), and any rate limit on drafting beyond the per-ask bound.
+
 ## The three doors
 
 | door | reaches it | runs under |
@@ -2429,6 +2554,7 @@ gonk.backup.every = "24h"
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
 # gonk.script.dir = "~/.ikigai/scripts"   # where published scripts and their runs live
+# gonk.nl.ask = "urn:llm:coder:ask"   # the model door urn:nl:sparql drafts through (default urn:llm:ask)
 # gonk.review.space = "reviews"       # bind the git-event review QUEUE; arms nothing
 # gonk.review.grant = "reviewer"      # the grant a pass runs under; naming it arms nothing
 # gonk.review.arm = true              # ⚠ and the word that arms it; needs the grant above
@@ -2605,7 +2731,10 @@ linked. For [scripts](#scripts-saved-queries-and-plans-ledger-939) it adds
 [`ikigai-script`](https://github.com/ikigai-rs/ikigai-script), `ikigai-engine`'s plan doors
 (`urn:plan:*`, nothing else of the engine) and
 [`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl), whose validator the plan doors
-compose and no door serves.
+compose and no door serves. For [natural language](#natural-language-a-query-drafted-from-a-sentence-ledger-1138)
+it adds [`ikigai-nl`](https://github.com/ikigai-rs/ikigai-nl) (`urn:nl:*`, drafting through the
+mount, so no model client) and binds `ikigai-vocab`'s `urn:ikigai:vocab`, the vocabulary its
+grounding states.
 
 ⚠ **That is a correction, and it has now been made twice.** Through 0.1.0 this section said
 "no filesystem module, no process execution and no outbound network client is compiled in, so
@@ -2650,6 +2779,8 @@ pins the backup composition's eight more — gonk's four and compress's four —
 a real archive, comparing the graph set and the per-graph counts rather than a total.
 `tests/scripts_939.rs` pins the script family's twelve — the library's eight, the plan doors'
 three and the validator — in the hub, and the validator's absence at every door.
+`tests/nl_1138.rs` pins the natural-language family's five (four without a mount, which binds no
+drafter).
 `tests/topology.rs` sources `urn:kernel:topology` through the hub and both door shapes, pins the
 named nodes and their order, asserts nothing of this crate's is opaque, and runs the §12.5
 reachability walk over the result.

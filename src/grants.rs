@@ -493,6 +493,49 @@ pub fn script_grants(name: &str, authority: ScriptAuthority) -> Result<Vec<Strin
     Ok(tokens)
 }
 
+/// Why `--nl draft` cannot be minted on a server with no `gonk.mount`: the refusal itself, so
+/// the CLI and the tests say the same sentence.
+pub const NL_DRAFT_NEEDS_A_MOUNT: &str =
+    "--nl draft grants drafting with urn:nl:sparql, which asks the model the `gonk.mount` line \
+     names — and this server has none, so it binds no drafter and there is no host for the net \
+     grant to name. Add `gonk.mount = \"prefer urn:llm:=…\"` to config.toml";
+
+/// The token that lets an identity DRAFT a query from a sentence (`--nl draft`, ledger
+/// [#1138](http://localhost:1060/l/default/item/1138)): `urn:cap:net:{host}` for the mounted
+/// peer, which [`crate::nl`] declares on `urn:nl:sparql` and the mount enforces exactly
+/// ([`crate::mount::net_grant`]).
+///
+/// ```
+/// use ikigai_gonk::grants::{nl_draft_grants, NL_DRAFT_NEEDS_A_MOUNT};
+/// assert_eq!(nl_draft_grants(Some("127.0.0.1")).unwrap(), ["urn:cap:net:127.0.0.1"]);
+/// assert_eq!(nl_draft_grants(None).unwrap_err(), NL_DRAFT_NEEDS_A_MOUNT);
+/// ```
+///
+/// # Why ONE token, and what it does not carry
+///
+/// It is the spend: the model is the only thing a draft reaches that the caller's other grants
+/// do not already reach. What the draft READS is the caller's own `--ledger` / `--browse-graph`
+/// grant (the grounding and the dry run run under it), and where it is SAVED is a
+/// `--script <name>=publish` name (`ikigai-script` matches a script grant exactly, so there is
+/// no "may draft under any name" token; a draft with no grant for its name is answered
+/// unsaved). ⚠ The same token is `--browse derive`'s net half, and it reaches `urn:llm:*`
+/// directly through every door, as it does for derive: the authority is "may spend the
+/// mounted model", not "may draft". No anonymous grant carries it.
+///
+/// # Errors
+///
+/// [`NL_DRAFT_NEEDS_A_MOUNT`] with no mount, and a host that could not be one.
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn nl_draft_grants(net_host: Option<&str>) -> Result<Vec<String>, String> {
+    let host = net_host.ok_or_else(|| NL_DRAFT_NEEDS_A_MOUNT.to_string())?;
+    if host.is_empty() || host == "*" || host.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "`{host}` cannot be the mounted peer's host in a net grant"
+        ));
+    }
+    Ok(vec![format!("urn:cap:net:{host}")])
+}
+
 /// Everything an ANONYMOUS loopback caller of the HTTP door holds: the read and write tokens of
 /// the ledgers in `gonk.http.ledger`, and [`crate::script::ANONYMOUS`] (run and read a PUBLIC
 /// script).

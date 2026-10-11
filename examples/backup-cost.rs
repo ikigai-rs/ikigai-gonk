@@ -126,6 +126,7 @@ fn hub(store: DurableStore, rotation: &Path) -> Arc<Kernel> {
             next: Default::default(),
         }),
         None,
+        None,
     ))
 }
 

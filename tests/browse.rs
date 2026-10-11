@@ -154,6 +154,7 @@ fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Serve
         Vec::new(),
         None,
         None,
+        None,
     ));
     Served {
         hub,
@@ -2002,6 +2003,7 @@ fn an_unwatched_roots_reads_are_not_cached() {
         Vec::new(),
         None,
         None,
+        None,
     ));
     let file = "urn:repo:demo:file:src/lib.rs";
     assert_eq!(text(&hub, Verb::Source, file, &[]), "the first version\n");
@@ -3306,6 +3308,7 @@ fn the_pass_requires_exactly_what_the_real_review_requires() {
             false,
             ikigai_gonk::config::QueuePolicy::default(),
         ),
+        None,
         None,
         None,
     );
