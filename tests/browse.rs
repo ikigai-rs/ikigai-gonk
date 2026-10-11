@@ -33,6 +33,9 @@
 //!   read timings printed.
 //! - [`a_watched_file_read_recomputes_after_the_file_changes_on_disk`] — the cache that
 //!   watcher makes safe, driven through the watcher's own notification path.
+//! - [`a_rewritten_annotation_is_never_seen_missing_by_a_concurrent_reader`] — one
+//!   transaction per archive record (`ikigai-browse` 0.18.5), measured through the kernel and
+//!   the HTTP door while the record is rewritten (ledger #1253).
 //!
 //! Every store here is an `in_memory_*` one, which carries the SAME coverage as its durable
 //! twin — `in_memory_shared_declaring` for the composition this server builds, plain
@@ -1125,6 +1128,133 @@ fn deleting_an_annotation_needs_a_read_grant_on_its_own_root() {
     assert!(
         matches!(gone, Err(ikigai_core::Error::NotFound(_))),
         "the permitted delete removed it: {gone:?}"
+    );
+}
+
+/// ★ **The measure for `ikigai-browse = "0.18.5"`** (ledger #1253, browse PR #92): a rewritten
+/// annotation is never seen MISSING by a reader running beside the rewrite, through either of
+/// this server's ways in: the kernel every door issues into (the socket door's path, in
+/// process) and the HTTP door's command adapter under a browsing grant.
+///
+/// Through 0.18.4 browse rewrote an annotation as many separate commits (remove the old
+/// record quad by quad, then insert the new one), so a read landing between them answered
+/// `NotFound` for a record that was never deleted. 0.18.5 writes every archive record as ONE
+/// transaction through `ikigai-store`'s `SharedWriter::over`, so a reader sees the old record
+/// or the new one and nothing in between.
+///
+/// ⚠ Still open, and NOT this test's subject: gonk hands browse a raw handle from
+/// `open_shared_declaring`, so browse runs its own `over` writer beside the store's (two
+/// writer threads and two locks on one dataset; ledger #1252, which needs a browse `Mount`
+/// that takes the host's `SharedWriter`).
+#[test]
+fn a_rewritten_annotation_is_never_seen_missing_by_a_concurrent_reader() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const REWRITES: usize = 300;
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let file = "urn:repo:demo:file:src/lib.rs";
+    annotate(&hub, "n1", file, "first", "rewrite 0");
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+    let read_path = k("source urn:iki:annotation:n1");
+    let (status, body) = door.get_html(&read_path, Some(&token));
+    assert_eq!(
+        status, 200,
+        "the door reads the annotation before the race: {body}"
+    );
+
+    // A read is one of three things: the record (old or new, whole), MISSING (a `NotFound`
+    // for a record nobody deleted), or TORN (anything else: a record whose body or target
+    // was caught between the remove and the insert).
+    let done = AtomicBool::new(false);
+    let (kernel_reads, kernel_missing, kernel_torn) = (
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    );
+    let (door_reads, door_missing, door_torn) = (
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    );
+    let first_torn = std::sync::Mutex::new(None::<String>);
+    let torn = |count: &AtomicUsize, what: String| {
+        count.fetch_add(1, Ordering::Relaxed);
+        first_torn.lock().unwrap().get_or_insert(what);
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                let answer = block_on(Kernel::issue(
+                    &hub,
+                    request(Verb::Source, "urn:iki:annotation:n1", &[]),
+                    &Capability::root(),
+                ));
+                kernel_reads.fetch_add(1, Ordering::Relaxed);
+                match answer {
+                    Ok(repr) if String::from_utf8_lossy(&repr.bytes).contains("rewrite ") => {}
+                    Ok(repr) => torn(
+                        &kernel_torn,
+                        format!("kernel: {}", String::from_utf8_lossy(&repr.bytes)),
+                    ),
+                    Err(ikigai_core::Error::NotFound(_)) => {
+                        kernel_missing.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(other) => torn(&kernel_torn, format!("kernel: {other}")),
+                }
+            }
+        });
+        scope.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                let (status, body) = door.get_html(&read_path, Some(&token));
+                door_reads.fetch_add(1, Ordering::Relaxed);
+                match status {
+                    200 if body.contains("rewrite ") => {}
+                    404 => {
+                        door_missing.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => torn(&door_torn, format!("HTTP door {status}: {body}")),
+                }
+            }
+        });
+        for n in 1..=REWRITES {
+            annotate(&hub, "n1", file, "first", &format!("rewrite {n}"));
+        }
+        done.store(true, Ordering::Release);
+    });
+
+    let (kernel_reads, kernel_missing, kernel_torn) = (
+        kernel_reads.into_inner(),
+        kernel_missing.into_inner(),
+        kernel_torn.into_inner(),
+    );
+    let (door_reads, door_missing, door_torn) = (
+        door_reads.into_inner(),
+        door_missing.into_inner(),
+        door_torn.into_inner(),
+    );
+    println!(
+        "--- {REWRITES} rewrites: the kernel read {kernel_reads} times, missing \
+         {kernel_missing}, torn {kernel_torn}; the HTTP door read {door_reads} times, missing \
+         {door_missing}, torn {door_torn}"
+    );
+    assert!(
+        kernel_reads > 0 && door_reads > 0,
+        "both readers ran beside the rewrites"
+    );
+    assert_eq!(
+        (kernel_missing, kernel_torn, door_missing, door_torn),
+        (0, 0, 0, 0),
+        "a rewritten annotation was seen missing or torn (kernel {kernel_missing}+{kernel_torn} \
+         of {kernel_reads}, HTTP door {door_missing}+{door_torn} of {door_reads}); the first \
+         torn read: {:?}",
+        first_torn.into_inner().unwrap()
+    );
+    let last = text(&hub, Verb::Source, "urn:iki:annotation:n1", &[]);
+    assert!(
+        last.contains(&format!("rewrite {REWRITES}")),
+        "the last rewrite is the one that stands: {last}"
     );
 }
 

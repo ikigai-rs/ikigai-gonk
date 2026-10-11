@@ -425,12 +425,24 @@ ikigai-nl = "0.2.0"
 # every capability, the root's included, and the listing drops it.
 # `tests/browse.rs::git_metadata_is_absent_through_both_doors` is the FLOOR TEST: red on 0.18.1.
 # `^0.18.2` is `<0.19.0`. Patch: a narrowed read (it refuses paths that used to be served).
-# ★ 0.18.4 is the pin now (ledger #1131, #1198): browse commits every archive write on ONE
-# long-lived writer thread, so reads after a run of writes stay fast (RocksDB seeds a memtable
-# skiplist's heights from the thread id, and this server's socket door spawns a thread per
-# connection; measured 6.4x to 68x slower reads before it). 0.18.3 (unpublished on its own):
-# a tree lists a link iff it is served. Nothing new is called here. `^0.18.4` is `<0.19.0`.
-ikigai-browse = "0.18.4"
+# 0.18.4 (ledger #1131, #1198): browse commits every archive write on ONE long-lived writer
+# thread, so reads after a run of writes stay fast (RocksDB seeds a memtable skiplist's heights
+# from the thread id, and this server's socket door spawns a thread per connection; measured
+# 6.4x to 68x slower reads before it). 0.18.3 (unpublished on its own): a tree lists a link iff
+# it is served.
+# ★ 0.18.5 is the pin now (ledger #1253, browse PR #92): every archive record (annotation,
+# decision, finding, verdict, review pass) is ONE transaction through `ikigai-store` 0.2.15's
+# `SharedWriter::over`, which browse requires, so the lock carries store 0.2.15 whatever the
+# store line above says. Through 0.18.4 a rewritten annotation was removed and re-inserted in
+# separate commits, and a reader between them saw it missing or torn.
+# `tests/browse.rs::a_rewritten_annotation_is_never_seen_missing_by_a_concurrent_reader` is
+# the FLOOR TEST: on 0.18.4, 300 rewrites against two readers were seen missing 2340 times and
+# torn 598 of 3550 kernel reads, and missing 110 of 303 HTTP door reads. ⚠ Still open (ledger
+# #1252): gonk hands browse the RAW handle from `open_shared_declaring`, so browse builds its
+# own `over` writer beside the store's: two writer threads and two locks on one dataset. That
+# needs a browse `Mount` that takes the host's `SharedWriter` first. Nothing new is called
+# here. `^0.18.5` is `<0.19.0`.
+ikigai-browse = "0.18.5"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
