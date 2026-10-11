@@ -39,7 +39,9 @@ fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {
 }
 
 fn hub() -> Arc<Kernel> {
-    Arc::new(compose(DurableStore::in_memory().expect("an in-memory store")))
+    Arc::new(compose(
+        DurableStore::in_memory().expect("an in-memory store"),
+    ))
 }
 
 /// The capability a QUIC session carries for `FP`, minted the way the door mints it.
@@ -268,7 +270,10 @@ fn a_stored_old_form_author_still_renders_as_that_machine() {
     let server = Server::start();
     // Seeded through the hub as root, the way the store already holds pre-migration writes.
     for (content, author) in [
-        ("written before the migration", format!("urn:iki:gonk:client:{FP}")),
+        (
+            "written before the migration",
+            format!("urn:iki:gonk:client:{FP}"),
+        ),
         ("written after it", format!("urn:iki:host:gonk:client:{FP}")),
     ] {
         block_on(server.hub.issue(
