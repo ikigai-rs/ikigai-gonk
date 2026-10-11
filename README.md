@@ -1989,6 +1989,16 @@ Every run is held to `urn:cap:ledger:read:*` and `urn:cap:store:read:graph:urn:i
 (`script::CEILING`). **Scripts here are read-only**, and a script that writes is refused when it
 is published: a SPARQL UPDATE, or a plan with a `Sink` or `Delete` step.
 
+The ceiling also names the EXACT read members of every ledger this server holds
+(`urn:cap:ledger:read:{L}` and `urn:cap:store:read:graph:urn:iki:ledger:graph:{L}`,
+`script::ceiling_over`; ledger #1220). A runner holding exact grants does not need them. The
+owner does: root holds no exact grant, and a plan step declares only a family (`next` declares
+`urn:cap:store:read:graph:*`, and the ledger's name is not in its IRI), so a plan the owner
+published and ran over the socket was refused, `capability does not grant
+urn:cap:store:read:graph:*`. The list is read from the store's graph list before each root run, so
+a ledger filed since the last run is in it. `tests/plan_ceiling_1220.rs` runs a root-published,
+root-run one-step plan over `urn:iki:ledger:library:next`, and over a ledger filed after startup.
+
 ⚠ **Why not "writes through the ledger's own doors".** `ikigai-ledger` writes every append and
 comment as a store update under the CALLER's capability, so the ledger's write door needs the
 ledger graph's store write token, the same token a raw update of that graph needs. A ceiling that
