@@ -415,6 +415,11 @@ store's `/iki/store/…` doors, the editor page's protocol face and its results 
   cannot narrow the capability the door computes, so it can neither forge the mark nor drop it.
   A signed-in caller gets the store's base. The socket is the owner (root). QUIC callers are
   authenticated by certificate and get their grant's budget.
+- **And inside an anonymous SCRIPT RUN** (ledger #1175): a run evaluates the script's query in a
+  sub-request under the run's attenuated capability, which no longer carries the marker, so the
+  run's wrapper (`crate::script`) carries the budget on the task and the store's overlay in the
+  hub stamps every evaluation made within the run. See
+  [Scripts](#scripts-saved-queries-and-plans-ledger-939).
 - **The stamp OVERWRITES.** A caller's own `budget=` is kept only when it is an inline whole number
   no larger than the door's, so it can lower the budget and nothing else. A larger, zero, malformed
   or by-reference value is replaced. (`ikigai-sparql` reads a by-reference `budget=` as no budget
@@ -1974,16 +1979,24 @@ could make one at a time.
 - **A result is cached in the hub**, under the store's write threads (and the script's own,
   which a republish cuts), so the same public read from a thousand callers is computed once.
   Measured in process: a cold `open-by-label:result` in about 1.2 ms, the next in about 30 µs.
-  A public run uses the store's base time budget rather than the anonymous door's: the caller
-  supplies parameter values, never text.
+- **An anonymous run is bounded in time and in rate** (ledger #1175). Every SPARQL evaluation
+  it makes takes the anonymous door's budget (`gonk.http.anonymous_sparql_budget_ms`, 1 s by
+  default), as the anonymous caller's own SPARQL does; a signed-in run gets the store's 5 s base.
+  The marker the door puts on an anonymous capability does not survive into the run (its
+  capability is attenuated to what the script derives), so gonk's wrapper around the run carries
+  the budget on the task, and the store's overlay stamps every evaluation made within it, a plan
+  script's ledger reads included. And anonymous runs, all of them together, are limited to **30
+  a minute** (`script::ANONYMOUS_RUNS`, an `ikigai-throttle` `RateLimit`), refused past it with
+  the time to retry; an answer from the hub's cache is not counted, and reading a script's source
+  is not a run. Before this, an anonymous run's query took the store's base and could be sent
+  without limit.
 - **The atoms are plain files** in `~/.ikigai/scripts` (`gonk.script.dir`), the library's
   `DirBackend`: one directory per script, a compare-and-set head, digest-checked versions, a
   file per run. Not in the RDF store, because the records ARE authority (a version stores what
   its publisher held) and a store graph is reachable by the per-graph grants this server mints.
   ⚠ **So a backup does not hold the scripts**: copy the directory beside it.
 - **Not built:** triggers (ledger #937), a script as an endpoint, a stepper, signed elevation,
-  ledger writes from a script (above), rate limiting of anonymous runs, and the backup of the
-  scripts directory.
+  and ledger writes from a script (above).
 
 ## Natural language: a query drafted from a sentence (ledger #1138)
 

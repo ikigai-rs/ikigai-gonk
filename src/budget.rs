@@ -169,14 +169,7 @@ pub fn stamp(request: Request, endpoint_id: &str, capability: &Capability) -> Re
 /// ```
 pub fn stamp_budget(request: Request, door_ms: u64) -> Request {
     let door_ms = door_ms.max(1);
-    let tighter = match request.args.get("budget") {
-        Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes)
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .is_some_and(|ms| (1..=door_ms).contains(&ms)),
-        _ => false,
-    };
-    if tighter {
+    if is_within(&request, door_ms) {
         request
     } else {
         request.with_arg("budget", ArgRef::Inline(door_ms.to_string().into_bytes()))
@@ -206,5 +199,65 @@ pub fn anonymous_budget(value: Option<&str>) -> Result<u64, String> {
              budget could never apply, because a request's budget only lowers what its \
              capability gets)"
         )),
+    }
+}
+
+// ------------------------------------------------------------------ an anonymous script run
+
+tokio::task_local! {
+    /// The anonymous budget of the script run this task is inside, if any: set by
+    /// [`within_run`] and read by [`run_budget`].
+    static RUN_BUDGET: u64;
+}
+
+/// `work` with the anonymous budget `door_ms` in force for every SPARQL evaluation it issues
+/// ([`run_budget`]) — how an anonymous SCRIPT RUN keeps the door's budget (ledger
+/// [#1175](http://localhost:1060/l/default/item/1175)).
+///
+/// # Why a task-local, and not the capability
+///
+/// The marker ([`anonymous_marker`]) is in the capability the door computed, and the stamp at
+/// the hub's front door ([`stamp`]) reads it there. A script run never reaches the store that
+/// way: `ikigai-script` evaluates the script's query in a SUB-request it issues under the run's
+/// capability, which is the runner's ATTENUATED to what the script derives — so the marker is
+/// dropped, and the sub-request passes no door. It ran under the store's base (5 s) whatever
+/// the door said. The run's endpoint is wrapped by gonk ([`crate::script`]), which still sees the
+/// runner's own capability, marker and all, and runs the endpoint inside this scope; the
+/// store's overlay in the hub ([`crate::sparql::bounded`]) stamps every SPARQL evaluation made
+/// within it. The kernel issues a sub-request on the task that issued it (the hub is not a
+/// scheduled kernel, so nothing here fans out onto other tasks), which is what carries it.
+///
+/// ⚠ **Within a run, EVERY evaluation is held to it**, a plan script's ledger reads included:
+/// the anonymous caller's run is the work being bounded. Outside a run the stamp is still only
+/// [`stamp`]'s, so gonk's own queries under an anonymous PAGE keep the store's base.
+pub async fn within_run<F: std::future::Future>(door_ms: u64, work: F) -> F::Output {
+    RUN_BUDGET.scope(door_ms, work).await
+}
+
+/// The anonymous budget of the script run this task is inside ([`within_run`]), or `None`.
+pub fn run_budget() -> Option<u64> {
+    RUN_BUDGET.try_with(|ms| *ms).ok()
+}
+
+/// Whether `request` already carries an inline `budget=` from 1 to `door_ms` — what
+/// [`stamp_budget`] keeps rather than overwrites.
+///
+/// ```
+/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_gonk::budget::{is_within, stamp_budget};
+/// let select = Request::new(Verb::Source, Iri::parse("urn:iki:store:graph-select").unwrap());
+/// assert!(!is_within(&select, 1000));
+/// assert!(is_within(&stamp_budget(select.clone(), 1000), 1000));
+/// let loose = select.with_arg("budget", ArgRef::Inline(b"5000".to_vec()));
+/// assert!(!is_within(&loose, 1000));
+/// ```
+pub fn is_within(request: &Request, door_ms: u64) -> bool {
+    let door_ms = door_ms.max(1);
+    match request.args.get("budget") {
+        Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .is_some_and(|ms| (1..=door_ms).contains(&ms)),
+        _ => false,
     }
 }

@@ -160,6 +160,15 @@ ikigai-ledger = "0.6.2"
 # a failed run cuts the runs thread too (core 0.1.95 — which is why the core line above moved).
 # ⚠ `"0.2.1"` is `<0.3.0`.
 ikigai-script = "0.2.1"
+# ★ The rate on ANONYMOUS script runs (ledger #1175, `crate::script::ANONYMOUS_RUNS`): one
+# `RateLimit` overlay over the script family, consulted only for a run whose capability carries
+# the anonymous door's marker, which is the advice `ikigai-script`'s README gives a host that
+# lets anonymous callers run ("Rate-limit the door (`ikigai-throttle`)"). 0.1.11 is the published
+# head and what was built and tested (`RateLimit` and `Rate` are older, but no earlier release
+# was built here). Its floor of core is 0.1.78, below the line above; it adds itself and five
+# small runtime-agnostic crates to the lock (`futures-timer`, `async-lock` and the
+# `event-listener` family `async-lock` is built on). ⚠ `"0.1.11"` is `<0.2.0`.
+ikigai-throttle = "0.1.11"
 # The plan doors a `language=plan` script reaches — `urn:plan:eval`, `urn:plan:validate`,
 # `urn:plan:requires` (`plan_space::space`, behind the `plan-reader` feature). 0.1.44 is where
 # they are published, so it is the true floor. ⚠ A fresh resolve takes 0.1.46, which needs

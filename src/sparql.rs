@@ -761,6 +761,21 @@ impl Endpoint for Guarded {
                 }
             }
         }
+        // ★ Inside an ANONYMOUS script run, every SPARQL evaluation takes the door's budget
+        // (ledger #1175, [`crate::budget::within_run`]): the run's sub-requests arrive here
+        // under an attenuated capability that no longer carries the door's marker. An
+        // invocation's request cannot be changed in place, so a request that is not yet within
+        // the budget is issued AGAIN, stamped; it resolves back here within it and runs. The
+        // re-issue is a sub-request of this one, so its expiry and threads are recorded here.
+        if let Some(door_ms) = crate::budget::run_budget() {
+            if crate::budget::SPARQL_IDS.contains(&name)
+                && !crate::budget::is_within(inv.request, door_ms)
+            {
+                return inv
+                    .issue(crate::budget::stamp_budget(inv.request.clone(), door_ms))
+                    .await;
+            }
+        }
         self.endpoint.invoke(inv).await
     }
 
