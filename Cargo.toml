@@ -62,7 +62,10 @@ path = "src/main.rs"
 # match with its own identity (0.1.91, ledger #948), a failed invocation as a trace node
 # (0.1.92), and principals as capability scopes (0.1.93, ledger #1077) — which gonk's doors
 # adopt (`Capability::with_principal`), so 0.1.93 is also an API floor.
-ikigai-core = "0.1.93"
+# ★ 0.1.95 since ledger #939, a RESOLUTION floor: `ikigai-script` 0.2.1 below requires it (the
+# kernel cuts a Sink's target when the endpoint ran and failed, so a failed script run still cuts
+# its runs thread). Nothing in gonk calls 0.1.94 or 0.1.95 API by name.
+ikigai-core = "0.1.95"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -149,6 +152,34 @@ ikigai-store = { version = "0.2.12", features = ["persistent"] }
 # space `urn:iki:space:ledger`; 0.6.1 draws the id nonce from getrandom on wasm; 0.6.2 takes
 # store 0.2.10 as a security floor. `^0.5.0` was `<0.6.0`: a ceiling, so this had to move.
 ikigai-ledger = "0.6.2"
+# ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
+# resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
+# `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
+# floor and an API one: 0.2.0 is where the principal is read from the CAPABILITY (core 0.1.93's
+# `urn:cap:principal:`, which every door here mints) instead of a host stamper, and 0.2.1 is where
+# a failed run cuts the runs thread too (core 0.1.95 — which is why the core line above moved).
+# ⚠ `"0.2.1"` is `<0.3.0`.
+ikigai-script = "0.2.1"
+# The plan doors a `language=plan` script reaches — `urn:plan:eval`, `urn:plan:validate`,
+# `urn:plan:requires` (`plan_space::space`, behind the `plan-reader` feature). 0.1.44 is where
+# they are published, so it is the true floor. ⚠ A fresh resolve takes 0.1.46, which needs
+# `ikigai-resolve` 0.1.46, so the lock moves that one crate under the other cli 0.1.44 crates
+# here. Its source has not changed since 0.1.29 (the cli releases bump it in lockstep for their
+# pins), and the alternative, pinning the lock back with `--precise`, re-chose spareval's sha2
+# edge and broke the build with two `digest` crates. ⚠ This links the ENGINE crate (the REPL
+# grammar) for its plan runner only; nothing else of it is bound. `"0.1.44"` is `<0.2.0`.
+ikigai-engine = { version = "0.1.44", features = ["plan-reader"] }
+# `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
+# vocabulary's shapes before it is stored, and again before it runs). ⚠⚠ **This is the widest
+# thing this manifest links, and it is linked for the plan doors ALONE.** rudof brings `reqwest`
+# and turns on oxigraph's `http-client`, so an HTTP client is compiled into gonk for the first
+# time; and rudof's validator can overflow its thread on data deep enough (ikigai-shacl's own
+# README), which ABORTS the process that holds the store. So the resource is never served to a
+# caller: every door refuses `urn:shacl:*` as it arrives (`crate::admit::not_served`), and only
+# the plan doors' own sub-requests reach it, with the vocabulary's fixed shapes and a plan the
+# script library has already bounded at 1 MiB. Its SERVICE/LOAD refusals are its own (0.3.x) and
+# the store's (0.2.10+). 0.3.3 is the published head and what was built and tested.
+ikigai-shacl = "0.3.3"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,

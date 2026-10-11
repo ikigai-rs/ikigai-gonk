@@ -62,6 +62,7 @@ fn main() {
             browse_graph,
             ledger_graphs,
             browse,
+            scripts,
             force,
             rotate,
             flags,
@@ -81,6 +82,7 @@ fn main() {
                         ledgers: &ledgers,
                         browse_graph,
                         ledger_graphs: &ledger_graphs,
+                        scripts: &scripts,
                     },
                     &browse_scopes,
                 ),
@@ -100,6 +102,7 @@ fn main() {
             browse_graph,
             ledger_graphs,
             browse,
+            scripts,
             force,
             minutes,
             flags,
@@ -109,6 +112,7 @@ fn main() {
                 ledgers: &ledgers,
                 browse_graph,
                 ledger_graphs: &ledger_graphs,
+                scripts: &scripts,
             },
             browse.as_ref(),
             force,
@@ -153,8 +157,10 @@ fn serve(flags: &config::Flags) -> ! {
     });
     // Before the store is opened: a socket the kernel cannot bind stops the server here.
     config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
-    let http_grants = grants::grants_for_all(&settings.http_ledgers, Authority::Write)
-        .unwrap_or_else(|e| fail(&e));
+    // The anonymous loopback caller: its ledgers' read and write tokens, and the right to run
+    // and read a PUBLIC script (ledger #939, `script::ANONYMOUS`).
+    let http_grants =
+        grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
 
     // Authority is decided before the store opens: a broken authority file stops the server
     // instead of degrading it. `grants.json` feeds BOTH identity doors (certificates and
@@ -355,6 +361,10 @@ fn serve(flags: &config::Flags) -> ! {
     if let Some(backfill) = &backfill {
         trigger_spaces.push(backfill.space());
     }
+    // ★ The script family (ledger #939): its atoms in `gonk.script.dir`, opened before the hub
+    // because the hub binds it, and attached after, so a publish re-describes the catalog.
+    let scripts =
+        ikigai_gonk::script::Scripts::open(&settings.script_dir).unwrap_or_else(|e| fail(&e));
     let hub = Arc::new(compose_with(
         store,
         browse_space,
@@ -365,7 +375,9 @@ fn serve(flags: &config::Flags) -> ! {
             jobs: jobs.clone(),
             next: backup_next.clone(),
         }),
+        Some(&scripts),
     ));
+    scripts.attach(&hub);
 
     // ★ The Queue's serious set, checked against the finding contract THIS kernel binds
     // (ledger #496): a word the contract does not declare stops this server naming both
@@ -564,6 +576,11 @@ fn serve(flags: &config::Flags) -> ! {
             eprintln!("          ⚠ {caveat}");
         }
         eprintln!("  browse  {browse_line}");
+        eprintln!(
+            "  scripts urn:script:* in {} — sparql and plan, read-only (the ledgers' reads); \
+             anonymous runs PUBLIC scripts only; a QUIC client drafts, a person publishes",
+            settings.script_dir.display()
+        );
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
         eprintln!("  review  {review_line}");
@@ -902,11 +919,16 @@ struct Subjects<'a> {
     ledgers: &'a [(String, Authority)],
     browse_graph: Option<Authority>,
     ledger_graphs: &'a [String],
+    /// `--script <name>=<read|run|publish>` (ledger #939).
+    scripts: &'a [(String, grants::ScriptAuthority)],
 }
 
 impl Subjects<'_> {
     fn is_empty(&self) -> bool {
-        self.ledgers.is_empty() && self.browse_graph.is_none() && self.ledger_graphs.is_empty()
+        self.ledgers.is_empty()
+            && self.browse_graph.is_none()
+            && self.ledger_graphs.is_empty()
+            && self.scripts.is_empty()
     }
 }
 
@@ -943,6 +965,11 @@ fn scopes_for(subjects: &Subjects<'_>, browse: &[String]) -> Vec<String> {
     }
     for token in browse {
         add(token.clone());
+    }
+    for (script, authority) in subjects.scripts {
+        for token in grants::script_grants(script, *authority).unwrap_or_else(|e| fail(&e)) {
+            add(token);
+        }
     }
     scopes
 }
@@ -1215,8 +1242,8 @@ fn passkey_invite(
     // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
     // in would be a ceremony that changes nothing — and a grant that looked like it limited
     // someone would not.
-    let anonymous = grants::grants_for_all(&settings.http_ledgers, Authority::Write)
-        .unwrap_or_else(|e| fail(&e));
+    let anonymous =
+        grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
     if scopes.iter().all(|scope| anonymous.contains(scope)) {
         fail(&format!(
             "that grant adds nothing: an anonymous loopback caller already reads and writes {}. \

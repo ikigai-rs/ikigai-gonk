@@ -91,6 +91,7 @@ fn r1_a_grant_naming_the_restore_token_is_refused_per_use_as_it_is_at_startup() 
             jobs: None,
             next: Default::default(),
         }),
+        None,
     ));
     let door = doors::door_kernel(Arc::clone(&hub));
     let into = backups_dir.path().join("chosen-by-the-remote-caller");

@@ -117,6 +117,7 @@ fn door_and_hub(
         Vec::new(),
         trigger_spaces,
         None,
+        None,
     ));
     let config = tempfile::tempdir().expect("a config home");
     let face = Arc::new(web::Web {
@@ -2091,6 +2092,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
             false,
             QueuePolicy::default(),
         ),
+        None,
         None,
     ));
     let config = tempfile::tempdir().expect("a config home");

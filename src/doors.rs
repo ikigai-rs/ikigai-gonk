@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens, and the run and read of PUBLIC scripts ([`crate::script::ANONYMOUS`]), for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME in the authority — `urn:iki:gonk:client:<fingerprint>`, minted into the session capability ([`crate::quic::authority`], ledger #1077), which core's clamp keeps whatever capability the client carries: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
@@ -130,8 +130,49 @@ fn hub_root(hub: &Kernel) -> Topology {
     }
 }
 
+/// The arguments a TRANSPORT adds to a write, which the hub's forward removes from every request into
+/// `urn:script:*` — with `principal`, which `ikigai-quic` adds to every request (ledger #939).
+///
+/// ★ **Why.** `ikigai-web` stamps a write with its provenance (`received`, `client`,
+/// `principal`) and the body's `content-type`, and `ikigai-quic` stamps `principal` on every
+/// verb. A ledger ignores an argument it does not declare; `ikigai-script` REFUSES one — a
+/// binding a script does not mention is refused rather than silently ignored, so a filter a
+/// caller thought was applied never silently is not — and a run's arguments are the script's
+/// own parameters. Through the HTTP and QUIC doors every run for effects was therefore a
+/// `400`, *"`client` is not a parameter of urn:script:…"*, with no way for the caller to avoid
+/// it. Who a request is from reaches the script in the CAPABILITY, where the door minted it.
+///
+/// ⚠ So a script parameter cannot be called any of these: the transport owns the name.
+pub const TRANSPORT_STAMPS: [&str; 3] = ["received", "client", "content-type"];
+
+/// The prefixes the hub binds and no door serves: `urn:shacl:`, linked as the plan doors'
+/// validator (ledger #939, [`crate::script`]).
+///
+/// ★ **Why not served.** rudof's validator walks a self-following shape one call per link of
+/// the DATA, so a deep enough chain overflows its thread and aborts the process (ikigai-shacl's
+/// README says so, and no bound on the shapes can refuse it) — and this process holds the
+/// store. The plan doors send it only the vocabulary's own shapes and a plan the script
+/// library has bounded, as sub-requests inside the hub, which never pass a door.
+///
+/// ```
+/// use ikigai_gonk::doors::not_served;
+/// assert!(not_served("urn:shacl:validate"));
+/// assert!(!not_served("urn:plan:validate"));
+/// assert!(!not_served("urn:script:catalog"));
+/// ```
+pub fn not_served(target: &str) -> bool {
+    NOT_SERVED.iter().any(|prefix| target.starts_with(prefix))
+}
+
+const NOT_SERVED: [&str; 1] = ["urn:shacl:"];
+
 impl Space for HubSpace {
     fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
+        // ★ What the hub binds for its own sub-requests and serves to no caller (ledger #939):
+        // a miss at every door, exactly as if it were not linked.
+        if not_served(request.target.as_str()) {
+            return Resolution::Miss;
+        }
         // A miss when the hub binds nothing here, so the door reports the kernel's own
         // "no endpoint" rather than a forwarding endpoint that fails on invoke.
         match self.hub.describe(&request.target) {
@@ -166,7 +207,9 @@ impl Space for HubSpace {
         self.hub.entries().map(|entries| {
             entries
                 .into_iter()
-                .filter(|entry| !entry.pattern.starts_with("urn:kernel:"))
+                .filter(|entry| {
+                    !entry.pattern.starts_with("urn:kernel:") && !not_served(&entry.pattern)
+                })
                 .collect()
         })
     }
@@ -208,6 +251,20 @@ impl Endpoint for Forward {
             crate::budget::stamp(inv.request.clone(), &self.description.id, inv.capability);
         if self.nobody {
             request.args.remove(crate::admit::PRINCIPAL_ARG);
+        }
+        // ★ The transports' own arguments never reach a script (ledger #939): see
+        // [`TRANSPORT_STAMPS`].
+        if request
+            .target
+            .as_str()
+            .starts_with(ikigai_script::name::PREFIX)
+        {
+            request.args.remove(crate::admit::PRINCIPAL_ARG);
+            if request.verb.is_mutating() {
+                for stamp in TRANSPORT_STAMPS {
+                    request.args.remove(stamp);
+                }
+            }
         }
         let answer = self.hub.issue(request, inv.capability).await?;
         Ok(if self.wire {
