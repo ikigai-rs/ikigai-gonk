@@ -164,10 +164,14 @@ ikigai-store = { version = "0.2.14", features = ["persistent"] }
 # comments, and makes a release a compare-and-set with `from=`. 0.8.0 adds the hand-back state
 # (`comment handback=true`, `next` skips an item awaiting its dispatcher) and records a claim's
 # PRINCIPAL beside its free-text holder, so a client principal the QUIC door mints owns its claim
-# and another worker holding the same lines cannot release it. ⚠ `"0.8.0"` is `<0.9.0`, and
-# 0.9.0's `count` is the ledger page's next move (`crate::web`'s listing reads `total` off
-# `items` today): a lock bump and that one read, not this one.
-ikigai-ledger = "0.8.0"
+# and another worker holding the same lines cannot release it.
+# ★ 0.9.0 is the floor now (ledger #1128, #1198), and an API one: `urn:iki:ledger:{L}:count`,
+# the filter's total as its own resource. The ledger page reads it (`crate::web`'s listing)
+# instead of `items limit=1` as JSON, whose face always ran the corpus check: a cold render's
+# total went from seven store queries to one (`tests/ledger_count_1198.rs`). It declares the
+# same read row `items` does, so every grant that reads a ledger, the worker's included, may
+# count it. `"0.9.0"` is `<0.10.0`: a ceiling too.
+ikigai-ledger = "0.9.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
@@ -215,11 +219,14 @@ ikigai-shacl = "0.3.3"
 # drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
 # templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
 # `state=draft` script through `ikigai-script` above. It links no model client and no network
-# code of its own: the model is the mount, so this adds no outbound surface. 0.1.0 is the only
-# release and what was built and tested. Its own floors (core 0.1.91, vocab 0.1.91, spargebra
-# 0.4.7, oxrdf 0.3, oxttl 0.2) are all below the lines here, so it moves nothing in the lock but
-# itself. ⚠ `"0.1.0"` is `<0.2.0`.
-ikigai-nl = "0.1.0"
+# code of its own: the model is the mount, so this adds no outbound surface.
+# ★ 0.2.0 is the floor now (ledger #1203): every draft's ask carries `max_tokens` (`Llm`'s
+# default, `DEFAULT_MAX_TOKENS`), so a reasoning model cannot spend its whole budget thinking;
+# gonk builds its `Llm` from that default and needed no change. `"0.1.0"` was `<0.2.0`, a
+# ceiling. 0.2.1 (ledger #1196) asks ikigai-script's own rule whether a caller may read a named
+# example, so a namespace grant counts; it takes ikigai-script 0.3.x, which gonk already pins.
+# ⚠ `"0.2.0"` is `<0.3.0`.
+ikigai-nl = "0.2.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
