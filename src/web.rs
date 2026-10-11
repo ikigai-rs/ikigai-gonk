@@ -854,6 +854,9 @@ async fn ledger_listing(
         Ok(read)
     };
     // The total first: an offset past it is refused before anything is drawn.
+    // ★ THE SEAM for ikigai-ledger 0.9.0 (ledger #1128, #1198): `urn:iki:ledger:count` answers
+    // this number as its own resource without the listing's corpus check. Moving to it is this
+    // one read (and `ledger_total`'s parse) after the pin moves; nothing else here counts.
     let total = ledger_total(&fetch(inv, filtered(TOTAL_FACE, 1)?).await?)?;
     if offset > 0 && offset >= total {
         return Err(Error::InvalidArgument {

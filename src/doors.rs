@@ -130,21 +130,6 @@ fn hub_root(hub: &Kernel) -> Topology {
     }
 }
 
-/// The arguments a TRANSPORT adds to a write, which the hub's forward removes from every request into
-/// `urn:script:*` — with `principal`, which `ikigai-quic` adds to every request (ledger #939).
-///
-/// ★ **Why.** `ikigai-web` stamps a write with its provenance (`received`, `client`,
-/// `principal`) and the body's `content-type`, and `ikigai-quic` stamps `principal` on every
-/// verb. A ledger ignores an argument it does not declare; `ikigai-script` REFUSES one — a
-/// binding a script does not mention is refused rather than silently ignored, so a filter a
-/// caller thought was applied never silently is not — and a run's arguments are the script's
-/// own parameters. Through the HTTP and QUIC doors every run for effects was therefore a
-/// `400`, *"`client` is not a parameter of urn:script:…"*, with no way for the caller to avoid
-/// it. Who a request is from reaches the script in the CAPABILITY, where the door minted it.
-///
-/// ⚠ So a script parameter cannot be called any of these: the transport owns the name.
-pub const TRANSPORT_STAMPS: [&str; 3] = ["received", "client", "content-type"];
-
 /// The prefixes the hub binds and no door serves: `urn:shacl:`, linked as the plan doors'
 /// validator (ledger #939, [`crate::script`]).
 ///
@@ -252,20 +237,11 @@ impl Endpoint for Forward {
         if self.nobody {
             request.args.remove(crate::admit::PRINCIPAL_ARG);
         }
-        // ★ The transports' own arguments never reach a script (ledger #939): see
-        // [`TRANSPORT_STAMPS`].
-        if request
-            .target
-            .as_str()
-            .starts_with(ikigai_script::name::PREFIX)
-        {
-            request.args.remove(crate::admit::PRINCIPAL_ARG);
-            if request.verb.is_mutating() {
-                for stamp in TRANSPORT_STAMPS {
-                    request.args.remove(stamp);
-                }
-            }
-        }
+        // The transports' own arguments (`received`, `client`, `principal`, `content-type`) pass
+        // through to a script untouched: `ikigai-script` 0.3.0 ignores them on a run
+        // (`ikigai_script::TRANSPORT_ARGUMENTS`, ledger #1173) and refuses a parameter declared
+        // by one of their names, so nothing here strips them (ledger #1196). Who a run is for
+        // is the CAPABILITY's principal, which the door minted.
         let answer = self.hub.issue(request, inv.capability).await?;
         Ok(if self.wire {
             for_the_wire(answer)

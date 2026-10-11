@@ -698,9 +698,11 @@ fn every_door_reaches_the_scripts_and_each_run_names_its_principal() {
         took[0], took[1]
     );
 
-    // ── HTTP, signed in: a run for EFFECTS, recorded as the passkey. `ikigai-web` stamps a
-    // `principal` argument on this write, which the script would refuse as no parameter of
-    // its own — the door removes it, and the record names the passkey from the capability.
+    // ── HTTP, signed in: a run for EFFECTS, recorded as the passkey. `ikigai-web` stamps
+    // `received`, `client`, `principal` and `content-type` on this write, which ikigai-script
+    // 0.2.x refused as no parameter of the script's (a `400`, "`client` is not a parameter");
+    // 0.3.0 ignores them, so they reach the hub untouched (ledger #1196), and the record names
+    // the passkey from the capability.
     let (status, body) = gonk.http(
         "POST",
         "/script/open-by-label/runs?label=triage",
@@ -793,4 +795,82 @@ fn every_door_reaches_the_scripts_and_each_run_names_its_principal() {
     }
     let (status, _) = gonk.http("GET", "/shacl/validate?data=&shapes=", None, "");
     assert_eq!(status, 404);
+}
+
+/// ★ A NAMESPACE grant (ikigai-script 0.3.0, ledger #1196): `--script team-*=<authority>` mints
+/// `urn:cap:script:{act}:team-*`, which reaches every script whose name begins `team-` through
+/// every door, and nothing outside it (`teammate` is not in `team-`). On 0.2.x the library
+/// matched a script grant exactly, so the same tokens reached nothing.
+#[test]
+fn a_namespace_grant_reaches_every_script_in_it_and_no_other() {
+    let gonk = Gonk::with_quic("");
+    gonk.over_socket(request(
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "a triage item"), ("labels", "triage")],
+    ))
+    .expect("append over the socket");
+    // Root publishes one script inside the namespace and one beside it.
+    for name in ["team-open", "teammate"] {
+        gonk.over_socket(request(
+            Verb::Sink,
+            &format!("urn:script:{name}"),
+            &[("language", "sparql"), ("content", OPEN_BY_LABEL)],
+        ))
+        .unwrap_or_else(|e| panic!("root publishes {name}: {e}"));
+    }
+
+    // ── QUIC, a machine granted to RUN the namespace: runs `team-open`, recorded as itself;
+    // `teammate` is refused.
+    let mut machine = grants_for("default", Authority::Read).unwrap();
+    machine.extend(script_grants("team-*", ScriptAuthority::Run).unwrap());
+    gonk.regrant_alpha(&machine);
+    let runs = |name: &str| {
+        request(
+            Verb::Sink,
+            &format!("urn:script:{name}:runs"),
+            &[("label", "triage")],
+        )
+    };
+    let answer = gonk
+        .over_quic(runs("team-open"))
+        .expect("a namespace holder runs a script in it");
+    let record = gonk.run_record(&run_iri(&text(&answer)));
+    assert_eq!(
+        record["principal"].as_str(),
+        Some(quic::client_iri(&gonk.client.fingerprint).as_str()),
+        "{record}"
+    );
+    let read = gonk
+        .over_quic(request(
+            Verb::Source,
+            "urn:script:team-open:result",
+            &[("label", "triage"), ("as", "text/csv")],
+        ))
+        .expect("and reads its result");
+    assert!(text(&read).contains("a triage item"), "{}", text(&read));
+    match gonk.over_quic(runs("teammate")) {
+        Err(Error::Denied(_)) => {}
+        other => panic!("`teammate` is not in `team-`: {other:?}"),
+    }
+
+    // ── HTTP, signed in: a person granted to PUBLISH the namespace publishes a new name in it,
+    // and not one outside it.
+    let mut scopes = grants_for("default", Authority::Write).unwrap();
+    scopes.extend(script_grants("team-*", ScriptAuthority::Publish).unwrap());
+    let session = gonk.sign_in(&scopes);
+    let (status, body) = gonk.http(
+        "POST",
+        "/script/team-new?language=sparql",
+        Some(&session),
+        OPEN_BY_LABEL,
+    );
+    assert_eq!(status, 200, "a namespace holder publishes in it: {body}");
+    let (status, body) = gonk.http(
+        "POST",
+        "/script/other?language=sparql",
+        Some(&session),
+        OPEN_BY_LABEL,
+    );
+    assert_eq!(status, 403, "outside the namespace: {body}");
 }

@@ -54,10 +54,12 @@
 //!    The design's rule for agents (an agent drafts, a human publishes), enforced at the one door
 //!    whose callers are machines.
 //!
-//! And two at the door boundary, in [`crate::doors`]: `urn:shacl:*` is never served to a
-//! caller (it is linked for the plan doors, and only their sub-requests reach it), and the
+//! And one at the door boundary, in [`crate::doors`]: `urn:shacl:*` is never served to a
+//! caller (it is linked for the plan doors, and only their sub-requests reach it). The
 //! transports' own arguments (`principal`, and a write's `received`, `client`,
-//! `content-type`) never reach a script, which refuses an argument it does not declare.
+//! `content-type`) pass the doors untouched: since `ikigai-script` 0.3.0 a run ignores them
+//! (`ikigai_script::TRANSPORT_ARGUMENTS`), so the strip gonk carried through 0.2.x is gone
+//! (ledger #1196).
 //!
 //! # What a caller can and cannot do here
 //!
@@ -66,8 +68,10 @@
 //!   refuses `language=plan` (pointing at `urn:plan:eval`) and `language=sparql`, and declares
 //!   `urn:cap:lisp`, which no grant here mints — so in gonk it is the owner's, and answers that
 //!   there is no evaluator.
-//! - **Grants are per script name** ([`crate::grants::script_grants`]): the library matches
-//!   `urn:cap:script:{verb}:{name}` exactly, so there is no "publish anything" grant below root.
+//! - **Grants are per script name or per namespace** ([`crate::grants::script_grants`]):
+//!   `urn:cap:script:{act}:{name}` or `urn:cap:script:{act}:{namespace}-*`, decided by the
+//!   library's `authority::holds` (ikigai-script 0.3.0). There is no "publish anything" grant
+//!   below root: `urn:cap:script:{act}:*` grants nothing.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock, Weak};

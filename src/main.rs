@@ -1163,7 +1163,7 @@ fn client_add(
                 layout.grants_json().display()
             ),
             None => println!(
-                "    ikigai-gonk client add {name} --ledger <ledger>=<read|write|delete|purge>"
+                "    ikigai-gonk client add {name} --ledger <ledger>=<read|worker|write|delete|purge>"
             ),
         }
     } else {
@@ -1296,7 +1296,10 @@ fn passkey_invite(
     // someone would not.
     let anonymous =
         grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
-    if scopes.iter().all(|scope| anonymous.contains(scope)) {
+    if scopes
+        .iter()
+        .all(|scope| grants::implied_by(scope, &anonymous))
+    {
         fail(&format!(
             "that grant adds nothing: an anonymous loopback caller already reads and writes {}. \
              Invite with more — `--ledger {}=delete`, or a ledger outside `gonk.http.ledger`",
