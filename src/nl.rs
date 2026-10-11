@@ -52,8 +52,13 @@ use ikigai_core::{
     Space, SpaceEntry, Topology, Verb,
 };
 
+use crate::budget::AnonymousRuns;
+
 /// The drafter's endpoint id in `ikigai-nl` (`urn:nl:sparql`).
 const DRAFTER_ID: &str = "nl-sparql";
+
+/// The check's endpoint id in `ikigai-nl` (`urn:nl:sparql:check`).
+const CHECK_ID: &str = "nl-sparql-check";
 
 /// The model door a draft is asked through when `gonk.nl.ask` says nothing: `ikigai-nl`'s own
 /// default, the mounted peer's default backend.
@@ -70,8 +75,10 @@ pub struct Nl {
 impl Nl {
     /// The family. `ask` is the model door a draft goes to (`gonk.nl.ask`); `mount_host` is
     /// the host the `gonk.mount` line dials ([`crate::config::Settings::mount_host`]), or
-    /// `None` when there is no mount, and then `urn:nl:sparql` is not bound.
-    pub fn new(ask: &str, mount_host: Option<&str>) -> Nl {
+    /// `None` when there is no mount, and then `urn:nl:sparql` is not bound. `runs` is the
+    /// anonymous run window an anonymous check's dry run counts against ([`CheckGuard`]),
+    /// the script family's own in `main`.
+    pub fn new(ask: &str, mount_host: Option<&str>, runs: AnonymousRuns) -> Nl {
         let config = ikigai_nl::SpaceConfig::new().llm(ikigai_nl::Llm {
             ask: ask.to_string(),
             ..ikigai_nl::Llm::default()
@@ -80,6 +87,7 @@ impl Nl {
             nl: Arc::new(Guarded {
                 inner: Arc::new(ikigai_nl::space(config)),
                 draft: mount_host.map(|host| format!("urn:cap:net:{host}")),
+                runs,
             }),
             vocab: Arc::new(ikigai_vocab::space()),
         }
@@ -92,16 +100,27 @@ impl Nl {
 }
 
 /// `ikigai-nl`'s space with the drafter declared to need the mount's net grant, or removed
-/// when there is no mount. An overlay with no identity or structure of its own.
+/// when there is no mount, and the check's dry run held to the anonymous budget and rate
+/// ([`CheckGuard`]). An overlay with no identity or structure of its own.
 struct Guarded {
     inner: Arc<dyn Space>,
     /// `urn:cap:net:{host}`, or `None` for no drafter at all.
     draft: Option<String>,
+    runs: AnonymousRuns,
 }
 
 impl Space for Guarded {
     fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
         let resolution = self.inner.resolve(request, scope);
+        if matches!(&resolution, Resolution::Hit(hit) if hit.endpoint.name() == CHECK_ID) {
+            let runs = self.runs.clone();
+            return resolution.map_endpoint(|endpoint| {
+                Arc::new(CheckGuard {
+                    inner: endpoint,
+                    runs,
+                }) as Arc<dyn Endpoint>
+            });
+        }
         let drafter =
             matches!(&resolution, Resolution::Hit(hit) if hit.endpoint.name() == DRAFTER_ID);
         if !drafter {
@@ -161,6 +180,44 @@ impl Endpoint for DraftGuard {
 
     fn describe(&self) -> Description {
         declare(self.inner.describe(), &self.scope)
+    }
+
+    fn confinement(&self) -> Option<Topology> {
+        self.inner.confinement()
+    }
+}
+
+/// `urn:nl:sparql:check` for an ANONYMOUS caller: its dry run is a RUN (ledger
+/// [#1210](http://localhost:1060/l/default/item/1210)).
+///
+/// The check evaluates the caller's own query, under a small `LIMIT`, through the store's
+/// graph-scoped door, in a sub-request the hub's front door never sees — so the door's stamp
+/// ([`crate::budget::stamp`]) never reached it, and a `LIMIT` bounds rows, not work: a filter
+/// that keeps nothing scans everything. Before this an anonymous `GET /k?c=source
+/// urn:nl:sparql:check content=…` ran a caller's query to the store's 5 s base, as often as it
+/// was sent. Now it is counted against the anonymous window and runs within the door's budget,
+/// exactly as a script's run does ([`crate::budget::AnonymousRuns::run`]). Anyone signed in is
+/// untouched.
+pub struct CheckGuard {
+    inner: Arc<dyn Endpoint>,
+    runs: AnonymousRuns,
+}
+
+#[async_trait]
+impl Endpoint for CheckGuard {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        match crate::budget::door_budget(inv.capability) {
+            Some(door_ms) => self.runs.run(inv, door_ms, self.inner.invoke(inv)).await,
+            None => self.inner.invoke(inv).await,
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
     }
 
     fn confinement(&self) -> Option<Topology> {

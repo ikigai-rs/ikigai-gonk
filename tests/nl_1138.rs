@@ -209,7 +209,11 @@ fn hub(peer: &Peer) -> Arc<Kernel> {
     let scripts = Scripts::in_memory();
     let mount = mount::parse(&peer.line(), std::path::Path::new("/home/nobody")).unwrap();
     let host = mount.target.net_host();
-    let nl = Nl::new(ikigai_gonk::nl::DEFAULT_ASK, Some(&host));
+    let nl = Nl::new(
+        ikigai_gonk::nl::DEFAULT_ASK,
+        Some(&host),
+        Default::default(),
+    );
     let hub = Arc::new(compose_with(
         DurableStore::in_memory().expect("an in-memory store"),
         None,
@@ -370,8 +374,12 @@ fn without_a_mount_the_drafter_is_not_bound_and_the_rest_is() {
             .collect()
     };
     let without = patterns(&hub(None));
-    let mounted = Nl::new(ikigai_gonk::nl::DEFAULT_ASK, Some("localhost"));
-    let unmounted = Nl::new(ikigai_gonk::nl::DEFAULT_ASK, None);
+    let mounted = Nl::new(
+        ikigai_gonk::nl::DEFAULT_ASK,
+        Some("localhost"),
+        Default::default(),
+    );
+    let unmounted = Nl::new(ikigai_gonk::nl::DEFAULT_ASK, None, Default::default());
     let added = |nl: &Nl| -> Vec<String> {
         patterns(&hub(Some(nl)))
             .difference(&without)
@@ -446,7 +454,11 @@ fn a_grounding_over_a_ledger_the_size_of_the_live_one_fits_the_bound() {
     );
     let scripts = Scripts::in_memory();
     let mount = mount::parse(&peer.line(), std::path::Path::new("/home/nobody")).unwrap();
-    let nl = Nl::new(ikigai_gonk::nl::DEFAULT_ASK, Some("localhost"));
+    let nl = Nl::new(
+        ikigai_gonk::nl::DEFAULT_ASK,
+        Some("localhost"),
+        Default::default(),
+    );
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
