@@ -20,12 +20,22 @@
 
 use ikigai_ledger::Ledger;
 
-/// How much authority over one ledger. Cumulative: each level includes the ones before it,
-/// because there is no useful "may delete but may not read".
+/// How much authority over one ledger. Cumulative, except [`Authority::Worker`]: each level
+/// includes the ones before it, because there is no useful "may delete but may not read".
+///
+/// ★ **`Worker` sits beside the chain, between `Read` and `Write`** (ledger
+/// [#1143](http://localhost:1060/l/default/item/1143)): everything `Read` holds, plus taking,
+/// renewing and releasing a claim and commenting, and NOTHING else. `Write` holds everything
+/// `Worker` does (the ledger's write grant covers claim and comment), so a worker is the one
+/// authority here that is not a prefix of the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authority {
     /// `items`, `item:{id}`, `next`, `ledgers`.
     Read,
+    /// …plus `claim` (take, renew, release) and `comment` (a hand-back included), through
+    /// `ikigai-ledger` 0.7's per-verb grants. Not `close` or `reopen` (the dispatcher's verdict
+    /// on the work), and not filing, linking, labeling, deferring or editing an item.
+    Worker,
     /// …plus `append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, and
     /// editing an item.
     Write,
@@ -41,11 +51,12 @@ impl std::str::FromStr for Authority {
     fn from_str(value: &str) -> Result<Self, String> {
         match value {
             "read" => Ok(Authority::Read),
+            "worker" => Ok(Authority::Worker),
             "write" => Ok(Authority::Write),
             "delete" => Ok(Authority::Delete),
             "purge" => Ok(Authority::Purge),
             other => Err(format!(
-                "`{other}` is not an authority (read | write | delete | purge)"
+                "`{other}` is not an authority (read | worker | write | delete | purge)"
             )),
         }
     }
@@ -64,7 +75,25 @@ impl std::str::FromStr for Authority {
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
 ///     ]
 /// );
+/// // A WORKER: claim and comment, never close (ikigai-ledger's published worker grant).
+/// assert_eq!(
+///     grants_for("acme", Authority::Worker).unwrap(),
+///     [
+///         "urn:cap:ledger:read:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:ledger:claim:acme",
+///         "urn:cap:ledger:comment:acme",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///     ]
+/// );
 /// ```
+///
+/// ⚠ **A worker holds the ledger graph's store WRITE token**, because every ledger write goes to
+/// the store under the caller's capability. On a bare kernel that token is raw quad authority
+/// (one SPARQL update could close an item without the close grant); behind this server's doors
+/// it is not, because a raw `urn:iki:store:graph-update` against a ledger graph is refused without
+/// the explicit raw grant ([`crate::admit::raw_write_refusal`], ledger #878), which this function
+/// never mints.
 ///
 /// # Errors
 ///
@@ -76,6 +105,12 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
     let graph = ledger.graph();
     let mut grants = vec![ledger.cap_read(), ikigai_store::cap_read_graph(&graph)];
     if authority == Authority::Read {
+        return Ok(grants);
+    }
+    if authority == Authority::Worker {
+        grants.push(ledger.cap_claim());
+        grants.push(ledger.cap_comment());
+        grants.push(ikigai_store::cap_write_graph(&graph));
         return Ok(grants);
     }
     grants.push(ledger.cap_write());
@@ -96,6 +131,33 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
     // so the read token is purge's alone (ledger #760, #768).
     grants.push(ikigai_store::cap_read_graph(&ledger.deleted_graph()));
     Ok(grants)
+}
+
+/// Whether `held` already carries `token`, counting what one ledger grant implies about
+/// another: `urn:cap:ledger:write:{L}` covers `…:claim:{L}`, `…:comment:{L}` and `…:close:{L}`
+/// (`ikigai-ledger` 0.7.0). Used to say a minted grant ADDS something to what a caller already
+/// holds, which a literal comparison would misjudge for a worker.
+///
+/// ```
+/// use ikigai_gonk::grants::{grants_for, implied_by, Authority};
+/// let write = grants_for("acme", Authority::Write).unwrap();
+/// assert!(grants_for("acme", Authority::Worker)
+///     .unwrap()
+///     .iter()
+///     .all(|t| implied_by(t, &write)));
+/// assert!(!implied_by("urn:cap:ledger:claim:other", &write));
+/// assert!(!implied_by("urn:cap:ledger:delete:acme", &write));
+/// ```
+pub fn implied_by(token: &str, held: &[String]) -> bool {
+    if held.iter().any(|h| h == token) {
+        return true;
+    }
+    ["claim", "comment", "close"].iter().any(|verb| {
+        token
+            .strip_prefix(&format!("urn:cap:ledger:{verb}:"))
+            .and_then(|name| Ledger::parse(name).ok())
+            .is_some_and(|ledger| held.contains(&ledger.cap_write()))
+    })
 }
 
 /// The prefix every ledger's graphs share: `urn:iki:ledger:graph:{name}` and its graveyard
@@ -120,6 +182,12 @@ pub const CAP_RAW_WRITE_PREFIX: &str = "urn:cap:gonk:raw-write:graph:";
 pub fn cap_raw_write_graph(graph: &str) -> String {
     format!("{CAP_RAW_WRITE_PREFIX}{graph}")
 }
+
+/// Why `worker` is refused for the browse graph: it is a LEDGER authority (claim and comment),
+/// and the browse graph has neither.
+pub const WORKER_IS_A_LEDGER_AUTHORITY: &str =
+    "`worker` is a ledger authority (claim and comment, no close): the browse graph has no \
+     claims or comments to grant. Use `read` or `write`";
 
 /// ★ **A ledger's graph as a STORE grant**: raw SPARQL UPDATE over the triples of one ledger's
 /// graph, through `urn:iki:store:graph-update` at a network door — the operator role that
@@ -197,15 +265,16 @@ pub fn ledger_graph_grants(ledger: &str) -> Result<Vec<String>, String> {
 ///
 /// ⚠ **Delete and Purge are the ledger's vocabulary, not this one.** A ledger's Delete needs
 /// a second graph (its graveyard) and Purge is a ledger verb; browse has neither — deleting
-/// an annotation is an ordinary write in this one graph. So anything above [`Authority::Read`]
-/// is exactly read+write here, and it says so rather than refusing, because an operator
-/// spelling `--browse-graph delete` means "and may remove things".
+/// an annotation is an ordinary write in this one graph. So `write` and above are exactly
+/// read+write here, and it says so rather than refusing, because an operator spelling
+/// `--browse-graph delete` means "and may remove things". `worker` is refused
+/// ([`WORKER_IS_A_LEDGER_AUTHORITY`]): it means claim and comment, which this graph has not.
 ///
 /// # Errors
 ///
 /// When this server's choice is the DEFAULT graph ([`crate::browse::Graph::TheDefault`]),
 /// which has no IRI for a token to name. The error is the explanation, because the operator
-/// asking has every reason to think a grant should exist.
+/// asking has every reason to think a grant should exist. And [`Authority::Worker`].
 #[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
 pub fn browse_graph_grants(authority: Authority) -> Result<Vec<String>, String> {
     let chosen = crate::browse::Graph::chosen();
@@ -215,6 +284,9 @@ pub fn browse_graph_grants(authority: Authority) -> Result<Vec<String>, String> 
          `browse::Graph`."
             .to_string()
     })?;
+    if authority == Authority::Worker {
+        return Err(WORKER_IS_A_LEDGER_AUTHORITY.to_string());
+    }
     let mut grants = vec![ikigai_store::cap_read_graph(graph.as_str())];
     if authority != Authority::Read {
         grants.push(ikigai_store::cap_write_graph(graph.as_str()));
@@ -395,15 +467,20 @@ pub fn browse_role_for(
     browse_role_grants(role, roots, host.as_deref())
 }
 
-/// How much authority over ONE script (ledger [#939](http://localhost:1060/l/default/item/939),
-/// [`crate::script`]) — `--script <name>=<read|run|publish>`, the way `--ledger` names a ledger.
-/// Cumulative, like [`Authority`].
+/// How much authority over ONE script, or over a NAMESPACE of them (ledger
+/// [#939](http://localhost:1060/l/default/item/939), [`crate::script`]) —
+/// `--script <name>=<read|run|publish>` or `--script <namespace>-*=<…>`, the way `--ledger`
+/// names a ledger. Cumulative, like [`Authority`].
 ///
-/// ★ **Per name, because the library matches a script grant EXACTLY.** `ikigai-script` checks
-/// `urn:cap:script:{verb}:{name}` against the capability with `allows`, and a held
-/// `urn:cap:script:write:*` is not a prefix grant there ("a script grant names exactly one
-/// script"), so there is no "may publish any script" token: a person is granted each name they
-/// may publish, before they publish it, and the owner's socket (root) publishes anything.
+/// ★ **A name, or a namespace; never "every script".** Since `ikigai-script` 0.3.0 (ledger
+/// #1174, #1196) a script grant is `urn:cap:script:{act}:{name}` for one script or
+/// `urn:cap:script:{act}:{namespace}-*` for every name beginning `{namespace}-`
+/// (`ikigai_script::authority::cap_namespace`; `team-*` covers `team-report` and
+/// `team-a-report`, never `teammate` or `team`), and the library's `authority::holds` is the
+/// whole rule. There is still no "may publish any script" token below root:
+/// `urn:cap:script:write:*` is spelled like the family each door declares and grants nothing,
+/// and a namespace must be a well-formed name prefix ending at a `-`. The owner's socket
+/// (root) publishes anything.
 ///
 /// The name `public` is the one exception, and it is the library's: it is reserved as a script
 /// name, so `urn:cap:script:{run,read}:public` are the grants that run and read every script
@@ -439,7 +516,8 @@ impl std::str::FromStr for ScriptAuthority {
     }
 }
 
-/// Every token an identity needs for `authority` over the script `name`.
+/// Every token an identity needs for `authority` over the script `name`, or over every script
+/// in a namespace when `name` is spelled `{namespace}-*`.
 ///
 /// ```
 /// use ikigai_gonk::grants::{script_grants, ScriptAuthority};
@@ -452,6 +530,16 @@ impl std::str::FromStr for ScriptAuthority {
 ///         "urn:cap:script:delete:open-by-label",
 ///     ]
 /// );
+/// // A NAMESPACE: every script whose name begins `team-` (ikigai-script 0.3.0).
+/// assert_eq!(
+///     script_grants("team-*", ScriptAuthority::Publish).unwrap(),
+///     [
+///         "urn:cap:script:read:team-*",
+///         "urn:cap:script:run:team-*",
+///         "urn:cap:script:write:team-*",
+///         "urn:cap:script:delete:team-*",
+///     ]
+/// );
 /// // Every PUBLIC script, to run and read: the anonymous HTTP caller's pair.
 /// assert_eq!(
 ///     script_grants("public", ScriptAuthority::Run).unwrap(),
@@ -459,6 +547,10 @@ impl std::str::FromStr for ScriptAuthority {
 /// );
 /// assert!(script_grants("public", ScriptAuthority::Publish).is_err());
 /// assert!(script_grants("Not A Name", ScriptAuthority::Run).is_err());
+/// // No "every script" grant, and a wildcard only after a `-`.
+/// assert!(script_grants("*", ScriptAuthority::Run).is_err());
+/// assert!(script_grants("team*", ScriptAuthority::Run).is_err());
+/// assert!(script_grants("-*", ScriptAuthority::Run).is_err());
 /// ```
 ///
 /// ⚠ No store or ledger token: what a script READS is the runner's own grant (`--ledger`),
@@ -467,11 +559,22 @@ impl std::str::FromStr for ScriptAuthority {
 ///
 /// # Errors
 ///
-/// When `name` cannot be a script name (`ikigai_script::name::validate`), or is `public` with
-/// more than `run`. A token is matched exactly, so a typo refused here would otherwise be a
-/// silent denial at first use.
+/// When `name` cannot be a script name (`ikigai_script::name::validate`) or a namespace
+/// (`ikigai_script::authority::cap_namespace`), or is `public` with more than `run`. A grant
+/// that matches nothing would otherwise be a silent denial at first use.
 pub fn script_grants(name: &str, authority: ScriptAuthority) -> Result<Vec<String>, String> {
-    use ikigai_script::authority::{cap_delete, cap_read, cap_run, cap_write};
+    use ikigai_script::authority::{cap, cap_namespace, Act};
+    let acts: &[Act] = match authority {
+        ScriptAuthority::Read => &[Act::Read],
+        ScriptAuthority::Run => &[Act::Read, Act::Run],
+        ScriptAuthority::Publish => &[Act::Read, Act::Run, Act::Write, Act::Delete],
+    };
+    if let Some(namespace) = name.strip_suffix("-*") {
+        return acts
+            .iter()
+            .map(|act| cap_namespace(*act, namespace).map_err(|e| format!("--script {name}: {e}")))
+            .collect();
+    }
     if name == "public" {
         if authority == ScriptAuthority::Publish {
             return Err(
@@ -481,16 +584,11 @@ pub fn script_grants(name: &str, authority: ScriptAuthority) -> Result<Vec<Strin
             );
         }
     } else {
-        ikigai_script::name::validate(name).map_err(|e| format!("--script {name}: {e}"))?;
+        ikigai_script::name::validate(name).map_err(|e| {
+            format!("--script {name}: {e} (a namespace is spelled `<namespace>-*`)")
+        })?;
     }
-    let mut tokens = vec![cap_read(name)];
-    if authority != ScriptAuthority::Read {
-        tokens.push(cap_run(name));
-    }
-    if authority == ScriptAuthority::Publish {
-        tokens.extend([cap_write(name), cap_delete(name)]);
-    }
-    Ok(tokens)
+    Ok(acts.iter().map(|act| cap(*act, name)).collect())
 }
 
 /// Why `--nl draft` cannot be minted on a server with no `gonk.mount`: the refusal itself, so
@@ -516,9 +614,9 @@ pub const NL_DRAFT_NEEDS_A_MOUNT: &str =
 /// It is the spend: the model is the only thing a draft reaches that the caller's other grants
 /// do not already reach. What the draft READS is the caller's own `--ledger` / `--browse-graph`
 /// grant (the grounding and the dry run run under it), and where it is SAVED is a
-/// `--script <name>=publish` name (`ikigai-script` matches a script grant exactly, so there is
-/// no "may draft under any name" token; a draft with no grant for its name is answered
-/// unsaved). ⚠ The same token is `--browse derive`'s net half, and it reaches `urn:llm:*`
+/// `--script <name>=publish` name, or a namespace (`--script nl-sparql-*=publish` covers the
+/// drafter's own default names, ikigai-script 0.3.0); a draft with no grant for its name is
+/// answered unsaved. ⚠ The same token is `--browse derive`'s net half, and it reaches `urn:llm:*`
 /// directly through every door, as it does for derive: the authority is "may spend the
 /// mounted model", not "may draft". No anonymous grant carries it.
 ///

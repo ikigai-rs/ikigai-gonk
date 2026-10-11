@@ -19,7 +19,7 @@
 
 use std::fs::File;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -54,7 +54,7 @@ impl Gonk {
     /// A gonk with its QUIC door OFF: HTTP and the socket only, so nothing picks a port.
     /// `config` is the scratch home's whole `config.toml` (empty for the defaults).
     pub fn start(config: &str) -> Gonk {
-        Gonk::launch(config, false, None).unwrap_or_else(|launch| match launch {
+        Gonk::launch(config, false, None, &|_, _| {}).unwrap_or_else(|launch| match launch {
             Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
         })
     }
@@ -64,7 +64,7 @@ impl Gonk {
     /// is the address the test then dials (ledger
     /// [#1045](http://localhost:1060/l/default/item/1045)). The QUIC door is off.
     pub fn start_bound(config: &str, ip: IpAddr) -> Gonk {
-        Gonk::launch(config, false, Some(ip)).unwrap_or_else(|launch| match launch {
+        Gonk::launch(config, false, Some(ip), &|_, _| {}).unwrap_or_else(|launch| match launch {
             Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
         })
     }
@@ -78,9 +78,18 @@ impl Gonk {
     /// pick another process takes before the child binds it (`AddrInUse`) is detected by the
     /// child's death and its log, and picked again. Every other failure still fails.
     pub fn with_quic(config: &str) -> Gonk {
+        Gonk::with_quic_prepared(config, &|_, _| {})
+    }
+
+    /// [`Gonk::with_quic`], with `prepare(config_home, home)` run after `alpha` is enrolled and
+    /// BEFORE the child starts — for a test that enrolls more clients (with the binary's own
+    /// `client add`, say): the set of TLS-trusted certificates is read at startup, so a client
+    /// added after it would never complete a handshake. Run again on a port retry, over a fresh
+    /// home.
+    pub fn with_quic_prepared(config: &str, prepare: &dyn Fn(&Path, &Path)) -> Gonk {
         let mut taken = Vec::new();
         for _ in 0..5 {
-            match Gonk::launch(config, true, None) {
+            match Gonk::launch(config, true, None, prepare) {
                 Ok(gonk) => return gonk,
                 Err(Launch::PortTaken(why)) => taken.push(why),
                 Err(Launch::Failed(why)) => panic!("{why}"),
@@ -92,7 +101,12 @@ impl Gonk {
         )
     }
 
-    fn launch(config_toml: &str, with_quic: bool, bound: Option<IpAddr>) -> Result<Gonk, Launch> {
+    fn launch(
+        config_toml: &str,
+        with_quic: bool,
+        bound: Option<IpAddr>,
+        prepare: &dyn Fn(&Path, &Path),
+    ) -> Result<Gonk, Launch> {
         let home = tempfile::tempdir().unwrap();
         // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir does not.
         let short = tempfile::Builder::new()
@@ -119,6 +133,7 @@ impl Gonk {
             false,
         )
         .unwrap();
+        prepare(&config, home.path());
 
         let quic: Option<SocketAddr> = with_quic.then(|| {
             UdpSocket::bind("127.0.0.1:0")
@@ -212,9 +227,14 @@ impl Gonk {
 
     /// One QUIC connection as this test's enrolled client. Only for a child with the door open.
     pub fn dial_quic(&self) -> std::io::Result<ikigai_quic::QuicResolver> {
+        self.dial_quic_as(&self.client.dir)
+    }
+
+    /// One QUIC connection as the client whose bundle is `bundle` (`gonk/quic/clients/<name>`).
+    pub fn dial_quic_as(&self, bundle: &Path) -> std::io::Result<ikigai_quic::QuicResolver> {
         let identity = ikigai_quic::Identity {
-            cert_pem: std::fs::read_to_string(self.client.dir.join("client.crt")).unwrap(),
-            key_pem: std::fs::read_to_string(self.client.dir.join("client.key")).unwrap(),
+            cert_pem: std::fs::read_to_string(bundle.join("client.crt")).unwrap(),
+            key_pem: std::fs::read_to_string(bundle.join("client.key")).unwrap(),
         };
         let (server, _) = quic::server_identity(&self.layout).unwrap();
         let addr = self.quic.expect("a gonk started with_quic");

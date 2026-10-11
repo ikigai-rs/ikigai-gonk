@@ -129,7 +129,13 @@ ikigai-vocab = "0.1.93"
 # one that degraded. 0.2.12 runs every update on ONE long-lived writer thread per store (writes
 # were already serialized by the store's write lock, so nothing new is serialized). 0.2.11 on
 # the way: consumer-worded SERVICE refusals exported as `ikigai_store::service`, additive.
-ikigai-store = { version = "0.2.12", features = ["persistent"] }
+# ★ 0.2.14 is the pin now (ledger #1198, the dependency wave): 0.2.13 (ledger #1132) copies a
+# scoped update's FOOTPRINT rather than the whole graph, so a ledger write no longer costs the
+# size of its ledger; 0.2.14 (ledger #1207) exports `SharedWriter`, the store's own writer thread
+# for a host writing through the raw handle. gonk calls neither by name (browse, its raw-handle
+# sharer, carries its own writer thread since 0.18.4), so this is the published head taken as a
+# stated floor: what was built and tested. ⚠ `"0.2.14"` is `<0.3.0`.
+ikigai-store = { version = "0.2.14", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -151,15 +157,31 @@ ikigai-store = { version = "0.2.12", features = ["persistent"] }
 # both (`crate::web`'s listing) instead of reading 2000 items to count them. 0.6.0 names its
 # space `urn:iki:space:ledger`; 0.6.1 draws the id nonce from getrandom on wasm; 0.6.2 takes
 # store 0.2.10 as a security floor. `^0.5.0` was `<0.6.0`: a ceiling, so this had to move.
-ikigai-ledger = "0.6.2"
+# ★ 0.8.0 is the floor now (ledger #1143, #1198), and an API one: 0.7.0 (never published on its
+# own) splits three verbs out of the write grant, `urn:cap:ledger:{claim,comment,close}:{L}`
+# (`Ledger::cap_claim`/`cap_comment`), which is what `grants::Authority::Worker` mints: claim,
+# renew, release and comment, never close. It also makes a close release the claim, adds keyed
+# comments, and makes a release a compare-and-set with `from=`. 0.8.0 adds the hand-back state
+# (`comment handback=true`, `next` skips an item awaiting its dispatcher) and records a claim's
+# PRINCIPAL beside its free-text holder, so a client principal the QUIC door mints owns its claim
+# and another worker holding the same lines cannot release it. ⚠ `"0.8.0"` is `<0.9.0`, and
+# 0.9.0's `count` is the ledger page's next move (`crate::web`'s listing reads `total` off
+# `items` today): a lock bump and that one read, not this one.
+ikigai-ledger = "0.8.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
 # floor and an API one: 0.2.0 is where the principal is read from the CAPABILITY (core 0.1.93's
 # `urn:cap:principal:`, which every door here mints) instead of a host stamper, and 0.2.1 is where
 # a failed run cuts the runs thread too (core 0.1.95 — which is why the core line above moved).
-# ⚠ `"0.2.1"` is `<0.3.0`.
-ikigai-script = "0.2.1"
+# ★ 0.3.0 is the floor now (ledger #1196, #1173, #1174): a run IGNORES the transports' own
+# arguments (`ikigai_script::TRANSPORT_ARGUMENTS`: `received`, `client`, `principal`,
+# `content-type`) instead of refusing them as undeclared parameters, so the per-door strip
+# this server carried through 0.2.x (`doors::TRANSPORT_STAMPS`) is gone, and a script grant
+# may name a NAMESPACE (`urn:cap:script:{act}:{namespace}-*`, `authority::cap_namespace`),
+# which `--script team-*=publish` mints. On 0.2.x a stamped run through the HTTP door is a
+# `400` without the strip, so this is an API floor. ⚠ `"0.3.0"` is `<0.4.0`.
+ikigai-script = "0.3.0"
 # ★ The rate on ANONYMOUS script runs (ledger #1175, `crate::script::ANONYMOUS_RUNS`): one
 # `RateLimit` overlay over the script family, consulted only for a run whose capability carries
 # the anonymous door's marker, which is the advice `ikigai-script`'s README gives a host that
@@ -396,7 +418,12 @@ ikigai-nl = "0.1.0"
 # every capability, the root's included, and the listing drops it.
 # `tests/browse.rs::git_metadata_is_absent_through_both_doors` is the FLOOR TEST: red on 0.18.1.
 # `^0.18.2` is `<0.19.0`. Patch: a narrowed read (it refuses paths that used to be served).
-ikigai-browse = "0.18.2"
+# ★ 0.18.4 is the pin now (ledger #1131, #1198): browse commits every archive write on ONE
+# long-lived writer thread, so reads after a run of writes stay fast (RocksDB seeds a memtable
+# skiplist's heights from the thread id, and this server's socket door spawns a thread per
+# connection; measured 6.4x to 68x slower reads before it). 0.18.3 (unpublished on its own):
+# a tree lists a link iff it is served. Nothing new is called here. `^0.18.4` is `<0.19.0`.
+ikigai-browse = "0.18.4"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

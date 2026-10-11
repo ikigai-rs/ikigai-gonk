@@ -137,8 +137,8 @@ ikigai-gonk — a standalone ikigai work-ledger server
 
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
-  ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
-                     [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
+  ikigai-gonk client add <name> [--ledger <ledger>=<read|worker|write|delete|purge>]... [--worker <ledger>]...
+                     [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--cert <client.crt>] [--force] [--rotate]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
@@ -158,8 +158,8 @@ usage:
                                    fingerprint with no bundle). grants.json is left alone: a
                                    grant name may be shared. Effective at its next connection;
                                    its certificate stays TLS-trusted until a restart
-  ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
-                     [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
+  ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|worker|write|delete|purge>]... [--worker <ledger>]...
+                     [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
@@ -185,7 +185,19 @@ usage:
   It reads config.toml (or --config) for the roots and the mount. Not covered: the PR
   layers' `gh` (urn:cap:exec:gh) and the browse graph's WRITE door (--browse-graph write)
 
-  --script names ONE script (urn:script:<name>), repeatable; each authority holds the one before:
+  --ledger <ledger>=<authority>, repeatable; each authority holds the one before, except worker:
+    read     items, an item, next, the ledger list
+    worker   read, plus claim (take, renew, release) and comment (a hand-back too): NOT close or
+             reopen, filing, labeling, linking, deferring or editing. For a remote worker whose
+             dispatcher closes; `--worker <ledger>` is the same. A claim it takes is its own
+             (the ledger records this client's principal), so another worker cannot release it
+    write    every ledger write: file, comment, claim, close, reopen, label, link, defer, edit
+    delete   write, plus Delete an item (into the ledger's graveyard)
+    purge    delete, plus purge an item's content from both graphs
+
+  --script names ONE script (urn:script:<name>) or a NAMESPACE of them (<namespace>-*: every
+  name beginning <namespace>-, e.g. team-* covers team-report, not teammate), repeatable; each
+  authority holds the one before:
     read     urn:cap:script:read:<name>       its source and head record, without running it
     run      urn:cap:script:run:<name>        run it; what it reads is the caller's own --ledger
                                               grant, held to the scripts' ceiling
@@ -199,8 +211,9 @@ usage:
                                               grant --browse derive carries; it also reaches
                                               urn:llm:* directly). A draft reads only what the
                                               --ledger / --browse-graph grant reads, and is saved
-                                              only under a --script <name>=publish name; with no
-                                              gonk.mount, refused
+                                              only under a --script publish name or namespace
+                                              (nl-sparql-*=publish covers its default names);
+                                              with no gonk.mount, refused
   ikigai-gonk review request <repo> <path> [--config PATH]
                                    drop ONE review request into the queue `gonk.review.space`
                                    names. Writes one file and exits: no store, no door, no
@@ -246,7 +259,7 @@ usage:
                                    the duplicates the old race made, over a RUNNING gonk's
                                    owner-only socket. Idempotent; --dry-run writes nothing
                                    (README, \"Upgrading the bridges: backfill the keys\")
-  ikigai-gonk grants <ledger> [read|write|delete|purge]
+  ikigai-gonk grants <ledger> [read|worker|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
                                    print the tokens for the BROWSE graph — SPARQL access to
@@ -899,7 +912,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("grants") => {
             args.next();
             let subject = args.next().ok_or(
-                "grants: expected <ledger> [read|write|delete|purge], --browse-graph, or \
+                "grants: expected <ledger> [read|worker|write|delete|purge], --browse-graph, or \
                  --browse <read|derive>",
             )?;
             if subject == "--browse" {
@@ -925,9 +938,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
                 }
                 other => Some(other.to_string()),
             };
-            let authority = match args.next() {
-                Some(value) => value.parse()?,
-                None => Authority::Write,
+            let authority = match (args.next(), &ledger) {
+                (Some(value), None) => browse_graph_authority(&value)?,
+                (Some(value), Some(_)) => value.parse()?,
+                (None, _) => Authority::Write,
             };
             if let Some(extra) = args.next() {
                 return Err(format!("grants: unexpected argument `{extra}`"));
@@ -1089,13 +1103,21 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
             "--ledger" => {
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
-                    format!("--ledger: expected <ledger>=<read|write|delete|purge>, got `{spec}`")
+                    format!(
+                        "--ledger: expected <ledger>=<read|worker|write|delete|purge>, got \
+                         `{spec}`"
+                    )
                 })?;
                 ledgers.push((ledger.to_string(), authority.parse()?));
             }
             "--browse-graph" => {
-                browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
+                browse_graph = Some(browse_graph_authority(&value(
+                    &mut args,
+                    "--browse-graph",
+                )?)?);
             }
+            // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
+            "--worker" => ledgers.push((value(&mut args, "--worker")?, Authority::Worker)),
             "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
             "--force" => force = true,
             "--rotate" => rotate = true,
@@ -1115,6 +1137,18 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         rotate,
         flags,
     })
+}
+
+/// `--browse-graph <authority>`: any ledger authority but `worker`, which names claims and
+/// comments the browse graph does not have ([`crate::grants::WORKER_IS_A_LEDGER_AUTHORITY`]).
+fn browse_graph_authority(spelled: &str) -> Result<Authority, String> {
+    match spelled.parse()? {
+        Authority::Worker => Err(format!(
+            "--browse-graph: {}",
+            crate::grants::WORKER_IS_A_LEDGER_AUTHORITY
+        )),
+        authority => Ok(authority),
+    }
 }
 
 /// `--nl <role>`: `draft` is the one role (ledger #1138).
@@ -1171,13 +1205,21 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             "--ledger" => {
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
-                    format!("--ledger: expected <ledger>=<read|write|delete|purge>, got `{spec}`")
+                    format!(
+                        "--ledger: expected <ledger>=<read|worker|write|delete|purge>, got \
+                         `{spec}`"
+                    )
                 })?;
                 ledgers.push((ledger.to_string(), authority.parse()?));
             }
             "--browse-graph" => {
-                browse_graph = Some(value(&mut args, "--browse-graph")?.parse()?);
+                browse_graph = Some(browse_graph_authority(&value(
+                    &mut args,
+                    "--browse-graph",
+                )?)?);
             }
+            // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
+            "--worker" => ledgers.push((value(&mut args, "--worker")?, Authority::Worker)),
             "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
             "--force" => force = true,
             "--minutes" => {

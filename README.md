@@ -1568,7 +1568,36 @@ which takes effect on its next connection; its certificate stays trusted at the 
 until a restart. There is no certificate authority, no expiry and no automated trust
 distribution — the server certificate is pinned by copying it.
 
-`ikigai-gonk grants <ledger> <read|write|delete|purge>` prints the token list for one
+**A remote WORKER** (ledger #1143, ikigai-ledger 0.8.0) is a client that takes work from a
+ledger and hands it back, and never decides that the work is done:
+
+```sh
+ikigai-gonk client add builder --worker default     # the same as --ledger default=worker
+```
+
+The grant is the ledger's published worker grant and nothing more:
+
+```text
+urn:cap:ledger:read:default
+urn:cap:store:read:graph:urn:iki:ledger:graph:default
+urn:cap:ledger:claim:default
+urn:cap:ledger:comment:default
+urn:cap:store:write:graph:urn:iki:ledger:graph:default
+```
+
+It may read items, claim one (`sink urn:iki:ledger:claim item=N`), renew its lease
+(`renew=true`), comment (`comment handback=true` hands the item back to its dispatcher, and
+`next` stops offering it), and release its claim (`delete urn:iki:ledger:claim item=N`). It may
+not close or reopen an item (the dispatcher's verdict, `urn:cap:ledger:close:{L}` or `write`),
+file, label, link, defer or edit one: each is a `Denied` naming the grant that would do. A claim
+is recorded with the client's principal (`urn:iki:host:gonk:client:<fingerprint>`), so another
+worker holding the same five lines cannot release it, whatever holder name it spells.
+⚠ The store write token is raw quad authority on a bare kernel; behind this server's doors a raw
+`urn:iki:store:graph-update` against a ledger graph is refused without the `--ledger-graph`
+grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
+this through the QUIC door of a real gonk.
+
+`ikigai-gonk grants <ledger> <read|worker|write|delete|purge>` prints the token list for one
 ledger, for writing `grants.json` by hand.
 
 ## Explaining what it browses
@@ -1927,11 +1956,15 @@ query's dataset must follow.
 | see a draft | no | its own | its own | every draft |
 | what a run may touch | the least of: the runner's grant, what the publisher held at publish, and the ceiling below | | | |
 
-- **A script grant names exactly one script.** The library matches
-  `urn:cap:script:{verb}:{name}` exactly, so there is no "publish anything" grant: grant each
-  name first (`--script <name>=<read|run|publish>`, on `passkey invite` and `client add`).
-  `public` is the one name that is not a script: `--script public=run` is the pair the
-  anonymous caller holds, every script marked `public=true`.
+- **A script grant names one script, or a namespace of them.** Since ikigai-script 0.3.0
+  `urn:cap:script:{act}:{name}` covers one script and `urn:cap:script:{act}:{namespace}-*` every
+  name beginning `{namespace}-` (`team-*` covers `team-report` and `team-a-report`, never
+  `teammate` or `team`); an exclusion (`urn:cap:script:{act}:-{name}`) takes one back out. There
+  is still no "publish anything" grant below root: `urn:cap:script:{act}:*` grants nothing. Grant
+  the name or the namespace first (`--script <name>=<read|run|publish>` or
+  `--script team-*=publish`, on `passkey invite` and `client add`). `public` is the one name that
+  is not a script: `--script public=run` is the pair the anonymous caller holds, every script
+  marked `public=true`.
 - **A publish declares nothing; the text derives it.** A query needs the store's read token
   for each graph it names, and a plan whatever its steps' contracts require. **A publisher must
   hold all of it**, or the publish is refused naming the tokens: a script can never run with
@@ -1975,10 +2008,12 @@ could make one at a time.
 - **The validator is served to no caller.** Plans are validated by `urn:shacl:validate`, which
   is linked for the plan doors alone: rudof's validator can overflow its thread on deep enough
   DATA, which would abort the process holding the store, so every door answers it as unbound.
-- **The transports' own arguments never reach a script.** `ikigai-web` stamps a write with
+- **The transports' own arguments are not a script's.** `ikigai-web` stamps a write with
   `received`, `client`, `principal` and `content-type`, and `ikigai-quic` stamps `principal` on
-  everything; a script refuses an argument it does not declare. gonk removes them at the door,
-  so a script parameter cannot take one of those names.
+  everything. Since ikigai-script 0.3.0 a run ignores those four names and a script may not
+  declare a parameter by one of them (refused at publish), so they pass through gonk's doors
+  untouched; through 0.2.x a script refused them as undeclared and gonk stripped them at the
+  door (ledger #1196). Who a run is for is the capability's principal, never an argument.
 - **A result is cached in the hub**, under the store's write threads (and the script's own,
   which a republish cuts), so the same public read from a thousand callers is computed once.
   Measured in process: a cold `open-by-label:result` in about 1.2 ms, the next in about 30 µs.
@@ -2065,7 +2100,7 @@ draft carries where it came from into the version a person publishes.
 | --- | --- | --- | --- | --- |
 | `urn:nl:grounding`, `urn:nl:sparql:check`, the prompts | **yes**, under its own grant | yes | yes | yes |
 | draft (`urn:nl:sparql`) | **no**: refused before any model call | with `--nl draft` | with `--nl draft` | yes |
-| where a draft is saved | | a `--script <name>=publish` name | the same, and a machine's draft is its own (only the owner sees it) | anywhere |
+| where a draft is saved | | a `--script <name>=publish` name or namespace | the same, and a machine's draft is its own (only the owner sees it) | anywhere |
 
 - **Drafting spends the mounted model, so it takes the grant that reaches it:**
   `urn:cap:net:{host}` for the host the `gonk.mount` line dials. `--nl draft` mints exactly
@@ -2079,10 +2114,11 @@ draft carries where it came from into the version a person publishes.
   caller may read (a graph it may not read contributes nothing, not even its name), and the
   check's dry run reads through the store's graph-scoped door under the same grant. Drafting
   widens nothing: the anonymous grounding is what anonymous could already read.
-- **Where a draft is SAVED is a script grant, per name.** `ikigai-script` matches
-  `urn:cap:script:write:{name}` exactly, so name the draft with `save=` and hold that name's
-  publish grant. Without one (and `ikigai-nl`'s default name, `nl-sparql-<digest>`, is never
-  grantable ahead of time) the valid draft is answered **unsaved**, the query in the answer, for
+- **Where a draft is SAVED is a script grant, by name or namespace.** Name the draft with
+  `save=` and hold that name's publish grant, or hold a namespace: `ikigai-nl`'s default name is
+  `nl-sparql-<digest>`, which no per-name grant can know ahead of time and
+  `--script nl-sparql-*=publish` covers (ikigai-script 0.3.0). Without a grant covering the name
+  the valid draft is answered **unsaved**, the query in the answer, for
   the person to publish by hand under a name they hold. A published script is never replaced
   by a draft: that is refused before any model is asked.
 - **A machine drafts, a person publishes**, as for every script here: the drafter only ever
