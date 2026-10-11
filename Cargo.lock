@@ -1558,20 +1558,21 @@ dependencies = [
 
 [[package]]
 name = "ikigai-nl"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da2e6301a684e3e8f7a456aa1b0923a1f411dcd195fb247ef1080ba271a55b9b"
+checksum = "726b86578547f802ce592046735c12da2c472c7f60349d010a98a27312b510f1"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
  "ikigai-core",
+ "ikigai-script",
  "ikigai-vocab",
  "oxrdf",
  "oxsdatatypes",
  "oxttl",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "spargebra",
 ]
 

@@ -219,11 +219,14 @@ ikigai-shacl = "0.3.3"
 # drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
 # templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
 # `state=draft` script through `ikigai-script` above. It links no model client and no network
-# code of its own: the model is the mount, so this adds no outbound surface. 0.1.0 is the only
-# release and what was built and tested. Its own floors (core 0.1.91, vocab 0.1.91, spargebra
-# 0.4.7, oxrdf 0.3, oxttl 0.2) are all below the lines here, so it moves nothing in the lock but
-# itself. ⚠ `"0.1.0"` is `<0.2.0`.
-ikigai-nl = "0.1.0"
+# code of its own: the model is the mount, so this adds no outbound surface.
+# ★ 0.2.0 is the floor now (ledger #1203): every draft's ask carries `max_tokens` (`Llm`'s
+# default, `DEFAULT_MAX_TOKENS`), so a reasoning model cannot spend its whole budget thinking;
+# gonk builds its `Llm` from that default and needed no change. `"0.1.0"` was `<0.2.0`, a
+# ceiling. 0.2.1 (ledger #1196) asks ikigai-script's own rule whether a caller may read a named
+# example, so a namespace grant counts; it takes ikigai-script 0.3.x, which gonk already pins.
+# ⚠ `"0.2.0"` is `<0.3.0`.
+ikigai-nl = "0.2.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
