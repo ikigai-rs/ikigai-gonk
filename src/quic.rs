@@ -452,21 +452,75 @@ pub fn remove_client(layout: &Layout, key: &str, by_name: bool) -> Result<Remove
     })
 }
 
-/// The IRI prefix a QUIC client is NAMED by — the principal its connection carries.
-pub const CLIENT_IRI_PREFIX: &str = "urn:iki:gonk:client:";
+/// The IRI prefix a QUIC client is NAMED by — the principal its connection carries:
+/// `urn:iki:host:{name}:client:<fingerprint>`, every host's door convention (Brian,
+/// 2026-10-10; ledger [#1183](http://localhost:1060/l/default/item/1183)), with this host's
+/// name, `gonk`.
+pub const CLIENT_IRI_PREFIX: &str = "urn:iki:host:gonk:client:";
+
+/// The prefix this server minted BEFORE the convention, kept as a **permanent alias**:
+/// `urn:iki:gonk:client:<fingerprint>`.
+///
+/// ★ **Recognized, never minted, never rewritten.** Ledger authors, the access log and
+/// hash-chained `ikigai-log` segments written before 2026-10-10 hold this spelling, and it
+/// stays true for what it labels: a rewrite would falsify who wrote what when, and break the
+/// segments' tamper evidence. So every place that decides whether an author names a principal
+/// ([`crate::admit::is_principal_iri`]) keeps recognizing it — or a client could write the old
+/// spelling of ANOTHER machine's name as its author and pass as that machine in the record —
+/// and every face that shows an author treats both spellings of one fingerprint as one actor
+/// ([`client_fingerprint`]).
+pub const LEGACY_CLIENT_IRI_PREFIX: &str = "urn:iki:gonk:client:";
+
+/// Both spellings a QUIC client's name has had, the current one first.
+pub const CLIENT_IRI_PREFIXES: [&str; 2] = [CLIENT_IRI_PREFIX, LEGACY_CLIENT_IRI_PREFIX];
 
 /// The stable IRI of the client whose certificate has `fingerprint` (normalized: lowercase
-/// hex, no colons) — what the access log writes as a QUIC request's `principal`, and the one
+/// hex, no colons) — what the access log writes as a QUIC request's `principal`, and the
 /// principal-shaped `author` a write through that connection may name.
 ///
 /// ```
 /// assert_eq!(
 ///     ikigai_gonk::quic::client_iri("AB:CD"),
-///     "urn:iki:gonk:client:abcd"
+///     "urn:iki:host:gonk:client:abcd"
 /// );
 /// ```
 pub fn client_iri(fingerprint: &str) -> String {
     format!("{CLIENT_IRI_PREFIX}{}", normalize(fingerprint))
+}
+
+/// The fingerprint a client IRI names, in EITHER spelling ([`CLIENT_IRI_PREFIXES`]), or
+/// `None` for any other text. Exact: the prefix as minted (lowercase), and a non-empty tail.
+/// Two IRIs naming one fingerprint name one actor.
+///
+/// ```
+/// use ikigai_gonk::quic::client_fingerprint;
+/// assert_eq!(client_fingerprint("urn:iki:host:gonk:client:ab12"), Some("ab12"));
+/// assert_eq!(client_fingerprint("urn:iki:gonk:client:ab12"), Some("ab12"));
+/// assert_eq!(client_fingerprint("urn:iki:host:layers:client:ab12"), None);
+/// assert_eq!(client_fingerprint("urn:iki:gonk:client:"), None);
+/// assert_eq!(client_fingerprint("hermes"), None);
+/// ```
+pub fn client_fingerprint(iri: &str) -> Option<&str> {
+    CLIENT_IRI_PREFIXES
+        .iter()
+        .find_map(|prefix| iri.strip_prefix(prefix))
+        .filter(|tail| !tail.is_empty())
+}
+
+/// Whether `a` and `b` name the same QUIC client, in either spelling — or are the same text.
+///
+/// ```
+/// use ikigai_gonk::quic::same_client;
+/// assert!(same_client("urn:iki:host:gonk:client:ab12", "urn:iki:gonk:client:ab12"));
+/// assert!(!same_client("urn:iki:host:gonk:client:ab12", "urn:iki:gonk:client:cd34"));
+/// assert!(same_client("hermes", "hermes"));
+/// ```
+pub fn same_client(a: &str, b: &str) -> bool {
+    a == b
+        || matches!(
+            (client_fingerprint(a), client_fingerprint(b)),
+            (Some(x), Some(y)) if x == y
+        )
 }
 
 /// The parsed `clients.json`: fingerprint → grant name, plus an explicit shared default.
@@ -740,7 +794,9 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
         .iter()
         .map(String::as_str)
         .filter(|scope| {
-            scope.starts_with(CLIENT_IRI_PREFIX)
+            CLIENT_IRI_PREFIXES
+                .iter()
+                .any(|prefix| scope.starts_with(prefix))
                 || scope.starts_with(ikigai_core::PRINCIPAL_SCOPE_PREFIX)
         })
         .collect();

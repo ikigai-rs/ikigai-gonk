@@ -226,10 +226,19 @@ pub fn refusal(capability: &Capability) -> Option<&'static str> {
 }
 
 /// The IRI prefixes this server names a PRINCIPAL by: a passkey (which the item page renders
-/// as that person's label) and a QUIC client certificate ([`crate::quic::client_iri`]).
-pub const PRINCIPAL_PREFIXES: [&str; 2] = [
+/// as that person's label) and a QUIC client certificate ([`crate::quic::client_iri`]) — in
+/// BOTH of its spellings.
+///
+/// ★ The client's pre-2026-10-10 spelling ([`crate::quic::LEGACY_CLIENT_IRI_PREFIX`]) is
+/// never minted again and is still here, permanently (ledger
+/// [#1183](http://localhost:1060/l/default/item/1183)): the record holds authors written in
+/// it, so if it stopped being principal-shaped a client could write
+/// `urn:iki:gonk:client:<another machine's fingerprint>` as plain text and be indistinguishable,
+/// in the record, from that machine before the migration.
+pub const PRINCIPAL_PREFIXES: [&str; 3] = [
     crate::identity::PASSKEY_IRI_PREFIX,
     crate::quic::CLIENT_IRI_PREFIX,
+    crate::quic::LEGACY_CLIENT_IRI_PREFIX,
 ];
 
 /// Whether `author` is shaped like a principal this server names — compared the way a
@@ -239,7 +248,10 @@ pub const PRINCIPAL_PREFIXES: [&str; 2] = [
 /// use ikigai_gonk::admit::is_principal_iri;
 /// assert!(is_principal_iri("urn:iki:gonk:passkey:Q1JFRC1CUklBTg"));
 /// assert!(is_principal_iri(" URN:IKI:GONK:PASSKEY:x"));
+/// assert!(is_principal_iri("urn:iki:host:gonk:client:ab12"));
+/// // The old spelling, recognized for ever: see `PRINCIPAL_PREFIXES`.
 /// assert!(is_principal_iri("urn:iki:gonk:client:ab12"));
+/// assert!(is_principal_iri(" URN:IKI:GONK:CLIENT:ab12"));
 /// assert!(!is_principal_iri("chris"));
 /// assert!(!is_principal_iri("roborev"));
 /// ```
@@ -263,7 +275,7 @@ pub const PRINCIPAL_ARG: &str = "principal";
 /// - **HTTP**: the signed-in passkey's IRI, minted by [`crate::doors::http_cap`] from the
 ///   session cookie, on every verb. An anonymous caller has none, and nothing a caller sends
 ///   (a `?principal=`, a header) reaches the capability.
-/// - **QUIC**: the client's NAME ([`crate::quic::authority`], `urn:iki:gonk:client:<fingerprint>`).
+/// - **QUIC**: the client's NAME ([`crate::quic::authority`], `urn:iki:host:gonk:client:<fingerprint>`).
 ///   A client carrying a narrower capability of its own is still named: core's `clamp` keeps
 ///   the session's principal and never takes the carried one's (ledger #879's failure, closed
 ///   in the capability itself).
@@ -322,6 +334,7 @@ pub fn principal(door: Door, capability: &Capability) -> Option<String> {
 ///     stamp(&Invocation::detached(&request, &bindings, &cap))
 /// };
 /// assert_eq!(kind(Some("urn:iki:gonk:passkey:Q1JFRC1CUklBTg")), ClaimKind::Person);
+/// assert_eq!(kind(Some("urn:iki:host:gonk:client:6f1c")), ClaimKind::Machine);
 /// assert_eq!(kind(Some("urn:iki:gonk:client:6f1c")), ClaimKind::Machine);
 /// assert_eq!(kind(None), ClaimKind::Machine);
 /// ```
@@ -348,7 +361,11 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
 /// Why `request` may not name the `author` it carries, or `None` when it may.
 ///
 /// An author shaped like a principal ([`is_principal_iri`]) must BE the request's own
-/// ([`principal`]); any other author is text and passes.
+/// ([`principal`]); any other author is text and passes. A QUIC client's own name counts in
+/// either spelling ([`crate::quic::same_client`]): `urn:iki:gonk:client:<fp>` and
+/// `urn:iki:host:gonk:client:<fp>` are one actor, so a client that names itself the old way
+/// still writes as itself — and the old spelling of ANY OTHER fingerprint is refused like the
+/// new one (ledger [#1183](http://localhost:1060/l/default/item/1183)).
 ///
 /// ```
 /// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
@@ -375,6 +392,9 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
 /// assert!(admit::author_refusal(Door::Quic, &client, &authored(&laptop)).is_none());
 /// assert!(admit::author_refusal(Door::Quic, &client, &authored(brian)).is_some());
 /// assert!(admit::author_refusal(Door::Quic, &client, &authored("hermes")).is_none());
+/// // Its own name in the pre-2026-10-10 spelling is still itself; another machine's is not.
+/// assert!(admit::author_refusal(Door::Quic, &client, &authored("urn:iki:gonk:client:ab12")).is_none());
+/// assert!(admit::author_refusal(Door::Quic, &client, &authored("urn:iki:gonk:client:cd34")).is_some());
 /// ```
 pub fn author_refusal(door: Door, capability: &Capability, request: &Request) -> Option<String> {
     let Some(ArgRef::Inline(bytes)) = request.args.get("author") else {
@@ -385,7 +405,10 @@ pub fn author_refusal(door: Door, capability: &Capability, request: &Request) ->
         return None;
     }
     let own = principal(door, capability);
-    if own.as_deref() == Some(author.trim()) {
+    if own
+        .as_deref()
+        .is_some_and(|own| crate::quic::same_client(own, author.trim()))
+    {
         return None;
     }
     Some(format!(

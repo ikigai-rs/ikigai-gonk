@@ -26,7 +26,7 @@
 //! | `outcome` | `ok`, or the kernel's error kind (`denied`, `not-found`, `invalid-argument`, …) |
 //! | `bytes` | the representation's body length; `-` on an error |
 //! | `dur` | milliseconds, from the door's issue to its answer |
-//! | `principal` | `owner` on the socket; a signed-in passkey's IRI on any HTTP request, `anon` on an anonymous write; the client's `urn:iki:gonk:client:<fingerprint>` on QUIC; `-` where the door names nobody |
+//! | `principal` | `owner` on the socket; a signed-in passkey's IRI on any HTTP request, `anon` on an anonymous write; the client's `urn:iki:host:gonk:client:<fingerprint>` on QUIC (`urn:iki:gonk:client:<fingerprint>` in lines written before 2026-10-10, which are never rewritten); `-` where the door names nobody |
 //! | `q` | HTTP only: the request's query arguments, percent-encoded; `-` when none |
 //!
 //! Past [`MAX_FIELD`] characters the subject and `q` are cut and end in `…` — a character
@@ -51,7 +51,7 @@
 //! - **who an anonymous request is from.** The column is the principal the DOOR minted into
 //!   the request's capability ([`crate::admit::principal`]; core 0.1.93, ledger #1077): a
 //!   signed-in passkey on every HTTP verb, reads included, and the client the QUIC door
-//!   authenticated (`urn:iki:gonk:client:<fingerprint>`, ledger #816) whatever capability it
+//!   authenticated (`urn:iki:host:gonk:client:<fingerprint>`, ledger #816, #1183) whatever capability it
 //!   carries — core's clamp keeps the session's name (ledger #879). An anonymous HTTP read is
 //!   `-`, and a `?principal=` a reader typed is never taken for one (ledger #864, R6): nothing
 //!   a caller sends reaches the capability.
@@ -343,9 +343,9 @@ fn millis(at: SystemTime) -> u64 {
 /// let laptop = ikigai_gonk::quic::client_iri("ab12");
 /// let session = Capability::scoped(["urn:cap:ledger:write:default"]).with_principal(&laptop).unwrap();
 /// let request = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
-///     .with_arg("principal", ArgRef::Inline(b"urn:iki:gonk:client:forged".to_vec()));
+///     .with_arg("principal", ArgRef::Inline(b"urn:iki:host:gonk:client:forged".to_vec()));
 /// assert!(line(0, Door::Quic, &request, &session, Ok(1), 1)
-///     .contains(" principal=urn:iki:gonk:client:ab12 "));
+///     .contains(" principal=urn:iki:host:gonk:client:ab12 "));
 /// ```
 pub fn line(
     at_ms: u64,

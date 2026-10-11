@@ -275,7 +275,7 @@ ledger #878 the door refuses a raw store write to a ledger graph — see
 
 **A write that names no author is attributed by the door** (R4 option (b), 2026-10-08). On the
 HTTP door the form adapter fills `author` from a signed-in session's passkey; on the QUIC door
-every write that names none is filled with the client's `urn:iki:gonk:client:<fingerprint>`,
+every write that names none is filled with the client's `urn:iki:host:gonk:client:<fingerprint>`,
 wherever the target declares `author`. An author given explicitly is kept when it is plain
 text or the request's own principal, and refused when it names another principal.
 
@@ -1531,7 +1531,8 @@ changes). An enrolment left behind by the old behavior shows in `client list` as
 `enrolled, NO bundle`; remove it by fingerprint.
 
 **Every QUIC request is attributed.** The server names each connection's client
-`urn:iki:gonk:client:<fingerprint>` (`client add` prints it) and mints that name into the
+`urn:iki:host:gonk:client:<fingerprint>` (`client add` prints it; the fingerprint is the
+lowercase hex SHA-256 of the certificate's DER) and mints that name into the
 session's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077). The access
 log writes it as the `principal` of every QUIC request, reads included; a write that names no
 `author` is attributed to it; and a write may name it as its `author`, and no other principal
@@ -1543,6 +1544,15 @@ intersection dropped it: every such request logged `principal=-` and its writes 
 author, ledger #879. From 0.1.41 to core 0.1.93 it rode beside the capability, as an argument
 `ikigai-quic` still stamps.) One cost: a principal is part of the cache key at every depth, so
 two clients reading one resource under one grant do not share a cached answer.
+
+**The name follows every host's convention, `urn:iki:host:{name}:client:<fingerprint>`**
+(ledger #1183, 2026-10-10), with this host's name, `gonk`. Before that, gonk minted
+`urn:iki:gonk:client:<fingerprint>`, and that spelling is a **permanent alias**: never minted
+again, never rewritten where it is stored (ledger authors, the access log, `ikigai-log`
+segments, whose hash chain a rewrite would break), and always recognized. An `author` in
+either spelling is principal-shaped, so a client may name ITSELF either way and can name no
+other machine in either; the item page shows both spellings of one fingerprint as one actor,
+in the current form. Enrollment is unchanged: `clients.json` is keyed by fingerprint.
 
 What admission means today: a client holding a trusted certificate and an enrolment is
 admitted until it is removed (`client remove`, or its entry deleted from `clients.json`),
@@ -1930,7 +1940,7 @@ query's dataset must follow.
   drafts only root sees.
 - **The record names the door's principal.** `urn:script:{name}:run:{id}` (`as=application/json`
   or `text/turtle`, PROV-O) carries the passkey's IRI, the certificate's
-  `urn:iki:gonk:client:<fingerprint>`, or `unstamped` from the socket.
+  `urn:iki:host:gonk:client:<fingerprint>`, or `unstamped` from the socket.
 
 ### The ceiling: the ledgers' reads, and nothing else
 
@@ -2106,7 +2116,7 @@ draft carries where it came from into the version a person publishes.
 | --- | --- | --- |
 | **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 | **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule here, the raw-write rule below; no `Host`/cross-site checks and no author rules |
-| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:gonk:client:<fingerprint>` |
+| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:host:gonk:client:<fingerprint>` |
 
 **Anonymously, the HTTP door is loopback only and grants little.** It can list, file,
 comment, close, claim, label and link in its ledgers, and run and read a script its publisher
@@ -3165,8 +3175,9 @@ the HTTP status**, which `ikigai-web` decides after the kernel returns and does 
 back. An HTTP request's `principal` is the signed-in passkey the door minted into its
 capability, on reads as well as writes (ledger #1077); an anonymous read is `-`, and a
 `?principal=` a reader types is never written as one (ledger #864, R6). A QUIC line names the client the connection authenticated,
-`urn:iki:gonk:client:<fingerprint>` (ledger #816), on every verb and whatever capability the
-client carries (ledger #879). A refusal the door kernel makes before dispatch (a capability
+`urn:iki:host:gonk:client:<fingerprint>` (ledger #816, #1183), on every verb and whatever
+capability the client carries (ledger #879); a line written before 2026-10-10 says
+`urn:iki:gonk:client:<fingerprint>`, and stays as written. A refusal the door kernel makes before dispatch (a capability
 floor, a name nothing binds) writes no line. ⚠ Nor, since ledger #879, does a foreign `Host` or
 a cross-site write, or (ledger #880) a GET another page loads: those are refused at the EDGE,
 before the kernel and so before this log —
@@ -3190,7 +3201,8 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
 
 - a `grants.json` grant naming a door's marker (`urn:iki:gonk:door:*`: a refusal, or the
   other-page label of ledger #880) or a
-  QUIC client's name (`urn:iki:gonk:client:*`) — both are computed by a door, never granted;
+  QUIC client's name (`urn:iki:host:gonk:client:*`, or the old `urn:iki:gonk:client:*`) —
+  both are computed by a door, never granted;
 - an ARMED reviewer (`gonk.review.arm = true`) whose net grant names a host other than the
   one `gonk.mount` dials — `urn:cap:net:localhost` for a `quic://127.0.0.1:…` peer is the
   usual case. Write `urn:cap:net:<the mount's host>` (the refusal prints the stanza).
@@ -3212,7 +3224,7 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
   read half of the caller's grant, so a link to an explanation from another page answers
   `403` and says why; open it from gonk's own page or type the address;
 - a write whose `author` names another principal (`urn:iki:gonk:passkey:*`,
-  `urn:iki:gonk:client:*`), on every route.
+  `urn:iki:host:gonk:client:*`, or the old `urn:iki:gonk:client:*`), on every route.
 
 **Moved**
 

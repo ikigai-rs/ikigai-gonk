@@ -60,6 +60,7 @@ use oxigraph::model::NamedOrBlankNode;
 use serde_json::{json, Value};
 
 use crate::identity::{self, Passkeys, Purpose};
+use crate::quic;
 use crate::render::{self, element, envelope, Graph};
 use crate::rows;
 use crate::rules::{self, Rules};
@@ -731,8 +732,12 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
 /// An author that is a passkey IRI ([`identity::passkey_iri`] — what the door stamps on a
 /// signed-in write, forwarded by [`Act`]) renders as that passkey's CURRENT label, read
 /// from `clients.json` the way the header's "Signed in as" is; a passkey since deleted
-/// renders as the IRI's tail, so the attribution never vanishes. Any other author — a plain
-/// name typed at the cli — renders as itself. ★ The IRI stays in the store; only the face
+/// renders as the IRI's tail, so the attribution never vanishes. A QUIC client's name renders
+/// in its CURRENT spelling ([`quic::client_iri`]) whichever one the store holds, so a machine
+/// that wrote as `urn:iki:gonk:client:<fp>` before 2026-10-10 and as
+/// `urn:iki:host:gonk:client:<fp>` after reads as one actor (ledger
+/// [#1183](http://localhost:1060/l/default/item/1183)). Any other author — a plain name typed
+/// at the cli — renders as itself. ★ The IRI stays in the store; only the face
 /// translates, so a relabelled passkey keeps its history and the store never learns a
 /// display name. The file is read at most once per render, and not at all when no author
 /// on the page is a passkey.
@@ -753,7 +758,10 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
     for (subject, who) in attributed {
         let shown = match (identity::passkey_credential(&who), &labels) {
             (Some(id), Some(labels)) => labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
-            _ => who,
+            _ => match quic::client_fingerprint(&who) {
+                Some(fingerprint) => quic::client_iri(fingerprint),
+                None => who,
+            },
         };
         graph.view(&subject, "author", shown);
     }
