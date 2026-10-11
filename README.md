@@ -12,6 +12,7 @@ $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
+  scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts only; a QUIC client drafts, a person publishes
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
@@ -165,7 +166,9 @@ good until it expires.
   both on the next request or connection. Delete a passkey's entry from `clients.json` to
   revoke it, with no restart.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
-  grant plus its own, and `passkey invite` refuses a grant that adds nothing.
+  grant plus its own, and `passkey invite` refuses a grant that adds nothing. The anonymous
+  grant includes running and reading PUBLIC scripts; publishing one takes
+  `--script <name>=publish` ([scripts](#scripts-saved-queries-and-plans-ledger-939)).
 - **A signed-in write carries its author.** The door mints the session's principal — the
   passkey's stable IRI `urn:iki:gonk:passkey:<credential id>`, never the label — into the
   request's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077), on
@@ -1834,17 +1837,156 @@ and a line on the server's stderr — and no other space fires at all. The file 
 written when this server is armed and removed when it is not, as the marker other readers of
 the tree use to tell a reactive space from a plain one.
 
+## Scripts: saved queries and plans (ledger #939)
+
+A SPARQL query or a plan, published at a name, is a resource like the ledger is: fetched
+without running, run as a READ, run for its EFFECTS with a record of who ran it, and versioned
+by its content. gonk mounts [`ikigai-script`](https://github.com/ikigai-rs/ikigai-script) in
+the hub, so every door reaches the same scripts, and each run names the principal the door
+minted: the passkey at HTTP, the client certificate at QUIC, nobody at the owner's socket.
+
+```text
+urn:script:{name}                    Source Exists Sink Delete  fetch WITHOUT running, publish, retire
+urn:script:{name}:version:{digest}   Source Exists              one immutable, content-addressed version
+urn:script:{name}:compiled           Source                     the head prepared for its evaluator
+urn:script:{name}:result             Source                     run it as a READ: its answer, cached
+urn:script:{name}:runs               Sink                       run it for EFFECTS: answers the run's IRI
+urn:script:{name}:run:{id}           Source Exists              one run: who, which version, under what, when, outcome
+urn:script:catalog                   Source                     every script the caller may read
+urn:plan:{eval,validate,requires}                               the plan doors a plan script reaches
+```
+
+A person who may publish `open-by-label` publishes it over HTTP, signed in; anyone on this
+machine then runs it, because it is public:
+
+```sh
+ikigai-gonk passkey invite brian --ledger default=write --script open-by-label=publish
+```
+
+```text
+$ curl -X POST -b 'gonk_session=…' --data-binary @open-by-label.rq \
+    'http://localhost:1060/script/open-by-label?language=sparql&public=true'
+urn:script:open-by-label:version:sha256:4f0c…
+
+$ curl 'http://localhost:1060/script/open-by-label/result?label=triage&as=text/csv'
+number,title
+1,first triage item
+3,second triage item
+```
+
+where `open-by-label.rq` declares its one parameter in its leading comment and names the graph
+it reads with `FROM`:
+
+```sparql
+# Open items carrying a label, lowest number first.
+# @param label xsd:string -- the label an item must carry
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT ?number ?title
+FROM <urn:iki:ledger:graph:default>
+WHERE {
+  ?item a ledger:Item ; ledger:status ledger:open ; ledger:label ?label ;
+        ledger:number ?number ; dcterms:title ?title .
+}
+ORDER BY ?number
+```
+
+A plan (`language=plan`, an `ik:Process` graph in Turtle) composes resources instead of
+querying the store: `tests/scripts_939.rs` holds one (`TRIAGE`) that joins
+`urn:iki:ledger:items labels=<label>` and `urn:iki:ledger:next`. It is validated against the
+vocabulary's shapes before it is stored, and what it needs is derived from its steps'
+contracts. A query's parameter values are bound into the parsed algebra, never spliced into the
+text; see the library's README for the parameter grammar, the faces (`as=`), and the rules a
+query's dataset must follow.
+
+### Who may do what
+
+| | anonymous HTTP | signed-in HTTP | QUIC (a machine) | socket (the owner) |
+| --- | --- | --- | --- | --- |
+| run and read a PUBLIC script | **yes** (`urn:cap:script:{run,read}:public`) | yes | only if granted (`--script public=run`) | yes |
+| run and read a named script | no | per grant (`--script <name>=run`) | per grant | yes |
+| publish, replace, retire | no | per grant (`--script <name>=publish`) | **no**: drafts only (`state=draft`) | yes |
+| see a draft | no | its own | its own | every draft |
+| what a run may touch | the least of: the runner's grant, what the publisher held at publish, and the ceiling below | | | |
+
+- **A script grant names exactly one script.** The library matches
+  `urn:cap:script:{verb}:{name}` exactly, so there is no "publish anything" grant: grant each
+  name first (`--script <name>=<read|run|publish>`, on `passkey invite` and `client add`).
+  `public` is the one name that is not a script: `--script public=run` is the pair the
+  anonymous caller holds, every script marked `public=true`.
+- **A publish declares nothing; the text derives it.** A query needs the store's read token
+  for each graph it names, and a plan whatever its steps' contracts require. **A publisher must
+  hold all of it**, or the publish is refused naming the tokens: a script can never run with
+  more than its publisher held. Reading a graph you cannot read by publishing a script that
+  does is the case this exists for.
+- **A machine drafts, a person publishes.** The QUIC door is the one whose callers are
+  machines (a certificate, not a passkey), and it refuses a publish or a retire whatever the
+  grant says: an agent may save a draft, and a person publishes it. One grant table serves
+  both identity doors, so the rule lives at the door.
+- **Drafts are their author's.** Every door here names its caller, so an author sees their own
+  draft, and to anyone else holding the grant it is absent (`404`, exactly as a name nobody
+  wrote). The socket names nobody: the owner there is root and sees every draft, and a narrowed
+  socket client (`ikigai mcp --grant …`) is recorded as `urn:script:principal:unstamped`, whose
+  drafts only root sees.
+- **The record names the door's principal.** `urn:script:{name}:run:{id}` (`as=application/json`
+  or `text/turtle`, PROV-O) carries the passkey's IRI, the certificate's
+  `urn:iki:gonk:client:<fingerprint>`, or `unstamped` from the socket.
+
+### The ceiling: the ledgers' reads, and nothing else
+
+Every run is held to `urn:cap:ledger:read:*` and `urn:cap:store:read:graph:urn:iki:ledger:graph:*`
+(`script::CEILING`). **Scripts here are read-only**, and a script that writes is refused when it
+is published: a SPARQL UPDATE, or a plan with a `Sink` or `Delete` step.
+
+⚠ **Why not "writes through the ledger's own doors".** `ikigai-ledger` writes every append and
+comment as a store update under the CALLER's capability, so the ledger's write door needs the
+ledger graph's store write token, the same token a raw update of that graph needs. A ceiling that
+admits one admits the other. gonk tells them apart where a request ARRIVES (the raw-write and
+author rules below), and a script's steps never arrive anywhere. For the same reason **a plan
+that writes runs only as root** at `urn:plan:eval`, at every depth: below root a plan step could
+write a ledger graph raw, or name another person as a comment's `author`, past both rules. A
+read-only plan runs for anyone, under their own capability, which is exactly the requests they
+could make one at a time.
+
+### What else is decided here
+
+- **Languages: SPARQL and plans.** No Lisp evaluator is bound, so `language=lisp` (the
+  library's default when none is given) is refused at publish. `urn:script:eval` is the
+  library's ad hoc door for Lisp and is the owner's here; a plan typed ad hoc runs at
+  `urn:plan:eval`.
+- **The validator is served to no caller.** Plans are validated by `urn:shacl:validate`, which
+  is linked for the plan doors alone: rudof's validator can overflow its thread on deep enough
+  DATA, which would abort the process holding the store, so every door answers it as unbound.
+- **The transports' own arguments never reach a script.** `ikigai-web` stamps a write with
+  `received`, `client`, `principal` and `content-type`, and `ikigai-quic` stamps `principal` on
+  everything; a script refuses an argument it does not declare. gonk removes them at the door,
+  so a script parameter cannot take one of those names.
+- **A result is cached in the hub**, under the store's write threads (and the script's own,
+  which a republish cuts), so the same public read from a thousand callers is computed once.
+  Measured in process: a cold `open-by-label:result` in about 1.2 ms, the next in about 30 µs.
+  A public run uses the store's base time budget rather than the anonymous door's: the caller
+  supplies parameter values, never text.
+- **The atoms are plain files** in `~/.ikigai/scripts` (`gonk.script.dir`), the library's
+  `DirBackend`: one directory per script, a compare-and-set head, digest-checked versions, a
+  file per run. Not in the RDF store, because the records ARE authority (a version stores what
+  its publisher held) and a store graph is reachable by the per-graph grants this server mints.
+  ⚠ **So a backup does not hold the scripts**: copy the directory beside it.
+- **Not built:** triggers (ledger #937), a script as an endpoint, a stepper, signed elevation,
+  ledger writes from a script (above), rate limiting of anonymous runs, and the backup of the
+  scripts directory.
+
 ## The three doors
 
 | door | reaches it | runs under |
 | --- | --- | --- |
-| **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`); signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
+| **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 | **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule here, the raw-write rule below; no `Host`/cross-site checks and no author rules |
 | **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:gonk:client:<fingerprint>` |
 
 **Anonymously, the HTTP door is loopback only and grants little.** It can list, file,
-comment, close, claim, label and link in its ledgers. It cannot delete or purge, cannot reach
-another ledger, and cannot touch the store's whole-dataset doors (`urn:iki:store:select`,
+comment, close, claim, label and link in its ledgers, and run and read a script its publisher
+marked public. It cannot delete or purge, cannot reach another ledger, cannot publish a script,
+and cannot touch the store's whole-dataset doors (`urn:iki:store:select`,
 `urn:iki:store:update`), because none of those tokens are in its grant. A passkey adds exactly
 its grant and nothing else.
 
@@ -1862,6 +2004,10 @@ named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
 | RAW writes to a LEDGER graph — `urn:iki:store:graph-update` naming `urn:iki:ledger:graph:*` (`urn:cap:gonk:raw-write:graph:<graph>`, ledger #878) | **no** — `403`, though its ledgers' own writes work | only if the grant names it — `--ledger-graph <ledger>` | yes (root) | only if the grant names it — `--ledger-graph <ledger>` |
 | `urn:sparql:{select,ask,construct,describe}` (`urn:cap:store:read:graph:*`, then each graph's token) — by default the UNION of the graphs the caller may read | its ledgers' graphs | + the graphs the passkey's grant names | every named graph (root) | the graphs the grant names |
+| `urn:script:{name}:result` and `:runs` — run a script ([scripts](#scripts-saved-queries-and-plans-ledger-939)); a run touches at most the runner's grant ∩ what the publisher held ∩ the ledgers' reads | **PUBLIC scripts only** (`urn:cap:script:run:public`) | + each name the grant names (`--script <name>=run`) | yes (root) | only the names the grant names, or `public=run` |
+| `urn:script:{name}` Sink and Delete — publish, replace, retire (`urn:cap:script:{write,delete}:{name}`) | **no** | each name the grant names (`--script <name>=publish`) | yes (root) | **drafts only** (`state=draft`): a machine drafts, a person publishes |
+| `urn:plan:eval` — a plan typed ad hoc, run under the caller's own capability | read-only plans | read-only plans | any plan (root) | read-only plans |
+| `urn:shacl:validate` — linked for the plan doors | **no** — not served | **no** | **no** | **no** |
 | `urn:repo:{root}:{explain,review}`, `pr:{n}:{explain,review}` — **spends model tokens** (`urn:cap:net:{host}`; ⚠ the two reviews no longer require `urn:cap:annotate` — browse 0.5.0 — so a pass writes pending findings and cannot publish) | **no** | only if the grant names it — `--browse derive` | yes (root) | only if the grant names it |
 | `urn:llm:*` on the mounted peer (`urn:cap:net:{host}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 
@@ -2156,6 +2302,10 @@ row is written), so the list also carries `urn:cap:store:answer:10000000` and
 grant raises rows and nothing else, so the job needs both. ⚠ The byte ceiling is about nine times
 today's answer, so it is the first bound a growing dataset will reach.
 
+⚠ **A backup is the DATASET, and the scripts are not in it** (ledger #939): they are plain files
+in `~/.ikigai/scripts` (`gonk.script.dir`). Copy that directory beside a backup until the backup
+family takes it.
+
 ### The format is N-Quads, and the easy mistake is Turtle
 
 **CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named
@@ -2278,6 +2428,7 @@ gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/p
 gonk.backup.every = "24h"
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
+# gonk.script.dir = "~/.ikigai/scripts"   # where published scripts and their runs live
 # gonk.review.space = "reviews"       # bind the git-event review QUEUE; arms nothing
 # gonk.review.grant = "reviewer"      # the grant a pass runs under; naming it arms nothing
 # gonk.review.arm = true              # ⚠ and the word that arms it; needs the grant above
@@ -2450,7 +2601,11 @@ and `ikigai-time`, whose `JobRegistry` fires the schedule and whose `urn:time:*`
 is deliberately **not** bound. For the browser face it adds two libraries it calls as
 functions and binds no resources from: `ikigai-xslt` (the stylesheet engine) and
 `ikigai-passkey` (the assertion verifier). **No LLM client** — the model is mounted, never
-linked.
+linked. For [scripts](#scripts-saved-queries-and-plans-ledger-939) it adds
+[`ikigai-script`](https://github.com/ikigai-rs/ikigai-script), `ikigai-engine`'s plan doors
+(`urn:plan:*`, nothing else of the engine) and
+[`ikigai-shacl`](https://github.com/ikigai-rs/ikigai-shacl), whose validator the plan doors
+compose and no door serves.
 
 ⚠ **That is a correction, and it has now been made twice.** Through 0.1.0 this section said
 "no filesystem module, no process execution and no outbound network client is compiled in, so
@@ -2463,9 +2618,13 @@ a `gonk.mount` line, gonk opens an outbound connection — QUIC, or a Unix socke
 peer named in its config, presenting one client certificate, speaking ikigai's own wire
 protocol**. That is narrower than what the old sentence ruled out in three ways that matter:
 
-- **No HTTP client is linked, and none is reachable.** `urn:httpGet` and its family are not
-  bound here; `ikigai-llm` is not a dependency. A capability cannot produce a request to an
-  arbitrary URL, because nothing in this process can build one.
+- **No HTTP client is reachable — but since ledger #939 one is LINKED, and this line used to
+  say otherwise.** `ikigai-shacl` brings rudof, and rudof brings `reqwest` and turns on
+  oxigraph's `http-client` (its SPARQL `SERVICE` handler). None of it is reachable from a
+  request: `urn:httpGet` and its family are not bound, `ikigai-llm` is not a dependency, the
+  validator is served to no caller and refuses a `SERVICE` in a shape itself, and the store
+  refuses `SERVICE` and `LOAD` at every door (0.2.10). So no capability can produce a request to
+  an arbitrary URL, and that is now three refusals deep rather than true by linkage.
 - **The address is config, not an argument.** A caller cannot say where to connect. The peer
   is the one `gonk.mount` names, and the only IRI prefix a mount line may claim is
   `urn:llm:` — so even an operator cannot quietly put another namespace behind these doors.
@@ -2489,6 +2648,8 @@ browse composition's twenty more, in the hub and through a door, pins the five t
 pins the backup composition's eight more — gonk's four and compress's four — asserts that
 `urn:time:schedule`, `urn:time:cancel` and `urn:time:jobs` are bound by nothing, and restores
 a real archive, comparing the graph set and the per-graph counts rather than a total.
+`tests/scripts_939.rs` pins the script family's twelve — the library's eight, the plan doors'
+three and the validator — in the hub, and the validator's absence at every door.
 `tests/topology.rs` sources `urn:kernel:topology` through the hub and both door shapes, pins the
 named nodes and their order, asserts nothing of this crate's is opaque, and runs the §12.5
 reachability walk over the result.

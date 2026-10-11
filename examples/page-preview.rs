@@ -122,6 +122,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         Vec::new(),
         Vec::new(),
         None,
+        None,
     ));
     let config = std::env::temp_dir().join("ikigai-gonk-preview");
     let face = Arc::new(web::Web {

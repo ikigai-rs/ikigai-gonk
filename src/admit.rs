@@ -87,7 +87,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ikigai_core::{
     ArgRef, Capability, Description, Endpoint, Error, InputSource, Invocation, Iri, Representation,
-    Request, Resolution, Result, Scope, Space, SpaceEntry, Topology,
+    Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 use crate::access::Door;
@@ -564,6 +564,72 @@ pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -
     ))
 }
 
+/// ★ **A machine drafts, a person publishes** (ledger [#939](http://localhost:1060/l/default/item/939)):
+/// why a request that ARRIVED at the QUIC door may not change a script, or `None`.
+///
+/// The design's rule for agents — an agent may draft a script, a human publishes it, and the
+/// review step IS the publish authority — enforced at the one door whose callers are machines
+/// (a client certificate is a machine's identity; a person signs in with a passkey). A grant
+/// cannot carry it: `grants.json` is one table for both identity doors, so a grant that may
+/// publish on a passkey may on a certificate too.
+///
+/// ```text
+/// Sink urn:script:{name} state=draft     → admitted (a draft is its author's alone)
+/// Sink urn:script:{name}, any other state → refused: publishing is a person's
+/// Delete urn:script:{name}                → refused: retiring is a person's
+/// anything else (a run, a read, eval)     → not this rule's
+/// ```
+///
+/// A person publishes a machine's draft by writing it again under their own grant — they cannot
+/// read it first (a draft is its author's), so the text comes to them another way, the review
+/// step the rule exists for — or the owner does, from the socket, which sees every draft.
+///
+/// ```
+/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_gonk::admit::machine_publish_refusal;
+/// let sink = |state: Option<&str>| {
+///     let request = Request::new(Verb::Sink, Iri::parse("urn:script:open").unwrap())
+///         .with_arg("content", ArgRef::Inline(b"SELECT * {}".to_vec()));
+///     match state {
+///         Some(state) => request.with_arg("state", ArgRef::Inline(state.as_bytes().to_vec())),
+///         None => request,
+///     }
+/// };
+/// assert!(machine_publish_refusal("script", &sink(Some("draft"))).is_none());
+/// assert!(machine_publish_refusal("script", &sink(None)).is_some());
+/// assert!(machine_publish_refusal("script", &sink(Some("published"))).is_some());
+/// let retire = Request::new(Verb::Delete, Iri::parse("urn:script:open").unwrap());
+/// assert!(machine_publish_refusal("script", &retire).is_some());
+/// let run = Request::new(Verb::Sink, Iri::parse("urn:script:open:runs").unwrap());
+/// assert!(machine_publish_refusal("script-runs", &run).is_none());
+/// ```
+pub fn machine_publish_refusal(id: &str, request: &Request) -> Option<String> {
+    if id != "script" {
+        return None;
+    }
+    let target = request.target.as_str();
+    match request.verb {
+        Verb::Delete => Some(format!(
+            "a client certificate may not retire `{target}`: a machine drafts, a person \
+             publishes and retires (sign in with a passkey, or use the owner's socket)"
+        )),
+        Verb::Sink => {
+            let state = match request.args.get("state") {
+                Some(ArgRef::Inline(bytes)) => String::from_utf8_lossy(bytes).trim().to_string(),
+                _ => String::new(),
+            };
+            (state != "draft").then(|| {
+                format!(
+                    "a client certificate may save `{target}` as a DRAFT (`state=draft`) and may \
+                     not publish it: a machine drafts, a person publishes (sign in with a \
+                     passkey, or use the owner's socket, which sees every draft)"
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
 /// A space that answers a door's refusals before anything it binds runs: an overlay with no
 /// identity or structure of its own (it forwards [`Space::id`], [`Space::topology`] and
 /// [`Space::entries`], so `urn:kernel:topology` reads the same with it or without it).
@@ -654,6 +720,11 @@ impl Endpoint for Admitted {
         if arrived && network {
             if let Some(why) = author_refusal(self.door, inv.capability, inv.request) {
                 return Err(Error::Denied(why));
+            }
+            if self.door == Door::Quic {
+                if let Some(why) = machine_publish_refusal(&description.id, inv.request) {
+                    return Err(Error::Denied(why));
+                }
             }
             // Attributed by the door: the same request with `author` filled in, issued as
             // this request's own sub-request, so it resolves to this same endpoint one level

@@ -395,6 +395,132 @@ pub fn browse_role_for(
     browse_role_grants(role, roots, host.as_deref())
 }
 
+/// How much authority over ONE script (ledger [#939](http://localhost:1060/l/default/item/939),
+/// [`crate::script`]) — `--script <name>=<read|run|publish>`, the way `--ledger` names a ledger.
+/// Cumulative, like [`Authority`].
+///
+/// ★ **Per name, because the library matches a script grant EXACTLY.** `ikigai-script` checks
+/// `urn:cap:script:{verb}:{name}` against the capability with `allows`, and a held
+/// `urn:cap:script:write:*` is not a prefix grant there ("a script grant names exactly one
+/// script"), so there is no "may publish any script" token: a person is granted each name they
+/// may publish, before they publish it, and the owner's socket (root) publishes anything.
+///
+/// The name `public` is the one exception, and it is the library's: it is reserved as a script
+/// name, so `urn:cap:script:{run,read}:public` are the grants that run and read every script
+/// its publisher marked `public=true` — `--script public=run`. The anonymous HTTP caller holds
+/// them already ([`crate::script::ANONYMOUS`]); a QUIC client holds them only when granted.
+///
+/// ⚠ `publish` on a CERTIFICATE saves drafts and nothing more: the QUIC door refuses a machine's
+/// publish and retire (a machine drafts, a person publishes; [`crate::admit`]). It is the same
+/// grant table for both doors, so the rule lives at the door rather than in the grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptAuthority {
+    /// Read the script's source and head record without running it: `urn:cap:script:read:{name}`.
+    Read,
+    /// …plus run it, as a read (`…:result`) and for effects (`…:runs`): `urn:cap:script:run:{name}`.
+    Run,
+    /// …plus publish, replace or draft it (`urn:cap:script:write:{name}`) and retire it
+    /// (`urn:cap:script:delete:{name}`).
+    Publish,
+}
+
+impl std::str::FromStr for ScriptAuthority {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "read" => Ok(ScriptAuthority::Read),
+            "run" => Ok(ScriptAuthority::Run),
+            "publish" => Ok(ScriptAuthority::Publish),
+            other => Err(format!(
+                "`{other}` is not a script authority (read | run | publish)"
+            )),
+        }
+    }
+}
+
+/// Every token an identity needs for `authority` over the script `name`.
+///
+/// ```
+/// use ikigai_gonk::grants::{script_grants, ScriptAuthority};
+/// assert_eq!(
+///     script_grants("open-by-label", ScriptAuthority::Publish).unwrap(),
+///     [
+///         "urn:cap:script:read:open-by-label",
+///         "urn:cap:script:run:open-by-label",
+///         "urn:cap:script:write:open-by-label",
+///         "urn:cap:script:delete:open-by-label",
+///     ]
+/// );
+/// // Every PUBLIC script, to run and read: the anonymous HTTP caller's pair.
+/// assert_eq!(
+///     script_grants("public", ScriptAuthority::Run).unwrap(),
+///     ["urn:cap:script:read:public", "urn:cap:script:run:public"]
+/// );
+/// assert!(script_grants("public", ScriptAuthority::Publish).is_err());
+/// assert!(script_grants("Not A Name", ScriptAuthority::Run).is_err());
+/// ```
+///
+/// ⚠ No store or ledger token: what a script READS is the runner's own grant (`--ledger`),
+/// intersected with what its publisher held. A run grant with no ledger grant runs nothing that
+/// reads a ledger.
+///
+/// # Errors
+///
+/// When `name` cannot be a script name (`ikigai_script::name::validate`), or is `public` with
+/// more than `run`. A token is matched exactly, so a typo refused here would otherwise be a
+/// silent denial at first use.
+pub fn script_grants(name: &str, authority: ScriptAuthority) -> Result<Vec<String>, String> {
+    use ikigai_script::authority::{cap_delete, cap_read, cap_run, cap_write};
+    if name == "public" {
+        if authority == ScriptAuthority::Publish {
+            return Err(
+                "`public=publish`: `public` names every public script, to run and read; \
+                 a script is published under its own name (`--script <name>=publish`)"
+                    .to_string(),
+            );
+        }
+    } else {
+        ikigai_script::name::validate(name).map_err(|e| format!("--script {name}: {e}"))?;
+    }
+    let mut tokens = vec![cap_read(name)];
+    if authority != ScriptAuthority::Read {
+        tokens.push(cap_run(name));
+    }
+    if authority == ScriptAuthority::Publish {
+        tokens.extend([cap_write(name), cap_delete(name)]);
+    }
+    Ok(tokens)
+}
+
+/// Everything an ANONYMOUS loopback caller of the HTTP door holds: the read and write tokens of
+/// the ledgers in `gonk.http.ledger`, and [`crate::script::ANONYMOUS`] (run and read a PUBLIC
+/// script).
+///
+/// ```
+/// use ikigai_gonk::grants::anonymous_http_grants;
+/// assert_eq!(
+///     anonymous_http_grants(&["default".to_string()]).unwrap(),
+///     [
+///         "urn:cap:ledger:read:default",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+///         "urn:cap:ledger:write:default",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
+///         "urn:cap:script:run:public",
+///         "urn:cap:script:read:public",
+///     ]
+/// );
+/// ```
+///
+/// # Errors
+///
+/// When a ledger name cannot be a ledger, as [`grants_for`].
+pub fn anonymous_http_grants(ledgers: &[String]) -> Result<Vec<String>, String> {
+    let mut tokens = grants_for_all(ledgers, Authority::Write)?;
+    tokens.extend(crate::script::ANONYMOUS.iter().map(|s| s.to_string()));
+    Ok(tokens)
+}
+
 /// The union of [`grants_for`] over several ledgers at one authority, first-seen order.
 pub fn grants_for_all(ledgers: &[String], authority: Authority) -> Result<Vec<String>, String> {
     let mut union: Vec<String> = Vec::new();

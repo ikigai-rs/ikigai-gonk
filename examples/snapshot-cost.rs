@@ -93,6 +93,7 @@ fn main() {
         Vec::new(),
         Vec::new(),
         None,
+        None,
     ));
     let t = Instant::now();
     let loaded = issue(

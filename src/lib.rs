@@ -55,6 +55,7 @@ pub mod render;
 pub mod roborev;
 pub mod rows;
 pub mod rules;
+pub mod script;
 pub mod sparql;
 pub mod stack;
 pub mod trigger;
@@ -136,7 +137,7 @@ pub mod spaces {
 ///   `Verb::Meta as=application/json`; without a renderer that answer degrades to an
 ///   anonymous row and named arguments stop routing, with no error anywhere.
 pub fn compose(store: DurableStore) -> Kernel {
-    compose_with(store, None, Vec::new(), Vec::new(), None)
+    compose_with(store, None, Vec::new(), Vec::new(), None, None)
 }
 
 /// [`compose`], plus the repository browse family when this server is configured for one.
@@ -193,12 +194,19 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// headless reviewer **cannot publish** — Brian's rule, *"Nothing gets published to Gonk
 /// except by the human"*, is arithmetic now. See [`crate::trigger`] and ledger
 /// [#466](http://localhost:1060/l/default/item/466).
+///
+/// `scripts` is [`crate::script::Scripts`]' family — `urn:script:*`, the plan doors and the
+/// validator they compose (ledger [#939](http://localhost:1060/l/default/item/939)). `main`
+/// always passes one; `None` is the composition every test before it pinned. The caller
+/// [attaches](crate::script::Scripts::attach) the hub afterwards, so a publish re-describes
+/// the catalog.
 pub fn compose_with(
     store: DurableStore,
     browse: Option<Arc<crate::browse::CachedReads>>,
     mounted: Vec<Arc<dyn Space>>,
     trigger: Vec<Arc<dyn Space>>,
     backups: Option<crate::backup::Backups>,
+    scripts: Option<&crate::script::Scripts>,
 ) -> Kernel {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
@@ -239,6 +247,13 @@ pub fn compose_with(
     // (`crate::sparql`). Bound with the store, always — it reaches nothing the store's own
     // scoped doors do not, and it is what lets `web.mount` prefer this socket.
     spaces.push(Arc::new(sparql::space()));
+    // ★ Scripts as resources (ledger #939, [`crate::script`]): `urn:script:*`, the plan doors
+    // a plan script reaches and the validator they compose — every door reaches the first two,
+    // and none reaches the validator (`crate::doors`). After the store, the ledger and
+    // `urn:sparql:*`, whose grammars none of them overlaps.
+    if let Some(scripts) = scripts {
+        spaces.extend(scripts.spaces());
+    }
     // The root to read the verdict set through, kept before the family is moved in.
     let verdict_root = browse
         .as_ref()

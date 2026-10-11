@@ -104,6 +104,7 @@ fn door_with(
         mounted,
         extra,
         None,
+        None,
     ));
     let config = tempfile::tempdir().expect("a config home");
     let face = Arc::new(web::Web {

@@ -35,6 +35,7 @@
 //! gonk.backup.every = "24h"
 //! # gonk.backup.keep = 5               # how many archives the rotation keeps (this IS the default)
 //! # gonk.backup.dir = "~/.ikigai/backups"   # where they land (this IS the default)
+//! # gonk.script.dir = "~/.ikigai/scripts"   # where the scripts live (this IS the default)
 //! # one access line per request on stderr (this IS the default; `false` for none)
 //! # gonk.log.access = true
 //! ```
@@ -54,7 +55,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::grants::{Authority, BrowseRole};
+use crate::grants::{Authority, BrowseRole, ScriptAuthority};
 use crate::mount::{self, Mount};
 
 /// The HTTP door's default port — and the QUIC door's, on UDP, which follows whatever port
@@ -92,7 +93,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 28] = [
+const KEYS: [&str; 29] = [
     "gonk.log.access",
     "gonk.queue.serious",
     "gonk.bind",
@@ -115,6 +116,7 @@ const KEYS: [&str; 28] = [
     "gonk.backup.dir",
     "gonk.backup.every",
     "gonk.backup.keep",
+    "gonk.script.dir",
     "gonk.review.space",
     "gonk.review.grant",
     "gonk.review.root",
@@ -130,12 +132,12 @@ ikigai-gonk — a standalone ikigai work-ledger server
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
   ikigai-gonk client add <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
-                     [--ledger-graph <ledger>]...
+                     [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--cert <client.crt>] [--force] [--rotate]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
-                                   with --ledger, --browse-graph or --browse enroll its
+                                   with --ledger, --browse-graph, --browse or --script enroll its
                                    fingerprint under a grant. An existing client KEEPS its
                                    identity: --force replaces its grant, --rotate replaces its
                                    key pair (or, with --cert, its certificate) and unenrolls the
@@ -151,7 +153,7 @@ usage:
                                    grant name may be shared. Effective at its next connection;
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|write|delete|purge>]... [--browse-graph <read|write>]
-                     [--ledger-graph <ledger>]...
+                     [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
@@ -176,6 +178,15 @@ usage:
                                               socket); with no gonk.mount, derive is refused
   It reads config.toml (or --config) for the roots and the mount. Not covered: the PR
   layers' `gh` (urn:cap:exec:gh) and the browse graph's WRITE door (--browse-graph write)
+
+  --script names ONE script (urn:script:<name>), repeatable; each authority holds the one before:
+    read     urn:cap:script:read:<name>       its source and head record, without running it
+    run      urn:cap:script:run:<name>        run it; what it reads is the caller's own --ledger
+                                              grant, held to the scripts' ceiling
+    publish  urn:cap:script:write:<name>      publish, replace or draft it, and retire it. On a
+             urn:cap:script:delete:<name>     certificate it saves DRAFTS only: the QUIC door
+                                              refuses a machine's publish and retire
+    `public=run` runs and reads every script its publisher marked public (anonymous HTTP has it)
   ikigai-gonk review request <repo> <path> [--config PATH]
                                    drop ONE review request into the queue `gonk.review.space`
                                    names. Writes one file and exits: no store, no door, no
@@ -301,6 +312,8 @@ pub enum Command {
         ledger_graphs: Vec<String>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
+        /// `--script <name>=<read|run|publish>`: scripts, each by name (ledger #939).
+        scripts: Vec<(String, ScriptAuthority)>,
         /// Replace an existing GRANT (or an enrolment under another grant). Never the key
         /// pair: that is `rotate`.
         force: bool,
@@ -347,6 +360,8 @@ pub enum Command {
         ledger_graphs: Vec<String>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
+        /// `--script <name>=<read|run|publish>`: scripts, each by name (ledger #939).
+        scripts: Vec<(String, ScriptAuthority)>,
         /// Replace an existing grant of that name with different scopes.
         force: bool,
         /// How long the invite is valid.
@@ -485,6 +500,9 @@ pub struct Settings {
     /// Whether every door writes one access line per request to stderr (`gonk.log.access`,
     /// on unless a line says `false`) — see [`crate::access`].
     pub access_log: bool,
+    /// Where the scripts live (`gonk.script.dir`, default [`crate::script::DIR_NAME`] under the
+    /// data home): one directory of plain files, this server's alone — see [`crate::script`].
+    pub script_dir: PathBuf,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -1023,10 +1041,11 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         .ok_or("client add: expected <name>")?;
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
     let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
-    let mut ledger_graphs = Vec::new();
+    let (mut ledger_graphs, mut scripts) = (Vec::new(), Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
+            "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
             "--root" => roots.push(value(&mut args, "--root")?),
             flag @ ("--config" | "--config-home" | "--data-home") => {
@@ -1063,10 +1082,23 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         browse_graph,
         ledger_graphs,
         browse: browse_grant(role, roots)?,
+        scripts,
         force,
         rotate,
         flags,
     })
+}
+
+/// `--script <name>=<read|run|publish>`, checked as it is parsed.
+fn script_spec(spec: &str) -> Result<(String, ScriptAuthority), String> {
+    let (name, authority) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("--script: expected <name>=<read|run|publish>, got `{spec}`"))?;
+    let authority: ScriptAuthority = authority.parse()?;
+    // The name is checked here, by the function that mints its tokens, so a typo is refused
+    // before anything is written.
+    crate::grants::script_grants(name, authority)?;
+    Ok((name.to_string(), authority))
 }
 
 fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
@@ -1091,9 +1123,11 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Flags::default(),
     );
     let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
+    let mut scripts = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
+            "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--root" => roots.push(value(&mut args, "--root")?),
             "--ledger" => {
                 let spec = value(&mut args, "--ledger")?;
@@ -1134,6 +1168,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         browse_graph,
         ledger_graphs,
         browse: browse_grant(role, roots)?,
+        scripts,
         force,
         minutes,
         flags,
@@ -1270,6 +1305,9 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         review,
         queue: queue_policy(text)?,
         access_log: access_log(text)?,
+        script_dir: value_for(text, "gonk.script.dir")
+            .map(|spelled| expand_home(&spelled, &homes.home))
+            .unwrap_or_else(|| homes.data.join(crate::script::DIR_NAME)),
     })
 }
 
@@ -2203,12 +2241,14 @@ mod tests {
                 browse_graph,
                 ledger_graphs,
                 browse,
+                scripts,
                 cert,
                 force,
                 rotate,
                 flags,
             } => {
                 assert_eq!(name, "laptop");
+                assert!(scripts.is_empty(), "no script grant unless named");
                 assert!(ledger_graphs.is_empty(), "no raw grant unless named");
                 assert!(!rotate);
                 assert!(browse.is_none() && flags.config.is_none());
