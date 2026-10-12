@@ -83,6 +83,9 @@ pub const FEED_RETRY: Duration = Duration::from_secs(30);
 /// The most tuples or receipts one `rd` page asks for (the layer host's own maximum).
 const PAGE: usize = 1000;
 
+/// Who the layer door says the caller is (ikigai-layers 0.2.2).
+const ME: &str = "urn:layers:me";
+
 const IK: &str = "https://ikigai-rs.dev/ns#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -321,6 +324,33 @@ impl LayerClient {
             Err(Error::Conflict(_)) | Err(Error::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    /// Who the layer door says THIS server is: the principal it minted for our connection,
+    /// read from `urn:layers:me as=application/json` (ikigai-layers 0.2.2, ledger
+    /// [#1316](http://localhost:1060/l/default/item/1316)).
+    ///
+    /// `Ok(None)` only when the host does not serve that resource (a host on ikigai-layers
+    /// 0.2.1 or older answers `NotFound` or `Unresolved`): the caller then falls back to
+    /// inferring its principal from the records it holds, as gonk did before.
+    /// Any other failure is an error, never a guess.
+    ///
+    /// # Errors
+    ///
+    /// When the door refuses or fails, or the answer is not the JSON face naming a principal.
+    pub fn me(&self) -> Result<Option<String>, String> {
+        let request = layer::request(Verb::Source, ME).with_arg("as", inline("application/json"));
+        let answer = match self.door.call(request) {
+            Ok(answer) => answer,
+            Err(Error::NotFound(_)) | Err(Error::Unresolved(_)) => return Ok(None),
+            Err(e) => return Err(format!("reading {ME}: {e}")),
+        };
+        let json: serde_json::Value = serde_json::from_slice(&answer.bytes)
+            .map_err(|e| format!("{ME} answered no JSON: {e}"))?;
+        json.get("principal")
+            .and_then(serde_json::Value::as_str)
+            .map(|principal| Some(principal.to_string()))
+            .ok_or_else(|| format!("{ME} names no principal: {json}"))
     }
 
     /// The receipt of `subject`'s take, re-read after a take that lost.
@@ -763,7 +793,17 @@ impl Mirror {
         }
 
         // 3. Each item against its newest offer.
-        let known_offerer = ours.keys().find_map(|o| offerer(o, &pending, &taken));
+        // Who we are at the door: what it says (`urn:layers:me`), and only from a host that
+        // does not serve that, the dropper of an offer we recorded, which knows nothing until
+        // we have one (ledger #1316).
+        let known_offerer = match self.layer.me() {
+            Ok(Some(me)) => Some(me),
+            Ok(None) => ours.keys().find_map(|o| offerer(o, &pending, &taken)),
+            Err(e) => {
+                report.failed(format!("{e} (withdrawing orphaned offers waits a pass)"));
+                None
+            }
+        };
         for item in &items {
             let offers = recorded.get(&item.iri).cloned().unwrap_or_default();
             let open = item.status == "open";

@@ -2233,7 +2233,9 @@ draft carries where it came from into the version a person publishes.
 
 - **The spend: at most 3 model calls per ask** (`ikigai-nl`'s default `max_attempts`): the
   first draft, then a repair for each refusal, each repair prompt carrying exactly what the
-  check refused. Drafting also stops the first time the model repeats a draft. A draft that
+  check refused. Drafting also stops the first time the model repeats a draft, and says so:
+  `drafting stopped: the model repeated attempt N`, the repeat marked as one (`repeatOf`,
+  `prov:alternateOf`) rather than counted as a failure (`ikigai-nl` 0.4.0). A draft that
   never validates is answered as **failed**, every attempt listed, no query, nothing saved.
 - **The spend per call: 2048 tokens a draft** (`ikigai-nl`'s `DEFAULT_MAX_TOKENS`, sent as
   `max_tokens=` since `ikigai-nl` 0.2.0, ledger [#1203](http://localhost:1060/l/default/item/1203);
