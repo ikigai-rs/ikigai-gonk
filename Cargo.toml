@@ -243,7 +243,8 @@ ikigai-throttle = "0.1.11"
 # 0.1.55 (ledger #1335): the one-release reason (see `ikigai-quic` below).
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` below).
 # 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below).
-ikigai-engine = { version = "0.1.57", features = ["plan-reader"] }
+# 0.1.58 (ledger #1379): the one-release reason.
+ikigai-engine = { version = "0.1.58", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). ⚠⚠ **This is the widest
 # thing this manifest links, and it is linked for the plan doors ALONE.** rudof brings `reqwest`
@@ -585,7 +586,8 @@ ikigai-repo = "0.2.0"
 # 0.1.55 (ledger #1335): the one-release reason.
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` below).
 # 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below).
-ikigai-intray = "0.1.57"
+# 0.1.58 (ledger #1379): the one-release reason.
+ikigai-intray = "0.1.58"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -606,7 +608,9 @@ ikigai-intray = "0.1.57"
 # 0.1.52 -> 0.1.55 (ledger #1335): quic and ipc at 0.1.55 require `ikigai-resolve ^0.1.55`.
 # 0.1.55 -> 0.1.56 (ledger #1378): quic and ipc at 0.1.56 require `ikigai-resolve ^0.1.56`.
 # 0.1.56 -> 0.1.57 (ledger #1378): quic and ipc at 0.1.57 require `ikigai-resolve ^0.1.57`.
-ikigai-resolve = "0.1.57"
+# 0.1.57 -> 0.1.58 (ledger #1379): quic and ipc at 0.1.58 require `ikigai-resolve ^0.1.58`. 0.1.58
+# adds a leading-`~` rule for config-home paths; gonk resolves its own paths and does not call it.
+ikigai-resolve = "0.1.58"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -648,7 +652,8 @@ ikigai-resolve = "0.1.57"
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` below); 0.1.55 is still the
 # API floor, and nothing in the socket transport changed.
 # 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below).
-ikigai-ipc = "0.1.57"
+# 0.1.58 (ledger #1379): the one-release reason.
+ikigai-ipc = "0.1.58"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -729,7 +734,8 @@ ikigai-ipc = "0.1.57"
 # is the FLOOR TEST: on 0.1.55 the call is lost (`connection lost`). `"0.1.56"` is `<0.2.0`.
 # 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below). 0.1.56 is still the
 # behavior floor above; the QUIC door's behavior did not change in 0.1.57.
-ikigai-quic = "0.1.57"
+# 0.1.58 (ledger #1379): the one-release reason.
+ikigai-quic = "0.1.58"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -806,7 +812,8 @@ ikigai-quic = "0.1.57"
 # the default, `text/plain`: one setting covers every route on the door, and `web/gonk.js` shows
 # an error's body to a person as text (`htmx:responseError`, and the passkey `post` helper), so
 # a JSON body would reach the page as raw JSON. `"0.1.57"` is `<0.2.0`.
-ikigai-web = "0.1.57"
+# 0.1.58 (ledger #1379): the one-release reason; 0.1.57 is still the behavior floor.
+ikigai-web = "0.1.58"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -895,7 +902,8 @@ ikigai-xslt = "0.2.1"
 # 0.1.55: the one-release reason; the verifier is unchanged.
 # 0.1.56: the one-release reason; the verifier is unchanged.
 # 0.1.57: the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.57"
+# 0.1.58: the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.58"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
@@ -963,5 +971,6 @@ ikigai-a11y = "0.2.1"
 # their own principal, and `tests/layer_mirror_1190.rs` resolves a lost take reply BEFORE the
 # first take through it. (The tests still bind `urn:collab:{name}:participants` themselves, as
 # they did when 0.2.1 was unpublished.) A dev-dependency only: gonk reaches a layer host over
-# the wire. `"0.2.2"` is `<0.3.0`.
-ikigai-layers = "0.2.2"
+# the wire. 0.2.8 (ledger #1377): the published head, moved with the cli 0.1.58 crates; 0.2.2 is
+# still the floor the tests need. `"0.2.8"` is `<0.3.0`.
+ikigai-layers = "0.2.8"
