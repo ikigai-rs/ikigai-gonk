@@ -2,7 +2,7 @@
 
 **A standalone work-ledger server for [ikigai](https://github.com/ikigai-rs).** One binary
 holds the machine's durable RDF store and serves named ledgers — items, comments, labels,
-links, claims, and a ranked `next` — through three doors: HTTP on loopback port 1060, with a
+links, claims, and a ranked `next` — through three doors: HTTP on loopback port 1062, with a
 browser face for reading, filing, editing, closing, deleting and querying; an owner-only Unix
 socket; and QUIC for other machines, where every connection is admitted by a client
 certificate and runs under the grant that certificate is enrolled for.
@@ -10,7 +10,7 @@ certificate and runs under the grant that certificate is enrolled for.
 ```text
 $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
-  http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s)
+  http    http://localhost:1062/ — loopback (127.0.0.1:1062); anonymous read+write: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
   scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts and read-only plans, 30 a minute in all (draft checks too), each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
@@ -18,10 +18,10 @@ ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
   mount   mount = "prefer urn:iki:ledger:=/Users/you/.ikigai/gonk.sock"  (and the same for urn:iki:store:)
 
-$ curl -X POST --data-binary 'Wire gonk into the cli' http://127.0.0.1:1060/iki/ledger/append
+$ curl -X POST --data-binary 'Wire gonk into the cli' http://127.0.0.1:1062/iki/ledger/append
 #1 urn:iki:ledger:default:item:01m2h3t8337vvs9j
 
-$ curl http://127.0.0.1:1060/iki/ledger/items
+$ curl http://127.0.0.1:1062/iki/ledger/items
    #1  open    p-  Wire gonk into the cli
 
 1 item(s)
@@ -42,7 +42,7 @@ ikigai-gonk
 ```
 
 That is the whole setup. The dataset lives in `~/.ikigai/store`, the socket at
-`~/.ikigai/gonk.sock`, and HTTP on `127.0.0.1:1060`. No configuration file is needed, and no
+`~/.ikigai/gonk.sock`, and HTTP on `127.0.0.1:1062`. No configuration file is needed, and no
 certificate is needed until another machine has to reach it.
 
 `ikigai-gonk --help` prints every flag and file.
@@ -68,7 +68,7 @@ the config home the server was given, not the process's (ledger #918).
 
 ## In a browser
 
-Open **<http://localhost:1060/>** — `localhost`, not `127.0.0.1`: a passkey is bound to a
+Open **<http://localhost:1062/>** — `localhost`, not `127.0.0.1`: a passkey is bound to a
 name, and a browser refuses an IP address as one.
 
 - **Browse.** The front page is the first ledger you may read, open items first, with filters
@@ -96,7 +96,7 @@ name, and a browser refuses an IP address as one.
   and leaves a tombstone; it is recoverable by hand. *Purge* destroys the content in both
   graphs and leaves only the tombstone. They are separate sections with separate
   confirmations, and each appears only for a caller whose grant holds it.
-- **Query.** <http://localhost:1060/sparql> runs SELECT, ASK, CONSTRUCT and DESCRIBE over one
+- **Query.** <http://localhost:1062/sparql> runs SELECT, ASK, CONSTRUCT and DESCRIBE over one
   ledger's graph and renders the answer as a table (or Turtle, or a boolean). Nine sample
   queries sit above the editor — one named ledger (with an explicit `GRAPH` clause, because
   each ledger is its own graph), open by priority, p1 only, a `COUNT` by `repo:` label,
@@ -104,7 +104,7 @@ name, and a browser refuses an IP address as one.
   search to edit. A sample fills the box and runs nothing: you press Run. A `ledger:` IRI
   reads as a CURIE (`ledger:open`, not `…/ledger#open`), with the prefix bound once above the
   table; the same URL answers a machine in the store's own formats, raw IRIs and all: `curl -H
-  'Accept: application/sparql-results+json' 'http://127.0.0.1:1060/sparql?query=…'`.
+  'Accept: application/sparql-results+json' 'http://127.0.0.1:1062/sparql?query=…'`.
   ⚠ There is deliberately **no "oldest" sample**: `dcterms:created` is when an item was
   *filed*, and a bulk migration files hundreds in one minute, so it does not say how long the
   work has waited. The page says so next to the buttons.
@@ -137,7 +137,7 @@ ikigai-gonk passkey invite brian --ledger default=delete
 ```text
 passkey invite for `brian` — grant `brian` (6 scopes) in /Users/you/.config/ikigai/gonk/grants.json
   valid for 30 minutes, once
-  open  http://localhost:1060/#invite=…
+  open  http://localhost:1062/#invite=…
 ```
 
 What you will see:
@@ -194,7 +194,7 @@ good until it expires.
 ### What the HTTP door refuses a browser
 
 A door that grants writes to whatever reaches loopback also grants them to any web page open
-on the machine: a page on any site can `POST` a form to `http://127.0.0.1:1060/` without a
+on the machine: a page on any site can `POST` a form to `http://127.0.0.1:1062/` without a
 preflight. So the capability is computed per request, and two browser-only signals turn it
 into a **refusal** before the request reaches anything it names — `403`, or `421 Misdirected
 Request` for the second:
@@ -208,8 +208,8 @@ Request` for the second:
   allowed" (ledger #2). The bound IP counts because a `gonk.bind` of another loopback address
   (`127.0.0.2:1070`) is admitted, and `localhost` does not reach it (ledger #1045). Only the
   bound one joins: a door on `127.0.0.1` still refuses `127.0.0.2`. The startup banner prints
-  the URL that reaches the bind — `http://localhost:1060/` for `127.0.0.1`, the IP literal
-  otherwise (`http://127.0.0.2:1070/`, `http://[::1]:1060/`) — and says when passkeys cannot
+  the URL that reaches the bind — `http://localhost:1062/` for `127.0.0.1`, the IP literal
+  otherwise (`http://127.0.0.2:1070/`, `http://[::1]:1062/`) — and says when passkeys cannot
   work there, since WebAuthn refuses an IP address as a relying party.
 
 ★ **Refused, not "given nothing"** (ledger #864, R2; PENDING item 2). Until then both cases
@@ -292,9 +292,9 @@ ledgers, plus whatever a passkey's grant names (the browse graph, for `--browse 
 named.
 
 ```sh
-curl -s -G http://127.0.0.1:1060/sparql -H 'Accept: text/csv' \
+curl -s -G http://127.0.0.1:1062/sparql -H 'Accept: text/csv' \
   --data-urlencode 'query=SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g'
-curl -s http://127.0.0.1:1060/sparql -H 'Accept: application/sparql-results+json' \
+curl -s http://127.0.0.1:1062/sparql -H 'Accept: application/sparql-results+json' \
   -H 'Content-Type: application/sparql-query' --data-binary 'ASK { ?s ?p ?o }'
 ```
 
@@ -529,8 +529,8 @@ a real server and reads back what was stored.
 ### Browsing a repository at this port
 
 ```sh
-open http://127.0.0.1:1060/browse                             # the roots this grant may read
-open http://127.0.0.1:1060/browse/urn:repo:ikigai-core:tree   # straight into one
+open http://127.0.0.1:1062/browse                             # the roots this grant may read
+open http://127.0.0.1:1062/browse/urn:repo:ikigai-core:tree   # straight into one
 ```
 
 **The header carries a `Browse` link** whenever the caller may read at least one configured
@@ -554,7 +554,7 @@ and then rebuilds a target IRI from it, and a command has spaces in it, which no
 the command travels as one query value here —
 
 ```sh
-curl 'http://127.0.0.1:1060/k?c=source%20urn:repo:ikigai-core:file:README.md%20as=text/html'
+curl 'http://127.0.0.1:1062/k?c=source%20urn:repo:ikigai-core:file:README.md%20as=text/html'
 ```
 
 — and `web/gonk.js` folds the path spelling into that query form in the browser, on
@@ -649,10 +649,10 @@ and prefetches nothing; the rest is the resource's economics, not the door's.
 ### The review Queue: a human publishes, or nothing does
 
 ```sh
-open http://127.0.0.1:1060/queue                      # what is pending, in triage order
-open 'http://127.0.0.1:1060/queue?state=published'    # what was published, and who rated it what
-open 'http://127.0.0.1:1060/queue?group=file'         # decide in batches — a kind the contract declares
-open 'http://127.0.0.1:1060/queue?summary=unconfirmed' # the walk: declines nobody evidently meant
+open http://127.0.0.1:1062/queue                      # what is pending, in triage order
+open 'http://127.0.0.1:1062/queue?state=published'    # what was published, and who rated it what
+open 'http://127.0.0.1:1062/queue?group=file'         # decide in batches — a kind the contract declares
+open 'http://127.0.0.1:1062/queue?summary=unconfirmed' # the walk: declines nobody evidently meant
 ```
 
 Since `ikigai-browse` 0.5.0 a review pass no longer mints annotations. It produces **pending
@@ -875,7 +875,7 @@ somewhere else. gonk turns some of its cells into controls — an item links to 
 decided by a rule table you can read, diff and replace**, served at `/render-rules` as Turtle:
 
 ```sh
-curl http://127.0.0.1:1060/render-rules
+curl http://127.0.0.1:1062/render-rules
 ```
 
 Why a resource rather than a config key, or a list of column names in the binary: **a SPARQL
@@ -921,11 +921,11 @@ representation. `as` and `content` are the transport's own names, so a query par
 spelled either is ignored.
 
 ```sh
-curl -X POST --data-binary $'Publish the store\n\nIt needs a README.' http://127.0.0.1:1060/iki/ledger/append
-curl http://127.0.0.1:1060/iki/ledger/items
-curl http://127.0.0.1:1060/iki/ledger/next
-curl -H 'Accept: text/turtle' http://127.0.0.1:1060/iki/ledger/items
-curl -X POST 'http://127.0.0.1:1060/iki/ledger/close?item=1'
+curl -X POST --data-binary $'Publish the store\n\nIt needs a README.' http://127.0.0.1:1062/iki/ledger/append
+curl http://127.0.0.1:1062/iki/ledger/items
+curl http://127.0.0.1:1062/iki/ledger/next
+curl -H 'Accept: text/turtle' http://127.0.0.1:1062/iki/ledger/items
+curl -X POST 'http://127.0.0.1:1062/iki/ledger/close?item=1'
 ```
 
 | method | path | resource |
@@ -961,7 +961,7 @@ shows up on browse's page for the file it is about.
 ```toml
 [[hooks]]
 event = "review.completed"
-command = "ikigai-gonk roborev file --gonk http://127.0.0.1:1060 --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
+command = "ikigai-gonk roborev file --gonk http://127.0.0.1:1062 --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
 ```
 
 roborev replaces each `{…}` with a single-quoted value before `sh -c` runs the line, so
@@ -1053,7 +1053,7 @@ linked    #3 parent #1
 3 filed, 0 already there; 2 comment(s), 1 close(s), 3 link(s) added; 1 deleted issue(s) and 1 link(s) skipped; not read: event 1, sqlite_sequence 1
 ```
 
-`--gonk` defaults to `http://127.0.0.1:1060` and `--ledger` to `default`; `--project NAME`
+`--gonk` defaults to `http://127.0.0.1:1062` and `--ledger` to `default`; `--project NAME`
 imports one kata project's issues.
 
 **`--dry-run` reads for real and writes nothing.** It asks the ledger for each issue's key, as
@@ -1489,7 +1489,7 @@ That generates this server's identity on first use, mints a client identity into
 `~/.config/ikigai/gonk/quic/clients/laptop/`, and enrols its certificate fingerprint under a
 grant called `laptop` holding exactly the tokens for reading and writing the `default`
 ledger. Restart `ikigai-gonk` — the set of trusted certificates is read at startup — and the
-banner reports `quic  udp 0.0.0.0:1060`. The QUIC door's port **follows the HTTP door's**:
+banner reports `quic  udp 0.0.0.0:1062`. The QUIC door's port **follows the HTTP door's**:
 `--port 1070` (or `gonk.port = 1070`) puts it on UDP 1070 too, and `client add` prints the
 `--connect` line with that port (pass it `--port` or `--quic-bind` when the server is started
 with flags rather than config). Until ledger #816 the QUIC default was UDP 1060 whatever
@@ -1501,14 +1501,14 @@ QUIC:
 
 ```sh
 cargo install --locked ikigai-cli --features quic
-ikigai --connect quic://gonk-host:1060 --cert-dir ~/gonk-laptop -c 'source urn:iki:ledger:items'
+ikigai --connect quic://gonk-host:1062 --cert-dir ~/gonk-laptop -c 'source urn:iki:ledger:items'
 ```
 
 or, to put the ledger into that machine's own ikigai processes:
 
 ```toml
-mount = "prefer urn:iki:store:=quic://gonk-host:1060 /home/you/gonk-laptop"
-mount = "prefer urn:iki:ledger:=quic://gonk-host:1060 /home/you/gonk-laptop"
+mount = "prefer urn:iki:store:=quic://gonk-host:1062 /home/you/gonk-laptop"
+mount = "prefer urn:iki:ledger:=quic://gonk-host:1062 /home/you/gonk-laptop"
 ```
 
 **To keep a client's private key on the client**, let it generate its own identity and
@@ -2012,10 +2012,10 @@ ikigai-gonk passkey invite brian --ledger default=write --script open-by-label=p
 
 ```text
 $ curl -X POST -b 'gonk_session=…' --data-binary @open-by-label.rq \
-    'http://localhost:1060/script/open-by-label?language=sparql&public=true'
+    'http://localhost:1062/script/open-by-label?language=sparql&public=true'
 urn:script:open-by-label:version:sha256:4f0c…
 
-$ curl 'http://localhost:1060/script/open-by-label/result?label=triage&as=text/csv'
+$ curl 'http://localhost:1062/script/open-by-label/result?label=triage&as=text/csv'
 number,title
 1,first triage item
 3,second triage item
@@ -2183,7 +2183,7 @@ ikigai-gonk passkey invite brian --ledger default=write --nl draft --script titl
 
 ```text
 $ curl -X POST -b 'gonk_session=…' --data-binary 'the titles of the open items, by number' \
-    'http://localhost:1060/nl/sparql?save=titles'
+    'http://localhost:1062/nl/sparql?save=titles'
 urn:script:titles:version:sha256:… (a DRAFT of urn:script:titles: review it, then publish it with state=published)
 
 PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
@@ -2192,10 +2192,10 @@ preview (LIMIT 5):
 ?number	?title
 …
 
-$ curl -b 'gonk_session=…' 'http://localhost:1060/script/titles'            # review it
+$ curl -b 'gonk_session=…' 'http://localhost:1062/script/titles'            # review it
 $ curl -X POST -b 'gonk_session=…' --data-binary @titles.rq \
-    'http://localhost:1060/script/titles?language=sparql'                    # publish it
-$ curl -b 'gonk_session=…' 'http://localhost:1060/script/titles/result'     # run it
+    'http://localhost:1062/script/titles?language=sparql'                    # publish it
+$ curl -b 'gonk_session=…' 'http://localhost:1062/script/titles/result'     # run it
 ```
 
 The body of the POST is the ask (`ask=` works too). `focus=<iri>` focuses the draft on one graph
@@ -2300,9 +2300,9 @@ draft carries where it came from into the version a person publishes.
 
 | door | reaches it | runs under |
 | --- | --- | --- |
-| **HTTP**, `127.0.0.1:1060` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
+| **HTTP**, `127.0.0.1:1062` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 | **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule here, the raw-write rule below; no `Host`/cross-site checks and no author rules |
-| **QUIC**, `udp 0.0.0.0:1060` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:host:gonk:client:<fingerprint>` |
+| **QUIC**, `udp 0.0.0.0:1062` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:host:gonk:client:<fingerprint>` |
 
 **Anonymously, the HTTP door is loopback only and grants little.** It can list, file,
 comment, close, claim, label and link in its ledgers, and run and read a script its publisher
@@ -2533,7 +2533,7 @@ Until then, other machines use the QUIC door.
 
 ## What it refuses
 
-- **A non-loopback HTTP bind.** `--bind 0.0.0.0:1060` stops the server before it opens
+- **A non-loopback HTTP bind.** `--bind 0.0.0.0:1062` stops the server before it opens
   anything, and says to use QUIC.
 - **A second holder of the store.** Another gonk, or an `ikigai` with `store = true`, holding
   the dataset stops this one with the path and the mount lines that fix it.
@@ -2754,10 +2754,10 @@ value becomes part of the value.
 
 ```toml
 # ~/.config/ikigai/config.toml
-# or gonk.port = 1060, which always means loopback
-gonk.bind = "127.0.0.1:1060"
+# or gonk.port = 1062, which always means loopback
+gonk.bind = "127.0.0.1:1062"
 gonk.socket = "~/.ikigai/gonk.sock"
-# gonk.quic.bind = "0.0.0.0:1060"     # unset: QUIC opens on UDP at the HTTP port once a certificate is enrolled;
+# gonk.quic.bind = "0.0.0.0:1062"     # unset: QUIC opens on UDP at the HTTP port once a certificate is enrolled;
                                       # set: QUIC must open, or gonk refuses to start
 # repeatable
 gonk.http.ledger = "default"
@@ -3341,13 +3341,27 @@ public answer (ledger #439). Catching the refusal is the achievable half.
 For the resources themselves — named ledgers, the grant table, delete versus purge, ordering
 policies — see `ikigai-ledger`'s README.
 
-## Port 1060
+## Port 1062
 
-Port 1060 is the default for both HTTP (TCP) and QUIC (UDP), which are separate namespaces, so
-one number names the server. It is also NetKernel's own port, registered with IANA as
-`polestar`: a machine running both collides, which is why it is a default and not a constant.
-`--port` and `--bind` move both doors (the QUIC door takes the HTTP door's port unless a
-QUIC bind is named); `--quic-bind` moves QUIC alone.
+Port 1062 is the default for both HTTP (TCP) and QUIC (UDP), which are separate namespaces, so
+one number names the server. `--port` and `--bind` move both doors (the QUIC door takes the HTTP
+door's port unless a QUIC bind is named); `--quic-bind` moves QUIC alone.
+
+**Until 2026-10-12 the default was 1060.** What the move changes for a server already running:
+
+- **Clients name the new port.** A browser opens `http://localhost:1062/`; a QUIC client
+  connects to `quic://<host>:1062` and a `mount` line names it; `roborev file --gonk` and
+  `kata import --gonk` default to `http://127.0.0.1:1062`. Passkeys are registered to the
+  relying party `localhost`, which carries no port, and the origin a sign-in is checked against
+  follows the port the server is serving on.
+- **A server that must stay on 1060** says so: `gonk.port = 1060` (or `--port 1060`).
+- **Old links still work.** Item and comment bodies carry thousands of links like
+  `http://localhost:1060/l/default/item/739`. The store keeps every body exactly as written;
+  when a page RENDERS one, a link at `http://localhost:1060` or `http://127.0.0.1:1060` whose
+  path is one of this server's own routes (`/l/…`, `/iki/…`, `/browse…`, `/queue…`, the
+  rest of `doors::GONK_PATHS`) gets a root-relative href, so it opens on the server showing the
+  page, whatever port that is. Its visible text is unchanged, and a 1060 link to any other
+  path is left alone (`render::rehome`).
 
 The name and the number are one tribute. GONK carries NK in order; the GNK power droid plods
 around carrying charge so the rest of the scene can work. And 1060 is XML read as Roman
@@ -3476,7 +3490,7 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
   every door: the socket door's owner holds root, and a QUIC certificate or a passkey identity
   whose grant carries both read tokens runs it with no root anywhere — over HTTP as the
   store's own resource under **this server's** mechanical path mapping
-  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…` on port 1060, which
+  (`GET /iki/store/graph-select?graph=<A>%20<B>&query=…` on port 1062, which
   `the_join_runs_through_the_http_door_under_a_signed_in_grant` drives end to end). ⚠ An
   earlier revision credited that path to `ikigai-web`. It is gonk's own door's mapping;
   `ikigai-web` writes the whole IRI in the path instead (`GET

@@ -8,11 +8,11 @@
 //!
 //! ```toml
 //! # the HTTP door (loopback only; this IS the default)
-//! gonk.bind = "127.0.0.1:1060"
-//! # gonk.port = 1060                    # shorthand for gonk.bind = "127.0.0.1:<port>"
+//! gonk.bind = "127.0.0.1:1062"
+//! # gonk.port = 1062                    # shorthand for gonk.bind = "127.0.0.1:<port>"
 //! # the owner-only socket (this IS the default)
 //! gonk.socket = "~/.ikigai/gonk.sock"
-//! # gonk.quic.bind = "0.0.0.0:1060"     # set it to REQUIRE the QUIC door; unset, it opens on
+//! # gonk.quic.bind = "0.0.0.0:1062"     # set it to REQUIRE the QUIC door; unset, it opens on
 //!                                       # UDP at the HTTP port once a certificate is enrolled
 //! # ledgers the HTTP door may read and write; repeatable
 //! gonk.http.ledger = "default"
@@ -65,8 +65,14 @@ use crate::grants::{Authority, BrowseRole, ScriptAuthority};
 use crate::mount::{self, Mount};
 
 /// The HTTP door's default port — and the QUIC door's, on UDP, which follows whatever port
-/// the HTTP door takes ([`quic_bind`]). See the README for 1060.
-pub const DEFAULT_PORT: u16 = 1060;
+/// the HTTP door takes ([`quic_bind`]). See the README, "Port 1062".
+pub const DEFAULT_PORT: u16 = 1062;
+
+/// The port gonk defaulted to until 2026-10-12, when the default moved to [`DEFAULT_PORT`]
+/// (1060 is a registered port another service uses). Stored bodies carry thousands of links
+/// at this port; [`crate::render::rehome`] points the ones naming gonk's
+/// own routes back at the server that renders them. Nothing listens on it by default.
+pub const LEGACY_PORT: u16 = 1060;
 
 /// The ledger the HTTP door serves when no `gonk.http.ledger` line names one.
 pub const DEFAULT_LEDGER: &str = "default";
@@ -227,7 +233,7 @@ usage:
                                    network — so a git hook can call it per changed file and a
                                    commit never waits. Identical requests collapse to one
                                    tuple (the drop is content-addressed)
-  ikigai-gonk roborev file --gonk http://127.0.0.1:1060 --ledger <ledger> --root <browse root>
+  ikigai-gonk roborev file --gonk http://127.0.0.1:1062 --ledger <ledger> --root <browse root>
                      --findings <markdown|-> [--job N] [--sha SHA] [--agent NAME]
                      [--repo-path PATH] [--min-severity critical|high|medium|low] [--dry-run]
                                    file each finding of ONE roborev review as a ledger item over
@@ -251,7 +257,7 @@ usage:
                                    refusals; then say which checkouts no gonk.browse.root uses
                                    and which roots there have no checkout. Clones nothing,
                                    writes no config: the command a timer runs
-  ikigai-gonk kata import <export.jsonl> [--gonk http://127.0.0.1:1060] [--ledger default]
+  ikigai-gonk kata import <export.jsonl> [--gonk http://127.0.0.1:1062] [--ledger default]
                      [--project NAME] [--dry-run]
                                    file a `kata export` file's issues as ledger items over the
                                    HTTP door: labels, priority, comments, closes, then links.
@@ -285,11 +291,11 @@ usage:
                                    `passkey invite` would write, before they write it
 
 serve flags (each overrides its config key wholesale):
-  --bind IP:PORT        the HTTP door (config `gonk.bind`); loopback only — default 127.0.0.1:1060
+  --bind IP:PORT        the HTTP door (config `gonk.bind`); loopback only — default 127.0.0.1:1062
   --port N              shorthand for --bind 127.0.0.1:N (config `gonk.port`)
   --socket PATH         the owner-only socket (config `gonk.socket`); default ~/.ikigai/gonk.sock
   --quic-bind IP:PORT   the QUIC door (config `gonk.quic.bind`); default 0.0.0.0 on the HTTP
-                        door's port (UDP) — 1060, or whatever --port / gonk.port says.
+                        door's port (UDP) — 1062, or whatever --port / gonk.port says.
                         Unset, the door opens once a client certificate is enrolled; set,
                         it must open, and gonk refuses to start when no client can be admitted
   --no-quic             do not open the QUIC door this run
@@ -1816,7 +1822,7 @@ fn browse_roots(
 /// posture, and a posture should not depend on what a resolver says today.
 pub fn parse_bind(spelled: &str) -> Result<SocketAddr, String> {
     spelled.parse().map_err(|_| {
-        format!("bind `{spelled}`: expected IP:PORT (e.g. 127.0.0.1:1060, [::1]:1060)")
+        format!("bind `{spelled}`: expected IP:PORT (e.g. 127.0.0.1:1062, [::1]:1062)")
     })
 }
 
@@ -2150,19 +2156,23 @@ mod tests {
     }
 
     #[test]
-    fn no_config_is_loopback_1060_with_the_default_ledger() {
+    fn no_config_is_loopback_1062_with_the_default_ledger() {
         let settings = settings(&Flags::default(), "", &homes()).unwrap();
-        assert_eq!(settings.http, addr("127.0.0.1:1060"));
+        assert_eq!(settings.http, addr("127.0.0.1:1062"));
+        assert_eq!(super::DEFAULT_PORT, 1062);
+        // The help states the default it serves on, both doors.
+        assert!(super::USAGE.contains("loopback only — default 127.0.0.1:1062"));
+        assert!(super::USAGE.contains("door's port (UDP) — 1062,"));
         assert_eq!(settings.socket, PathBuf::from("/home/u/.ikigai/gonk.sock"));
-        assert_eq!(settings.quic, QuicBind::Default(addr("0.0.0.0:1060")));
+        assert_eq!(settings.quic, QuicBind::Default(addr("0.0.0.0:1062")));
         // Naming the bind — even to the default address — is a decision.
         let named = super::settings(
             &Flags::default(),
-            "gonk.quic.bind = \"0.0.0.0:1060\"\n",
+            "gonk.quic.bind = \"0.0.0.0:1062\"\n",
             &homes(),
         )
         .unwrap();
-        assert_eq!(named.quic, QuicBind::Explicit(addr("0.0.0.0:1060")));
+        assert_eq!(named.quic, QuicBind::Explicit(addr("0.0.0.0:1062")));
         let flagged = Flags {
             quic_bind: Some("127.0.0.1:4000".into()),
             ..Flags::default()

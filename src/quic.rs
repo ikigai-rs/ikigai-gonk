@@ -30,7 +30,7 @@
 //! ```
 //!
 //! A `clients/<name>/` directory is laid out as `ikigai --cert-dir` expects, so a client
-//! copies it and connects with `ikigai --connect quic://host:1060 --cert-dir <it>`.
+//! copies it and connects with `ikigai --connect quic://host:1062 --cert-dir <it>`.
 //! Provisioning, rotation and trust distribution are not built: the server's certificate is
 //! pinned by copying it, and a client admitted today is admitted until its entry is removed.
 

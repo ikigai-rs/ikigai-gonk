@@ -665,7 +665,12 @@ pub(crate) struct Door {
 
 impl Door {
     pub(crate) fn parse(url: &str) -> Result<Door, String> {
-        let bad = |why: &str| format!("--gonk `{url}`: {why} (expected http://127.0.0.1:1060)");
+        let bad = |why: &str| {
+            format!(
+                "--gonk `{url}`: {why} (expected http://127.0.0.1:{})",
+                crate::config::DEFAULT_PORT
+            )
+        };
         let rest = url
             .strip_prefix("http://")
             .ok_or_else(|| bad("only http:// — the door is plain HTTP on loopback"))?;
