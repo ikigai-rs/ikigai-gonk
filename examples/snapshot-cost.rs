@@ -77,11 +77,13 @@ fn main() {
 
     // The composition `main` builds for a gonk with browse roots, over an in-memory store.
     let graph = browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let wired = browse::wire(
         roots.clone(),
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         None,
         None,
         &graph,

@@ -65,7 +65,9 @@ path = "src/main.rs"
 # ★ 0.1.95 since ledger #939, a RESOLUTION floor: `ikigai-script` 0.2.1 below requires it (the
 # kernel cuts a Sink's target when the endpoint ran and failed, so a failed script run still cuts
 # its runs thread). Nothing in gonk calls 0.1.94 or 0.1.95 API by name.
-ikigai-core = "0.1.95"
+# ★ 0.1.96 since ledger #1287, a RESOLUTION floor: the cli-workspace crates at 0.1.52 (`ikigai-quic`
+# below, for the restarted-peer heal) require `^0.1.96`. Nothing in gonk calls 0.1.96 API by name.
+ikigai-core = "0.1.96"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -73,7 +75,8 @@ ikigai-core = "0.1.95"
 # and dev dependencies — one lock serves `build` and `test`, so it is the version the
 # shipped binary links.
 # 0.1.93: the published head, beside core (they ship from one workspace).
-ikigai-vocab = "0.1.93"
+# 0.1.96 (ledger #1287): a resolution floor, `ikigai-engine` 0.1.52 requires `^0.1.96`.
+ikigai-vocab = "0.1.96"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
 # 0.2.4 is where the freshness half of this pin comes from, and it is the whole of what
@@ -134,8 +137,14 @@ ikigai-vocab = "0.1.93"
 # size of its ledger; 0.2.14 (ledger #1207) exports `SharedWriter`, the store's own writer thread
 # for a host writing through the raw handle. gonk calls neither by name (browse, its raw-handle
 # sharer, carries its own writer thread since 0.18.4), so this is the published head taken as a
-# stated floor: what was built and tested. ⚠ `"0.2.14"` is `<0.3.0`.
-ikigai-store = { version = "0.2.14", features = ["persistent"] }
+# stated floor: what was built and tested.
+# ★ 0.2.15 is the floor now, for an API this binary calls (ledger #1252): `SharedWriter::store`
+# and `SharedWriter::declared`, and a `DurableStore::shared_writer` that carries the
+# `open_shared_declaring` declaration and enforces it. `main` hands browse
+# `store.shared_writer()` (see `ikigai-browse` below), so browse's archive writes commit on the
+# store's OWN writer thread under its write lock; browse 0.18.6 requires `^0.2.15` too.
+# ⚠ `"0.2.15"` is `<0.3.0`.
+ikigai-store = { version = "0.2.15", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -202,8 +211,12 @@ ikigai-throttle = "0.1.11"
 # here. Its source has not changed since 0.1.29 (the cli releases bump it in lockstep for their
 # pins), and the alternative, pinning the lock back with `--precise`, re-chose spareval's sha2
 # edge and broke the build with two `digest` crates. ⚠ This links the ENGINE crate (the REPL
-# grammar) for its plan runner only; nothing else of it is bound. `"0.1.44"` is `<0.2.0`.
-ikigai-engine = { version = "0.1.44", features = ["plan-reader"] }
+# grammar) for its plan runner only; nothing else of it is bound.
+# 0.1.52 (ledger #1287): the one-release reason. Every cli-workspace line here moved together to
+# the published head so the graph holds ONE release of that workspace again (the lock had engine
+# and resolve at 0.1.46 under the others at 0.1.44); the plan runner did not change in a way this
+# binary calls. 0.1.44 is still the API floor. `"0.1.52"` is `<0.2.0`.
+ikigai-engine = { version = "0.1.52", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). ⚠⚠ **This is the widest
 # thing this manifest links, and it is linked for the plan doors ALONE.** rudof brings `reqwest`
@@ -437,12 +450,20 @@ ikigai-nl = "0.2.0"
 # separate commits, and a reader between them saw it missing or torn.
 # `tests/browse.rs::a_rewritten_annotation_is_never_seen_missing_by_a_concurrent_reader` is
 # the FLOOR TEST: on 0.18.4, 300 rewrites against two readers were seen missing 2340 times and
-# torn 598 of 3550 kernel reads, and missing 110 of 303 HTTP door reads. ⚠ Still open (ledger
-# #1252): gonk hands browse the RAW handle from `open_shared_declaring`, so browse builds its
-# own `over` writer beside the store's: two writer threads and two locks on one dataset. That
-# needs a browse `Mount` that takes the host's `SharedWriter` first. Nothing new is called
-# here. `^0.18.5` is `<0.19.0`.
-ikigai-browse = "0.18.5"
+# torn 598 of 3550 kernel reads, and missing 110 of 303 HTTP door reads.
+# ★★ 0.18.6 is the floor now, for an API this binary calls (ledger #1252, browse PR #94):
+# `Mount::annotations_through(SharedWriter)`. Through 0.18.5 gonk handed browse the RAW handle
+# from `open_shared_declaring` and browse built its own `SharedWriter::over` beside the store's:
+# two writer threads and two locks on one dataset, and on RocksDB (whose transactions do not
+# exclude each other) a store-door read-modify-write held open across an annotation rewrite left
+# a 15-quad record as 1 quad (reproduced in browse's `tests/host_writer.rs`). `browse::wire` now
+# takes the store's own writer, so every browse write is ordered with every store door, and the
+# `ExplainConfig` is built on `writer.store()`, the same handle. 0.18.6 also asserts both at
+# mount time, panicking with both sides named: the mount's graph must be one the writer
+# declares, and the explain config must be on the writer's store.
+# `tests/browse.rs::a_mount_refuses_a_writer_that_does_not_declare_its_graph` pins the gonk half
+# of that refusal. `^0.18.6` is `<0.19.0`.
+ikigai-browse = "0.18.6"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
@@ -514,7 +535,9 @@ ikigai-repo = "0.2.0"
 # `tests/trigger.rs::a_retargeted_handler_file_is_dead_lettered_never_fired` is the FLOOR TEST:
 # 0.1.40 has no such method. (0.1.38 to 0.1.40 moved this line for the one-release reason only.)
 # 0.1.44: the published head (the intray's `match=` SPARQL is bounded, ledger #963).
-ikigai-intray = "0.1.44"
+# 0.1.52 (ledger #1287): the one-release reason (see `ikigai-quic` below for why the workspace
+# moved); 0.1.41 is still the floor this binary uses.
+ikigai-intray = "0.1.52"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -531,7 +554,8 @@ ikigai-intray = "0.1.44"
 # when a sibling moves it.
 # 0.1.37 -> 0.1.41 for the same reason: intray, ipc and quic at 0.1.41 require
 # `ikigai-resolve ^0.1.41`. 0.1.41 -> 0.1.44: the one-release reason.
-ikigai-resolve = "0.1.44"
+# 0.1.44 -> 0.1.52 (ledger #1287): quic and ipc at 0.1.52 require `ikigai-resolve ^0.1.52`.
+ikigai-resolve = "0.1.52"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -563,7 +587,10 @@ ikigai-resolve = "0.1.44"
 # wire is still v8.
 # 0.1.41 is the pin now for the one-release reason: nothing in the socket transport moved that
 # this binary calls by name, and the wire is still v8.
-ikigai-ipc = "0.1.44"
+# 0.1.52 (ledger #1287): the one-release reason. The socket transport's own heal (a peer restart
+# on a Unix socket is an immediate ECONNREFUSED or EOF, and the next call redials) is unchanged
+# since 0.1.25; the move is for `ikigai-quic` below.
+ikigai-ipc = "0.1.52"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -603,7 +630,26 @@ ikigai-ipc = "0.1.44"
 # `tests/doors.rs::a_narrowed_quic_client_is_still_named_and_authors_its_writes` is the FLOOR TEST.
 # ⚠ The cost, stated by the crate: the argument is part of the cache key, so two clients reading
 # one resource under one capability no longer share a cached answer.
-ikigai-quic = "0.1.44"
+# ★★ 0.1.46 is the BEHAVIOR floor now, and it is why gonk survives a restarted peer (ledger
+# #1287, the root cause of #1262; ikigai-cli PR 442, ledger #1092). Through 0.1.45 a QUIC door's
+# stateless-reset key and connection-ID key were random per process, so a peer restarted on the
+# same port could not reset the connection its predecessor held, and the client half kept that
+# dead connection: on 2026-10-11 a reregister of plasma's inference peer left every `urn:llm:`
+# request through gonk hanging (30 s describe deadlines, then the 300 s idle timeout) until gonk
+# itself restarted. 0.1.46 derives both keys from the door's identity, so the replacement resets
+# the old connection and the client redials and replays the read at once; and a describe that
+# hits its deadline marks the connection stale, so a peer too old to reset costs one deadline,
+# not every call. Both halves matter here: gonk is the CLIENT of its `gonk.mount` peer, and the
+# SERVER of every QUIC client that dials it (a gonk restart now resets their connections too).
+# `tests/quic_redial_1287.rs::a_restarted_llm_peer_is_redialled_by_gonk` is the FLOOR TEST: on
+# 0.1.44 the ask after the restart had no answer within its bound; on 0.1.52 it answers from the
+# new peer in well under a second. ⚠ The test's stub peer binds with `bind` +
+# `serve_bounded_on` (0.1.51, ledger #1188: port 0, read back from the bound socket), so the
+# test itself compiles from 0.1.51; the behavior it pins is 0.1.46's.
+# 0.1.52 is the pin: the published head, and the one-release reason for the rest of the
+# workspace (nothing between 0.1.46 and 0.1.52 in this crate is one this binary calls by name;
+# 0.1.47's connection-age bound is `serve_bounded`'s, and gonk's door does not set one).
+ikigai-quic = "0.1.52"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -660,7 +706,10 @@ ikigai-quic = "0.1.44"
 # READS too, so no query string can name a principal on any verb.
 # `tests/audit_864.rs::a_refused_request_gets_no_options_and_no_description` is the FLOOR TEST.
 # 0.1.44: the one-release reason.
-ikigai-web = "0.1.44"
+# 0.1.52 (ledger #1287): the one-release reason (see `ikigai-quic` above). 0.1.50 makes the HTTP
+# door bind before its banner (ledger #1223); gonk already binds its own listener and hands it to
+# `serve_with_listener`, so that change does not reach it.
+ikigai-web = "0.1.52"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -741,8 +790,8 @@ ikigai-xslt = "0.2.1"
 # (its last change is ikigai-cli PR #296), so this is not an API floor: 0.1.30 is what is built
 # and tested, and it is the cli workspace's shared version, which every other line from that
 # workspace here now names (0.1.37: the verifier is unchanged since 0.1.30).
-# 0.1.41, 0.1.44: the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.44"
+# 0.1.41, 0.1.44, 0.1.52: the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.52"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).

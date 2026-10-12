@@ -143,7 +143,9 @@ fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Serve
     let tiers = ExplainTiers::default();
     let wired = browse::wire(
         roots(dir),
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         Some(&watch),
         mount.is_some().then_some(&tiers),
         &graph,
@@ -182,12 +184,14 @@ struct Served {
 /// and make every read `Expiry::Always`. It exists so the cost of the easy path is a number
 /// in the test output rather than an assertion about a counterfactual.
 fn naive(dir: &TempDir) -> Arc<Kernel> {
-    let (store, handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
+    let (store, _handle) = DurableStore::in_memory_shared().expect("a shared in-memory store");
     // No watcher either: a host that accepts the blanket has no reason to run one, and
     // `ikigai-browse`'s reads are live and uncacheable exactly as it declares them.
     let wired = browse::wire(
         roots(dir),
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         None,
         None,
         &browse::Graph::chosen(),
@@ -2121,11 +2125,20 @@ fn build_output_and_what_git_ignores_cut_no_cached_read() {
 fn an_unwatched_roots_reads_are_not_cached() {
     let dir = scratch_root();
     let graph = browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     // Wired with an EMPTY watched set — what `main` builds for a root whose platform watcher
     // refused to start.
-    let wired = browse::wire(roots(&dir), handle, None, None, &graph, None);
+    let wired = browse::wire(
+        roots(&dir),
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
+        None,
+        None,
+        &graph,
+        None,
+    );
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
@@ -3407,14 +3420,16 @@ impl HttpDoorHarness {
 fn the_pass_requires_exactly_what_the_real_review_requires() {
     let dir = scratch_root();
     let graph = browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let (watch, refused) = RootWatch::start(&roots(&dir));
     assert!(refused.is_empty(), "{refused:?}");
     let tiers = ExplainTiers::default();
     let wired = browse::wire(
         roots(&dir),
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         Some(&watch),
         Some(&tiers),
         &graph,
@@ -3652,10 +3667,12 @@ fn the_style_watch_is_over_the_config_home_the_server_was_given() {
     let dir = TempDir::new().expect("tempdir");
     let home = TempDir::new().expect("a config home");
     let wire = |config_home: Option<std::path::PathBuf>| {
-        let (_store, handle) = DurableStore::in_memory_shared().expect("a shared store");
+        let (store, _handle) = DurableStore::in_memory_shared().expect("a shared store");
         browse::wire(
             roots(&dir),
-            handle,
+            store
+                .shared_writer()
+                .expect("a shared store hands out its writer"),
             None,
             None,
             &browse::Graph::chosen(),
@@ -3679,4 +3696,64 @@ fn the_style_watch_is_over_the_config_home_the_server_was_given() {
     );
     let none = wire(None);
     assert_eq!(none.style.home(), None, "a stated absence watches nothing");
+}
+
+/// Ledger [#1252](http://localhost:1060/l/default/item/1252): `browse::wire` hands browse the
+/// store's OWN writer, and `ikigai-browse` 0.18.6 checks at mount time that the graph gonk
+/// chose for it ([`browse::Graph::chosen`]) is one the writer's declaration names. A store
+/// opened declaring only the default graph, under a mount that writes the named browse graph,
+/// would refuse every browse write record by record long after startup; the mount refuses at
+/// once instead, naming both sides. `main` derives both from one [`browse::Graph`], so this is
+/// the dependency's check of that derivation, pinned here so a browse release that drops it is
+/// a red test in the host that relies on it.
+#[test]
+fn a_mount_refuses_a_writer_that_does_not_declare_its_graph() {
+    let dir = scratch_root();
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(
+        ikigai_store::SharerWrites::only_the_default_graph(),
+    )
+    .expect("a shared in-memory store declaring the default graph only");
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        browse::wire(
+            roots(&dir),
+            store
+                .shared_writer()
+                .expect("a shared store hands out its writer"),
+            None,
+            None,
+            &browse::Graph::chosen(),
+            None,
+        )
+    }))
+    .err()
+    .expect("a writer that does not declare browse's graph was accepted");
+    let message = refused
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| refused.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("this mount writes graph <urn:iki:browse:graph:default>"),
+        "names the mount's graph: {message}"
+    );
+    assert!(
+        message.contains("the host's writer declares the default graph"),
+        "names the writer's declaration: {message}"
+    );
+
+    // And the composition `main` builds is accepted: the declaration is DERIVED from the
+    // same `Graph` the mount writes.
+    let graph = browse::Graph::chosen();
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+        .expect("a shared in-memory store");
+    let _ = browse::wire(
+        roots(&dir),
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
+        None,
+        None,
+        &graph,
+        None,
+    );
 }

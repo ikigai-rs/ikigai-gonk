@@ -253,10 +253,14 @@ fn serve(flags: &config::Flags) -> ! {
     if let Some(handle) = handle.as_deref() {
         warn_unmigrated(handle, &browse_graph, &store_path, &settings.socket);
     }
-    let browse = handle.map(|handle| {
+    let browse = handle.map(|_| {
         browse::wire(
             settings.browse_roots.clone(),
-            handle,
+            // ★ The store's OWN writer (ledger #1252): browse's writes commit on the thread and
+            // under the lock every store door uses, and carry the declaration made above.
+            store
+                .shared_writer()
+                .expect("a store opened shared hands out its writer"),
             Some(&root_watch),
             explains.then_some(&settings.explain),
             // The SAME value the declaration above was derived from — not a second

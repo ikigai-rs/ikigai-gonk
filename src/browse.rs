@@ -13,8 +13,9 @@
 //!
 //! # One dataset, two named graphs
 //!
-//! The annotation family takes an `Arc<Store>` — the same dataset the ledger's named graphs
-//! live in, handed over by `DurableStore::open_shared_declaring`. That is the whole point of
+//! The annotation family takes the store's own `SharedWriter` (ledger
+//! [#1252](http://localhost:1060/l/default/item/1252)) — over the same dataset the ledger's named
+//! graphs live in, opened by `DurableStore::open_shared_declaring`. That is the whole point of
 //! the arc: a ledger item's `ledger:about <urn:repo:…>` and an annotation on that file are
 //! two graphs in ONE store, so the join is a local SPARQL query and not a federation problem.
 //! What the shared handle costs the LEDGER's read cache is **nothing**, and the reason is the
@@ -95,7 +96,7 @@ use ikigai_core::{
     Description, Endpoint, EndpointSpace, Invocation, Iri, Representation, Request, Resolution,
     Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
-use ikigai_store::{SharerWrites, Store};
+use ikigai_store::{SharedWriter, SharerWrites, Store};
 use oxigraph::model::{GraphName, NamedNode};
 
 use crate::config::ExplainTiers;
@@ -344,6 +345,18 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 
 /// Wire the family: the space to compose, and the watch that keeps `urn:repo:style` fresh.
 ///
+/// ★ `writer` is the STORE'S OWN writer (`DurableStore::shared_writer`, ledger
+/// [#1252](http://localhost:1060/l/default/item/1252)), never a `SharedWriter::over` and never
+/// the raw handle. Every browse write (annotations, findings, the explanation archive, review
+/// passes) then commits on the store's one writer thread under its one write lock, ordered with
+/// every store door; a writer of browse's own beside it is a second thread and a second lock,
+/// and on RocksDB a door's read-modify-write held open across an annotation rewrite left a
+/// 15-quad record as 1 quad that way (`ikigai-browse`'s `tests/host_writer.rs`). The writer
+/// carries the store's `SharerWrites` declaration, and `ikigai-browse` refuses at mount time,
+/// with both sides named, a graph the declaration does not name: so [`Graph::sharer_writes`]
+/// and the mount `Graph::on` builds are checked against each other by the dependency, not
+/// only by this crate.
+///
 /// `watch` is the [`RootWatch`] `main` started, when there is one: the reads of the roots it
 /// actually got, and only those, are made cacheable ([`cached_reads`]), and every write to the
 /// family touches its [`Epochs`] so the header badge knows to recount.
@@ -376,15 +389,18 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 /// hermetic test wants.
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
-    store: Arc<Store>,
+    writer: SharedWriter,
     watch: Option<&RootWatch>,
     explain: Option<&ExplainTiers>,
     graph: &Graph,
     config_home: Option<PathBuf>,
 ) -> Wired {
     let first = roots.first().map(|(name, _)| name.clone());
+    // The explain archive is built on the WRITER'S handle: browse refuses at mount time an
+    // `ExplainConfig` on any other `Arc<Store>`, even one over the same dataset.
+    let store = Arc::clone(writer.store());
     let mount = graph.on(Mount::new(roots)
-        .annotations(Arc::clone(&store))
+        .annotations_through(writer)
         // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style`
         // reads its themes and its contrast floor from. Without it that file would sit
         // on disk doing nothing — the quietest kind of wrong.

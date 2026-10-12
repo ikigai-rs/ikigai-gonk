@@ -105,12 +105,14 @@ fn main() {
 fn door(root: &str, path: &Path) -> Kernel {
     let roots = vec![(root.to_string(), path.to_path_buf())];
     let graph = browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let (watch, _refused) = watch::RootWatch::start(&roots);
     let wired = browse::wire(
         roots.clone(),
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         Some(&watch),
         None,
         &graph,
