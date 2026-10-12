@@ -533,13 +533,34 @@ fn serve(flags: &config::Flags) -> ! {
                 doors::quic_kernel_with(Arc::clone(&hub), access(access::Door::Quic)),
                 quic::minter(layout.clone()),
             );
+            // ★ Bound HERE, before the banner (ledger #1300, the gonk half of ledger #1188), so
+            // the banner names the port the kernel chose: `--quic-bind 127.0.0.1:0` used to be
+            // announced as `udp 127.0.0.1:0`, a door nobody could find, which made every
+            // scratch gonk pick a port by bind-and-release (field guide 9h). The IP is the one
+            // configured: a wildcard binds one dual-stack `[::]` socket, and the banner keeps
+            // naming what the operator wrote.
+            let socket = ikigai_quic::bind(addr)
+                .unwrap_or_else(|e| fail(&format!("cannot bind quic {addr}: {e}")));
+            let bound = socket
+                .local_addr()
+                .map(|local| std::net::SocketAddr::new(addr.ip(), local.port()))
+                .unwrap_or(addr);
             let line = format!(
-                "udp {addr} — {} trusted certificate(s), {enrolled} enrolled",
+                "udp {bound} — {} trusted certificate(s), {enrolled} enrolled",
                 trusted.len()
             );
             std::thread::spawn(move || {
-                let error = ikigai_quic::serve(door, addr, &identity, &trusted, minter).err();
-                fail(&format!("the QUIC door on {addr} stopped: {error:?}"))
+                let error = ikigai_quic::serve_bounded_on(
+                    door,
+                    socket,
+                    &identity,
+                    &trusted,
+                    minter,
+                    ikigai_quic::DEFAULT_IDLE_TIMEOUT,
+                    None,
+                )
+                .err();
+                fail(&format!("the QUIC door on {bound} stopped: {error:?}"))
             });
             line
         }

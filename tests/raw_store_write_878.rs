@@ -285,18 +285,26 @@ fn quic_door(grant: &[String], access: Option<AccessLog>) -> QuicDoor {
         .collect();
     let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
     let door = doors::quic_kernel_with(Arc::clone(&hub), access);
-    let port = std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    // Bound here and handed to the door, so the port is the one the kernel chose and nothing
+    // picks one by bind-and-release (ledger #1300, field guide 9h).
+    let udp = ikigai_quic::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr: SocketAddr = udp.local_addr().unwrap();
     let minter = quic::minter(layout.clone());
     let server_identity = ikigai_quic::Identity {
         cert_pem: server.cert_pem.clone(),
         key_pem: server.key_pem,
     };
-    std::thread::spawn(move || ikigai_quic::serve(door, addr, &server_identity, &trusted, minter));
+    std::thread::spawn(move || {
+        ikigai_quic::serve_bounded_on(
+            door,
+            udp,
+            &server_identity,
+            &trusted,
+            minter,
+            ikigai_quic::DEFAULT_IDLE_TIMEOUT,
+            None,
+        )
+    });
     let identity = ikigai_quic::Identity {
         cert_pem: std::fs::read_to_string(hermes.dir.join("client.crt")).unwrap(),
         key_pem: std::fs::read_to_string(hermes.dir.join("client.key")).unwrap(),

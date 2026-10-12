@@ -5,10 +5,13 @@
 //!
 //! Two rules, each learned from a flake:
 //!
-//! - **No port is picked here and handed over, except QUIC's.** The child binds HTTP port 0 and
-//!   the banner names the port it got. Picking a free port and releasing it raced every other
-//!   socket on the machine for the time the child takes to open its store: `AddrInUse`, 43 of
-//!   160 runs of `tests/sparql_depth_915.rs` at 8 concurrent copies.
+//! - **No port is picked here and handed over.** The child binds HTTP port 0 and QUIC port 0,
+//!   and the banner names the ports it got. Picking a free port and releasing it raced every
+//!   other socket on the machine for the time the child takes to open its store: `AddrInUse`, 43
+//!   of 160 runs of `tests/sparql_depth_915.rs` at 8 concurrent copies. QUIC was the one
+//!   exception until ledger [#1300](http://localhost:1060/l/default/item/1300): the door bound
+//!   inside `ikigai_quic::serve` and never said where, so its port was picked here and a taken
+//!   pick retried. The door now binds before the banner, and nothing is retried.
 //! - **Ready means every door ANSWERS**, never that a file exists: the banner for HTTP, a
 //!   connection that completes the hello on the socket, and a QUIC handshake with this test's
 //!   own client when that door is open. The socket's file appearing is not the socket
@@ -18,7 +21,7 @@
 //! not call is normal here rather than dead (the same reason `tests/common/mod.rs` gives).
 
 use std::fs::File;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -31,7 +34,8 @@ pub struct Gonk {
     pub child: Child,
     /// Read from the banner: the child bound port 0.
     pub http: SocketAddr,
-    /// `None` when the child was started with `--no-quic` ([`Gonk::start`]).
+    /// Read from the banner: the child bound QUIC port 0. `None` when it was started with
+    /// `--no-quic` ([`Gonk::start`]).
     pub quic: Option<SocketAddr>,
     pub socket: PathBuf,
     pub stderr: PathBuf,
@@ -41,22 +45,12 @@ pub struct Gonk {
     _dirs: (tempfile::TempDir, tempfile::TempDir),
 }
 
-/// What [`Gonk::launch`] says when the child did not come up.
-enum Launch {
-    /// The child died because its QUIC port was taken: worth another pick.
-    PortTaken(String),
-    /// Anything else, which a retry would only hide.
-    Failed(String),
-}
-
 #[allow(dead_code)] // see the module docs: not every binary calls every constructor
 impl Gonk {
     /// A gonk with its QUIC door OFF: HTTP and the socket only, so nothing picks a port.
     /// `config` is the scratch home's whole `config.toml` (empty for the defaults).
     pub fn start(config: &str) -> Gonk {
-        Gonk::launch(config, false, None, &|_, _| {}).unwrap_or_else(|launch| match launch {
-            Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
-        })
+        Gonk::launch(config, false, None, &|_, _| {})
     }
 
     /// A gonk whose HTTP door binds where `config` says (`gonk.bind = "<ip>:0"`), not where
@@ -64,19 +58,11 @@ impl Gonk {
     /// is the address the test then dials (ledger
     /// [#1045](http://localhost:1060/l/default/item/1045)). The QUIC door is off.
     pub fn start_bound(config: &str, ip: IpAddr) -> Gonk {
-        Gonk::launch(config, false, Some(ip), &|_, _| {}).unwrap_or_else(|launch| match launch {
-            Launch::PortTaken(why) | Launch::Failed(why) => panic!("{why}"),
-        })
+        Gonk::launch(config, false, Some(ip), &|_, _| {})
     }
 
-    /// A gonk with its QUIC door open on loopback, for the tests that send over it.
-    ///
-    /// ⚠ **The one port still picked, and why it is retried rather than avoided** (ledger
-    /// #1004). `ikigai_quic::serve` binds inside the transport crate and never reports its
-    /// address (ledger [#1027](http://localhost:1060/l/default/item/1027)), so a child told
-    /// `127.0.0.1:0` would listen where nobody can find it. So the port is picked here, and a
-    /// pick another process takes before the child binds it (`AddrInUse`) is detected by the
-    /// child's death and its log, and picked again. Every other failure still fails.
+    /// A gonk with its QUIC door open on loopback port 0, for the tests that send over it; the
+    /// banner's `quic` line names the port it bound.
     pub fn with_quic(config: &str) -> Gonk {
         Gonk::with_quic_prepared(config, &|_, _| {})
     }
@@ -84,21 +70,9 @@ impl Gonk {
     /// [`Gonk::with_quic`], with `prepare(config_home, home)` run after `alpha` is enrolled and
     /// BEFORE the child starts — for a test that enrolls more clients (with the binary's own
     /// `client add`, say): the set of TLS-trusted certificates is read at startup, so a client
-    /// added after it would never complete a handshake. Run again on a port retry, over a fresh
-    /// home.
+    /// added after it would never complete a handshake.
     pub fn with_quic_prepared(config: &str, prepare: &dyn Fn(&Path, &Path)) -> Gonk {
-        let mut taken = Vec::new();
-        for _ in 0..5 {
-            match Gonk::launch(config, true, None, prepare) {
-                Ok(gonk) => return gonk,
-                Err(Launch::PortTaken(why)) => taken.push(why),
-                Err(Launch::Failed(why)) => panic!("{why}"),
-            }
-        }
-        panic!(
-            "five QUIC ports were taken before the child bound them:\n{}",
-            taken.join("\n")
-        )
+        Gonk::launch(config, true, None, prepare)
     }
 
     fn launch(
@@ -106,7 +80,7 @@ impl Gonk {
         with_quic: bool,
         bound: Option<IpAddr>,
         prepare: &dyn Fn(&Path, &Path),
-    ) -> Result<Gonk, Launch> {
+    ) -> Gonk {
         let home = tempfile::tempdir().unwrap();
         // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir does not.
         let short = tempfile::Builder::new()
@@ -135,12 +109,6 @@ impl Gonk {
         .unwrap();
         prepare(&config, home.path());
 
-        let quic: Option<SocketAddr> = with_quic.then(|| {
-            UdpSocket::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap()
-        });
         let socket = short.path().join("s");
         let stderr = home.path().join("stderr.log");
         let mut command = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
@@ -157,10 +125,11 @@ impl Gonk {
         if bound.is_none() {
             command.args(["--port", "0"]);
         }
-        match quic {
-            Some(addr) => command.args(["--quic-bind", &addr.to_string()]),
-            None => command.arg("--no-quic"),
-        };
+        if with_quic {
+            command.args(["--quic-bind", "127.0.0.1:0"]);
+        } else {
+            command.arg("--no-quic");
+        }
         let child = command
             .env("HOME", home.path())
             .stdin(Stdio::null())
@@ -172,44 +141,45 @@ impl Gonk {
             child,
             // The port is unknown until the banner says; nothing reads it before then.
             http: SocketAddr::new(bound.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0),
-            quic,
+            // Likewise until the banner's `quic` line names it.
+            quic: with_quic.then(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
             socket,
             stderr,
             layout,
             client,
             _dirs: (home, short),
         };
-        gonk.until_ready()?;
-        Ok(gonk)
+        if let Err(why) = gonk.until_ready() {
+            panic!("{why}");
+        }
+        gonk
     }
 
     /// Wait until every door this child opened ANSWERS — not until its files exist.
-    fn until_ready(&mut self) -> Result<(), Launch> {
+    fn until_ready(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                let log = self.log();
-                let why = format!("gonk exited while starting ({status}):\n{log}");
-                return Err(
-                    if log.contains("QUIC door") && log.contains("Address already in use") {
-                        Launch::PortTaken(why)
-                    } else {
-                        Launch::Failed(why)
-                    },
-                );
+                return Err(format!(
+                    "gonk exited while starting ({status}):\n{}",
+                    self.log()
+                ));
             }
             if Instant::now() > deadline {
-                return Err(Launch::Failed(format!(
-                    "gonk never came up:\n{}",
-                    self.log()
-                )));
+                return Err(format!("gonk never came up:\n{}", self.log()));
             }
             if self.http.port() == 0 {
                 if let Some(port) = banner_port(&self.log()) {
                     self.http.set_port(port);
                 }
             }
+            if self.quic.is_some_and(|quic| quic.port() == 0) {
+                if let (Some(port), Some(quic)) = (banner_quic_port(&self.log()), &mut self.quic) {
+                    quic.set_port(port);
+                }
+            }
             if self.http.port() != 0
+                && self.quic.is_none_or(|quic| quic.port() != 0)
                 && ikigai_ipc::connect(&self.socket).is_ok()
                 && std::net::TcpStream::connect(self.http).is_ok()
                 && (self.quic.is_none() || self.dial_quic().is_ok())
@@ -249,6 +219,15 @@ fn banner_port(log: &str) -> Option<u16> {
     let at = line.find("http://")? + "http://".len();
     let authority = line[at..].split('/').next()?;
     authority.rsplit_once(':')?.1.parse().ok()
+}
+
+/// The port the banner's `quic` line names: `  quic    udp 127.0.0.1:{port} — …`, the port the
+/// door BOUND (ledger [#1300](http://localhost:1060/l/default/item/1300)).
+fn banner_quic_port(log: &str) -> Option<u16> {
+    let line = log.lines().find(|l| l.trim_start().starts_with("quic "))?;
+    let at = line.find("udp ")? + "udp ".len();
+    let addr: SocketAddr = line[at..].split_whitespace().next()?.parse().ok()?;
+    Some(addr.port())
 }
 
 impl Drop for Gonk {

@@ -26,8 +26,8 @@
 //! resolve identically. What the word buys here is the other half of its meaning, which is
 //! the half that matters for a ledger server: **an absent peer costs explain and nothing
 //! else.** Concretely — [`LazyMount`] never dials at startup, a failed dial is remembered
-//! for [`RETRY`] rather than retried per request, and a `urn:iki:ledger:*` read does not
-//! touch this module at all. The mode word is still required in the line, and still spelled
+//! for a backoff that starts at [`FIRST_HOLD`] and doubles to [`RETRY`] rather than retried per
+//! request, and a `urn:iki:ledger:*` read does not touch this module at all. The mode word is still required in the line, and still spelled
 //! `prefer`, so the line reads as the same setting the cli reads.
 //!
 //! # ★ The mounted call runs on its own thread, and that is not tidiness
@@ -81,13 +81,65 @@ use ikigai_resolve::{CacheStatus, MountedRemote, Resolver};
 /// file nobody reads. One prefix, for the one thing this server has a use for.
 pub const LLM_PREFIX: &str = "urn:llm:";
 
-/// How long a failed dial is remembered before another is attempted.
+/// The LONGEST a failed dial is remembered before another is attempted: the cap of the
+/// backoff [`FIRST_HOLD`] starts ([`hold_after`]).
 ///
 /// The point is the catalog path: `MountedRemote::entries` asks the peer, and the catalog is
 /// read by every `urn:kernel:catalog`, every manifold query and every door's enumeration. A
 /// peer that is down would otherwise cost a connect attempt — five seconds, on QUIC — per
 /// enumeration, which is how "explain is unavailable" turns into "the ledger pages hang".
 pub const RETRY: Duration = Duration::from_secs(30);
+
+/// How long the FIRST failed dial in a row is remembered; each further failure doubles it, up
+/// to [`RETRY`].
+///
+/// ★ Ledger [#1300](http://localhost:1060/l/default/item/1300): through gonk 0.x every failure
+/// held the mount off for the whole of [`RETRY`], including the one that follows a single lost
+/// call on a healthy peer, so one hiccup made explain unavailable for half a minute. A peer that
+/// is really down still settles at one dial per [`RETRY`] after five failures (1, 2, 4, 8, 16,
+/// then 30 s): bounded, never a hot loop, and never a dial per request.
+pub const FIRST_HOLD: Duration = Duration::from_secs(1);
+
+/// The hold after `failures` failed dials in a row: [`FIRST_HOLD`] doubled per failure after
+/// the first, capped at [`RETRY`]. No failures, no hold.
+///
+/// ```
+/// use std::time::Duration;
+/// use ikigai_gonk::mount::{hold_after, RETRY};
+/// assert_eq!(hold_after(0), Duration::ZERO);
+/// assert_eq!(hold_after(1), Duration::from_secs(1));
+/// assert_eq!(hold_after(3), Duration::from_secs(4));
+/// assert_eq!(hold_after(6), RETRY);
+/// assert_eq!(hold_after(u32::MAX), RETRY);
+/// ```
+pub fn hold_after(failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
+    }
+    // 2^(failures - 1), saturating well before the cap could overflow anything.
+    let doublings = (failures - 1).min(16);
+    FIRST_HOLD.saturating_mul(1 << doublings).min(RETRY)
+}
+
+/// The deadline a mounted peer gets to DESCRIBE ITSELF (an enumeration, a `Meta`): two thirds
+/// of the deadline gonk's own callers give gonk, which is the transports' default (30 s on both
+/// `ikigai-ipc` and `ikigai-quic`), so 20 s.
+///
+/// ★ Ledger [#1288](http://localhost:1060/l/default/item/1288), cli PR 461's rule, by ROLE: a
+/// process that serves a door gives its mounts LESS than its callers give it, so when a peer
+/// hangs, gonk answers first with the peer's name and a third of the caller's bound to spare.
+/// At equal deadlines (gonk 0.x took `ikigai_quic::connect`'s default, 30 s) the two raced and
+/// the caller's usually won, blaming gonk, which was healthy. ⚠ Per hop, as the bound always
+/// was; the real fix is a budget carried on the wire.
+///
+/// ```
+/// use ikigai_gonk::mount::DESCRIBE_TIMEOUT;
+/// assert_eq!(DESCRIBE_TIMEOUT, std::time::Duration::from_secs(20));
+/// assert!(DESCRIBE_TIMEOUT < ikigai_ipc::DEFAULT_DESCRIBE_TIMEOUT);
+/// assert!(DESCRIBE_TIMEOUT < ikigai_quic::DEFAULT_DESCRIBE_TIMEOUT);
+/// ```
+pub const DESCRIBE_TIMEOUT: Duration =
+    Duration::from_millis(ikigai_quic::DEFAULT_DESCRIBE_TIMEOUT.as_millis() as u64 * 2 / 3);
 
 /// Where a mounted peer lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,13 +309,15 @@ pub fn space(mount: &Mount) -> Arc<dyn Space> {
     ))
 }
 
-/// A resolver that dials on first use, remembers a failure for [`RETRY`], and runs every
-/// call `off_thread`.
+/// A resolver that dials on first use, remembers a failure for a bounded backoff
+/// ([`hold_after`]), and runs every call `off_thread`.
 pub struct LazyMount {
     target: Target,
     state: Mutex<State>,
     /// Whether every answer is handed back UNCACHEABLE ([`LazyMount::fresh`]).
     fresh: bool,
+    /// The peer's self-description deadline ([`DESCRIBE_TIMEOUT`] unless a test sets it).
+    describe_timeout: Duration,
 }
 
 #[derive(Default)]
@@ -271,6 +325,8 @@ struct State {
     connected: Option<Arc<dyn Resolver>>,
     /// When the next dial may be attempted, after a failure.
     hold_until: Option<Instant>,
+    /// Failed dials in a row, for [`hold_after`]; a dial that connects resets it.
+    failures: u32,
 }
 
 impl LazyMount {
@@ -280,7 +336,20 @@ impl LazyMount {
             target,
             state: Mutex::new(State::default()),
             fresh: false,
+            describe_timeout: DESCRIBE_TIMEOUT,
         }
+    }
+
+    /// Set the peer's self-description deadline (builder): [`DESCRIBE_TIMEOUT`] by default.
+    /// Takes effect at the next dial, so set it before the first use.
+    pub fn with_describe_timeout(mut self, deadline: Duration) -> LazyMount {
+        self.describe_timeout = deadline;
+        self
+    }
+
+    /// The peer's self-description deadline ([`LazyMount::with_describe_timeout`]).
+    pub fn describe_timeout(&self) -> Duration {
+        self.describe_timeout
     }
 
     /// A mount on `target` whose every answer is marked UNCACHEABLE (`Expiry::Always`) on
@@ -312,26 +381,29 @@ impl LazyMount {
         if let Some(until) = state.hold_until {
             if Instant::now() < until {
                 return Err(Error::Unavailable(format!(
-                    "the mounted peer at {} is not reachable (last dial failed; the next is \
-                     held off for up to {}s)",
+                    "the mounted peer at {} is not reachable (the last {} dial(s) failed; the \
+                     next is held off for {:?} more)",
                     self.target,
-                    RETRY.as_secs()
+                    state.failures,
+                    until.saturating_duration_since(Instant::now())
                 )));
             }
         }
         // The lock is deliberately held across the dial: a burst of first calls should cost
         // one handshake, not one each.
-        let target = self.target.clone();
-        let dialled = off_thread(move || dial(&target))
+        let (target, deadline) = (self.target.clone(), self.describe_timeout);
+        let dialled = off_thread(move || dial(&target, deadline))
             .unwrap_or_else(|| Err("the dial panicked".to_string()));
         match dialled {
             Ok(resolver) => {
                 state.hold_until = None;
+                state.failures = 0;
                 state.connected = Some(Arc::clone(&resolver));
                 Ok(resolver)
             }
             Err(e) => {
-                state.hold_until = Some(Instant::now() + RETRY);
+                state.failures = state.failures.saturating_add(1);
+                state.hold_until = Some(Instant::now() + hold_after(state.failures));
                 // Once per hold window, not once per request: a down peer must not be able
                 // to fill a launchd log.
                 eprintln!("ikigai-gonk: mount {}: {e}", self.target);
@@ -343,18 +415,38 @@ impl LazyMount {
         }
     }
 
-    /// Forget the connection and hold off for [`RETRY`] before dialling again.
+    /// Forget the connection, so the next call DIALS: no hold of its own.
     ///
-    /// Both wire resolvers redial internally on a dead connection, so reaching here means
-    /// one has already tried and given up — the peer is down rather than the socket stale.
-    /// Holding the resolver would then fail every call with the same error forever; dialling
-    /// on the very next call would put a connect attempt in front of every request while it
-    /// stays down. The hold is the same one a first failed dial takes, and the cost of it is
-    /// that a single hiccup makes explain unavailable for half a minute.
+    /// Holding the resolver would fail every call with the same error forever, so it goes. But
+    /// an `Unavailable` answer does not say the peer is down: the peer's own endpoint can
+    /// answer it (its model backend restarting, say) over a healthy connection, and a lost
+    /// reply can be one dropped packet. Through gonk 0.x this held the mount off for [`RETRY`]
+    /// anyway, so a single hiccup made explain unavailable for half a minute (ledger
+    /// [#1300](http://localhost:1060/l/default/item/1300)). Now the next call redials, and only
+    /// a dial that FAILS starts the backoff ([`hold_after`]): a peer that is really down still
+    /// costs one dial per hold window, never one per request.
     fn drop_connection(&self) {
-        let mut state = self.state();
-        state.connected = None;
-        state.hold_until = Some(Instant::now() + RETRY);
+        self.state().connected = None;
+    }
+
+    /// A transient from the peer, with the peer's NAME in it ([`Error::Timeout`] and
+    /// [`Error::Unavailable`], the same variant): the transports say "the peer did not describe
+    /// itself within 20s" and "connection lost", and a caller several hops away cannot tell
+    /// WHICH peer from that (ledger #1288). Every other error is the peer's answer, as it was.
+    fn naming_the_peer(&self, error: Error) -> Error {
+        let named = |message: String| {
+            let peer = self.target.to_string();
+            if message.contains(&peer) {
+                message
+            } else {
+                format!("the mounted peer at {peer}: {message}")
+            }
+        };
+        match error {
+            Error::Timeout(message) => Error::Timeout(named(message)),
+            Error::Unavailable(message) => Error::Unavailable(named(message)),
+            other => other,
+        }
     }
 
     /// The state, **taking a poisoned lock as state rather than as a fatality**.
@@ -425,11 +517,14 @@ pub fn net_grant(target: &Target, capability: &Capability) -> Result<(), Error> 
     )))
 }
 
-/// Dial `target`. Neither transport blocks longer than its own connect timeout.
-fn dial(target: &Target) -> Result<Arc<dyn Resolver>, String> {
+/// Dial `target`, with `describe` as the peer's self-description deadline
+/// ([`DESCRIBE_TIMEOUT`]). Neither transport blocks longer than its own connect timeout.
+fn dial(target: &Target, describe: Duration) -> Result<Arc<dyn Resolver>, String> {
     match target {
         Target::Socket(path) => ikigai_ipc::connect(path)
-            .map(|resolver| Arc::new(resolver) as Arc<dyn Resolver>)
+            .map(|resolver| {
+                Arc::new(resolver.with_describe_timeout(Some(describe))) as Arc<dyn Resolver>
+            })
             .map_err(|e| format!("{}: {e}", path.display())),
         Target::Quic { authority, certs } => {
             let identity = ikigai_quic::Identity {
@@ -445,7 +540,9 @@ fn dial(target: &Target) -> Result<Arc<dyn Resolver>, String> {
                 .next()
                 .ok_or_else(|| format!("quic://{authority}: resolved to no address"))?;
             ikigai_quic::connect(addr, &identity, &server)
-                .map(|resolver| Arc::new(resolver) as Arc<dyn Resolver>)
+                .map(|resolver| {
+                    Arc::new(resolver.with_describe_timeout(Some(describe))) as Arc<dyn Resolver>
+                })
                 .map_err(|e| format!("quic://{authority} ({addr}): {e}"))
         }
     }
@@ -494,6 +591,7 @@ impl Resolver for LazyMount {
         if matches!(answer, Err(Error::Unavailable(_))) {
             self.drop_connection();
         }
+        let answer = answer.map_err(|error| self.naming_the_peer(error));
         if self.fresh {
             return answer.map(|(representation, _)| {
                 (
