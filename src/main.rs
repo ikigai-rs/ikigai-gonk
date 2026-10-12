@@ -56,6 +56,7 @@ fn main() {
             );
         }
         Command::ReviewRequest { repo, path, flags } => review_request(&repo, &path, &flags),
+        Command::LayerTake { offer, flags } => layer_take(&offer, &flags),
         Command::ClientAdd {
             name,
             cert,
@@ -1065,14 +1066,71 @@ fn start_layers(
                     binding.ledger, binding.layer, binding.target
                 ));
             }
-            layer::Role::Take => lines.push(format!(
-                "layer `{}` on {} mounted for ledger `{}`; the take role's follower is not built \
-                 yet",
-                binding.layer, binding.target, binding.ledger
-            )),
+            layer::Role::Take => {
+                let ledger = ikigai_gonk::taker::hub_ledger(binding, Arc::clone(hub))
+                    .unwrap_or_else(|e| fail(&e));
+                let worker = ikigai_gonk::taker::Taker::new(
+                    binding.clone(),
+                    Arc::clone(door) as Arc<dyn layer::Door>,
+                    ledger,
+                )
+                .unwrap_or_else(|e| fail(&e));
+                ikigai_gonk::taker::start(worker, hub);
+                lines.push(format!(
+                    "layer `{}` on {} taken into ledger `{}` (`ikigai-gonk layer take <offer>`)",
+                    binding.layer, binding.target, binding.ledger
+                ));
+            }
         }
     }
     lines.join("; ")
+}
+
+/// `ikigai-gonk layer take <offer>`: through the running gonk's socket (its layer mount is
+/// this gonk's identity at the door, and its ledger is the one this server holds).
+fn layer_take(offer: &str, flags: &config::Flags) {
+    let settings = read_settings(flags);
+    let layer_name = offer
+        .strip_prefix("urn:layer:")
+        .and_then(|rest| rest.split(':').next())
+        .unwrap_or_default();
+    let binding = settings
+        .layers
+        .iter()
+        .find(|b| b.layer == layer_name && b.role == layer::Role::Take)
+        .unwrap_or_else(|| {
+            fail(&format!(
+                "no `gonk.layer` line binds layer `{layer_name}` in the take role here"
+            ))
+        });
+    let client: Arc<dyn ikigai_resolve::Resolver> =
+        Arc::new(ikigai_ipc::connect(&settings.socket).unwrap_or_else(|e| {
+            fail(&format!(
+                "cannot reach gonk's socket at {}: {e} (is gonk running? `--socket` names another)",
+                settings.socket.display()
+            ))
+        }));
+    let ledger_client = Arc::clone(&client);
+    let ledger: ikigai_gonk::taker::LedgerIssue = Arc::new(move |request| {
+        let target = request.target.to_string();
+        ledger_client
+            .issue(request)
+            .map(|(r, _)| r.bytes)
+            .map_err(|e| format!("{target}: {e}"))
+    });
+    let door = Arc::new(ikigai_gonk::taker::ResolverDoor(client));
+    match ikigai_gonk::taker::take(binding, door, &ledger, offer) {
+        Ok(ikigai_gonk::taker::Took::Filed(n)) => {
+            println!("took <{offer}>; filed as {}#{n}", binding.ledger)
+        }
+        Ok(ikigai_gonk::taker::Took::Already(n)) => {
+            println!(
+                "<{offer}> is already taken by this server; filed as {}#{n}",
+                binding.ledger
+            )
+        }
+        Err(e) => fail(&e),
+    }
 }
 
 fn read_settings(flags: &config::Flags) -> config::Settings {

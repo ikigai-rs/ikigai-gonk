@@ -113,10 +113,17 @@ pub struct Tuple {
     pub note: Option<String>,
     /// A hand-back's evidence.
     pub evidence: Vec<String>,
+    /// An offer's title.
+    pub title: Option<String>,
+    /// An offer's brief.
+    pub brief: Option<String>,
+    /// An offer's repository.
+    pub repository: Option<String>,
 }
 
 impl Tuple {
-    fn is(&self, class: &str) -> bool {
+    /// Whether it is typed `ik:{class}`.
+    pub fn is(&self, class: &str) -> bool {
         self.types.contains(&ik(class))
     }
 
@@ -148,11 +155,11 @@ pub struct Report {
 }
 
 impl Report {
-    fn did(&mut self, line: String) {
+    pub(crate) fn did(&mut self, line: String) {
         self.actions.push(line);
     }
 
-    fn failed(&mut self, line: String) {
+    pub(crate) fn failed(&mut self, line: String) {
         self.problems.push(line);
     }
 }
@@ -167,13 +174,186 @@ enum Check {
 /// One binding's offer side.
 pub struct Mirror {
     binding: Binding,
-    door: Arc<dyn Door>,
+    layer: LayerClient,
     hub: Arc<Kernel>,
     capability: Capability,
     principal: String,
     /// `urn:jsonld:*`, in a kernel only this mirror issues to.
     prune: Kernel,
+}
+
+/// A task layer, through a binding's door: its definition (checked once to be a tuplespace),
+/// its pending tuples, its receipts, take and out. Shared by both roles.
+pub struct LayerClient {
+    door: Arc<dyn Door>,
+    layer: String,
     check: Mutex<Check>,
+}
+
+impl LayerClient {
+    /// Layer `layer`, through `door`.
+    pub fn new(door: Arc<dyn Door>, layer: &str) -> LayerClient {
+        LayerClient {
+            door,
+            layer: layer.to_string(),
+            check: Mutex::new(Check::Unchecked),
+        }
+    }
+
+    /// The layer's name.
+    pub fn layer(&self) -> &str {
+        &self.layer
+    }
+
+    /// The door, shared.
+    pub fn door(&self) -> Arc<dyn Door> {
+        Arc::clone(&self.door)
+    }
+
+    pub fn iri(&self, part: &str) -> String {
+        if part.is_empty() {
+            format!("urn:layer:{}", self.layer)
+        } else {
+            format!("urn:layer:{}:{part}", self.layer)
+        }
+    }
+
+    /// The layer's context, after checking (once) that the layer is a tuplespace.
+    pub fn ready(&self) -> Result<String, String> {
+        let mut check = self.check.lock().unwrap_or_else(|p| p.into_inner());
+        match &*check {
+            Check::Ready { context } => return Ok(context.clone()),
+            Check::Refused(why) => return Err(why.clone()),
+            Check::Unchecked => {}
+        }
+        let definition = self
+            .door
+            .call(layer::request(Verb::Source, &self.iri("")))
+            .map_err(|e| format!("reading {}: {e}", self.iri("")))?;
+        let triples = parse_turtle(&definition.bytes)?;
+        let model = triples
+            .iter()
+            .find(|(s, p, _)| *s == self.iri("") && *p == ik("layerModel"))
+            .map(|(_, _, o)| o.value().to_string());
+        if model.as_deref() != Some("tuplespace") {
+            let why =
+                format!(
+                "layer `{}` is {}, and only a task layer (`tuplespace`) is bound to a ledger: the \
+                 binding is refused",
+                self.layer,
+                model.map_or("of no stated model".to_string(), |m| format!("a `{m}` layer"))
+            );
+            *check = Check::Refused(why.clone());
+            return Err(why);
+        }
+        let context = self
+            .door
+            .call(layer::request(Verb::Source, &self.iri("context")))
+            .map_err(|e| format!("reading {}: {e}", self.iri("context")))?;
+        let context = String::from_utf8(context.bytes)
+            .map_err(|_| format!("{} is not UTF-8", self.iri("context")))?;
+        *check = Check::Ready {
+            context: context.clone(),
+        };
+        Ok(context)
+    }
+
+    /// `rd`, every page: the pending tuples (`taken = false`) or the receipts.
+    fn read_tuples(&self, taken: bool) -> Result<String, String> {
+        let mut all = String::new();
+        let mut after = 0u64;
+        loop {
+            let mut request = layer::request(Verb::Source, &self.iri("tuples"))
+                .with_arg("as", inline("text/turtle"))
+                .with_arg("after", inline(&after.to_string()))
+                .with_arg("limit", inline(&PAGE.to_string()));
+            if taken {
+                request = request.with_arg("state", inline("taken"));
+            }
+            let page = self
+                .door
+                .call(request)
+                .map_err(|e| format!("reading {}: {e}", self.iri("tuples")))?;
+            let text = String::from_utf8(page.bytes)
+                .map_err(|_| format!("{} answered non-UTF-8", self.iri("tuples")))?;
+            let triples = parse_turtle(text.as_bytes())?;
+            // The page's positions: a tuple's or a receipt's own ik:seq (a receipt also holds
+            // its tuple's, which is never larger than the take's).
+            let seqs: Vec<u64> = triples
+                .iter()
+                .filter(|(_, p, _)| *p == ik("seq"))
+                .filter_map(|(_, _, o)| o.value().parse().ok())
+                .collect();
+            let count = if taken {
+                triples.iter().filter(|(_, p, _)| *p == PROV_USED).count()
+            } else {
+                triples
+                    .iter()
+                    .map(|(s, _, _)| s.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+            };
+            all.push_str(&text);
+            all.push('\n');
+            match seqs.into_iter().max() {
+                Some(last) if count >= PAGE && last > after => after = last,
+                _ => return Ok(all),
+            }
+        }
+    }
+
+    pub fn pending(&self) -> Result<BTreeMap<String, Tuple>, String> {
+        let text = self.read_tuples(false)?;
+        Ok(tuples(&parse_turtle(text.as_bytes())?))
+    }
+
+    pub fn receipts(&self) -> Result<BTreeMap<String, Taken>, String> {
+        let text = self.read_tuples(true)?;
+        Ok(receipts(&parse_turtle(text.as_bytes())?))
+    }
+
+    /// Take `subject` from the layer. `Ok(true)` when this take won.
+    pub fn take(&self, subject: &str) -> Result<bool, Error> {
+        let request =
+            layer::request(Verb::Delete, &self.iri("tuples")).with_arg("tuple", inline(subject));
+        match self.door.call(request) {
+            Ok(_) => Ok(true),
+            Err(Error::Conflict(_)) | Err(Error::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The receipt of `subject`'s take, re-read after a take that lost.
+    pub fn receipt_of(&self, subject: &str) -> Result<Option<Taken>, String> {
+        let request = layer::request(Verb::Source, &self.iri("tuples"))
+            .with_arg("state", inline("taken"))
+            .with_arg("tuple", inline(subject))
+            .with_arg("as", inline("text/turtle"));
+        match self.door.call(request) {
+            Ok(r) => Ok(receipts(&parse_turtle(&r.bytes)?).remove(subject)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(format!("reading the receipt of <{subject}>: {e}")),
+        }
+    }
+
+    /// Take `subject`, answering the tuple as taken (Turtle), or the layer's refusal.
+    pub fn take_tuple(&self, subject: &str) -> Result<String, Error> {
+        let request =
+            layer::request(Verb::Delete, &self.iri("tuples")).with_arg("tuple", inline(subject));
+        let answer = self.door.call(request)?;
+        String::from_utf8(answer.bytes)
+            .map_err(|_| Error::Endpoint(format!("the take of <{subject}> answered non-UTF-8")))
+    }
+
+    /// Drop one tuple (Turtle or JSON-LD).
+    pub fn out(&self, content: Vec<u8>) -> Result<(), String> {
+        let request = layer::request(Verb::Sink, &self.iri("tuples"))
+            .with_arg("content", ArgRef::Inline(content));
+        self.door
+            .call(request)
+            .map(|_| ())
+            .map_err(|e| format!("dropping into {}: {e}", self.iri("tuples")))
+    }
 }
 
 /// The capability a mirror writes to its ledger under: the worker grant (read, claim, comment,
@@ -203,146 +383,17 @@ impl Mirror {
         let capability = capability(&binding)?;
         Ok(Mirror {
             principal: binding.principal(),
+            layer: LayerClient::new(door, &binding.layer),
             binding,
-            door,
             hub,
             capability,
             prune: Kernel::new(Arc::new(ikigai_jsonld::space())),
-            check: Mutex::new(Check::Unchecked),
         })
     }
 
     /// The binding this mirror serves.
     pub fn binding(&self) -> &Binding {
         &self.binding
-    }
-
-    fn layer_iri(&self, part: &str) -> String {
-        if part.is_empty() {
-            self.binding.layer_iri()
-        } else {
-            format!("{}:{part}", self.binding.layer_iri())
-        }
-    }
-
-    // ---- the layer side -------------------------------------------------------------------
-
-    /// The layer's context, after checking (once) that the layer is a tuplespace.
-    fn ready(&self) -> Result<String, String> {
-        let mut check = self.check.lock().unwrap_or_else(|p| p.into_inner());
-        match &*check {
-            Check::Ready { context } => return Ok(context.clone()),
-            Check::Refused(why) => return Err(why.clone()),
-            Check::Unchecked => {}
-        }
-        let definition = self
-            .door
-            .call(layer::request(Verb::Source, &self.layer_iri("")))
-            .map_err(|e| format!("reading {}: {e}", self.layer_iri("")))?;
-        let triples = parse_turtle(&definition.bytes)?;
-        let model = triples
-            .iter()
-            .find(|(s, p, _)| *s == self.layer_iri("") && *p == ik("layerModel"))
-            .map(|(_, _, o)| o.value().to_string());
-        if model.as_deref() != Some("tuplespace") {
-            let why =
-                format!(
-                "layer `{}` is {}, and only a task layer (`tuplespace`) is bound to a ledger: the \
-                 binding is refused",
-                self.binding.layer,
-                model.map_or("of no stated model".to_string(), |m| format!("a `{m}` layer"))
-            );
-            *check = Check::Refused(why.clone());
-            return Err(why);
-        }
-        let context = self
-            .door
-            .call(layer::request(Verb::Source, &self.layer_iri("context")))
-            .map_err(|e| format!("reading {}: {e}", self.layer_iri("context")))?;
-        let context = String::from_utf8(context.bytes)
-            .map_err(|_| format!("{} is not UTF-8", self.layer_iri("context")))?;
-        *check = Check::Ready {
-            context: context.clone(),
-        };
-        Ok(context)
-    }
-
-    /// `rd`, every page: the pending tuples (`taken = false`) or the receipts.
-    fn read_tuples(&self, taken: bool) -> Result<String, String> {
-        let mut all = String::new();
-        let mut after = 0u64;
-        loop {
-            let mut request = layer::request(Verb::Source, &self.layer_iri("tuples"))
-                .with_arg("as", inline("text/turtle"))
-                .with_arg("after", inline(&after.to_string()))
-                .with_arg("limit", inline(&PAGE.to_string()));
-            if taken {
-                request = request.with_arg("state", inline("taken"));
-            }
-            let page = self
-                .door
-                .call(request)
-                .map_err(|e| format!("reading {}: {e}", self.layer_iri("tuples")))?;
-            let text = String::from_utf8(page.bytes)
-                .map_err(|_| format!("{} answered non-UTF-8", self.layer_iri("tuples")))?;
-            let triples = parse_turtle(text.as_bytes())?;
-            // The page's positions: a tuple's or a receipt's own ik:seq (a receipt also holds
-            // its tuple's, which is never larger than the take's).
-            let seqs: Vec<u64> = triples
-                .iter()
-                .filter(|(_, p, _)| *p == ik("seq"))
-                .filter_map(|(_, _, o)| o.value().parse().ok())
-                .collect();
-            let count = if taken {
-                triples.iter().filter(|(_, p, _)| *p == PROV_USED).count()
-            } else {
-                triples
-                    .iter()
-                    .map(|(s, _, _)| s.as_str())
-                    .collect::<BTreeSet<_>>()
-                    .len()
-            };
-            all.push_str(&text);
-            all.push('\n');
-            match seqs.into_iter().max() {
-                Some(last) if count >= PAGE && last > after => after = last,
-                _ => return Ok(all),
-            }
-        }
-    }
-
-    fn pending(&self) -> Result<BTreeMap<String, Tuple>, String> {
-        let text = self.read_tuples(false)?;
-        Ok(tuples(&parse_turtle(text.as_bytes())?))
-    }
-
-    fn receipts(&self) -> Result<BTreeMap<String, Taken>, String> {
-        let text = self.read_tuples(true)?;
-        Ok(receipts(&parse_turtle(text.as_bytes())?))
-    }
-
-    /// Take `subject` from the layer. `Ok(true)` when this take won.
-    fn take(&self, subject: &str) -> Result<bool, Error> {
-        let request = layer::request(Verb::Delete, &self.layer_iri("tuples"))
-            .with_arg("tuple", inline(subject));
-        match self.door.call(request) {
-            Ok(_) => Ok(true),
-            Err(Error::Conflict(_)) | Err(Error::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// The receipt of `subject`'s take, re-read after a take that lost.
-    fn receipt_of(&self, subject: &str) -> Result<Option<Taken>, String> {
-        let request = layer::request(Verb::Source, &self.layer_iri("tuples"))
-            .with_arg("state", inline("taken"))
-            .with_arg("tuple", inline(subject))
-            .with_arg("as", inline("text/turtle"));
-        match self.door.call(request) {
-            Ok(r) => Ok(receipts(&parse_turtle(&r.bytes)?).remove(subject)),
-            Err(Error::NotFound(_)) => Ok(None),
-            Err(e) => Err(format!("reading the receipt of <{subject}>: {e}")),
-        }
     }
 
     /// What the collaboration's participants graph says each taker is.
@@ -352,6 +403,7 @@ impl Mirror {
         };
         let iri = format!("urn:collab:{collab}:participants");
         let answer = self
+            .layer
             .door
             .call(layer::request(Verb::Source, &iri).with_arg("as", inline("text/turtle")))
             .map_err(|e| e.to_string())
@@ -378,12 +430,9 @@ impl Mirror {
     /// Drop an offer for `item` under `offer`, built and pruned here.
     fn drop_offer(&self, item: &Item, offer: &str, context: &str) -> Result<(), String> {
         let document = self.build_offer(item, offer, context)?;
-        let request = layer::request(Verb::Sink, &self.layer_iri("tuples"))
-            .with_arg("content", ArgRef::Inline(document));
-        match self.door.call(request) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(format!("dropping <{offer}>: {e}")),
-        }
+        self.layer
+            .out(document)
+            .map_err(|e| format!("<{offer}>: {e}"))
     }
 
     /// The offer for `item`: the fixed CONSTRUCT, then `urn:jsonld:prune` against the layer's
@@ -558,11 +607,11 @@ impl Mirror {
     /// read cannot be read; an action that fails is a [`Report::problems`] line instead, and
     /// the next pass tries again.
     pub fn pass(&self) -> Result<Report, String> {
-        let context = self.ready()?;
+        let context = self.layer.ready()?;
         let mut report = Report::default();
         self.refresh_kinds(&mut report);
-        let mut pending = self.pending()?;
-        let mut taken = self.receipts()?;
+        let mut pending = self.layer.pending()?;
+        let mut taken = self.layer.receipts()?;
         let recorded = self.recorded()?;
         let (mut items, complete) = self.items()?;
 
@@ -590,7 +639,7 @@ impl Mirror {
         reports.sort_by_key(|t| t.seq);
         let mut fresh: BTreeSet<String> = BTreeSet::new();
         for tuple in reports {
-            match self.take(&tuple.subject) {
+            match self.layer.take(&tuple.subject) {
                 Ok(true) => {
                     report.did(format!("took report <{}>", tuple.subject));
                     fresh.insert(tuple.subject.clone());
@@ -604,7 +653,7 @@ impl Mirror {
             pending.remove(&tuple.subject);
         }
         if !fresh.is_empty() {
-            taken = self.receipts()?;
+            taken = self.layer.receipts()?;
         }
 
         // 2. Apply every report we hold, in feed order. Idempotent: keyed comments, and a
@@ -800,7 +849,7 @@ impl Mirror {
                 .map(|t| t.subject.clone())
                 .collect();
             for offer in orphans {
-                match self.take(&offer) {
+                match self.layer.take(&offer) {
                     Ok(true) => report.did(format!("withdrew <{offer}> (its item is gone)")),
                     Ok(false) => {}
                     Err(e) => report.failed(format!("withdrawing <{offer}>: {e}")),
@@ -838,7 +887,7 @@ impl Mirror {
     /// Withdraw `offer` by taking it back; a take that loses the race is the taker's, and
     /// stands.
     fn withdraw(&self, item: &Item, offer: &str, why: &str, report: &mut Report) {
-        match self.take(offer) {
+        match self.layer.take(offer) {
             Ok(true) => {
                 report.did(format!("withdrew <{offer}> ({} is {why})", item.display));
                 return;
@@ -849,7 +898,7 @@ impl Mirror {
                 return;
             }
         }
-        let taken = match self.receipt_of(offer) {
+        let taken = match self.layer.receipt_of(offer) {
             Ok(Some(t)) => t,
             Ok(None) => return,
             Err(e) => {
@@ -935,7 +984,7 @@ fn offer_construct(item: &str, offer: &str) -> String {
 }
 
 /// Turtle, as `(subject, predicate, object)`; a blank node's subject is `_:label`.
-fn parse_turtle(bytes: &[u8]) -> Result<Vec<(String, String, Term)>, String> {
+pub(crate) fn parse_turtle(bytes: &[u8]) -> Result<Vec<(String, String, Term)>, String> {
     RdfParser::from_format(RdfFormat::Turtle)
         .for_slice(bytes)
         .map(|quad| {
@@ -969,7 +1018,7 @@ impl TermValue for Term {
 }
 
 /// The tuples in `triples`, by subject (receipt subjects excluded).
-fn tuples(triples: &[(String, String, Term)]) -> BTreeMap<String, Tuple> {
+pub(crate) fn tuples(triples: &[(String, String, Term)]) -> BTreeMap<String, Tuple> {
     let mut out: BTreeMap<String, Tuple> = BTreeMap::new();
     for (s, p, o) in triples {
         if s.starts_with("_:") || s.contains(":receipt:") || *p == PROV_USED {
@@ -988,6 +1037,9 @@ fn tuples(triples: &[(String, String, Term)]) -> BTreeMap<String, Tuple> {
             p if p == ik("seq") => t.seq = o.value().parse().unwrap_or(0),
             p if p == ik("note") => t.note = Some(o.value().to_string()),
             p if p == ik("evidence") => t.evidence.push(o.value().to_string()),
+            p if p == ik("brief") => t.brief = Some(o.value().to_string()),
+            p if p == ik("repository") => t.repository = Some(o.value().to_string()),
+            "http://purl.org/dc/terms/title" => t.title = Some(o.value().to_string()),
             _ => {}
         }
     }
@@ -1144,12 +1196,25 @@ pub fn mint_id() -> String {
 pub fn start(mirror: Mirror) {
     let mirror = Arc::new(mirror);
     let (kick, kicks) = sync_channel::<()>(1);
-    spawn_feed(Arc::clone(&mirror), kick.clone());
-    spawn_listener(&mirror, kick.clone());
+    let layer = mirror.binding.layer.clone();
+    spawn_feed(
+        mirror.layer.door(),
+        layer.clone(),
+        format!("gonk-layer-feed-{layer}"),
+        kick.clone(),
+    );
+    if let Err(e) = spawn_listener(
+        &mirror.hub,
+        &mirror.binding.ledger,
+        format!("gonk-layer-cuts-{layer}"),
+        kick.clone(),
+    ) {
+        log(&mirror, &e);
+    }
     let _ = kick.try_send(());
     let worker = Arc::clone(&mirror);
     std::thread::Builder::new()
-        .name(format!("gonk-layer-{}", mirror.binding.layer))
+        .name(format!("gonk-layer-{layer}"))
         .spawn(move || run_passes(&worker, &kicks))
         .expect("spawning the mirror's thread");
 }
@@ -1192,19 +1257,19 @@ fn nudge(kick: &SyncSender<()>) -> bool {
     !matches!(kick.try_send(()), Err(TrySendError::Disconnected(_)))
 }
 
-/// Follow the layer's feed: each event (or a wait that ends) after the cursor is a kick.
-fn spawn_feed(mirror: Arc<Mirror>, kick: SyncSender<()>) {
-    let name = format!("gonk-layer-feed-{}", mirror.binding.layer);
+/// Follow `layer`'s feed through `door`: each event after the cursor is a kick.
+pub(crate) fn spawn_feed(door: Arc<dyn Door>, layer: String, thread: String, kick: SyncSender<()>) {
     std::thread::Builder::new()
-        .name(name)
+        .name(thread)
         .spawn(move || {
+            let feed = format!("urn:layer:{layer}:feed");
             let mut after = 0u64;
             loop {
-                let request = layer::request(Verb::Source, &mirror.layer_iri("feed"))
+                let request = layer::request(Verb::Source, &feed)
                     .with_arg("after", inline(&after.to_string()))
                     .with_arg("wait", inline(&FEED_WAIT_SECS.to_string()))
                     .with_arg("as", inline("application/json"));
-                match mirror.door.call(request) {
+                match door.call(request) {
                     Ok(answer) => {
                         let json: serde_json::Value =
                             serde_json::from_slice(&answer.bytes).unwrap_or_default();
@@ -1225,40 +1290,34 @@ fn spawn_feed(mirror: Arc<Mirror>, kick: SyncSender<()>) {
                 }
             }
         })
-        .expect("spawning the mirror's feed thread");
+        .expect("spawning a layer feed thread");
 }
 
-/// Listen for cuts under the ledger's names: every write to it is a kick.
+/// Listen for cuts under `ledger`'s names on `hub`: every write to it is a kick.
 ///
 /// The default ledger is also written through the short forms (`urn:iki:ledger:append`), which
 /// are not under `urn:iki:ledger:default:`, so for it the listener hears every ledger; an extra
-/// pass changes nothing.
-fn spawn_listener(mirror: &Mirror, kick: SyncSender<()>) {
-    let prefix = if mirror.binding.ledger == ikigai_gonk_default_ledger() {
+/// pass changes nothing. `Err` when the kernel refuses the listener (then the feed and the
+/// sweep remain).
+pub(crate) fn spawn_listener(
+    hub: &Kernel,
+    ledger: &str,
+    thread: String,
+    kick: SyncSender<()>,
+) -> Result<(), String> {
+    let prefix = if ledger == ikigai_gonk_default_ledger() {
         "urn:iki:ledger:".to_string()
     } else {
-        format!("urn:iki:ledger:{}:", mirror.binding.ledger)
+        format!("urn:iki:ledger:{ledger}:")
     };
-    let listener = match mirror
-        .hub
+    let listener = hub
         .listen(ListenSpec::new().prefix(prefix), &Capability::root())
-    {
-        Ok(listener) => listener,
-        Err(e) => {
-            log(
-                mirror,
-                &format!("no cut listener ({e}): the feed and the sweep remain"),
-            );
-            return;
-        }
-    };
-    let name = format!("gonk-layer-cuts-{}", mirror.binding.layer);
+        .map_err(|e| format!("no cut listener ({e}): the feed and the sweep remain"))?;
     std::thread::Builder::new()
-        .name(name)
+        .name(thread)
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().build() {
-                Ok(runtime) => runtime,
-                Err(_) => return,
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+                return;
             };
             loop {
                 runtime.block_on(listener.wait());
@@ -1268,7 +1327,8 @@ fn spawn_listener(mirror: &Mirror, kick: SyncSender<()>) {
                 }
             }
         })
-        .expect("spawning the mirror's listener thread");
+        .expect("spawning a ledger listener thread");
+    Ok(())
 }
 
 fn ikigai_gonk_default_ledger() -> &'static str {

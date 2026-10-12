@@ -1750,9 +1750,35 @@ every five minutes as a backstop:
 **The mirror holds the worker grant and never `close`**
 (`urn:cap:ledger:{read,claim,comment}:{ledger}` and the ledger graph's store tokens): the
 taker's hand-back makes the item wait, and the dispatcher checks the evidence and closes it.
-Nothing closes across. The take role (following the feed, `ikigai-gonk layer take <offer>`,
-reports from the local ledger) is not built yet: a `take` line mounts the layer and runs
-nothing.
+Nothing closes across.
+
+### The take role
+
+The other side of the same layer, on the collaborator's gonk:
+
+```sh
+ikigai-gonk layer take urn:layer:tasks-bobby:offer:01m4…
+```
+
+takes one offer, through the running gonk (its socket; its layer mount is this gonk's
+identity at the door), and files it into the bound ledger with `key=layer:{layer}:<the
+offer's local name>` and `about` the offer (and its repository): run twice, it files once. A
+take whose reply was lost is recovered from its receipt once this server can tell the receipt
+names itself (it can after its first take: the receipts of the offers its ledger already
+holds name it; before that it says so, and names the taker). Taking stays a person's
+decision; an auto-take policy is v2.
+
+The running server then reports on each filed item, on the same triggers as the mirror, under
+report names derived from what they report (so a pass run twice drops once):
+
+- **open**: a `Progress` a day, which renews the offerer's lease on the claim it holds for us;
+- **closed `done`**: a `Handback` whose evidence is every pull request URL
+  (`https://github.com/{owner}/{repo}/pull/{n}`) in the item's body and comments; new evidence
+  is a new hand-back. Closed `done` with no such URL hands nothing back, and the pass says so;
+- **closed any other way**: a `Release`, and the offerer offers the work again.
+
+Its pass also says, once, which offers are open in the layer and how to take them. This side
+never reads or writes the offerer's ledger: it sees offers and nothing else.
 
 ## Reviewing on a git event
 
@@ -3411,6 +3437,11 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
 
 ## Not built
 
+- **Layer bindings (ledger #1190) have no status resource and no `urn:iki:gonk:feed`.** A
+  binding says what it does on stderr (once per distinct problem); the change feed of ledger
+  #1144 is not built from the mirror's listener here. Nor is an auto-take policy, nor a way
+  for a gonk to ask the layer door who it is (a lost-reply take before this server's first
+  take cannot be told apart from someone else's).
 - **No identity reaches a write.** A form filed while signed in is not attributed to the
   passkey: the capability carries the grant, but nothing carries WHO to the ledger's `author`.
 - **No manifold-driven forms yet.** The forms are hand-written in the stylesheet. They post
