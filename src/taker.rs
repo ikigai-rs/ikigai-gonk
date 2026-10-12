@@ -13,7 +13,8 @@
 //!   layer's replay rule, one subject one tuple): while the item is open, a `Progress` a day,
 //!   which renews the offerer's lease on the claim it holds for us; once it is closed `done`, a
 //!   `Handback` whose evidence is every pull request URL in its body and comments (new evidence
-//!   is a new hand-back); once it is closed any other way, a `Release`.
+//!   is a new hand-back); once it is closed any other way, a `Release`, one per close reason
+//!   (a later comment on the closed item is not another release).
 //! - **This side never reads or writes the offerer's ledger.** It sees offers and nothing else.
 //!
 //! ★ "Closed `done` is a hand-back, closed otherwise is a release" is this module's reading of
@@ -455,9 +456,13 @@ impl Taker {
                     extra,
                 )
             } else {
+                // Named by the close's REASON, never by `modified`: any later write to the
+                // closed item (a comment) moves `modified`, and each move was another Release
+                // (the audit of 2026-10-11). The offerer applies a release from the first one;
+                // a second close for the same reason has nothing new to say.
                 let reason = item.closed_reason.as_deref().unwrap_or("closed");
                 (
-                    format!("{base}:release:{}", &hex_digest(&item.modified)[..12]),
+                    format!("{base}:release:{}", &hex_digest(reason)[..12]),
                     "Release",
                     format!(
                         " ; ik:note {}",
