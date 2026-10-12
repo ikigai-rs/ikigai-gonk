@@ -2160,6 +2160,47 @@ fn urls_and_ledger_references_in_bodies_are_links_and_nothing_else_is() {
     );
 }
 
+/// Ledger [#1376](http://localhost:1062/l/default/item/1376): the linker compared a body's
+/// first eight BYTES at each word boundary, so `http:/` followed by a wide character, or any
+/// word whose eighth byte fell inside one, panicked the render and the item's page failed for
+/// every reader. Anyone who may write a body could do that to a page. Both bodies render now,
+/// as written, and a URL beside a wide character still links.
+#[test]
+fn a_body_with_a_wide_character_after_a_partial_scheme_still_renders() {
+    let server = Server::start();
+    let body = "Broken scheme http:/€uro and prose like abcdefg€ or wxyz𝄞 here.";
+    let (iri, id) = file(&server, &format!("Wide characters\n\n{body}"));
+    let commented = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &iri),
+            (
+                "content",
+                "Comment: https:/€ then https://a.example/é€ done.",
+            ),
+        ],
+        None,
+    );
+    assert_eq!(commented.status, 200, "{commented:?}");
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let html = &page.body;
+    assert!(
+        html.contains(body),
+        "the item body renders as written: {html}"
+    );
+    assert!(
+        html.contains(
+            "Comment: https:/€ then \
+             <a href='https://a.example/é€'>https://a.example/é€</a> done."
+        ),
+        "the comment renders, and its whole URL links: {html}"
+    );
+}
+
 /// gonk's default port moved from 1060 to 1062 on 2026-10-12. A stored link
 /// to gonk at the OLD origin renders onto the server serving the page (a root-relative href,
 /// which the browser resolves against this door's origin), in an item's body and a comment's;

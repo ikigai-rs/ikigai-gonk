@@ -804,8 +804,11 @@ pub fn rehome(url: &str) -> Option<String> {
 /// The length of the http(s) URL that `text` starts with, trailing punctuation given back to
 /// the sentence; `None` when it starts with none.
 fn url_at(text: &str) -> Option<usize> {
+    // `get`, not slicing (ledger #1376): the byte a scheme's length lands on may sit inside a
+    // multibyte character, and then this text simply does not start with that scheme.
     let scheme = ["https://", "http://"].into_iter().find(|scheme| {
-        text.len() >= scheme.len() && text[..scheme.len()].eq_ignore_ascii_case(scheme)
+        text.get(..scheme.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
     })?;
     // Where the URL ends: whitespace, markup (never present here), or an entity for a
     // character no URL in prose carries unescaped (`<`, `>`, `"`, `'`). `&amp;` stays: it is
@@ -842,7 +845,11 @@ fn url_at(text: &str) -> Option<usize> {
 /// The length of the `ledger #N` reference that `text` starts with, if it does.
 fn ledger_ref_at(text: &str) -> Option<usize> {
     const WORD: &str = "ledger #";
-    if text.len() < WORD.len() || !text[..WORD.len()].eq_ignore_ascii_case(WORD) {
+    // `get`, not slicing, for the reason [`url_at`] gives.
+    if !text
+        .get(..WORD.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(WORD))
+    {
         return None;
     }
     let digits = text[WORD.len()..]
@@ -1022,6 +1029,50 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    /// Ledger [#1376](http://localhost:1062/l/default/item/1376): `url_at` and `ledger_ref_at`
+    /// compared the first eight BYTES of the text after a length check alone, so a multibyte
+    /// character straddling byte eight of any word-boundary position (`http:/€`, but also plain
+    /// prose like `abcdefg€`) panicked the page render. A text that holds no link comes back
+    /// unchanged, whatever character sits at whatever byte.
+    #[test]
+    fn a_multibyte_character_at_any_offset_never_panics_the_linker() {
+        for lead in [
+            "", "http:/", "https:/", "http://", "ledger ", "ledger #", "x ",
+        ] {
+            for pad in 0..10 {
+                for wide in ['é', '€', '𝄞'] {
+                    let text = format!("{lead}{}{wide}{wide} tail", "a".repeat(pad));
+                    let html = format!("<p data-linkify='default'>{text}</p>");
+                    let got = linkify(&html);
+                    assert_eq!(ledger_ref_at(&text), None, "{text:?}");
+                    if lead == "http://" {
+                        // A whole scheme: what follows it, wide characters included, is the URL.
+                        let url = text.split(' ').next().unwrap();
+                        assert_eq!(url_at(&text), Some(url.len()), "{text:?}");
+                        assert!(
+                            got.contains(&format!("<a href='{url}'>{url}</a> tail")),
+                            "{got}"
+                        );
+                    } else {
+                        assert_eq!(url_at(&text), None, "{text:?}");
+                        assert_eq!(got, html, "{text:?}");
+                    }
+                }
+            }
+        }
+        // And a URL or a reference beside a multibyte character still links, while a wide
+        // LETTER after the number still makes it a word rather than a reference.
+        assert_eq!(
+            linkify("<p data-linkify='default'>http://a.example/é€ and ledger #7€, ledger #8é</p>"),
+            "<p data-linkify='default'><a href='http://a.example/é€'>http://a.example/é€</a> \
+             and <a href='/l/default/item/7'>ledger #7</a>€, ledger #8é</p>"
+        );
+        assert_eq!(
+            linkify("<p data-linkify='default'>€ledger #7 é</p>"),
+            "<p data-linkify='default'>€<a href='/l/default/item/7'>ledger #7</a> é</p>"
+        );
     }
 
     #[test]

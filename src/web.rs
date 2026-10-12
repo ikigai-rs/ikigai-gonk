@@ -574,11 +574,14 @@ fn repository_grants() -> Vec<(String, String)> {
 }
 
 /// `2026-09-14T10:00:00.123Z` → `2026-09-14 10:00 UTC`.
+/// Anything else is shown as written: the head is read with `get` and must be ASCII, so a
+/// stored value with a wide character where the digits go cannot panic the page (ledger #1376).
 pub(crate) fn when(iso: &str) -> String {
-    if iso.len() >= 16 && iso.as_bytes()[10] == b'T' {
-        format!("{} {} UTC", &iso[..10], &iso[11..16])
-    } else {
-        iso.to_string()
+    match iso.get(..16).filter(|head| head.is_ascii()) {
+        Some(head) if head.as_bytes()[10] == b'T' => {
+            format!("{} {} UTC", &head[..10], &head[11..])
+        }
+        _ => iso.to_string(),
     }
 }
 
@@ -2965,6 +2968,22 @@ mod tests {
         assert_eq!(form("a=%zz%4")["a"], "%zz%4");
         // A multibyte character right after `%` must not panic the request.
         assert_eq!(form("a=%é1&b=%%")["a"], "%é1");
+    }
+
+    /// Ledger [#1376](http://localhost:1062/l/default/item/1376)'s sweep: a stored time is
+    /// shown as `date time UTC` only when it has that shape; anything else (a wide character
+    /// where the minutes go, a short value) is shown as written, never a panic.
+    #[test]
+    fn a_time_is_shortened_only_when_it_has_the_shape() {
+        assert_eq!(when("2026-09-14T10:00:00.123Z"), "2026-09-14 10:00 UTC");
+        for odd in [
+            "2026-09-14T10:0€0Z",
+            "2026-09-14T1€:00Z",
+            "2026-09-14T",
+            "é",
+        ] {
+            assert_eq!(when(odd), odd, "{odd:?}");
+        }
     }
 
     #[test]
