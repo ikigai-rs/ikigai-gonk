@@ -2235,10 +2235,12 @@ draft carries where it came from into the version a person publishes.
   first draft, then a repair for each refusal, each repair prompt carrying exactly what the
   check refused. Drafting also stops the first time the model repeats a draft. A draft that
   never validates is answered as **failed**, every attempt listed, no query, nothing saved.
-- ⚠ **No `max_tokens` on a draft.** `ikigai-nl` 0.1.0 sends `prompt`, `as` and `temperature`
-  and no ceiling, and every other ask this server makes carries one, because a thinking model
-  with none can burn its budget reasoning and return nothing. Choose a non-reasoning model for
-  `gonk.nl.ask` until the library takes one (reported up).
+- **The spend per call: 2048 tokens a draft** (`ikigai-nl`'s `DEFAULT_MAX_TOKENS`, sent as
+  `max_tokens=` since `ikigai-nl` 0.2.0, ledger [#1203](http://localhost:1060/l/default/item/1203);
+  gonk takes the library's default). A drafted query is well under a thousand tokens, so the
+  bound is about time: a model that runs past it is cut off, its answer fails the check, and the
+  attempt is repaired or answered as failed. A reasoning model can still spend the whole bound
+  thinking and return nothing, so a non-reasoning model is the better `gonk.nl.ask`.
 - **The grounding's size: it fits, measured on a ledger the size of the live one.** `ikigai-nl`
   refuses a grounding over 1 MiB (never truncates it). `tests/nl_1138.rs` seeds 750 items and
   composes browse as the live gonk does; the ledger graph's SHAPE is bounded by its partitions

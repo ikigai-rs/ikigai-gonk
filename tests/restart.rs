@@ -411,7 +411,15 @@ fn a_certificate_client_beside_a_passkey_opens_both_doors() {
     assert!(both.banner.contains("1 passkey(s)"), "{}", both.banner);
     let quic = both.quic_line();
     assert!(
-        quic.contains("udp 127.0.0.1:0") && quic.contains("1 trusted certificate(s), 1 enrolled"),
+        quic.contains("1 trusted certificate(s), 1 enrolled"),
         "{quic}"
     );
+    // ★ Asked for port 0, the banner names the port the door BOUND (ledger #1300): through
+    // gonk 0.x with `ikigai_quic::serve` it said `udp 127.0.0.1:0`, a door nobody could find.
+    let port: u16 = quic
+        .split_once("udp 127.0.0.1:")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("a udp 127.0.0.1:<port> quic line: {quic}"));
+    assert_ne!(port, 0, "the banner names the bound port: {quic}");
 }
