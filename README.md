@@ -2098,7 +2098,8 @@ $ curl -X POST -b 'gonk_session=…' --data-binary @titles.rq \
 $ curl -b 'gonk_session=…' 'http://localhost:1060/script/titles/result'     # run it
 ```
 
-The body of the POST is the ask (`ask=` works too). `graph=<iri>` focuses the draft on one graph,
+The body of the POST is the ask (`ask=` works too). `focus=<iri>` focuses the draft on one graph
+(`graph=` is a deprecated alias in `ikigai-nl` 0.3.0, kept for one release),
 `as=application/json` answers every attempt with what the check said of it, and
 `as=text/turtle` the drafting's PROV-O. The saved text opens with that provenance as comment
 lines (the ask, each attempt and its model, the grounding's and the prompts' digests), so the
@@ -2151,19 +2152,28 @@ draft carries where it came from into the version a person publishes.
   refuses a grounding over 1 MiB (never truncates it). `tests/nl_1138.rs` seeds 750 items and
   composes browse as the live gonk does; the ledger graph's SHAPE is bounded by its partitions
   and samples, not its item count, so what grows a grounding is the caller's manifold. Release
-  build, in process:
+  build, in process, `ikigai-nl` 0.3.0, the WHOLE grounding (`urn:nl:grounding`, every part)
+  over one browse root:
 
   | caller | no focus, JSON | no focus, Turtle | `focus=urn:iki:ledger:graph:default` |
   | --- | --- | --- | --- |
-  | anonymous | 249 KB | 265 KB | 3.5 KB |
-  | a person (`--ledger default=write --nl draft`) | 258 KB | 277 KB | 3.5 KB |
-  | the same with `--browse read` | 355 KB | 365 KB | 3.5 KB |
-  | root (the socket) | 431 KB | 459 KB | 3.5 KB |
+  | anonymous | 276 KB | 292 KB | 5.5 KB |
+  | a person (`--ledger default=write --nl draft`) | 286 KB | 304 KB | 5.5 KB |
+  | the same with `--browse read` | 383 KB | 392 KB | 5.5 KB |
+  | root (the socket) | 456 KB | 482 KB | 5.5 KB |
 
-  Root's unfocused grounding is 42% of the bound. It is computed in about 20 to 30 ms cold;
-  the parts are cached, but the grounding itself is recomputed on every read (about 3 to 5 ms
-  for JSON, 10 to 20 ms for Turtle) because its examples come from `urn:script:catalog`, which
-  is live (the library's README says why).
+  ⚠ The manifold part grows by about 100 KB per browse root, so the whole unfocused grounding
+  does NOT fit on a gonk with the live root count: over 51 roots it was 4,886,597 bytes as JSON
+  on `ikigai-nl` 0.2.1, whose drafter read it whole and so refused every unfocused draft. **A
+  draft no longer reads it**: since 0.3.0 the drafter and the check read only the vocabulary,
+  the graphs and the examples (ledger [#1243](http://localhost:1060/l/default/item/1243)): 109 KB
+  as root over 51 roots, and
+  `tests/nl_1138.rs::an_unfocused_draft_over_the_live_root_count_fits_the_bound` drafts unfocused
+  over 51 roots. A direct unfocused read of `urn:nl:grounding` there still needs `focus=` or
+  `parts=`. The whole grounding is
+  computed in about 20 ms cold; the parts are cached, but the grounding itself is recomputed on
+  every read (about 2 to 3 ms for JSON, 9 to 15 ms for Turtle) because its examples come from
+  `urn:script:catalog`, which is live (the library's README says why).
 
 ### What else is decided here
 

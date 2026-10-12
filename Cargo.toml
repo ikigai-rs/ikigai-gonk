@@ -194,6 +194,10 @@ ikigai-ledger = "0.9.0"
 # may name a NAMESPACE (`urn:cap:script:{act}:{namespace}-*`, `authority::cap_namespace`),
 # which `--script team-*=publish` mints. On 0.2.x a stamped run through the HTTP door is a
 # `400` without the strip, so this is an API floor. ⚠ `"0.3.0"` is `<0.4.0`.
+# The lock carries 0.3.3 (ledger #1261, ikigai-script PR 20): running a DRAFT answers "is a draft;
+# publish it" instead of a misleading `urn:cap:lisp` refusal, and a SPARQL draft's refusal no
+# longer points at `urn:script:eval`, which refuses SPARQL. A better refusal, not an API this
+# binary calls, so 0.3.0 stays the stated floor.
 ikigai-script = "0.3.0"
 # ★ The rate on ANONYMOUS script runs (ledger #1175, `crate::script::ANONYMOUS_RUNS`): one
 # `RateLimit` overlay over the script family, consulted only for a run whose capability carries
@@ -238,8 +242,17 @@ ikigai-shacl = "0.3.3"
 # gonk builds its `Llm` from that default and needed no change. `"0.1.0"` was `<0.2.0`, a
 # ceiling. 0.2.1 (ledger #1196) asks ikigai-script's own rule whether a caller may read a named
 # example, so a namespace grant counts; it takes ikigai-script 0.3.x, which gonk already pins.
-# ⚠ `"0.2.0"` is `<0.3.0`.
-ikigai-nl = "0.2.0"
+# ★ 0.3.0 is the floor now (ledger #1243, #1242; ikigai-nl PR 12), and `"0.2.0"` was a CEILING
+# that held it out: through 0.2.x the drafter's grounding carried the caller's whole manifold,
+# about 100 KB of browse actions per root, so on the live gonk (51 roots) every UNFOCUSED draft
+# was refused before any model call at ~4.9 MB against the 1 MiB bound. 0.3.0's drafter and check
+# read only the vocabulary, the graphs and the examples (`parts=` on `urn:nl:grounding`), so the
+# root count no longer moves a draft. Also in 0.3.0: an empty preview triggers a repair and a
+# draft still empty is saved MARKED; the focus argument is `focus=` everywhere (`graph=` a
+# deprecated alias on `urn:nl:sparql` for one release; gonk passes neither). Nothing here calls
+# new API by name. `tests/nl_1138.rs::an_unfocused_draft_over_the_live_root_count_fits_the_bound`
+# is the FLOOR TEST: on 0.2.1 it is that refusal (4,886,597 bytes). ⚠ `"0.3.0"` is `<0.4.0`.
+ikigai-nl = "0.3.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
