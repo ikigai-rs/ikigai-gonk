@@ -31,6 +31,11 @@
 //! state changes on the layer host's schedule, and threads do not cross a mount. A `gonk.mount`
 //! line still refuses every prefix but `urn:llm:`; a layer is reachable only by binding it.
 //!
+//! Every call through them runs under a SHORT deadline ([`CALL_TIMEOUT`], plus the wait of a
+//! feed read that asks for one): a layer host that accepts a call and never answers it fails the
+//! pass in seconds, naming the host, rather than holding it for the transport's idle timeout
+//! (ledger [#1335](http://localhost:1060/l/default/item/1335)).
+//!
 //! # What a binding refuses
 //!
 //! - **A layer whose model is not `tuplespace`.** Only a task layer is bound to a ledger;
@@ -42,9 +47,10 @@
 //!   bindings that name different doors (one layer host per gonk, so `urn:layers:` and
 //!   `urn:collab:` have one place to resolve).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 use ikigai_core::{Error, Iri, Representation, Request, Resolution, Scope, Space, SpaceEntry};
 use ikigai_ledger::claim::ClaimKind;
@@ -56,6 +62,24 @@ use crate::mount::{LazyMount, Target};
 /// The longest layer name ikigai-layers accepts: MCP caps a tool name at 64 characters and the
 /// longest a layer projects is `layer-{layer}-latest__source`.
 pub const MAX_LAYER_NAME: usize = 24;
+
+/// The deadline every call through a layer binding's door runs under: a feed read gets its own
+/// wait on top ([`crate::mount::deadline_for`]), and a self-description keeps
+/// [`crate::mount::DESCRIBE_TIMEOUT`].
+///
+/// ★ Ledger [#1335](http://localhost:1060/l/default/item/1335): every other call a mirror or a
+/// taker makes (a definition, an `rd` page, a take, a drop, `urn:layers:me`) is answered by a
+/// healthy layer host in well under a second, so fifteen is generous and a host that accepts a
+/// call and never answers it costs a pass fifteen seconds, not the transport's 300 (twice, with
+/// the replay). Far below the mount default ([`crate::mount::CALL_TIMEOUT`]), which is sized
+/// for model calls.
+///
+/// ```
+/// use ikigai_gonk::layer::CALL_TIMEOUT;
+/// assert_eq!(CALL_TIMEOUT, std::time::Duration::from_secs(15));
+/// assert!(CALL_TIMEOUT < ikigai_gonk::mount::CALL_TIMEOUT);
+/// ```
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The principal a mirror's own ledger writes carry: `urn:iki:gonk:layer:{layer}`.
 ///
@@ -285,7 +309,7 @@ pub fn mount(bindings: &[Binding]) -> Mounted {
             spaces: Vec::new(),
         };
     };
-    let door = Arc::new(LazyMount::fresh(first.target.clone()));
+    let door = Arc::new(LazyMount::fresh(first.target.clone()).with_call_timeout(CALL_TIMEOUT));
     let origin = first.target.to_string();
     let resolver = || Arc::clone(&door) as Arc<dyn Resolver>;
     let mut spaces: Vec<Arc<dyn Space>> = bindings
@@ -385,6 +409,43 @@ pub(crate) fn request(verb: ikigai_core::Verb, iri: &str) -> Request {
 fn kinds() -> &'static RwLock<BTreeMap<(String, String), ClaimKind>> {
     static KINDS: OnceLock<RwLock<BTreeMap<(String, String), ClaimKind>>> = OnceLock::new();
     KINDS.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+/// `ik:Machine`: a running host acting under its own identity (itself a `prov:SoftwareAgent`).
+const IK_MACHINE: &str = "https://ikigai-rs.dev/ns#Machine";
+/// `foaf:Person`.
+const FOAF_PERSON: &str = "http://xmlns.com/foaf/0.1/Person";
+/// `prov:SoftwareAgent`: an agent acting for a person (a collaborator's Claude).
+const PROV_SOFTWARE_AGENT: &str = "http://www.w3.org/ns/prov#SoftwareAgent";
+
+/// The claim kind a participant's `rdf:type`s in a collaboration's participants graph name, read
+/// the way the layer host reads them for `urn:layers:me` (ikigai-layers' `kind_of`): `ik:Machine`
+/// first (it is also a `prov:SoftwareAgent`), then `foaf:Person`, then `prov:SoftwareAgent` as an
+/// AGENT ([`ClaimKind::Agent`], ikigai-ledger 0.11.0, ledger
+/// [#1330](http://localhost:1060/l/default/item/1330)), and `Machine`, the ledger's own default,
+/// for anything else.
+///
+/// ```
+/// use std::collections::BTreeSet;
+/// use ikigai_gonk::layer::kind_of;
+/// use ikigai_ledger::claim::ClaimKind;
+/// let types = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+/// let agent = "http://www.w3.org/ns/prov#SoftwareAgent";
+/// assert_eq!(kind_of(&types(&["http://xmlns.com/foaf/0.1/Person"])), ClaimKind::Person);
+/// assert_eq!(kind_of(&types(&[agent])), ClaimKind::Agent);
+/// assert_eq!(kind_of(&types(&[agent, "https://ikigai-rs.dev/ns#Machine"])), ClaimKind::Machine);
+/// assert_eq!(kind_of(&types(&["urn:example:Robot"])), ClaimKind::Machine);
+/// ```
+pub fn kind_of(types: &BTreeSet<String>) -> ClaimKind {
+    if types.contains(IK_MACHINE) {
+        ClaimKind::Machine
+    } else if types.contains(FOAF_PERSON) {
+        ClaimKind::Person
+    } else if types.contains(PROV_SOFTWARE_AGENT) {
+        ClaimKind::Agent
+    } else {
+        ClaimKind::Machine
+    }
 }
 
 /// Record what `mirror`'s collaboration says each participant is, replacing what it said before.

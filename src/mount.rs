@@ -69,7 +69,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ikigai_core::{Capability, Error, Representation, Request, Space, SpaceEntry};
+use ikigai_core::{ArgRef, Capability, Error, Representation, Request, Space, SpaceEntry, Verb};
 use ikigai_resolve::{CacheStatus, MountedRemote, Resolver};
 
 /// The only prefix this server mounts.
@@ -140,6 +140,62 @@ pub fn hold_after(failures: u32) -> Duration {
 /// ```
 pub const DESCRIBE_TIMEOUT: Duration =
     Duration::from_millis(ikigai_quic::DEFAULT_DESCRIBE_TIMEOUT.as_millis() as u64 * 2 / 3);
+
+/// The deadline a mounted call that is NOT a self-description runs under, from its first byte
+/// to its last, unless the mount sets its own ([`LazyMount::with_call_timeout`]): the
+/// transports' own standing bound, 300 s on both (`ikigai_quic::DEFAULT_IDLE_TIMEOUT`,
+/// `ikigai_ipc::DEFAULT_TIMEOUT`).
+///
+/// ★ Ledger [#1335](http://localhost:1060/l/default/item/1335): through cli 0.1.52 a mounted call
+/// had no deadline of its own, only the transport's silence bound, so a peer that accepted a
+/// call and never answered it held the caller for twice the idle timeout (a read is replayed
+/// once on a fresh connection), and for ever if it kept the connection talking. The standing
+/// bound is the default ON PURPOSE for `urn:llm:`: a model call is long, and against an honest
+/// peer the silence before its reply already was the whole call, so no call that used to finish
+/// is cut. A task layer's door sets a short one ([`crate::layer::CALL_TIMEOUT`]).
+///
+/// ```
+/// use ikigai_gonk::mount::CALL_TIMEOUT;
+/// assert_eq!(CALL_TIMEOUT, ikigai_quic::DEFAULT_IDLE_TIMEOUT);
+/// assert_eq!(CALL_TIMEOUT, ikigai_ipc::DEFAULT_TIMEOUT);
+/// ```
+pub const CALL_TIMEOUT: Duration = ikigai_quic::DEFAULT_IDLE_TIMEOUT;
+
+/// The most a request's own `wait=<seconds>` (a long poll: a layer's feed waits up to a minute
+/// for an event) adds to the call deadline ([`deadline_for`]). A caller's `wait` is the caller's
+/// to choose, so without a ceiling it would choose the deadline too.
+pub const MAX_WAIT: Duration = Duration::from_secs(120);
+
+/// The deadline `request` runs under on a mount whose call deadline is `call`: `call`, plus the
+/// request's own `wait=<seconds>` (at most [`MAX_WAIT`]) when it asks the peer to WAIT. A long
+/// poll is not a peer that went silent, so a short call deadline must not cut it; a peer that
+/// says nothing for the wait AND the deadline is.
+///
+/// ```
+/// use std::time::Duration;
+/// use ikigai_core::{ArgRef, Iri, Request, Verb};
+/// use ikigai_gonk::mount::{deadline_for, MAX_WAIT};
+/// let call = Duration::from_secs(15);
+/// let feed = |wait: &str| {
+///     Request::new(Verb::Source, Iri::parse("urn:layer:tasks:feed").unwrap())
+///         .with_arg("wait", ArgRef::Inline(wait.as_bytes().to_vec()))
+/// };
+/// assert_eq!(deadline_for(&feed("50"), call), Duration::from_secs(65));
+/// assert_eq!(deadline_for(&feed("100000"), call), call + MAX_WAIT);
+/// assert_eq!(deadline_for(&feed("soon"), call), call);
+/// let rd = Request::new(Verb::Source, Iri::parse("urn:layer:tasks:tuples").unwrap());
+/// assert_eq!(deadline_for(&rd, call), call);
+/// ```
+pub fn deadline_for(request: &Request, call: Duration) -> Duration {
+    let wait = match request.args.get("wait") {
+        Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .map(Duration::from_secs),
+        _ => None,
+    };
+    call + wait.unwrap_or(Duration::ZERO).min(MAX_WAIT)
+}
 
 /// Where a mounted peer lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,11 +374,45 @@ pub struct LazyMount {
     fresh: bool,
     /// The peer's self-description deadline ([`DESCRIBE_TIMEOUT`] unless a test sets it).
     describe_timeout: Duration,
+    /// Every other call's deadline ([`CALL_TIMEOUT`] unless the mount sets its own).
+    call_timeout: Duration,
+}
+
+/// A connected peer, by transport: kept concrete, not as `dyn Resolver`, because a call that asks
+/// the peer to wait runs under a deadline of its own (`issue_as_within`), which the trait has
+/// no word for.
+enum Peer {
+    Socket(ikigai_ipc::IpcResolver),
+    Quic(ikigai_quic::QuicResolver),
+}
+
+impl Peer {
+    fn resolver(&self) -> &dyn Resolver {
+        match self {
+            Peer::Socket(resolver) => resolver,
+            Peer::Quic(resolver) => resolver,
+        }
+    }
+
+    /// `request` under `deadline` when one is given, else under the standing deadlines the
+    /// dial set (the call deadline, or the describe deadline for a `Meta`).
+    fn issue_as(
+        &self,
+        request: Request,
+        capability: &Capability,
+        deadline: Option<Duration>,
+    ) -> Result<(Representation, CacheStatus), Error> {
+        match (self, deadline) {
+            (Peer::Socket(resolver), Some(d)) => resolver.issue_as_within(request, capability, d),
+            (Peer::Quic(resolver), Some(d)) => resolver.issue_as_within(request, capability, d),
+            (peer, None) => peer.resolver().issue_as(request, capability),
+        }
+    }
 }
 
 #[derive(Default)]
 struct State {
-    connected: Option<Arc<dyn Resolver>>,
+    connected: Option<Arc<Peer>>,
     /// When the next dial may be attempted, after a failure.
     hold_until: Option<Instant>,
     /// Failed dials in a row, for [`hold_after`]; a dial that connects resets it.
@@ -337,7 +427,21 @@ impl LazyMount {
             state: Mutex::new(State::default()),
             fresh: false,
             describe_timeout: DESCRIBE_TIMEOUT,
+            call_timeout: CALL_TIMEOUT,
         }
+    }
+
+    /// Set the deadline every call that is not a self-description runs under (builder):
+    /// [`CALL_TIMEOUT`] by default. Takes effect at the next dial, so set it before the first
+    /// use. A request that asks the peer to wait gets its wait on top ([`deadline_for`]).
+    pub fn with_call_timeout(mut self, deadline: Duration) -> LazyMount {
+        self.call_timeout = deadline;
+        self
+    }
+
+    /// The call deadline ([`LazyMount::with_call_timeout`]).
+    pub fn call_timeout(&self) -> Duration {
+        self.call_timeout
     }
 
     /// Set the peer's self-description deadline (builder): [`DESCRIBE_TIMEOUT`] by default.
@@ -373,7 +477,7 @@ impl LazyMount {
     /// `Err` is [`Error::Unavailable`] — the transient the mount means it to be: a caller
     /// (or a reliability overlay above it) can tell "the peer is down" from "the peer said
     /// no", which a blanket endpoint error could not.
-    fn resolver(&self) -> Result<Arc<dyn Resolver>, Error> {
+    fn resolver(&self) -> Result<Arc<Peer>, Error> {
         let mut state = self.state();
         if let Some(resolver) = &state.connected {
             return Ok(Arc::clone(resolver));
@@ -391,8 +495,12 @@ impl LazyMount {
         }
         // The lock is deliberately held across the dial: a burst of first calls should cost
         // one handshake, not one each.
-        let (target, deadline) = (self.target.clone(), self.describe_timeout);
-        let dialled = off_thread(move || dial(&target, deadline))
+        let (target, describe, call) = (
+            self.target.clone(),
+            self.describe_timeout,
+            self.call_timeout,
+        );
+        let dialled = off_thread(move || dial(&target, describe, call))
             .unwrap_or_else(|| Err("the dial panicked".to_string()));
         match dialled {
             Ok(resolver) => {
@@ -518,12 +626,17 @@ pub fn net_grant(target: &Target, capability: &Capability) -> Result<(), Error> 
 }
 
 /// Dial `target`, with `describe` as the peer's self-description deadline
-/// ([`DESCRIBE_TIMEOUT`]). Neither transport blocks longer than its own connect timeout.
-fn dial(target: &Target, describe: Duration) -> Result<Arc<dyn Resolver>, String> {
+/// ([`DESCRIBE_TIMEOUT`]) and `call` as every other call's ([`CALL_TIMEOUT`]). Neither
+/// transport blocks longer than its own connect timeout.
+fn dial(target: &Target, describe: Duration, call: Duration) -> Result<Arc<Peer>, String> {
     match target {
         Target::Socket(path) => ikigai_ipc::connect(path)
             .map(|resolver| {
-                Arc::new(resolver.with_describe_timeout(Some(describe))) as Arc<dyn Resolver>
+                Arc::new(Peer::Socket(
+                    resolver
+                        .with_describe_timeout(Some(describe))
+                        .with_call_timeout(Some(call)),
+                ))
             })
             .map_err(|e| format!("{}: {e}", path.display())),
         Target::Quic { authority, certs } => {
@@ -541,7 +654,11 @@ fn dial(target: &Target, describe: Duration) -> Result<Arc<dyn Resolver>, String
                 .ok_or_else(|| format!("quic://{authority}: resolved to no address"))?;
             ikigai_quic::connect(addr, &identity, &server)
                 .map(|resolver| {
-                    Arc::new(resolver.with_describe_timeout(Some(describe))) as Arc<dyn Resolver>
+                    Arc::new(Peer::Quic(
+                        resolver
+                            .with_describe_timeout(Some(describe))
+                            .with_call_timeout(Some(call)),
+                    ))
                 })
                 .map_err(|e| format!("quic://{authority} ({addr}): {e}"))
         }
@@ -581,11 +698,15 @@ impl Resolver for LazyMount {
     ) -> Result<(Representation, CacheStatus), Error> {
         // Before the dial: a caller this mount refuses costs no handshake.
         net_grant(&self.target, capability)?;
-        let resolver = self.resolver()?;
+        let peer = self.resolver()?;
         let capability = capability.clone();
         let target = self.target.to_string();
+        // A long poll (`wait=`) runs under the call deadline plus its wait; everything else
+        // under the standing deadlines the dial set. A `Meta` keeps the describe deadline.
+        let deadline = (request.verb != Verb::Meta && request.args.contains_key("wait"))
+            .then(|| deadline_for(&request, self.call_timeout));
         let answer =
-            off_thread(move || resolver.issue_as(request, &capability)).ok_or_else(|| {
+            off_thread(move || peer.issue_as(request, &capability, deadline)).ok_or_else(|| {
                 Error::Endpoint(format!("the mount to {target} panicked serving this call"))
             })?;
         if matches!(answer, Err(Error::Unavailable(_))) {
@@ -605,16 +726,16 @@ impl Resolver for LazyMount {
 
     fn is_cached(&self, request: &Request, capability: &Capability) -> bool {
         // The peer knows; if it cannot be asked, the answer is no.
-        let Ok(resolver) = self.resolver() else {
+        let Ok(peer) = self.resolver() else {
             return false;
         };
         let (request, capability) = (request.clone(), capability.clone());
-        off_thread(move || resolver.is_cached(&request, &capability)).unwrap_or(false)
+        off_thread(move || peer.resolver().is_cached(&request, &capability)).unwrap_or(false)
     }
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
-        let resolver = self.resolver().ok()?;
-        off_thread(move || resolver.entries()).flatten()
+        let peer = self.resolver().ok()?;
+        off_thread(move || peer.resolver().entries()).flatten()
     }
 
     /// The tracer is forwarded only when the peer is ALREADY connected: `set_tracer` is
@@ -622,14 +743,14 @@ impl Resolver for LazyMount {
     /// attempt. Untraced (or first-call) mounted work shows as one node rather than the
     /// peer's subtree, which is a loss of detail and not of correctness.
     fn set_tracer(&self, tracer: Arc<dyn ikigai_core::Tracer>) {
-        if let Some(resolver) = self.state().connected.as_ref() {
-            resolver.set_tracer(tracer);
+        if let Some(peer) = self.state().connected.as_ref() {
+            peer.resolver().set_tracer(tracer);
         }
     }
 
     fn clear_tracer(&self) {
-        if let Some(resolver) = self.state().connected.as_ref() {
-            resolver.clear_tracer();
+        if let Some(peer) = self.state().connected.as_ref() {
+            peer.resolver().clear_tracer();
         }
     }
 

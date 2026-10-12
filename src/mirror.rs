@@ -22,18 +22,26 @@
 //!    for [`LEASE`]; an offer released by its taker is replaced by a new one.
 //!
 //! ★ **Nothing closes across.** The mirror holds `urn:cap:ledger:{read,claim,comment}:{ledger}`
-//! (the worker grant, [`crate::grants::Authority::Worker`]) and never `close`: the taker's
-//! hand-back makes the item wait for its dispatcher, who checks the evidence and closes it.
+//! (the worker grant, [`crate::grants::Authority::Worker`]) plus `urn:cap:ledger:about:{ledger}`
+//! ([`capability`]), and never `close` or `write`: the taker's hand-back makes the item wait for
+//! its dispatcher, who checks the evidence and closes it.
 //!
 //! # Where an offer is recorded
 //!
-//! On its item, as a COMMENT keyed `layer:{layer}:offered:<offer IRI>`, written before the offer
-//! is dropped. The design said `about <offer IRI>`, and `item:{id}:about` needs
-//! `urn:cap:ledger:write:{ledger}`, which is the close grant too; a keyed comment is the record
-//! the worker grant CAN write, it is idempotent, and it shows the person reading the item where
-//! its work went. A crash between the record and the drop leaves a recorded offer the layer has
+//! On its item, as an `about` edge to the offer's IRI (`item:{id}:about`), written before the
+//! offer is dropped: what the design said, what `items about=<offer>` finds, and what the item's
+//! page shows as where its work went. Adding an edge already there is not an error, so the record
+//! is idempotent. A crash between the record and the drop leaves a recorded offer the layer has
 //! never seen, which the next pass drops (the same subject, so the layer's replay rule makes a
 //! retry one record).
+//!
+//! ★ Through ikigai-ledger 0.9 `item:{id}:about` needed `urn:cap:ledger:write:{ledger}`, which is
+//! the close grant too, so gonk recorded an offer as a COMMENT keyed
+//! `layer:{layer}:offered:<offer IRI>` ([`offered_key`]). 0.10.0 split the `about` grant out of
+//! write (ledger [#1315](http://localhost:1060/l/default/item/1315)) and the mirror records an
+//! edge now (ledger [#1330](http://localhost:1060/l/default/item/1330)). An item offered before
+//! still carries only the comment, and [`Mirror::pass`] reads BOTH, so those offers are neither
+//! lost nor offered a second time; nothing is migrated.
 //!
 //! # What crosses
 //!
@@ -115,7 +123,6 @@ const PROV_ATTRIBUTED: &str = "http://www.w3.org/ns/prov#wasAttributedTo";
 const PROV_USED: &str = "http://www.w3.org/ns/prov#used";
 const PROV_ASSOCIATED: &str = "http://www.w3.org/ns/prov#wasAssociatedWith";
 const PROV_ENDED: &str = "http://www.w3.org/ns/prov#endedAtTime";
-const FOAF_PERSON: &str = "http://xmlns.com/foaf/0.1/Person";
 
 fn ik(local: &str) -> String {
     format!("{IK}{local}")
@@ -417,26 +424,35 @@ impl LayerClient {
     /// read from `urn:layers:me as=application/json` (ikigai-layers 0.2.2, ledger
     /// [#1316](http://localhost:1060/l/default/item/1316)).
     ///
-    /// `Ok(None)` only when the host does not serve that resource (a host on ikigai-layers
-    /// 0.2.1 or older answers `NotFound` or `Unresolved`): the caller then falls back to
-    /// inferring its principal from the records it holds, as gonk did before.
-    /// Any other failure is an error, never a guess.
+    /// ★ A host that does not serve it (ikigai-layers 0.2.1 or older answers `NotFound` or
+    /// `Unresolved`) is REFUSED by name (ledger [#1328](http://localhost:1060/l/default/item/1328)).
+    /// Through gonk 0.x the caller then inferred its principal from the records it held, which
+    /// knew nothing before the first take or offer and was wrong once the ledger held an item
+    /// filed for someone else's take (ledger #1336). Every layer host gonk talks to serves it
+    /// since cli 0.1.55 (layers 0.2.4); an older one is named, never guessed around.
     ///
     /// # Errors
     ///
-    /// When the door refuses or fails, or the answer is not the JSON face naming a principal.
-    pub fn me(&self) -> Result<Option<String>, String> {
+    /// When the host does not serve `urn:layers:me`, the door refuses or fails, or the answer is
+    /// not the JSON face naming a principal.
+    pub fn me(&self) -> Result<String, String> {
         let request = layer::request(Verb::Source, ME).with_arg("as", inline("application/json"));
         let answer = match self.door.call(request) {
             Ok(answer) => answer,
-            Err(Error::NotFound(_)) | Err(Error::Unresolved(_)) => return Ok(None),
+            Err(e @ (Error::NotFound(_) | Error::Unresolved(_))) => {
+                return Err(format!(
+                    "the layer host does not serve {ME} ({e}), so this server cannot tell \
+                     which offers and takes are its own: it needs ikigai-layers 0.2.2 or newer \
+                     (an `ikigai serve` door from cli 0.1.55 on)"
+                ))
+            }
             Err(e) => return Err(format!("reading {ME}: {e}")),
         };
         let json: serde_json::Value = serde_json::from_slice(&answer.bytes)
             .map_err(|e| format!("{ME} answered no JSON: {e}"))?;
         json.get("principal")
             .and_then(serde_json::Value::as_str)
-            .map(|principal| Some(principal.to_string()))
+            .map(str::to_string)
             .ok_or_else(|| format!("{ME} names no principal: {json}"))
     }
 
@@ -492,9 +508,16 @@ impl LayerClient {
 }
 
 /// The capability a mirror writes to its ledger under: the worker grant (read, claim, comment,
-/// and the ledger graph's store tokens), acting as the mirror's own principal. Never `close`.
+/// and the ledger graph's store tokens) plus `urn:cap:ledger:about:{ledger}` (ikigai-ledger
+/// 0.10.0), which records an offer on its item, acting as the mirror's own principal. Never
+/// `close`, never `write`.
 pub fn capability(binding: &Binding) -> Result<Capability, String> {
-    let scopes = crate::grants::grants_for(&binding.ledger, crate::grants::Authority::Worker)?;
+    let mut scopes = crate::grants::grants_for(&binding.ledger, crate::grants::Authority::Worker)?;
+    scopes.push(
+        Ledger::parse(&binding.ledger)
+            .map_err(|e| e.to_string())?
+            .cap_about(),
+    );
     Capability::scoped(scopes)
         .with_principal(&binding.principal())
         .map_err(|e| format!("the mirror's principal {}: {e:?}", binding.principal()))
@@ -545,15 +568,19 @@ impl Mirror {
             .and_then(|r| parse_turtle(&r.bytes));
         match answer {
             Ok(triples) => {
-                let mut kinds = BTreeMap::new();
+                let mut types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
                 for (s, p, o) in &triples {
                     if *p == RDF_TYPE && !s.starts_with("_:") {
-                        let kind = kinds.entry(s.clone()).or_insert(ClaimKind::Machine);
-                        if o.value() == FOAF_PERSON {
-                            *kind = ClaimKind::Person;
-                        }
+                        types
+                            .entry(s.clone())
+                            .or_default()
+                            .insert(o.value().to_string());
                     }
                 }
+                let kinds: BTreeMap<String, ClaimKind> = types
+                    .into_iter()
+                    .map(|(participant, types)| (participant, layer::kind_of(&types)))
+                    .collect();
                 layer::record_kinds(&self.principal, &kinds);
             }
             Err(e) => report.failed(format!(
@@ -637,15 +664,20 @@ impl Mirror {
         }
     }
 
-    /// The offers recorded on each item: `item IRI → offer IRIs`, from the comment keys.
+    /// The offers recorded on each item: `item IRI → offer IRIs`, from its `about` edges to
+    /// this layer's offers, and from the comment keys an offer was recorded under before
+    /// ikigai-ledger 0.10 (see the module docs).
     fn recorded(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
         let ledger = Ledger::parse(&self.binding.ledger).map_err(|e| e.to_string())?;
         let prefix = offered_key(&self.binding.layer, "");
+        let offers = format!("{}:offer:", self.binding.layer_iri());
         let query = format!(
-            "SELECT ?item ?key WHERE {{ ?c <{on}> ?item ; <{key}> ?key . \
-             FILTER(STRSTARTS(STR(?key), \"{prefix}\")) }}",
+            "SELECT ?item ?key ?about WHERE {{ \
+             {{ ?c <{on}> ?item ; <{key}> ?key . FILTER(STRSTARTS(STR(?key), \"{prefix}\")) }} \
+             UNION {{ ?item <{about}> ?about . FILTER(STRSTARTS(STR(?about), \"{offers}\")) }} }}",
             on = v::ON_ITEM,
             key = v::COMMENT_KEY,
+            about = v::ABOUT,
         );
         let bytes = self.ledger_issue(
             layer::request(Verb::Source, "urn:iki:store:graph-select")
@@ -662,13 +694,12 @@ impl Mirror {
             .flatten()
         {
             let value = |name: &str| binding.pointer(&format!("/{name}/value"))?.as_str();
-            if let (Some(item), Some(key)) = (value("item"), value("key")) {
-                if let Some(offer) = key.strip_prefix(&prefix) {
-                    recorded
-                        .entry(item.to_string())
-                        .or_default()
-                        .push(offer.to_string());
-                }
+            let offer = value("about").or_else(|| value("key")?.strip_prefix(&prefix));
+            if let (Some(item), Some(offer)) = (value("item"), offer) {
+                recorded
+                    .entry(item.to_string())
+                    .or_default()
+                    .push(offer.to_string());
             }
         }
         for offers in recorded.values_mut() {
@@ -902,8 +933,7 @@ impl Mirror {
         // does not serve that, the dropper of an offer we recorded, which knows nothing until
         // we have one (ledger #1316).
         let known_offerer = match self.layer.me() {
-            Ok(Some(me)) => Some(me),
-            Ok(None) => ours.keys().find_map(|o| offerer(o, &pending, &taken)),
+            Ok(me) => Some(me),
             Err(e) => {
                 report.failed(format!("{e} (withdrawing orphaned offers waits a pass)"));
                 None
@@ -1016,9 +1046,10 @@ impl Mirror {
             return;
         }
         if existing.is_none() {
-            let key = offered_key(&self.binding.layer, &offer);
-            let text = format!("Offered in layer {} as <{offer}>.", self.binding.layer);
-            if let Err(e) = self.comment(item, &key, &text, false, report) {
+            let record = self
+                .ledger_request(Verb::Sink, &format!("item:{}:about", item.number))
+                .with_arg("content", inline(&offer));
+            if let Err(e) = self.ledger_issue(record) {
                 report.failed(format!("recording the offer of {}: {e}", item.display));
                 return;
             }
@@ -1101,7 +1132,8 @@ pub fn report_key(layer: &str, report: &str) -> String {
     format!("layer:{layer}:report:sha256:{hex}")
 }
 
-/// The comment key an offer is recorded under on its item.
+/// The comment key an offer was recorded under on its item before ikigai-ledger 0.10 (now an
+/// `about` edge; see the module docs), still read so those offers are not offered twice.
 pub fn offered_key(layer: &str, offer: &str) -> String {
     format!("layer:{layer}:offered:{offer}")
 }

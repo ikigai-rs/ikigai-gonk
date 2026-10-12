@@ -135,7 +135,7 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 
 /// Whether `held` already carries `token`, counting what one ledger grant implies about
 /// another: `urn:cap:ledger:write:{L}` covers `…:claim:{L}`, `…:comment:{L}` and `…:close:{L}`
-/// (`ikigai-ledger` 0.7.0). Used to say a minted grant ADDS something to what a caller already
+/// (`ikigai-ledger` 0.7.0), and `…:about:{L}` (0.10.0). Used to say a minted grant ADDS something to what a caller already
 /// holds, which a literal comparison would misjudge for a worker.
 ///
 /// ```
@@ -145,6 +145,7 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 ///     .unwrap()
 ///     .iter()
 ///     .all(|t| implied_by(t, &write)));
+/// assert!(implied_by("urn:cap:ledger:about:acme", &write));
 /// assert!(!implied_by("urn:cap:ledger:claim:other", &write));
 /// assert!(!implied_by("urn:cap:ledger:delete:acme", &write));
 /// ```
@@ -152,7 +153,7 @@ pub fn implied_by(token: &str, held: &[String]) -> bool {
     if held.iter().any(|h| h == token) {
         return true;
     }
-    ["claim", "comment", "close"].iter().any(|verb| {
+    ["claim", "comment", "close", "about"].iter().any(|verb| {
         token
             .strip_prefix(&format!("urn:cap:ledger:{verb}:"))
             .and_then(|name| Ledger::parse(name).ok())

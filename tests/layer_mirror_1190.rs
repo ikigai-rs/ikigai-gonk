@@ -123,6 +123,7 @@ const PARTICIPANTS: &str = r#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <urn:collab:participant:plasma-gonk> a ik:Machine ; prov:actedOnBehalfOf <urn:collab:participant:brian> .
 <urn:collab:participant:bobby>       a foaf:Person .
 <urn:collab:participant:bobby-gonk>  a ik:Machine ; prov:actedOnBehalfOf <urn:collab:participant:bobby> .
+<urn:collab:participant:bobby-claude> a prov:SoftwareAgent ; prov:actedOnBehalfOf <urn:collab:participant:bobby> .
 "#;
 
 const CREW: &str = r#"[[mount]]
@@ -130,6 +131,7 @@ layer = "tasks"
 plasma-gonk = ["read", "feed", "out", "take"]
 bobby-gonk  = ["read", "feed", "out", "take"]
 bobby       = ["read", "feed", "out", "take"]
+bobby-claude = ["read", "feed", "out", "take"]
 
 [[mount]]
 layer = "talk"
@@ -411,8 +413,9 @@ fn a_take_becomes_a_claim_by_the_taker() {
     let offer = offered(&pass(&mirror));
     assert!(offer.starts_with("urn:layer:tasks:offer:"), "{offer}");
     assert_eq!(w.pending(), std::slice::from_ref(&offer));
-    assert!(
-        w.comments(n).iter().any(|c| c.contains(&offer)),
+    assert_eq!(
+        w.item(n)["about"],
+        serde_json::json!([offer]),
         "the offer is recorded on its item"
     );
     settled(&mirror);
@@ -450,6 +453,106 @@ fn a_person_who_takes_holds_a_persons_claim() {
         claim["kind"], "person",
         "the participants graph says foaf:Person"
     );
+}
+
+/// ★ Ledger [#1330](http://localhost:1060/l/default/item/1330): an AGENT (`prov:SoftwareAgent`
+/// in the participants graph: a collaborator's Claude) holds an agent's claim. Through
+/// ikigai-ledger 0.10 there was no such kind, and the mirror stamped it `machine`, beside a
+/// cron loop.
+#[test]
+fn an_agent_who_takes_holds_an_agents_claim() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file(
+        "Draft the section\n\nWrite the first draft of section 2.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    w.take(&participant("bobby-claude"), &offer).unwrap();
+    pass(&mirror);
+    let claim = &w.item(n)["claim"];
+    assert_eq!(claim["holder"], participant("bobby-claude"));
+    assert_eq!(
+        claim["kind"], "agent",
+        "the participants graph says prov:SoftwareAgent"
+    );
+}
+
+/// ★ Ledger [#1330](http://localhost:1060/l/default/item/1330): an offer is recorded on its
+/// item as an `about` edge (the offer's IRI), which is what `items about=` finds and what the
+/// design said, not as a keyed comment. ikigai-ledger 0.10 split the `about` grant from
+/// `write`, so the mirror holds it without holding close.
+#[test]
+fn an_offer_is_recorded_as_an_about_edge_not_a_comment() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file(
+        "Port the exporter\n\nThe exporter writes the new format.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let about: Vec<String> = w.item(n)["about"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(about, vec![offer.clone()], "the item is about its offer");
+    assert!(
+        w.comments(n).is_empty(),
+        "no comment records it: {:?}",
+        w.comments(n)
+    );
+    let found = w
+        .gonk(
+            Verb::Source,
+            "items",
+            &[("about", &offer), ("as", "application/json")],
+        )
+        .unwrap();
+    assert!(found.contains(&format!("\"number\":{n}")), "{found}");
+    settled(&mirror);
+}
+
+/// An offer recorded the old way (a comment keyed `layer:{layer}:offered:<offer>`, gonk before
+/// ikigai-ledger 0.10) is still read: the next pass drops it under the name already recorded,
+/// rather than minting a second offer for the same item.
+#[test]
+fn an_offer_recorded_as_a_comment_is_still_read() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("An older item\n\nOffered before the about grant.", &[]);
+    let legacy = format!("urn:layer:{LAYER}:offer:{}", mirror::mint_id());
+    w.gonk(
+        Verb::Sink,
+        "comment",
+        &[
+            ("item", &n.to_string()),
+            ("key", &mirror::offered_key(LAYER, &legacy)),
+            (
+                "content",
+                &format!("Offered in layer {LAYER} as <{legacy}>."),
+            ),
+        ],
+    )
+    .unwrap();
+    let report = pass(&mirror);
+    assert_eq!(offered(&report), legacy, "{:?}", report.actions);
+    assert_eq!(w.pending(), vec![legacy]);
+    settled(&mirror);
+}
+
+/// The mirror's grant: the worker grant plus `about`, and still never close or write.
+#[test]
+fn the_mirror_holds_about_and_not_close() {
+    let capability = mirror::capability(&World::new().binding(LAYER)).unwrap();
+    assert!(capability.allows(&format!("urn:cap:ledger:about:{LEDGER}")));
+    for never in ["close", "write", "delete"] {
+        assert!(
+            !capability.allows(&format!("urn:cap:ledger:{never}:{LEDGER}")),
+            "the mirror holds {never}"
+        );
+    }
 }
 
 #[test]
@@ -1058,17 +1161,20 @@ fn a_take_whose_reply_was_lost_is_found_by_its_receipt() {
     assert!(theirs_not.contains(&participant("bobby")), "{theirs_not}");
 }
 
-/// From a host that does not serve `urn:layers:me` (before ikigai-layers 0.2.2) the taker infers
-/// who it is from what its ledger holds, as before: nothing before the first take, and a lost
-/// reply on another offer once it holds one.
+/// ★ Ledger [#1328](http://localhost:1060/l/default/item/1328): a host that does not serve
+/// `urn:layers:me` (ikigai-layers before 0.2.2) is REFUSED, by name, wherever this server needs
+/// to know who it is there. Through gonk 0.x it inferred itself from what its ledger held, which
+/// knew nothing before the first take and was wrong once the ledger held an item filed for
+/// someone else's take (ledger #1336). The edge door serves it since cli 0.1.55.
 #[test]
-fn without_urn_layers_me_a_lost_reply_resolves_only_after_the_first_take() {
+fn a_host_without_urn_layers_me_is_refused_by_name() {
     let w = World::new();
-    let mirror = w.mirror();
+    let mirror = w.mirror_through(Arc::new(WithoutMe(w.door(&us()))));
     let theirs = w.theirs_through(Arc::new(WithoutMe(w.door(&them()))));
     w.file("First\n\nOne.", &[]);
     w.file("Second\n\nTwo.", &[]);
-    let offers: Vec<String> = pass(&mirror)
+    let report = mirror.pass().expect("a pass");
+    let offers: Vec<String> = report
         .actions
         .iter()
         .filter(|a| a.starts_with("offered "))
@@ -1080,18 +1186,37 @@ fn without_urn_layers_me_a_lost_reply_resolves_only_after_the_first_take() {
                 .to_string()
         })
         .collect();
-    assert_eq!(offers.len(), 2);
-    w.take(&them(), &offers[0]).unwrap();
-    let unknown = theirs.taker.take(&offers[0]).unwrap_err();
+    assert_eq!(offers.len(), 2, "offering needs no identity");
     assert!(
-        unknown.contains("cannot tell") && unknown.contains("urn:layers:me"),
-        "{unknown}"
+        report
+            .problems
+            .iter()
+            .any(|p| p.contains("does not serve urn:layers:me")),
+        "the mirror says why it cannot know itself: {:?}",
+        report.problems
     );
+    // Their take whose reply was lost (taken at the door, never filed): refused, not inferred.
     assert!(matches!(theirs.taker.take(&offers[1]), Ok(Took::Filed(_))));
-    assert!(matches!(
-        theirs.taker.take(&offers[0]),
-        Ok(Took::Already(_))
-    ));
+    w.take(&them(), &offers[0]).unwrap();
+    let refused = theirs.taker.take(&offers[0]).unwrap_err();
+    assert!(
+        refused.contains("does not serve urn:layers:me"),
+        "{refused}"
+    );
+    // And their pass reports nothing, saying why, rather than guessing who it is.
+    let pass = theirs.taker.pass().expect("their pass");
+    assert!(
+        pass.problems
+            .iter()
+            .any(|p| p.contains("does not serve urn:layers:me")),
+        "{:?}",
+        pass.problems
+    );
+    assert!(
+        !pass.actions.iter().any(|a| a.starts_with("reported ")),
+        "{:?}",
+        pass.actions
+    );
 }
 
 /// ★ An offer whose item is DELETED is withdrawn, even when it was this ledger's only offer
@@ -1121,17 +1246,19 @@ fn the_only_offer_of_a_deleted_item_is_withdrawn() {
 
 // ---- the audit before a collaborator connects (2026-10-11) ----------------------------------
 
-/// The offer recorded on item `n` most recently, from its "Offered in layer" comment.
+/// The offer recorded on item `n` most recently, from its `about` edges (offer IRIs sort by the
+/// time they were minted).
 fn recorded_offer(w: &World, n: i64) -> String {
-    w.comments(n)
+    let item = w.item(n);
+    item["about"]
+        .as_array()
+        .unwrap()
         .iter()
-        .rev()
-        .find_map(|c| {
-            c.strip_prefix(&format!("Offered in layer {LAYER} as <"))
-                .and_then(|rest| rest.split_once('>'))
-                .map(|(offer, _)| offer.to_string())
-        })
-        .unwrap_or_else(|| panic!("no offer recorded on {n}: {:?}", w.comments(n)))
+        .filter_map(|a| a.as_str())
+        .filter(|a| a.starts_with(&format!("urn:layer:{LAYER}:offer:")))
+        .max()
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no offer recorded on {n}: {item}"))
 }
 
 /// A taker's report is the TAKER's content, kept whole inside the receipt of our take of it.

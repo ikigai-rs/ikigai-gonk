@@ -67,7 +67,14 @@ path = "src/main.rs"
 # its runs thread). Nothing in gonk calls 0.1.94 or 0.1.95 API by name.
 # ★ 0.1.96 since ledger #1287, a RESOLUTION floor: the cli-workspace crates at 0.1.52 (`ikigai-quic`
 # below, for the restarted-peer heal) require `^0.1.96`. Nothing in gonk calls 0.1.96 API by name.
-ikigai-core = "0.1.96"
+# ★ 0.1.98 since ledger #1330's arc (2026-10-12): the published head, and the release that
+# replaced 0.1.97, which shipped from the draft vocabulary branch and is YANKED. Between 0.1.96 and
+# it: a `%` in a name is a character in every face (ledger #1345, #1352), an authored scope is
+# escaped, parsed or kept as a literal everywhere (ledger #1356), and the floor memo degrades past
+# its bound (ledger #791). Nothing in gonk calls 0.1.97 or 0.1.98 API by name; the cli 0.1.55
+# crates below still ask only `^0.1.96`. The lock carries 0.1.99 (published the same day: core's
+# validate refuses a name no IRI can carry, ledger #1351). `"0.1.98"` is `<0.2.0`.
+ikigai-core = "0.1.98"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -76,7 +83,8 @@ ikigai-core = "0.1.96"
 # shipped binary links.
 # 0.1.93: the published head, beside core (they ship from one workspace).
 # 0.1.96 (ledger #1287): a resolution floor, `ikigai-engine` 0.1.52 requires `^0.1.96`.
-ikigai-vocab = "0.1.96"
+# 0.1.98: core's lockstep release (0.1.97 is yanked here too).
+ikigai-vocab = "0.1.98"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
 # 0.2.4 is where the freshness half of this pin comes from, and it is the whole of what
@@ -144,7 +152,12 @@ ikigai-vocab = "0.1.96"
 # `store.shared_writer()` (see `ikigai-browse` below), so browse's archive writes commit on the
 # store's OWN writer thread under its write lock; browse 0.18.6 requires `^0.2.15` too.
 # ⚠ `"0.2.15"` is `<0.3.0`.
-ikigai-store = { version = "0.2.15", features = ["persistent"] }
+# ★ 0.2.19 since ledger #1330's arc, a SECURITY floor and not an API one: 0.2.18 adds
+# `EvaluationBudget` (ledger #1327; cli 0.1.55's edge door takes it), and 0.2.19 bounds the
+# triple terms an update may leave in the store and how deep a triple-term template nests (ledger
+# #1333, #1354). gonk calls none of it by name; every caller's SPARQL reaches the store's own
+# doors, which carry the bounds.
+ikigai-store = { version = "0.2.19", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -179,8 +192,15 @@ ikigai-store = { version = "0.2.15", features = ["persistent"] }
 # instead of `items limit=1` as JSON, whose face always ran the corpus check: a cold render's
 # total went from seven store queries to one (`tests/ledger_count_1198.rs`). It declares the
 # same read row `items` does, so every grant that reads a ledger, the worker's included, may
-# count it. `"0.9.0"` is `<0.10.0`: a ceiling too.
-ikigai-ledger = "0.9.0"
+# count it. `"0.9.0"` was `<0.10.0`: a ceiling too.
+# ★ 0.11.0 is the floor now (ledger #1330), and an API one twice over. 0.10.0 (ledger #1315)
+# splits `urn:cap:ledger:about:{L}` out of the write grant (`Ledger::cap_about`), so the layer
+# mirror records an offer as an `about` edge on its item (`crate::mirror`) holding the worker
+# grant plus that token, still never close. 0.11.0 (ledger #1329) adds `ClaimKind::Agent`, which
+# `crate::layer::kind_for` stamps for a `prov:SoftwareAgent` participant (a collaborator's Claude)
+# instead of `Machine`; the enum is `#[non_exhaustive]` from 0.11.0, so a later kind is a minor.
+# `"0.11.0"` is `<0.12.0`.
+ikigai-ledger = "0.11.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
@@ -220,7 +240,8 @@ ikigai-throttle = "0.1.11"
 # the published head so the graph holds ONE release of that workspace again (the lock had engine
 # and resolve at 0.1.46 under the others at 0.1.44); the plan runner did not change in a way this
 # binary calls. 0.1.44 is still the API floor. `"0.1.52"` is `<0.2.0`.
-ikigai-engine = { version = "0.1.52", features = ["plan-reader"] }
+# 0.1.55 (ledger #1335): the one-release reason (see `ikigai-quic` below).
+ikigai-engine = { version = "0.1.55", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). ⚠⚠ **This is the widest
 # thing this manifest links, and it is linked for the plan doors ALONE.** rudof brings `reqwest`
@@ -231,7 +252,10 @@ ikigai-engine = { version = "0.1.52", features = ["plan-reader"] }
 # the plan doors' own sub-requests reach it, with the vocabulary's fixed shapes and a plan the
 # script library has already bounded at 1 MiB. Its SERVICE/LOAD refusals are its own (0.3.x) and
 # the store's (0.2.10+). 0.3.3 is the published head and what was built and tested.
-ikigai-shacl = "0.3.3"
+# ★ 0.3.4 is the floor now (ledger #1326), a SECURITY one and a resolution one: a recursive shape
+# over a long chain in the data aborted the process that held it, and the cli 0.1.55 workspace
+# (`ikigai-engine` above) requires `^0.3.4`.
+ikigai-shacl = "0.3.4"
 # ★ Natural language to a DRAFT query (ledger #1138, `crate::nl`): `urn:nl:grounding` (what a
 # drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
 # templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
@@ -556,7 +580,8 @@ ikigai-repo = "0.2.0"
 # 0.1.44: the published head (the intray's `match=` SPARQL is bounded, ledger #963).
 # 0.1.52 (ledger #1287): the one-release reason (see `ikigai-quic` below for why the workspace
 # moved); 0.1.41 is still the floor this binary uses.
-ikigai-intray = "0.1.52"
+# 0.1.55 (ledger #1335): the one-release reason.
+ikigai-intray = "0.1.55"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -574,7 +599,8 @@ ikigai-intray = "0.1.52"
 # 0.1.37 -> 0.1.41 for the same reason: intray, ipc and quic at 0.1.41 require
 # `ikigai-resolve ^0.1.41`. 0.1.41 -> 0.1.44: the one-release reason.
 # 0.1.44 -> 0.1.52 (ledger #1287): quic and ipc at 0.1.52 require `ikigai-resolve ^0.1.52`.
-ikigai-resolve = "0.1.52"
+# 0.1.52 -> 0.1.55 (ledger #1335): quic and ipc at 0.1.55 require `ikigai-resolve ^0.1.55`.
+ikigai-resolve = "0.1.55"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -609,7 +635,11 @@ ikigai-resolve = "0.1.52"
 # 0.1.52 (ledger #1287): the one-release reason. The socket transport's own heal (a peer restart
 # on a Unix socket is an immediate ECONNREFUSED or EOF, and the next call redials) is unchanged
 # since 0.1.25; the move is for `ikigai-quic` below.
-ikigai-ipc = "0.1.52"
+# ★ 0.1.55 is the floor now, an API one (ledger #1335): `IpcResolver::with_call_timeout` and
+# `issue_as_within`, a deadline on one whole call rather than on each read's silence, so a
+# peer that accepts a call and trickles (or never sends) its reply costs the caller a deadline.
+# `crate::mount::dial` sets it on every mount. `"0.1.55"` is `<0.2.0`.
+ikigai-ipc = "0.1.55"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -668,7 +698,16 @@ ikigai-ipc = "0.1.52"
 # 0.1.52 is the pin: the published head, and the one-release reason for the rest of the
 # workspace (nothing between 0.1.46 and 0.1.52 in this crate is one this binary calls by name;
 # 0.1.47's connection-age bound is `serve_bounded`'s, and gonk's door does not set one).
-ikigai-quic = "0.1.52"
+# ★ 0.1.55 is the floor now, an API one (ledger #1335, ikigai-cli PR 470):
+# `QuicResolver::with_call_timeout` and `issue_as_within`. Through 0.1.52 a mounted call had no
+# deadline of its own (only a self-description did), so a layer host that accepted a call and
+# never answered held a mirror pass for twice the idle timeout, and for ever if it kept the
+# connection talking. On expiry the stream is canceled on the wire (`CANCELED`) and the next
+# call redials. `crate::mount::dial` sets the deadline on every mount, a short one on a task
+# layer's door (`crate::layer::CALL_TIMEOUT`).
+# `tests/layer_call_deadline_1335.rs::a_silent_layer_host_fails_the_pass_at_the_doors_deadline`
+# is the FLOOR TEST: on 0.1.52 the pass had no answer within the test's minute.
+ikigai-quic = "0.1.55"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -728,7 +767,8 @@ ikigai-quic = "0.1.52"
 # 0.1.52 (ledger #1287): the one-release reason (see `ikigai-quic` above). 0.1.50 makes the HTTP
 # door bind before its banner (ledger #1223); gonk already binds its own listener and hands it to
 # `serve_with_listener`, so that change does not reach it.
-ikigai-web = "0.1.52"
+# 0.1.55 (ledger #1335): the one-release reason.
+ikigai-web = "0.1.55"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -810,7 +850,8 @@ ikigai-xslt = "0.2.1"
 # and tested, and it is the cli workspace's shared version, which every other line from that
 # workspace here now names (0.1.37: the verifier is unchanged since 0.1.30).
 # 0.1.41, 0.1.44, 0.1.52: the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.52"
+# 0.1.55: the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.55"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
