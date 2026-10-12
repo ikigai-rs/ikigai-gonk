@@ -797,3 +797,236 @@ fn oxigraph_triples(turtle: &str) -> Vec<(String, String, String)> {
         })
         .collect()
 }
+
+// ---- the take role: their gonk, against our mirror ------------------------------------------
+
+use ikigai_gonk::taker::{self, Taker, Took};
+
+/// Their side: another gonk (its own store and ledger `ikigai`), taking from the same layer as
+/// `bobby-gonk`.
+struct Theirs {
+    hub: Arc<Kernel>,
+    taker: Taker,
+}
+
+impl World {
+    fn theirs(&self) -> Theirs {
+        let certs = tempfile::tempdir().unwrap();
+        let line = format!(
+            "{LAYER} take quic://127.0.0.1:1 {} ledger=ikigai",
+            certs.path().display()
+        );
+        let binding = layer::parse(&line, std::path::Path::new("/nowhere")).unwrap();
+        let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
+        let ledger = taker::hub_ledger(&binding, Arc::clone(&hub)).unwrap();
+        let taker = Taker::new(binding, Arc::new(self.door(&them())), ledger).unwrap();
+        Theirs { hub, taker }
+    }
+}
+
+impl Theirs {
+    fn gonk(&self, verb: Verb, resource: &str, args: &[(&str, &str)]) -> Result<String, Error> {
+        let request = args.iter().fold(
+            Request::new(
+                verb,
+                Iri::parse(format!("urn:iki:ledger:ikigai:{resource}")).unwrap(),
+            ),
+            |r, (k, v)| r.with_arg(*k, ArgRef::Inline(v.as_bytes().to_vec())),
+        );
+        Resolver::issue(&*self.hub, request)
+            .map(|(r, _)| String::from_utf8_lossy(&r.bytes).into_owned())
+    }
+
+    fn item(&self, number: i64) -> serde_json::Value {
+        let answer = self
+            .gonk(
+                Verb::Source,
+                &format!("item:{number}"),
+                &[("as", "application/json")],
+            )
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&answer).unwrap()["item"].clone()
+    }
+
+    fn pass(&self) -> mirror::Report {
+        let report = self.taker.pass().expect("their pass");
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        report
+    }
+
+    fn reported(&self, class: &str) -> usize {
+        self.pass()
+            .actions
+            .iter()
+            .filter(|a| a.starts_with(&format!("reported {class}")))
+            .count()
+    }
+}
+
+#[test]
+fn an_offer_taken_by_hand_is_filed_once_and_claimed_on_our_side() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    let n = w.file(
+        "Port the importer\n\nThe importer reads the old format.",
+        &[("about", "https://github.com/ikigai-rs/ikigai-core")],
+    );
+    let offer = offered(&pass(&mirror));
+    let announced = theirs.pass();
+    assert!(
+        announced.actions.iter().any(|a| a.contains(&offer)),
+        "their pass announces the open offer: {:?}",
+        announced.actions
+    );
+
+    let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
+        panic!("not filed")
+    };
+    let item = theirs.item(local);
+    assert_eq!(item["title"], "Port the importer");
+    assert!(item["body"]
+        .as_str()
+        .unwrap()
+        .starts_with("The importer reads the old format."));
+    assert_eq!(item["key"], taker::filed_key(LAYER, &offer));
+    let about: Vec<&str> = item["about"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert!(about.contains(&offer.as_str()), "{about:?}");
+    assert!(about.contains(&"https://github.com/ikigai-rs/ikigai-core"));
+    // Run twice, filed once.
+    assert_eq!(theirs.taker.take(&offer).unwrap(), Took::Already(local));
+
+    pass(&mirror);
+    assert_eq!(w.item(n)["claim"]["holder"], them());
+}
+
+#[test]
+fn their_close_hands_back_with_evidence_and_our_item_waits_for_its_dispatcher() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    let n = w.file("Fix the parser\n\nIt drops the last line.", &[]);
+    let offer = offered(&pass(&mirror));
+    let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
+        panic!("not filed")
+    };
+    pass(&mirror);
+    // Open: a Progress a day, and only one.
+    assert_eq!(theirs.reported("Progress"), 1);
+    assert_eq!(theirs.reported("Progress"), 0);
+    let report = pass(&mirror);
+    assert!(
+        report.actions.iter().any(|a| a.starts_with("renewed ")),
+        "{:?}",
+        report.actions
+    );
+
+    theirs
+        .gonk(
+            Verb::Sink,
+            "comment",
+            &[
+                ("item", &local.to_string()),
+                (
+                    "content",
+                    "Merged: https://github.com/ikigai-rs/ikigai-core/pull/41.",
+                ),
+            ],
+        )
+        .unwrap();
+    theirs
+        .gonk(
+            Verb::Sink,
+            "close",
+            &[("item", &local.to_string()), ("reason", "done")],
+        )
+        .unwrap();
+    assert_eq!(theirs.reported("Handback"), 1);
+    assert_eq!(
+        theirs.reported("Handback"),
+        0,
+        "a hand-back is dropped once"
+    );
+
+    pass(&mirror);
+    let ours = w.item(n);
+    assert_eq!(ours["awaiting"], "dispatcher");
+    assert_eq!(ours["status"], "open", "nothing closes across");
+    let handed: Vec<String> = w
+        .comments(n)
+        .into_iter()
+        .filter(|c| c.starts_with("Handed back"))
+        .collect();
+    assert_eq!(handed.len(), 1);
+    assert!(handed[0].contains("https://github.com/ikigai-rs/ikigai-core/pull/41"));
+    settled(&mirror);
+}
+
+#[test]
+fn their_close_without_done_releases_and_we_offer_again() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    let n = w.file("Measure the cache\n\nBefore and after.", &[]);
+    let first = offered(&pass(&mirror));
+    let Took::Filed(local) = theirs.taker.take(&first).unwrap() else {
+        panic!("not filed")
+    };
+    pass(&mirror);
+    theirs
+        .gonk(
+            Verb::Sink,
+            "close",
+            &[("item", &local.to_string()), ("reason", "wontfix")],
+        )
+        .unwrap();
+    assert_eq!(theirs.reported("Release"), 1);
+    let report = pass(&mirror);
+    let second = offered(&report);
+    assert_ne!(first, second);
+    assert!(w.item(n)["claim"].is_null());
+    assert_eq!(theirs.reported("Release"), 0);
+}
+
+#[test]
+fn a_take_whose_reply_was_lost_is_found_by_its_receipt() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    w.file("First\n\nOne.", &[]);
+    w.file("Second\n\nTwo.", &[]);
+    let offers: Vec<String> = pass(&mirror)
+        .actions
+        .iter()
+        .filter(|a| a.starts_with("offered "))
+        .map(|a| {
+            a.rsplit('<')
+                .next()
+                .unwrap()
+                .trim_end_matches('>')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(offers.len(), 2);
+    // With nothing taken yet this server cannot know the receipt names itself.
+    w.take(&them(), &offers[0]).unwrap();
+    let unknown = theirs.taker.take(&offers[0]).unwrap_err();
+    assert!(unknown.contains("cannot tell"), "{unknown}");
+    // Once it holds one take, a lost reply on another is recovered.
+    assert!(matches!(theirs.taker.take(&offers[1]), Ok(Took::Filed(_))));
+    assert!(matches!(
+        theirs.taker.take(&offers[0]),
+        Ok(Took::Already(_))
+    ));
+    // Someone else's take is not ours.
+    w.file("Third\n\nThree.", &[]);
+    let third = offered(&pass(&mirror));
+    w.take(&participant("bobby"), &third).unwrap();
+    let theirs_not = theirs.taker.take(&third).unwrap_err();
+    assert!(theirs_not.contains(&participant("bobby")), "{theirs_not}");
+}

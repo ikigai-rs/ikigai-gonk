@@ -217,6 +217,10 @@ usage:
                                               only under a --script publish name or namespace
                                               (nl-sparql-*=publish covers its default names);
                                               with no gonk.mount, refused
+  ikigai-gonk layer take <offer IRI> [--socket PATH] [--config PATH]
+                                   take ONE offer from a task layer this server binds in the
+                                   take role (`gonk.layer`), through the running gonk, and file
+                                   it into that binding's ledger, keyed: run twice, files once
   ikigai-gonk review request <repo> <path> [--config PATH]
                                    drop ONE review request into the queue `gonk.review.space`
                                    names. Writes one file and exits: no store, no door, no
@@ -368,6 +372,13 @@ pub enum Command {
         /// Whether `key` is a bundle name (`true`) or a fingerprint.
         by_name: bool,
         /// `--config`.
+        flags: Flags,
+    },
+    /// Take one offer from a bound task layer into its ledger (ledger #1190).
+    LayerTake {
+        /// The offer's IRI, `urn:layer:{layer}:…`.
+        offer: String,
+        /// Where to read the config from, and `--socket`.
         flags: Flags,
     },
     /// Drop one review request into the configured queue.
@@ -898,6 +909,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return parse_review(args);
         }
+        Some("layer") => {
+            args.next();
+            return parse_layer(args);
+        }
         Some("roborev") => {
             args.next();
             return crate::roborev::parse_args(args).map(Command::RoborevFile);
@@ -1023,6 +1038,48 @@ fn parse_review(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         return Err("review request: neither the repository nor the path may be empty".to_string());
     }
     Ok(Command::ReviewRequest { repo, path, flags })
+}
+
+/// `layer take <offer IRI> [--socket <path>] [--config|--config-home|--data-home <path>]`.
+///
+/// ```
+/// use ikigai_gonk::config::{parse_args, Command};
+/// let args = ["layer", "take", "urn:layer:tasks:offer:01m4", "--socket", "/tmp/g.sock"];
+/// match parse_args(args.iter().map(|s| s.to_string())).unwrap() {
+///     Command::LayerTake { offer, flags } => {
+///         assert_eq!(offer, "urn:layer:tasks:offer:01m4");
+///         assert_eq!(flags.socket.as_deref(), Some("/tmp/g.sock"));
+///     }
+///     _ => unreachable!(),
+/// }
+/// assert!(parse_args(["layer", "take"].iter().map(|s| s.to_string())).is_err());
+/// assert!(parse_args(["layer", "drop", "x"].iter().map(|s| s.to_string())).is_err());
+/// ```
+fn parse_layer(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    match args.next().as_deref() {
+        Some("take") => {}
+        Some(other) => {
+            return Err(format!(
+                "layer: `{other}` is not a subcommand (take <offer IRI>)"
+            ))
+        }
+        None => return Err("layer: expected `take <offer IRI>`".to_string()),
+    }
+    let offer = args
+        .next()
+        .filter(|o| o.starts_with("urn:layer:"))
+        .ok_or("layer take: expected the offer's IRI, `urn:layer:{layer}:…`")?;
+    let mut flags = Flags::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            "--socket" => flags.socket = Some(value(&mut args, "--socket")?),
+            other => return Err(format!("layer take: unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::LayerTake { offer, flags })
 }
 
 fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
