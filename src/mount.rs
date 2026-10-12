@@ -1,4 +1,7 @@
-//! The one namespace this server mounts: `urn:llm:` on a peer that serves it.
+//! The one namespace a `gonk.mount` line mounts: `urn:llm:` on a peer that serves it.
+//!
+//! (A task layer's names are mounted too, by a `gonk.layer` binding and by nothing else; see
+//! [`crate::layer`]. They reuse [`LazyMount`], in its [`LazyMount::fresh`] form.)
 //!
 //! ```toml
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
@@ -231,7 +234,7 @@ pub fn parse(line: &str, home: &Path) -> Result<Mount, String> {
 }
 
 /// `~/x` → `$HOME/x`. A config file is hand-written, and `~` is what a person types.
-fn expand_home(spelled: &str, home: &Path) -> PathBuf {
+pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
     match spelled.strip_prefix("~/") {
         Some(rest) => home.join(rest),
         None => PathBuf::from(spelled),
@@ -259,6 +262,8 @@ pub fn space(mount: &Mount) -> Arc<dyn Space> {
 pub struct LazyMount {
     target: Target,
     state: Mutex<State>,
+    /// Whether every answer is handed back UNCACHEABLE ([`LazyMount::fresh`]).
+    fresh: bool,
 }
 
 #[derive(Default)]
@@ -274,6 +279,23 @@ impl LazyMount {
         LazyMount {
             target,
             state: Mutex::new(State::default()),
+            fresh: false,
+        }
+    }
+
+    /// A mount on `target` whose every answer is marked UNCACHEABLE (`Expiry::Always`) on
+    /// the way back — for a namespace whose state changes on the PEER's schedule.
+    ///
+    /// ★ The module docs' warning made concrete (ledger #1190): threads do not cross a mount,
+    /// so a cacheable remote answer arrives here with no dependency anyone can cut, and the
+    /// hub would serve it until the process restarts. A layer's `rd` is cacheable on its host
+    /// (under that host's tuples thread); through a plain mount, a `rd` read here would show
+    /// a tuple as pending long after it was taken. A task layer is read for its CURRENT
+    /// state, so every answer is fetched, never remembered.
+    pub fn fresh(target: Target) -> LazyMount {
+        LazyMount {
+            fresh: true,
+            ..LazyMount::new(target)
         }
     }
 
@@ -472,6 +494,14 @@ impl Resolver for LazyMount {
         if matches!(answer, Err(Error::Unavailable(_))) {
             self.drop_connection();
         }
+        if self.fresh {
+            return answer.map(|(representation, _)| {
+                (
+                    representation.with_expiry(ikigai_core::Expiry::Always),
+                    CacheStatus::Uncacheable,
+                )
+            });
+        }
         answer
     }
 
@@ -569,6 +599,11 @@ mod tests {
         assert!(overridden.contains("must be `prefer`"), "{overridden}");
         let elsewhere = parse("prefer urn:personal:=/tmp/x.sock", &home()).unwrap_err();
         assert!(elsewhere.contains("urn:llm:` only"), "{elsewhere}");
+        // A layer is reached by binding it (`gonk.layer`), never by a mount line.
+        for prefix in ["urn:layer:", "urn:layers:", "urn:collab:"] {
+            let layer = parse(&format!("prefer {prefix}=/tmp/x.sock"), &home()).unwrap_err();
+            assert!(layer.contains("urn:llm:` only"), "{layer}");
+        }
         assert!(
             parse("prefer urn:llm=/tmp/x.sock", &home()).is_err(),
             "no colon"

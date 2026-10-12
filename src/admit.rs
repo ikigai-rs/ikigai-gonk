@@ -235,10 +235,15 @@ pub fn refusal(capability: &Capability) -> Option<&'static str> {
 /// it, so if it stopped being principal-shaped a client could write
 /// `urn:iki:gonk:client:<another machine's fingerprint>` as plain text and be indistinguishable,
 /// in the record, from that machine before the migration.
-pub const PRINCIPAL_PREFIXES: [&str; 3] = [
+///
+/// ★ And a layer binding's mirror ([`crate::layer::MIRROR_PRINCIPAL_PREFIX`], ledger
+/// [#1190](http://localhost:1060/l/default/item/1190)): this process's own actor, minted by no
+/// door, so no caller at any door can write as it.
+pub const PRINCIPAL_PREFIXES: [&str; 4] = [
     crate::identity::PASSKEY_IRI_PREFIX,
     crate::quic::CLIENT_IRI_PREFIX,
     crate::quic::LEGACY_CLIENT_IRI_PREFIX,
+    crate::layer::MIRROR_PRINCIPAL_PREFIX,
 ];
 
 /// Whether `author` is shaped like a principal this server names — compared the way a
@@ -321,6 +326,13 @@ pub fn principal(door: Door, capability: &Capability) -> Option<String> {
 /// `tests/claim_kind_775.rs` proves each row against a real server: a caller-supplied
 /// principal and `kind=` do not survive any door.
 ///
+/// ★ **One more claimant: a layer binding's mirror** (ledger
+/// [#1190](http://localhost:1060/l/default/item/1190)). It claims an item for the participant
+/// who TOOK its offer, so the kind is that participant's, read from the collaboration's
+/// participants graph ([`crate::layer::kind_for`]: `foaf:Person` is a person, anything else a
+/// machine). It is recognized by the capability's principal, which only this process mints
+/// ([`crate::layer::MIRROR_PRINCIPAL_PREFIX`]); no door can mint it.
+///
 /// ```
 /// use ikigai_core::{ArgRef, Bindings, Capability, Invocation, Iri, Request, Verb};
 /// use ikigai_ledger::claim::ClaimKind;
@@ -340,6 +352,14 @@ pub fn principal(door: Door, capability: &Capability) -> Option<String> {
 /// ```
 pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
     Arc::new(|inv: &Invocation<'_>| {
+        if let Some(mirror) = inv
+            .capability
+            .principal()
+            .filter(|p| p.starts_with(crate::layer::MIRROR_PRINCIPAL_PREFIX))
+        {
+            let holder = inv.inline_str("content").unwrap_or_default().trim();
+            return crate::layer::kind_for(mirror, holder);
+        }
         let person = match inv.request.args.get(PRINCIPAL_ARG) {
             Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).is_ok_and(|p| {
                 let prefix = crate::identity::PASSKEY_IRI_PREFIX;

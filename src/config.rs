@@ -19,6 +19,8 @@
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+//! # a ledger bound to a task layer, offering its items (or taking them: `take`); repeatable
+//! # gonk.layer = "tasks-bobby offer quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=bobby collab=bobby"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
 //! # bind the git-event review QUEUE (urn:space:reviews)
 //! gonk.review.space = "reviews"
@@ -97,8 +99,9 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 31] = [
+const KEYS: [&str; 32] = [
     "gonk.log.access",
+    "gonk.layer",
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -518,6 +521,8 @@ pub struct Settings {
     /// The mounted peers. Empty means `urn:llm:*` resolves nowhere, and the explanation
     /// families are therefore not bound — see [`Settings::explains`].
     pub mounts: Vec<Mount>,
+    /// The ledgers bound to task layers, one per `gonk.layer` line ([`crate::layer`]).
+    pub layers: Vec<crate::layer::Binding>,
     /// The per-kind providers and spend ceilings the explanation families derive under.
     pub explain: ExplainTiers,
     /// Where backups land, how many are kept, and how often one is taken.
@@ -1368,6 +1373,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     };
     let browse_roots = browse_roots(flags, text, homes)?;
     let mounts = mounts(flags, text, homes)?;
+    let layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
     let explain = explain_tiers(text)?;
     let backup = backup_policy(flags, text, homes)?;
     let review = review_trigger(text, homes)?;
@@ -1382,6 +1388,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         anonymous_sparql_budget_ms,
         browse_roots,
         mounts,
+        layers,
         explain,
         backup,
         review,

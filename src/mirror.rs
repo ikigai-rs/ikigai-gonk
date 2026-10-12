@@ -1,0 +1,1311 @@
+//! The OFFER role of a layer binding ([`crate::layer`]): this server's ledger, mirrored into a
+//! task layer (ledger [#1190](http://localhost:1060/l/default/item/1190); design sections 8 and
+//! 10).
+//!
+//! # The pass
+//!
+//! Level-triggered and idempotent: every pass reads what IS (the layer's pending tuples and its
+//! receipts, the ledger's items and the offers recorded on them) and acts on the difference from
+//! what SHOULD be, so running it twice in a row changes nothing the second time.
+//!
+//! 1. **Reports first, in feed order.** A pending `Progress`, `Release` or `Handback` on one of
+//!    our offers is addressed to us; it is taken, by its subject, in `ik:seq` order (never
+//!    take-first, whose order is the intray's). Every report we have ever taken is then applied,
+//!    and applying one twice is a no-op: a `Handback` is a comment keyed by the report's IRI
+//!    with `handback=true` (so a replay comments nothing and cannot re-set a hand-back the
+//!    dispatcher has cleared), a `Release` is a keyed comment plus the release of the taker's
+//!    claim while that offer is still the item's newest, and a `Progress` renews the taker's
+//!    lease when it is taken (and comments, keyed, when it carries a note).
+//! 2. **Then each item.** An open, unclaimed item that is not awaiting its dispatcher has a
+//!    pending offer; an offer whose item is closed, deleted, claimed outside the layer or
+//!    handed back is withdrawn (taken back by us); a taken offer's item is claimed for its taker
+//!    for [`LEASE`]; an offer released by its taker is replaced by a new one.
+//!
+//! ★ **Nothing closes across.** The mirror holds `urn:cap:ledger:{read,claim,comment}:{ledger}`
+//! (the worker grant, [`crate::grants::Authority::Worker`]) and never `close`: the taker's
+//! hand-back makes the item wait for its dispatcher, who checks the evidence and closes it.
+//!
+//! # Where an offer is recorded
+//!
+//! On its item, as a COMMENT keyed `layer:{layer}:offered:<offer IRI>`, written before the offer
+//! is dropped. The design said `about <offer IRI>`, and `item:{id}:about` needs
+//! `urn:cap:ledger:write:{ledger}`, which is the close grant too; a keyed comment is the record
+//! the worker grant CAN write, it is idempotent, and it shows the person reading the item where
+//! its work went. A crash between the record and the drop leaves a recorded offer the layer has
+//! never seen, which the next pass drops (the same subject, so the layer's replay rule makes a
+//! retry one record).
+//!
+//! # What crosses
+//!
+//! An offer is a fixed CONSTRUCT over the ledger's graph that names only the item's title, its
+//! body as the BRIEF, one `https://github.com/{owner}/{repo}` it is `about` as the repository,
+//! and the minted offer IRI; then `urn:jsonld:prune` against the layer's own context, and the
+//! mirror REFUSES to publish when prune dropped anything (a drop is a CONSTRUCT bug to see, not
+//! absorb); then the layer host's closed shapes. Labels, links, comments, claims, numbers and
+//! ledger IRIs cannot appear.
+//!
+//! # A take that races a withdrawal
+//!
+//! Both are takes of one tuple, and exactly one wins. If ours does, the offer is withdrawn and
+//! the taker was refused. If the taker's does, the take stands: the mirror comments that it
+//! happened after a withdrawal was attempted (keyed, so once), claims the item for the taker
+//! when it is open and free, and leaves the rest to the dispatcher. It never reverses a take.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use ikigai_core::{ArgRef, Capability, Error, Kernel, ListenSpec, Verb};
+use ikigai_ledger::claim::ClaimKind;
+use ikigai_ledger::json::{Item, ItemsDocument};
+use ikigai_ledger::vocabulary as v;
+use ikigai_ledger::Ledger;
+use ikigai_resolve::Resolver;
+use oxigraph::io::{RdfFormat, RdfParser};
+use oxigraph::model::Term;
+
+use crate::layer::{self, Binding, Door};
+
+/// How long a taker's claim is held between its reports: renewed by every `Progress`.
+pub const LEASE: &str = "7d";
+
+/// The backstop: a pass at least this often, whatever the feed and the ledger say.
+pub const SWEEP: Duration = Duration::from_secs(5 * 60);
+
+/// How long one feed read waits for an event (the layer host's bound is 60 s).
+pub const FEED_WAIT_SECS: u64 = 50;
+
+/// How long a failed feed read is held off before the next.
+pub const FEED_RETRY: Duration = Duration::from_secs(30);
+
+/// The most tuples or receipts one `rd` page asks for (the layer host's own maximum).
+const PAGE: usize = 1000;
+
+const IK: &str = "https://ikigai-rs.dev/ns#";
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const PROV_ATTRIBUTED: &str = "http://www.w3.org/ns/prov#wasAttributedTo";
+const PROV_USED: &str = "http://www.w3.org/ns/prov#used";
+const PROV_ASSOCIATED: &str = "http://www.w3.org/ns/prov#wasAssociatedWith";
+const PROV_ENDED: &str = "http://www.w3.org/ns/prov#endedAtTime";
+const FOAF_PERSON: &str = "http://xmlns.com/foaf/0.1/Person";
+
+fn ik(local: &str) -> String {
+    format!("{IK}{local}")
+}
+
+/// One tuple, as the layer holds it (pending, or inside a receipt as taken).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tuple {
+    /// Its subject: the name its dropper minted.
+    pub subject: String,
+    /// Its classes (`ik:Offer`, `ik:Progress`, `ik:Release`, `ik:Handback`).
+    pub types: BTreeSet<String>,
+    /// Who dropped it, as the host stamped it.
+    pub dropper: Option<String>,
+    /// The offer a report is about.
+    pub offer: Option<String>,
+    /// Its place in the layer's feed.
+    pub seq: u64,
+    /// A report's note.
+    pub note: Option<String>,
+    /// A hand-back's evidence.
+    pub evidence: Vec<String>,
+}
+
+impl Tuple {
+    fn is(&self, class: &str) -> bool {
+        self.types.contains(&ik(class))
+    }
+
+    fn is_report(&self) -> bool {
+        self.is("Progress") || self.is("Release") || self.is("Handback")
+    }
+}
+
+/// One take, from its receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    /// Who took it, as the door named them.
+    pub taker: String,
+    /// When.
+    pub time: String,
+    /// The take's place in the feed.
+    pub seq: u64,
+    /// The tuple as taken.
+    pub tuple: Tuple,
+}
+
+/// What one pass did, for the log and the tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    /// Lines, one per action, in the order they happened.
+    pub actions: Vec<String>,
+    /// What could not be done this pass (the next pass tries again).
+    pub problems: Vec<String>,
+}
+
+impl Report {
+    fn did(&mut self, line: String) {
+        self.actions.push(line);
+    }
+
+    fn failed(&mut self, line: String) {
+        self.problems.push(line);
+    }
+}
+
+/// Whether the binding is usable: checked against the layer's own definition once.
+enum Check {
+    Unchecked,
+    Ready { context: String },
+    Refused(String),
+}
+
+/// One binding's offer side.
+pub struct Mirror {
+    binding: Binding,
+    door: Arc<dyn Door>,
+    hub: Arc<Kernel>,
+    capability: Capability,
+    principal: String,
+    /// `urn:jsonld:*`, in a kernel only this mirror issues to.
+    prune: Kernel,
+    check: Mutex<Check>,
+}
+
+/// The capability a mirror writes to its ledger under: the worker grant (read, claim, comment,
+/// and the ledger graph's store tokens), acting as the mirror's own principal. Never `close`.
+pub fn capability(binding: &Binding) -> Result<Capability, String> {
+    let scopes = crate::grants::grants_for(&binding.ledger, crate::grants::Authority::Worker)?;
+    Capability::scoped(scopes)
+        .with_principal(&binding.principal())
+        .map_err(|e| format!("the mirror's principal {}: {e:?}", binding.principal()))
+}
+
+impl Mirror {
+    /// The offer side of `binding`, reaching the layer through `door` and the ledger through
+    /// `hub`.
+    ///
+    /// # Errors
+    ///
+    /// When the binding is not an offer binding, or its capability cannot be built.
+    pub fn new(binding: Binding, door: Arc<dyn Door>, hub: Arc<Kernel>) -> Result<Self, String> {
+        if binding.role != layer::Role::Offer {
+            return Err(format!(
+                "layer `{}` is bound in the {} role, not offer",
+                binding.layer,
+                binding.role.as_str()
+            ));
+        }
+        let capability = capability(&binding)?;
+        Ok(Mirror {
+            principal: binding.principal(),
+            binding,
+            door,
+            hub,
+            capability,
+            prune: Kernel::new(Arc::new(ikigai_jsonld::space())),
+            check: Mutex::new(Check::Unchecked),
+        })
+    }
+
+    /// The binding this mirror serves.
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
+    fn layer_iri(&self, part: &str) -> String {
+        if part.is_empty() {
+            self.binding.layer_iri()
+        } else {
+            format!("{}:{part}", self.binding.layer_iri())
+        }
+    }
+
+    // ---- the layer side -------------------------------------------------------------------
+
+    /// The layer's context, after checking (once) that the layer is a tuplespace.
+    fn ready(&self) -> Result<String, String> {
+        let mut check = self.check.lock().unwrap_or_else(|p| p.into_inner());
+        match &*check {
+            Check::Ready { context } => return Ok(context.clone()),
+            Check::Refused(why) => return Err(why.clone()),
+            Check::Unchecked => {}
+        }
+        let definition = self
+            .door
+            .call(layer::request(Verb::Source, &self.layer_iri("")))
+            .map_err(|e| format!("reading {}: {e}", self.layer_iri("")))?;
+        let triples = parse_turtle(&definition.bytes)?;
+        let model = triples
+            .iter()
+            .find(|(s, p, _)| *s == self.layer_iri("") && *p == ik("layerModel"))
+            .map(|(_, _, o)| o.value().to_string());
+        if model.as_deref() != Some("tuplespace") {
+            let why =
+                format!(
+                "layer `{}` is {}, and only a task layer (`tuplespace`) is bound to a ledger: the \
+                 binding is refused",
+                self.binding.layer,
+                model.map_or("of no stated model".to_string(), |m| format!("a `{m}` layer"))
+            );
+            *check = Check::Refused(why.clone());
+            return Err(why);
+        }
+        let context = self
+            .door
+            .call(layer::request(Verb::Source, &self.layer_iri("context")))
+            .map_err(|e| format!("reading {}: {e}", self.layer_iri("context")))?;
+        let context = String::from_utf8(context.bytes)
+            .map_err(|_| format!("{} is not UTF-8", self.layer_iri("context")))?;
+        *check = Check::Ready {
+            context: context.clone(),
+        };
+        Ok(context)
+    }
+
+    /// `rd`, every page: the pending tuples (`taken = false`) or the receipts.
+    fn read_tuples(&self, taken: bool) -> Result<String, String> {
+        let mut all = String::new();
+        let mut after = 0u64;
+        loop {
+            let mut request = layer::request(Verb::Source, &self.layer_iri("tuples"))
+                .with_arg("as", inline("text/turtle"))
+                .with_arg("after", inline(&after.to_string()))
+                .with_arg("limit", inline(&PAGE.to_string()));
+            if taken {
+                request = request.with_arg("state", inline("taken"));
+            }
+            let page = self
+                .door
+                .call(request)
+                .map_err(|e| format!("reading {}: {e}", self.layer_iri("tuples")))?;
+            let text = String::from_utf8(page.bytes)
+                .map_err(|_| format!("{} answered non-UTF-8", self.layer_iri("tuples")))?;
+            let triples = parse_turtle(text.as_bytes())?;
+            // The page's positions: a tuple's or a receipt's own ik:seq (a receipt also holds
+            // its tuple's, which is never larger than the take's).
+            let seqs: Vec<u64> = triples
+                .iter()
+                .filter(|(_, p, _)| *p == ik("seq"))
+                .filter_map(|(_, _, o)| o.value().parse().ok())
+                .collect();
+            let count = if taken {
+                triples.iter().filter(|(_, p, _)| *p == PROV_USED).count()
+            } else {
+                triples
+                    .iter()
+                    .map(|(s, _, _)| s.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+            };
+            all.push_str(&text);
+            all.push('\n');
+            match seqs.into_iter().max() {
+                Some(last) if count >= PAGE && last > after => after = last,
+                _ => return Ok(all),
+            }
+        }
+    }
+
+    fn pending(&self) -> Result<BTreeMap<String, Tuple>, String> {
+        let text = self.read_tuples(false)?;
+        Ok(tuples(&parse_turtle(text.as_bytes())?))
+    }
+
+    fn receipts(&self) -> Result<BTreeMap<String, Taken>, String> {
+        let text = self.read_tuples(true)?;
+        Ok(receipts(&parse_turtle(text.as_bytes())?))
+    }
+
+    /// Take `subject` from the layer. `Ok(true)` when this take won.
+    fn take(&self, subject: &str) -> Result<bool, Error> {
+        let request = layer::request(Verb::Delete, &self.layer_iri("tuples"))
+            .with_arg("tuple", inline(subject));
+        match self.door.call(request) {
+            Ok(_) => Ok(true),
+            Err(Error::Conflict(_)) | Err(Error::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The receipt of `subject`'s take, re-read after a take that lost.
+    fn receipt_of(&self, subject: &str) -> Result<Option<Taken>, String> {
+        let request = layer::request(Verb::Source, &self.layer_iri("tuples"))
+            .with_arg("state", inline("taken"))
+            .with_arg("tuple", inline(subject))
+            .with_arg("as", inline("text/turtle"));
+        match self.door.call(request) {
+            Ok(r) => Ok(receipts(&parse_turtle(&r.bytes)?).remove(subject)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(format!("reading the receipt of <{subject}>: {e}")),
+        }
+    }
+
+    /// What the collaboration's participants graph says each taker is.
+    fn refresh_kinds(&self, report: &mut Report) {
+        let Some(collab) = &self.binding.collab else {
+            return;
+        };
+        let iri = format!("urn:collab:{collab}:participants");
+        let answer = self
+            .door
+            .call(layer::request(Verb::Source, &iri).with_arg("as", inline("text/turtle")))
+            .map_err(|e| e.to_string())
+            .and_then(|r| parse_turtle(&r.bytes));
+        match answer {
+            Ok(triples) => {
+                let mut kinds = BTreeMap::new();
+                for (s, p, o) in &triples {
+                    if *p == RDF_TYPE && !s.starts_with("_:") {
+                        let kind = kinds.entry(s.clone()).or_insert(ClaimKind::Machine);
+                        if o.value() == FOAF_PERSON {
+                            *kind = ClaimKind::Person;
+                        }
+                    }
+                }
+                layer::record_kinds(&self.principal, &kinds);
+            }
+            Err(e) => report.failed(format!(
+                "reading {iri} (claim kinds stay as last read): {e}"
+            )),
+        }
+    }
+
+    /// Drop an offer for `item` under `offer`, built and pruned here.
+    fn drop_offer(&self, item: &Item, offer: &str, context: &str) -> Result<(), String> {
+        let document = self.build_offer(item, offer, context)?;
+        let request = layer::request(Verb::Sink, &self.layer_iri("tuples"))
+            .with_arg("content", ArgRef::Inline(document));
+        match self.door.call(request) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("dropping <{offer}>: {e}")),
+        }
+    }
+
+    /// The offer for `item`: the fixed CONSTRUCT, then `urn:jsonld:prune` against the layer's
+    /// context, refused when prune dropped anything. Answers the JSON-LD the layer is sent.
+    pub fn build_offer(&self, item: &Item, offer: &str, context: &str) -> Result<Vec<u8>, String> {
+        let ledger = Ledger::parse(&self.binding.ledger).map_err(|e| e.to_string())?;
+        let query = offer_construct(&item.iri, offer);
+        let constructed = self.ledger_issue(
+            layer::request(Verb::Source, "urn:iki:store:graph-construct")
+                .with_arg("graph", inline(ledger.graph().as_str()))
+                .with_arg("query", inline(&query))
+                .with_arg("as", inline("text/turtle")),
+        )?;
+        let triples = parse_turtle(&constructed)?;
+        if !triples.iter().any(|(_, p, _)| *p == ik("brief")) {
+            return Err(format!(
+                "{} has no body, and the body is an offer's brief: nothing to offer",
+                item.display
+            ));
+        }
+        let expanded = expanded_json_ld(&triples);
+        prune_strict(&self.prune, &expanded, context)
+    }
+
+    // ---- the ledger side ------------------------------------------------------------------
+
+    fn ledger_issue(&self, request: ikigai_core::Request) -> Result<Vec<u8>, String> {
+        let target = request.target.to_string();
+        Resolver::issue_as(&*self.hub, request, &self.capability)
+            .map(|(r, _)| r.bytes)
+            .map_err(|e| format!("{target}: {e}"))
+    }
+
+    fn ledger_request(&self, verb: Verb, resource: &str) -> ikigai_core::Request {
+        layer::request(
+            verb,
+            &format!("urn:iki:ledger:{}:{resource}", self.binding.ledger),
+        )
+    }
+
+    /// Every item of the ledger, open and closed, and whether the listing was the whole set.
+    fn items(&self) -> Result<(Vec<Item>, bool), String> {
+        let mut items: Vec<Item> = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut total = 0;
+        loop {
+            let bytes = self.ledger_issue(
+                self.ledger_request(Verb::Source, "items")
+                    .with_arg("status", inline("all"))
+                    .with_arg("limit", inline("0"))
+                    .with_arg("offset", inline(&items.len().to_string()))
+                    .with_arg("as", inline("application/json")),
+            )?;
+            let page: ItemsDocument = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("the ledger's items are not its JSON document: {e}"))?;
+            total = page.total.unwrap_or(page.count).max(total);
+            let got = page.items.len();
+            for item in page.items {
+                if seen.insert(item.iri.clone()) {
+                    items.push(item);
+                }
+            }
+            if got == 0 || items.len() >= total {
+                let complete = items.len() == total;
+                return Ok((items, complete));
+            }
+        }
+    }
+
+    /// The offers recorded on each item: `item IRI → offer IRIs`, from the comment keys.
+    fn recorded(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
+        let ledger = Ledger::parse(&self.binding.ledger).map_err(|e| e.to_string())?;
+        let prefix = offered_key(&self.binding.layer, "");
+        let query = format!(
+            "SELECT ?item ?key WHERE {{ ?c <{on}> ?item ; <{key}> ?key . \
+             FILTER(STRSTARTS(STR(?key), \"{prefix}\")) }}",
+            on = v::ON_ITEM,
+            key = v::COMMENT_KEY,
+        );
+        let bytes = self.ledger_issue(
+            layer::request(Verb::Source, "urn:iki:store:graph-select")
+                .with_arg("graph", inline(ledger.graph().as_str()))
+                .with_arg("query", inline(&query)),
+        )?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("the store's SELECT answer is not JSON: {e}"))?;
+        let mut recorded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for binding in json
+            .pointer("/results/bindings")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let value = |name: &str| binding.pointer(&format!("/{name}/value"))?.as_str();
+            if let (Some(item), Some(key)) = (value("item"), value("key")) {
+                if let Some(offer) = key.strip_prefix(&prefix) {
+                    recorded
+                        .entry(item.to_string())
+                        .or_default()
+                        .push(offer.to_string());
+                }
+            }
+        }
+        for offers in recorded.values_mut() {
+            offers.sort();
+            offers.dedup();
+        }
+        Ok(recorded)
+    }
+
+    /// A comment on `item` under `key`; a key already used writes nothing.
+    fn comment(
+        &self,
+        item: &Item,
+        key: &str,
+        text: &str,
+        handback: bool,
+        report: &mut Report,
+    ) -> Result<(), String> {
+        let mut request = self
+            .ledger_request(Verb::Sink, "comment")
+            .with_arg("item", inline(&item.number.to_string()))
+            .with_arg("key", inline(key))
+            .with_arg("author", inline(&self.principal))
+            .with_arg("as", inline("application/json"))
+            .with_arg("content", inline(text));
+        if handback {
+            request = request.with_arg("handback", inline("true"));
+        }
+        let answer = self.ledger_issue(request)?;
+        let outcome = serde_json::from_slice::<serde_json::Value>(&answer)
+            .ok()
+            .and_then(|j| j.get("outcome")?.as_str().map(str::to_string));
+        if outcome.as_deref() != Some("existing") {
+            report.did(format!("commented on {} ({key})", item.display));
+        }
+        Ok(())
+    }
+
+    fn claim(&self, item: &Item, taker: &str, renew: bool) -> Result<(), String> {
+        let mut request = self
+            .ledger_request(Verb::Sink, "claim")
+            .with_arg("item", inline(&item.number.to_string()))
+            .with_arg("lease", inline(LEASE))
+            .with_arg(
+                "purpose",
+                inline(&format!("taken in layer {}", self.binding.layer)),
+            )
+            .with_arg("content", inline(taker));
+        if renew {
+            request = request.with_arg("renew", inline("true"));
+        }
+        self.ledger_issue(request).map(|_| ())
+    }
+
+    fn release(&self, item: &Item, taker: &str) -> Result<(), String> {
+        self.ledger_issue(
+            self.ledger_request(Verb::Delete, "claim")
+                .with_arg("item", inline(&item.number.to_string()))
+                .with_arg("from", inline(taker)),
+        )
+        .map(|_| ())
+    }
+
+    // ---- the pass -------------------------------------------------------------------------
+
+    /// One pass. See the module docs for what it does, and why twice is once.
+    ///
+    /// # Errors
+    ///
+    /// When the binding is refused (a layer that is not a tuplespace) or what the pass must
+    /// read cannot be read; an action that fails is a [`Report::problems`] line instead, and
+    /// the next pass tries again.
+    pub fn pass(&self) -> Result<Report, String> {
+        let context = self.ready()?;
+        let mut report = Report::default();
+        self.refresh_kinds(&mut report);
+        let mut pending = self.pending()?;
+        let mut taken = self.receipts()?;
+        let recorded = self.recorded()?;
+        let (mut items, complete) = self.items()?;
+
+        // Our offers: every offer recorded on a live item.
+        let mut ours: BTreeMap<String, String> = BTreeMap::new();
+        for (item, offers) in &recorded {
+            for offer in offers {
+                ours.insert(offer.clone(), item.clone());
+            }
+        }
+        let offerer =
+            |offer: &str, pending: &BTreeMap<String, Tuple>, taken: &BTreeMap<String, Taken>| {
+                pending
+                    .get(offer)
+                    .and_then(|t| t.dropper.clone())
+                    .or_else(|| taken.get(offer).and_then(|t| t.tuple.dropper.clone()))
+            };
+
+        // 1. Take the reports on our offers that are still pending, in feed order.
+        let mut reports: Vec<Tuple> = pending
+            .values()
+            .filter(|t| t.is_report() && t.offer.as_ref().is_some_and(|o| ours.contains_key(o)))
+            .cloned()
+            .collect();
+        reports.sort_by_key(|t| t.seq);
+        let mut fresh: BTreeSet<String> = BTreeSet::new();
+        for tuple in reports {
+            match self.take(&tuple.subject) {
+                Ok(true) => {
+                    report.did(format!("took report <{}>", tuple.subject));
+                    fresh.insert(tuple.subject.clone());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    report.failed(format!("taking report <{}>: {e}", tuple.subject));
+                    continue;
+                }
+            }
+            pending.remove(&tuple.subject);
+        }
+        if !fresh.is_empty() {
+            taken = self.receipts()?;
+        }
+
+        // 2. Apply every report we hold, in feed order. Idempotent: keyed comments, and a
+        //    release only while the offer is its item's newest and the taker still holds it.
+        let newest: BTreeMap<String, String> = recorded
+            .iter()
+            .filter_map(|(item, offers)| Some((item.clone(), offers.last()?.clone())))
+            .collect();
+        let mut applied: Vec<&Taken> = taken
+            .values()
+            .filter(|r| r.tuple.is_report())
+            .filter(|r| {
+                r.tuple.offer.as_ref().is_some_and(|o| {
+                    ours.contains_key(o)
+                        && offerer(o, &pending, &taken).as_deref() == Some(&r.taker)
+                })
+            })
+            .collect();
+        applied.sort_by_key(|r| r.seq);
+        let mut released: BTreeSet<String> = BTreeSet::new();
+        let mut touched = false;
+        let applied: Vec<Taken> = applied.into_iter().cloned().collect();
+        for r in &applied {
+            let offer = r.tuple.offer.clone().unwrap_or_default();
+            let Some(item) = items.iter().find(|i| Some(&i.iri) == ours.get(&offer)) else {
+                continue;
+            };
+            let Some(taker) = taken.get(&offer).map(|t| t.taker.clone()) else {
+                continue;
+            };
+            let note = r
+                .tuple
+                .note
+                .as_deref()
+                .map(|n| format!(" Note: {n}"))
+                .unwrap_or_default();
+            let outcome = if r.tuple.is("Handback") {
+                let evidence = r.tuple.evidence.join(" ");
+                self.comment(
+                    item,
+                    &report_key(&self.binding.layer, &r.tuple.subject),
+                    &format!(
+                        "Handed back in layer {} by <{taker}> with evidence: {evidence}.{note}",
+                        self.binding.layer
+                    ),
+                    true,
+                    &mut report,
+                )
+            } else if r.tuple.is("Release") {
+                released.insert(offer.clone());
+                let commented = self.comment(
+                    item,
+                    &report_key(&self.binding.layer, &r.tuple.subject),
+                    &format!(
+                        "Released in layer {} by <{taker}>; it is offered again.{note}",
+                        self.binding.layer
+                    ),
+                    false,
+                    &mut report,
+                );
+                let held = item.claim.as_ref().is_some_and(|c| c.holder == taker);
+                if commented.is_ok() && held && newest.get(&item.iri) == Some(&offer) {
+                    match self.release(item, &taker) {
+                        Ok(()) => {
+                            report.did(format!("released {} from <{taker}>", item.display));
+                            touched = true;
+                        }
+                        Err(e) => report.failed(format!("releasing {}: {e}", item.display)),
+                    }
+                }
+                commented
+            } else {
+                // Progress: renew a lease only when this pass took the report, so a sweep
+                // does not extend a lease nobody is reporting on.
+                let held = item.claim.as_ref().is_some_and(|c| c.holder == taker);
+                if fresh.contains(&r.tuple.subject) && held && item.status == "open" {
+                    match self.claim(item, &taker, true) {
+                        Ok(()) => {
+                            report.did(format!("renewed {} for <{taker}>", item.display));
+                            touched = true;
+                        }
+                        Err(e) => report.failed(format!("renewing {}: {e}", item.display)),
+                    }
+                }
+                match &r.tuple.note {
+                    Some(n) => self.comment(
+                        item,
+                        &report_key(&self.binding.layer, &r.tuple.subject),
+                        &format!(
+                            "Progress in layer {} from <{taker}>: {n}",
+                            self.binding.layer
+                        ),
+                        false,
+                        &mut report,
+                    ),
+                    None => Ok(()),
+                }
+            };
+            if let Err(e) = outcome {
+                report.failed(format!("applying report <{}>: {e}", r.tuple.subject));
+            } else {
+                touched = touched || r.tuple.is("Handback");
+            }
+        }
+        if touched {
+            items = self.items()?.0;
+        }
+
+        // 3. Each item against its newest offer.
+        let known_offerer = ours.keys().find_map(|o| offerer(o, &pending, &taken));
+        for item in &items {
+            let offers = recorded.get(&item.iri).cloned().unwrap_or_default();
+            let open = item.status == "open";
+            let holder = item.claim.as_ref().map(|c| c.holder.clone());
+            let awaiting = item.awaiting.is_some();
+            let wants_offer = open && holder.is_none() && !awaiting;
+            // An older offer still pending was superseded: withdraw it.
+            for older in offers.iter().rev().skip(1) {
+                if pending.contains_key(older) {
+                    self.withdraw(item, older, "superseded by a newer offer", &mut report);
+                }
+            }
+            let Some(newest) = offers.last() else {
+                if wants_offer {
+                    self.offer(item, None, &context, &mut report);
+                }
+                continue;
+            };
+            if pending.contains_key(newest) {
+                let why = if !open {
+                    Some("closed")
+                } else if awaiting {
+                    Some("handed back, awaiting its dispatcher")
+                } else if holder.is_some() {
+                    Some("claimed outside the layer")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    self.withdraw(item, newest, why, &mut report);
+                }
+                continue;
+            }
+            match taken.get(newest) {
+                None => {
+                    // Recorded, never dropped (a crash between the two): drop it now, under
+                    // the name the record already gives it.
+                    if wants_offer {
+                        self.offer(item, Some(newest), &context, &mut report);
+                    }
+                }
+                Some(t)
+                    if Some(&t.taker) == t.tuple.dropper.as_ref() || released.contains(newest) =>
+                {
+                    // Withdrawn by us, or released by its taker: a fresh offer when it wants one.
+                    if wants_offer {
+                        self.offer(item, None, &context, &mut report);
+                    }
+                }
+                Some(t) => {
+                    if !open || awaiting {
+                        continue;
+                    }
+                    match holder.as_deref() {
+                        None => self.claim_for(item, &t.taker, newest, &mut report),
+                        Some(h) if h == t.taker => {}
+                        Some(h) => {
+                            let text = format!(
+                                "Taken in layer {} by <{}> at {}, but held here by {h}: both \
+                                 stand, and the dispatcher decides.",
+                                self.binding.layer, t.taker, t.time
+                            );
+                            let key = format!("layer:{}:conflict:{newest}", self.binding.layer);
+                            if let Err(e) = self.comment(item, &key, &text, false, &mut report) {
+                                report.failed(format!("commenting on {}: {e}", item.display));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Our offers pending in the layer for an item that is no longer live (deleted).
+        if let (true, Some(us)) = (complete, known_offerer) {
+            let live: BTreeSet<&str> = items.iter().map(|i| i.iri.as_str()).collect();
+            let orphans: Vec<String> = pending
+                .values()
+                .filter(|t| t.is("Offer") && t.dropper.as_deref() == Some(us.as_str()))
+                .filter(|t| {
+                    ours.get(&t.subject)
+                        .is_none_or(|i| !live.contains(i.as_str()))
+                })
+                .map(|t| t.subject.clone())
+                .collect();
+            for offer in orphans {
+                match self.take(&offer) {
+                    Ok(true) => report.did(format!("withdrew <{offer}> (its item is gone)")),
+                    Ok(false) => {}
+                    Err(e) => report.failed(format!("withdrawing <{offer}>: {e}")),
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Offer `item`: under `existing` (a recorded offer the layer never got), else a new name,
+    /// recorded on the item before it is dropped.
+    fn offer(&self, item: &Item, existing: Option<&String>, context: &str, report: &mut Report) {
+        let offer = existing
+            .cloned()
+            .unwrap_or_else(|| format!("{}:offer:{}", self.binding.layer_iri(), mint_id()));
+        // Built first: an item that cannot be offered records nothing.
+        if let Err(e) = self.build_offer(item, &offer, context) {
+            report.failed(format!("not offering {}: {e}", item.display));
+            return;
+        }
+        if existing.is_none() {
+            let key = offered_key(&self.binding.layer, &offer);
+            let text = format!("Offered in layer {} as <{offer}>.", self.binding.layer);
+            if let Err(e) = self.comment(item, &key, &text, false, report) {
+                report.failed(format!("recording the offer of {}: {e}", item.display));
+                return;
+            }
+        }
+        match self.drop_offer(item, &offer, context) {
+            Ok(()) => report.did(format!("offered {} as <{offer}>", item.display)),
+            Err(e) => report.failed(e),
+        }
+    }
+
+    /// Withdraw `offer` by taking it back; a take that loses the race is the taker's, and
+    /// stands.
+    fn withdraw(&self, item: &Item, offer: &str, why: &str, report: &mut Report) {
+        match self.take(offer) {
+            Ok(true) => {
+                report.did(format!("withdrew <{offer}> ({} is {why})", item.display));
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                report.failed(format!("withdrawing <{offer}>: {e}"));
+                return;
+            }
+        }
+        let taken = match self.receipt_of(offer) {
+            Ok(Some(t)) => t,
+            Ok(None) => return,
+            Err(e) => {
+                report.failed(e);
+                return;
+            }
+        };
+        if Some(&taken.taker) == taken.tuple.dropper.as_ref() {
+            return; // an earlier withdrawal of ours
+        }
+        let attempted = ikigai_ledger::sparql::iso8601(now_millis());
+        let text = format!(
+            "Taken in layer {} by <{}> at {}, after this server tried to withdraw it at \
+             {attempted} ({} is {why}). The take stands; the dispatcher decides.",
+            self.binding.layer, taken.taker, taken.time, item.display
+        );
+        let key = format!("layer:{}:late-take:{offer}", self.binding.layer);
+        if let Err(e) = self.comment(item, &key, &text, false, report) {
+            report.failed(format!("commenting on {}: {e}", item.display));
+        }
+        let free = item.status == "open" && item.claim.is_none() && item.awaiting.is_none();
+        if free {
+            self.claim_for(item, &taken.taker, offer, report);
+        }
+    }
+
+    fn claim_for(&self, item: &Item, taker: &str, offer: &str, report: &mut Report) {
+        match self.claim(item, taker, false) {
+            Ok(()) => report.did(format!(
+                "claimed {} for <{taker}> (took <{offer}>)",
+                item.display
+            )),
+            Err(e) => report.failed(format!("claiming {} for <{taker}>: {e}", item.display)),
+        }
+    }
+}
+
+/// The comment key a report is applied under: the report's own IRI (design section 10), or,
+/// when the taker minted one a ledger key cannot spell (keys are `[A-Za-z0-9-._~:]`, at most
+/// 256 characters), `layer:{layer}:report:sha256:<hex>` of it.
+///
+/// ```
+/// use ikigai_gonk::mirror::report_key;
+/// let plain = "urn:layer:tasks:report:01m4abc";
+/// assert_eq!(report_key("tasks", plain), plain);
+/// assert!(report_key("tasks", "urn:layer:tasks:report/a b").starts_with("layer:tasks:report:sha256:"));
+/// ```
+pub fn report_key(layer: &str, report: &str) -> String {
+    if ikigai_ledger::model::parse_key(report).is_ok() {
+        return report.to_string();
+    }
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(report.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("layer:{layer}:report:sha256:{hex}")
+}
+
+/// The comment key an offer is recorded under on its item.
+pub fn offered_key(layer: &str, offer: &str) -> String {
+    format!("layer:{layer}:offered:{offer}")
+}
+
+/// The fixed CONSTRUCT an offer is built from: the item's title (at most 200 characters, the
+/// shape's bound), its body as the brief, and one GitHub repository it is about.
+fn offer_construct(item: &str, offer: &str) -> String {
+    format!(
+        "PREFIX dcterms: <http://purl.org/dc/terms/>\n\
+         PREFIX ik: <{IK}>\n\
+         CONSTRUCT {{ <{offer}> a ik:Offer ; dcterms:title ?title ; ik:brief ?brief ; \
+         ik:repository ?repository . }}\n\
+         WHERE {{\n\
+           <{item}> dcterms:title ?t .\n\
+           OPTIONAL {{ <{item}> <{body}> ?b }}\n\
+           BIND(SUBSTR(STR(?t), 1, 200) AS ?title)\n\
+           BIND(STR(?b) AS ?brief)\n\
+           OPTIONAL {{ SELECT (MIN(STR(?a)) AS ?r) WHERE {{ <{item}> <{about}> ?a . \
+             FILTER(isIRI(?a) && REGEX(STR(?a), \"^https://github[.]com/[^/]+/[^/]+$\")) }} }}\n\
+           BIND(IRI(?r) AS ?repository)\n\
+         }}",
+        body = v::BODY,
+        about = v::ABOUT,
+    )
+}
+
+/// Turtle, as `(subject, predicate, object)`; a blank node's subject is `_:label`.
+fn parse_turtle(bytes: &[u8]) -> Result<Vec<(String, String, Term)>, String> {
+    RdfParser::from_format(RdfFormat::Turtle)
+        .for_slice(bytes)
+        .map(|quad| {
+            let quad = quad.map_err(|e| format!("not Turtle: {e}"))?;
+            Ok((
+                match &quad.subject {
+                    oxigraph::model::NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                    oxigraph::model::NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
+                },
+                quad.predicate.as_str().to_string(),
+                quad.object,
+            ))
+        })
+        .collect()
+}
+
+trait TermValue {
+    fn value(&self) -> &str;
+}
+
+impl TermValue for Term {
+    fn value(&self) -> &str {
+        match self {
+            Term::NamedNode(n) => n.as_str(),
+            Term::BlankNode(b) => b.as_str(),
+            Term::Literal(l) => l.value(),
+            #[allow(unreachable_patterns)] // oxigraph's rdf-12 feature adds a triple term
+            _ => "",
+        }
+    }
+}
+
+/// The tuples in `triples`, by subject (receipt subjects excluded).
+fn tuples(triples: &[(String, String, Term)]) -> BTreeMap<String, Tuple> {
+    let mut out: BTreeMap<String, Tuple> = BTreeMap::new();
+    for (s, p, o) in triples {
+        if s.starts_with("_:") || s.contains(":receipt:") || *p == PROV_USED {
+            continue;
+        }
+        let t = out.entry(s.clone()).or_insert_with(|| Tuple {
+            subject: s.clone(),
+            ..Tuple::default()
+        });
+        match p.as_str() {
+            RDF_TYPE => {
+                t.types.insert(o.value().to_string());
+            }
+            PROV_ATTRIBUTED => t.dropper = Some(o.value().to_string()),
+            p if p == ik("offer") => t.offer = Some(o.value().to_string()),
+            p if p == ik("seq") => t.seq = o.value().parse().unwrap_or(0),
+            p if p == ik("note") => t.note = Some(o.value().to_string()),
+            p if p == ik("evidence") => t.evidence.push(o.value().to_string()),
+            _ => {}
+        }
+    }
+    for t in out.values_mut() {
+        t.evidence.sort();
+    }
+    // A receipt's subject is under `…:receipt:`; anything typed only as a prov:Activity is one.
+    out.retain(|_, t| !t.types.contains("http://www.w3.org/ns/prov#Activity"));
+    out
+}
+
+/// The takes in `triples` (receipt documents), by the subject taken.
+fn receipts(triples: &[(String, String, Term)]) -> BTreeMap<String, Taken> {
+    let tuples = tuples(triples);
+    /// One receipt's own statements: what it used, who took it, when, and its place.
+    #[derive(Default)]
+    struct Take {
+        used: Option<String>,
+        taker: Option<String>,
+        time: Option<String>,
+        seq: u64,
+    }
+    let mut by_receipt: BTreeMap<&str, Take> = BTreeMap::new();
+    for (s, p, o) in triples {
+        let entry = by_receipt.entry(s.as_str()).or_default();
+        match p.as_str() {
+            PROV_USED => entry.used = Some(o.value().to_string()),
+            PROV_ASSOCIATED => entry.taker = Some(o.value().to_string()),
+            PROV_ENDED => entry.time = Some(o.value().to_string()),
+            p if p == ik("seq") => entry.seq = o.value().parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    by_receipt
+        .into_values()
+        .filter_map(|take| {
+            let used = take.used?;
+            Some((
+                used.clone(),
+                Taken {
+                    taker: take.taker?,
+                    time: take.time.unwrap_or_default(),
+                    seq: take.seq,
+                    tuple: tuples.get(&used).cloned().unwrap_or(Tuple {
+                        subject: used,
+                        ..Tuple::default()
+                    }),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// `triples` as an expanded JSON-LD document, one node object per subject.
+fn expanded_json_ld(triples: &[(String, String, Term)]) -> Vec<u8> {
+    let mut nodes: BTreeMap<&str, serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
+    for (s, p, o) in triples {
+        let node = nodes.entry(s.as_str()).or_insert_with(|| {
+            let mut m = serde_json::Map::new();
+            m.insert("@id".into(), s.clone().into());
+            m
+        });
+        let (key, value) = if *p == RDF_TYPE {
+            ("@type".to_string(), serde_json::Value::from(o.value()))
+        } else {
+            let value = match o {
+                Term::Literal(l) => {
+                    let mut v = serde_json::Map::new();
+                    v.insert("@value".into(), l.value().into());
+                    if let Some(lang) = l.language() {
+                        v.insert("@language".into(), lang.into());
+                    } else if l.datatype().as_str() != XSD_STRING {
+                        v.insert("@type".into(), l.datatype().as_str().into());
+                    }
+                    serde_json::Value::Object(v)
+                }
+                other => serde_json::json!({ "@id": other.value() }),
+            };
+            (p.clone(), value)
+        };
+        node.entry(key)
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("every value here is an array")
+            .push(value);
+    }
+    serde_json::to_vec(&nodes.into_values().collect::<Vec<_>>()).expect("JSON serializes")
+}
+
+/// `urn:jsonld:prune` of `document` against `context`, REFUSED when prune dropped anything:
+/// what the CONSTRUCT emits is exactly what the context allows, so a drop is a bug to see.
+///
+/// # Errors
+///
+/// A drop (naming what prune removed), or prune refusing the context or the document.
+pub fn prune_strict(prune: &Kernel, document: &[u8], context: &str) -> Result<Vec<u8>, String> {
+    let call = |face: &str| {
+        let request = layer::request(Verb::Source, "urn:jsonld:prune")
+            .with_arg("content", ArgRef::Inline(document.to_vec()))
+            .with_arg("context", inline(context))
+            .with_arg("face", inline(face));
+        Resolver::issue(prune, request)
+            .map(|(r, _)| r.bytes)
+            .map_err(|e| format!("urn:jsonld:prune: {e}"))
+    };
+    let removed: serde_json::Value = serde_json::from_slice(&call("report")?)
+        .map_err(|e| format!("urn:jsonld:prune's report is not JSON: {e}"))?;
+    let dropped = removed
+        .get("dropped")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("urn:jsonld:prune's report has no `dropped`")?;
+    if dropped != 0 {
+        return Err(format!(
+            "refused to publish: urn:jsonld:prune removed {dropped} thing(s) the layer's context \
+             does not define ({removed}); the offer's CONSTRUCT must emit only what the layer \
+             allows"
+        ));
+    }
+    call("document")
+}
+
+fn inline(value: &str) -> ArgRef {
+    ArgRef::Inline(value.as_bytes().to_vec())
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A new offer's local name: the time in milliseconds (10 Crockford base-32 characters, so the
+/// names sort by when they were minted) and 16 random ones.
+pub fn mint_id() -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let mut out = String::with_capacity(26);
+    let millis = now_millis();
+    for i in (0..10).rev() {
+        out.push(ALPHABET[((millis >> (i * 5)) & 31) as usize] as char);
+    }
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).expect("the operating system's random source");
+    for byte in random {
+        out.push(ALPHABET[(byte & 31) as usize] as char);
+    }
+    out
+}
+
+// ---- running it ---------------------------------------------------------------------------
+
+/// Run `mirror` for the life of the process: a pass now, on every event in the layer's feed, on
+/// every cut under the ledger's names, and every [`SWEEP`] whatever happens.
+pub fn start(mirror: Mirror) {
+    let mirror = Arc::new(mirror);
+    let (kick, kicks) = sync_channel::<()>(1);
+    spawn_feed(Arc::clone(&mirror), kick.clone());
+    spawn_listener(&mirror, kick.clone());
+    let _ = kick.try_send(());
+    let worker = Arc::clone(&mirror);
+    std::thread::Builder::new()
+        .name(format!("gonk-layer-{}", mirror.binding.layer))
+        .spawn(move || run_passes(&worker, &kicks))
+        .expect("spawning the mirror's thread");
+}
+
+fn run_passes(mirror: &Mirror, kicks: &Receiver<()>) {
+    let mut last = String::new();
+    loop {
+        match kicks.recv_timeout(SWEEP) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        let said = match mirror.pass() {
+            Ok(report) => {
+                for line in &report.actions {
+                    log(mirror, line);
+                }
+                report.problems.join("; ")
+            }
+            Err(e) => e,
+        };
+        // A problem is said once, and again only when it changes: a door that is down for an
+        // hour must not fill the log.
+        if !said.is_empty() && said != last {
+            log(mirror, &said);
+        }
+        last = said;
+    }
+}
+
+fn log(mirror: &Mirror, line: &str) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "ikigai-gonk: layer {} → ledger {}: {line}",
+        mirror.binding.layer,
+        mirror.binding.ledger
+    );
+}
+
+fn nudge(kick: &SyncSender<()>) -> bool {
+    !matches!(kick.try_send(()), Err(TrySendError::Disconnected(_)))
+}
+
+/// Follow the layer's feed: each event (or a wait that ends) after the cursor is a kick.
+fn spawn_feed(mirror: Arc<Mirror>, kick: SyncSender<()>) {
+    let name = format!("gonk-layer-feed-{}", mirror.binding.layer);
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            let mut after = 0u64;
+            loop {
+                let request = layer::request(Verb::Source, &mirror.layer_iri("feed"))
+                    .with_arg("after", inline(&after.to_string()))
+                    .with_arg("wait", inline(&FEED_WAIT_SECS.to_string()))
+                    .with_arg("as", inline("application/json"));
+                match mirror.door.call(request) {
+                    Ok(answer) => {
+                        let json: serde_json::Value =
+                            serde_json::from_slice(&answer.bytes).unwrap_or_default();
+                        let events = json
+                            .get("events")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(0, Vec::len);
+                        if let Some(last) = json.get("last").and_then(serde_json::Value::as_u64) {
+                            after = last;
+                        }
+                        if events > 0 && !nudge(&kick) {
+                            return;
+                        }
+                    }
+                    // The host's feed is not the one the cursor came from: start over.
+                    Err(Error::Conflict(_)) => after = 0,
+                    Err(_) => std::thread::sleep(FEED_RETRY),
+                }
+            }
+        })
+        .expect("spawning the mirror's feed thread");
+}
+
+/// Listen for cuts under the ledger's names: every write to it is a kick.
+///
+/// The default ledger is also written through the short forms (`urn:iki:ledger:append`), which
+/// are not under `urn:iki:ledger:default:`, so for it the listener hears every ledger; an extra
+/// pass changes nothing.
+fn spawn_listener(mirror: &Mirror, kick: SyncSender<()>) {
+    let prefix = if mirror.binding.ledger == ikigai_gonk_default_ledger() {
+        "urn:iki:ledger:".to_string()
+    } else {
+        format!("urn:iki:ledger:{}:", mirror.binding.ledger)
+    };
+    let listener = match mirror
+        .hub
+        .listen(ListenSpec::new().prefix(prefix), &Capability::root())
+    {
+        Ok(listener) => listener,
+        Err(e) => {
+            log(
+                mirror,
+                &format!("no cut listener ({e}): the feed and the sweep remain"),
+            );
+            return;
+        }
+    };
+    let name = format!("gonk-layer-cuts-{}", mirror.binding.layer);
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            loop {
+                runtime.block_on(listener.wait());
+                let _ = listener.drain();
+                if !nudge(&kick) {
+                    return;
+                }
+            }
+        })
+        .expect("spawning the mirror's listener thread");
+}
+
+fn ikigai_gonk_default_ledger() -> &'static str {
+    crate::config::DEFAULT_LEDGER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minted_ids_sort_by_time_and_differ() {
+        let a = mint_id();
+        std::thread::sleep(Duration::from_millis(2));
+        let b = mint_id();
+        assert_eq!(a.len(), 26);
+        assert!(a < b, "{a} then {b}");
+        assert_ne!(a[10..], b[10..]);
+    }
+
+    #[test]
+    fn receipts_and_tuples_are_read_apart() {
+        let text = r#"
+            @prefix ik: <https://ikigai-rs.dev/ns#> .
+            @prefix prov: <http://www.w3.org/ns/prov#> .
+            <urn:layer:t:receipt:1> a prov:Activity ; prov:used <urn:layer:t:offer:a> ;
+                prov:wasAssociatedWith <urn:p:bob> ; prov:endedAtTime "2026-10-11T00:00:00Z" ;
+                ik:seq 3 .
+            <urn:layer:t:offer:a> a ik:Offer ; prov:wasAttributedTo <urn:p:us> ; ik:seq 1 .
+        "#;
+        let triples = parse_turtle(text.as_bytes()).unwrap();
+        let taken = receipts(&triples);
+        let a = &taken["urn:layer:t:offer:a"];
+        assert_eq!(a.taker, "urn:p:bob");
+        assert_eq!(a.seq, 3);
+        assert_eq!(a.tuple.dropper.as_deref(), Some("urn:p:us"));
+        assert!(a.tuple.is("Offer"));
+        assert_eq!(tuples(&triples).len(), 1, "the receipt is not a tuple");
+    }
+}

@@ -845,6 +845,13 @@ notify = "6.1"
 # packages to the graph (`globset`, `bstr`, `crossbeam-deque`, `crossbeam-epoch`); `regex`,
 # `walkdir` and the rest it needs were already here.
 ignore = "0.4.33"
+# `urn:jsonld:prune`, the trust-boundary egress filter a task-layer offer passes through before
+# it leaves this process (ledger #1190, `crate::mirror`): the offer is a fixed CONSTRUCT over the
+# ledger's graph, then pruned to the LAYER's own context, and the mirror refuses to publish when
+# prune dropped anything. ⚠ Linked for the mirror ALONE and bound in a private kernel only it
+# issues to: no door serves `urn:jsonld:*`. 0.2.2 is the release that has prune (ledger #1180).
+# `"0.2.2"` is `<0.3.0`.
+ikigai-jsonld = "0.2.2"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
@@ -859,3 +866,8 @@ tempfile = "3"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # The WCAG contrast floor the page's palette is held to, in both color schemes.
 ikigai-a11y = "0.2.1"
+# The scripted layer host the mirror's tests run against (ledger #1190): the published layer
+# host, in process, behind a door that mints each participant's principal. 0.2.0 is the
+# published release (0.2.1, with `urn:collab:{name}:participants`, is merged and not yet
+# published, so the tests bind that one read themselves). `"0.2.0"` is `<0.3.0`.
+ikigai-layers = "0.2.0"
