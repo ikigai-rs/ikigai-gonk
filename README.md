@@ -1663,7 +1663,7 @@ cp <peer cert-dir>/server.crt ~/.config/ikigai/gonk/quic/peers/plasma/server.crt
 The directory holds `client.crt`, `client.key` and the `server.crt` to pin — the same layout
 `ikigai --cert-dir` uses, and the same one `ikigai-gonk client add` writes for gonk's own
 clients. `gonk.mount` is the ONLY key that names it, and `urn:llm:` is the only prefix a
-mount line may claim: a mount is composed in front of the local spaces and its catalog is
+mount line may claim (a task layer is mounted by binding it, below, and by nothing else): a mount is composed in front of the local spaces and its catalog is
 served through every door, so what these doors can serve stays a property of the manifest
 plus one namespace.
 
@@ -1688,6 +1688,71 @@ nor read an archived one, while the socket door's root can do both. A signed-in 
 certificate identity may derive when its grant was minted with `--browse derive`
 ([the roles](#provisioning-a-browsing-identity-the---browse-roles)), whose net scope names
 this mount's host.
+
+## A ledger bound to a task layer (ledger #1190)
+
+A **layer** is a shared space on a layer host ([`ikigai-layers`](https://github.com/ikigai-rs/ikigai-layers),
+served by an `ikigai serve` door): a task layer is a tuplespace where work is offered, taken
+atomically, and reported on. One `gonk.layer` line binds one of this server's ledgers to one
+task layer, in one role:
+
+```toml
+# ours: offer ledger `bobby`'s items into `tasks-bobby`, and claim what is taken
+gonk.layer = "tasks-bobby offer quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=bobby collab=bobby"
+# theirs: take offers from it into their own ledger
+gonk.layer = "tasks-bobby take quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=ikigai"
+```
+
+The certificate directory is this gonk's own identity at the layer door (`client.crt`,
+`client.key`, and the `server.crt` it pins); the door's enrollment names the participant it is
+(`plasma-gonk` in the edge's `collabs/bobby.toml`). `collab=` names the collaboration whose
+participants graph (`urn:collab:{name}:participants`) says whether a taker is a person or a
+machine, which is the KIND of the claim the mirror takes for them.
+
+**What it mounts.** `urn:layer:{layer}` and everything under `urn:layer:{layer}:`, then
+`urn:layers:` and `urn:collab:`, as override mounts on that one door, and nothing else: a
+`gonk.mount` line still refuses every prefix but `urn:llm:`. Every answer through them is
+uncacheable, because a layer's state changes on the layer host's schedule and golden threads
+do not cross a mount. Nothing is dialled at start; a door that is down costs the mirror and
+nothing else.
+
+**What it refuses.** A layer whose model (`ik:layerModel` in its definition) is not
+`tuplespace`: messages never touch a ledger. It is read when the binding first runs, and a
+wrong model refuses the binding for the life of the process, said once on stderr. Also two
+lines for one layer, two offer lines for one ledger, and bindings on two different doors.
+
+### The offer role: the mirror
+
+A pass is level-triggered and idempotent (twice is once), and runs on every event in the
+layer's feed, on every write to the ledger (a cut listener on `urn:iki:ledger:{ledger}:`), and
+every five minutes as a backstop:
+
+- **An open, unclaimed item that is not awaiting its dispatcher is offered.** The offer is a
+  fixed CONSTRUCT over the ledger's graph naming only the title, the BODY as the brief, and
+  one `https://github.com/{owner}/{repo}` the item is `about`; then `urn:jsonld:prune` against
+  the layer's own context, and the mirror refuses to publish if prune removed anything; then
+  the layer host's closed shapes. Labels, links, comments, numbers and ledger IRIs cannot
+  cross. An item with no body is not offered (the pass says why). The offer is recorded on
+  the item as a comment keyed `layer:{layer}:offered:<offer IRI>` before it is dropped.
+- **A taken offer's item is claimed for its taker**, `lease=7d`, as the mirror's principal
+  (`urn:iki:gonk:layer:{layer}`), with the kind the participants graph gives.
+- **Reports addressed to us are taken in feed order** and applied: `Progress` renews the
+  lease (and comments, keyed, when it has a note); `Release` comments, releases the taker's
+  claim and offers the item again under a new name; `Handback` comments with its evidence and
+  `handback=true`, so the item waits for its dispatcher. Every report comment is keyed by the
+  report's IRI, so a hand-back seen twice comments once and cannot re-set a hand-back the
+  dispatcher has answered.
+- **A pending offer whose item closed, was deleted, was claimed outside the layer or was
+  handed back is withdrawn** by taking it back. If the taker's take wins that race, the take
+  stands: the mirror comments once that it happened after a withdrawal was attempted, claims
+  the item for the taker when it is open and free, and leaves the rest to the dispatcher.
+
+**The mirror holds the worker grant and never `close`**
+(`urn:cap:ledger:{read,claim,comment}:{ledger}` and the ledger graph's store tokens): the
+taker's hand-back makes the item wait, and the dispatcher checks the evidence and closes it.
+Nothing closes across. The take role (following the feed, `ikigai-gonk layer take <offer>`,
+reports from the local ledger) is not built yet: a `take` line mounts the layer and runs
+nothing.
 
 ## Reviewing on a git event
 

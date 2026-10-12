@@ -13,7 +13,8 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{
-    access, browse, compose_with, doors, mount, queue, quic, trigger, verdict, watch, web,
+    access, browse, compose_with, doors, layer, mirror, mount, queue, quic, trigger, verdict,
+    watch, web,
 };
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
@@ -286,8 +287,12 @@ fn serve(flags: &config::Flags) -> ! {
     // The mounts are built before the kernel and dialled by neither: `crate::mount` dials on
     // first use, so a peer that is down costs this server nothing at startup and the ledger
     // is served whether or not a model can be reached.
-    let mounted: Vec<Arc<dyn ikigai_core::Space>> =
+    let mut mounted: Vec<Arc<dyn ikigai_core::Space>> =
         settings.mounts.iter().map(mount::space).collect();
+    // ★ The layer bindings' mounts (ledger #1190): `urn:layer:{layer}` per `gonk.layer` line,
+    // then `urn:layers:` and `urn:collab:`, on one door nothing dials until it is used.
+    let layer_mounts = layer::mount(&settings.layers);
+    mounted.extend(layer_mounts.spaces.iter().cloned());
     let mount_line = mount_line(&settings, explains);
 
     // The backup rotation, and the timer that fires it. Both are built before the kernel
@@ -399,6 +404,7 @@ fn serve(flags: &config::Flags) -> ! {
         Some(&nl),
     ));
     scripts.attach(&hub);
+    let layer_line = start_layers(&settings, layer_mounts.door.as_ref(), &hub);
 
     // ★ The Queue's serious set, checked against the finding contract THIS kernel binds
     // (ledger #496): a word the contract does not declare stops this server naming both
@@ -618,6 +624,7 @@ fn serve(flags: &config::Flags) -> ! {
         );
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
+        eprintln!("  layer   {layer_line}");
         eprintln!("  review  {review_line}");
         eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");
@@ -1028,6 +1035,44 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
     let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
+}
+
+/// Start each `gonk.layer` binding's worker, and say what is bound (ledger #1190).
+///
+/// The offer role runs the mirror ([`mirror::start`]); nothing is dialled here, so a layer door
+/// that is down stops nothing (the mirror says so once, and keeps trying).
+fn start_layers(
+    settings: &config::Settings,
+    door: Option<&Arc<ikigai_gonk::mount::LazyMount>>,
+    hub: &Arc<ikigai_core::Kernel>,
+) -> String {
+    let Some(door) = door else {
+        return "no gonk.layer, so no ledger is bound to a layer".to_string();
+    };
+    let mut lines = Vec::new();
+    for binding in &settings.layers {
+        match binding.role {
+            layer::Role::Offer => {
+                let worker = mirror::Mirror::new(
+                    binding.clone(),
+                    Arc::clone(door) as Arc<dyn layer::Door>,
+                    Arc::clone(hub),
+                )
+                .unwrap_or_else(|e| fail(&e));
+                mirror::start(worker);
+                lines.push(format!(
+                    "ledger `{}` offered into layer `{}` on {}",
+                    binding.ledger, binding.layer, binding.target
+                ));
+            }
+            layer::Role::Take => lines.push(format!(
+                "layer `{}` on {} mounted for ledger `{}`; the take role's follower is not built \
+                 yet",
+                binding.layer, binding.target, binding.ledger
+            )),
+        }
+    }
+    lines.join("; ")
 }
 
 fn read_settings(flags: &config::Flags) -> config::Settings {

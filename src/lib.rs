@@ -48,6 +48,8 @@ pub mod identity;
 pub mod k;
 pub mod kata;
 pub mod keys;
+pub mod layer;
+pub mod mirror;
 pub mod mount;
 pub mod nl;
 pub mod queue;
