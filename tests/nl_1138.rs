@@ -441,12 +441,14 @@ fn a_grounding_over_a_ledger_the_size_of_the_live_one_fits_the_bound() {
     let root_dir = tempfile::tempdir().expect("a browse root");
     std::fs::write(root_dir.path().join("README.md"), "# demo\n").unwrap();
     let graph = ikigai_gonk::browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let tiers = ikigai_gonk::config::ExplainTiers::default();
     let wired = ikigai_gonk::browse::wire(
         vec![("demo".to_string(), root_dir.path().to_path_buf())],
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         None,
         Some(&tiers),
         &graph,

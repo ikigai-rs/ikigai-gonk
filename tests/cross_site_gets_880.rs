@@ -163,11 +163,20 @@ fn gonk() -> Gonk {
     }
     let peer = stub_peer();
     let graph = browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let roots: Vec<(String, PathBuf)> = vec![(ROOT.to_string(), root.path().to_path_buf())];
     let tiers = ExplainTiers::default();
-    let wired = browse::wire(roots, handle, None, Some(&tiers), &graph, None);
+    let wired = browse::wire(
+        roots,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
+        None,
+        Some(&tiers),
+        &graph,
+        None,
+    );
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),

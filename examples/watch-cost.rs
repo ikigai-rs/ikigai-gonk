@@ -97,11 +97,13 @@ fn main() {
         t_watch.elapsed()
     );
     let graph = browse::Graph::chosen();
-    let (store, handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
         .expect("a shared in-memory store");
     let wired = browse::wire(
         roots.clone(),
-        handle,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
         Some(&watch),
         None,
         &graph,
