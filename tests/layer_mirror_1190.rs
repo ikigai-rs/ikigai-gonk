@@ -193,13 +193,18 @@ fn grant(principal: &str) -> Capability {
 
 impl World {
     fn new() -> World {
+        World::with_task_shapes(TASK_SHAPES)
+    }
+
+    /// A host whose task layer is admitted by `shapes` instead of the closed ones.
+    fn with_task_shapes(shapes: &str) -> World {
         let config = tempfile::tempdir().unwrap();
         let write = |rel: &str, text: &str| {
             let path = config.path().join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         };
-        write("layers/tasks.shapes.ttl", TASK_SHAPES);
+        write("layers/tasks.shapes.ttl", shapes);
         write("layers/tasks.context.jsonld", TASK_CONTEXT);
         write(
             "layers/tasks.toml",
@@ -1112,4 +1117,199 @@ fn the_only_offer_of_a_deleted_item_is_withdrawn() {
         report.actions
     );
     assert!(!w.pending().contains(&offer), "withdrawn from the layer");
+}
+
+// ---- the audit before a collaborator connects (2026-10-11) ----------------------------------
+
+/// The offer recorded on item `n` most recently, from its "Offered in layer" comment.
+fn recorded_offer(w: &World, n: i64) -> String {
+    w.comments(n)
+        .iter()
+        .rev()
+        .find_map(|c| {
+            c.strip_prefix(&format!("Offered in layer {LAYER} as <"))
+                .and_then(|rest| rest.split_once('>'))
+                .map(|(offer, _)| offer.to_string())
+        })
+        .unwrap_or_else(|| panic!("no offer recorded on {n}: {:?}", w.comments(n)))
+}
+
+/// A taker's report is the TAKER's content, kept whole inside the receipt of our take of it.
+/// In a layer whose closed shapes name more than the design's (an operator's choice), a report
+/// can carry `prov:used`/`prov:wasAssociatedWith` statements of its own, and they must never
+/// read as a receipt: before the audit they did, and an item was claimed for a principal that
+/// never took anything.
+#[test]
+fn statements_inside_a_report_never_pass_for_a_receipt() {
+    // Still closed (the host refuses an open shape), but naming three PROV properties a report
+    // may carry: an operator's choice the host admits.
+    let note = "[ sh:path ik:note ; sh:maxCount 1 ; sh:datatype xsd:string ] ,";
+    assert_eq!(TASK_SHAPES.matches(note).count(), 1);
+    let lax = TASK_SHAPES.replace(
+        note,
+        &format!(
+            "{note} [ sh:path prov:used ; sh:nodeKind sh:IRI ] , \
+             [ sh:path prov:wasAssociatedWith ; sh:nodeKind sh:IRI ] , \
+             [ sh:path prov:endedAtTime ] ,"
+        ),
+    );
+    let w = World::with_task_shapes(&lax);
+    let mirror = w.mirror();
+    let x = w.file("Item x\n\nThe first one.", &[]);
+    let y = w.file("Item y\n\nThe second one.", &[]);
+    pass(&mirror);
+    let (offer_x, offer_y) = (recorded_offer(&w, x), recorded_offer(&w, y));
+    w.take(&them(), &offer_y).unwrap();
+    pass(&mirror);
+    assert_eq!(w.item(y)["claim"]["holder"], them());
+    // x closes here, so its offer is withdrawn (taken back by us).
+    w.gonk(
+        Verb::Sink,
+        "close",
+        &[("item", &x.to_string()), ("reason", "wontfix")],
+    )
+    .unwrap();
+    pass(&mirror);
+    assert!(!w.pending().contains(&offer_x), "withdrawn");
+
+    // The taker reports on ITS take (the host admits that) and writes, inside the report,
+    // that someone else took x's offer.
+    let mallory = "urn:example:mallory";
+    w.report(
+        &them(),
+        "Progress",
+        &offer_y,
+        &format!(
+            "; <http://www.w3.org/ns/prov#used> <{offer_x}> ; \
+             <http://www.w3.org/ns/prov#wasAssociatedWith> <{mallory}> ; \
+             <http://www.w3.org/ns/prov#endedAtTime> \"2026-10-11T00:00:00Z\""
+        ),
+    );
+    w.gonk(Verb::Sink, "reopen", &[("item", &x.to_string())])
+        .unwrap();
+    let report = pass(&mirror);
+    assert!(
+        !report.actions.iter().any(|a| a.contains(mallory)),
+        "a report's own statements made a take: {:?}",
+        report.actions
+    );
+    assert!(
+        w.item(x)["claim"].is_null(),
+        "x is claimed for a principal that took nothing: {}",
+        w.item(x)["claim"]
+    );
+    assert_ne!(recorded_offer(&w, x), offer_x, "x is offered again");
+    assert_eq!(
+        w.item(y)["claim"]["holder"],
+        them(),
+        "y is still the taker's"
+    );
+}
+
+/// A layer host that answers every `rd` page full, with positions that keep rising: a hostile
+/// (or broken) host never ends a listing. Counts the pages asked, and stops answering at
+/// `stop` so a mirror that follows it for ever still ends this test.
+struct EndlessPages {
+    pages: std::sync::atomic::AtomicUsize,
+    stop: usize,
+}
+
+impl Door for EndlessPages {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        let turtle = |text: String| {
+            Ok(Representation::new(
+                ReprType::new("text/turtle"),
+                text.into_bytes(),
+            ))
+        };
+        match request.target.as_str() {
+            "urn:layer:tasks" => turtle(format!(
+                "<urn:layer:tasks> <{IK}layerModel> \"tuplespace\" .\n"
+            )),
+            "urn:layer:tasks:context" => Ok(Representation::new(
+                ReprType::new("application/ld+json"),
+                TASK_CONTEXT.as_bytes().to_vec(),
+            )),
+            TUPLES if request.verb == Verb::Source => {
+                let page = self.pages.fetch_add(1, Ordering::SeqCst);
+                if page >= self.stop {
+                    return Err(Error::Endpoint(format!(
+                        "page {page}: the scripted host stops"
+                    )));
+                }
+                let after: u64 = match request.args.get("after") {
+                    Some(ArgRef::Inline(bytes)) => {
+                        std::str::from_utf8(bytes).unwrap().parse().unwrap()
+                    }
+                    _ => 0,
+                };
+                turtle(
+                    (after + 1..=after + 1000)
+                        .map(|n| format!("<urn:layer:tasks:offer:p{n}> <{IK}seq> {n} .\n"))
+                        .collect(),
+                )
+            }
+            other => Err(Error::NotFound(other.to_string())),
+        }
+    }
+}
+
+#[test]
+fn a_listing_that_never_ends_is_refused_within_a_bound() {
+    let w = World::new();
+    let door = Arc::new(EndlessPages {
+        pages: std::sync::atomic::AtomicUsize::new(0),
+        stop: 300,
+    });
+    let mirror = w.mirror_through(Arc::clone(&door) as Arc<dyn Door>);
+    let refused = mirror.pass().expect_err("an endless listing is not a pass");
+    let asked = door.pages.load(Ordering::SeqCst);
+    assert!(
+        asked <= 101,
+        "followed {asked} pages of an endless listing ({refused})"
+    );
+    assert!(refused.contains("pages"), "{refused}");
+}
+
+/// One close is one `Release`. The taker named a release by its item's `modified`, which any
+/// later write moves (a comment on the closed item), so every note on a closed item dropped
+/// another `Release` and left another "Released … offered again" comment on ours.
+#[test]
+fn a_comment_on_their_closed_item_is_not_another_release() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    let n = w.file("Trim the log\n\nKeep a week.", &[]);
+    let first = offered(&pass(&mirror));
+    let Took::Filed(local) = theirs.taker.take(&first).unwrap() else {
+        panic!("not filed")
+    };
+    pass(&mirror);
+    theirs
+        .gonk(
+            Verb::Sink,
+            "close",
+            &[("item", &local.to_string()), ("reason", "wontfix")],
+        )
+        .unwrap();
+    assert_eq!(theirs.reported("Release"), 1);
+    pass(&mirror);
+    theirs
+        .gonk(
+            Verb::Sink,
+            "comment",
+            &[
+                ("item", &local.to_string()),
+                ("content", "For the record: the log rotates already."),
+            ],
+        )
+        .unwrap();
+    assert_eq!(theirs.reported("Release"), 0, "a comment is not a release");
+    pass(&mirror);
+    let released = w
+        .comments(n)
+        .iter()
+        .filter(|c| c.starts_with("Released in layer"))
+        .count();
+    assert_eq!(released, 1, "{:?}", w.comments(n));
 }

@@ -80,8 +80,30 @@ pub const FEED_WAIT_SECS: u64 = 50;
 /// How long a failed feed read is held off before the next.
 pub const FEED_RETRY: Duration = Duration::from_secs(30);
 
+/// An answer faster than this that did not move the cursor did not wait as it was asked to
+/// ([`FEED_WAIT_SECS`]), so the next read is held off for [`FEED_RETRY`].
+///
+/// ★ The audit of 2026-10-11: an answer that is not JSON, events with no `last`, a host that
+/// ignores `wait`, or a `Conflict` at 0 used to be read again AT ONCE, for ever (152,377
+/// reads in 300 ms), each read naming events kicking a whole pass. A host that waits answers an
+/// idle feed after [`FEED_WAIT_SECS`], and an answer that moves the cursor is never held off.
+pub const FEED_QUICK: Duration = Duration::from_secs(1);
+
 /// The most tuples or receipts one `rd` page asks for (the layer host's own maximum).
 const PAGE: usize = 1000;
+
+/// The most `rd` pages one listing follows: a page of 1000 (the host's maximum) times this, a
+/// hundred thousand tuples or receipts, is far past any layer one collaboration fills (receipts
+/// are kept for the life of a layer, so they are the listing that grows).
+///
+/// ★ Found by the audit of 2026-10-11: the listing followed pages for as long as the host said
+/// a page was full and its positions rose, so a hostile or broken host held a pass (and its
+/// memory) for ever. A listing past the bound is refused, and says so.
+pub const MAX_PAGES: usize = 100;
+
+/// The most bytes one listing reads, whatever the page count: one wire answer is already
+/// bounded (64 MiB), and this bounds the sum.
+pub const MAX_LISTING_BYTES: usize = 128 * 1024 * 1024;
 
 /// Who the layer door says the caller is (ikigai-layers 0.2.2).
 const ME: &str = "urn:layers:me";
@@ -265,7 +287,7 @@ impl LayerClient {
     fn read_tuples(&self, taken: bool) -> Result<String, String> {
         let mut all = String::new();
         let mut after = 0u64;
-        loop {
+        for _ in 0..MAX_PAGES {
             let mut request = layer::request(Verb::Source, &self.iri("tuples"))
                 .with_arg("as", inline("text/turtle"))
                 .with_arg("after", inline(&after.to_string()))
@@ -279,6 +301,12 @@ impl LayerClient {
                 .map_err(|e| format!("reading {}: {e}", self.iri("tuples")))?;
             let text = String::from_utf8(page.bytes)
                 .map_err(|_| format!("{} answered non-UTF-8", self.iri("tuples")))?;
+            if all.len() + text.len() > MAX_LISTING_BYTES {
+                return Err(format!(
+                    "{} answered more than {MAX_LISTING_BYTES} bytes in one listing: refused",
+                    self.iri("tuples")
+                ));
+            }
             let triples = parse_turtle(text.as_bytes())?;
             // The page's positions: a tuple's or a receipt's own ik:seq (a receipt also holds
             // its tuple's, which is never larger than the take's).
@@ -288,7 +316,10 @@ impl LayerClient {
                 .filter_map(|(_, _, o)| o.value().parse().ok())
                 .collect();
             let count = if taken {
-                triples.iter().filter(|(_, p, _)| *p == PROV_USED).count()
+                triples
+                    .iter()
+                    .filter(|(s, p, _)| *p == PROV_USED && is_receipt(s))
+                    .count()
             } else {
                 triples
                     .iter()
@@ -303,6 +334,12 @@ impl LayerClient {
                 _ => return Ok(all),
             }
         }
+        Err(format!(
+            "{} {} still had more after {MAX_PAGES} pages of {PAGE}: refused rather than \
+             followed",
+            self.iri("tuples"),
+            if taken { "(receipts)" } else { "(pending)" }
+        ))
     }
 
     pub fn pending(&self) -> Result<BTreeMap<String, Tuple>, String> {
@@ -1057,11 +1094,34 @@ impl TermValue for Term {
     }
 }
 
+/// Whether `subject` is a receipt's: `urn:layer:{layer}:receipt:{id}`, a name only the layer
+/// host mints.
+///
+/// ★ The audit of 2026-10-11: a receipt holds the tuple it took, and the tuple is its DROPPER's
+/// content. Recognized by its statements (`prov:used`, `prov:wasAssociatedWith`), a receipt could
+/// be forged from inside a report whose layer's shapes name those properties, and the mirror
+/// claimed an item for a principal that never took anything. A tuple can never carry this name:
+/// the host refuses `receipt` as the first word of a tuple's subject.
+///
+/// ```
+/// use ikigai_gonk::mirror::is_receipt;
+/// assert!(is_receipt("urn:layer:tasks:receipt:01m4abc"));
+/// assert!(!is_receipt("urn:layer:tasks:report:01m4abc"));
+/// assert!(!is_receipt("urn:layer:tasks:report:receipt:1"));
+/// assert!(!is_receipt("urn:example:receipt:1"));
+/// ```
+pub fn is_receipt(subject: &str) -> bool {
+    subject
+        .strip_prefix("urn:layer:")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(_, local)| local.starts_with("receipt:"))
+}
+
 /// The tuples in `triples`, by subject (receipt subjects excluded).
 pub(crate) fn tuples(triples: &[(String, String, Term)]) -> BTreeMap<String, Tuple> {
     let mut out: BTreeMap<String, Tuple> = BTreeMap::new();
     for (s, p, o) in triples {
-        if s.starts_with("_:") || s.contains(":receipt:") || *p == PROV_USED {
+        if s.starts_with("_:") || is_receipt(s) || *p == PROV_USED {
             continue;
         }
         let t = out.entry(s.clone()).or_insert_with(|| Tuple {
@@ -1104,6 +1164,9 @@ fn receipts(triples: &[(String, String, Term)]) -> BTreeMap<String, Taken> {
     }
     let mut by_receipt: BTreeMap<&str, Take> = BTreeMap::new();
     for (s, p, o) in triples {
+        if !is_receipt(s) {
+            continue; // a tuple's own statements, never a take
+        }
         let entry = by_receipt.entry(s.as_str()).or_default();
         match p.as_str() {
             PROV_USED => entry.used = Some(o.value().to_string()),
@@ -1309,6 +1372,7 @@ pub(crate) fn spawn_feed(door: Arc<dyn Door>, layer: String, thread: String, kic
                     .with_arg("after", inline(&after.to_string()))
                     .with_arg("wait", inline(&FEED_WAIT_SECS.to_string()))
                     .with_arg("as", inline("application/json"));
+                let asked = std::time::Instant::now();
                 match door.call(request) {
                     Ok(answer) => {
                         let json: serde_json::Value =
@@ -1317,15 +1381,20 @@ pub(crate) fn spawn_feed(door: Arc<dyn Door>, layer: String, thread: String, kic
                             .get("events")
                             .and_then(serde_json::Value::as_array)
                             .map_or(0, Vec::len);
-                        if let Some(last) = json.get("last").and_then(serde_json::Value::as_u64) {
+                        let last = json.get("last").and_then(serde_json::Value::as_u64);
+                        let moved = last.is_some_and(|last| last > after);
+                        if let Some(last) = last {
                             after = last;
                         }
                         if events > 0 && !nudge(&kick) {
                             return;
                         }
+                        if !moved && asked.elapsed() < FEED_QUICK {
+                            std::thread::sleep(FEED_RETRY);
+                        }
                     }
-                    // The host's feed is not the one the cursor came from: start over.
-                    Err(Error::Conflict(_)) => after = 0,
+                    // The host's feed is not the one the cursor came from: start over, once.
+                    Err(Error::Conflict(_)) if after > 0 => after = 0,
                     Err(_) => std::thread::sleep(FEED_RETRY),
                 }
             }
@@ -1387,6 +1456,86 @@ mod tests {
         assert_eq!(a.len(), 26);
         assert!(a < b, "{a} then {b}");
         assert_ne!(a[10..], b[10..]);
+    }
+
+    /// A layer door whose every feed read answers at once with `answer`, counting the reads.
+    struct AtOnce<F> {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        answer: F,
+    }
+
+    impl<F> Door for AtOnce<F>
+    where
+        F: Fn(u64) -> Result<ikigai_core::Representation, Error> + Send + Sync,
+    {
+        fn call(
+            &self,
+            request: ikigai_core::Request,
+        ) -> Result<ikigai_core::Representation, Error> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let after = match request.args.get("after") {
+                Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|a| a.parse().ok())
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            (self.answer)(after)
+        }
+    }
+
+    fn json(text: String) -> Result<ikigai_core::Representation, Error> {
+        Ok(ikigai_core::Representation::new(
+            ikigai_core::ReprType::new("application/json"),
+            text.into_bytes(),
+        ))
+    }
+
+    /// Follow a feed through a door answering with `answer` for a moment; the reads it made.
+    fn reads_in_a_moment<F>(answer: F) -> usize
+    where
+        F: Fn(u64) -> Result<ikigai_core::Representation, Error> + Send + Sync + 'static,
+    {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let door = Arc::new(AtOnce {
+            calls: Arc::clone(&calls),
+            answer,
+        });
+        let (kick, kicks) = sync_channel::<()>(1);
+        spawn_feed(door, "t".to_string(), "test-feed".to_string(), kick);
+        // Drain the kicks so a feed that kicks is never stopped by a full channel.
+        let drained = std::thread::spawn(move || while kicks.recv().is_ok() {});
+        std::thread::sleep(Duration::from_millis(300));
+        drop(drained);
+        calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The audit of 2026-10-11: an answer that came back at once and did not move the cursor
+    /// (not JSON, events with no `last`, a host that ignores `wait`, a `Conflict` at 0) was
+    /// read again at once, for ever, and kicked a whole pass each time it named events.
+    #[test]
+    fn a_feed_that_answers_at_once_without_moving_is_held_off() {
+        let garbage = reads_in_a_moment(|_| json("not json".to_string()));
+        let unmoving = reads_in_a_moment(|_| json(r#"{"events":[{"seq":1}]}"#.to_string()));
+        let no_wait = reads_in_a_moment(|after| json(format!(r#"{{"last":{after},"events":[]}}"#)));
+        let conflict = reads_in_a_moment(|_| Err(Error::Conflict("another feed".to_string())));
+        for (what, reads) in [
+            ("not JSON", garbage),
+            ("events that do not move the cursor", unmoving),
+            ("an empty answer at once", no_wait),
+            ("a Conflict at 0", conflict),
+        ] {
+            assert!(reads <= 2, "{what}: {reads} reads in 300 ms");
+        }
+        // And a feed that MOVES is followed at once, however fast it answers.
+        let moving = reads_in_a_moment(|after| {
+            json(format!(
+                r#"{{"last":{},"events":[{{"seq":{}}}]}}"#,
+                after + 1,
+                after + 1
+            ))
+        });
+        assert!(moving > 10, "a moving feed was held off: {moving} reads");
     }
 
     #[test]
