@@ -1667,6 +1667,14 @@ mount line may claim (a task layer is mounted by binding it, below, and by nothi
 served through every door, so what these doors can serve stays a property of the manifest
 plus one namespace.
 
+**The peer's door must be ikigai 0.1.56 or later** (ledger #1378). From cli 0.1.56 gonk's
+mounts are QUIC clients that ping: a PING every 5 s of quiet, and a connection given up after
+15 s of silence, so a peer that has gone is found in seconds rather than at the call deadline. A
+door older than 0.1.56 reads no packets and sends no ACKs while it resolves a call, so a pinging
+client loses any call to it that stays silent longer than 15 s, and a model call often does (the
+61 s rollup below). So upgrade the peer first, then this gonk. gonk's own QUIC door answers
+pings from the same release (`tests/quic_keepalive_1378.rs`).
+
 **What a derivation costs, and what bounds it.** Each grain has a provider and a `max_tokens`
 ceiling (`gonk.explain.*`), and the ceiling is the only bound on one call — a thinking model
 with no ceiling burns the budget on reasoning and returns nothing. Over time the bound is the
