@@ -20,6 +20,7 @@
 //! - [`a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label`]
 //! - [`an_anonymous_form_write_has_no_author_and_a_form_may_not_name_one`]
 //! - [`the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it`]
+//! - [`an_http_delete_answers_with_the_ledgers_text`]
 //! - [`the_palette_clears_the_contrast_floor`]
 //! - [`a_result_column_is_never_narrower_than_its_own_word`]
 //! - [`a_sample_button_is_a_toggle_the_server_renders_unpressed`]
@@ -1925,6 +1926,69 @@ fn the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it() {
         !graph.contains(&who) && !graph.contains("author"),
         "the ledger declares no `principal`, so the mechanical route is exactly as it was: {graph}"
     );
+}
+
+/// ★ **An HTTP `DELETE` on a ledger resource answers `200` with the ledger's text** (ledger
+/// #1378). Through `ikigai-web` 0.1.56 the edge answered every successful Delete `204 No
+/// Content` and dropped the body; from 0.1.57 (ikigai-cli PR 474) a Delete whose endpoint
+/// answers with a representation is a `200` carrying it, and only an EMPTY answer is a `204`.
+/// Every ledger Delete answers a sentence, so on the mechanical door (`DELETE /iki/ledger/…`,
+/// what `curl` and the cli's HTTP mount use) each is now a `200`.
+///
+/// Three neighbors of that change are pinned beside it, because 0.1.57 moved them too:
+///
+/// - the REPEAT of a Delete that succeeded is still `204` (the edge's tombstone), and since
+///   0.1.57 the tombstone keys on the query as well as the path;
+/// - a Delete of something that never existed is a `404` carrying the LEDGER's own message,
+///   where through 0.1.56 the edge answered a bare `not found`;
+/// - the browser never sends a `DELETE`: its forms post to `/act` with `_verb=Delete`, a Sink
+///   at the edge, so the UI's answers did not move (`a_passkey_identity_adds_its_grant_and_only_its_grant`
+///   deletes that way and expects `200`, as it always did).
+#[test]
+fn an_http_delete_answers_with_the_ledgers_text() {
+    let server = Server::start_configured(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("default", Authority::Delete).unwrap(),
+    );
+    let (_, id) = file(&server, "Delete me over http");
+    let deferred = server.raw("POST", &format!("/iki/ledger/defer?item={id}"), &[], "");
+    assert_eq!(deferred.status, 200, "{deferred:?}");
+
+    // A Delete that names its target by a query argument: the deferral comes off, and the
+    // answer says so. (Not a label: a label's Delete takes the label as `content`, and the
+    // edge forwards neither a DELETE's body nor a `content` query argument, so that Delete
+    // is out of an HTTP `DELETE`'s reach in every release, 0.1.57 included. It is reached
+    // through `/act`, which is how the browser removes a label.)
+    let resumed = server.raw("DELETE", &format!("/iki/ledger/defer?item={id}"), &[], "");
+    assert_eq!(resumed.status, 200, "{resumed:?}");
+    assert!(
+        resumed
+            .head
+            .to_ascii_lowercase()
+            .contains("content-type: text/plain"),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed.body, "#1 resumed\n", "{resumed:?}");
+
+    // The item itself: the ledger's receipt comes back, naming where the quads went.
+    let deleted = server.raw("DELETE", &format!("/iki/ledger/item/{id}"), &[], "");
+    assert_eq!(deleted.status, 200, "{deleted:?}");
+    assert!(deleted.body.starts_with("deleted #1 "), "{deleted:?}");
+    assert!(deleted.body.contains("recoverable"), "{deleted:?}");
+    let gone = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(gone.status, 404, "{gone:?}");
+
+    // The same request again: the item is gone, and the edge's tombstone makes the retry
+    // idempotent — an empty `204`, not the `404` a fresh request for it would get.
+    let again = server.raw("DELETE", &format!("/iki/ledger/item/{id}"), &[], "");
+    assert_eq!(again.status, 204, "{again:?}");
+    assert_eq!(again.body, "", "{again:?}");
+
+    // Never existed: a `404` that carries the ledger's own sentence, not the edge's.
+    let never = server.raw("DELETE", "/iki/ledger/item/0000000000zzzzzz", &[], "");
+    assert_eq!(never.status, 404, "{never:?}");
+    assert_ne!(never.body.trim(), "not found", "{never:?}");
+    assert!(never.body.contains("0000000000zzzzzz"), "{never:?}");
 }
 
 /// A search term comes back into the page as the search box's `value` attribute, so a hostile term must
