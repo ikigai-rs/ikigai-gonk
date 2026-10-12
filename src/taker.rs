@@ -6,8 +6,8 @@
 //!   auto-take policy is v2. The take is the layer's own atomic take, and on success the offer
 //!   is filed into the bound ledger with `append key=layer:{layer}:<the offer's local name>
 //!   about=<offer IRI>`: keyed, so a take run twice files once. A take whose reply was lost is
-//!   found again from its receipt, and when the receipt names THIS server (known from the
-//!   offers this ledger already holds) the take is ours and the item is filed.
+//!   found again from its receipt, and when the receipt names THIS server (as the layer door
+//!   says, `urn:layers:me`) the take is ours and the item is filed.
 //! - **Reports follow the local item** ([`Taker::pass`]), each a tuple addressed to the offer's
 //!   offerer under a name derived from what it reports, so a pass run twice drops once (the
 //!   layer's replay rule, one subject one tuple): while the item is open, a `Progress` a day,
@@ -162,8 +162,9 @@ pub fn take(
                     taken.taker,
                     taken.time,
                     if us.is_none() {
-                        " (and this server has taken nothing in this layer yet, so it cannot \
-                         tell whether that was itself after a lost reply)"
+                        " (and the layer host does not serve urn:layers:me and this server has \
+                         taken nothing in this layer yet, so it cannot tell whether that was \
+                         itself after a lost reply)"
                     } else {
                         ""
                     }
@@ -180,8 +181,15 @@ pub fn take(
     file(binding, ledger, offer, &key, &tuple).map(Took::Filed)
 }
 
-/// Who this server is at the layer door: the taker of any offer the bound ledger already holds.
+/// Who this server is at the layer door: what the door says (`urn:layers:me`, ledger
+/// [#1316](http://localhost:1060/l/default/item/1316)), so a take whose reply was lost resolves
+/// even before this server has taken anything. Only from a host that does not serve
+/// `urn:layers:me` (ikigai-layers 0.2.1 or older) is it inferred, as before: the taker of an offer
+/// the bound ledger already holds, which knows nothing until the first take.
 fn ourselves(client: &LayerClient, items: &[Item]) -> Result<Option<String>, String> {
+    if let Some(me) = client.me()? {
+        return Ok(Some(me));
+    }
     let receipts = client.receipts()?;
     Ok(items
         .iter()

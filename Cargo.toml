@@ -251,8 +251,13 @@ ikigai-shacl = "0.3.3"
 # draft still empty is saved MARKED; the focus argument is `focus=` everywhere (`graph=` a
 # deprecated alias on `urn:nl:sparql` for one release; gonk passes neither). Nothing here calls
 # new API by name. `tests/nl_1138.rs::an_unfocused_draft_over_the_live_root_count_fits_the_bound`
-# is the FLOOR TEST: on 0.2.1 it is that refusal (4,886,597 bytes). ⚠ `"0.3.0"` is `<0.4.0`.
-ikigai-nl = "0.3.0"
+# is the FLOOR TEST: on 0.2.1 it is that refusal (4,886,597 bytes).
+# ★ 0.4.0 (ledger #1301, #1298; ikigai-nl PR 14): a draft the model REPEATS is recorded as a
+# repeat (`Attempt::repeat_of`, `prov:alternateOf`) and the answer says "drafting stopped: the
+# model repeated attempt N" instead of claiming the bound was reached. gonk constructs no
+# `Attempt` and matches no wording, so it needed no code change. `"0.3.0"` was `<0.4.0`, a
+# ceiling; `"0.4.0"` is `<0.5.0`.
+ikigai-nl = "0.4.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
@@ -475,8 +480,9 @@ ikigai-nl = "0.3.0"
 # mount time, panicking with both sides named: the mount's graph must be one the writer
 # declares, and the explain config must be on the writer's store.
 # `tests/browse.rs::a_mount_refuses_a_writer_that_does_not_declare_its_graph` pins the gonk half
-# of that refusal. `^0.18.6` is `<0.19.0`.
-ikigai-browse = "0.18.6"
+# of that refusal. 0.18.7 (ledger #1303): a review pass no longer discards the regions it
+# reused. `^0.18.7` is `<0.19.0`.
+ikigai-browse = "0.18.7"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
@@ -867,7 +873,10 @@ p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # The WCAG contrast floor the page's palette is held to, in both color schemes.
 ikigai-a11y = "0.2.1"
 # The scripted layer host the mirror's tests run against (ledger #1190): the published layer
-# host, in process, behind a door that mints each participant's principal. 0.2.0 is the
-# published release (0.2.1, with `urn:collab:{name}:participants`, is merged and not yet
-# published, so the tests bind that one read themselves). `"0.2.0"` is `<0.3.0`.
-ikigai-layers = "0.2.0"
+# host, in process, behind a door that mints each participant's principal. ★ 0.2.2 is the
+# floor (ledger #1316): it serves `urn:layers:me`, which the mirror and the taker read for
+# their own principal, and `tests/layer_mirror_1190.rs` resolves a lost take reply BEFORE the
+# first take through it. (The tests still bind `urn:collab:{name}:participants` themselves, as
+# they did when 0.2.1 was unpublished.) A dev-dependency only: gonk reaches a layer host over
+# the wire. `"0.2.2"` is `<0.3.0`.
+ikigai-layers = "0.2.2"

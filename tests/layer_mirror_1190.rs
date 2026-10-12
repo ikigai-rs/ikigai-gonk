@@ -811,6 +811,11 @@ struct Theirs {
 
 impl World {
     fn theirs(&self) -> Theirs {
+        self.theirs_through(Arc::new(self.door(&them())))
+    }
+
+    /// Their side through `door` instead of their own plain one.
+    fn theirs_through(&self, door: Arc<dyn Door>) -> Theirs {
         let certs = tempfile::tempdir().unwrap();
         let line = format!(
             "{LAYER} take quic://127.0.0.1:1 {} ledger=ikigai",
@@ -819,8 +824,21 @@ impl World {
         let binding = layer::parse(&line, std::path::Path::new("/nowhere")).unwrap();
         let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
         let ledger = taker::hub_ledger(&binding, Arc::clone(&hub)).unwrap();
-        let taker = Taker::new(binding, Arc::new(self.door(&them())), ledger).unwrap();
+        let taker = Taker::new(binding, door, ledger).unwrap();
         Theirs { hub, taker }
+    }
+}
+
+/// A layer host from before `urn:layers:me` (ikigai-layers 0.2.1 or older): the same door,
+/// answering `NotFound` for that one resource.
+struct WithoutMe(AsParticipant);
+
+impl Door for WithoutMe {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        if request.target.as_str() == "urn:layers:me" {
+            return Err(Error::NotFound("urn:layers:me".to_string()));
+        }
+        self.0.call(request)
     }
 }
 
@@ -999,6 +1017,51 @@ fn a_take_whose_reply_was_lost_is_found_by_its_receipt() {
     let mirror = w.mirror();
     let theirs = w.theirs();
     w.file("First\n\nOne.", &[]);
+    let offers: Vec<String> = pass(&mirror)
+        .actions
+        .iter()
+        .filter(|a| a.starts_with("offered "))
+        .map(|a| {
+            a.rsplit('<')
+                .next()
+                .unwrap()
+                .trim_end_matches('>')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(offers.len(), 1);
+    // ★ BEFORE this server has taken anything (ledger #1316): the door says who it is
+    // (`urn:layers:me`), so the receipt is recognized as its own and the offer is filed. Through
+    // gonk 0.x this was "cannot tell whether that was itself after a lost reply".
+    w.take(&them(), &offers[0]).unwrap();
+    let Took::Already(filed) = theirs
+        .taker
+        .take(&offers[0])
+        .expect("the lost reply resolves")
+    else {
+        panic!("a take already made is Already")
+    };
+    assert_eq!(
+        theirs.item(filed)["key"],
+        taker::filed_key(LAYER, &offers[0])
+    );
+    // Someone else's take is not ours.
+    w.file("Third\n\nThree.", &[]);
+    let third = offered(&pass(&mirror));
+    w.take(&participant("bobby"), &third).unwrap();
+    let theirs_not = theirs.taker.take(&third).unwrap_err();
+    assert!(theirs_not.contains(&participant("bobby")), "{theirs_not}");
+}
+
+/// From a host that does not serve `urn:layers:me` (before ikigai-layers 0.2.2) the taker infers
+/// who it is from what its ledger holds, as before: nothing before the first take, and a lost
+/// reply on another offer once it holds one.
+#[test]
+fn without_urn_layers_me_a_lost_reply_resolves_only_after_the_first_take() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs_through(Arc::new(WithoutMe(w.door(&them()))));
+    w.file("First\n\nOne.", &[]);
     w.file("Second\n\nTwo.", &[]);
     let offers: Vec<String> = pass(&mirror)
         .actions
@@ -1013,20 +1076,40 @@ fn a_take_whose_reply_was_lost_is_found_by_its_receipt() {
         })
         .collect();
     assert_eq!(offers.len(), 2);
-    // With nothing taken yet this server cannot know the receipt names itself.
     w.take(&them(), &offers[0]).unwrap();
     let unknown = theirs.taker.take(&offers[0]).unwrap_err();
-    assert!(unknown.contains("cannot tell"), "{unknown}");
-    // Once it holds one take, a lost reply on another is recovered.
+    assert!(
+        unknown.contains("cannot tell") && unknown.contains("urn:layers:me"),
+        "{unknown}"
+    );
     assert!(matches!(theirs.taker.take(&offers[1]), Ok(Took::Filed(_))));
     assert!(matches!(
         theirs.taker.take(&offers[0]),
         Ok(Took::Already(_))
     ));
-    // Someone else's take is not ours.
-    w.file("Third\n\nThree.", &[]);
-    let third = offered(&pass(&mirror));
-    w.take(&participant("bobby"), &third).unwrap();
-    let theirs_not = theirs.taker.take(&third).unwrap_err();
-    assert!(theirs_not.contains(&participant("bobby")), "{theirs_not}");
+}
+
+/// ★ An offer whose item is DELETED is withdrawn, even when it was this ledger's only offer
+/// (ledger #1316): the mirror knows itself from `urn:layers:me`. Inferred from the offers it had
+/// recorded, as through gonk 0.x, it knew nobody once the only item carrying a record was gone,
+/// and the orphan stayed pending in the layer.
+#[test]
+fn the_only_offer_of_a_deleted_item_is_withdrawn() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("Short-lived\n\nGone soon.", &[]);
+    let offer = offered(&pass(&mirror));
+    assert!(w.pending().contains(&offer));
+    w.gonk(Verb::Delete, &format!("item:{n}"), &[])
+        .expect("the owner deletes the item");
+    let report = pass(&mirror);
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|a| a.contains(&offer) && a.contains("its item is gone")),
+        "{:?}",
+        report.actions
+    );
+    assert!(!w.pending().contains(&offer), "withdrawn from the layer");
 }
