@@ -560,6 +560,118 @@ fn a_grounding_over_a_ledger_the_size_of_the_live_one_fits_the_bound() {
     );
 }
 
+/// The live gonk's browse root count on 2026-10-12 (`gonk.browse.root` lines in its config home).
+const LIVE_ROOTS: usize = 51;
+
+/// ★ Ledger [#1243](http://localhost:1060/l/default/item/1243): an UNFOCUSED draft as the owner,
+/// with browse composed over as many roots as the live gonk serves, FITS. Through `ikigai-nl`
+/// 0.2.x the drafter's grounding carried the caller's whole manifold, about 100 KB of browse
+/// actions per root, so the live gonk refused every unfocused draft before any model call
+/// ("the grounding with no focus is 4966451 bytes … over this host bound of 1048576"). 0.3.0's
+/// drafter reads only the vocabulary, the graphs and the examples, so the root count no longer
+/// moves it. Measured here before the move: on 0.2.1 this draft is that same refusal.
+#[test]
+fn an_unfocused_draft_over_the_live_root_count_fits_the_bound() {
+    let peer = Peer::start();
+    let roots_dir = tempfile::tempdir().expect("the browse roots");
+    let roots: Vec<(String, std::path::PathBuf)> = (0..LIVE_ROOTS)
+        .map(|n| {
+            let dir = roots_dir.path().join(format!("r{n}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("README.md"), format!("# root {n}\n")).unwrap();
+            (format!("repo{n}"), dir)
+        })
+        .collect();
+    let graph = ikigai_gonk::browse::Graph::chosen();
+    let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
+        .expect("a shared in-memory store");
+    let tiers = ikigai_gonk::config::ExplainTiers::default();
+    let wired = ikigai_gonk::browse::wire(
+        roots,
+        store
+            .shared_writer()
+            .expect("a shared store hands out its writer"),
+        None,
+        Some(&tiers),
+        &graph,
+        None,
+    );
+    let scripts = Scripts::in_memory();
+    let mount = mount::parse(&peer.line(), std::path::Path::new("/home/nobody")).unwrap();
+    let nl = Nl::new(
+        ikigai_gonk::nl::DEFAULT_ASK,
+        Some("localhost"),
+        Default::default(),
+    );
+    let hub = Arc::new(compose_with(
+        store,
+        Some(Arc::new(wired.space)),
+        vec![mount::space(&mount)],
+        Vec::new(),
+        None,
+        Some(&scripts),
+        Some(&nl),
+    ));
+    scripts.attach(&hub);
+    issue(
+        &hub,
+        &Capability::root(),
+        Verb::Sink,
+        "urn:iki:ledger:append",
+        &[("content", "first item")],
+    )
+    .expect("append");
+
+    let before = peer.calls();
+    let drafted = issue(
+        &hub,
+        &Capability::root(),
+        Verb::Sink,
+        "urn:nl:sparql",
+        &[
+            ("content", "the TITLES of the ledger's items"),
+            ("save", "titles"),
+            ("as", "application/json"),
+        ],
+    )
+    .unwrap_or_else(|e| panic!("an unfocused draft over {LIVE_ROOTS} roots: {e}"));
+    let d = json(&drafted);
+    assert_eq!(d["status"], "saved", "{d}");
+    assert_eq!(peer.calls(), before + 1, "the model was asked once: {d}");
+
+    // What the README says of the WHOLE grounding at this root count: a direct unfocused read
+    // is still over the bound (the manifold part is what grows), and the drafter's own parts fit.
+    let whole = issue(
+        &hub,
+        &Capability::root(),
+        Verb::Source,
+        "urn:nl:grounding",
+        &[("as", "application/json")],
+    );
+    assert!(
+        whole
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("over this host")),
+        "the whole unfocused grounding over {LIVE_ROOTS} roots is refused at the bound: {:?}",
+        whole.map(|r| r.bytes.len())
+    );
+    let drafting = issue(
+        &hub,
+        &Capability::root(),
+        Verb::Source,
+        "urn:nl:grounding",
+        &[
+            ("as", "application/json"),
+            ("parts", ikigai_nl::DRAFTING_PARTS),
+        ],
+    )
+    .expect("the drafter's parts of the grounding fit");
+    println!(
+        "{LIVE_ROOTS} roots: the drafter's grounding is {} bytes",
+        drafting.bytes.len()
+    );
+}
+
 // ------------------------------------------------------------- a real gonk: every door
 
 use std::io::{Read, Write};
@@ -794,19 +906,27 @@ fn a_person_drafts_a_query_from_a_sentence_and_publishes_it() {
     assert!(body.contains("\"draft\""), "{body}");
     let mut reader = grants_for("default", Authority::Read).unwrap();
     reader.extend(script_grants("titles", ScriptAuthority::Run).unwrap());
+    reader.extend(script_grants("ghost", ScriptAuthority::Run).unwrap());
     let other = gonk.sign_in(&Authenticator::named("reader"), "reader", &reader);
     let (status, body) = gonk.http("GET", "/script/titles", Some(&other), "");
     assert_eq!(status, 404, "a draft is its author's alone: {body}");
-    // Nor does it run for them, refused exactly as a name nobody wrote is (a never-published
-    // name wears the script family's generic contract, whose floor refuses either).
+    // Nor does it run for them, refused exactly as a name nobody wrote is, under the same grant
+    // (`ghost`: held, never written). Since ikigai-script 0.3.3 (ledger #1261) a draft wears
+    // the run family's contract, not Lisp's, so both are NotFound, word for word but the name;
+    // through 0.3.2 a draft's run was refused for want of `urn:cap:lisp`, which hid the reason.
     let run = gonk.http("GET", "/script/titles/result", Some(&other), "");
-    let nobody = gonk.http("GET", "/script/nobody-wrote-this/result", Some(&other), "");
+    let nobody = gonk.http("GET", "/script/ghost/result", Some(&other), "");
     assert_ne!(
         run.0, 200,
         "a draft does not run for another person: {}",
         run.1
     );
     assert_eq!(run.0, nobody.0, "{} / {}", run.1, nobody.1);
+    assert_eq!(
+        run.1.replace("titles", "ghost"),
+        nobody.1,
+        "a draft is indistinguishable from an absent name"
+    );
     gonk.over_socket(request(Verb::Source, "urn:script:titles", &[]))
         .expect("root sees every draft");
 
