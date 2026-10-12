@@ -1313,3 +1313,285 @@ fn a_comment_on_their_closed_item_is_not_another_release() {
         .count();
     assert_eq!(released, 1, "{:?}", w.comments(n));
 }
+
+// ---- the audit's follow-ups (ledger #1336) ---------------------------------------------------
+
+/// A repository URL crosses only as exactly `https://github.com/<owner>/<repo>`: a query string,
+/// a fragment, userinfo or a trailing path can carry a token, and an item's `about` is the
+/// dispatcher's private record. Before ledger #1336 the CONSTRUCT's regex
+/// (`^https://github[.]com/[^/]+/[^/]+$`) admitted `?` and `#`, so a tokenized URL was offered.
+#[test]
+fn a_token_bearing_repository_url_is_not_offered() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let secret = "ghp_SECRETTOKEN";
+    for about in [
+        format!("https://github.com/ikigai-rs/ikigai-store?access_token={secret}"),
+        format!("https://github.com/ikigai-rs/ikigai-store#{secret}"),
+        format!("https://github.com/ikigai-rs/ikigai-store?{secret}"),
+        format!("https://{secret}@github.com/ikigai-rs/ikigai-store"),
+        format!("https://github.com/ikigai-rs/{secret}/tree"),
+        format!("https://github.com/ikigai-rs%2F{secret}/ikigai-store"),
+    ] {
+        w.file(
+            &format!("Tokenized\n\nThe body for {about}."),
+            &[("about", &about)],
+        );
+    }
+    // And beside a clean URL, the clean one crosses.
+    let clean = "https://github.com/ikigai-rs/ikigai-store";
+    w.file(
+        "Both\n\nOne clean, one not.",
+        &[(
+            "about",
+            &format!("https://github.com/ikigai-rs/ikigai-store?token={secret} {clean}"),
+        )],
+    );
+    let report = pass(&mirror);
+    let offers: Vec<String> = report
+        .actions
+        .iter()
+        .filter(|a| a.starts_with("offered "))
+        .map(|a| {
+            a.rsplit('<')
+                .next()
+                .unwrap()
+                .trim_end_matches('>')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(offers.len(), 7, "{:?}", report.actions);
+    let mut clean_seen = 0;
+    let mut crossed: Vec<String> = Vec::new();
+    for offer in &offers {
+        let tuple = w.tuple(offer);
+        let repositories: Vec<String> = oxigraph_triples(&tuple)
+            .into_iter()
+            .filter(|(_, p, _)| p == &format!("{IK}repository"))
+            .map(|(_, _, o)| o)
+            .collect();
+        if repositories == [format!("<{clean}>")] {
+            clean_seen += 1;
+        } else {
+            crossed.extend(repositories);
+        }
+    }
+    assert!(
+        crossed.is_empty(),
+        "crossed as the repository: {crossed:#?}"
+    );
+    assert_eq!(
+        clean_seen, 1,
+        "the clean URL beside a tokenized one crosses"
+    );
+}
+
+/// Drop `content` into the layer as `who`, answering its subject.
+fn drop_as(w: &World, who: &str, content: &str) -> Result<Representation, Error> {
+    w.door(who).call(
+        Request::new(Verb::Sink, Iri::parse(TUPLES).unwrap())
+            .with_arg("content", ArgRef::Inline(content.as_bytes().to_vec())),
+    )
+}
+
+/// `ikigai-gonk layer take` of a tuple that is NOT an offer (a report IRI pasted by mistake)
+/// must not consume it. Before ledger #1336 the take ran first and the type was checked after,
+/// so the report was gone from the layer and its addressee never saw it; and a non-offer the
+/// taker had already taken was FILED into its ledger as if it were one.
+#[test]
+fn taking_a_tuple_that_is_not_an_offer_consumes_nothing() {
+    let w = World::new();
+    let theirs = w.theirs();
+    // Their gonk offers; Bobby takes it by hand and reports to their gonk: a Progress
+    // addressed to bobby-gonk, which bobby-gonk may take.
+    let offer = format!("urn:layer:{LAYER}:offer:{}", mirror::mint_id());
+    drop_as(
+        &w,
+        &them(),
+        &format!(
+            "@prefix ik: <{IK}> .\n@prefix dcterms: <http://purl.org/dc/terms/> .\n\
+             <{offer}> a ik:Offer ; dcterms:title \"Theirs\" ; ik:brief \"Their own offer.\" .\n"
+        ),
+    )
+    .unwrap();
+    w.take(&participant("bobby"), &offer).unwrap();
+    let progress = format!("urn:layer:{LAYER}:report:{}", mirror::mint_id());
+    drop_as(
+        &w,
+        &participant("bobby"),
+        &format!(
+            "@prefix ik: <{IK}> .\n<{progress}> a ik:Progress ; ik:offer <{offer}> ; \
+             ik:addressedTo <{}> ; ik:note \"halfway\" .\n",
+            them()
+        ),
+    )
+    .unwrap();
+    assert!(w.pending().contains(&progress));
+
+    let refused = theirs.taker.take(&progress).unwrap_err();
+    assert!(refused.contains("not an offer"), "{refused}");
+    assert!(
+        w.pending().contains(&progress),
+        "a mistaken take consumed the report: {:?}",
+        w.pending()
+    );
+
+    // Taken already (by bobby-gonk itself, elsewhere): still not an offer, so nothing is filed.
+    w.take(&them(), &progress).unwrap();
+    let refused = theirs.taker.take(&progress).unwrap_err();
+    assert!(refused.contains("not an offer"), "{refused}");
+    let items = theirs
+        .gonk(
+            Verb::Source,
+            "items",
+            &[("status", "all"), ("as", "application/json")],
+        )
+        .unwrap();
+    let items: serde_json::Value = serde_json::from_str(&items).unwrap();
+    assert_eq!(
+        items["items"].as_array().unwrap().len(),
+        0,
+        "a report was filed as an offer: {items}"
+    );
+}
+
+/// The taker knows itself from what the door says (`urn:layers:me`), never from which take its
+/// ledger happens to hold first. Before ledger #1336 `Taker::pass` inferred itself from the first
+/// filed item with a receipt, so an item filed by hand for someone else's take made the taker
+/// THAT someone: its own takes went unreported and the other's drew a refusal every pass.
+#[test]
+fn the_taker_knows_itself_from_the_door_not_from_its_ledger() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    w.file("Bobby's\n\nTaken by the person.", &[]);
+    w.file("Their gonk's\n\nTaken by the machine.", &[]);
+    let offers: Vec<String> = pass(&mirror)
+        .actions
+        .iter()
+        .filter(|a| a.starts_with("offered "))
+        .map(|a| {
+            a.rsplit('<')
+                .next()
+                .unwrap()
+                .trim_end_matches('>')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(offers.len(), 2);
+    // His gonk takes one; Bobby (the person) takes the other by hand, and files it into his
+    // gonk's ledger by hand, after (so it lists first, newest first).
+    assert!(matches!(theirs.taker.take(&offers[1]), Ok(Took::Filed(_))));
+    w.take(&participant("bobby"), &offers[0]).unwrap();
+    theirs
+        .gonk(
+            Verb::Sink,
+            "append",
+            &[
+                ("content", "Bobby's\n\nFiled by hand."),
+                ("key", &taker::filed_key(LAYER, &offers[0])),
+                ("about", &offers[0]),
+            ],
+        )
+        .unwrap();
+    let report = theirs.pass();
+    let progress: Vec<&String> = report
+        .actions
+        .iter()
+        .filter(|a| a.starts_with("reported Progress"))
+        .collect();
+    assert_eq!(progress.len(), 1, "{:?}", report.actions);
+    assert!(progress[0].contains(&offers[1]), "{progress:?}");
+}
+
+/// A door that counts the bytes of every receipt listing (`rd state=taken`, no `tuple=`).
+struct CountingReceipts {
+    inner: AsParticipant,
+    bytes: std::sync::atomic::AtomicUsize,
+}
+
+impl Door for CountingReceipts {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        let listing = request.verb == Verb::Source
+            && request.target.as_str() == TUPLES
+            && matches!(request.args.get("state"), Some(ArgRef::Inline(s)) if s == b"taken")
+            && !request.args.contains_key("tuple");
+        let answer = self.inner.call(request)?;
+        if listing {
+            self.bytes.fetch_add(answer.bytes.len(), Ordering::SeqCst);
+        }
+        Ok(answer)
+    }
+}
+
+/// A pass costs what changed, not the layer's history: receipts are kept for the life of a
+/// layer, and before ledger #1336 every pass read every one (twice when it took a report).
+#[test]
+fn a_pass_reads_only_the_receipts_it_has_not_read() {
+    let w = World::new();
+    let door = Arc::new(CountingReceipts {
+        inner: w.door(&us()),
+        bytes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mirror = w.mirror_through(Arc::clone(&door) as Arc<dyn Door>);
+    let n = w.file("Count the bytes\n\nOf every listing.", &[]);
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    assert_eq!(w.item(n)["claim"]["holder"], them());
+    let before = door.bytes.load(Ordering::SeqCst);
+    assert!(before > 0, "the take's receipt was read");
+    settled(&mirror);
+    settled(&mirror);
+    assert_eq!(
+        door.bytes.load(Ordering::SeqCst),
+        before,
+        "a pass with nothing new re-read receipts it already held"
+    );
+    // And what is new is still read: a report, taken and applied.
+    w.report(&them(), "Progress", &offer, "; ik:note \"still going\"");
+    let report = pass(&mirror);
+    assert!(
+        report.actions.iter().any(|a| a.starts_with("renewed ")),
+        "{:?}",
+        report.actions
+    );
+    assert!(w.comments(n).iter().any(|c| c.contains("still going")));
+}
+
+/// A door whose layer host can be swapped: a host restored from a backup, or another host
+/// answering at the same address.
+struct Swappable(std::sync::Mutex<AsParticipant>);
+
+impl Door for Swappable {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        self.0.lock().unwrap().call(request)
+    }
+}
+
+/// The receipt cursor never outlives the history it came from: when the newest receipt it holds
+/// is no longer the host's, everything held is dropped and read again.
+#[test]
+fn receipts_are_read_again_when_the_host_is_not_the_one_they_came_from() {
+    let a = World::new();
+    let b = World::new();
+    let door = Arc::new(Swappable(std::sync::Mutex::new(a.door(&us()))));
+    let client = mirror::LayerClient::new(Arc::clone(&door) as Arc<dyn Door>, LAYER);
+    let mirror_a = a.mirror();
+    a.file("On host a\n\nTaken there.", &[]);
+    let offer_a = offered(&pass(&mirror_a));
+    a.take(&them(), &offer_a).unwrap();
+    assert!(client.receipts().unwrap().contains_key(&offer_a));
+
+    *door.0.lock().unwrap() = b.door(&us());
+    let mirror_b = b.mirror();
+    b.file("On host b\n\nTaken here.", &[]);
+    let offer_b = offered(&pass(&mirror_b));
+    b.take(&them(), &offer_b).unwrap();
+    let held = client.receipts().unwrap();
+    assert!(
+        !held.contains_key(&offer_a),
+        "a receipt of another host's history is still held"
+    );
+    assert!(held.contains_key(&offer_b), "{:?}", held.keys());
+}

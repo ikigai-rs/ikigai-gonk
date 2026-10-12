@@ -5,7 +5,8 @@
 //! - **Taking is a person's decision**: `ikigai-gonk layer take <offer IRI>` ([`take`]); an
 //!   auto-take policy is v2. The take is the layer's own atomic take, and on success the offer
 //!   is filed into the bound ledger with `append key=layer:{layer}:<the offer's local name>
-//!   about=<offer IRI>`: keyed, so a take run twice files once. A take whose reply was lost is
+//!   about=<offer IRI>`: keyed, so a take run twice files once. A tuple that is not an offer is
+//!   read first and refused, so nothing is taken by mistake. A take whose reply was lost is
 //!   found again from its receipt, and when the receipt names THIS server (as the layer door
 //!   says, `urn:layers:me`) the take is ours and the item is filed.
 //! - **Reports follow the local item** ([`Taker::pass`]), each a tuple addressed to the offer's
@@ -21,7 +22,7 @@
 //! the design's "on his close, a Handback; on his release, a Release": a ledger has no release
 //! of an item that nobody claimed, and a close's reason is the one thing a person always says.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -31,7 +32,7 @@ use ikigai_ledger::json::{Item, ItemsDocument};
 use ikigai_resolve::Resolver;
 
 use crate::layer::{self, Binding, Door, Role};
-use crate::mirror::{self, LayerClient, Tuple};
+use crate::mirror::{self, LayerClient, Taken, Tuple};
 
 /// How a taker reaches its own ledger: one request in, the answer's bytes out.
 pub type LedgerIssue = Arc<dyn Fn(Request) -> Result<Vec<u8>, String> + Send + Sync>;
@@ -147,6 +148,17 @@ pub fn take(
     {
         return Ok(Took::Already(item.number));
     }
+    // ★ Read before taking (ledger #1336): the host's take is by subject alone, with no
+    // condition on what the tuple is, so a report's IRI given here by mistake was consumed and
+    // only then refused, and its addressee never saw it. Reading first is as good as a
+    // conditional take: a subject names ONE tuple for the life of a layer (the host refuses a
+    // second drop under it), so what is read is what a take would take, and the only thing that
+    // can happen in between is someone else's take, which our take answers as a Conflict.
+    if let Some(pending) = client.read_pending(offer)? {
+        if !pending.is("Offer") {
+            return Err(not_an_offer(offer, &pending, "nothing was taken"));
+        }
+    }
     let tuple = match client.take_tuple(offer) {
         Ok(text) => mirror::tuples(&mirror::parse_turtle(text.as_bytes())?)
             .remove(offer)
@@ -156,7 +168,7 @@ pub fn take(
             let taken = client
                 .receipt_of(offer)?
                 .ok_or_else(|| format!("<{offer}>: {why}"))?;
-            let us = ourselves(&client, &items)?;
+            let us = ourselves(&client, &items, None)?;
             if us.as_deref() != Some(taken.taker.as_str()) {
                 return Err(format!(
                     "<{offer}> was taken by <{}> at {}{}",
@@ -171,27 +183,68 @@ pub fn take(
                     }
                 ));
             }
+            if !taken.tuple.is("Offer") {
+                return Err(not_an_offer(
+                    offer,
+                    &taken.tuple,
+                    "this server took it, and nothing is filed",
+                ));
+            }
             let number = file(binding, ledger, offer, &key, &taken.tuple)?;
             return Ok(Took::Already(number));
         }
         Err(e) => return Err(format!("taking <{offer}>: {e}")),
     };
     if !tuple.is("Offer") {
-        return Err(format!("<{offer}> is not an offer"));
+        // Unreachable from a host that keeps one tuple per subject (it was read as an offer).
+        return Err(not_an_offer(
+            offer,
+            &tuple,
+            "it was taken, and nothing is filed",
+        ));
     }
     file(binding, ledger, offer, &key, &tuple).map(Took::Filed)
+}
+
+fn not_an_offer(subject: &str, tuple: &Tuple, outcome: &str) -> String {
+    let classes: Vec<&str> = tuple
+        .types
+        .iter()
+        .map(|t| t.strip_prefix("https://ikigai-rs.dev/ns#").unwrap_or(t))
+        .collect();
+    format!(
+        "<{subject}> is not an offer ({}): {outcome}",
+        if classes.is_empty() {
+            "it states no class".to_string()
+        } else {
+            format!("it is {}", classes.join(", "))
+        }
+    )
 }
 
 /// Who this server is at the layer door: what the door says (`urn:layers:me`, ledger
 /// [#1316](http://localhost:1060/l/default/item/1316)), so a take whose reply was lost resolves
 /// even before this server has taken anything. Only from a host that does not serve
 /// `urn:layers:me` (ikigai-layers 0.2.1 or older) is it inferred, as before: the taker of an offer
-/// the bound ledger already holds, which knows nothing until the first take.
-fn ourselves(client: &LayerClient, items: &[Item]) -> Result<Option<String>, String> {
+/// the bound ledger already holds, which knows nothing until the first take (and is wrong when
+/// the ledger holds an item filed for someone else's take: ledger #1336). `receipts` are the
+/// layer's, when the caller has read them already.
+fn ourselves(
+    client: &LayerClient,
+    items: &[Item],
+    receipts: Option<&BTreeMap<String, Taken>>,
+) -> Result<Option<String>, String> {
     if let Some(me) = client.me()? {
         return Ok(Some(me));
     }
-    let receipts = client.receipts()?;
+    let read;
+    let receipts = match receipts {
+        Some(receipts) => receipts,
+        None => {
+            read = client.receipts()?;
+            &read
+        }
+    };
     Ok(items
         .iter()
         .filter_map(|i| offer_of(i, client.layer()))
@@ -385,10 +438,16 @@ impl Taker {
         let pending = self.client.pending()?;
         let taken = self.client.receipts()?;
         let items = keyed_items(&self.binding, &self.ledger)?;
-        let us = items
-            .iter()
-            .filter_map(|i| offer_of(i, &self.binding.layer))
-            .find_map(|o| taken.get(&o).map(|t| t.taker.clone()));
+        // Who we are is what the door says (`urn:layers:me`), as for a take; inferred from the
+        // receipts only from a host that does not serve it (ledger #1336). Unknown, nothing is
+        // reported this pass, and the offers are still announced.
+        let us = match ourselves(&self.client, &items, Some(&taken)) {
+            Ok(us) => us,
+            Err(e) => {
+                report.failed(format!("{e} (reports wait a pass)"));
+                None
+            }
+        };
 
         {
             let mut announced = self.announced.lock().unwrap_or_else(|p| p.into_inner());

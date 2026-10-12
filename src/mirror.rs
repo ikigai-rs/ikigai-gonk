@@ -213,6 +213,25 @@ pub struct LayerClient {
     door: Arc<dyn Door>,
     layer: String,
     check: Mutex<Check>,
+    receipts: Mutex<Receipts>,
+}
+
+/// The receipts read so far, and the cursor past them.
+///
+/// ★ Ledger [#1336](http://localhost:1060/l/default/item/1336): receipts are kept for the life of
+/// a layer, and every pass read all of them (twice when it took a report), so a pass cost the
+/// layer's whole history. A receipt never changes once the host has written it, and the host
+/// numbers them in the order it records them, so what was read is kept and only receipts past
+/// the newest held are asked for.
+#[derive(Default)]
+struct Receipts {
+    /// The newest receipt's `ik:seq`: the next listing asks for what comes after it.
+    after: u64,
+    /// The subject taken in the newest receipt held, re-read before each listing: a host that
+    /// no longer answers that receipt, or answers another, is not the history the rest came
+    /// from (restored from a backup, or another host at the same address).
+    newest: Option<String>,
+    taken: BTreeMap<String, Taken>,
 }
 
 impl LayerClient {
@@ -222,6 +241,7 @@ impl LayerClient {
             door,
             layer: layer.to_string(),
             check: Mutex::new(Check::Unchecked),
+            receipts: Mutex::new(Receipts::default()),
         }
     }
 
@@ -283,10 +303,9 @@ impl LayerClient {
         Ok(context)
     }
 
-    /// `rd`, every page: the pending tuples (`taken = false`) or the receipts.
-    fn read_tuples(&self, taken: bool) -> Result<String, String> {
+    /// `rd`, every page after `after`: the pending tuples (`taken = false`) or the receipts.
+    fn read_tuples(&self, taken: bool, mut after: u64) -> Result<String, String> {
         let mut all = String::new();
-        let mut after = 0u64;
         for _ in 0..MAX_PAGES {
             let mut request = layer::request(Verb::Source, &self.iri("tuples"))
                 .with_arg("as", inline("text/turtle"))
@@ -343,13 +362,44 @@ impl LayerClient {
     }
 
     pub fn pending(&self) -> Result<BTreeMap<String, Tuple>, String> {
-        let text = self.read_tuples(false)?;
+        let text = self.read_tuples(false, 0)?;
         Ok(tuples(&parse_turtle(text.as_bytes())?))
     }
 
+    /// Every take in the layer, by the subject taken: those held from earlier calls, and only
+    /// the receipts past them read from the host: a receipt never changes, so it is read once.
+    ///
+    /// # Errors
+    ///
+    /// When the host cannot be read, or the receipts held would pass [`MAX_PAGES`] pages of
+    /// a thousand: the bound a single listing has, kept for the sum.
     pub fn receipts(&self) -> Result<BTreeMap<String, Taken>, String> {
-        let text = self.read_tuples(true)?;
-        Ok(receipts(&parse_turtle(text.as_bytes())?))
+        let mut held = self.receipts.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(subject) = held.newest.clone() {
+            let still = self.receipt_of(&subject)?;
+            if still.as_ref() != held.taken.get(&subject) {
+                *held = Receipts::default();
+            }
+        }
+        let text = self.read_tuples(true, held.after)?;
+        let fresh = receipts(&parse_turtle(text.as_bytes())?);
+        for (subject, take) in fresh {
+            if take.seq > held.after {
+                held.after = take.seq;
+                held.newest = Some(subject.clone());
+            }
+            held.taken.insert(subject, take);
+        }
+        if held.taken.len() > MAX_PAGES * PAGE {
+            let count = held.taken.len();
+            *held = Receipts::default();
+            return Err(format!(
+                "{} holds {count} receipts, more than {MAX_PAGES} pages of {PAGE}: refused \
+                 rather than kept",
+                self.iri("tuples")
+            ));
+        }
+        Ok(held.taken.clone())
     }
 
     /// Take `subject` from the layer. `Ok(true)` when this take won.
@@ -400,6 +450,24 @@ impl LayerClient {
             Ok(r) => Ok(receipts(&parse_turtle(&r.bytes)?).remove(subject)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(e) => Err(format!("reading the receipt of <{subject}>: {e}")),
+        }
+    }
+
+    /// `subject` as it is pending in the layer (`rd tuple=`), or `None` when it is not pending:
+    /// taken, gone, or never dropped (the host answers `NotFound` for each, and a take says
+    /// which).
+    ///
+    /// # Errors
+    ///
+    /// When the door fails otherwise, or the answer is not the tuple's Turtle.
+    pub fn read_pending(&self, subject: &str) -> Result<Option<Tuple>, String> {
+        let request = layer::request(Verb::Source, &self.iri("tuples"))
+            .with_arg("tuple", inline(subject))
+            .with_arg("as", inline("text/turtle"));
+        match self.door.call(request) {
+            Ok(r) => Ok(tuples(&parse_turtle(&r.bytes)?).remove(subject)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(format!("reading <{subject}>: {e}")),
         }
     }
 
@@ -1038,8 +1106,18 @@ pub fn offered_key(layer: &str, offer: &str) -> String {
     format!("layer:{layer}:offered:{offer}")
 }
 
+/// What an offer's repository must be, whole: `https://github.com/<owner>/<repo>` and nothing
+/// else, in GitHub's own name characters (an owner is letters, digits and hyphens, with `_` for
+/// an enterprise-managed account; a repository adds `.`).
+///
+/// ★ Ledger [#1336](http://localhost:1060/l/default/item/1336), from the audit of 2026-10-11:
+/// the pattern was `^https://github[.]com/[^/]+/[^/]+$`, which admits a query string, a fragment
+/// and a percent-escape, so `https://github.com/o/r?access_token=…` on an item's `about` crossed
+/// to the layer in its offer. No `?`, `#`, `%`, `@` or further path can match this.
+pub const REPOSITORY: &str = "^https://github[.]com/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$";
+
 /// The fixed CONSTRUCT an offer is built from: the item's title (at most 200 characters, the
-/// shape's bound), its body as the brief, and one GitHub repository it is about.
+/// shape's bound), its body as the brief, and one GitHub repository it is about ([`REPOSITORY`]).
 fn offer_construct(item: &str, offer: &str) -> String {
     format!(
         "PREFIX dcterms: <http://purl.org/dc/terms/>\n\
@@ -1052,7 +1130,7 @@ fn offer_construct(item: &str, offer: &str) -> String {
            BIND(SUBSTR(STR(?t), 1, 200) AS ?title)\n\
            BIND(STR(?b) AS ?brief)\n\
            OPTIONAL {{ SELECT (MIN(STR(?a)) AS ?r) WHERE {{ <{item}> <{about}> ?a . \
-             FILTER(isIRI(?a) && REGEX(STR(?a), \"^https://github[.]com/[^/]+/[^/]+$\")) }} }}\n\
+             FILTER(isIRI(?a) && REGEX(STR(?a), \"{REPOSITORY}\")) }} }}\n\
            BIND(IRI(?r) AS ?repository)\n\
          }}",
         body = v::BODY,
