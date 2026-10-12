@@ -2159,3 +2159,77 @@ fn urls_and_ledger_references_in_bodies_are_links_and_nothing_else_is() {
         "a comment's body is linked too: {html}"
     );
 }
+
+/// gonk's default port moved from 1060 to 1062 on 2026-10-12. A stored link
+/// to gonk at the OLD origin renders onto the server serving the page (a root-relative href,
+/// which the browser resolves against this door's origin), in an item's body and a comment's;
+/// a 1060 link that is not one of gonk's routes is left alone; and the STORE still holds
+/// every body exactly as written (`render::rehome`).
+#[test]
+fn a_stored_link_to_gonk_at_port_1060_renders_onto_this_server() {
+    let server = Server::start();
+    let body = "Old links: [#739](http://localhost:1060/l/default/item/739) and \
+                http://127.0.0.1:1060/browse/urn:repo:x:tree, but not \
+                http://localhost:1060/other/service/page.";
+    let (iri, id) = file(&server, &format!("Old port links\n\n{body}"));
+    let commented = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &iri),
+            (
+                "content",
+                "See http://localhost:1060/queue?state=published&group=file.",
+            ),
+        ],
+        None,
+    );
+    assert_eq!(commented.status, 200, "{commented:?}");
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let html = &page.body;
+    for (href, text) in [
+        (
+            "/l/default/item/739",
+            "http://localhost:1060/l/default/item/739",
+        ),
+        (
+            "/browse/urn:repo:x:tree",
+            "http://127.0.0.1:1060/browse/urn:repo:x:tree",
+        ),
+        (
+            "/queue?state=published&amp;group=file",
+            "http://localhost:1060/queue?state=published&amp;group=file",
+        ),
+    ] {
+        assert!(
+            html.contains(&format!("<a href='{href}'>{text}</a>")),
+            "{href}: {html}"
+        );
+    }
+    assert!(
+        html.contains(
+            "<a href='http://localhost:1060/other/service/page'>\
+             http://localhost:1060/other/service/page</a>."
+        ),
+        "a 1060 link that is not gonk's stays as written: {html}"
+    );
+    let stored = server.raw(
+        "GET",
+        &format!("/iki/ledger/item/{id}"),
+        &[("Accept", "text/turtle".to_string())],
+        "",
+    );
+    assert_eq!(stored.status, 200, "{stored:?}");
+    assert!(
+        stored
+            .body
+            .contains("[#739](http://localhost:1060/l/default/item/739)")
+            && stored
+                .body
+                .contains("http://localhost:1060/queue?state=published&group=file"),
+        "the store holds the bodies as written: {stored:?}"
+    );
+}

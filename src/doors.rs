@@ -473,7 +473,7 @@ pub struct HttpDoor {
 /// ⚠ **The two browser checks are new with the HTML face, and they close a hole the first arc
 /// had.** A door that grants writes to whatever reaches loopback also grants them to any web
 /// page open in a browser on the machine: a page on any site can send a form-encoded `POST`
-/// to `http://127.0.0.1:1060/iki/ledger/append` without a preflight. A browser always labels
+/// to `http://127.0.0.1:1062/iki/ledger/append` without a preflight. A browser always labels
 /// such a write with `Origin` (and `Sec-Fetch-Site`), which a local non-browser process —
 /// `curl`, a script — does not send, so refusing a foreign one costs those callers nothing.
 /// And a rebinding attack reaches loopback under a foreign `Host`, which is refused on every
@@ -591,7 +591,7 @@ pub enum Page {
 ///
 /// ★ **Why a page on another PORT counts, and why `SameSite=Strict` did not stop it.** A site is
 /// a scheme and a registrable domain; the port is not part of it. So a page on
-/// `http://localhost:8090` is SAME-SITE with gonk on `http://localhost:1060`, the browser sends
+/// `http://localhost:8090` is SAME-SITE with gonk on `http://localhost:1062`, the browser sends
 /// gonk's `Strict` session cookie with every request it makes, and it labels them
 /// `Sec-Fetch-Site: same-site` — not `cross-site`. The line here is ORIGIN, which includes the
 /// port: only `same-origin` and `none` are gonk's own.
@@ -607,7 +607,7 @@ pub enum Page {
 ///     body: Vec::new(),
 ///     peer: None,
 /// };
-/// let door: std::net::SocketAddr = "127.0.0.1:1060".parse().unwrap();
+/// let door: std::net::SocketAddr = "127.0.0.1:1062".parse().unwrap();
 /// assert_eq!(page_of(&get(&[]), door), Page::Ours);
 /// assert_eq!(page_of(&get(&[("sec-fetch-site", "same-origin")]), door), Page::Ours);
 /// assert_eq!(page_of(&get(&[("sec-fetch-site", "none")]), door), Page::Ours);
@@ -621,7 +621,7 @@ pub enum Page {
 /// // A browser that sends no fetch metadata still sends a Referer.
 /// let referred = |from: &str| get(&[("referer", from)]);
 /// assert_eq!(page_of(&referred("http://localhost:8090/x"), door), Page::ForeignNavigation);
-/// assert_eq!(page_of(&referred("http://localhost:1060/l/default"), door), Page::Ours);
+/// assert_eq!(page_of(&referred("http://localhost:1062/l/default"), door), Page::Ours);
 /// // A door bound to another loopback IP counts that IP's origin as its own (ledger #1045);
 /// // a door that is not bound there does not.
 /// let own: std::net::SocketAddr = "127.0.0.2:1070".parse().unwrap();
@@ -791,9 +791,9 @@ fn our_names(bind: SocketAddr) -> Vec<String> {
 ///
 /// ```
 /// use ikigai_gonk::doors::http_url;
-/// assert_eq!(http_url("127.0.0.1:1060".parse().unwrap()), "http://localhost:1060/");
+/// assert_eq!(http_url("127.0.0.1:1062".parse().unwrap()), "http://localhost:1062/");
 /// assert_eq!(http_url("127.0.0.2:1070".parse().unwrap()), "http://127.0.0.2:1070/");
-/// assert_eq!(http_url("[::1]:1060".parse().unwrap()), "http://[::1]:1060/");
+/// assert_eq!(http_url("[::1]:1062".parse().unwrap()), "http://[::1]:1062/");
 /// ```
 pub fn http_url(bind: SocketAddr) -> String {
     match bind.ip() {
@@ -814,13 +814,13 @@ pub fn http_url(bind: SocketAddr) -> String {
 ///
 /// ```
 /// use ikigai_gonk::doors::passkey_caveat;
-/// assert_eq!(passkey_caveat("127.0.0.1:1060".parse().unwrap()), None);
+/// assert_eq!(passkey_caveat("127.0.0.1:1062".parse().unwrap()), None);
 /// assert!(passkey_caveat("127.0.0.2:1070".parse().unwrap())
 ///     .unwrap()
 ///     .starts_with("passkeys cannot work on this bind"));
-/// assert!(passkey_caveat("[::1]:1060".parse().unwrap())
+/// assert!(passkey_caveat("[::1]:1062".parse().unwrap())
 ///     .unwrap()
-///     .contains("http://localhost:1060/"));
+///     .contains("http://localhost:1062/"));
 /// ```
 pub fn passkey_caveat(bind: SocketAddr) -> Option<String> {
     match bind.ip() {
@@ -856,11 +856,11 @@ pub fn passkey_caveat(bind: SocketAddr) -> Option<String> {
 /// ```
 /// use ikigai_gonk::doors::invite_base;
 /// assert_eq!(
-///     invite_base("127.0.0.1:1060".parse().unwrap()),
-///     Ok(("http://localhost:1060/".to_string(), None))
+///     invite_base("127.0.0.1:1062".parse().unwrap()),
+///     Ok(("http://localhost:1062/".to_string(), None))
 /// );
-/// let (url, warning) = invite_base("[::1]:1060".parse().unwrap()).unwrap();
-/// assert_eq!(url, "http://localhost:1060/");
+/// let (url, warning) = invite_base("[::1]:1062".parse().unwrap()).unwrap();
+/// assert_eq!(url, "http://localhost:1062/");
 /// assert!(warning.unwrap().contains("only where localhost resolves to ::1"));
 /// assert!(invite_base("127.0.0.2:1070".parse().unwrap())
 ///     .unwrap_err()
@@ -1005,6 +1005,52 @@ pub fn edge_config(door: HttpDoor) -> EdgeConfig {
         principal_fn: Some(http_principal(door)),
         ..EdgeConfig::default()
     }
+}
+
+/// The paths this door answers as gonk's own: every row of [`edge_config`]'s route table, plus
+/// the mechanical families gonk serves and documents (`/iki/…` for the ledger and the store,
+/// `/script/…`, `/nl/…`). A path ending in `/` covers what lies UNDER it only; any other
+/// covers itself and what lies under it; `/` is the home page alone.
+///
+/// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
+/// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
+/// forgotten here fails a test rather than leaving its old links pointing at the old port.
+pub const GONK_PATHS: [&str; 14] = [
+    "/",
+    "/l/",
+    "/act",
+    "/sparql",
+    "/render-rules",
+    "/auth/",
+    "/static/",
+    "/k",
+    "/queue",
+    "/browse",
+    "/iki/",
+    "/script/",
+    "/nl/",
+    crate::batch::BATCH_PATH,
+];
+
+/// Whether `path` (no query, no fragment) is one of [`GONK_PATHS`].
+///
+/// ```
+/// use ikigai_gonk::doors::is_gonk_path;
+/// assert!(is_gonk_path("/l/default/item/739"));
+/// assert!(is_gonk_path("/browse"));
+/// assert!(is_gonk_path("/browse/urn:repo:x:tree"));
+/// assert!(is_gonk_path("/"));
+/// assert!(!is_gonk_path("/l"));
+/// assert!(!is_gonk_path("/iki"));
+/// assert!(!is_gonk_path("/browsex"));
+/// assert!(!is_gonk_path("/other/service/page"));
+/// ```
+pub fn is_gonk_path(path: &str) -> bool {
+    GONK_PATHS.iter().any(|p| match *p {
+        "/" => path == "/",
+        p if p.ends_with('/') => path.len() > p.len() && path.starts_with(p),
+        p => path == p || (path.starts_with(p) && path.as_bytes().get(p.len()) == Some(&b'/')),
+    })
 }
 
 /// How many path segments a `/browse/` URL may carry — see `browse_routes` below.

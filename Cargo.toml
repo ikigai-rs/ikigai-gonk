@@ -8,7 +8,7 @@ repository = "https://github.com/ikigai-rs/ikigai-gonk"
 homepage = "https://github.com/ikigai-rs/ikigai-gonk"
 keywords = ["ikigai", "roc", "ledger", "rdf", "server"]
 categories = ["command-line-utilities", "development-tools"]
-description = "A standalone ikigai work-ledger server: one binary that holds the durable RDF store and serves named ledgers over loopback HTTP (port 1060), an owner-only Unix socket, and QUIC authenticated per client certificate."
+description = "A standalone ikigai work-ledger server: one binary that holds the durable RDF store and serves named ledgers over loopback HTTP (port 1062), an owner-only Unix socket, and QUIC authenticated per client certificate."
 
 [[bin]]
 name = "ikigai-gonk"

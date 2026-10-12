@@ -656,6 +656,8 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 ///   `(see https://a.example/x).` links `https://a.example/x`.
 /// - **`ledger #N`** links to `/l/<ledger>/item/N` (gonk's convention for an item reference in
 ///   prose, field guide 9i).
+/// - **A link to gonk at its OLD port** (`http://localhost:1060/l/…`, gonk's own routes only)
+///   gets a root-relative href onto this server ([`rehome`]); its text stays as written.
 /// - Everything else is text: no markdown, no HTML.
 ///
 /// ```
@@ -732,7 +734,8 @@ fn linkify_text(text: &str, ledger: &str) -> String {
         if boundary(i) {
             if let Some(len) = url_at(here) {
                 let url = &here[..len];
-                out.push_str(&format!("<a href='{url}'>{url}</a>"));
+                let href = rehome(url).unwrap_or_else(|| url.to_string());
+                out.push_str(&format!("<a href='{href}'>{url}</a>"));
                 i += len;
                 continue;
             }
@@ -753,6 +756,49 @@ fn linkify_text(text: &str, ledger: &str) -> String {
         i += c.len_utf8();
     }
     out
+}
+
+/// A link to gonk at its OLD origin, pointed at the server rendering it: `Some(root-relative
+/// href)` when `url` is `http://localhost:1060/…` or `http://127.0.0.1:1060/…`
+/// ([`crate::config::LEGACY_PORT`]) AND its path is one of gonk's own
+/// ([`crate::doors::is_gonk_path`]); `None` for anything else, which links as written.
+///
+/// gonk's default port moved to [`crate::config::DEFAULT_PORT`] on 2026-10-12, so every stored
+/// `http://localhost:1060/l/default/item/N` would otherwise reach whatever listens on 1060. The
+/// href is ROOT-RELATIVE on purpose: a browser resolves it against the origin the page came
+/// from, which is exactly the address this gonk is serving on, whatever port or loopback name
+/// that is; the same convention `ledger #N` links already follow. Only the href changes: the
+/// link text, and the stored body, stay as written. `url` is the escaped text [`linkify`]
+/// found, so a query's `&amp;` carries through unchanged.
+///
+/// ```
+/// use ikigai_gonk::render::rehome;
+/// assert_eq!(rehome("http://localhost:1060/l/default/item/739").as_deref(), Some("/l/default/item/739"));
+/// assert_eq!(rehome("http://127.0.0.1:1060/iki/ledger/next").as_deref(), Some("/iki/ledger/next"));
+/// assert_eq!(rehome("http://localhost:1060").as_deref(), Some("/"));
+/// // Not gonk's route, not gonk's old origin: untouched.
+/// assert_eq!(rehome("http://localhost:1060/other/service/page"), None);
+/// assert_eq!(rehome("http://localhost:10600/l/default/item/1"), None);
+/// assert_eq!(rehome("http://example.org:1060/l/default/item/1"), None);
+/// ```
+pub fn rehome(url: &str) -> Option<String> {
+    let port = crate::config::LEGACY_PORT;
+    let rest = ["localhost", "127.0.0.1"].into_iter().find_map(|host| {
+        let origin = format!("http://{host}:{port}");
+        // `get`, not slicing: the byte after the origin may sit inside a multibyte character.
+        url.get(..origin.len())
+            .filter(|head| head.eq_ignore_ascii_case(&origin))
+            .map(|_| &url[origin.len()..])
+    })?;
+    let rest = match rest.chars().next() {
+        None => return Some("/".to_string()),
+        Some('/') => rest.to_string(),
+        Some('?' | '#') => format!("/{rest}"),
+        // `:10600`, `:1060x`: another port, or not a port at all.
+        Some(_) => return None,
+    };
+    let path = rest.split(['?', '#']).next().unwrap_or("/");
+    crate::doors::is_gonk_path(path).then_some(rest)
 }
 
 /// The length of the http(s) URL that `text` starts with, trailing punctuation given back to
@@ -914,6 +960,68 @@ mod tests {
             "{page}"
         );
         assert!(page.contains("<main id='main'>"), "{page}");
+    }
+
+    /// ★ gonk's default port moved from 1060 to 1062 on 2026-10-12. Thousands of stored bodies link `http://localhost:1060/l/{ledger}/item/N`;
+    /// those links must reach THIS gonk, wherever it serves, and the stored text stays as
+    /// written: the link text is unchanged, only the href is rehomed.
+    #[test]
+    fn a_stored_link_to_gonk_on_its_old_port_renders_on_the_serving_origin() {
+        let got = linkify(
+            "<div data-linkify='default'>see [#739](http://localhost:1060/l/default/item/739), \
+             http://127.0.0.1:1060/iki/ledger/item/1 and \
+             http://LOCALHOST:1060/queue?state=published&amp;group=file. \
+             Browse http://localhost:1060/browse/urn:repo:x:tree or http://localhost:1060/</div>",
+        );
+        for (href, text) in [
+            (
+                "/l/default/item/739",
+                "http://localhost:1060/l/default/item/739",
+            ),
+            (
+                "/iki/ledger/item/1",
+                "http://127.0.0.1:1060/iki/ledger/item/1",
+            ),
+            (
+                "/queue?state=published&amp;group=file",
+                "http://LOCALHOST:1060/queue?state=published&amp;group=file",
+            ),
+            (
+                "/browse/urn:repo:x:tree",
+                "http://localhost:1060/browse/urn:repo:x:tree",
+            ),
+            ("/", "http://localhost:1060/"),
+        ] {
+            assert!(
+                got.contains(&format!("<a href='{href}'>{text}</a>")),
+                "{href}: {got}"
+            );
+        }
+        assert!(!got.contains("href='http"), "{got}");
+    }
+
+    /// The rewrite is gonk's OWN routes at gonk's OLD origin and nothing else: another service
+    /// on 1060, another host, another port, and https all link as written.
+    #[test]
+    fn a_link_that_is_not_a_gonk_route_on_the_old_port_is_untouched() {
+        for url in [
+            "http://localhost:1060/other/service/page",
+            "http://localhost:1060/lx/default/item/1",
+            "http://localhost:1060/iki",
+            "http://example.org:1060/l/default/item/1",
+            "http://localhost:10600/l/default/item/1",
+            "http://localhost:1062/l/default/item/1",
+            "https://localhost:1060/l/default/item/1",
+            "http://localhost:8090/l/default/item/1",
+            "http://localhost:106é/l/default/item/1",
+        ] {
+            let got = linkify(&format!("<p data-linkify='default'>{url}</p>"));
+            assert_eq!(
+                got,
+                format!("<p data-linkify='default'><a href='{url}'>{url}</a></p>"),
+                "{url}"
+            );
+        }
     }
 
     #[test]

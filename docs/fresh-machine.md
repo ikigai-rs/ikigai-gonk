@@ -72,7 +72,7 @@ empty config home:
 
 ```text
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
-  http    http://localhost:1060/ — loopback (127.0.0.1:1060); anonymous read+write: default; 0 passkey(s); anonymous SPARQL budget 1000 ms
+  http    http://localhost:1062/ — loopback (127.0.0.1:1062); anonymous read+write: default; 0 passkey(s); anonymous SPARQL budget 1000 ms
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
   backup  every 24h into /Users/you/.ikigai/backups — keep 5, the first in 1m. …
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
@@ -96,18 +96,18 @@ It takes no arguments there: everything comes from the config home.
 
 ## 4. Use the ledger
 
-**In a browser:** open <http://localhost:1060/>. Use `localhost`, not `127.0.0.1` (passkeys
+**In a browser:** open <http://localhost:1062/>. Use `localhost`, not `127.0.0.1` (passkeys
 in step 5 are bound to the name). An anonymous caller on this machine may read and write the
 `default` ledger: file an item from the form, open it, comment, close it.
 
 **Over HTTP**, the mechanical routes for programs:
 
 ```sh
-curl -X POST --data-binary 'Try gonk on a fresh machine' http://127.0.0.1:1060/iki/ledger/append
-curl -X POST --data-binary 'Started it from the runbook' 'http://127.0.0.1:1060/iki/ledger/comment?item=1'
-curl http://127.0.0.1:1060/iki/ledger/next
-curl -X POST 'http://127.0.0.1:1060/iki/ledger/close?item=1&reason=done'
-curl http://127.0.0.1:1060/iki/ledger/item/1
+curl -X POST --data-binary 'Try gonk on a fresh machine' http://127.0.0.1:1062/iki/ledger/append
+curl -X POST --data-binary 'Started it from the runbook' 'http://127.0.0.1:1062/iki/ledger/comment?item=1'
+curl http://127.0.0.1:1062/iki/ledger/next
+curl -X POST 'http://127.0.0.1:1062/iki/ledger/close?item=1&reason=done'
+curl http://127.0.0.1:1062/iki/ledger/item/1
 ```
 
 ```text
@@ -185,7 +185,7 @@ eedab90be25077cf31ad1a8562e164f0ab4de23e clean
 ```
 
 **In a browser** you need an identity. The anonymous caller holds ledger tokens only, so
-<http://localhost:1060/browse> says *Sign in to browse the repositories*, and a direct read
+<http://localhost:1062/browse> says *Sign in to browse the repositories*, and a direct read
 answers `403`. Invite yourself, with the browse role:
 
 ```sh
@@ -195,7 +195,7 @@ ikigai-gonk passkey invite me --ledger default=delete --browse read
 ```text
 passkey invite for `me` — grant `me` (8 scopes) in /Users/you/.config/ikigai/gonk/grants.json
   valid for 30 minutes, once
-  open  http://localhost:1060/#invite=…
+  open  http://localhost:1062/#invite=…
 ```
 
 Open that link on this machine, click **Create passkey** and approve the browser's sheet

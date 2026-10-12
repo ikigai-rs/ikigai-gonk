@@ -714,3 +714,38 @@ fn a_narrowed_quic_client_is_still_named_and_authors_its_writes() {
     eprintln!("access line: {}", logged[0]);
     eprintln!("item author: {}", item["item"]["author"]);
 }
+
+/// Every row of the HTTP door's route table is one of `doors::GONK_PATHS`, which decides which
+/// stored links at gonk's OLD port (1060, the default until 2026-10-12) `render::rehome` points
+/// back at this server. A route added to the table and forgotten in the list would leave its
+/// old links pointing at the old port; this fails instead.
+#[test]
+fn every_route_the_http_door_serves_is_a_gonk_path() {
+    let config = doors::edge_config(doors::HttpDoor {
+        anonymous: grants_for("default", Authority::Write).unwrap(),
+        bind: "127.0.0.1:1062".parse().unwrap(),
+        passkeys: None,
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+    });
+    assert!(!config.routes.routes.is_empty());
+    for route in &config.routes.routes {
+        // `{ledger}`, `{+p3}`: any one segment stands for a capture.
+        let concrete: String = route
+            .pattern
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "x"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(
+            doors::is_gonk_path(&concrete),
+            "route `{}` ({concrete}) is not in doors::GONK_PATHS",
+            route.pattern
+        );
+    }
+}

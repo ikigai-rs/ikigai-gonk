@@ -88,7 +88,7 @@ pub const KEY_PREFIX: &str = "urn:kata:issue:";
 pub struct ImportArgs {
     /// The export file.
     pub file: String,
-    /// `--gonk`: the HTTP door. Default `http://127.0.0.1:1060`.
+    /// `--gonk`: the HTTP door. Default `http://127.0.0.1:1062` ([`crate::config::DEFAULT_PORT`]).
     pub gonk: String,
     /// `--ledger`: the ledger to file into. Default `default`.
     pub ledger: String,
@@ -107,7 +107,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
     }
     let mut out = ImportArgs {
         file: String::new(),
-        gonk: "http://127.0.0.1:1060".to_string(),
+        gonk: format!("http://127.0.0.1:{}", crate::config::DEFAULT_PORT),
         ledger: "default".to_string(),
         project: None,
         dry_run: false,
@@ -893,7 +893,7 @@ mod tests {
     fn the_arguments() {
         let parsed = parse_args(["import", "x.jsonl"].into_iter().map(String::from)).unwrap();
         assert_eq!(parsed.ledger, "default");
-        assert_eq!(parsed.gonk, "http://127.0.0.1:1060");
+        assert_eq!(parsed.gonk, "http://127.0.0.1:1062");
         assert!(parse_args(["import"].into_iter().map(String::from))
             .unwrap_err()
             .contains("expected <export.jsonl>"));

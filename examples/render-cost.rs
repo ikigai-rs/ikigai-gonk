@@ -3,7 +3,7 @@
 //!
 //! ```sh
 //! curl -H 'Accept: text/turtle' \
-//!   'http://localhost:1060/iki/ledger/items?status=open&limit=2000' > /tmp/items.ttl
+//!   'http://localhost:1062/iki/ledger/items?status=open&limit=2000' > /tmp/items.ttl
 //! cargo run --release --example render-cost -- /tmp/items.ttl all   # what the page cost
 //! cargo run --release --example render-cost -- /tmp/items.ttl 50    # what it costs now
 //! ```
