@@ -1706,15 +1706,23 @@ gonk.layer = "tasks-bobby take quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/l
 The certificate directory is this gonk's own identity at the layer door (`client.crt`,
 `client.key`, and the `server.crt` it pins); the door's enrollment names the participant it is
 (`plasma-gonk` in the edge's `collabs/bobby.toml`). `collab=` names the collaboration whose
-participants graph (`urn:collab:{name}:participants`) says whether a taker is a person or a
-machine, which is the KIND of the claim the mirror takes for them.
+participants graph (`urn:collab:{name}:participants`) says whether a taker is a person
+(`foaf:Person`), an agent acting for one (`prov:SoftwareAgent`, a collaborator's Claude) or a
+machine (`ik:Machine`), which is the KIND of the claim the mirror takes for them: `person`,
+`agent` or `machine` (anything else is `machine`, the ledger's default).
+
+The layer host must serve `urn:layers:me` (ikigai-layers 0.2.2 or newer; an `ikigai serve`
+door from cli 0.1.55 on): that is how this gonk knows which offers and takes in the layer are
+its own. A host that does not is named in every pass that needs it, never guessed around.
 
 **What it mounts.** `urn:layer:{layer}` and everything under `urn:layer:{layer}:`, then
 `urn:layers:` and `urn:collab:`, as override mounts on that one door, and nothing else: a
 `gonk.mount` line still refuses every prefix but `urn:llm:`. Every answer through them is
 uncacheable, because a layer's state changes on the layer host's schedule and golden threads
 do not cross a mount. Nothing is dialled at start; a door that is down costs the mirror and
-nothing else.
+nothing else. Every call through the door runs under a 15-second deadline (a feed read gets its
+own wait on top), so a host that accepts a call and never answers fails the pass in seconds,
+naming the host, rather than holding it for the transport's five-minute idle timeout.
 
 **What it refuses.** A layer whose model (`ik:layerModel` in its definition) is not
 `tuplespace`: messages never touch a ledger. It is read when the binding first runs, and a
@@ -1733,7 +1741,9 @@ every five minutes as a backstop:
   the layer's own context, and the mirror refuses to publish if prune removed anything; then
   the layer host's closed shapes. Labels, links, comments, numbers and ledger IRIs cannot
   cross. An item with no body is not offered (the pass says why). The offer is recorded on
-  the item as a comment keyed `layer:{layer}:offered:<offer IRI>` before it is dropped.
+  the item as an `about` edge to the offer's IRI before it is dropped, so `items about=<offer>`
+  finds it. (Offers recorded before ikigai-ledger 0.10, as a comment keyed
+  `layer:{layer}:offered:<offer IRI>`, are still read and are not offered twice.)
 - **A taken offer's item is claimed for its taker**, `lease=7d`, as the mirror's principal
   (`urn:iki:gonk:layer:{layer}`), with the kind the participants graph gives.
 - **Reports addressed to us are taken in feed order** and applied: `Progress` renews the
@@ -1747,8 +1757,8 @@ every five minutes as a backstop:
   stands: the mirror comments once that it happened after a withdrawal was attempted, claims
   the item for the taker when it is open and free, and leaves the rest to the dispatcher.
 
-**The mirror holds the worker grant and never `close`**
-(`urn:cap:ledger:{read,claim,comment}:{ledger}` and the ledger graph's store tokens): the
+**The mirror holds the worker grant plus `about`, and never `close`**
+(`urn:cap:ledger:{read,claim,comment,about}:{ledger}` and the ledger graph's store tokens): the
 taker's hand-back makes the item wait, and the dispatcher checks the evidence and closes it.
 Nothing closes across.
 
@@ -1763,10 +1773,9 @@ ikigai-gonk layer take urn:layer:tasks-bobby:offer:01m4…
 takes one offer, through the running gonk (its socket; its layer mount is this gonk's
 identity at the door), and files it into the bound ledger with `key=layer:{layer}:<the
 offer's local name>` and `about` the offer (and its repository): run twice, it files once. A
-take whose reply was lost is recovered from its receipt once this server can tell the receipt
-names itself (it can after its first take: the receipts of the offers its ledger already
-holds name it; before that it says so, and names the taker). Taking stays a person's
-decision; an auto-take policy is v2.
+take whose reply was lost is recovered from its receipt when the receipt names this server,
+as the layer door says who it is (`urn:layers:me`); a receipt naming anyone else is refused,
+naming the taker. Taking stays a person's decision; an auto-take policy is v2.
 
 The running server then reports on each filed item, on the same triggers as the mirror, under
 report names derived from what they report (so a pass run twice drops once):

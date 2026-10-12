@@ -22,7 +22,7 @@
 //! the design's "on his close, a Handback; on his release, a Release": a ledger has no release
 //! of an item that nobody claimed, and a close's reason is the one thing a person always says.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -32,7 +32,7 @@ use ikigai_ledger::json::{Item, ItemsDocument};
 use ikigai_resolve::Resolver;
 
 use crate::layer::{self, Binding, Door, Role};
-use crate::mirror::{self, LayerClient, Taken, Tuple};
+use crate::mirror::{self, LayerClient, Tuple};
 
 /// How a taker reaches its own ledger: one request in, the answer's bytes out.
 pub type LedgerIssue = Arc<dyn Fn(Request) -> Result<Vec<u8>, String> + Send + Sync>;
@@ -168,19 +168,13 @@ pub fn take(
             let taken = client
                 .receipt_of(offer)?
                 .ok_or_else(|| format!("<{offer}>: {why}"))?;
-            let us = ourselves(&client, &items, None)?;
-            if us.as_deref() != Some(taken.taker.as_str()) {
+            let us = client
+                .me()
+                .map_err(|e| format!("<{offer}> was taken by <{}>, and {e}", taken.taker))?;
+            if us != taken.taker {
                 return Err(format!(
-                    "<{offer}> was taken by <{}> at {}{}",
-                    taken.taker,
-                    taken.time,
-                    if us.is_none() {
-                        " (and the layer host does not serve urn:layers:me and this server has \
-                         taken nothing in this layer yet, so it cannot tell whether that was \
-                         itself after a lost reply)"
-                    } else {
-                        ""
-                    }
+                    "<{offer}> was taken by <{}> at {}",
+                    taken.taker, taken.time
                 ));
             }
             if !taken.tuple.is("Offer") {
@@ -220,35 +214,6 @@ fn not_an_offer(subject: &str, tuple: &Tuple, outcome: &str) -> String {
             format!("it is {}", classes.join(", "))
         }
     )
-}
-
-/// Who this server is at the layer door: what the door says (`urn:layers:me`, ledger
-/// [#1316](http://localhost:1060/l/default/item/1316)), so a take whose reply was lost resolves
-/// even before this server has taken anything. Only from a host that does not serve
-/// `urn:layers:me` (ikigai-layers 0.2.1 or older) is it inferred, as before: the taker of an offer
-/// the bound ledger already holds, which knows nothing until the first take (and is wrong when
-/// the ledger holds an item filed for someone else's take: ledger #1336). `receipts` are the
-/// layer's, when the caller has read them already.
-fn ourselves(
-    client: &LayerClient,
-    items: &[Item],
-    receipts: Option<&BTreeMap<String, Taken>>,
-) -> Result<Option<String>, String> {
-    if let Some(me) = client.me()? {
-        return Ok(Some(me));
-    }
-    let read;
-    let receipts = match receipts {
-        Some(receipts) => receipts,
-        None => {
-            read = client.receipts()?;
-            &read
-        }
-    };
-    Ok(items
-        .iter()
-        .filter_map(|i| offer_of(i, client.layer()))
-        .find_map(|o| receipts.get(&o).map(|t| t.taker.clone())))
 }
 
 /// File `tuple` (an offer) into the ledger, keyed.
@@ -438,11 +403,11 @@ impl Taker {
         let pending = self.client.pending()?;
         let taken = self.client.receipts()?;
         let items = keyed_items(&self.binding, &self.ledger)?;
-        // Who we are is what the door says (`urn:layers:me`), as for a take; inferred from the
-        // receipts only from a host that does not serve it (ledger #1336). Unknown, nothing is
-        // reported this pass, and the offers are still announced.
-        let us = match ourselves(&self.client, &items, Some(&taken)) {
-            Ok(us) => us,
+        // Who we are is what the door says (`urn:layers:me`), as for a take, and only that
+        // (ledger #1336, #1328): a host that does not serve it is named in the report. Unknown,
+        // nothing is reported this pass, and the offers are still announced.
+        let us = match self.client.me() {
+            Ok(us) => Some(us),
             Err(e) => {
                 report.failed(format!("{e} (reports wait a pass)"));
                 None
