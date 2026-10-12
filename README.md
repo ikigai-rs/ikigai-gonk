@@ -943,6 +943,14 @@ pages above are the browser's way in.
 
 A path nothing serves answers `404` (`no endpoint resolved for urn:…`, the IRI the path became).
 
+A `DELETE` answers `200` with the ledger's own sentence (`deleted #1 …`, `#1 resumed`), the way
+a `POST` does; an empty answer would be a `204`, and repeating a `DELETE` that succeeded is a
+`204` for a while rather than a `404`. Deleting something that was never there is a `404`
+carrying the ledger's message. Since gonk links `ikigai-web` 0.1.57 (ledger #1378); before it
+every successful `DELETE` was a bodiless `204`. ⚠ A `DELETE`'s body reaches nothing, so a
+Delete that takes its target as `content` (removing a label) is not reachable this way: send
+it with the cli, or through the page's own form.
+
 ⚠ **There is no `urn:iki:ledger:comments`**, so `/iki/ledger/comments` is one of those paths.
 Comments are read inside the item they belong to — `GET /iki/ledger/item/244` (`Source
 urn:iki:ledger:item:244`) carries them, in Turtle too — and written through the one comment

@@ -242,7 +242,8 @@ ikigai-throttle = "0.1.11"
 # binary calls. 0.1.44 is still the API floor. `"0.1.52"` is `<0.2.0`.
 # 0.1.55 (ledger #1335): the one-release reason (see `ikigai-quic` below).
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` below).
-ikigai-engine = { version = "0.1.56", features = ["plan-reader"] }
+# 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below).
+ikigai-engine = { version = "0.1.57", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). ⚠⚠ **This is the widest
 # thing this manifest links, and it is linked for the plan doors ALONE.** rudof brings `reqwest`
@@ -583,7 +584,8 @@ ikigai-repo = "0.2.0"
 # moved); 0.1.41 is still the floor this binary uses.
 # 0.1.55 (ledger #1335): the one-release reason.
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` below).
-ikigai-intray = "0.1.56"
+# 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below).
+ikigai-intray = "0.1.57"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -603,7 +605,8 @@ ikigai-intray = "0.1.56"
 # 0.1.44 -> 0.1.52 (ledger #1287): quic and ipc at 0.1.52 require `ikigai-resolve ^0.1.52`.
 # 0.1.52 -> 0.1.55 (ledger #1335): quic and ipc at 0.1.55 require `ikigai-resolve ^0.1.55`.
 # 0.1.55 -> 0.1.56 (ledger #1378): quic and ipc at 0.1.56 require `ikigai-resolve ^0.1.56`.
-ikigai-resolve = "0.1.56"
+# 0.1.56 -> 0.1.57 (ledger #1378): quic and ipc at 0.1.57 require `ikigai-resolve ^0.1.57`.
+ikigai-resolve = "0.1.57"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -644,7 +647,8 @@ ikigai-resolve = "0.1.56"
 # `crate::mount::dial` sets it on every mount. `"0.1.55"` is `<0.2.0`.
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` below); 0.1.55 is still the
 # API floor, and nothing in the socket transport changed.
-ikigai-ipc = "0.1.56"
+# 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below).
+ikigai-ipc = "0.1.57"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -723,7 +727,9 @@ ikigai-ipc = "0.1.56"
 # doors already on 0.1.56. Upgrade the doors a gonk mounts before installing this gonk.
 # `tests/quic_keepalive_1378.rs::a_call_silent_past_the_liveness_bound_answers_through_the_door`
 # is the FLOOR TEST: on 0.1.55 the call is lost (`connection lost`). `"0.1.56"` is `<0.2.0`.
-ikigai-quic = "0.1.56"
+# 0.1.57 (ledger #1378): the one-release reason (see `ikigai-web` below). 0.1.56 is still the
+# behavior floor above; the QUIC door's behavior did not change in 0.1.57.
+ikigai-quic = "0.1.57"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -785,9 +791,22 @@ ikigai-quic = "0.1.56"
 # `serve_with_listener`, so that change does not reach it.
 # 0.1.55 (ledger #1335): the one-release reason.
 # 0.1.56 (ledger #1378): the one-release reason (see `ikigai-quic` above). The HTTP edge did not
-# change in 0.1.56. ⚠ The NEXT release changes it: from 0.1.57 a Delete whose endpoint answers
-# with a non-empty body is a `200` with that body rather than a `204` (ikigai-cli PR 474).
-ikigai-web = "0.1.56"
+# change in 0.1.56.
+# ★ 0.1.57 is the floor now, a BEHAVIOR one (ledger #1378, ikigai-cli PR 474): a DELETE whose
+# endpoint answers with a non-empty body is a `200` carrying it, where through 0.1.56 it was a
+# `204` with the body dropped; an empty answer is still `204`. Every ledger Delete answers a
+# sentence, so on the mechanical door (`DELETE /iki/ledger/…`) each is now a `200`. Also in
+# 0.1.57 and relied on: a Delete's `404` carries the endpoint's message, and the tombstone that
+# makes a repeated DELETE a `204` keys on the query as well as the path. Nothing in gonk
+# depended on the old `204`: the browser deletes through `POST /act` (a Sink at the edge) and
+# the starter's scripts through the cli over the socket or QUIC.
+# `tests/web.rs::an_http_delete_answers_with_the_ledgers_text` is the FLOOR TEST: on 0.1.56 the
+# deferral's Delete answers `204` with no body.
+# ⚠ 0.1.57 also offers a typed JSON error body (`EdgeConfig::error_body`), and gonk leaves it at
+# the default, `text/plain`: one setting covers every route on the door, and `web/gonk.js` shows
+# an error's body to a person as text (`htmx:responseError`, and the passkey `post` helper), so
+# a JSON body would reach the page as raw JSON. `"0.1.57"` is `<0.2.0`.
+ikigai-web = "0.1.57"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -875,7 +894,8 @@ ikigai-xslt = "0.2.1"
 # 0.1.41, 0.1.44, 0.1.52: the one-release reason; the verifier is unchanged.
 # 0.1.55: the one-release reason; the verifier is unchanged.
 # 0.1.56: the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.56"
+# 0.1.57: the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.57"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
