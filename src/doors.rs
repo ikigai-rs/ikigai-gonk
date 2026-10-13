@@ -133,11 +133,15 @@ fn hub_root(hub: &Kernel) -> Topology {
 /// The prefixes the hub binds and no door serves: `urn:shacl:`, linked as the plan doors'
 /// validator (ledger #939, [`crate::script`]).
 ///
-/// ★ **Why not served.** rudof's validator walks a self-following shape one call per link of
-/// the DATA, so a deep enough chain overflows its thread and aborts the process (ikigai-shacl's
-/// README says so, and no bound on the shapes can refuse it) — and this process holds the
-/// store. The plan doors send it only the vocabulary's own shapes and a plan the script
-/// library has bounded, as sub-requests inside the hub, which never pass a door.
+/// ★ **Why not served.** It is the plan doors' validator, not a service: they send it only the
+/// vocabulary's own shapes and a plan the script library has bounded, as sub-requests inside
+/// the hub, which never pass a door. Since ledger #1176 the installed binary links
+/// ikigai-shacl without rudof, so it validates with the subset validator, which recurses over
+/// neither graph and refuses every construct outside its subset. The rule stays anyway: a
+/// caller's shapes are not the vocabulary's, and a build that compiles rudof (the test suite
+/// does, through a dev-dependency) has a validator that walks a self-following shape one call
+/// per link of the DATA, so a deep enough chain overflows its thread and aborts the process
+/// that holds the store.
 ///
 /// ```
 /// use ikigai_gonk::doors::not_served;

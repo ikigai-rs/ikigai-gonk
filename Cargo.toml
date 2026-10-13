@@ -246,19 +246,31 @@ ikigai-throttle = "0.1.11"
 # 0.1.58 (ledger #1379): the one-release reason.
 ikigai-engine = { version = "0.1.58", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
-# vocabulary's shapes before it is stored, and again before it runs). ⚠⚠ **This is the widest
-# thing this manifest links, and it is linked for the plan doors ALONE.** rudof brings `reqwest`
-# and turns on oxigraph's `http-client`, so an HTTP client is compiled into gonk for the first
-# time; and rudof's validator can overflow its thread on data deep enough (ikigai-shacl's own
-# README), which ABORTS the process that holds the store. So the resource is never served to a
-# caller: every door refuses `urn:shacl:*` as it arrives (`crate::admit::not_served`), and only
-# the plan doors' own sub-requests reach it, with the vocabulary's fixed shapes and a plan the
-# script library has already bounded at 1 MiB. Its SERVICE/LOAD refusals are its own (0.3.x) and
-# the store's (0.2.10+). 0.3.3 is the published head and what was built and tested.
-# ★ 0.3.4 is the floor now (ledger #1326), a SECURITY one and a resolution one: a recursive shape
-# over a long chain in the data aborted the process that held it, and the cli 0.1.55 workspace
-# (`ikigai-engine` above) requires `^0.3.4`.
-ikigai-shacl = "0.3.4"
+# vocabulary's shapes before it is stored, and again before it runs). It is linked for the plan
+# doors ALONE, and gonk never serves it to a caller: every door refuses `urn:shacl:*` as it
+# arrives (`crate::doors::not_served`, `NOT_SERVED`), so only the plan doors' own sub-requests
+# reach it, with `ikigai_vocab::SHAPES` and a plan the script library has bounded at 1 MiB.
+# ★ `default-features = false` (ledger #1176): the `rudof` feature is OFF, and since 0.3.5 the
+# endpoint is then served by ikigai-shacl's subset validator (`ikigai_shacl::core_shacl`).
+# - **Why off.** rudof cannot be built without a network stack (reqwest from `rudof_iri`, and
+#   oxigraph's `http-client` from `rudof_rdf`'s native target), so linking it compiled an HTTP
+#   client into gonk for nothing; and rudof's validator recurses along the DATA, so a deep enough
+#   chain overflowed its thread and ABORTED the process that holds the store. The subset links
+#   neither and recurses over neither graph. Off, the installed binary drops 111 packages
+#   (527 → 416 across all targets), reqwest and `http-client` among them.
+# - **What the subset covers**: every construct in `ikigai_vocab::SHAPES` (class targets, node
+#   and single-predicate property shapes, the count, kind, datatype, `sh:in` and `sh:pattern`
+#   constraints, and the SHACL-SPARQL `sh:select` constraints under the store's size, nesting,
+#   no-SERVICE and time-budget guards). ikigai-shacl checked it against rudof over the plan shapes.
+# - **A shape outside the subset is REFUSED by name, never skipped**, so a vocabulary release that
+#   used a new construct would make every plan fail validation (fail closed: none runs), not pass.
+#   `tests/plan_shapes_1176.rs` runs the subset over this lock's vocabulary and gonk's plans.
+# ⚠ **`cargo test` still compiles rudof**: `ikigai-layers`, a dev-dependency, takes ikigai-shacl
+# with default features, and a test build unifies dev-dependency features. So the hub in the
+# test suite validates through rudof while the installed binary validates through the subset;
+# `tests/plan_shapes_1176.rs` covers the binary's path by binding the subset itself.
+# 0.3.5 is the floor: the first release with the feature. `"0.3.5"` is `<0.4.0`.
+ikigai-shacl = { version = "0.3.5", default-features = false }
 # ★ Natural language to a DRAFT query (ledger #1138, `crate::nl`): `urn:nl:grounding` (what a
 # drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
 # templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
