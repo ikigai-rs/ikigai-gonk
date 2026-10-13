@@ -21,6 +21,7 @@
 //! - [`an_anonymous_form_write_has_no_author_and_a_form_may_not_name_one`]
 //! - [`the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it`]
 //! - [`an_http_delete_answers_with_the_ledgers_text`]
+//! - [`a_post_expecting_100_continue_is_invited_at_once`]
 //! - [`the_palette_clears_the_contrast_floor`]
 //! - [`a_result_column_is_never_narrower_than_its_own_word`]
 //! - [`a_sample_button_is_a_toggle_the_server_renders_unpressed`]
@@ -29,6 +30,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 mod common;
 
@@ -128,17 +130,7 @@ impl Server {
         stream.write_all(body.as_bytes()).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
-        let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
-        let status = head
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .unwrap_or_else(|| panic!("no status line: {response}"));
-        Response {
-            status,
-            head: head.to_string(),
-            body: body.to_string(),
-        }
+        Response::parse(&response)
     }
 
     /// A browser navigation.
@@ -196,6 +188,22 @@ struct Response {
     status: u16,
     head: String,
     body: String,
+}
+
+impl Response {
+    fn parse(response: &str) -> Response {
+        let (head, body) = response.split_once("\r\n\r\n").unwrap_or((response, ""));
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line: {response}"));
+        Response {
+            status,
+            head: head.to_string(),
+            body: body.to_string(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Response {
@@ -1989,6 +1997,111 @@ fn an_http_delete_answers_with_the_ledgers_text() {
     assert_eq!(never.status, 404, "{never:?}");
     assert_ne!(never.body.trim(), "not found", "{never:?}");
     assert!(never.body.contains("0000000000zzzzzz"), "{never:?}");
+}
+
+/// How long a client that sent `Expect: 100-continue` waits for the door's first word before
+/// it sends its body anyway: curl's expect timeout (a JVM HTTP client waits 3 s). A door that
+/// says nothing costs every such write at least this long.
+const EXPECT_PROMPT: Duration = Duration::from_secs(1);
+
+impl Server {
+    /// Send `head` the way a client honoring `Expect: 100-continue` does: the head alone, then
+    /// wait for the door's first answer before the body. Returns that first answer's head, how
+    /// long it took to arrive, and the final response. After an interim `100` the body is sent
+    /// and the final response is what follows; a door may instead answer its final status at
+    /// once (RFC 9110 §10.1.1), and then the body is never sent.
+    fn expecting(&self, head: &str, body: &str) -> (String, Duration, Response) {
+        let mut stream = TcpStream::connect(self.addr).expect("connect");
+        // Bounded so a silent door fails the test instead of hanging it: through `ikigai-web`
+        // 0.1.59 the door waited for the body until its 30 s body deadline and answered `408`.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let started = Instant::now();
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let end = loop {
+            if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => break got.len(),
+                Ok(n) => got.extend_from_slice(&chunk[..n]),
+                Err(e) => panic!(
+                    "the door said nothing to a head asking `Expect: 100-continue` in {:?}: {e}",
+                    started.elapsed()
+                ),
+            }
+        };
+        let waited = started.elapsed();
+        let first = String::from_utf8_lossy(&got[..end]).into_owned();
+        let mut rest = got[end..].to_vec();
+        if first.starts_with("HTTP/1.1 100 ") {
+            stream.write_all(body.as_bytes()).unwrap();
+        } else {
+            rest = got;
+        }
+        stream.read_to_end(&mut rest).unwrap();
+        let response = String::from_utf8_lossy(&rest).into_owned();
+        (first, waited, Response::parse(&response))
+    }
+}
+
+/// ★ **A write that asks `Expect: 100-continue` is invited at once** (ledger #1408). A client
+/// that sends the expectation holds its body back until the door's interim `100 Continue`.
+/// Through `ikigai-web` 0.1.59 the door read the body without ever sending it, so every such
+/// POST waited out the client's own expect timeout (curl's 1 s, a JVM HTTP client's 3 s), and a
+/// client that never gives up waited the 30 s body deadline for a `408`. From 0.1.60
+/// (ikigai-cli PR 482) `read_request` sends the `100` once the head has passed the checks made
+/// on the head alone. This is gonk's own door — its routes, its `CapFn` and its admission —
+/// with a mechanical append, the write `curl --data-binary` makes:
+///
+/// - the interim `100` arrives well inside [`EXPECT_PROMPT`], the body follows, and the item is
+///   filed;
+/// - a write the door refuses (a cross-site one) is answered promptly too, its `403` either
+///   instead of the invitation or right after the body, never after a stall.
+///
+/// FLOOR TEST for `ikigai-web` 0.1.60: on 0.1.58 the first read times out with no answer at all.
+#[test]
+fn a_post_expecting_100_continue_is_invited_at_once() {
+    let server = Server::start();
+    let body = "Filed with an expectation";
+    let head = format!(
+        "POST /iki/ledger/append HTTP/1.1\r\nHost: localhost:{}\r\nContent-Type: text/plain\r\n\
+         Expect: 100-continue\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        server.addr.port(),
+        body.len()
+    );
+    let (first, waited, filed) = server.expecting(&head, body);
+    assert_eq!(first, "HTTP/1.1 100 Continue\r\n\r\n", "{filed:?}");
+    assert!(
+        waited < EXPECT_PROMPT,
+        "the invitation took {waited:?}, so a client waits out its own expect timeout"
+    );
+    assert_eq!(filed.status, 200, "{filed:?}");
+    let (_, id) = first_item(&filed.body);
+    let item = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(item.status, 200, "{item:?}");
+    assert!(
+        item.body.contains(body),
+        "the body reached the ledger: {item:?}"
+    );
+
+    let forged = "forged with an expectation";
+    let head = format!(
+        "POST /iki/ledger/append HTTP/1.1\r\nHost: localhost:{}\r\nContent-Type: text/plain\r\n\
+         Sec-Fetch-Site: cross-site\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        server.addr.port(),
+        forged.len()
+    );
+    let (first, waited, refused) = server.expecting(&head, forged);
+    assert!(
+        waited < EXPECT_PROMPT,
+        "a refused write's first answer took {waited:?}: {first}"
+    );
+    assert_eq!(refused.status, 403, "{refused:?}");
 }
 
 /// A search term comes back into the page as the search box's `value` attribute, so a hostile term must

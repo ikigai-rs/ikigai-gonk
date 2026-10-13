@@ -951,6 +951,11 @@ every successful `DELETE` was a bodiless `204`. ⚠ A `DELETE`'s body reaches no
 Delete that takes its target as `content` (removing a label) is not reachable this way: send
 it with the cli, or through the page's own form.
 
+A write whose client asks `Expect: 100-continue` (curl does for a large body, and a JVM HTTP
+client can for any) is sent the interim `100 Continue` at once and then answered as usual.
+Since gonk links `ikigai-web` 0.1.60 (ledger #1408); before it the door never sent the `100`,
+so such a client waited out its own expect timeout (curl 1 s, a JVM client 3 s) on every POST.
+
 ⚠ **There is no `urn:iki:ledger:comments`**, so `/iki/ledger/comments` is one of those paths.
 Comments are read inside the item they belong to — `GET /iki/ledger/item/244` (`Source
 urn:iki:ledger:item:244`) carries them, in Turtle too — and written through the one comment
