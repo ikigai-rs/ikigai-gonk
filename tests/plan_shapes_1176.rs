@@ -2,17 +2,20 @@
 //! its `rudof` feature OFF, so the installed binary validates plans with the subset validator
 //! (`ikigai_shacl::core_shacl`), which links no network stack and recurses over neither graph.
 //!
-//! ⚠ **`cargo test` does not build that binary's validator into the hub.** `ikigai-layers`, a
-//! dev-dependency, takes `ikigai-shacl` with default features, and a test build unifies
-//! dev-dependency features, so the hub every other test composes validates through rudof. This
-//! file covers the gap three ways:
+//! ★ Since ikigai-layers 0.2.9 (ledger [#1405](http://localhost:1062/l/default/item/1405)) a
+//! test build links the same validator. Before it, `ikigai-layers`, a dev-dependency, took
+//! `ikigai-shacl` with default features, a test build unified them, and the hub every other
+//! test composes validated through rudof. Now no build of gonk links rudof, so this file no
+//! longer compares the subset with rudof: that differential lives in ikigai-shacl
+//! (`tests/differential.rs`). It checks the binary's path three ways:
 //!
 //! - [`a_plan_that_breaks_a_shape_is_refused_with_the_report`]: through gonk's own hub, a plan
 //!   that breaks a shape is refused by `urn:plan:validate` with the validator's report, and
-//!   `urn:plan:eval` will not run it (whichever validator the build linked).
-//! - [`the_subset_agrees_with_the_linked_validator_on_gonk_plans`]: the subset, called
-//!   directly over THIS lock's `ikigai_vocab::SHAPES`, gives the same outcome as the linked
-//!   validator on every fixture, conforming and not.
+//!   `urn:plan:eval` will not run it.
+//! - [`the_linked_validator_is_the_subset_on_gonk_plans`]: the subset, called directly over
+//!   THIS lock's `ikigai_vocab::SHAPES`, accepts the vocabulary's shapes and gives the expected
+//!   outcome on every fixture, conforming and not; and the crate's own entry point, which the
+//!   hub reaches, serves the same report byte for byte.
 //! - [`the_plan_door_validates_through_the_subset`]: the plan doors gonk links
 //!   (`ikigai_engine::plan_space`), composed over the subset bound at `urn:shacl:validate`, as
 //!   the installed binary composes them.
@@ -211,20 +214,25 @@ fn a_plan_that_breaks_a_shape_is_refused_with_the_report() {
 }
 
 #[test]
-fn the_subset_agrees_with_the_linked_validator_on_gonk_plans() {
+fn the_linked_validator_is_the_subset_on_gonk_plans() {
     let mut cases = vec![("good", GOOD.to_string()), ("fork", FORK.to_string())];
     cases.extend(broken().into_iter().map(|(name, plan, _)| (name, plan)));
     for (name, plan) in cases {
         let subset = core_shacl::validate_report(&plan, SHAPES)
             .unwrap_or_else(|e| panic!("{name}: the subset refused the vocabulary's shapes: {e}"))
             .outcome();
-        let linked = ikigai_shacl::validate_outcome(&plan, SHAPES).expect(name);
-        assert_eq!(subset, linked, "{name}");
         assert_eq!(
             subset.conforms,
             name == "good" || name == "fork",
             "{name}: {subset:?}"
         );
+        // The crate-level entry point is what `urn:shacl:validate` (and so the hub) serves. With
+        // no `rudof` feature in this build it IS the subset, so the report is the same bytes. A
+        // tripwire for a dependency that turns rudof back on, not the proof that none does: that
+        // is `cargo tree -e features -i ikigai-shacl` (see the manifest).
+        let linked = ikigai_shacl::validate_turtle(&plan, SHAPES).expect(name);
+        let direct = core_shacl::validate_turtle(&plan, SHAPES).expect(name);
+        assert_eq!(linked, direct, "{name}");
     }
 }
 
