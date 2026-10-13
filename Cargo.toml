@@ -267,10 +267,14 @@ ikigai-engine = { version = "0.1.60", features = ["plan-reader"] }
 # - **A shape outside the subset is REFUSED by name, never skipped**, so a vocabulary release that
 #   used a new construct would make every plan fail validation (fail closed: none runs), not pass.
 #   `tests/plan_shapes_1176.rs` runs the subset over this lock's vocabulary and gonk's plans.
-# ⚠ **`cargo test` still compiles rudof**: `ikigai-layers`, a dev-dependency, takes ikigai-shacl
-# with default features, and a test build unifies dev-dependency features. So the hub in the
-# test suite validates through rudof while the installed binary validates through the subset;
-# `tests/plan_shapes_1176.rs` covers the binary's path by binding the subset itself.
+# ★ **Test builds now match the binary** (ledger #1405). Until ikigai-layers 0.2.9 (a
+# dev-dependency, below) took ikigai-shacl with `default-features = false`, a test build unified
+# its default features and so compiled rudof back in: the hub in the test suite validated through
+# rudof while the installed binary validated through the subset. Now neither graph links rudof
+# (`cargo tree -e features -i ikigai-shacl` shows no `rudof` feature, `cargo tree -i rudof_rdf`
+# finds nothing), so every test that composes the hub exercises the binary's validator.
+# `tests/plan_shapes_1176.rs` still binds the subset directly too. The rudof-vs-subset
+# differential lives in ikigai-shacl (`tests/differential.rs`), not here.
 # 0.3.5 is the floor of the feature.
 # 0.3.6 (ledger #1396): `futures` is no longer a normal dependency of the library (only its wasm
 # `module` feature takes it), so the subset build links exactly what `ikigai-store` already does.
@@ -1015,5 +1019,10 @@ ikigai-a11y = "0.2.1"
 # first take through it. (The tests still bind `urn:collab:{name}:participants` themselves, as
 # they did when 0.2.1 was unpublished.) A dev-dependency only: gonk reaches a layer host over
 # the wire. 0.2.8 (ledger #1377): the published head, moved with the cli 0.1.58 crates; 0.2.2 is
-# still the floor the tests need. `"0.2.8"` is `<0.3.0`.
-ikigai-layers = "0.2.8"
+# still the floor the tests need for the layer host itself.
+# ★ 0.2.9 (ledger #1405) is the floor now, for the BUILD rather than the API: it takes
+# ikigai-shacl with `default-features = false`. Through 0.2.8 it took the defaults, and since a
+# test build unifies dev-dependency features, that one edge turned rudof back on in every gonk
+# test build, so the tests validated plans with a different engine than the binary ships (see
+# the ikigai-shacl note above). `"0.2.9"` is `<0.3.0`.
+ikigai-layers = "0.2.9"
