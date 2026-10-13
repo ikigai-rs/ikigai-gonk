@@ -2132,8 +2132,12 @@ could make one at a time.
   library's ad hoc door for Lisp and is the owner's here; a plan typed ad hoc runs at
   `urn:plan:eval`.
 - **The validator is served to no caller.** Plans are validated by `urn:shacl:validate`, which
-  is linked for the plan doors alone: rudof's validator can overflow its thread on deep enough
-  DATA, which would abort the process holding the store, so every door answers it as unbound.
+  is linked for the plan doors alone, and every door answers it as unbound. Since ledger #1176
+  it is ikigai-shacl's subset validator (the `rudof` feature off): it covers every construct in
+  the vocabulary's shapes, refuses any other by name, and recurses over neither graph. The rule
+  predates that and stays: a caller's shapes are not the vocabulary's, and a build that does
+  compile rudof (the test suite, through a dev-dependency) has a validator that can overflow
+  its thread on deep enough DATA, which would abort the process holding the store.
 - **The transports' own arguments are not a script's.** `ikigai-web` stamps a write with
   `received`, `client`, `principal` and `content-type`, and `ikigai-quic` stamps `principal` on
   everything. Since ikigai-script 0.3.0 a run ignores those four names and a script may not
@@ -2983,13 +2987,15 @@ a `gonk.mount` line, gonk opens an outbound connection — QUIC, or a Unix socke
 peer named in its config, presenting one client certificate, speaking ikigai's own wire
 protocol**. That is narrower than what the old sentence ruled out in three ways that matter:
 
-- **No HTTP client is reachable — but since ledger #939 one is LINKED, and this line used to
-  say otherwise.** `ikigai-shacl` brings rudof, and rudof brings `reqwest` and turns on
-  oxigraph's `http-client` (its SPARQL `SERVICE` handler). None of it is reachable from a
-  request: `urn:httpGet` and its family are not bound, `ikigai-llm` is not a dependency, the
-  validator is served to no caller and refuses a `SERVICE` in a shape itself, and the store
-  refuses `SERVICE` and `LOAD` at every door (0.2.10). So no capability can produce a request to
-  an arbitrary URL, and that is now three refusals deep rather than true by linkage.
+- **No HTTP client is reachable, and since ledger #1176 none is linked again.** From ledger
+  #939 until then `ikigai-shacl` brought rudof, and rudof brought `reqwest` and turned on
+  oxigraph's `http-client` (its SPARQL `SERVICE` handler). gonk now links ikigai-shacl with
+  its `rudof` feature off, and the installed binary's dependency graph holds neither
+  (`cargo tree -e no-dev -i reqwest` prints nothing). The refusals stay as well: `urn:httpGet`
+  and its family are not bound, `ikigai-llm` is not a dependency, the validator is served to
+  no caller and refuses a `SERVICE` in a shape itself, and the store refuses `SERVICE` and
+  `LOAD` at every door (0.2.10). ⚠ The TEST build still links rudof, through the
+  `ikigai-layers` dev-dependency, so this is a statement about the binary, not about `cargo test`.
 - **The address is config, not an argument.** A caller cannot say where to connect. The peer
   is the one `gonk.mount` names, and the only IRI prefix a mount line may claim is
   `urn:llm:` — so even an operator cannot quietly put another namespace behind these doors.
