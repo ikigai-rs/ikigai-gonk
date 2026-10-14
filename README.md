@@ -2420,6 +2420,14 @@ draft carries where it came from into the version a person publishes.
 
 - **Which model drafts:** `gonk.nl.ask` (default `urn:llm:ask`, the peer's default backend), a
   door under `urn:llm:` like every provider here.
+- **One deadline for a whole draft** (ledger #1203): a draft makes up to three model calls (a
+  draft, a repair, an escalation), and all of them together get **300 s**
+  (`nl::DRAFT_DEADLINE`), the bound the QUIC door's transport puts on ONE call
+  (`mount::CALL_TIMEOUT`). Each call runs under what is left, and a call that would start after
+  it is refused as a timeout. It matters most at the HTTP door, which has no request deadline of
+  its own: before this a draft there could hold its request for three times 300 s. The bound
+  rides the request's task into the mount (`mount::within`), because a mounted call blocks its
+  thread and a deadline on the future could not interrupt it.
 - **Worked examples are the published SPARQL scripts the caller may read.** Publish a few
   good queries and drafting improves for everyone who can read them.
 - **Nothing new is linked for the network.** `ikigai-nl` has no model client: the model is the
