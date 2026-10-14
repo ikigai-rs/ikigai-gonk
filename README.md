@@ -3139,7 +3139,9 @@ process can satisfy is an over-offer.
 ledger's fourteen and gonk's own five (the chunk renderer and the four `urn:sparql:*` forms,
 which are a mapping onto the store and link nothing new), pins the HTTP door's to those plus its
 pages, and walks
-`ikigai-conformance` over the hub, a door, and the HTTP door. `tests/browse.rs` pins the
+`ikigai-conformance` over the hub, a door, and the HTTP door, scoped by `Suite::own` to gonk's
+own resources, with the store's and the ledger's pinned exactly as inherited (each crate walks
+its own suite). `tests/browse.rs` pins the
 browse composition's twenty more, in the hub and through a door, pins the five the mount adds
 (and their absence without one), and pins the spend gate per capability. `tests/backup.rs`
 pins the backup composition's eight more — gonk's four and compress's four — asserts that

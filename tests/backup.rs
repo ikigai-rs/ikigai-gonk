@@ -311,54 +311,13 @@ fn the_backup_composition_conforms() {
     std::fs::write(dir.path().join(&planted), b"planted").expect("plant an archive");
     let hub = hub(dir.path(), 5);
     seed(&hub);
-    let mut suite = STORE_IDS.iter().fold(Suite::new(), |suite, id| {
-        suite.opt_out(
-            *id,
-            None,
-            "ikigai-store's own conformance suite walks it with real SPARQL; it is bound \
-                 here because every ledger read and write composes over it",
-        )
-    });
-    // The ledger is walked with its own fixtures over the SAME composition by
-    // `tests/conformance.rs::the_hub_conforms`. Duplicating forty lines of fixtures here
-    // would give two places for the ledger's contract to be asserted and one of them to
-    // drift; this file exists to walk the backup family.
-    for id in LEDGER_IDS {
-        suite = suite.opt_out(
-            id,
-            None,
-            "walked with ikigai-ledger's own fixtures by tests/conformance.rs over this same \
-             composition; this file walks the backup family",
-        );
-    }
-    // `ikigai-compress`'s own suite makes exactly these declarations, and they are repeated
-    // rather than assumed because binding a module is this server taking responsibility for
-    // what it serves: the compressors are pure functions of their inputs, and no fixture can
-    // express a decompressor's input (a gzip stream is not UTF-8 and `Fixture::arg` takes a
-    // String).
-    for id in ["compress-gzip", "compress-zlib"] {
-        suite = suite
-            .pure(id)
-            .cacheable(id)
-            .fixture(Fixture::new(id, Verb::Source).arg("content", "hello"));
-    }
-    for id in ["decompress-gzip", "decompress-zlib"] {
-        suite = suite.opt_out(
-            id,
-            None,
-            "no fixture can express this input: a gzip/zlib stream is not UTF-8 and \
-             Fixture::arg takes a String. Walked end to end by the round-trip tests below, \
-             which decompress a real archive.",
-        );
-    }
-    for id in HUB_IDS {
-        suite = suite.opt_out(
-            id,
-            None,
-            "walked with real fixtures by tests/conformance.rs over this same composition; \
-             this file walks the backup family",
-        );
-    }
+    // Scoped to the backup family (conformance 0.8's `Suite::own`): everything else in this
+    // composition is inherited, not walked, and pinned exactly below. The store, the ledger
+    // and the compressors are walked by their own crates' suites, and gonk's hub resources by
+    // `tests/conformance.rs` over this same composition.
+    let suite = BACKUP_IDS
+        .iter()
+        .fold(Suite::new(), |suite, id| suite.own(*id));
     let suite = suite
         .opt_out(
             "gonk-restore",
@@ -380,6 +339,28 @@ fn the_backup_composition_conforms() {
     let report = suite.run_blocking(&hub);
     println!("--- backup composition ---\n{report}");
     assert!(report.is_clean(), "{report}");
+    let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
+    walked.sort_unstable();
+    walked.dedup();
+    let mut family = BACKUP_IDS.to_vec();
+    family.sort_unstable();
+    assert_eq!(walked, family, "{report}");
+    let mut inherited: Vec<&str> = report
+        .declared
+        .inherited
+        .iter()
+        .map(String::as_str)
+        .collect();
+    inherited.sort_unstable();
+    let mut rest: Vec<&str> = STORE_IDS
+        .iter()
+        .chain(LEDGER_IDS.iter())
+        .chain(HUB_IDS.iter())
+        .chain(COMPRESS_IDS.iter())
+        .copied()
+        .collect();
+    rest.sort_unstable();
+    assert_eq!(inherited, rest, "{report}");
 }
 
 // ------------------------------------------------------------------ the round trip
