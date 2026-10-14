@@ -3519,11 +3519,13 @@ capability, on reads as well as writes (ledger #1077); an anonymous read is `-`,
 `urn:iki:host:gonk:client:<fingerprint>` (ledger #816, #1183), on every verb and whatever
 capability the client carries (ledger #879); a line written before 2026-10-10 says
 `urn:iki:gonk:client:<fingerprint>`, and stays as written. A refusal the door kernel makes before dispatch (a capability
-floor, a name nothing binds) writes no line. ⚠ Nor, since ledger #879, does a foreign `Host` or
-a cross-site write, or (ledger #880) a GET another page loads: those are refused at the EDGE,
-before the kernel and so before this log —
-which is what keeps `OPTIONS` and `?description` from answering them — where they used to be
-refused one step later, by the door's admission, with an `outcome=denied` line. No line ever carries a cookie, a token or a form
+floor, a name nothing binds) writes no line. A foreign `Host`, a cross-site write and (ledger
+#880) a GET another page loads are refused at the EDGE, before the kernel (which is what keeps
+`OPTIONS` and `?description` from answering them), and the edge writes their line itself
+(ledger #894): `outcome=denied bytes=- dur=0`, under the IRI the route table would have mapped
+the path to, with the query in `q` and the principal of an anonymous request whatever cookie it
+carried (a refused request's session is not believed). Between ledger #879 and #894 they wrote
+none, so probing was invisible. No line ever carries a cookie, a token or a form
 body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
 
 ★ **The Queue badge's poll is sampled** (ledger #767). Every open page fetches
