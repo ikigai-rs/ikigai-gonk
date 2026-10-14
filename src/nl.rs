@@ -72,6 +72,19 @@ pub struct Nl {
     vocab: Arc<dyn Space>,
 }
 
+/// The longest one draft at `urn:nl:sparql` may spend on its model calls, ALL of them together
+/// (up to three: a draft, a repair, an escalation): **300 s**, the same bound the QUIC door's
+/// transport puts on one call ([`crate::mount::CALL_TIMEOUT`]). Ledger
+/// [#1203](http://localhost:1062/l/default/item/1203): the HTTP door has no request deadline,
+/// so before this a draft over HTTP could hold its request for three of those, fifteen minutes.
+/// It bounds the draft at every door, since the drafter is the same resource behind all three;
+/// [`crate::mount::within`] is how.
+///
+/// ```
+/// assert_eq!(ikigai_gonk::nl::DRAFT_DEADLINE, ikigai_gonk::mount::CALL_TIMEOUT);
+/// ```
+pub const DRAFT_DEADLINE: std::time::Duration = crate::mount::CALL_TIMEOUT;
+
 impl Nl {
     /// The family. `ask` is the model door a draft goes to (`gonk.nl.ask`); `mount_host` is
     /// the host the `gonk.mount` line dials ([`crate::config::Settings::mount_host`]), or
@@ -79,6 +92,17 @@ impl Nl {
     /// anonymous run window an anonymous check's dry run counts against ([`CheckGuard`]),
     /// the script family's own in `main`.
     pub fn new(ask: &str, mount_host: Option<&str>, runs: AnonymousRuns) -> Nl {
+        Nl::with_draft_deadline(ask, mount_host, runs, DRAFT_DEADLINE)
+    }
+
+    /// The family with `deadline` as a draft's overall bound instead of [`DRAFT_DEADLINE`] —
+    /// for a test that cannot wait five minutes.
+    pub fn with_draft_deadline(
+        ask: &str,
+        mount_host: Option<&str>,
+        runs: AnonymousRuns,
+        deadline: std::time::Duration,
+    ) -> Nl {
         let config = ikigai_nl::SpaceConfig::new().llm(ikigai_nl::Llm {
             ask: ask.to_string(),
             ..ikigai_nl::Llm::default()
@@ -87,6 +111,7 @@ impl Nl {
             nl: Arc::new(Guarded {
                 inner: Arc::new(ikigai_nl::space(config)),
                 draft: mount_host.map(|host| format!("urn:cap:net:{host}")),
+                deadline,
                 runs,
             }),
             vocab: Arc::new(ikigai_vocab::space()),
@@ -106,6 +131,8 @@ struct Guarded {
     inner: Arc<dyn Space>,
     /// `urn:cap:net:{host}`, or `None` for no drafter at all.
     draft: Option<String>,
+    /// A draft's overall deadline ([`DRAFT_DEADLINE`]).
+    deadline: std::time::Duration,
     runs: AnonymousRuns,
 }
 
@@ -132,6 +159,7 @@ impl Space for Guarded {
                 Arc::new(DraftGuard {
                     inner: endpoint,
                     scope: scope.clone(),
+                    deadline: self.deadline,
                 }) as Arc<dyn Endpoint>
             }),
         }
@@ -163,15 +191,20 @@ impl Space for Guarded {
 /// host grant ([`crate::mount::net_grant`]), so the drafter always needed it; declaring it
 /// moves the refusal to the kernel's floor, before the grounding is computed, and stops the
 /// manifold offering a drafter the caller could only be refused by.
+///
+/// And it bounds every model call the draft makes by ONE overall deadline ([`DRAFT_DEADLINE`],
+/// ledger #1203), through [`crate::mount::within`].
 pub struct DraftGuard {
     inner: Arc<dyn Endpoint>,
     scope: String,
+    deadline: std::time::Duration,
 }
 
 #[async_trait]
 impl Endpoint for DraftGuard {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        self.inner.invoke(inv).await
+        let by = std::time::Instant::now() + self.deadline;
+        crate::mount::within(by, self.inner.invoke(inv)).await
     }
 
     fn name(&self) -> &str {

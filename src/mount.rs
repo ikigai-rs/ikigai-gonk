@@ -201,6 +201,35 @@ pub fn deadline_for(request: &Request, call: Duration) -> Duration {
     call + wait.unwrap_or(Duration::ZERO).min(MAX_WAIT)
 }
 
+tokio::task_local! {
+    /// The instant by which everything this task still sends to a mounted peer must be
+    /// answered, if the request it serves set one ([`within`]).
+    static TASK_DEADLINE: Instant;
+}
+
+/// `work`, with every call it makes to a mounted peer bounded by `deadline` IN TOTAL, not per
+/// call: each call runs under what is left of it (or its own standing deadline, if that is
+/// shorter), and a call that would start after it is refused at once as a [`Error::Timeout`].
+///
+/// ★ Ledger [#1203](http://localhost:1062/l/default/item/1203): a draft at `urn:nl:sparql` makes
+/// up to three model calls, each bounded only by [`CALL_TIMEOUT`] (300 s), so one HTTP request
+/// could hold its connection for fifteen minutes; the HTTP door has no request deadline of its
+/// own. A deadline on the FUTURE could not stop that: a mounted call blocks the task's thread
+/// until it returns, so the bound has to be handed to the call itself, which is what the
+/// task-local is for. It rides the task, so it reaches every sub-request the work issues
+/// through the hub, at any depth, and nothing outside it.
+pub async fn within<F: std::future::Future>(deadline: Instant, work: F) -> F::Output {
+    TASK_DEADLINE.scope(deadline, work).await
+}
+
+/// What is left of the task's deadline ([`within`]): `None` when none is set,
+/// `Some(Duration::ZERO)` when it has passed.
+fn task_remaining() -> Option<Duration> {
+    TASK_DEADLINE
+        .try_with(|at| at.saturating_duration_since(Instant::now()))
+        .ok()
+}
+
 /// Where a mounted peer lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -783,13 +812,36 @@ impl Resolver for LazyMount {
     ) -> Result<(Representation, CacheStatus), Error> {
         // Before the dial: a caller this mount refuses costs no handshake.
         net_grant(&self.target, capability)?;
+        // A request with an overall deadline ([`within`], ledger #1203) that has run out sends
+        // nothing more.
+        let remaining = task_remaining();
+        if remaining == Some(Duration::ZERO) {
+            return Err(Error::Timeout(format!(
+                "the request's overall deadline ran out before its next call to the mounted \
+                 peer at {}",
+                self.target
+            )));
+        }
         let peer = self.resolver()?;
         let capability = capability.clone();
         let target = self.target.to_string();
         // A long poll (`wait=`) runs under the call deadline plus its wait; everything else
         // under the standing deadlines the dial set. A `Meta` keeps the describe deadline.
-        let deadline = (request.verb != Verb::Meta && request.args.contains_key("wait"))
-            .then(|| deadline_for(&request, self.call_timeout));
+        // Under an overall deadline, never past what is left of it.
+        let standing = if request.verb == Verb::Meta {
+            self.describe_timeout
+        } else {
+            self.call_timeout
+        };
+        let deadline = match (
+            (request.verb != Verb::Meta && request.args.contains_key("wait"))
+                .then(|| deadline_for(&request, self.call_timeout)),
+            remaining,
+        ) {
+            (Some(own), Some(left)) => Some(own.min(left)),
+            (None, Some(left)) => Some(standing.min(left)),
+            (own, None) => own,
+        };
         let answer =
             off_thread(move || peer.issue_as(request, &capability, deadline)).ok_or_else(|| {
                 Error::Endpoint(format!("the mount to {target} panicked serving this call"))
