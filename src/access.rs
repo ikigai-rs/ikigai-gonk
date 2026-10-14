@@ -55,7 +55,8 @@
 //!   carries — core's clamp keeps the session's name (ledger #879). An anonymous HTTP read is
 //!   `-`, and a `?principal=` a reader typed is never taken for one (ledger #864, R6): nothing
 //!   a caller sends reaches the capability.
-//! - **a refusal the door kernel makes before dispatch** — a capability floor's denial, a name
+//! - **a refusal the door kernel makes before dispatch** (a refusal the HTTP EDGE makes is
+//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — a capability floor's denial, a name
 //!   nothing binds (`404`), a nesting refusal — and the kernel's own `urn:kernel:*`
 //!   operations and Meta answers, which no endpoint of this server's spaces handles.
 //!
@@ -210,6 +211,39 @@ impl AccessLog {
     /// The door this log describes.
     pub fn door(&self) -> Door {
         self.door
+    }
+
+    /// Write the line for a request the door's EDGE refused before any kernel saw it (ledger
+    /// [#894](http://localhost:1062/l/default/item/894)): `outcome=denied`, `bytes=-`, `dur=0`,
+    /// and no principal beyond what [`line()`] writes for an empty capability (`anon` on a write,
+    /// `-` on a read), because a refused request's cookie is not believed. Always written:
+    /// a refusal is never sampled.
+    ///
+    /// ```
+    /// use std::sync::{Arc, Mutex};
+    /// use ikigai_core::{Iri, Request, Verb};
+    /// use ikigai_gonk::access::{AccessLog, Door};
+    ///
+    /// let kept = Arc::new(Mutex::new(Vec::<String>::new()));
+    /// let into = Arc::clone(&kept);
+    /// let log = AccessLog::to(Door::Http, Arc::new(move |l: &str| into.lock().unwrap().push(l.to_string())));
+    /// let write = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap());
+    /// log.refused_at_edge(&write, "a cross-site write");
+    /// let line = kept.lock().unwrap()[0].clone();
+    /// assert!(line.ends_with(
+    ///     " gonk:Access urn:iki:ledger:append door=http verb=sink outcome=denied bytes=- dur=0 principal=anon q=-"
+    /// ), "{line}");
+    /// ```
+    pub fn refused_at_edge(&self, request: &Request, why: &str) {
+        let line = line(
+            millis(SystemTime::now()),
+            self.door,
+            request,
+            &Capability::scoped(Vec::<String>::new()),
+            Err(&Error::Denied(why.to_string())),
+            0,
+        );
+        (self.sink)(&line);
     }
 
     /// Wrap `space` so every host-issued request resolved through it writes a line.

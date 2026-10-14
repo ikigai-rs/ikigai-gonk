@@ -682,7 +682,8 @@ fn serve(flags: &config::Flags) -> ! {
             http,
             doors::http_cap(door.clone()),
             listener,
-            doors::edge_config(door),
+            // Edge refusals write their own access lines (ledger #894).
+            doors::edge_config_with(door, access(access::Door::Http)),
         )
         .await;
         fail(&format!("the http door stopped: {error:?}"))

@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use ikigai_core::{
     Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Expiry,
     Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result,
-    Scope, Space, SpaceEntry, SystemClock, Topology,
+    Scope, Space, SpaceEntry, SystemClock, Topology, Verb,
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{
@@ -685,16 +685,112 @@ fn origin_of(url: &str) -> String {
 /// verbs) and `?description` (the contract of the capability-free actions) without
 /// dispatching, so a request this door refused still learned what was behind it.
 pub fn http_admit(door: HttpDoor) -> AdmitFn {
+    http_admit_with(door, None)
+}
+
+/// [`http_admit`], writing an `outcome=denied` access line for every refusal when `access` is
+/// given (ledger [#894](http://localhost:1062/l/default/item/894)).
+///
+/// ★ Since ledger #879 these refusals never reach a kernel, so the access log's overlay
+/// ([`crate::access::Logged`]) cannot see them, and probing (a rebinding page, a cross-site
+/// form) went unrecorded. The line is written HERE, from the request alone: its subject is the
+/// IRI the route table WOULD have mapped the path to ([`edge_subject`]), its verb the method's
+/// ([`edge_verb`]), its `q` the query, and nothing from the request's cookie or body.
+pub fn http_admit_with(door: HttpDoor, access: Option<AccessLog>) -> AdmitFn {
     Arc::new(move |request: &HttpRequest| {
         let marker = http_refusal(&door, request)?;
         let capability = Capability::scoped([marker.to_string()]);
+        let reason = crate::admit::refusal(&capability)
+            .unwrap_or("this door refused the request")
+            .to_string();
+        if let Some(log) = &access {
+            if let Some(refused) = edge_request(request) {
+                log.refused_at_edge(&refused, &reason);
+            }
+        }
         Some(Refusal {
             status: refusal_status(marker),
-            reason: crate::admit::refusal(&capability)
-                .unwrap_or("this door refused the request")
-                .to_string(),
+            reason,
         })
     })
+}
+
+/// The kernel request an edge-refused HTTP request would have become: [`edge_verb`] on
+/// [`edge_subject`], its query pairs as arguments. `None` only when the subject is not an IRI.
+fn edge_request(request: &HttpRequest) -> Option<Request> {
+    let target = Iri::parse(edge_subject(&request.path)).ok()?;
+    Some(request.query.iter().fold(
+        Request::new(edge_verb(&request.method), target),
+        |r, (k, v)| {
+            r.with_arg(
+                k.as_str(),
+                ikigai_core::ArgRef::Inline(v.as_bytes().to_vec()),
+            )
+        },
+    ))
+}
+
+/// The verb an HTTP method maps to, as `ikigai-web` maps it: `GET`/`HEAD` read, `DELETE`
+/// deletes, `OPTIONS` asks for the contract, and every other method writes.
+///
+/// ```
+/// use ikigai_core::Verb;
+/// use ikigai_gonk::doors::edge_verb;
+/// assert_eq!(edge_verb("GET"), Verb::Source);
+/// assert_eq!(edge_verb("HEAD"), Verb::Source);
+/// assert_eq!(edge_verb("POST"), Verb::Sink);
+/// assert_eq!(edge_verb("PATCH"), Verb::Sink);
+/// assert_eq!(edge_verb("DELETE"), Verb::Delete);
+/// assert_eq!(edge_verb("OPTIONS"), Verb::Meta);
+/// ```
+pub fn edge_verb(method: &str) -> Verb {
+    match method {
+        "GET" | "HEAD" => Verb::Source,
+        "DELETE" => Verb::Delete,
+        "OPTIONS" => Verb::Meta,
+        _ => Verb::Sink,
+    }
+}
+
+/// The IRI this door's route table maps `path` to ([`edge_config`]'s rows, first match), or
+/// the library's mechanical mapping (`/iki/ledger/append` → `urn:iki:ledger:append`) when no
+/// row matches: the subject an edge-refused request's access line names, so it reads like the
+/// line the same request writes when it is served.
+///
+/// A row's `{var}` (or raw `{+var}`) captures one path segment. ⚠ This mirrors the library's
+/// matcher for the routes this door has and is used for the LOG only: a path the library would
+/// refuse as a strict-variable `400` still gets a subject here.
+///
+/// ```
+/// use ikigai_gonk::doors::edge_subject;
+/// assert_eq!(edge_subject("/"), "urn:iki:gonk:page:home");
+/// assert_eq!(edge_subject("/l/default"), "urn:iki:gonk:page:ledger:default");
+/// assert_eq!(edge_subject("/l/default/item/12"), "urn:iki:gonk:page:item:default:12");
+/// assert_eq!(edge_subject("/iki/ledger/append"), "urn:iki:ledger:append");
+/// assert_eq!(edge_subject("/browse/urn:repo:x:file/src"), "urn:iki:gonk:page:browse:urn:repo:x:file/src");
+/// ```
+pub fn edge_subject(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for route in routes() {
+        let pattern: Vec<&str> = route.pattern.split('/').filter(|s| !s.is_empty()).collect();
+        if pattern.len() != segments.len() {
+            continue;
+        }
+        let mut iri = route.iri_template.clone();
+        let matched = pattern.iter().zip(&segments).all(|(p, seg)| {
+            match p.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+                Some(var) => {
+                    iri = iri.replace(&format!("{{{var}}}"), seg);
+                    true
+                }
+                None => p == seg,
+            }
+        });
+        if matched {
+            return iri;
+        }
+    }
+    format!("urn:{}", segments.join(":"))
 }
 
 /// The HTTP status [`http_admit`] answers a refusal marker with.
@@ -946,6 +1042,27 @@ fn session_token(request: &HttpRequest) -> Option<String> {
 /// [`http_cap`] computes, and with it the `Host` and cross-site checks that make a POST to
 /// `/k` safe on a machine with a browser open.
 pub fn edge_config(door: HttpDoor) -> EdgeConfig {
+    edge_config_with(door, None)
+}
+
+/// [`edge_config`], writing an access line for every request the edge refuses when `access`
+/// is given ([`http_admit_with`], ledger [#894](http://localhost:1062/l/default/item/894)) —
+/// what `main` builds, with the HTTP door's own log.
+pub fn edge_config_with(door: HttpDoor, access: Option<AccessLog>) -> EdgeConfig {
+    EdgeConfig {
+        routes: RouteTable::new(routes()),
+        routes_only: false,
+        // Ahead of every answer the edge gives (ledger #879): a foreign `Host` and a
+        // cross-site write never reach the push stream, `OPTIONS`, `?description` or
+        // dispatch. Over the same `door` as the two seams below, so the three agree.
+        admit_fn: Some(http_admit_with(door.clone(), access)),
+        principal_fn: Some(http_principal(door)),
+        ..EdgeConfig::default()
+    }
+}
+
+/// [`edge_config`]'s route table, in order: the page routes, then the browse depths.
+fn routes() -> Vec<Route> {
     let route = |pattern: &str, iri_template: &str| Route {
         pattern: pattern.to_string(),
         iri_template: iri_template.to_string(),
@@ -953,62 +1070,51 @@ pub fn edge_config(door: HttpDoor) -> EdgeConfig {
         cors: None,
         csp: None,
     };
-    EdgeConfig {
-        routes: RouteTable::new(
-            vec![
-                route("/", "urn:iki:gonk:page:home"),
-                route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
-                route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
-                // Ledger #775: the doctor, read-only (`web::DoctorView`).
-                route("/l/{ledger}/doctor", "urn:iki:gonk:page:doctor:{ledger}"),
-                route(
-                    "/l/{ledger}/item/{id}",
-                    "urn:iki:gonk:page:item:{ledger}:{id}",
-                ),
-                route(
-                    "/l/{ledger}/item/{id}/card",
-                    "urn:iki:gonk:fragment:item:{ledger}:{id}",
-                ),
-                route("/act", "urn:iki:gonk:act"),
-                route("/sparql", "urn:iki:gonk:sparql"),
-                route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
-                route("/render-rules", "urn:iki:gonk:render-rules"),
-                route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
-                route("/static/{name}", "urn:iki:gonk:asset:{name}"),
-                route("/k", crate::k::K_IRI),
-                // The review queue (ledger #444): the page, the section it swaps, and the
-                // one write a human makes on it. `/queue/decide` takes no per-route `cap`
-                // for the reason the browse rows do not — a route ceiling would REPLACE the
-                // per-request capability, and with it the `Host` and cross-site checks that
-                // make a POST safe on a machine with a browser open.
-                route("/queue", crate::queue::QUEUE_IRI),
-                route("/queue/rows", crate::queue::ROWS_IRI),
-                route("/queue/decide", crate::queue::DECIDE_IRI),
-                // Ledger #506: one batch decline, fanned out to the same Sink per member — no
-                // per-route `cap`, for the same reason as `/queue/decide`.
-                route(crate::batch::BATCH_PATH, crate::batch::BATCH_IRI),
-                // The header's depth badge, polled every `queue::BADGE_EVERY`. It is a GET
-                // of a fragment like `/queue/rows`, and it is the trigger's only liveness
-                // signal — see `queue::Badge`.
-                route("/queue/depth", crate::queue::BADGE_IRI),
-                // The browse family's landing page. ⚠ It must be listed BEFORE the
-                // `/browse/{p1}…` arities below — not for precedence (the patterns cannot
-                // both match: this one has no segment after `/browse`) but because reading
-                // the table top to bottom should meet the door before its depths.
-                route("/browse", crate::k::ROOTS_IRI),
-            ]
-            .into_iter()
-            .chain(browse_routes())
-            .collect(),
+    vec![
+        route("/", "urn:iki:gonk:page:home"),
+        route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
+        route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
+        // Ledger #775: the doctor, read-only (`web::DoctorView`).
+        route("/l/{ledger}/doctor", "urn:iki:gonk:page:doctor:{ledger}"),
+        route(
+            "/l/{ledger}/item/{id}",
+            "urn:iki:gonk:page:item:{ledger}:{id}",
         ),
-        routes_only: false,
-        // Ahead of every answer the edge gives (ledger #879): a foreign `Host` and a
-        // cross-site write never reach the push stream, `OPTIONS`, `?description` or
-        // dispatch. Over the same `door` as the two seams below, so the three agree.
-        admit_fn: Some(http_admit(door.clone())),
-        principal_fn: Some(http_principal(door)),
-        ..EdgeConfig::default()
-    }
+        route(
+            "/l/{ledger}/item/{id}/card",
+            "urn:iki:gonk:fragment:item:{ledger}:{id}",
+        ),
+        route("/act", "urn:iki:gonk:act"),
+        route("/sparql", "urn:iki:gonk:sparql"),
+        route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
+        route("/render-rules", "urn:iki:gonk:render-rules"),
+        route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
+        route("/static/{name}", "urn:iki:gonk:asset:{name}"),
+        route("/k", crate::k::K_IRI),
+        // The review queue (ledger #444): the page, the section it swaps, and the
+        // one write a human makes on it. `/queue/decide` takes no per-route `cap`
+        // for the reason the browse rows do not — a route ceiling would REPLACE the
+        // per-request capability, and with it the `Host` and cross-site checks that
+        // make a POST safe on a machine with a browser open.
+        route("/queue", crate::queue::QUEUE_IRI),
+        route("/queue/rows", crate::queue::ROWS_IRI),
+        route("/queue/decide", crate::queue::DECIDE_IRI),
+        // Ledger #506: one batch decline, fanned out to the same Sink per member — no
+        // per-route `cap`, for the same reason as `/queue/decide`.
+        route(crate::batch::BATCH_PATH, crate::batch::BATCH_IRI),
+        // The header's depth badge, polled every `queue::BADGE_EVERY`. It is a GET
+        // of a fragment like `/queue/rows`, and it is the trigger's only liveness
+        // signal — see `queue::Badge`.
+        route("/queue/depth", crate::queue::BADGE_IRI),
+        // The browse family's landing page. ⚠ It must be listed BEFORE the
+        // `/browse/{p1}…` arities below — not for precedence (the patterns cannot
+        // both match: this one has no segment after `/browse`) but because reading
+        // the table top to bottom should meet the door before its depths.
+        route("/browse", crate::k::ROOTS_IRI),
+    ]
+    .into_iter()
+    .chain(browse_routes())
+    .collect()
 }
 
 /// The paths this door answers as gonk's own: every row of [`edge_config`]'s route table, plus

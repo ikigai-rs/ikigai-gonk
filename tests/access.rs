@@ -58,10 +58,11 @@ fn serve_http(sink: ikigai_gonk::access::Sink) -> (SocketAddr, tempfile::TempDir
     let config = tempfile::tempdir().unwrap();
     let hub = hub();
     let face = web_face(&hub, &config, addr.port());
+    let log = AccessLog::to(Door::Http, sink);
     let http = Arc::new(doors::http_kernel_with(
         hub,
         web::space(face),
-        Some(AccessLog::to(Door::Http, sink)),
+        Some(log.clone()),
     ));
     let door = doors::HttpDoor {
         anonymous: grants_for("default", Authority::Write).unwrap(),
@@ -74,7 +75,7 @@ fn serve_http(sink: ikigai_gonk::access::Sink) -> (SocketAddr, tempfile::TempDir
             http,
             doors::http_cap(door.clone()),
             listener,
-            doors::edge_config(door),
+            doors::edge_config_with(door, Some(log)),
         ))
     });
     (addr, config)
@@ -288,4 +289,85 @@ fn the_log_changes_no_doors_arrangement() {
         topology(&page(None)),
         topology(&page(Some(AccessLog::to(Door::Http, sink)))),
     );
+}
+
+/// One raw exchange with exactly the headers given (a `Host` among them, or none).
+fn http_raw(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, String)]) -> u16 {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    let mut head = format!("{method} {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("Content-Length: 1\r\nConnection: close\r\n\r\nx");
+    stream.write_all(head.as_bytes()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status line: {response}"))
+}
+
+/// ★ Ledger [#894](http://localhost:1062/l/default/item/894): a request the EDGE refuses (a
+/// foreign `Host`, a cross-site write, a read another page loads) writes a line too, so probing
+/// stays visible. Since ledger #879 moved those refusals ahead of the kernel they wrote none.
+#[test]
+fn an_edge_refusal_writes_a_denied_line() {
+    let (lines, sink) = collector();
+    let (addr, _config) = serve_http(sink);
+    let ours = format!("localhost:{}", addr.port());
+
+    assert_eq!(
+        http_raw(
+            addr,
+            "GET",
+            "/l/default?status=all",
+            &[("Host", "evil.example".to_string())]
+        ),
+        421
+    );
+    let foreign = line_for(&lines, "urn:iki:gonk:page:ledger:default");
+    assert_eq!(
+        http_raw(
+            addr,
+            "POST",
+            "/iki/ledger/append",
+            &[
+                ("Host", ours.clone()),
+                ("Origin", "http://attacker.example".to_string()),
+                ("Cookie", "gonk_session=not-a-real-session".to_string()),
+            ]
+        ),
+        403
+    );
+    let cross = line_for(&lines, "urn:iki:ledger:append");
+    assert_eq!(
+        http_raw(
+            addr,
+            "GET",
+            "/iki/ledger/items",
+            &[
+                ("Host", ours),
+                ("Sec-Fetch-Site", "cross-site".to_string()),
+                ("Sec-Fetch-Mode", "no-cors".to_string()),
+                ("Sec-Fetch-Dest", "image".to_string()),
+            ]
+        ),
+        403
+    );
+    let load = line_for(&lines, "urn:iki:ledger:items");
+
+    for line in [&foreign, &cross, &load] {
+        assert_eq!(value(line, "door"), "http", "{line}");
+        assert_eq!(value(line, "outcome"), "denied", "{line}");
+        assert_eq!(value(line, "bytes"), "-", "{line}");
+        assert!(!line.contains("not-a-real-session"), "no cookie: {line}");
+    }
+    assert_eq!(value(&foreign, "verb"), "source");
+    assert_eq!(value(&foreign, "q"), "status=all", "{foreign}");
+    assert_eq!(value(&cross, "verb"), "sink");
+    assert_eq!(value(&cross, "principal"), "anon", "{cross}");
+    assert_eq!(value(&load, "principal"), "-", "{load}");
+    assert_eq!(lines.lock().unwrap().len(), 3, "one line per refusal");
 }
