@@ -1741,7 +1741,11 @@ The directory holds `client.crt`, `client.key` and the `server.crt` to pin — t
 clients. `gonk.mount` is the ONLY key that names it, and `urn:llm:` is the only prefix a
 mount line may claim (a task layer is mounted by binding it, below, and by nothing else): a mount is composed in front of the local spaces and its catalog is
 served through every door, so what these doors can serve stays a property of the manifest
-plus one namespace.
+plus one namespace. Every resource under the prefix declares the mount's exact net token,
+`urn:cap:net:{host}`, beside whatever the peer declares, because that is what the mount checks
+on every call: the manifold offers a mounted resource to exactly the callers the mount serves
+(ledger #1204; `urn:llm:config`, which declares nothing on the peer, used to be offered to an
+anonymous caller and then denied).
 
 **The peer's door must be ikigai 0.1.56 or later** (ledger #1378). From cli 0.1.56 gonk's
 mounts are QUIC clients that ping: a PING every 5 s of quiet, and a connection given up after
