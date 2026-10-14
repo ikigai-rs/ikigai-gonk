@@ -361,7 +361,7 @@ pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
 /// was given and nothing else. (The cli wraps its `prefer` in a `PrefixGuard` because its
 /// failover pair would otherwise answer for every local IRI; there is no pair here.)
 ///
-/// ★ **Behind [`Declaring`], so the manifold offers what the mount serves** (ledger
+/// ★ **Behind an overlay, `Declaring`, so the manifold offers what the mount serves** (ledger
 /// [#1204](http://localhost:1062/l/default/item/1204)). The mount enforces `urn:cap:net:{host}`
 /// on every call it forwards ([`net_grant`]), but each mounted resource describes itself with
 /// the PEER's declaration: `urn:llm:config` declares nothing, so an anonymous caller was offered
