@@ -1043,6 +1043,69 @@ once more with the findings merged and reworded. A hook cannot tell a member fro
 synthesis's, deduplicated only where the words match. Point this hook at single-agent reviews
 if one item per defect matters more than seeing every reviewer's wording.
 
+## Filing gonk's own findings
+
+gonk's review pass mints **pending findings**, and a person publishes or declines each one at
+the [Queue](#the-review-queue-a-human-publishes-or-nothing-does). A published finding is a fact
+about the code, and fixing it is work, so it belongs on the ledger. This command files them, the
+way `roborev file` files roborev's:
+
+```sh
+ikigai-gonk findings file ikigai-gonk --dry-run          # read and plan; files nothing
+ikigai-gonk findings file ikigai-gonk                    # file them into `default`
+ikigai-gonk findings file ikigai-gonk --ledger reviews --reproduced
+```
+
+The argument is the browse root's NAME. It speaks to a RUNNING gonk over its owner-only socket
+(`--socket PATH`; unset, the one `config.toml` or `--config` names, else
+`~/.ikigai/gonk.sock`), because reading findings needs `urn:cap:browse:read:*`, which no
+anonymous HTTP caller holds. Each finding is one line:
+
+```text
+filed    #1462  Slicing the first byte panics on an empty word.
+already  #1388 (closed)  urn:iki:finding:645d521aab16830f076e0857
+skipped  1fa92632a54c273633bc10fe  minor is not in gonk.queue.serious (critical,major); --severity all files it
+
+3 published finding(s) on ikigai-gonk: 1 filed, 1 already filed, 1 skipped
+```
+
+**What is filed: published findings, never pending ones.** A pending finding is a model's claim
+nobody has looked at, and the review-value experiment (ledger
+[#723](http://localhost:1062/l/default/item/723)) measured how much of that is worth a person's
+time: a per-commit reviewer found less than half the serious bugs per token of an unled audit,
+and about half of its serious claims were coin flips. Filing every pending guess would make the
+ledger a second review queue with no decline button. The Queue decides; the ledger holds what was
+decided. By default only the **serious set** is filed (`gonk.queue.serious`, the words the Queue
+asks a person about, judged on the row's `effective_severity`, which is the person's word when
+they re-rated it): a published remark below it is often praise or a note worth keeping on the
+file's page, not work. `--severity all` files every published finding; `--reproduced` files only
+those published with the "reproduced" mark (a person showed the defect happen).
+
+**What a finding becomes.**
+
+| finding | ledger item |
+| --- | --- |
+| its text | the title (its first line, cut near 100 characters), and the body in full |
+| the file and line, the quote, the severity (and the model's proposal when a person re-rated it), the reviewer, the decision's time and note, the judge's verdict | lines in the body |
+| `urn:iki:finding:{id}` | `key`, the idempotence key, and an `about` |
+| the file (or pull request) it annotates, and the annotation its publication minted | `about`, so browse's page for the file lists the item |
+| — | the labels `finding`, `repo:<root>`, the severity word, and `reproduced` when it was marked |
+
+**Filed once.** Each finding is ONE keyed append (`key=urn:iki:finding:{id}`): the ledger checks
+the key and files in the same store update, and a key already taken (by an open, closed or
+deleted item) answers that item (`already`) and files nothing. A finding's id hashes its pass and
+its quote, so it is stable, and running this after every triage session, or from a timer, files
+only what was published since. ⚠ An item filed by hand before this command existed, with some
+other key (the gonk Book's "Review every commit" chapter used `key=finding:{id}`), is not that
+key, and the finding is filed again beside it. No priority is set: the severity is a label, and
+ranking is the ledger's `next` policy's call.
+
+**Why a command, and not a step inside the publish.** The Queue's publish runs under the deciding
+person's grant, which holds `urn:cap:annotate` and need not hold any ledger's write token; which
+ledger a root's work belongs in is a setting nobody has written; and one click with effects in two
+graphs leaves no way to publish without filing. So the decision and the filing stay two acts, and
+the key makes the second one free to repeat.
+
 ## Importing from kata
 
 [kata](https://github.com/kenn-io/kata) keeps issues in its own database. `kata export` writes
@@ -1945,6 +2008,33 @@ reviewed is the current content, exactly as it would be for someone clicking **r
 
 ⚠ That is also why a request carries **no commit SHA**: a SHA would make every drop unique
 and the queue would grow rather than collapse. The trade is deliberate.
+
+A `post-commit` hook that asks for a review of every file a commit touched
+(`.git/hooks/post-commit`, executable; put the repository's `gonk.browse.root` NAME in `root`):
+
+```sh
+#!/bin/sh
+# Ask gonk to review every file this commit touched. Never fails the commit.
+root=my-repo
+git diff-tree --root --no-commit-id --name-only -r HEAD |
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue        # a deleted path has nothing to review
+    ikigai-gonk review request "$root" "$f" >/dev/null || true
+  done
+exit 0
+```
+
+⚠ **`--root` is not optional.** `git diff-tree` compares a commit with its parent, and the
+FIRST commit of a repository has none: without `--root` it prints nothing for that commit, and
+the hook exits 0 having asked for nothing. That is the commit that adds every file, so the gap
+is the whole repository, and nothing says so. `--root` compares a parentless commit with the
+empty tree, which lists every file it added. `--no-commit-id` drops the commit's own id from
+the output, so only paths reach the loop. A merge commit lists nothing either (diff-tree shows
+a merge only when asked how: `-m` lists its files against each parent, so pipe through
+`sort -u`). git runs the hook in the repository's top directory, which is where the listed
+paths are relative to, and ignores its exit status: the `|| true` and `exit 0` are for a person
+reading it. With `gonk.review.arm` unset the requests are kept and nothing drains them, so the
+hook is safe to install before a reviewer is armed.
 
 ### Draining it, by hand, over the socket
 

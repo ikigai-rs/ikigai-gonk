@@ -266,6 +266,16 @@ usage:
                                    append), and a re-run adds only what is missing. --dry-run
                                    reads the ledger and writes nothing (README, \"Importing
                                    from kata\")
+  ikigai-gonk findings file <root> [--ledger default] [--severity serious|all] [--reproduced]
+                     [--dry-run] [--socket PATH] [--config PATH]
+                                   file each PUBLISHED review finding of one browse root as a
+                                   ledger item, over a RUNNING gonk's owner-only socket. Never a
+                                   pending one; by default only the gonk.queue.serious set (and
+                                   unrated ones), --severity all for every published one,
+                                   --reproduced for those marked reproduced. Each is ONE keyed
+                                   append (key urn:iki:finding:<id>), so a re-run files nothing
+                                   new; --dry-run reads and files nothing (README, \"Filing
+                                   gonk's own findings\")
   ikigai-gonk ledger backfill-keys [--ledger default] [--socket PATH] [--config PATH] [--dry-run]
                                    give the items roborev and kata filed BEFORE keyed appends
                                    their `ledger:key` (from their bridge `about` IRI), and list
@@ -447,6 +457,8 @@ pub enum Command {
     KataImport(crate::kata::ImportArgs),
     /// Give the items the bridges filed before keys existed their key, over the socket.
     BackfillKeys(crate::keys::BackfillArgs),
+    /// File a browse root's PUBLISHED review findings as ledger items, over the socket.
+    FindingsFile(crate::findings::FileArgs),
     /// Print the usage.
     Help,
 }
@@ -934,6 +946,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("ledger") => {
             args.next();
             return crate::keys::parse_args(args).map(Command::BackfillKeys);
+        }
+        Some("findings") => {
+            args.next();
+            return crate::findings::parse_args(args).map(Command::FindingsFile);
         }
         Some("grants") => {
             args.next();

@@ -146,6 +146,7 @@ fn main() {
             ikigai_gonk::kata::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
         }
         Command::BackfillKeys(args) => backfill_keys(&args),
+        Command::FindingsFile(args) => findings_file(&args),
         Command::Serve(flags) => serve(&flags),
     }
 }
@@ -1056,6 +1057,15 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
         ikigai_ledger::Ledger::parse(&args.ledger).unwrap_or_else(|e| fail(&e.to_string()));
     let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
+        .unwrap_or_else(|e| fail(&e));
+}
+
+/// `ikigai-gonk findings file` — over the socket of the gonk this config describes, under the
+/// `gonk.queue.serious` set that config names (ledger #1453).
+fn findings_file(args: &ikigai_gonk::findings::FileArgs) {
+    let settings = read_settings(&args.flags);
+    let issue = ikigai_gonk::keys::over_socket(&settings.socket).unwrap_or_else(|e| fail(&e));
+    ikigai_gonk::findings::run(&issue, args, &settings.queue, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
 }
 
