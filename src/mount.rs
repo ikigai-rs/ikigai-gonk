@@ -69,7 +69,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ikigai_core::{ArgRef, Capability, Error, Representation, Request, Space, SpaceEntry, Verb};
+use async_trait::async_trait;
+use ikigai_core::{
+    ArgRef, Capability, Description, Endpoint, Error, Invocation, Iri, Representation, Request,
+    Resolution, Scope, Space, SpaceEntry, Topology, Verb,
+};
 use ikigai_resolve::{CacheStatus, MountedRemote, Resolver};
 
 /// The only prefix this server mounts.
@@ -356,13 +360,94 @@ pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
 /// name — and `MountedRemote` misses outside its prefix, so the mount claims exactly what it
 /// was given and nothing else. (The cli wraps its `prefer` in a `PrefixGuard` because its
 /// failover pair would otherwise answer for every local IRI; there is no pair here.)
+///
+/// ★ **Behind [`Declaring`], so the manifold offers what the mount serves** (ledger
+/// [#1204](http://localhost:1062/l/default/item/1204)). The mount enforces `urn:cap:net:{host}`
+/// on every call it forwards ([`net_grant`]), but each mounted resource describes itself with
+/// the PEER's declaration: `urn:llm:config` declares nothing, so an anonymous caller was offered
+/// it and then denied, and `urn:llm:ask` declares the offering wildcard `urn:cap:net:*`, which a
+/// grant naming another host satisfies. Every resource under the prefix now also declares the
+/// exact token the mount checks.
 pub fn space(mount: &Mount) -> Arc<dyn Space> {
     let origin = mount.target.to_string();
-    Arc::new(MountedRemote::overriding(
+    let remote = Arc::new(MountedRemote::overriding(
         Arc::new(LazyMount::new(mount.target.clone())) as Arc<dyn Resolver>,
         mount.prefix.clone(),
         origin,
-    ))
+    ));
+    Arc::new(Declaring {
+        inner: remote,
+        prefix: mount.prefix.clone(),
+        scope: format!("urn:cap:net:{}", mount.target.net_host()),
+    })
+}
+
+/// An overlay with no identity or structure of its own (it forwards [`Space::id`],
+/// [`Space::topology`] and [`Space::entries`]) that adds the mount's net requirement to the
+/// description of every resource it resolves under the mount's prefix ([`space`]).
+///
+/// The mount's own status resource lies OUTSIDE the prefix and is answered here, never by the
+/// peer, so it reaches no host and declares nothing new.
+struct Declaring {
+    inner: Arc<dyn Space>,
+    prefix: String,
+    /// `urn:cap:net:{host}`, exactly what [`net_grant`] checks.
+    scope: String,
+}
+
+impl Space for Declaring {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        if !request.target.as_str().starts_with(&self.prefix) {
+            return resolution;
+        }
+        // `map_endpoint` carries the canonical name and the answering space through, and
+        // leaves a limiter alone.
+        resolution.map_endpoint(|endpoint| {
+            Arc::new(NetDeclared {
+                inner: endpoint,
+                scope: self.scope.clone(),
+            }) as Arc<dyn Endpoint>
+        })
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
+    }
+}
+
+/// A mounted endpoint, unchanged but for its description: every action also requires the
+/// mount's net token ([`crate::nl::declare`]).
+struct NetDeclared {
+    inner: Arc<dyn Endpoint>,
+    scope: String,
+}
+
+#[async_trait]
+impl Endpoint for NetDeclared {
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        self.inner.invoke(inv).await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        crate::nl::declare(self.inner.describe(), &self.scope)
+    }
+
+    fn confinement(&self) -> Option<Topology> {
+        self.inner.confinement()
+    }
 }
 
 /// A resolver that dials on first use, remembers a failure for a bounded backoff

@@ -289,9 +289,10 @@ fn the_drafter_needs_the_mounts_net_grant_and_the_rest_needs_nothing_new() {
     assert_eq!(peer.calls(), before, "refused before any model was asked");
 }
 
-/// ★ The grounding composes for every caller, the stub mount in front included: a mounted
-/// resource that declares nothing (`urn:llm:config`) is offered to a caller the mount then
-/// refuses, and the grounding describes every offered action.
+/// ★ The grounding composes for every caller, the stub mount in front included, and describes
+/// every offered action. (A mounted resource that declares nothing, `urn:llm:config`, used to be
+/// offered to a caller the mount then refused; since ledger #1204 the mount declares its net
+/// token on every resource, `tests/mount_offer_1204.rs`.)
 #[test]
 fn the_grounding_composes_for_every_caller_with_a_mount_in_front() {
     let peer = Peer::start();
