@@ -6,6 +6,8 @@
 //! - [`old_filings_gain_their_keys_once_and_duplicates_are_listed`] — dry run writes nothing;
 //!   the real run keys the first filing of each IRI and lists the rest; a keyed append then
 //!   answers `existing`; a second run writes nothing.
+//! - [`a_hand_filed_finding_gains_the_key_findings_file_uses`] — `urn:iki:finding:` is a bridge
+//!   too (ledger #1502): an unkeyed hand filing is keyed, a `key=finding:{id}` one is skipped.
 
 use std::path::Path;
 use std::process::Output;
@@ -189,6 +191,86 @@ fn old_filings_gain_their_keys_once_and_duplicates_are_listed() {
     assert!(
         again.contains("0 key(s) written, 4 item(s) already keyed, 1 duplicate(s) listed"),
         "{again}"
+    );
+}
+
+/// Ledger [#1502](http://localhost:1062/l/default/item/1502): `findings file` is the third
+/// bridge. A published finding filed by hand `about` its `urn:iki:finding:{id}` with no key
+/// gains that key, so the command's keyed append answers `existing` rather than filing it
+/// again; one filed the gonk Book's old way, `key=finding:{id}`, keeps its key and is named as
+/// skipped (a key is set once); one `findings file` filed is already keyed.
+#[test]
+fn a_hand_filed_finding_gains_the_key_findings_file_uses() {
+    const F1: &str = "urn:iki:finding:645d521aab16830f076e0857";
+    const F2: &str = "urn:iki:finding:745d521aab16830f076e0858";
+    const F3: &str = "urn:iki:finding:845d521aab16830f076e0859";
+    let hub = Arc::new(compose(
+        DurableStore::in_memory().expect("an in-memory store"),
+    ));
+    let hand = append(&hub, "initials panics on an empty word", &[("about", F1)]);
+    let book = append(
+        &hub,
+        "Another finding",
+        &[("about", F2), ("key", "finding:745d521aab16830f076e0858")],
+    );
+    let filed = append(
+        &hub,
+        "A finding the command filed",
+        &[
+            (
+                "about",
+                &format!(
+                    "urn:repo:demo:file:src/lib.rs {F3} urn:iki:annotation:845d521aab16830f076e0859"
+                ),
+            ),
+            ("key", F3),
+        ],
+    );
+    assert_eq!(
+        [&hand, &book, &filed].map(|s| s.as_str()),
+        ["reviews#1", "reviews#2", "reviews#3"]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("g.sock");
+    let door = doors::door_kernel(Arc::clone(&hub));
+    let path = socket.clone();
+    std::thread::spawn(move || ikigai_ipc::serve(door, &path));
+    ready::socket(&socket);
+
+    let run = stdout(&backfill(&socket, &[]));
+    assert!(run.contains(&format!("keying  reviews#1  {F1}")), "{run}");
+    assert!(
+        run.contains(&format!(
+            "skipped  reviews#2: already keyed `finding:745d521aab16830f076e0858`, which is not \
+             its bridge IRI `{F2}`"
+        )),
+        "{run}"
+    );
+    assert!(
+        run.contains("1 key(s) written, 1 item(s) already keyed, 0 duplicate(s) listed, 1 skipped"),
+        "{run}"
+    );
+    assert_eq!(keyed(&hub, F1).as_deref(), Some("reviews#1"));
+    assert_eq!(keyed(&hub, F3).as_deref(), Some("reviews#3"));
+
+    // What `findings file` sends for F1 now finds the hand-filed item.
+    let replay = issue(
+        &hub,
+        Request::new(
+            Verb::Sink,
+            Iri::parse("urn:iki:ledger:reviews:append").unwrap(),
+        )
+        .with_arg(
+            "content",
+            ArgRef::Inline(b"initials panics on an empty word".to_vec()),
+        )
+        .with_arg("key", ArgRef::Inline(F1.as_bytes().to_vec()))
+        .with_arg("about", ArgRef::Inline(F1.as_bytes().to_vec())),
+    );
+    assert!(
+        replay.starts_with("reviews#1 ") && replay.contains(" existing open"),
+        "{replay}"
     );
 }
 

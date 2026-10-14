@@ -43,9 +43,11 @@
 //! (or pull request) the finding annotates and the annotation its publication minted, so browse
 //! joins the item to the file exactly as it joins a roborev item.
 //!
-//! ⚠ The gonk Book's "Review every commit" chapter, written before this command, files by hand
+//! ⚠ The gonk Book's "Review every commit" chapter, written before this command, filed by hand
 //! with `key=finding:{id}`. An item filed that way is a different key, and this command files
-//! the finding again beside it.
+//! the finding again beside it. `ikigai-gonk ledger backfill-keys` ([`crate::keys`]) gives a
+//! hand-filed item `about` `urn:iki:finding:{id}` this command's key, but only when it carries
+//! NO key: the ledger sets a key once, so a `key=finding:{id}` item is reported as skipped.
 //!
 //! # Where it runs: the owner-only socket, never the HTTP door
 //!
