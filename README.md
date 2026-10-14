@@ -2257,6 +2257,14 @@ could make one at a time.
   `RateLimit` window, `budget::AnonymousRuns`), refused past it with the time to retry; an
   answer from the hub's cache is not counted, and reading a script's source is not a run.
   Before this, an anonymous run's query took the store's base and could be sent without limit.
+  ⚠ **What the refusal looks like** (ledger #1273): over HTTP it is still `500 Internal Server
+  Error`, body ``endpoint error: rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30/60s
+  — retry after Ns``, with no `Retry-After` header. It should be `429 Too Many Requests` with
+  `Retry-After: N`, and gonk cannot say so alone: `ikigai-throttle` refuses with a plain
+  `Error::Endpoint` (core has no typed rate-limit error), which `ikigai-web` maps to 500, and the
+  one way a door answers 429 (its admission hook) runs before the request is known to be a run
+  and carries no header. The QUIC door and the socket never meet this window: their callers are
+  never anonymous (a certificate, the owner), so nothing there is counted or refused by it.
 - **An ad hoc plan and a draft's dry run are runs too** (ledger #1210). An anonymous
   `urn:plan:eval` keeps the caller's capability, marker and all, but its steps are sub-requests
   the hub's front door never stamps, so a read-only plan whose step sent its own query to
@@ -3592,8 +3600,6 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
   #1144 is not built from the mirror's listener here. Nor is an auto-take policy, nor a way
   for a gonk to ask the layer door who it is (a lost-reply take before this server's first
   take cannot be told apart from someone else's).
-- **No identity reaches a write.** A form filed while signed in is not attributed to the
-  passkey: the capability carries the grant, but nothing carries WHO to the ledger's `author`.
 - **No manifold-driven forms yet.** The forms are hand-written in the stylesheet. They post
   only actions and inputs the ledger declares, and `/act` refuses anything else, but a new
   ledger input does not appear on the page until the stylesheet names it.
