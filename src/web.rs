@@ -736,6 +736,48 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
     }
 }
 
+/// `view:Child` nodes for every item's children, in place: the inbound `ledger:parent` edges
+/// (ledger [#1501](http://localhost:1062/l/default/item/1501)).
+///
+/// Since ikigai-ledger 0.12.0 (ledger #1454) an item's Turtle face carries its children as the
+/// triples that make them so, `<child> ledger:parent <item>`: the vocabulary has no inverse
+/// property. [`enrich_items`] turns only OUTBOUND edges into [`render::VIEW_NS`] `Link` nodes,
+/// so without this a page named its parent and never its children. The children cost no read
+/// of their own: the ledger loads them with the item, in the query this page already pays
+/// for (`tests/ledger_count_1198.rs`). Each child is named as the parent link names its
+/// target, `{ledger} {id}`, because the item's face carries the child's IRI and nothing else
+/// about it; a number or a title would be another read per child.
+fn enrich_children(graph: &mut Graph) {
+    let parent = format!("{LEDGER_NS}parent");
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let id = item
+            .rsplit_once(":item:")
+            .map(|(_, id)| id)
+            .unwrap_or(&item)
+            .to_string();
+        let mut children = graph.subjects_with(&parent, &item);
+        children.retain(|child| child != &item);
+        children.sort();
+        for (order, child) in children.iter().enumerate() {
+            let Some((other, _)) = Ledger::item_iri(child) else {
+                continue;
+            };
+            let child_id = child.rsplit_once(":item:").map(|(_, t)| t).unwrap_or("");
+            let node = format!("urn:iki:gonk:view:child:{id}:{}", order + 1);
+            graph.typed(&node, &format!("{}Child", render::VIEW_NS));
+            graph.view(&node, "order", format!("{:04}", order + 1));
+            graph.view(&node, "item", item.clone());
+            graph.view(&node, "target", child.clone());
+            graph.view(
+                &node,
+                "href",
+                format!("/l/{}/item/{child_id}", other.name()),
+            );
+            graph.view(&node, "text", format!("{} {child_id}", other.name()));
+        }
+    }
+}
+
 /// `view:author` for every item and comment that carries `ledger:author`, in place.
 ///
 /// An author that is a passkey IRI ([`identity::passkey_iri`] — what the door stamps on a
@@ -1369,6 +1411,7 @@ async fn item_card(
     );
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, "open");
+    enrich_children(&mut graph);
     enrich_authors(&mut graph, &web.passkeys);
     // The ledger a comment's `ledger #N` references resolve in (`render::linkify`, ledger #989).
     for comment in graph.subjects_of_type(&format!("{LEDGER_NS}Comment")) {

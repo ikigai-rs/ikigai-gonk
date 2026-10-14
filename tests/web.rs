@@ -651,6 +651,74 @@ fn a_person_files_edits_comments_and_closes_through_forms() {
     );
 }
 
+/// Ledger [#1501](http://localhost:1062/l/default/item/1501): an item's page lists its
+/// CHILDREN, the inbound `ledger:parent` edges ikigai-ledger 0.12.0 puts in the item's Turtle
+/// face, as links into each child's page; a child's page names its parent and lists none.
+#[test]
+fn an_item_page_lists_its_children_as_links() {
+    let server = Server::start();
+    let (parent_iri, parent_id) = file(&server, "The epic");
+    let mut children = Vec::new();
+    for title in ["First step", "Second step"] {
+        let (child_iri, child_id) = file(&server, title);
+        let linked = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "link"),
+                ("_verb", "Sink"),
+                ("_id", &child_id),
+                ("_then", "card"),
+                ("item", &child_iri),
+                ("type", "parent"),
+                ("content", &parent_iri),
+            ],
+            None,
+        );
+        assert_eq!(linked.status, 200, "{linked:?}");
+        children.push(child_id);
+    }
+    children.sort();
+
+    let page = server.page(&format!("/l/default/item/{parent_id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let section = page
+        .body
+        .split("<section aria-labelledby='children-title' class='panel children'>")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no Children section: {page:?}"));
+    let section = &section[..section.find("</section>").expect("a closed section")];
+    assert!(
+        section.contains("<h2 id='children-title'>Children</h2>"),
+        "{section}"
+    );
+    let links: Vec<&str> = section.matches("<li><a href=").collect();
+    assert_eq!(links.len(), 2, "one link per child: {section}");
+    let first = section
+        .find(&format!(
+            "<a href='/l/default/item/{}'>default {}</a>",
+            children[0], children[0]
+        ))
+        .unwrap_or_else(|| panic!("no link to {}: {section}", children[0]));
+    let second = section
+        .find(&format!(
+            "<a href='/l/default/item/{}'>default {}</a>",
+            children[1], children[1]
+        ))
+        .unwrap_or_else(|| panic!("no link to {}: {section}", children[1]));
+    assert!(first < second, "children in a stable order: {section}");
+
+    // The child names its parent among its links, and has no children of its own.
+    let child = server.page(&format!("/l/default/item/{}", children[0]), None);
+    assert_eq!(child.status, 200, "{child:?}");
+    assert!(
+        child.body.contains(&format!(
+            "<a href='/l/default/item/{parent_id}'>default {parent_id}</a>"
+        )),
+        "{child:?}"
+    );
+    assert!(!child.body.contains("children-title"), "{child:?}");
+}
+
 #[test]
 fn a_form_can_send_only_what_the_ledger_declares() {
     let server = Server::start();

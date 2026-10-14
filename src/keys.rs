@@ -5,7 +5,9 @@
 //! request that checks `ledger:key` and files in the same store update. Every item they filed
 //! BEFORE that carries its key only as an `about` IRI (`urn:roborev:finding:{hash}`,
 //! `urn:kata:issue:{uid}`) and no `ledger:key`, so the keyed append cannot see it, and the
-//! first keyed run after an upgrade would file all of it again. This command closes that gap,
+//! first keyed run after an upgrade would file all of it again. `findings file` is the third
+//! bridge (ledger #1502): a published finding a person filed by hand, `about`
+//! `urn:iki:finding:{id}` with no key, is the same gap. This command closes that gap,
 //! and it is the only way to: the ledger sets a key at filing and has no resource that sets one
 //! on an existing item (its README, "Not built"), so the key is written here as one SPARQL
 //! update per item, through the store's graph-scoped door.
@@ -47,8 +49,19 @@ use ikigai_ledger::vocabulary as v;
 use ikigai_ledger::Ledger;
 use ikigai_resolve::Resolver;
 
-/// The `about` IRIs the bridges file under, which are also their keys.
-pub const BRIDGE_PREFIXES: [&str; 2] = [crate::roborev::KEY_PREFIX, crate::kata::KEY_PREFIX];
+/// The `about` IRIs the bridges file under, which are also their keys: roborev's, kata's, and
+/// gonk's own published findings (`ikigai-gonk findings file`, `urn:iki:finding:{id}`; ledger
+/// [#1502](http://localhost:1062/l/default/item/1502)).
+///
+/// ⚠ A finding item filed by hand BEFORE `findings file` existed is keyed here only when it
+/// carries no key at all. The gonk Book's old hand step filed `key=finding:{id}`, and the
+/// ledger sets a key once: such an item is reported as skipped ("already keyed"), never
+/// re-keyed, and `findings file` still files that finding beside it.
+pub const BRIDGE_PREFIXES: [&str; 3] = [
+    crate::roborev::KEY_PREFIX,
+    crate::kata::KEY_PREFIX,
+    crate::queue::FINDING_PREFIX,
+];
 
 const GRAPH_SELECT: &str = "urn:iki:store:graph-select";
 const GRAPH_UPDATE: &str = "urn:iki:store:graph-update";

@@ -152,6 +152,23 @@ impl Graph {
         self.values(subject, predicate).into_iter().next()
     }
 
+    /// The IRI subjects of `?s predicate <object>`: an edge read INBOUND, in first-seen order
+    /// and once each.
+    pub fn subjects_with(&self, predicate: &str, object: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for t in &self.triples {
+            if t.predicate.as_str() != predicate {
+                continue;
+            }
+            if let (NamedOrBlankNode::NamedNode(s), Term::NamedNode(o)) = (&t.subject, &t.object) {
+                if o.as_str() == object && !out.iter().any(|x| x == s.as_str()) {
+                    out.push(s.as_str().to_string());
+                }
+            }
+        }
+        out
+    }
+
     /// Split this graph into windows of `size` subjects, in the order `subjects` gives —
     /// one graph per window, each holding exactly the triples whose subject is in it.
     /// A triple whose subject is in no window is in no output graph (a listing renders

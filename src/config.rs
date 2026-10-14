@@ -287,7 +287,8 @@ usage:
                                    new; --dry-run reads and files nothing (README, \"Filing
                                    gonk's own findings\")
   ikigai-gonk ledger backfill-keys [--ledger default] [--socket PATH] [--config PATH] [--dry-run]
-                                   give the items roborev and kata filed BEFORE keyed appends
+                                   give the items roborev and kata filed BEFORE keyed appends,
+                                   and published findings filed by hand without a key,
                                    their `ledger:key` (from their bridge `about` IRI), and list
                                    the duplicates the old race made, over a RUNNING gonk's
                                    owner-only socket. Idempotent; --dry-run writes nothing

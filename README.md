@@ -1236,6 +1236,13 @@ unkeyed items are listed as its duplicates. An item about two bridge IRIs is ski
 It does not touch `modified`, and it does not key a deleted item's tombstone. A second run
 writes nothing (`0 key(s) written`).
 
+`findings file` is the third bridge (ledger [#1502](http://localhost:1062/l/default/item/1502)):
+a published finding someone filed by hand, `about` `urn:iki:finding:{id}` with no key, is keyed
+the same way, so the next `findings file` answers `existing` instead of filing it again.
+⚠ Only an UNKEYED item: the gonk Book's old hand step filed `key=finding:{id}`, and since a key
+is set once, such an item is reported as `skipped` (already keyed, not its bridge IRI) and
+`findings file` files that finding beside it. Close one of the two by hand.
+
 **The order, at an upgrade:** dry run, read the duplicates, run it, then let the bridges run
 again. Running it after a keyed run is safe too — that run's re-filings are listed as the
 duplicates' holders rather than keyed twice — but it is the order that files nothing extra.
@@ -3136,7 +3143,7 @@ line the explanation families are not bound either, because an action no kernel 
 process can satisfy is an over-offer.
 
 `tests/conformance.rs` pins the socket and QUIC catalog to the store's thirteen resources, the
-ledger's fourteen and gonk's own five (the chunk renderer and the four `urn:sparql:*` forms,
+ledger's twenty-two and gonk's own five (the chunk renderer and the four `urn:sparql:*` forms,
 which are a mapping onto the store and link nothing new), pins the HTTP door's to those plus its
 pages, and walks
 `ikigai-conformance` over the hub, a door, and the HTTP door, scoped by `Suite::own` to gonk's

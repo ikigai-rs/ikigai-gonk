@@ -1453,6 +1453,17 @@
           </ul>
         </section>
       </xsl:if>
+      <!-- The inbound parent edges (ledger #1501): src/web.rs::enrich_children. -->
+      <xsl:if test="count(rdf:RDF/view:Child) &gt; 0">
+        <section class="panel children" aria-labelledby="children-title">
+          <h2 id="children-title">Children</h2>
+          <ul class="plain">
+            <xsl:apply-templates select="rdf:RDF/view:Child">
+              <xsl:sort select="view:order"/>
+            </xsl:apply-templates>
+          </ul>
+        </section>
+      </xsl:if>
       <section class="panel comments" aria-labelledby="comments-title">
         <h2 id="comments-title">Comments</h2>
         <xsl:if test="count(rdf:RDF/ledger:Comment) = 0"><p class="empty">No comments yet.</p></xsl:if>
@@ -1530,6 +1541,10 @@
         </form>
       </xsl:if>
     </li>
+  </xsl:template>
+
+  <xsl:template match="view:Child">
+    <li><a><xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute><xsl:value-of select="view:text"/></a></li>
   </xsl:template>
 
   <xsl:template match="ledger:Comment">
