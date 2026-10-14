@@ -1066,10 +1066,11 @@ ikigai-jsonld = "0.2.2"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
-# PRODUCTION floor too: see the vocab note above. 0.6.1 (SPACE-NAME, a purity rule that fires,
-# an `Expiry::At` deadline read as a bound): `"0.3"` was `<0.4.0`, so gonk was held to an old
-# definition of "done".
-ikigai-conformance = "0.6.1"
+# PRODUCTION floor too: see the vocab note above. 0.8.0: REQUIRED (a required input dropped
+# must be refused, typed), VALIDATE, and `Suite::own`, which scopes every walk here to gonk's
+# own resources and pins the rest as inherited. `"0.6.1"` was `<0.7.0`, so gonk was held to
+# an old definition of "done"; `"0.8.0"` is `<0.9.0`.
+ikigai-conformance = "0.8.0"
 futures = "0.3"
 tempfile = "3"
 # A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path
