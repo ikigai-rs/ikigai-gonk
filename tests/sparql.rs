@@ -155,7 +155,10 @@ fn a_one_graph_caller_reads_only_its_graph_by_every_route() {
     .unwrap();
     assert_eq!(rows(&graphs), [BROWSE], "{graphs}");
 
-    // And `GRAPH <ledger>` matches nothing rather than reaching around the grant.
+    // And `GRAPH <ledger>` does not reach around the grant: since `ikigai-store` 0.2.22 (ledger
+    // #388) a constant `GRAPH` outside the read's set is REFUSED by name, where through 0.2.21
+    // it was answered `false`. It names the graph the QUERY wrote, outside the set this face
+    // computed from the grant, so it says nothing about whether that graph exists.
     let around = ask(
         &hub,
         &cap,
@@ -164,9 +167,14 @@ fn a_one_graph_caller_reads_only_its_graph_by_every_route() {
             "query",
             &format!("ASK {{ GRAPH <{LEDGER}> {{ ?s ?p ?o }} }}"),
         )],
-    )
-    .unwrap();
-    assert!(around.contains("false"), "{around}");
+    );
+    match around {
+        Err(Error::InvalidArgument { name, detail }) => {
+            assert_eq!(name, "query");
+            assert!(detail.contains(&format!("<{LEDGER}>")), "{detail}");
+        }
+        other => panic!("GRAPH <ledger> outside the set: expected a refusal, got {other:?}"),
+    }
 }
 
 #[test]
