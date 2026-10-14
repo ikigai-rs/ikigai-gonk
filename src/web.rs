@@ -1754,10 +1754,11 @@ pub const SAMPLES: [(&str, &str, &str); 9] = [
         // page says so itself now, and shows that join without offering to run it —
         // [`CROSS_GRAPH`], #401.
         //
-        // ⚠ `GRAPH <other>` matches NOTHING rather than erroring (ikigai-store confines the
-        // query's available named graphs to the set it was issued for, and this page always
-        // issues one), so editing this to another ledger's graph without also choosing that
-        // ledger above returns zero rows.
+        // ⚠ `GRAPH <other>` is REFUSED by name (ikigai-store confines the query's available
+        // named graphs to the set it was issued for, and this page always issues one; since
+        // store 0.2.22, ledger #388, a constant `GRAPH <iri>` outside that set is refused rather
+        // than answered empty), so editing this to another ledger's graph without also choosing
+        // that ledger above is an error naming the graph, not zero rows.
         "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
 PREFIX dcterms: <http://purl.org/dc/terms/>
 
@@ -1920,16 +1921,18 @@ fn samples() -> String {
 /// Why the cross-graph example is SHOWN and not offered as a button. See [`CROSS_GRAPH`].
 pub const CROSS_GRAPH_WHY: &str =
     "This one is shown, not loadable: the box above sends a single ledger's graph, so this \
-     query pressed into it would return no rows and make a working capability look broken. \
+     query pressed into it would be refused for naming the browse graph, and make a working \
+     capability look broken. \
      Run it where the graphs are named — from ikigai -c, or any caller holding a read token \
      for each graph. Within the set you were issued, GRAPH <…> picks one; outside it, GRAPH <…> \
-     matches nothing rather than erroring.";
+     is refused, naming the graph.";
 
 /// ★ The join, SHOWN rather than offered — the widened capability made visible without
 /// pretending this page has it.
 ///
 /// `sparql_results` sends `ledger.graph()` and nothing else, so loading this into the editor
-/// would return zero rows: a real feature presented as a broken one. It therefore travels as
+/// would be refused for naming a graph outside that set (ikigai-store 0.2.22, ledger #388; it
+/// answered zero rows before): a real feature presented as a broken one. It therefore travels as
 /// a `view:cross-graph` element with no `id` and no `label`, is rendered outside
 /// `#sample-queries`, and carries no `data-query` — so `web/gonk.js`, which loads a sample by
 /// looking up `data-query` as an element id, cannot reach it.

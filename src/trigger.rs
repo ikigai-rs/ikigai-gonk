@@ -1105,8 +1105,12 @@ pub fn check_reviewer(
     host: &str,
     scopes: &[String],
 ) -> std::result::Result<(), String> {
+    // `Capability::satisfies` is the kernel's own declared-scope predicate (core 0.1.102,
+    // ledger #439): a trailing `*` is the family form, a presence test under the prefix, which
+    // `allows` (exact containment) would refuse for every correct reviewer grant. Through core
+    // 0.1.101 that predicate was `pub(crate)` and this module carried a hand copy of it.
     let capability = Capability::scoped(scopes.to_vec());
-    if satisfies(&capability, ikigai_browse::CAP_ANNOTATE) {
+    if capability.satisfies(ikigai_browse::CAP_ANNOTATE) {
         return Err(format!(
             "the reviewer grant carries `{}` — the token that PUBLISHES. A review pass \
              produces pending findings and cannot reach the annotation family on its own \
@@ -1135,7 +1139,7 @@ pub fn check_reviewer(
         .any(|scope| scope == crate::grants::CAP_NET_ANY)
         .then(|| format!("urn:cap:net:{host}"));
     for scope in required.iter().chain(store.iter()).chain(host_grant.iter()) {
-        if !satisfies(&capability, scope) {
+        if !capability.satisfies(scope) {
             return Err(format!(
                 "the reviewer grant does not satisfy `{scope}`, which a review pass needs. \
                  Every pass would dead-letter with a permission error, so this server \
@@ -1145,30 +1149,6 @@ pub fn check_reviewer(
         }
     }
     Ok(())
-}
-
-/// Whether `capability` satisfies a DECLARED scope, the way the kernel will.
-///
-/// ⚠⚠ **This is a hand copy of `ikigai_core`'s `cap_satisfies`, because that predicate is
-/// `pub(crate)`.** `Capability::allows` is exact containment and is the WRONG test for a
-/// declared scope: a trailing `*` is the parameterized-ACL family form — `urn:cap:net:*`
-/// means "holds some grant under this prefix" — and the kernel resolves it with a prefix
-/// match before dispatch. Using `allows` here would make this whole check refuse every
-/// correct reviewer grant, which it did on the first draft.
-///
-/// ★ Reported up as friction: a host cannot pre-flight a grant against a contract without
-/// re-deriving this, and a re-derivation that drifts gives a startup check that disagrees
-/// with the kernel in one direction or the other. Both directions are bad, and the wrong one
-/// is worse: a check that is more permissive than the kernel passes a grant every pass then
-/// dead-letters on.
-fn satisfies(capability: &Capability, scope: &str) -> bool {
-    match scope.strip_suffix('*') {
-        Some(prefix) => match capability.scopes() {
-            None => true, // root
-            Some(held) => held.iter().any(|s| s.starts_with(prefix)),
-        },
-        None => capability.allows(scope),
-    }
 }
 
 /// The `grants.json` stanza this kernel's own contracts say a reviewer needs — for a refusal

@@ -145,12 +145,16 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
     //     [items: 7 store queries, items: 3 store queries]
     // — the total's seven being the COUNT, the one row, and the corpus check's scans.
     // AFTER: the total is one COUNT.
+    // ⚠ The page of rows is FOUR store queries since ikigai-ledger 0.12.0 (ledger #1454), three
+    // through 0.11.1: loading a set of items now runs one query of its own for the INBOUND
+    // `parent` edges, so every face of an item can name its children (`<child> ledger:parent
+    // <item>` in the Turtle this page reads). The count is unchanged at one.
     let cold = one_render(&runtime, &hub, &http);
     assert_eq!(
         cold,
         vec![
             read("urn:iki:ledger:default:count", 1, false),
-            read("urn:iki:ledger:default:items", 3, false),
+            read("urn:iki:ledger:default:items", 4, false),
         ]
     );
     // Both reads are cacheable: the next render asks the hub twice and the store nothing…
@@ -176,7 +180,7 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
         one_render(&runtime, &hub, &http),
         vec![
             read("urn:iki:ledger:default:count", 1, false),
-            read("urn:iki:ledger:default:items", 3, false),
+            read("urn:iki:ledger:default:items", 4, false),
         ]
     );
 }

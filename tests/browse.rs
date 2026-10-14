@@ -1478,8 +1478,12 @@ fn a_bare_pattern_select_sees_nothing_because_every_quad_is_in_a_named_graph() {
 ///
 /// ⚠ **The set is ONE whitespace-separated `graph` value.** `graph=A graph=B` is last-wins in
 /// the engine — silently, with no error (ledger #387) — so the repeated form asks for the
-/// LAST graph alone and a join written that way comes back empty. The final block below pins
-/// that, because it is the same silent narrowing assertion 4 exists to have closed.
+/// LAST graph alone. Through `ikigai-store` 0.2.21 a join written that way came back EMPTY;
+/// since 0.2.22 (ledger #388) the store refuses a constant `GRAPH <iri>` outside the read's
+/// set, so this join is refused naming the graph the narrowing dropped. The final block below
+/// pins that, because it is the same narrowing assertion 4 exists to have closed: the engine
+/// still drops the first value, and the store is what now says so (only for a constant
+/// `GRAPH`; a `GRAPH ?g` join would still narrow in silence).
 #[test]
 fn a_scoped_token_reads_browse_and_both_tokens_run_the_join() {
     let dir = scratch_root();
@@ -1572,19 +1576,26 @@ fn a_scoped_token_reads_browse_and_both_tokens_run_the_join() {
     }
 
     // 3b. One graph is still one graph: naming the LEDGER's graph inside a query scoped to
-    // the browse graph alone matches nothing, because the available named graphs are the set
-    // the read was issued for and this set has one member. The narrowing is what a token
-    // means; what 0.2.5 changed is that a caller may now ASK for both.
+    // the browse graph alone is REFUSED, because the available named graphs are the set the
+    // read was issued for and this set has one member. Through `ikigai-store` 0.2.21 it was
+    // answered empty; 0.2.22 (ledger #388) refuses it by name, so a mistyped or forgotten
+    // graph no longer looks like an empty one. The narrowing is what a token means; what 0.2.5
+    // changed is that a caller may now ASK for both.
     let unasked = scoped(
         browse_graph,
         "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
          SELECT ?item WHERE { GRAPH <urn:iki:ledger:graph:default> { ?item ledger:about ?f } }",
-    )
-    .expect("the query is legal; the graph it names is simply not in the set");
+    );
+    let Err(ikigai_core::Error::InvalidArgument { name, detail }) = &unasked else {
+        panic!(
+            "a constant GRAPH outside the set is refused rather than answered empty — \
+             ikigai-store's own `GRAPH <other>` row: {unasked:?}"
+        );
+    };
+    assert_eq!(name, "query");
     assert!(
-        rows_of(&unasked).is_empty(),
-        "a graph outside the set matches nothing rather than erroring — ikigai-store's own \
-         `GRAPH <other>` row, and the reason the set is named in `graph=` and not in the query"
+        detail.contains("<urn:iki:ledger:graph:default>"),
+        "the refusal names the graph outside the set: {detail}"
     );
 
     // 4. ★ THE JOIN, under the two read tokens an operator can mint — and nothing else.
@@ -1659,7 +1670,9 @@ fn a_scoped_token_reads_browse_and_both_tokens_run_the_join() {
     // ⚠ And the trap this spelling avoids. `graph=A graph=B` is not a set: `Request::args`
     // holds ONE value per name and the engine inserts named arguments last-wins, silently
     // (ledger #387), so the repeated form asks for the LAST graph alone. Holding both tokens
-    // does not save it — the read is legal, and the join is empty with nothing said.
+    // does not save it. Through `ikigai-store` 0.2.21 the join was empty with nothing said;
+    // since 0.2.22 (ledger #388) the query's constant `GRAPH` on the dropped ledger graph is
+    // refused by name, which is the store catching what the engine still narrows.
     let repeated = block_on(Kernel::issue(
         &hub,
         request(
@@ -1672,13 +1685,19 @@ fn a_scoped_token_reads_browse_and_both_tokens_run_the_join() {
             ],
         ),
         &both,
-    ))
-    .expect("last-wins leaves a legal one-graph read, which is exactly the problem");
+    ));
+    let Err(ikigai_core::Error::InvalidArgument { name, detail }) = &repeated else {
+        panic!(
+            "the repeated form narrows to the last value, and the store refuses the join's \
+             GRAPH on the dropped graph — pinned here so that a further change upstream (a \
+             declared repeatable argument) shows up as a red test in the repo that would \
+             otherwise go on spelling it the safe way by folklore: {repeated:?}"
+        );
+    };
+    assert_eq!(name, "query");
     assert!(
-        rows_of(&repeated).is_empty(),
-        "the repeated form silently narrows to the last value — pinned here so that a fix \
-         upstream (a refusal, or a declared repeatable argument) shows up as a red test in \
-         the repo that would otherwise go on spelling it the safe way by folklore"
+        detail.contains("<urn:iki:ledger:graph:default>"),
+        "the refusal names the graph last-wins dropped: {detail}"
     );
 }
 
@@ -2182,9 +2201,12 @@ fn an_unwatched_roots_reads_are_not_cached() {
 ///    anonymous authority on this door;
 /// 2. a passkey identity enrolled with `--ledger default=read --browse-graph read` runs the
 ///    join and gets the row;
-/// 3. ⚠ and the natural repeated spelling `graph=A&graph=B` comes back **200 with no rows**,
+/// 3. ⚠ and the natural repeated spelling `graph=A&graph=B` narrows to the LAST graph,
 ///    because query parameters become named arguments one per name (ledger #387) — the
-///    engine's last-wins narrowing, reachable from a URL. Same value, one door further out.
+///    engine's last-wins narrowing, reachable from a URL. Through `ikigai-store` 0.2.21 that
+///    came back **200 with no rows**; since 0.2.22 (ledger #388) it is a **400** naming the
+///    graph the narrowing dropped, because the query's constant `GRAPH` on it is outside the
+///    read's set. Same refusal, one door further out.
 #[test]
 fn the_join_runs_through_the_http_door_under_a_signed_in_grant() {
     let dir = scratch_root();
@@ -2256,15 +2278,14 @@ fn the_join_runs_through_the_http_door_under_a_signed_in_grant() {
         urlencode(&query)
     );
     let (status, body) = door.get(&repeated, Some(&token));
-    assert_eq!(status, 200, "{body}");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("SPARQL results JSON");
+    assert_eq!(
+        status, 400,
+        "`graph=A&graph=B` is one argument, last value wins (ledger #387): the join narrows to \
+         one graph, and the store refuses its GRAPH on the other (ledger #388) — {body}"
+    );
     assert!(
-        json["results"]["bindings"]
-            .as_array()
-            .expect("bindings")
-            .is_empty(),
-        "`graph=A&graph=B` is one argument, last value wins: the join silently narrows to \
-         one graph and answers 200 with nothing (ledger #387) — {body}"
+        body.contains("<urn:iki:ledger:graph:default>"),
+        "the refusal names the graph the narrowing dropped: {body}"
     );
 }
 
