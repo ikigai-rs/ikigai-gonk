@@ -178,6 +178,141 @@ fn write_passkey(layout: &Layout, entry: &Enrolled) -> Result<(), String> {
     quic::write_private(&layout.clients_json(), &text)
 }
 
+/// Which passkey `passkey revoke` names: its label (a display name, so possibly shared) or its
+/// credential id (exact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Which<'a> {
+    /// Every passkey whose label is this; refused unless exactly one.
+    Label(&'a str),
+    /// The passkey with this credential id (base64url, as `passkey list` prints it).
+    Credential(&'a str),
+}
+
+/// The file `passkey revoke` appends one line to per revocation: `gonk/passkeys.log`.
+pub fn audit_log(layout: &Layout) -> std::path::PathBuf {
+    layout.clients_json().with_file_name("passkeys.log")
+}
+
+/// Every enrolled passkey, checked the way a change to the file is checked: `clients.json`
+/// must parse as the QUIC door reads it AND every passkey entry must be whole. A file that is
+/// not is reported, never repaired: `Err` names what is wrong.
+pub fn checked_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, String> {
+    let path = layout.clients_json();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            quic::parse_enrolment(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    }
+    read_passkeys(layout).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Remove ONE passkey from `clients.json` and append a `gonk:PasskeyRevoked` line to
+/// [`audit_log`] — what `ikigai-gonk passkey revoke` runs (ledger
+/// [#313](http://localhost:1062/l/default/item/313)). Returns the passkey removed.
+///
+/// ★ **Checked before and after, or nothing is written.** The file as it is must be whole
+/// ([`checked_passkeys`]); a label must name exactly one passkey (two can share one, and
+/// guessing between them would remove the wrong person); and the file as it WILL be must still
+/// parse as both doors read it. A malformed file is refused rather than rewritten, so this
+/// command can never be the edit that leaves the doors reading garbage.
+///
+/// Takes effect at the passkey's next request: the HTTP door re-reads `clients.json` for every
+/// request that carries a session ([`Passkeys::identity`]), so a live session ends with it.
+/// `grants.json` is left alone, as `client remove` leaves it: a grant name may be shared.
+///
+/// The audit line is written AFTER the change, so it never claims a revocation that did not
+/// happen; if it cannot be written the change stands and the error says so.
+pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
+    let enrolled = checked_passkeys(layout)?;
+    let matches: Vec<&Enrolled> = enrolled
+        .values()
+        .filter(|entry| match which {
+            Which::Label(label) => entry.label == label,
+            Which::Credential(id) => entry.credential_id == id,
+        })
+        .collect();
+    let target = match (matches.as_slice(), which) {
+        ([one], _) => (*one).clone(),
+        ([], Which::Label(label)) => {
+            return Err(format!(
+                "no passkey is labeled `{label}` — `ikigai-gonk passkey list` shows what there is"
+            ))
+        }
+        ([], Which::Credential(id)) => {
+            return Err(format!(
+                "no passkey has credential id `{id}` — `ikigai-gonk passkey list` shows what \
+                 there is"
+            ))
+        }
+        (many, _) => {
+            let ids: Vec<&str> = many.iter().map(|e| e.credential_id.as_str()).collect();
+            return Err(format!(
+                "{} passkeys are labeled that way ({}): name one with --credential <id>, and \
+                 nothing was written",
+                many.len(),
+                ids.join(", ")
+            ));
+        }
+    };
+    let mut doc = quic::read_object(&layout.clients_json())?;
+    let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
+        return Err("`passkeys` in clients.json must be an object".to_string());
+    };
+    passkeys.remove(&target.credential_id);
+    doc.insert("passkeys".to_string(), Value::Object(passkeys));
+    let text = quic::pretty(&Value::Object(doc))?;
+    quic::parse_enrolment(&text)?;
+    quic::write_private(&layout.clients_json(), &text)?;
+    let line = format!(
+        "{} gonk:PasskeyRevoked {} label={} grant={}\n",
+        crate::backup::stamp_iso_ms(now_ms),
+        passkey_iri(&target.credential_id),
+        encoded(&target.label),
+        encoded(&target.grant),
+    );
+    append_line(&audit_log(layout), &line).map_err(|e| {
+        format!(
+            "passkey `{}` WAS revoked, but its audit line could not be written to {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        )
+    })?;
+    Ok(target)
+}
+
+/// A value as one audit-line token: everything but unreserved IRI characters percent-encoded,
+/// so a label with a space (`Touch ID`) cannot split the line.
+fn encoded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':' | b'@') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    if out.is_empty() {
+        "-".to_string()
+    } else {
+        out
+    }
+}
+
+/// Append `line` to `path`, creating it readable by this user only.
+fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(line.as_bytes())
+}
+
 /// Create an invite for `grant`, writing the grant's scopes into `grants.json` first. Returns
 /// the one-time code — the only copy; the file keeps its SHA-256.
 ///

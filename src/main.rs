@@ -100,6 +100,12 @@ fn main() {
             by_name,
             flags,
         } => client_remove(&key, by_name, &flags),
+        Command::PasskeyList { flags } => passkey_list(&flags),
+        Command::PasskeyRevoke {
+            key,
+            by_label,
+            flags,
+        } => passkey_revoke(&key, by_label, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -1404,6 +1410,57 @@ fn client_remove(key: &str, by_name: bool, flags: &config::Flags) {
     println!(
         "  grants.json is unchanged: a grant name may be shared by other certificates and \
          passkeys. Restart ikigai-gonk to stop trusting the certificate at the TLS handshake"
+    );
+}
+
+/// `ikigai-gonk passkey list` — every enrolled passkey (ledger #313).
+fn passkey_list(flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let enrolled = identity::checked_passkeys(&layout).unwrap_or_else(|e| fail(&e));
+    if enrolled.is_empty() {
+        println!(
+            "no passkeys enrolled in {} — `ikigai-gonk passkey invite <name> …` makes one",
+            layout.clients_json().display()
+        );
+    }
+    for entry in enrolled.values() {
+        println!(
+            "{:<16} grant {:<12} credential {}  {}",
+            entry.label,
+            entry.grant,
+            entry.credential_id,
+            identity::passkey_iri(&entry.credential_id)
+        );
+    }
+}
+
+/// `ikigai-gonk passkey revoke <label> | --credential <id>` (ledger #313).
+fn passkey_revoke(key: &str, by_label: bool, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let revoked = identity::revoke(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
+    println!(
+        "revoked passkey `{}` ({}, grant `{}`) from {} — refused from its next request, live \
+         sessions included",
+        revoked.label,
+        identity::passkey_iri(&revoked.credential_id),
+        revoked.grant,
+        layout.clients_json().display()
+    );
+    println!(
+        "  recorded in {}. grants.json is unchanged: a grant name may be shared by other \
+         passkeys and certificates",
+        identity::audit_log(&layout).display()
     );
 }
 
