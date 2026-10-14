@@ -167,6 +167,16 @@ usage:
                                    fingerprint with no bundle). grants.json is left alone: a
                                    grant name may be shared. Effective at its next connection;
                                    its certificate stays TLS-trusted until a restart
+  ikigai-gonk passkey list [--config PATH]
+                                   every enrolled passkey: its label, grant, credential id
+                                   and IRI
+  ikigai-gonk passkey revoke <label> | --credential <id> [--config PATH]
+                                   remove one passkey from clients.json and append a
+                                   gonk:PasskeyRevoked line to gonk/passkeys.log. A label two
+                                   passkeys share is refused (name the --credential); a
+                                   malformed clients.json is refused, never rewritten.
+                                   grants.json is left alone. Effective at its next request,
+                                   live sessions included
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
@@ -404,6 +414,20 @@ pub enum Command {
         /// The file's path within that root.
         path: String,
         /// Where to read the config from.
+        flags: Flags,
+    },
+    /// Every enrolled passkey: label, grant, credential id and IRI (ledger #313).
+    PasskeyList {
+        /// Where the config home is read from.
+        flags: Flags,
+    },
+    /// Remove one enrolled passkey and record it (ledger #313).
+    PasskeyRevoke {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// `--config`.
         flags: Flags,
     },
     /// Invite a browser to enrol a passkey under a grant.
@@ -1260,12 +1284,57 @@ fn script_spec(spec: &str) -> Result<(String, ScriptAuthority), String> {
 fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     match args.next().as_deref() {
         Some("invite") => {}
+        Some("list") => {
+            let mut flags = Flags::default();
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?
+                    }
+                    other => return Err(format!("passkey list: unknown argument `{other}`")),
+                }
+            }
+            return Ok(Command::PasskeyList { flags });
+        }
+        Some("revoke") => {
+            let mut flags = Flags::default();
+            let (mut label, mut credential) = (None, None);
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(format!("passkey revoke: unknown argument `{other}`"))
+                    }
+                    other if label.is_none() => label = Some(other.to_string()),
+                    other => return Err(format!("passkey revoke: unexpected argument `{other}`")),
+                }
+            }
+            let (key, by_label) = match (label, credential) {
+                (Some(label), None) => (label, true),
+                (None, Some(credential)) => (credential, false),
+                _ => {
+                    return Err("passkey revoke: expected <label> or --credential <id> (as \
+                                `passkey list` prints them), not both"
+                        .to_string())
+                }
+            };
+            return Ok(Command::PasskeyRevoke {
+                key,
+                by_label,
+                flags,
+            });
+        }
         Some(other) => {
             return Err(format!(
-                "passkey: unknown subcommand `{other}` (expected `invite`)"
+                "passkey: unknown subcommand `{other}` (expected `invite`, `list` or `revoke`)"
             ))
         }
-        None => return Err("passkey: expected `invite <name>`".to_string()),
+        None => {
+            return Err("passkey: expected `invite <name>`, `list` or `revoke <label>`".to_string())
+        }
     }
     let name = args
         .next()

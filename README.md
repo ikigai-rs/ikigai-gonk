@@ -163,8 +163,18 @@ good until it expires.
   `clients`, passkeys under `passkeys`), and the grant name maps to scopes in
   `gonk/grants.json`, the one file where scope lists live. Enrol a laptop certificate and a
   passkey under the same name and they hold the same authority, and editing the grant changes
-  both on the next request or connection. Delete a passkey's entry from `clients.json` to
-  revoke it, with no restart.
+  both on the next request or connection.
+- **List and revoke** (ledger #313). `ikigai-gonk passkey list` prints every enrolled passkey:
+  its label, grant, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
+  `--credential <id>`, which a label two passkeys share requires) removes that one entry from
+  `clients.json`, with no restart: the door re-reads the file on every request that carries a
+  session, so the passkey's live sessions end at their next request. It appends one line to
+  `gonk/passkeys.log`, `<RFC 3339 ms> gonk:PasskeyRevoked urn:iki:gonk:passkey:<credential id>
+  label=… grant=…`, after the change, so the record never claims a revocation that did not
+  happen. A malformed `clients.json` is refused and left exactly as it is, and the file as it
+  will be is checked against what both doors read before it replaces the old one (atomically),
+  so the command cannot be the edit that leaves a door reading garbage. `grants.json` is left
+  alone, as `client remove` leaves it: a grant name may be shared.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
   grant plus its own, and `passkey invite` refuses a grant that adds nothing. The anonymous
   grant includes running and reading PUBLIC scripts; publishing one takes
@@ -3048,6 +3058,7 @@ root at that worktree by hand if that is what you want to read.
 | `gonk/clients.json` | identity → grant name: certificate fingerprints under `clients` (the same shape `ikigai serve quic://…` reads), passkeys under `passkeys` |
 | `gonk/grants.json` | grant name → capability scopes (the same shape as the cli's `grants.json`) |
 | `gonk/invites.json` | outstanding passkey invites, by the SHA-256 of their codes |
+| `gonk/passkeys.log` | one `gonk:PasskeyRevoked` line per `passkey revoke`, append-only, owner-only |
 | `gonk/render-rules.ttl` | this deployment's render rules, replacing the shipped table wholesale |
 | `gonk/quic/` | `server.crt`, `server.key`, and one `clients/<name>/` bundle per client |
 | `~/.ikigai/backups/` | the rotation: `gonk-store-<stamp>.nq.gz` and a `.meta.json` sidecar each, owner-only; any other file there is never listed or pruned |
@@ -3599,8 +3610,6 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
   ledger input does not appear on the page until the stylesheet names it.
 - **No graph visualization**, no live updates (a change made elsewhere shows on the next
   load), and no page without JavaScript for the in-place forms.
-- **No passkey management commands** beyond `invite`: list and revoke by editing
-  `clients.json`.
 - **No certificate lifecycle beyond the commands.** `client list`, `client remove` and
   `client add --rotate` exist; there is no CA, no expiry and no distribution. See the QUIC
   section for what admission means.
