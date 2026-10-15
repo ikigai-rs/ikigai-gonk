@@ -1406,7 +1406,14 @@ impl Endpoint for DoctorView {
             &[
                 ("ledger", ledger.name()),
                 ("lifecycle", &doc.lifecycle),
+                // Ledger #1604: the lifecycle's states, `urn:iki:ledger:lifecycle:{name}`,
+                // through the mechanical `/iki/…` door — its plain face lists them in order.
+                (
+                    "lifecycle-href",
+                    &format!("/iki/ledger/lifecycle/{}", percent_encode(&doc.lifecycle)),
+                ),
                 ("checked", &when(&doc.checked_at)),
+                ("checked-at", &doc.checked_at),
                 ("checks", &doc.checks.join(", ")),
                 ("count", &doc.problems.len().to_string()),
                 ("ledger-href", &format!("/l/{}", ledger.name())),
