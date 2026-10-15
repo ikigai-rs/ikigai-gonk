@@ -1424,13 +1424,19 @@
     <section id="doctor" class="panel doctor" aria-labelledby="doctor-title">
       <p class="crumbs"><a><xsl:attribute name="href"><xsl:value-of select="@ledger-href"/></xsl:attribute><xsl:value-of select="@ledger"/></a></p>
       <h1 id="doctor-title">Doctor</h1>
-      <p class="meta">
-        <xsl:text>lifecycle </xsl:text><code><xsl:value-of select="@lifecycle"/></code>
-        <xsl:text> · checked </xsl:text><xsl:value-of select="@checked"/>
-        <xsl:text> · </xsl:text><xsl:value-of select="@checks"/>
+      <!-- Ledger #1604: ONE sentence, in reading order, never a grid (`.meta` is the item
+           card's two-column `<dl>` layout and split this into cells). The lifecycle links to
+           its states; the checked time is when the doctor's CACHED answer last ran, which is
+           deliberate (ledger #1567), so the page says so. -->
+      <p class="doctor-scope">
+        <xsl:text>Judged against the </xsl:text>
+        <a><xsl:attribute name="href"><xsl:value-of select="@lifecycle-href"/></xsl:attribute><xsl:value-of select="@lifecycle"/><xsl:text> lifecycle</xsl:text></a>
+        <xsl:text> · checked </xsl:text>
+        <time><xsl:attribute name="datetime"><xsl:value-of select="@checked-at"/></xsl:attribute><xsl:value-of select="@checked"/></time>
+        <xsl:text> (when this cached check last ran) · checks: </xsl:text><xsl:value-of select="@checks"/>
       </p>
       <xsl:choose>
-        <xsl:when test="@count = '0'"><p class="empty">No problems.</p></xsl:when>
+        <xsl:when test="@count = '0'"><p class="empty">None of these checks found a problem.</p></xsl:when>
         <xsl:otherwise>
           <p><xsl:value-of select="@count"/><xsl:text> problem(s). Nothing here is repaired: each remedy is a judgment for whoever reads it.</xsl:text></p>
           <ol class="plain doctor-list">

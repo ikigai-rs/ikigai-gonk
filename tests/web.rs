@@ -26,6 +26,7 @@
 //! - [`a_result_column_is_never_narrower_than_its_own_word`]
 //! - [`a_sample_button_is_a_toggle_the_server_renders_unpressed`]
 //! - [`the_active_sample_is_cleared_by_typing_in_the_editor`]
+//! - [`the_doctor_says_what_it_judged_against_on_one_line`]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -2642,4 +2643,117 @@ fn the_header_says_when_a_section_is_withheld_and_only_then() {
         !page.body.contains("demo"),
         "the sentence never names what is hidden: {page:?}"
     );
+}
+
+/// ★ **Ledger #1604: the doctor says what it judged against, on ONE line a reader can parse.**
+///
+/// The page used to put its lifecycle, its checked time and its checks in a `<p class="meta">`,
+/// and `.meta` is the item card's `<dl>` grid (`max-content 1fr`): every text run and `<code>`
+/// in the paragraph became a grid cell, so "lifecycle" sat alone at the left, `kata-flight`
+/// sat in monospace at the right, and "· checked … · orphaned, …" fell to a row of its own.
+/// Nothing in it said what "lifecycle" or "kata-flight" meant, or what "checked" was.
+///
+/// Pinned here: one paragraph, in reading order, that names the lifecycle as a LINK to its
+/// states (the ledger's own `urn:iki:ledger:lifecycle:{name}`, through the mechanical
+/// `/iki/…` door, which a browser can follow), marks the checked time as a `<time>` and says
+/// it is when the cached check last ran (decided in ledger #1567), and labels the checks.
+/// The paragraph is not in a grid or flex container, so at any width it flows as a sentence.
+/// A clean bill reads as a sentence about those checks, not a bare "No problems."
+#[test]
+fn the_doctor_says_what_it_judged_against_on_one_line() {
+    let server = Server::start();
+    let page = server.page("/l/default/doctor", None);
+    assert_eq!(page.status, 200, "{page:?}");
+
+    let at = page
+        .body
+        .find("doctor-scope")
+        .unwrap_or_else(|| panic!("no doctor-scope paragraph: {page:?}"));
+    let open = page.body[..at].rfind('<').expect("the paragraph's tag");
+    assert!(
+        page.body[open..].starts_with("<p "),
+        "the scope is ONE paragraph: {page:?}"
+    );
+    let line = &page.body[open..open + page.body[open..].find("</p>").expect("closed") + 4];
+    let text = {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in line.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                c if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let checked = text
+        .split(" · checked ")
+        .nth(1)
+        .and_then(|rest| rest.split(" (when").next())
+        .unwrap_or_else(|| panic!("no checked time in: {text}"));
+    assert!(
+        checked.ends_with(" UTC") && checked.len() == "2026-10-15 15:56 UTC".len(),
+        "the checked time reads as a time: {text}"
+    );
+    assert_eq!(
+        text,
+        format!(
+            "Judged against the kata-flight lifecycle · checked {checked} (when this cached \
+             check last ran) · checks: orphaned, abandoned, lease-expired, unknown-state, \
+             two-states, awaiting-closed"
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains("<a href='/iki/ledger/lifecycle/kata-flight'>kata-flight lifecycle</a>"),
+        "the lifecycle is a link to its states: {line}"
+    );
+    assert!(
+        line.contains("<time datetime='"),
+        "the checked time is a <time> with its instant: {line}"
+    );
+    assert!(
+        !line.contains("<code>"),
+        "no monospace run to wrap on its own: {line}"
+    );
+
+    // The paragraph's class lays out as text: no grid, no flex.
+    let css = include_str!("../web/gonk.css");
+    for rule in css.split('}') {
+        let Some((selectors, body)) = rule.split_once('{') else {
+            continue;
+        };
+        if selectors
+            .split(',')
+            .any(|s| s.split_whitespace().last() == Some(".doctor-scope"))
+        {
+            assert!(
+                !body.contains("display"),
+                "the scope line is a paragraph of text, never a layout: {rule}"
+            );
+        }
+    }
+
+    assert!(
+        page.body
+            .contains("<p class='empty'>None of these checks found a problem.</p>"),
+        "{page:?}"
+    );
+    assert!(!page.body.contains("No problems."), "{page:?}");
+
+    // ★ The link goes somewhere a browser can read: the lifecycle's states, in order.
+    let states = server.page("/iki/ledger/lifecycle/kata-flight", None);
+    assert_eq!(states.status, 200, "{states:?}");
+    for state in [
+        "filed",
+        "queued",
+        "reviewed",
+        "resolving",
+        "refining",
+        "shipping",
+    ] {
+        assert!(states.body.contains(state), "{state}: {states:?}");
+    }
 }

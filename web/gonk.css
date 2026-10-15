@@ -127,6 +127,9 @@ summary { cursor: pointer; color: var(--accent); }
 .meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0 0 1rem; }
 .meta dt { color: var(--muted); }
 .meta dd { margin: 0; overflow-wrap: anywhere; }
+/* Ledger #1604: the doctor's scope is one sentence that flows and wraps like text at any
+ * width. Never `.meta`, whose grid split it into cells; `tests/web.rs` holds it to no layout. */
+.doctor-scope { color: var(--muted); margin: 0 0 1rem; overflow-wrap: break-word; }
 .iri { overflow-wrap: anywhere; }
 .plain { list-style: none; margin: 0; padding: 0; }
 .plain > li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
