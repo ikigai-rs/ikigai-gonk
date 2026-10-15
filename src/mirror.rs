@@ -511,6 +511,11 @@ impl LayerClient {
 /// and the ledger graph's store tokens) plus `urn:cap:ledger:about:{ledger}` (ikigai-ledger
 /// 0.10.0), which records an offer on its item, acting as the mirror's own principal. Never
 /// `close`, never `write`.
+///
+/// It also holds the store's host reserve ([`crate::budget::STORE_RESERVE`], ledger
+/// [#1598](http://localhost:1062/l/default/item/1598)): the mirror is this server's own job, so
+/// its ledger reads use the slots the store keeps for the host rather than a caller's share.
+/// A priority, not an authority: it reaches no resource.
 pub fn capability(binding: &Binding) -> Result<Capability, String> {
     let mut scopes = crate::grants::grants_for(&binding.ledger, crate::grants::Authority::Worker)?;
     scopes.push(
@@ -518,6 +523,7 @@ pub fn capability(binding: &Binding) -> Result<Capability, String> {
             .map_err(|e| e.to_string())?
             .cap_about(),
     );
+    scopes.push(crate::budget::STORE_RESERVE.to_string());
     Capability::scoped(scopes)
         .with_principal(&binding.principal())
         .map_err(|e| format!("the mirror's principal {}: {e:?}", binding.principal()))

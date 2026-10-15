@@ -40,6 +40,21 @@ pub type LedgerIssue = Arc<dyn Fn(Request) -> Result<Vec<u8>, String> + Send + S
 /// The ledger, through the hub, as the binding's own principal holding the write grant (it
 /// files, and it never closes or claims: the person working the item does that).
 pub fn hub_ledger(binding: &Binding, hub: Arc<Kernel>) -> Result<LedgerIssue, String> {
+    let capability = capability(binding)?;
+    Ok(Arc::new(move |request: Request| {
+        let target = request.target.to_string();
+        Resolver::issue_as(&*hub, request, &capability)
+            .map(|(r, _)| r.bytes)
+            .map_err(|e| format!("{target}: {e}"))
+    }))
+}
+
+/// The capability a taker files into its ledger under ([`hub_ledger`]): the read grant, the
+/// ledger's `write` and its graph's store write, as the binding's own principal — plus the
+/// store's host reserve ([`crate::budget::STORE_RESERVE`], ledger
+/// [#1598](http://localhost:1062/l/default/item/1598)), because the taker is this server's own
+/// job. A priority, not an authority: it reaches no resource.
+pub fn capability(binding: &Binding) -> Result<Capability, String> {
     let scopes = crate::grants::grants_for(&binding.ledger, crate::grants::Authority::Read)?
         .into_iter()
         .chain([
@@ -51,17 +66,12 @@ pub fn hub_ledger(binding: &Binding, hub: Arc<Kernel>) -> Result<LedgerIssue, St
                     .map_err(|e| e.to_string())?
                     .graph(),
             ),
+            crate::budget::STORE_RESERVE.to_string(),
         ])
         .collect::<Vec<_>>();
-    let capability = Capability::scoped(scopes)
+    Capability::scoped(scopes)
         .with_principal(&binding.principal())
-        .map_err(|e| format!("the taker's principal {}: {e:?}", binding.principal()))?;
-    Ok(Arc::new(move |request: Request| {
-        let target = request.target.to_string();
-        Resolver::issue_as(&*hub, request, &capability)
-            .map(|(r, _)| r.bytes)
-            .map_err(|e| format!("{target}: {e}"))
-    }))
+        .map_err(|e| format!("the taker's principal {}: {e:?}", binding.principal()))
 }
 
 /// The key an offer is filed under in the taking ledger: `layer:{layer}:<local name>`, or a

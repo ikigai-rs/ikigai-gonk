@@ -160,12 +160,18 @@ pub const RESTORE_SCRIPTS: &str = "urn:iki:gonk:restore:scripts";
 /// could have this server issue any request under this list. The list is narrow, but the
 /// principle is that the target set is fixed at startup by this server, not chosen at call
 /// time by a caller.
-pub const JOB_SCOPES: [&str; 5] = [
+///
+/// It also holds the store's host reserve ([`crate::budget::STORE_RESERVE`], ledger
+/// [#1598](http://localhost:1062/l/default/item/1598)): the job names no principal, so from the
+/// store release after 0.2.23 it would otherwise share ONE per-caller share with every anonymous
+/// request, and one anonymous runaway query would refuse it.
+pub const JOB_SCOPES: [&str; 6] = [
     CAP_BACKUP,
     ikigai_store::CAP_READ,
     JOB_BUDGET,
     JOB_ANSWER_ROWS,
     JOB_ANSWER_BYTES,
+    crate::budget::STORE_RESERVE,
 ];
 
 /// How long the scheduled backup's whole-dataset query may run, in milliseconds: **120 s**,
@@ -2348,6 +2354,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         handle.cancel();
+    }
+
+    /// The job fires under `JOB_SCOPES` (the registry's ceiling and the job's own capability),
+    /// and that capability holds the store's host reserve, spelled here as the store spells it
+    /// (ledger #1598): a principal-less job without it shares one share with every anonymous
+    /// caller once gonk takes the store release after 0.2.23.
+    #[test]
+    fn the_job_holds_the_stores_host_reserve() {
+        let job = Capability::scoped(JOB_SCOPES);
+        assert!(job.allows("urn:cap:store:reserve"), "{JOB_SCOPES:?}");
+        assert_eq!(
+            job.principal(),
+            None,
+            "why it needs the reserve: no principal"
+        );
     }
 
     #[test]

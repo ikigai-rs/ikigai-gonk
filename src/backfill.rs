@@ -145,6 +145,27 @@ pub struct Run {
     pub unjudgeable: BTreeMap<String, String>,
 }
 
+/// The scopes the server's own backfill runs under: the browse read and a net grant naming
+/// `net_host`, the mounted peer's host — what judge-finding declares — plus the store's host
+/// reserve ([`crate::budget::STORE_RESERVE`], ledger
+/// [#1598](http://localhost:1062/l/default/item/1598)), which reaches no resource and keeps the
+/// run's store reads out of the one share every principal-less caller counts against. Nothing a
+/// store write, an annotation or `gh` would need.
+///
+/// ```
+/// let scopes = ikigai_gonk::backfill::scopes("127.0.0.1");
+/// assert!(scopes.iter().any(|s| s == "urn:cap:net:127.0.0.1"));
+/// assert!(scopes.iter().any(|s| s == "urn:cap:store:reserve"));
+/// ```
+#[must_use]
+pub fn scopes(net_host: &str) -> Vec<String> {
+    vec![
+        ikigai_browse::CAP_WILDCARD.to_string(),
+        format!("urn:cap:net:{net_host}"),
+        crate::budget::STORE_RESERVE.to_string(),
+    ]
+}
+
 impl Backfill {
     /// A backfill over `roots`, judging the findings `policy` calls serious with `judge` (the
     /// configured `gonk.review.judge`, `None` when off), under exactly `scopes`.

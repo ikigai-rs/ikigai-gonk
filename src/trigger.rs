@@ -1171,6 +1171,34 @@ pub fn grant_stanza(hub: &Kernel, review_iri: &str, host: &str) -> String {
     }
 }
 
+/// The capability an armed review pass runs under: the operator's grant, `scopes` (read
+/// through [`reviewer_scopes`]), plus the store's host reserve
+/// ([`crate::budget::STORE_RESERVE`], ledger [#1598](http://localhost:1062/l/default/item/1598)).
+///
+/// ★ This is the one token the server adds to a grant an operator wrote down, and it is a
+/// PRIORITY, not an authority: no endpoint requires it and it reaches no resource. A pass names
+/// no principal, so without it, from the store release after 0.2.23, its store reads would share
+/// ONE per-caller share with every anonymous request. It is added here rather than asked of
+/// `grants.json` because a grant there can also be handed to a certificate or a passkey, and a
+/// client holding the host's reserve could take the slots kept for the host.
+///
+/// ```
+/// let reviewer = ikigai_gonk::trigger::reviewer_capability(&["urn:cap:browse:read:*".to_string()]);
+/// assert!(reviewer.allows("urn:cap:store:reserve"));
+/// assert!(reviewer.allows("urn:cap:browse:read:*"));
+/// ```
+#[must_use]
+pub fn reviewer_capability(scopes: &[String]) -> Capability {
+    Capability::scoped(
+        scopes
+            .iter()
+            .map(String::as_str)
+            .chain([crate::budget::STORE_RESERVE])
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// Put a reactor over this queue: catch up on what is waiting, then watch for drops.
 ///
 /// ★ **`with_host_authority` is the whole reason this is safe to do at all**, and it was
@@ -1223,7 +1251,7 @@ pub fn arm(
     set_handler(trigger, true)?;
     let space = trigger.space.clone();
     let ours = trigger.space.clone();
-    let reviewer = Capability::scoped(scopes.to_vec());
+    let reviewer = reviewer_capability(scopes);
     let reactor = ikigai_intray::SpaceReactor::new(
         trigger.root.clone(),
         hub as Arc<dyn ikigai_resolve::Resolver>,
