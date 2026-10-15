@@ -149,7 +149,7 @@ ikigai-gonk — a standalone ikigai work-ledger server
 
 usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
-  ikigai-gonk client add <name> [--ledger <ledger>=<read|worker|write|delete|purge>]... [--worker <ledger>]...
+  ikigai-gonk client add <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--cert <client.crt>] [--force] [--rotate]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
@@ -180,7 +180,7 @@ usage:
                                    malformed clients.json is refused, never rewritten.
                                    grants.json is left alone. Effective at its next request,
                                    live sessions included
-  ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|worker|write|delete|purge>]... [--worker <ledger>]...
+  ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
@@ -207,8 +207,13 @@ usage:
   It reads config.toml (or --config) for the roots and the mount. Not covered: the PR
   layers' `gh` (urn:cap:exec:gh) and the browse graph's WRITE door (--browse-graph write)
 
-  --ledger <ledger>=<authority>, repeatable; each authority holds the one before, except worker:
+  --ledger <ledger>=<authority>, repeatable; each authority holds the one before, except audit
+  and worker:
     read     items, an item, next, the ledger list
+    audit    read, plus READ the ledger's graveyard (urn:iki:ledger:graph:<ledger>:deleted, through
+             urn:sparql:* graph=…): see what was deleted without writing, deleting or purging
+             anything. Purge holds it too; with delete (two --ledger lines) it is delete that can
+             see the graveyard and cannot purge
     worker   read, plus claim (take, renew, release) and comment (a hand-back too): NOT close or
              reopen, filing, labeling, linking, deferring or editing. For a remote worker whose
              dispatcher closes; `--worker <ledger>` is the same. A claim it takes is its own
@@ -296,7 +301,7 @@ usage:
                                    the duplicates the old race made, over a RUNNING gonk's
                                    owner-only socket. Idempotent; --dry-run writes nothing
                                    (README, \"Upgrading the bridges: backfill the keys\")
-  ikigai-gonk grants <ledger> [read|worker|write|delete|purge]
+  ikigai-gonk grants <ledger> [read|audit|worker|write|delete|purge]
                                    print the capability tokens for one ledger (JSON)
   ikigai-gonk grants --browse-graph [read|write]
                                    print the tokens for the BROWSE graph — SPARQL access to
@@ -986,7 +991,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("grants") => {
             args.next();
             let subject = args.next().ok_or(
-                "grants: expected <ledger> [read|worker|write|delete|purge], --browse-graph, or \
+                "grants: expected <ledger> [read|audit|worker|write|delete|purge], --browse-graph, or \
                  --browse <read|derive>",
             )?;
             if subject == "--browse" {
@@ -1220,7 +1225,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
                     format!(
-                        "--ledger: expected <ledger>=<read|worker|write|delete|purge>, got \
+                        "--ledger: expected <ledger>=<read|audit|worker|write|delete|purge>, got \
                          `{spec}`"
                     )
                 })?;
@@ -1256,12 +1261,18 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
 }
 
 /// `--browse-graph <authority>`: any ledger authority but `worker`, which names claims and
-/// comments the browse graph does not have ([`crate::grants::WORKER_IS_A_LEDGER_AUTHORITY`]).
+/// comments the browse graph does not have ([`crate::grants::WORKER_IS_A_LEDGER_AUTHORITY`]),
+/// and `audit`, which names a graveyard it does not have either
+/// ([`crate::grants::AUDIT_IS_A_LEDGER_AUTHORITY`]).
 fn browse_graph_authority(spelled: &str) -> Result<Authority, String> {
     match spelled.parse()? {
         Authority::Worker => Err(format!(
             "--browse-graph: {}",
             crate::grants::WORKER_IS_A_LEDGER_AUTHORITY
+        )),
+        Authority::Audit => Err(format!(
+            "--browse-graph: {}",
+            crate::grants::AUDIT_IS_A_LEDGER_AUTHORITY
         )),
         authority => Ok(authority),
     }
@@ -1367,7 +1378,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                 let spec = value(&mut args, "--ledger")?;
                 let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
                     format!(
-                        "--ledger: expected <ledger>=<read|worker|write|delete|purge>, got \
+                        "--ledger: expected <ledger>=<read|audit|worker|write|delete|purge>, got \
                          `{spec}`"
                     )
                 })?;
