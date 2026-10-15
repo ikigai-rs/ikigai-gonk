@@ -535,6 +535,7 @@ fn serve(flags: &config::Flags) -> ! {
             identity,
             trusted,
             enrolled,
+            clients,
         } => {
             let (door, minter) = (
                 doors::quic_kernel_with(Arc::clone(&hub), access(access::Door::Quic)),
@@ -552,10 +553,15 @@ fn serve(flags: &config::Flags) -> ! {
                 .local_addr()
                 .map(|local| std::net::SocketAddr::new(addr.ip(), local.port()))
                 .unwrap_or(addr);
-            let line = format!(
+            // The count line stays as it was (a harness reads the port from it); each client
+            // follows on a line of its own, named rather than counted (ledger #427).
+            let mut line = format!(
                 "udp {bound} — {} trusted certificate(s), {enrolled} enrolled",
                 trusted.len()
             );
+            for client in &clients {
+                line.push_str(&format!("\n          {client}"));
+            }
             std::thread::spawn(move || {
                 let error = ikigai_quic::serve_bounded_on(
                     door,

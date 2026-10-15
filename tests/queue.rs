@@ -668,12 +668,11 @@ fn reason_words(door: &Kernel) -> Vec<String> {
 /// - The words carry HYPHENS, and [`contains_token`] splits on them — it would read a
 ///   hyphenated word as two harmless halves and never find it. So a token here is a run of
 ///   alphanumerics AND hyphens ([`contains_word`]).
-/// - The stylesheet is checked over its REVIEW-QUEUE SECTION only. The ledger item's "Close
-///   as" menu, further down the same file, is a different closed set — `ikigai-ledger`'s
-///   close reasons — and one of its words is also a decline reason. That menu is a
-///   hard-coded copy of ANOTHER crate's contract (a drift of its own, reported rather than
-///   fixed here); counting it against this set would make the guard fail for a word this
-///   arc never wrote.
+/// - It holds a SECOND closed set too: `ikigai-ledger`'s close reasons, the item page's
+///   "Close as" menu. Until ledger #505 that menu was a hard-coded copy of the ledger's
+///   contract, so this guard read only the stylesheet's review-queue section (one word,
+///   `duplicate`, is in both sets). The menu now reads `urn:iki:ledger:close`'s own `one_of`
+///   (`src/web.rs::enrich_close_reasons`), and the guard reads the WHOLE stylesheet for both.
 #[test]
 fn no_reason_word_is_written_down_in_this_crate() {
     let dir = scratch_root();
@@ -683,20 +682,18 @@ fn no_reason_word_is_written_down_in_this_crate() {
         declared.len() > 1,
         "a closed set of more than one: {declared:?}"
     );
+    let closing = queue::one_of(&door, "urn:iki:ledger:close", Verb::Sink, "reason")
+        .expect("urn:iki:ledger:close declares its reason set");
+    assert!(
+        closing.len() > 1,
+        "a closed set of more than one: {closing:?}"
+    );
 
-    let xsl = include_str!("../web/gonk.xsl");
-    let start = xsl
-        .find("the review queue -->")
-        .expect("the stylesheet's review-queue section marker");
-    let end = start
-        + xsl[start..]
-            .find("a ledger -->")
-            .expect("the section after the queue");
     for (what, source) in [
         ("src/queue.rs", include_str!("../src/queue.rs")),
         ("src/batch.rs", include_str!("../src/batch.rs")),
         ("src/walk.rs", include_str!("../src/walk.rs")),
-        ("web/gonk.xsl (the review queue)", &xsl[start..end]),
+        ("web/gonk.xsl", include_str!("../web/gonk.xsl")),
         ("web/gonk.js", include_str!("../web/gonk.js")),
     ] {
         for word in &declared {
@@ -706,6 +703,27 @@ fn no_reason_word_is_written_down_in_this_crate() {
                  (`ikigai-browse`'s own constant, read through the contract)."
             );
         }
+    }
+    // ⚠ A close word is checked as MARKUP, not as a token: `done` is also an English word,
+    // and the copy this guards against is a menu — an `<option>` carrying the word.
+    let xsl = include_str!("../web/gonk.xsl");
+    for word in &closing {
+        for shape in [
+            format!("value=\"{word}\""),
+            format!("value='{word}'"),
+            format!(">{word}<"),
+        ] {
+            assert!(
+                !xsl.contains(&shape),
+                "web/gonk.xsl draws the close reason `{word}` itself (`{shape}`). The set lives \
+                 in ONE place (`ikigai-ledger`'s own constant, read through \
+                 `urn:iki:ledger:close`)."
+            );
+        }
+        assert!(
+            !include_str!("../src/web.rs").contains(&format!("\"{word}\"")),
+            "src/web.rs spells the close reason `{word}` as a string"
+        );
     }
 }
 

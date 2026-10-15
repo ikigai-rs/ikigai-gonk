@@ -414,6 +414,22 @@ fn a_certificate_client_beside_a_passkey_opens_both_doors() {
         quic.contains("1 trusted certificate(s), 1 enrolled"),
         "{quic}"
     );
+    // ★ And the certificate is NAMED, not only counted (ledger #427): its label, the first 16
+    // hex of its fingerprint (the cli's length, ledger #426), and the file that trusts it.
+    let crt = scratch.gonk_dir().join("quic/clients/laptop/client.crt");
+    let pem = std::fs::read_to_string(&crt).unwrap();
+    let fingerprint = ikigai_quic::fingerprint_of_pem(&pem).unwrap();
+    let named = format!(
+        "client  laptop  {}  {}  trusted and enrolled",
+        &fingerprint[..16],
+        crt.display()
+    );
+    assert!(both.banner.contains(&named), "{named}\n{}", both.banner);
+    assert!(
+        !both.banner.contains(&fingerprint),
+        "the fingerprint is shortened, never printed whole: {}",
+        both.banner
+    );
     // ★ Asked for port 0, the banner names the port the door BOUND (ledger #1300): through
     // gonk 0.x with `ikigai_quic::serve` it said `udp 127.0.0.1:0`, a door nobody could find.
     let port: u16 = quic
