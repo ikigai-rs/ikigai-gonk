@@ -133,10 +133,50 @@ pub const SPARQL_IDS: [&str; 14] = [
 /// constant for it: when gonk takes the store release that adds `ikigai_store::budget::
 /// CAP_RESERVE`, use that instead and pin the two equal in a test.
 ///
+/// ★ **Never a grant** (ledger [#1600](http://localhost:1062/l/default/item/1600)). Gonk adds
+/// it to its own jobs' capabilities; `quic::grant_refusal` refuses it in `grants.json`, in
+/// `client add` and in a passkey invite ([`store_reserve_scopes`]), because on a certificate or
+/// a passkey it would put a caller in the store's host class.
+///
 /// ```
 /// assert_eq!(ikigai_gonk::budget::STORE_RESERVE, "urn:cap:store:reserve");
 /// ```
 pub const STORE_RESERVE: &str = "urn:cap:store:reserve";
+
+/// The scopes in `scopes` that are the store's host reserve ([`STORE_RESERVE`]) or a token in
+/// its family (`urn:cap:store:reserve:…`, so a later host token spelled under it is refused
+/// too). Asked by `quic::grant_refusal`, and through it by every path that turns a grant into
+/// scopes.
+///
+/// ⚠ No wildcard is listed because none reaches the reserve: the store asks
+/// `Capability::allows(CAP_RESERVE)`, an exact match, so a held `urn:cap:store:*` does not put
+/// its holder in the host class (`tests/store_reserve_1600.rs` pins that).
+///
+/// ```
+/// use ikigai_gonk::budget::store_reserve_scopes;
+/// let scopes = [
+///     "urn:cap:ledger:read:default".to_string(),
+///     "urn:cap:store:reserve".to_string(),
+///     "urn:cap:store:reserve:backup".to_string(),
+///     "urn:cap:store:reserved".to_string(),
+/// ];
+/// assert_eq!(
+///     store_reserve_scopes(&scopes),
+///     ["urn:cap:store:reserve", "urn:cap:store:reserve:backup"]
+/// );
+/// ```
+pub fn store_reserve_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| {
+            scope.as_str() == STORE_RESERVE
+                || scope
+                    .strip_prefix(STORE_RESERVE)
+                    .is_some_and(|rest| rest.starts_with(':'))
+        })
+        .cloned()
+        .collect()
+}
 
 /// The marker an anonymous HTTP caller's capability carries.
 ///

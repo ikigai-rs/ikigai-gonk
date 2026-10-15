@@ -824,12 +824,16 @@ pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String
 /// reviewer (`trigger::reviewer_scopes`), and both writers of `grants.json` ([`put_grant`],
 /// [`enrol`]).
 ///
-/// Three families, each a token whose SHAPE says "all of them" or "the airlock":
+/// The families, each a token whose SHAPE says "all of them", "the airlock" or "the host":
 ///
 /// - the store's broad tokens ([`broad_store_scopes`]): every graph, or `DROP ALL`;
 /// - the offering wildcards (`wildcard_refusal`): every program, or every host;
+/// - a door's markers and an identity's name, which only a door computes;
 /// - the backup family ([`crate::grants::gonk_admin_scopes`]): every graph in one file, and a
-///   store built at a path the caller names. Reachable from the owner-only socket only.
+///   store built at a path the caller names. Reachable from the owner-only socket only;
+/// - the store's host reserve ([`crate::budget::store_reserve_scopes`], ledger
+///   [#1600](http://localhost:1062/l/default/item/1600)): the evaluation slots kept for gonk's
+///   own jobs. A priority, not an authority, but one a caller must never hold.
 ///
 /// ⚠ Audit round 4 (ledger [#864](http://localhost:1060/l/default/item/864), R1) found the
 /// third family checked at STARTUP and nowhere else: `grants.json` is re-read per connection
@@ -884,6 +888,18 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
              supplies; neither belongs on a certificate or a passkey. They are reachable from \
              the owner-only socket, whose caller can read the dataset's files anyway",
             admin.join(" and ")
+        ));
+    }
+    let reserve = crate::budget::store_reserve_scopes(scopes);
+    if !reserve.is_empty() {
+        return Some(format!(
+            "grant `{name}` names {} — the store's HOST RESERVE: the evaluation slots kept for \
+             this server's own jobs (the backup, the reviewer, the judge backfill, a layer's \
+             mirror and taker), so a pool full of callers cannot refuse them. It is the host's \
+             own priority, never a caller's: on a certificate or a passkey it would take the \
+             caller out of its per-caller share and into the slots kept for the backup. Remove \
+             it; gonk gives it to its own jobs itself",
+            reserve.join(" and ")
         ));
     }
     None
