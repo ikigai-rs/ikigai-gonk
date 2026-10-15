@@ -117,7 +117,7 @@ use crate::watch::{
 /// Until `ikigai-browse` 0.4.0 they agreed by TRANSCRIPTION: `main` wrote
 /// `SharerWrites::only_the_default_graph()` because a person had read browse's source and
 /// found `GraphName::DefaultGraph` hard-coded in its three writers. Nothing in either crate
-/// connected the sentence to the behaviour — the promise was a fact about a dependency's
+/// connected the sentence to the behavior — the promise was a fact about a dependency's
 /// internals, re-typed here, with a comment asking the next person to keep it true
 /// (ledger #282). A transcribed invariant drifts, and this one drifts silently.
 ///

@@ -361,13 +361,13 @@ otherwise):
 pub enum Command {
     /// Serve, with these flags.
     Serve(Flags),
-    /// Trust a QUIC client, and optionally enrol it.
+    /// Trust a QUIC client, and optionally enroll it.
     ClientAdd {
         /// The bundle's name.
         name: String,
         /// A certificate the client generated itself, to import instead of minting.
         cert: Option<PathBuf>,
-        /// Ledgers and authorities to enrol the client under.
+        /// Ledgers and authorities to enroll the client under.
         ledgers: Vec<(String, Authority)>,
         /// `--browse-graph`: also grant the browse graph's store tokens at this authority.
         browse_graph: Option<Authority>,
@@ -380,7 +380,7 @@ pub enum Command {
         scripts: Vec<(String, ScriptAuthority)>,
         /// `--nl draft`: draft queries with `urn:nl:sparql` (ledger #1138).
         nl_draft: bool,
-        /// Replace an existing GRANT (or an enrolment under another grant). Never the key
+        /// Replace an existing GRANT (or an enrollment under another grant). Never the key
         /// pair: that is `rotate`.
         force: bool,
         /// `--rotate`: mint (or import) a NEW identity for an existing client and take the
@@ -395,7 +395,7 @@ pub enum Command {
         /// Where the config home is read from (`--config` is accepted for symmetry).
         flags: Flags,
     },
-    /// Remove a QUIC client: its bundle and its enrolment, or one enrolled fingerprint.
+    /// Remove a QUIC client: its bundle and its enrollment, or one enrolled fingerprint.
     ClientRemove {
         /// The bundle name, or — with `--fingerprint` — the fingerprint.
         key: String,
@@ -434,7 +434,7 @@ pub enum Command {
         /// `--config`.
         flags: Flags,
     },
-    /// Invite a browser to enrol a passkey under a grant.
+    /// Invite a browser to enroll a passkey under a grant.
     PasskeyInvite {
         /// The grant name (and the default label).
         name: String,
@@ -828,7 +828,7 @@ impl Default for ExplainTiers {
 
 /// The QUIC door's bind, and where it came from — which is half of whether it opens.
 ///
-/// ★ The distinction exists because `gonk/clients.json` serves two doors. A passkey enrolment
+/// ★ The distinction exists because `gonk/clients.json` serves two doors. A passkey enrollment
 /// writes that file too, so the file existing is not a decision to face the network; an
 /// operator naming a bind is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1659,7 +1659,7 @@ fn access_log(text: &str) -> Result<bool, String> {
 ///
 /// ⚠ `gonk.review.grant` is READ whether or not anything runs under it. It is printed by
 /// the banner so an operator can see the authority they wrote down, and it is refused early
-/// if `grants.json` cannot honour it — a grant that is a typo should not first be noticed
+/// if `grants.json` cannot honor it — a grant that is a typo should not first be noticed
 /// on the day the drainer is armed.
 ///
 /// ★★ **`gonk.review.arm` is the second of two facts, and neither is implicit.** Naming a

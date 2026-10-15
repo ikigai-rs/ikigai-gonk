@@ -20,7 +20,7 @@
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
-// third-party script, which is what that leaves as the defence.
+// third-party script, which is what that leaves as the defense.
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
@@ -433,7 +433,7 @@
   // ------------------------------------------------------------------ ceremonies
 
   // A WebAuthn call the browser refuses rejects with NotAllowedError whatever the cause — a
-  // cancelled sheet, a timeout, or a page without focus — and its DOM text ("The document is
+  // canceled sheet, a timeout, or a page without focus — and its DOM text ("The document is
   // not focused", "The operation either timed out or was not allowed") says nothing a person
   // can act on. Say what to do instead. Anything else (a server refusal) is already words.
   function ceremonyError(err, retry) {
@@ -513,7 +513,7 @@
       $("enrol").hidden = true;
       // ★ Do NOT chain navigator.credentials.get() here. When create() resolves, the system
       // passkey sheet still holds focus, and Chrome refuses get() from an unfocused document
-      // ("The document is not focused") — found by the first real Touch ID enrolment. A click
+      // ("The document is not focused") — found by the first real Touch ID enrollment. A click
       // on the sign-in button is a fresh user gesture on a page that has focus back.
       const created = "Passkey created for " + done.label + " (grant " + done.grant + "). ";
       const login = $("auth-login");

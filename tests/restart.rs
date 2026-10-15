@@ -299,7 +299,7 @@ impl Drop for Running {
     }
 }
 
-/// Invite, start, enrol the software passkey through `POST /auth/register`, stop.
+/// Invite, start, enroll the software passkey through `POST /auth/register`, stop.
 fn enrol_a_passkey(scratch: &Scratch) {
     let invite = scratch.invite();
     let mut first = scratch.serve(&[]);

@@ -390,7 +390,7 @@ fn a_mount_binds_the_explanation_families_and_nothing_else_does() {
 
 // ------------------------------------------------------------- the spend gate
 
-/// ★★ **The spend gate, per capability — the centre of this arc.**
+/// ★★ **The spend gate, per capability — the center of this arc.**
 ///
 /// Deriving an explanation calls a model, and this server's pages are meant to be browsed.
 /// So the question is not whether explain works but who can make it spend, and the answer is
@@ -3112,7 +3112,7 @@ fn a_cross_site_post_cannot_annotate_through_the_adapter() {
 /// rebuilds a target IRI from it, and a command has spaces in it. The query form is not.
 ///
 /// So both halves are pinned here: the refusal that makes the fold necessary, and the fold
-/// itself travelling in the script this server actually serves. If the first assertion ever
+/// itself traveling in the script this server actually serves. If the first assertion ever
 /// fails because the path form started working, the fold has become removable and someone
 /// should decide whether to remove it.
 #[test]
@@ -3382,7 +3382,7 @@ impl HttpDoorHarness {
         v["challenge"].as_str().expect("challenge").to_string()
     }
 
-    /// Enrol an identity whose grant is `--ledger default=read --browse-graph read` — the two
+    /// Enroll an identity whose grant is `--ledger default=read --browse-graph read` — the two
     /// halves `main`'s `scopes_for` composes — and sign in. Returns the session token.
     fn enrol_and_sign_in(&self) -> String {
         let mut scopes = grants_for("default", Authority::Read).expect("the ledger's tokens");

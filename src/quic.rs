@@ -17,7 +17,7 @@
 //! that names no scopes (a typo, or one deleted from `grants.json`) is refused, not treated
 //! as unrestricted. A grant naming a broad store token, an offering wildcard or the backup
 //! family is refused ([`grant_refusal`]) — at startup, and again per connection in case the
-//! file was edited after. An enrolment file
+//! file was edited after. An enrollment file
 //! that does not parse stops the server rather than degrading it.
 //!
 //! Everything lives under `<config home>/gonk/`:
@@ -249,7 +249,7 @@ fn fingerprint_of(pem: &str, name: &str) -> Result<String, String> {
         .map_err(|e| format!("client `{name}`: not a PEM certificate: {e}"))
 }
 
-/// The fingerprint [`add_client`] WOULD enrol, worked out without writing anything — so
+/// The fingerprint [`add_client`] WOULD enroll, worked out without writing anything — so
 /// every refusal can run before a key pair is minted ([`enrol_refusal`]).
 ///
 /// `None` when the call would mint a new identity, whose fingerprint does not exist yet and
@@ -310,7 +310,7 @@ pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
     Ok(removed)
 }
 
-/// Move `old`'s enrolment in `clients.json` to `new`, in ONE write: the same grant, the same
+/// Move `old`'s enrollment in `clients.json` to `new`, in ONE write: the same grant, the same
 /// label, nothing in `grants.json` touched. `Ok(Some(grant))` names the grant the new
 /// certificate is now enrolled under; `Ok(None)` when `old` had no entry of its own (a
 /// certificate admitted only through the shared `default` grant, or not at all), in which case
@@ -363,7 +363,7 @@ pub struct ClientRow {
     pub name: Option<String>,
     /// The certificate's fingerprint.
     pub fingerprint: String,
-    /// The grant `clients.json` enrols it under, when it is enrolled.
+    /// The grant `clients.json` enrolls it under, when it is enrolled.
     pub grant: Option<String>,
 }
 
@@ -380,7 +380,7 @@ impl ClientRow {
 }
 
 /// Every QUIC client this server knows of — each bundle under `clients/`, and each
-/// fingerprint `clients.json` enrols — joined on the fingerprint, bundles first by name.
+/// fingerprint `clients.json` enrolls — joined on the fingerprint, bundles first by name.
 /// The `String` is `clients.json`'s explicit shared `default` grant, when one is set.
 pub fn list_clients(layout: &Layout) -> Result<(Vec<ClientRow>, Option<String>), String> {
     let enrolment = read_enrolment(&layout.clients_json())?.unwrap_or_default();
@@ -622,7 +622,7 @@ pub enum QuicDoor {
         identity: Identity,
         /// Trusted client certificates, PEM.
         trusted: Vec<String>,
-        /// How many fingerprints `clients.json` enrols.
+        /// How many fingerprints `clients.json` enrolls.
         enrolled: usize,
         /// The banner's line per client, from the same read ([`client_lines`]).
         clients: Vec<String>,
@@ -1227,7 +1227,7 @@ pub fn enrol_refusal(
     Ok(change)
 }
 
-/// Enrol `fingerprint` under a grant called `grant` holding `scopes`, writing both files.
+/// Enroll `fingerprint` under a grant called `grant` holding `scopes`, writing both files.
 ///
 /// Both files are checked before either is written ([`enrol_refusal`]): any token
 /// [`grant_refusal`] refuses always, and an existing grant with different scopes, or a

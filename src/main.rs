@@ -71,7 +71,7 @@ fn main() {
             flags,
         } => {
             // The full settings are read only when a role needs this server's roots and
-            // mount, so a ledger-only enrolment works exactly as before on a host with no
+            // mount, so a ledger-only enrollment works exactly as before on a host with no
             // config.toml; the QUIC port for the printed line is read either way.
             let browse_scopes = if browse.is_some() || nl_draft {
                 role_tokens(browse.as_ref(), nl_draft, &read_settings(&flags))
@@ -346,7 +346,7 @@ fn serve(flags: &config::Flags) -> ! {
     // whatever writes into it, and `review request` writes with no server running.
     //
     // ★ The reviewer's SCOPES are resolved here, before the kernel exists, because a grant
-    // that `grants.json` cannot honour must stop this server rather than arm a reactor that
+    // that `grants.json` cannot honor must stop this server rather than arm a reactor that
     // dead-letters everything. The reactor itself needs the kernel, so it is installed after
     // the hub below — the two halves of arming, in the only order they can happen.
     let reviewer = match &settings.review {
@@ -794,7 +794,7 @@ fn humanize(duration: std::time::Duration) -> String {
 /// EMPTY annotation list, with no error at any layer. Nothing else in the process can tell —
 /// the reads succeed.
 ///
-/// ⚠ It warns rather than refusing to start, and that is a judgement worth stating: the
+/// ⚠ It warns rather than refusing to start, and that is a judgment worth stating: the
 /// ledger, the doors and the backup are unaffected by this condition, and turning a
 /// browse-only data problem into a total outage would be the wrong trade for a server whose
 /// job is holding the ledger. The operator sequence in the README puts the migration where it
@@ -1018,7 +1018,7 @@ impl Subjects<'_> {
     }
 }
 
-/// Every token an enrolment asks for: the ledgers' grants, plus — when `--browse-graph` was
+/// Every token an enrollment asks for: the ledgers' grants, plus — when `--browse-graph` was
 /// given — the browse graph's store doors, plus each `--ledger-graph`'s raw store grant
 /// (ledger #878), plus a `--browse` role's tokens (already computed against this server's
 /// roots and mount by [`browse_tokens`]), in first-seen order.
@@ -1295,7 +1295,7 @@ fn client_add(
     println!("  fingerprint  {}", bundle.fingerprint);
     println!("  principal    {}", quic::client_iri(&bundle.fingerprint));
     // ★ A rotation with no scopes keeps the client's AUTHORITY and replaces only its identity
-    // (ledger #918): the old certificate's enrolment moves to the new one, same grant, and
+    // (ledger #918): the old certificate's enrollment moves to the new one, same grant, and
     // `grants.json` is not touched. Without this the new certificate was enrolled under
     // nothing and the client was refused at its next connection.
     let mut carried = None;
@@ -1340,7 +1340,7 @@ fn client_add(
     // ★ A rotation says what it REPLACED (ledger #864, R7): the old certificate is no longer
     // enrolled, so the deployed bundle stops working at its next connection — on purpose.
     if let Some(old) = &bundle.replaced {
-        // Already moved to the new certificate when the enrolment was carried over.
+        // Already moved to the new certificate when the enrollment was carried over.
         let unenrolled =
             carried.is_some() || quic::unenrol(&layout, old).unwrap_or_else(|e| fail(&e));
         println!(
@@ -1666,7 +1666,7 @@ fn queue_line(settings: &config::Settings, declared: &[String]) -> String {
 }
 
 /// The banner's review line — the queue, what is waiting in it, and, when a grant is named,
-/// whether `grants.json` can honour it.
+/// whether `grants.json` can honor it.
 ///
 /// ⚠ **It says plainly that nothing drains this** — because with `gonk.review.arm` unset
 /// nothing does, and a queue filling with nobody reading it is the quietest way for this

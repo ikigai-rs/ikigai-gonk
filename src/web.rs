@@ -855,7 +855,7 @@ fn enrich_children(graph: &mut Graph) {
 /// `urn:iki:host:gonk:client:<fp>` after reads as one actor (ledger
 /// [#1183](http://localhost:1060/l/default/item/1183)). Any other author — a plain name typed
 /// at the cli — renders as itself. ★ The IRI stays in the store; only the face
-/// translates, so a relabelled passkey keeps its history and the store never learns a
+/// translates, so a relabeled passkey keeps its history and the store never learns a
 /// display name. The file is read at most once per render, and not at all when no author
 /// on the page is a passkey.
 fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {

@@ -359,7 +359,7 @@ impl Gonk {
         v["challenge"].as_str().expect("challenge").to_string()
     }
 
-    /// Enrol a passkey under the `--browse derive` role over every root (plus the default
+    /// Enroll a passkey under the `--browse derive` role over every root (plus the default
     /// ledger's write grant) and sign in: the identity whose session a same-site page rides.
     fn sign_in_deriving(&self) -> String {
         let mut scopes = grants_for("default", Authority::Write).expect("ledger tokens");

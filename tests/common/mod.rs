@@ -14,7 +14,7 @@ pub struct Authenticator {
 
 // ⚠ Each test binary compiles this module WHOLE and uses part of it, so a constructor no
 // single binary calls is normal here rather than dead: `tests/web.rs` signs with `new`,
-// `tests/browse.rs` enrols several identities and needs `named`.
+// `tests/browse.rs` enrolls several identities and needs `named`.
 #[allow(dead_code)]
 impl Authenticator {
     pub fn new() -> Authenticator {
@@ -26,7 +26,7 @@ impl Authenticator {
 
     /// A DIFFERENT authenticator, deterministically derived from `name`.
     ///
-    /// ⚠ Needed the moment one test enrols twice: a credential id is unique per server, so
+    /// ⚠ Needed the moment one test enrolls twice: a credential id is unique per server, so
     /// a second [`Authenticator::new`] is refused with "this credential is already
     /// enrolled" — which reads like a test-harness bug and is the server being right.
     pub fn named(name: &str) -> Authenticator {

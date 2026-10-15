@@ -58,7 +58,7 @@
 //! # ★ What arms it: an operator's line, and an authority they wrote down
 //!
 //! Two facts, both required, neither implicit — `gonk.review.arm = true` **and** a
-//! `gonk.review.grant` that `grants.json` can honour ([`reviewer_scopes`]). `arm` without a
+//! `gonk.review.grant` that `grants.json` can honor ([`reviewer_scopes`]). `arm` without a
 //! usable grant is a startup refusal, not a degraded server; a grant without `arm` is read,
 //! checked and printed, exactly as before. The grant alone is deliberately NOT the switch:
 //! this server spent a release inviting operators to write one down *so they could see it*,
@@ -326,7 +326,7 @@ pub fn reviewer_scopes(
 ///   `host` is where the mounted peer lives — for `quic://127.0.0.1:4433` that is
 ///   `127.0.0.1` and **not** `localhost`, because `Capability::allows` is exact string
 ///   containment.
-/// - Nothing is dropped. A `requires` this function does not recognise passes through
+/// - Nothing is dropped. A `requires` this function does not recognize passes through
 ///   unchanged, because an unknown token is a capability an operator needs and not one this
 ///   crate gets to decide about.
 ///
@@ -816,8 +816,8 @@ impl Drop for Pass {
 /// The severity words of the findings a pass's JSON answer says it minted — one per row of
 /// `annotations` (browse's `included_for_ids` over the pass's own `minted` set), [`UNRATED`]
 /// where the model wrote none. Empty for an archive HIT (`derived: false`): those rows were
-/// labelled by an earlier pass, possibly an earlier run, and counting them again would let a
-/// replayed file move a number that exists to watch what the model is labelling now.
+/// labeled by an earlier pass, possibly an earlier run, and counting them again would let a
+/// replayed file move a number that exists to watch what the model is labeling now.
 ///
 /// ⚠ Read from the answer this pass already holds, never from a second query: the pass
 /// declares browse read and net and nothing else, and it must not grow a read it would then
@@ -1596,12 +1596,12 @@ impl Status {
     ///
     /// Severity is SELF-REPORTED by the model, and ledger
     /// [#449](http://localhost:1060/l/default/item/449) measured that a prompt asking for
-    /// "major or worse" moved the serious share 27% → 62% by RE-LABELLING, not by finding
+    /// "major or worse" moved the serious share 27% → 62% by RE-LABELING, not by finding
     /// more. Gating the Queue page on the word ([#496](http://localhost:1060/l/default/item/496))
     /// makes the word load-bearing, so the share becomes the tripwire: it was 27–33% on the
     /// incumbent model and 42% on q8 ([#491](http://localhost:1060/l/default/item/491)), and a
     /// jump with no model or prompt change is the label inflating — re-examine the gate, do
-    /// not celebrate the number. The other defence is negative and lives nowhere in this crate
+    /// not celebrate the number. The other defense is negative and lives nowhere in this crate
     /// on purpose: nothing gonk renders or sends can tell a pass that only serious findings get
     /// read.
     pub fn serious_share_percent(&self) -> Option<u64> {

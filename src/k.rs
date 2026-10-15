@@ -245,7 +245,7 @@ impl KAdapter {
         // browse for a file page as HTML, gonk adds `proposals=<words>`: the finding
         // contract's severity set less `gonk.queue.serious`, read from the contract at call
         // time ([`crate::queue::proposal_words`]) — never a list held here. browse 0.7.0
-        // draws those pending findings beside their lines as proposal marks, labelled
+        // draws those pending findings beside their lines as proposal marks, labeled
         // proposal and never annotation; the queue stays the place for decisions.
         //
         // Three guards, each a refusal to guess. The caller's own `proposals=` wins (a
