@@ -103,7 +103,10 @@ fn hub(peer: &Peer, nl: impl Fn(&str) -> Nl) -> Arc<Kernel> {
     let hub = Arc::new(compose_with(
         DurableStore::in_memory().expect("an in-memory store"),
         None,
-        vec![mount::space(&mount)],
+        vec![mount::space(
+            &mount,
+            &ikigai_gonk::budget::model_calls(ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR),
+        )],
         Vec::new(),
         None,
         Some(&scripts),

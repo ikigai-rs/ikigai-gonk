@@ -180,7 +180,10 @@ fn gonk() -> Gonk {
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
-        vec![mount::space(&peer.mount)],
+        vec![mount::space(
+            &peer.mount,
+            &ikigai_gonk::budget::model_calls(ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR),
+        )],
         Vec::new(),
         None,
         None,

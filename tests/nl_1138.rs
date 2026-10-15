@@ -217,7 +217,10 @@ fn hub(peer: &Peer) -> Arc<Kernel> {
     let hub = Arc::new(compose_with(
         DurableStore::in_memory().expect("an in-memory store"),
         None,
-        vec![mount::space(&mount)],
+        vec![mount::space(
+            &mount,
+            &ikigai_gonk::budget::model_calls(ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR),
+        )],
         Vec::new(),
         None,
         Some(&scripts),
@@ -465,7 +468,10 @@ fn a_grounding_over_a_ledger_the_size_of_the_live_one_fits_the_bound() {
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
-        vec![mount::space(&mount)],
+        vec![mount::space(
+            &mount,
+            &ikigai_gonk::budget::model_calls(ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR),
+        )],
         Vec::new(),
         None,
         Some(&scripts),
@@ -607,7 +613,10 @@ fn an_unfocused_draft_over_the_live_root_count_fits_the_bound() {
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(wired.space)),
-        vec![mount::space(&mount)],
+        vec![mount::space(
+            &mount,
+            &ikigai_gonk::budget::model_calls(ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR),
+        )],
         Vec::new(),
         None,
         Some(&scripts),

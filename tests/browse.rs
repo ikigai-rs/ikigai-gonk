@@ -151,7 +151,17 @@ fn served_in(dir: &TempDir, mount: Option<Mount>, graph: browse::Graph) -> Serve
         &graph,
         None,
     );
-    let mounted = mount.iter().map(mount::space).collect();
+    let mounted = mount
+        .iter()
+        .map(|m| {
+            mount::space(
+                m,
+                &ikigai_gonk::budget::model_calls(
+                    ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR,
+                ),
+            )
+        })
+        .collect();
     let hub = Arc::new(compose_with(
         store.clone(),
         Some(Arc::new(wired.space)),
@@ -3467,7 +3477,10 @@ fn the_pass_requires_exactly_what_the_real_review_requires() {
     let hub = compose_with(
         store,
         Some(Arc::new(wired.space)),
-        vec![mount::space(&dead_mount())],
+        vec![mount::space(
+            &dead_mount(),
+            &ikigai_gonk::budget::model_calls(ikigai_gonk::budget::DEFAULT_MODEL_CALLS_PER_HOUR),
+        )],
         ikigai_gonk::trigger::space(
             &queue,
             Arc::new(ikigai_gonk::trigger::Activity::default()),
