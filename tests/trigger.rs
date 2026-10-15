@@ -1470,33 +1470,36 @@ fn a_request_a_restart_caught_mid_pass_is_requeued_and_reviewed() {
         "the banner names what recovery requeued: {banner}"
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline
-        && trigger::depth(Some(&q))
-            != (trigger::Depth::Counted {
-                inbox: 0,
-                processing: 0,
-                outbox: 1,
-                error: 0,
-            })
-    {
+    // ⚠ The bound is 60 s, not 10 (ledger [#1582](http://localhost:1062/l/default/item/1582)),
+    // for the reason `an_armed_trigger_reviews_what_was_already_waiting` gives (ledger #1004):
+    // the catch-up that claims the requeued tuple runs only after the reactor's watch is
+    // established, and on a busy machine establishing it has taken from 0 to 12.5 s. With 10 s
+    // this failed in at least four recorded local runs (2026-10-12 to 10-15), each at the
+    // deadline (10.02 to 11.15 s) with the review never called; the message below now prints
+    // where the tuple stood. A passing run takes milliseconds, so the bound costs nothing
+    // unless something is wrong.
+    let handled = trigger::Depth::Counted {
+        inbox: 0,
+        processing: 0,
+        outbox: 1,
+        error: 0,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline && trigger::depth(Some(&q)) != handled {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let calls = seen.lock().expect("not poisoned").clone();
     assert_eq!(
         calls.len(),
         1,
-        "the interrupted request must reach the review exactly once: {calls:?}"
+        "the interrupted request must reach the review exactly once: {calls:?}, with the queue \
+         at {:?}",
+        trigger::depth(Some(&q))
     );
     assert_eq!(calls[0].1, "urn:repo:demo:review:a.rs");
     assert_eq!(
         trigger::depth(Some(&q)),
-        trigger::Depth::Counted {
-            inbox: 0,
-            processing: 0,
-            outbox: 1,
-            error: 0
-        },
+        handled,
         "requeued and handled — not dead-lettered, which is the crate's default"
     );
 }
@@ -1678,8 +1681,32 @@ fn a_retargeted_handler_file_is_dead_lettered_never_fired() {
     };
     trigger::drop_tuple(&q, &tuple).expect("a drop");
 
-    let settled = |depth: &trigger::Depth| matches!(depth, trigger::Depth::Counted { outbox, error, .. } if outbox + error > 0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The dead-letter note, once it has been written. ⚠ The reactor moves the tuple into
+    // `error/` FIRST and writes its `.err` note after, so a depth that already counts the dead
+    // letter can be read before the note exists or while it is still empty (2 runs in 240 under
+    // 24 concurrent copies of this binary, ledger #1582). The wait below is for both.
+    let note = || -> Option<String> {
+        std::fs::read_dir(q.dir().join("error"))
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .find(|path| path.extension().is_some_and(|ext| ext == "err"))
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .filter(|note| !note.is_empty())
+    };
+    // Settled: handled (wrong, and said below at once) or dead-lettered with its note.
+    let settled = |depth: &trigger::Depth| match depth {
+        trigger::Depth::Counted { outbox, .. } if *outbox > 0 => true,
+        trigger::Depth::Counted { error, .. } if *error > 0 => note().is_some(),
+        _ => false,
+    };
+    // ⚠ Past the reactor's sweep, not 10 s (ledger
+    // [#1582](http://localhost:1062/l/default/item/1582)). This drop lands AFTER `arm`, so what
+    // claims it is the catch-up (which waits behind establishing the watch, up to 12.5 s on a
+    // busy machine, ledger #1004) or the watch's event; and a missed event is caught only by
+    // the next sweep, `SWEEP_EVERY` later. With 10 s it failed once in a recorded local run
+    // (2026-10-14, at 10.03 s, the tuple still in the inbox). A passing run takes milliseconds.
+    let deadline =
+        std::time::Instant::now() + ikigai_intray::SWEEP_EVERY + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline && !settled(&trigger::depth(Some(&q))) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1698,12 +1725,7 @@ fn a_retargeted_handler_file_is_dead_lettered_never_fired() {
         "the retargeted handler's target must never be called: {:?}",
         seen.lock().expect("not poisoned")
     );
-    let note = std::fs::read_dir(q.dir().join("error"))
-        .expect("an error directory")
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .find(|path| path.extension().is_some_and(|ext| ext == "err"))
-        .map(|path| std::fs::read_to_string(path).expect("a note"))
-        .expect("a dead-letter note");
+    let note = note().expect("a dead-letter note");
     assert!(
         note.contains("refused") && note.contains(review),
         "the note names the refused target: {note}"
