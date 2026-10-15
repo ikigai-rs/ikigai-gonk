@@ -20,20 +20,32 @@
 
 use ikigai_ledger::Ledger;
 
-/// How much authority over one ledger. Cumulative, except [`Authority::Worker`]: each level
-/// includes the ones before it, because there is no useful "may delete but may not read".
+/// How much authority over one ledger. Cumulative, except [`Authority::Audit`] and
+/// [`Authority::Worker`]: each level includes the ones before it, because there is no useful
+/// "may delete but may not read".
 ///
 /// ★ **`Worker` sits beside the chain, between `Read` and `Write`** (ledger
 /// [#1143](http://localhost:1060/l/default/item/1143)): everything `Read` holds, plus taking,
 /// renewing and releasing a claim and commenting, and NOTHING else. `Write` holds everything
-/// `Worker` does (the ledger's write grant covers claim and comment), so a worker is the one
-/// authority here that is not a prefix of the next.
+/// `Worker` does (the ledger's write grant covers claim and comment), so a worker is not a
+/// prefix of the next.
+///
+/// ★ **`Audit` sits beside the chain too, between `Read` and `Purge`** (ledger
+/// [#1611](http://localhost:1060/l/default/item/1611)): everything `Read` holds, plus READING the
+/// ledger's graveyard graph, and NOTHING that writes. Before it, the graveyard's read token came
+/// only with `Purge`, so whoever could see what was deleted could also destroy it. `Purge` holds
+/// everything `Audit` does; `Delete` does not (a delete only inserts into the graveyard), so
+/// `--ledger L=delete --ledger L=audit` is delete with the graveyard visible and no purge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authority {
     /// `items`, `item:{id}`, `next`, `ledgers`.
     Read,
-    /// …plus `claim` (take, renew, release) and `comment` (a hand-back included), through
-    /// `ikigai-ledger` 0.7's per-verb grants. Not `close` or `reopen` (the dispatcher's verdict
+    /// …plus reading the ledger's graveyard (`urn:iki:ledger:graph:{name}:deleted`) through the
+    /// store's per-graph read doors (`urn:sparql:*` with `graph=` names it). Writes nothing:
+    /// not the ledger, not either graph, and not a purge.
+    Audit,
+    /// `Read` (not `Audit`), plus `claim` (take, renew, release) and `comment` (a hand-back
+    /// included), through `ikigai-ledger` 0.7's per-verb grants. Not `close` or `reopen` (the dispatcher's verdict
     /// on the work), and not filing, linking, labeling, deferring or editing an item.
     Worker,
     /// …plus `append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, and
@@ -51,12 +63,13 @@ impl std::str::FromStr for Authority {
     fn from_str(value: &str) -> Result<Self, String> {
         match value {
             "read" => Ok(Authority::Read),
+            "audit" => Ok(Authority::Audit),
             "worker" => Ok(Authority::Worker),
             "write" => Ok(Authority::Write),
             "delete" => Ok(Authority::Delete),
             "purge" => Ok(Authority::Purge),
             other => Err(format!(
-                "`{other}` is not an authority (read | worker | write | delete | purge)"
+                "`{other}` is not an authority (read | audit | worker | write | delete | purge)"
             )),
         }
     }
@@ -86,6 +99,15 @@ impl std::str::FromStr for Authority {
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
 ///     ]
 /// );
+/// // An AUDITOR: read, plus the graveyard's read token, and nothing that writes (ledger #1611).
+/// assert_eq!(
+///     grants_for("acme", Authority::Audit).unwrap(),
+///     [
+///         "urn:cap:ledger:read:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:deleted",
+///     ]
+/// );
 /// ```
 ///
 /// ⚠ **A worker holds the ledger graph's store WRITE token**, because every ledger write goes to
@@ -105,6 +127,12 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
     let graph = ledger.graph();
     let mut grants = vec![ledger.cap_read(), ikigai_store::cap_read_graph(&graph)];
     if authority == Authority::Read {
+        return Ok(grants);
+    }
+    if authority == Authority::Audit {
+        // The token purge holds for the same graph (below), alone: the store's per-graph read
+        // doors answer it, and no write door accepts a read token.
+        grants.push(ikigai_store::cap_read_graph(&ledger.deleted_graph()));
         return Ok(grants);
     }
     if authority == Authority::Worker {
@@ -128,7 +156,8 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
     // ★ Purge READS the graveyard (ikigai-ledger 0.3.0 resolves a deleted item through its
     // tombstone and clears what it archived), and since ikigai-store 0.2.6 an update with a
     // WHERE needs the read grant on the graph it reads. A plain delete only INSERTs there,
-    // so the read token is purge's alone (ledger #760, #768).
+    // so among the WRITING roles the read token is purge's alone (ledger #760, #768); the one
+    // other role holding it is the read-only audit (ledger #1611).
     grants.push(ikigai_store::cap_read_graph(&ledger.deleted_graph()));
     Ok(grants)
 }
@@ -189,6 +218,12 @@ pub fn cap_raw_write_graph(graph: &str) -> String {
 pub const WORKER_IS_A_LEDGER_AUTHORITY: &str =
     "`worker` is a ledger authority (claim and comment, no close): the browse graph has no \
      claims or comments to grant. Use `read` or `write`";
+
+/// Why `audit` is refused for the browse graph: it reads a LEDGER's graveyard, and the browse
+/// graph has none.
+pub const AUDIT_IS_A_LEDGER_AUTHORITY: &str =
+    "`audit` is a ledger authority (read, plus the ledger's graveyard of deleted items): the \
+     browse graph has no graveyard. Use `read` or `write`";
 
 /// ★ **A ledger's graph as a STORE grant**: raw SPARQL UPDATE over the triples of one ledger's
 /// graph, through `urn:iki:store:graph-update` at a network door — the operator role that
@@ -270,12 +305,15 @@ pub fn ledger_graph_grants(ledger: &str) -> Result<Vec<String>, String> {
 /// read+write here, and it says so rather than refusing, because an operator spelling
 /// `--browse-graph delete` means "and may remove things". `worker` is refused
 /// ([`WORKER_IS_A_LEDGER_AUTHORITY`]): it means claim and comment, which this graph has not.
+/// So is `audit` ([`AUDIT_IS_A_LEDGER_AUTHORITY`]): it means a ledger's graveyard, which this
+/// graph has not either, and reading it as `read` would hide that the operator asked for more.
 ///
 /// # Errors
 ///
 /// When this server's choice is the DEFAULT graph ([`crate::browse::Graph::TheDefault`]),
 /// which has no IRI for a token to name. The error is the explanation, because the operator
-/// asking has every reason to think a grant should exist. And [`Authority::Worker`].
+/// asking has every reason to think a grant should exist. And [`Authority::Worker`] and
+/// [`Authority::Audit`].
 #[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
 pub fn browse_graph_grants(authority: Authority) -> Result<Vec<String>, String> {
     let chosen = crate::browse::Graph::chosen();
@@ -287,6 +325,9 @@ pub fn browse_graph_grants(authority: Authority) -> Result<Vec<String>, String> 
     })?;
     if authority == Authority::Worker {
         return Err(WORKER_IS_A_LEDGER_AUTHORITY.to_string());
+    }
+    if authority == Authority::Audit {
+        return Err(AUDIT_IS_A_LEDGER_AUTHORITY.to_string());
     }
     let mut grants = vec![ikigai_store::cap_read_graph(graph.as_str())];
     if authority != Authority::Read {
@@ -791,6 +832,44 @@ mod tests {
         assert!(broad_store_scopes(&purge).is_empty());
     }
 
+    /// ★ Ledger #1611: the AUDIT role reads the graveyard and writes nothing. Literals, for
+    /// the reason above. Before it, the graveyard's read token came only with purge.
+    #[test]
+    fn an_audit_grant_reads_the_graveyard_and_writes_nothing() {
+        let audit = grants_for("acme", Authority::Audit).unwrap();
+        assert_eq!(
+            audit,
+            [
+                "urn:cap:ledger:read:acme",
+                "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+                "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:deleted",
+            ]
+        );
+        assert_eq!("audit".parse::<Authority>(), Ok(Authority::Audit));
+        assert!(broad_store_scopes(&audit).is_empty());
+        // No write of any kind: not a ledger verb, not either graph's store write token.
+        for token in &audit {
+            assert!(
+                !token.contains(":write:")
+                    && !token.contains(":delete:")
+                    && !token.contains(":purge:")
+                    && !token.contains(":claim:")
+                    && !token.contains(":comment:"),
+                "{token}"
+            );
+        }
+        // Purge holds everything audit does; delete does not hold the graveyard read.
+        let purge = grants_for("acme", Authority::Purge).unwrap();
+        assert!(audit.iter().all(|t| purge.contains(t)), "{purge:?}");
+        let delete = grants_for("acme", Authority::Delete).unwrap();
+        assert!(!delete.contains(&audit[2]), "{delete:?}");
+        // And it is a ledger authority: the browse graph has no graveyard.
+        assert_eq!(
+            browse_graph_grants(Authority::Audit),
+            Err(AUDIT_IS_A_LEDGER_AUTHORITY.to_string())
+        );
+    }
+
     /// ★ The browse graph's tokens, as literals for the same reason the ledger's are: they
     /// go into an operator's `grants.json`, and they are the FIRST spelling of "may read
     /// browse's data" this server has ever been able to offer.
@@ -1000,6 +1079,8 @@ mod tests {
         assert!(acme.deleted_graph().starts_with(LEDGER_GRAPH_PREFIX));
         for authority in [
             Authority::Read,
+            Authority::Audit,
+            Authority::Worker,
             Authority::Write,
             Authority::Delete,
             Authority::Purge,

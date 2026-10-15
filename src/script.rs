@@ -121,7 +121,8 @@ pub const DIR_NAME: &str = "scripts";
 /// both are reported up, not built here.
 ///
 /// The graveyards (`urn:iki:ledger:graph:{name}:deleted`) match the prefix too; a run reaches
-/// one only when its runner could read it directly, which only a purge grant does.
+/// one only when its runner could read it directly, which only an audit or a purge grant does
+/// (ledger #1611).
 pub const CEILING: [&str; 2] = [
     "urn:cap:ledger:read:*",
     "urn:cap:store:read:graph:urn:iki:ledger:graph:*",

@@ -1320,7 +1320,7 @@ fn client_add(
                 layout.grants_json().display()
             ),
             None => println!(
-                "    ikigai-gonk client add {name} --ledger <ledger>=<read|worker|write|delete|purge>"
+                "    ikigai-gonk client add {name} --ledger <ledger>=<read|audit|worker|write|delete|purge>"
             ),
         }
     } else {

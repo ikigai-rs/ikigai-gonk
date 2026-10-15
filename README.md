@@ -1692,8 +1692,42 @@ worker holding the same five lines cannot release it, whatever holder name it sp
 grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
 this through the QUIC door of a real gonk.
 
-`ikigai-gonk grants <ledger> <read|worker|write|delete|purge>` prints the token list for one
-ledger, for writing `grants.json` by hand.
+**An AUDITOR** (ledger #1611) sees what a ledger deleted and can change nothing:
+
+```sh
+ikigai-gonk client add box --ledger default=audit      # passkey invite takes the same flag
+```
+
+```text
+urn:cap:ledger:read:default
+urn:cap:store:read:graph:urn:iki:ledger:graph:default
+urn:cap:store:read:graph:urn:iki:ledger:graph:default:deleted
+```
+
+It reads the ledger, and the graveyard through the SPARQL faces (`urn:sparql:select
+graph=urn:iki:ledger:graph:default:deleted`, or `/sparql` with the same `graph`): each deleted
+item's archived content, beside its tombstone in the ledger's own graph. It cannot purge, delete,
+file, comment or close, and it cannot restore an item or clear the graveyard by hand: it holds
+no write token for either graph. Before it, the graveyard's read token came only with `purge`, so
+an auditor had to be able to destroy what it audited. `tests/audit_role_1611.rs` drives it through
+the QUIC door of a real gonk.
+
+The ledger roles, and what each adds:
+
+| `--ledger <ledger>=` | holds | adds |
+| --- | --- | --- |
+| `read` | — | items, an item, `next`, the ledger list |
+| `audit` | `read` | READ the graveyard (`urn:iki:ledger:graph:<ledger>:deleted`); writes nothing |
+| `worker` | `read` | claim (take, renew, release) and comment, a hand-back included; not close |
+| `write` | `worker` | every ledger write: file, close, reopen, label, link, defer, edit |
+| `delete` | `write` | Delete an item: its quads move into the graveyard (written, not read) |
+| `purge` | `delete` and `audit` | purge an item's content from both graphs, leaving its tombstone |
+
+Two lines combine: `--ledger default=delete --ledger default=audit` deletes and sees the
+graveyard, and cannot purge.
+
+`ikigai-gonk grants <ledger> <read|audit|worker|write|delete|purge>` prints the token list for
+one ledger, for writing `grants.json` by hand.
 
 ## Explaining what it browses
 
