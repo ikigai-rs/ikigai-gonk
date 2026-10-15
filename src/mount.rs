@@ -52,17 +52,31 @@
 //! `into_inner()` on poison: a panic anywhere in here must cost one call, never wedge the
 //! mount for the life of the process.
 //!
-//! # ⚠ Threads do not cross a mount (#92)
+//! # ⚠ Threads do not cross a mount (ledger [#92](http://localhost:1062/l/default/item/92))
 //!
-//! A mounted result arrives `cacheable()` with an EMPTY dependency set: the peer's golden
-//! threads are the peer's, and nothing here can cut them. For `urn:llm:*ask` that is
-//! harmless, and it is harmless for a specific reason rather than by luck — **the archive,
-//! not the cache, is what makes an explanation cheap the second time.** `ikigai-browse` keys
-//! its archive on `(path, content-hash, version-tag)` in the store, and re-derives when the
-//! content changes; a kernel cache entry keyed on the ask's prompt would be a second,
-//! weaker copy of that. The next thing anyone mounts here will not be harmless: mount a
-//! namespace whose answers change on the peer's own schedule and this kernel will serve the
-//! first answer it got until the process restarts.
+//! The peer's golden threads are the peer's, and nothing here can cut them. What that costs
+//! depends on the cli this binary is built against, and it changes at the next cli release:
+//!
+//! - **On the current pin (`ikigai-resolve` 0.1.63)** a mounted result arrives with the PEER's
+//!   expiry and an EMPTY dependency set. A cacheable peer answer (`urn:llm:config`, a pinned
+//!   `urn:llm:{provider}:model`) is cached here, hung only from this kernel's own thread for
+//!   the name, which nothing here cuts when the peer changes: this kernel serves the first
+//!   answer it got until the process restarts. A model's answer is uncacheable on the peer and
+//!   arrives uncacheable.
+//! - **From the cli release carrying ikigai-rs/ikigai-cli PR 513** every answer a mount
+//!   forwards is `Expiry::Always` here: a mounted read is never staler than the peer's own
+//!   cache, and never cached here, so EVERY mounted read is a round trip to the peer. That is
+//!   why the model-call window counts only the names that reach a model
+//!   ([`reaches_a_model`]): `urn:llm:{provider}:model` is read on every explain, and counted
+//!   it would spend the window by browsing.
+//!
+//! For `urn:llm:*ask` neither is a problem, for a specific reason rather than by luck — **the
+//! archive, not the cache, is what makes an explanation cheap the second time.**
+//! `ikigai-browse` keys its archive on `(path, content-hash, version-tag)` in the store, and
+//! re-derives when the content changes; a kernel cache entry keyed on the ask's prompt would be
+//! a second, weaker copy of that. A namespace whose answers change on the peer's own schedule
+//! is mounted [`LazyMount::fresh`] (a task layer), which marks every answer uncacheable here on
+//! either pin.
 
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
@@ -400,12 +414,14 @@ pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
 /// grant naming another host satisfies. Every resource under the prefix now also declares the
 /// exact token the mount checks.
 ///
-/// ★ **And every call it forwards is counted against `calls`** (ledger
+/// ★ **And every call it forwards TO A MODEL is counted against `calls`** (ledger
 /// [#308](http://localhost:1062/l/default/item/308), [`crate::budget::model_calls`]): one
 /// window over every caller and every family that reaches the model, consulted when the call
 /// is invoked — after the kernel has checked the caller's grant, so a refused caller spends
 /// nothing — and never for a `Meta`, which the kernel answers from the description without
-/// invoking anything.
+/// invoking anything. A read that calls no model ([`reaches_a_model`]) still goes through the
+/// mount and still needs its net grant; it just spends nothing (ledger
+/// [#1576](http://localhost:1062/l/default/item/1576)).
 pub fn space(mount: &Mount, calls: &Window) -> Arc<dyn Space> {
     let origin = mount.target.to_string();
     let remote = Arc::new(MountedRemote::overriding(
@@ -419,6 +435,65 @@ pub fn space(mount: &Mount, calls: &Window) -> Arc<dyn Space> {
         format!("urn:cap:net:{}", mount.target.net_host()),
         calls,
     )
+}
+
+/// The names under [`LLM_PREFIX`] that `ikigai-llm` binds and that answer WITHOUT calling a
+/// model: the registry, the inventory and the selection.
+pub const MODEL_FREE: [&str; 3] = ["urn:llm:config", "urn:llm:models", "urn:llm:select"];
+
+/// The last segment of a provider's names (`urn:llm:{provider}:{leaf}`) that answer without
+/// calling a model: its configured model id, its liveness and what it has installed. `:up` and
+/// `:installed` (and a `:model` with no pinned model) send the provider's server a cheap `GET`;
+/// none of them asks the model anything.
+pub const MODEL_FREE_PER_PROVIDER: [&str; 3] = ["model", "up", "installed"];
+
+/// Whether a forward of `target` through the `urn:llm:` mount reaches a model, and so spends the
+/// model-call window ([`space`], ledger [#1576](http://localhost:1062/l/default/item/1576)).
+///
+/// ★ **An explicit list of what does NOT, and everything else does.** `ikigai-llm` binds
+/// `urn:llm:ask`, `urn:llm:{provider}:ask` and the model-free names above ([`MODEL_FREE`],
+/// [`MODEL_FREE_PER_PROVIDER`]). The list is of the exempt, not of the asks, because the window
+/// is a SPEND ceiling and must fail closed: a name the peer gains later (an embedding, a second
+/// chat form) is counted until someone shows it calls no model, and the worst an unlisted cheap
+/// read can do is spend a slot. Nothing the peer declares tells the two apart — `urn:llm:{p}:up`
+/// declares the same net grant an ask does — so the list is by name, matched EXACTLY: one
+/// provider segment, one leaf, nothing after it.
+///
+/// Why it matters: browse reads `urn:llm:{provider}:model` on every explain, every explain
+/// status and once per rollup child, to key its archive. From the cli release carrying
+/// ikigai-rs/ikigai-cli PR 513 a mounted answer is never cached here (see the module docs), so
+/// each of those reads is a forward, and counted they would empty the window by browsing.
+///
+/// ```
+/// use ikigai_gonk::mount::reaches_a_model;
+/// assert!(reaches_a_model("urn:llm:ask"));
+/// assert!(reaches_a_model("urn:llm:coder:ask"));
+/// assert!(!reaches_a_model("urn:llm:config"));
+/// assert!(!reaches_a_model("urn:llm:models"));
+/// assert!(!reaches_a_model("urn:llm:select"));
+/// assert!(!reaches_a_model("urn:llm:coder:model"));
+/// assert!(!reaches_a_model("urn:llm:coder:up"));
+/// assert!(!reaches_a_model("urn:llm:coder:installed"));
+/// // Anything not on the list is counted: a name the peer may gain, and a near miss.
+/// assert!(reaches_a_model("urn:llm:coder:embed"));
+/// assert!(reaches_a_model("urn:llm::model"));
+/// assert!(reaches_a_model("urn:llm:a:b:model"));
+/// assert!(reaches_a_model("urn:llm:coder:models"));
+/// assert!(reaches_a_model("urn:llm:config:x"));
+/// ```
+pub fn reaches_a_model(target: &str) -> bool {
+    if MODEL_FREE.contains(&target) {
+        return false;
+    }
+    let Some(rest) = target.strip_prefix(LLM_PREFIX) else {
+        return true;
+    };
+    match rest.split_once(':') {
+        Some((provider, leaf)) => {
+            provider.is_empty() || leaf.contains(':') || !MODEL_FREE_PER_PROVIDER.contains(&leaf)
+        }
+        None => true,
+    }
 }
 
 /// [`space`]'s overlay over any `inner`: what it adds to a mount, apart from the mount.
@@ -452,13 +527,16 @@ impl Space for Declaring {
         if !request.target.as_str().starts_with(&self.prefix) {
             return resolution;
         }
+        // Decided by the name that is FORWARDED: the mount overrides, so the peer resolves
+        // exactly this IRI.
+        let calls = reaches_a_model(request.target.as_str()).then(|| self.calls.clone());
         // `map_endpoint` carries the canonical name and the answering space through, and
         // leaves a limiter alone.
         resolution.map_endpoint(|endpoint| {
             Arc::new(NetDeclared {
                 inner: endpoint,
                 scope: self.scope.clone(),
-                calls: self.calls.clone(),
+                calls,
             }) as Arc<dyn Endpoint>
         })
     }
@@ -478,18 +556,21 @@ impl Space for Declaring {
 
 /// A mounted endpoint, unchanged but for its description — every action also requires the
 /// mount's net token ([`crate::nl::declare`]) — and for the model-call window its invoke
-/// counts against ([`space`]).
+/// counts against ([`space`]), when it reaches a model at all.
 struct NetDeclared {
     inner: Arc<dyn Endpoint>,
     scope: String,
-    calls: Window,
+    /// The model-call window, or `None` for a name that calls no model ([`reaches_a_model`]).
+    calls: Option<Window>,
 }
 
 #[async_trait]
 impl Endpoint for NetDeclared {
     async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
-        if let Some(refused) = self.calls.admit(inv).await {
-            return refused;
+        if let Some(calls) = &self.calls {
+            if let Some(refused) = calls.admit(inv).await {
+                return refused;
+            }
         }
         self.inner.invoke(inv).await
     }

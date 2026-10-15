@@ -1791,7 +1791,13 @@ bounded by the ceilings above; the window bounds both. It counts at the mount be
 where spend leaves: an explanation, a review pass, a pull request's layers, the judge and a
 natural-language draft all reach the model there, and an archive hit never does. A call is
 counted when it is invoked, after the kernel has checked the caller's grant, so a caller
-without the net grant spends none of it; a `describe` is never counted. Past the window a call
+without the net grant spends none of it; a `describe` is never counted, and neither is a read
+that calls no model (ledger #1576): `urn:llm:config`, `urn:llm:models`, `urn:llm:select` and a
+provider's `:model`, `:up` and `:installed` still go through the mount and still need its net
+grant, but spend nothing. Every other name under `urn:llm:` counts, a name the peer gains later
+included, because a spend ceiling fails closed. That matters from the cli release carrying
+ikigai-cli PR 513, which stops caching a mounted answer on this side: browse reads a
+provider's `:model` on every explain, so each would otherwise spend a call. Past the window a call
 is refused with ``rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000/3600s — retry
 after Ns`` (an `Error::Endpoint`, since core has no typed rate-limit error). Why 2,000: the
 busiest hour on record is 728 derivations (2026-10-02, the review-value experiments), and a

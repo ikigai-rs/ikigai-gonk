@@ -473,7 +473,10 @@ impl Endpoint for Pass {
 /// directory explanation, a review pass, a pull request's layers, the judge, a natural-language
 /// draft — reaches the model through the one `urn:llm:` mount, and so does a direct ask. A rate
 /// on the derivation endpoints would count archive hits (a re-read costs nothing) and miss the
-/// direct ask; a rate on the mount counts exactly the calls that spend.
+/// direct ask; a rate on the mount counts exactly the calls that spend. ⚠ Only the forwards
+/// that reach a model, though: the mount also carries reads that call none (`urn:llm:config`,
+/// a provider's `:model`, which browse reads on every explain), and those spend nothing
+/// ([`crate::mount::reaches_a_model`], ledger [#1576](http://localhost:1062/l/default/item/1576)).
 ///
 /// ★ **Why 2,000.** The busiest hour on record is 728 derivation activities (`prov:Activity`
 /// in browse's graph, 2026-10-02 19:00 UTC, during the review-value experiments), and the
