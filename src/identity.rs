@@ -19,7 +19,7 @@
 //! So a person with a laptop certificate and a passkey who are enrolled under one grant
 //! cannot hold read over QUIC and write over HTTP by accident: there is one list to be
 //! wrong in. Both files are re-read on every use — every QUIC connection, every HTTP request
-//! carrying a session — so editing a grant or deleting an enrolment takes effect on the next
+//! carrying a session — so editing a grant or deleting an enrollment takes effect on the next
 //! request, with no restart.
 //!
 //! # Registration: the INVITE is the trust anchor
@@ -85,7 +85,7 @@ pub const MAX_PENDING: usize = 256;
 ///
 /// ★ The tail is the CREDENTIAL ID, not the label. A label is a display name an operator
 /// may change (`"Touch ID"`), and two passkeys can share one; the credential id is what the
-/// authenticator minted and what `clients.json` is keyed by, so a relabelled passkey keeps
+/// authenticator minted and what `clients.json` is keyed by, so a relabeled passkey keeps
 /// its history and two passkeys named alike stay distinct. The IRI is what the store holds;
 /// only the face translates it back to a label ([`Passkeys::labels`]).
 pub const PASSKEY_IRI_PREFIX: &str = "urn:iki:gonk:passkey:";
@@ -407,7 +407,7 @@ pub struct Passkeys {
 /// A signed-in identity, as a page or the capability function sees it.
 #[derive(Debug, Clone)]
 pub struct Identity {
-    /// The enrolment.
+    /// The enrollment.
     pub enrolled: Enrolled,
     /// The grant's scopes, resolved now.
     pub scopes: Vec<String>,

@@ -95,7 +95,7 @@ impl Gonk {
         self.raw("GET", path, &headers, "")
     }
 
-    /// Enrol a passkey under a grant that writes the default ledger, sign in, return the token.
+    /// Enroll a passkey under a grant that writes the default ledger, sign in, return the token.
     fn sign_in(&self) -> String {
         let authenticator = Authenticator::new();
         let invite = identity::invite(

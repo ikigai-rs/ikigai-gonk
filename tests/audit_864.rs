@@ -208,8 +208,8 @@ fn enrol_refuses_the_offering_wildcards_as_put_grant_does() {
 
 // ------------------------------------------------------------------------------------------
 // Ledger #805, part 3: `client add` minted (or wrote) the bundle and THEN enrolled it, so a
-// refusal from the enrolment left a bundle behind. Importing another client's certificate
-// under a new name is refused by the enrolment ("already enrolled under grant `a`"), and on
+// refusal from the enrollment left a bundle behind. Importing another client's certificate
+// under a new name is refused by the enrollment ("already enrolled under grant `a`"), and on
 // `c3443a6` it left `clients/b/` with that certificate in it.
 // ------------------------------------------------------------------------------------------
 #[test]
@@ -914,7 +914,7 @@ fn client_list_and_remove_show_and_revoke_what_is_enrolled() {
         "the grant is left alone: {grants}"
     );
 
-    // An enrolment with no bundle (what an old `--force` left behind) is removable by its
+    // An enrollment with no bundle (what an old `--force` left behind) is removable by its
     // fingerprint, and listed as what it is until then.
     let orphan = "ab".repeat(32);
     std::fs::write(

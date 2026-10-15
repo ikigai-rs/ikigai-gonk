@@ -603,7 +603,7 @@ fn the_state_nav_is_the_findings_contracts_own_one_of() {
 ///
 /// So: no severity word the contract declares appears as a token in this crate's page code or
 /// its stylesheet. ⚠ `web/gonk.css` is deliberately exempt and it is worth saying why — a
-/// selector like `.badge.sev.critical` is a COLOUR, and a severity the sheet has no rule for
+/// selector like `.badge.sev.critical` is a COLOR, and a severity the sheet has no rule for
 /// still renders with its own word in its own badge. A missing rule is a missing emphasis; a
 /// missing menu entry is an option a human cannot choose.
 #[test]
@@ -1394,7 +1394,7 @@ fn a_planted_finding_renders_the_contracts_menu_and_publishes() {
     );
     // ⚠ And NO human rating is shown while the finding is pending. `effective_severity`
     // falls back to the model's proposal when there is no decision — correct for a consumer
-    // wanting one number, and a lie on a badge labelled "human", on the one page whose whole
+    // wanting one number, and a lie on a badge labeled "human", on the one page whose whole
     // argument is that the two ratings are different things.
     assert!(
         !pending.contains("human:"),
@@ -1564,7 +1564,7 @@ fn the_header_badge_renders_the_depth_and_polls_for_it() {
     let badge = String::from_utf8(answer.bytes).expect("utf-8");
     // ★ Since ledger #496 the NUMBERS are findings waiting for a human (none planted here),
     // and the request depth — the seven tuples — rides in the tooltip's sentence with the
-    // rest of the liveness half. The colour still says a backlog exists.
+    // rest of the liveness half. The color still says a backlog exists.
     assert!(
         badge.contains("class='serious'>0<") && badge.contains("class='other'>+0<"),
         "the two numbers a person came to see: {badge}"
@@ -1577,7 +1577,7 @@ fn the_header_badge_renders_the_depth_and_polls_for_it() {
     // waiting is correct rather than alarming.
     assert!(badge.contains("badge-depth count"), "{badge}");
     assert!(!badge.contains("stuck"), "{badge}");
-    // ★ The whole sentence rides as the tooltip, so colour is never the message (WCAG 1.4.1)
+    // ★ The whole sentence rides as the tooltip, so color is never the message (WCAG 1.4.1)
     // and the one fact that tells a slow queue from a stuck one is readable.
     assert!(badge.contains("NOTHING IS DRAINING"), "{badge}");
 
@@ -2013,7 +2013,7 @@ fn an_unrated_finding_is_never_hidden() {
 
 /// ★★ **The badge carries TWO numbers**: what is waiting for a human in the serious set, and
 /// the rest — and both are facts about the STORE, so a finding minted by anyone moves the
-/// revision the list refreshes on. The liveness half (colour, spark, the depth's own
+/// revision the list refreshes on. The liveness half (color, spark, the depth's own
 /// sentence) is untouched, which the tooltip's first sentence shows.
 #[test]
 fn the_badge_carries_the_serious_count_and_the_other_count() {

@@ -220,7 +220,7 @@ fn a_certificate_can_be_enrolled_under_a_role() {
             "urn:cap:store:read:graph:urn:iki:browse:graph:default",
         ])
     );
-    // A ledger-only enrolment needs no config at all, exactly as before.
+    // A ledger-only enrollment needs no config at all, exactly as before.
     let bare = World::new(false);
     std::fs::remove_file(bare.root.join("xdg/ikigai/config.toml")).unwrap();
     let ledger_only = bare.run(&["client", "add", "laptop", "--ledger", "default=read"]);

@@ -193,7 +193,7 @@ pub fn compose(store: DurableStore) -> Kernel {
 ///
 /// ⚠ **Binding the queue is still not arming the trigger**, and composing it never was:
 /// arming happens in `main`, after this function, and takes `gonk.review.arm = true` plus a
-/// `gonk.review.grant` that `grants.json` can honour ([`crate::trigger::arm`]). What changed
+/// `gonk.review.grant` that `grants.json` can honor ([`crate::trigger::arm`]). What changed
 /// on 2026-09-20 is that arming became safe rather than possible: `ikigai-browse` 0.5.0 made
 /// a review pass produce PENDING findings and stop declaring `urn:cap:annotate`, so a
 /// headless reviewer **cannot publish** — Brian's rule, *"Nothing gets published to Gonk

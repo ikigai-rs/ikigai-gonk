@@ -1571,7 +1571,7 @@ fn the_depth_has_its_own_floor_and_answers_both_faces() {
 
 /// ★ **The serious share is a number this host reports, because the Queue page now filters
 /// on a label the model wrote.** Ledger [#449](http://localhost:1060/l/default/item/449)
-/// measured a prompt moving that share 27% → 62% by re-labelling; a gate on the word makes
+/// measured a prompt moving that share 27% → 62% by re-labeling; a gate on the word makes
 /// the word load-bearing, and this is the tripwire.
 ///
 /// Three things pinned: the labels are read off the pass's OWN answer and only a derived one

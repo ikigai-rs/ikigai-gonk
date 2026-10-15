@@ -202,7 +202,7 @@ impl Server {
         )
     }
 
-    /// Enrol a passkey under a grant reading the default ledger, sign in, and return the
+    /// Enroll a passkey under a grant reading the default ledger, sign in, and return the
     /// session token. The grant carries the store's answer grants (ledger #993), which
     /// `grants.json` accepts, so a signed-in caller's answers are bounded by time alone here.
     fn sign_in(&self) -> String {

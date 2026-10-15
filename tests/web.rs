@@ -1121,7 +1121,7 @@ fn the_sparql_page_offers_the_samples_without_running_them() {
         "the query text blocks are rendered: {page:?}"
     );
     // The page says what `dcterms:created` actually means, because the ledger cannot answer
-    // "the oldest p1" and a button labelled that way would be a lie.
+    // "the oldest p1" and a button labeled that way would be a lie.
     assert!(
         page.body.contains(
             &ikigai_gonk::web::CREATED_IS_FILING_TIME
@@ -1529,7 +1529,7 @@ fn a_passkey_identity_adds_its_grant_and_only_its_grant() {
     );
     assert_eq!(enrolled.status, 200, "{enrolled:?}");
     // ★ One grant table: the passkey sits in the same clients.json the QUIC door reads, and
-    // that file still parses as the QUIC door's enrolment.
+    // that file still parses as the QUIC door's enrollment.
     let clients = std::fs::read_to_string(server.layout.clients_json()).unwrap();
     assert!(
         clients.contains("\"passkeys\"") && clients.contains("\"grant\": \"brian\""),
@@ -1771,7 +1771,7 @@ fn the_active_sample_is_cleared_by_typing_in_the_editor() {
     );
 }
 
-/// Enrol [`Authenticator::new`] under `grant` holding `scopes`, sign it in, and return the
+/// Enroll [`Authenticator::new`] under `grant` holding `scopes`, sign it in, and return the
 /// session token and the passkey's stable IRI — the `principal` the door stamps on a write.
 fn sign_in(server: &Server, grant: &str, scopes: &[String]) -> (String, String) {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1862,7 +1862,7 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
     let commented = comment_as(&server, &iri, &id, "Decided.", Some(&token));
     assert_eq!(commented.status, 200, "{commented:?}");
 
-    // The store holds the IRI — the credential, never the label. A relabelled passkey keeps
+    // The store holds the IRI — the credential, never the label. A relabeled passkey keeps
     // its history, and two passkeys named alike stay distinct.
     let graph = turtle(&server, &id);
     assert_eq!(
@@ -1891,7 +1891,7 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
     );
 
     // ★ The CURRENT label: relabel the passkey in clients.json and the page follows on the
-    // next request, with nothing rewritten in the store. (⚠ Not "Touch ID": the enrol
+    // next request, with nothing rewritten in the store. (⚠ Not "Touch ID": the `#enrol`
     // panel's placeholder says that on every page, so a negative check on it is void.)
     let clients = server.layout.clients_json();
     let text = std::fs::read_to_string(&clients).unwrap();

@@ -78,7 +78,7 @@
 //!
 //! ⚠ **The trap.** Severity is self-reported by the model, and
 //! [#449](http://localhost:1060/l/default/item/449) measured a prompt asking only for the
-//! serious tier moving the serious share 27% → 62% by RE-LABELLING. Gating on the word makes the
+//! serious tier moving the serious share 27% → 62% by RE-LABELING. Gating on the word makes the
 //! word load-bearing. Two defences: nothing this page renders or sends reaches a pass (the
 //! prompt is browse's, and this crate adds no hint, banner or form copy a pass could see), and
 //! `urn:iki:gonk:review:depth` reports the serious share of what this run has minted
@@ -1146,7 +1146,7 @@ impl QueuePage {
         // offers must still find it on the published tab.)
         //
         // ⚠ Nothing about this gate is visible to a review pass — no argument, no banner, no
-        // form copy reaches the prompt — and that is a defence, not an omission: severity is
+        // form copy reaches the prompt — and that is a defense, not an omission: severity is
         // self-reported, and a model that learned only serious words get read would rate
         // everything serious. The tripwire for that is the depth's serious share.
         let policy = &self.web.queue;
@@ -1549,7 +1549,7 @@ impl QueuePage {
     /// flight is working, and a queue with twelve waiting and nothing in flight is a dead
     /// watcher. Both render as "12 waiting" if only the number is printed, and exactly one
     /// of them needs a person. So the trigger's own [`crate::trigger::Status`] writes the
-    /// sentence and this only chooses the word the stylesheet colours it by.
+    /// sentence and this only chooses the word the stylesheet colors it by.
     pub(crate) async fn intray_element(&self, inv: &Invocation<'_>) -> String {
         match read_depth(inv).await {
             Ok(status) => element(
@@ -1641,7 +1641,7 @@ impl QueuePage {
         }
         // ⚠ **Only when a human actually rated it.** `effective_severity` FALLS BACK to the
         // model's proposal when there is no decision — which is right for a consumer that
-        // wants one number, and wrong for a badge labelled "human": rendering it on a pending
+        // wants one number, and wrong for a badge labeled "human": rendering it on a pending
         // row would show a rating nobody made, on the one page built to keep the two apart.
         if let (Some(effective), true) = (
             row.get("effective_severity").and_then(Value::as_str),
@@ -1911,7 +1911,7 @@ impl QueuePage {
 /// twin, when, at what rating, the one-word reason (browse 0.10.0) and the human's note if
 /// one was typed. ⚠ Both are empty on most rows today (14 of 458 declines carried a note when
 /// 0.9.0 shipped, and none can carry a word from before 0.10.0), so the line is built to stand
-/// without them: the date and the twin are what make the repeat recognisable.
+/// without them: the date and the twin are what make the repeat recognizable.
 pub(crate) fn prior_element(prior: &Value) -> String {
     let text = |key: &str| prior.get(key).and_then(Value::as_str).unwrap_or("");
     let twin = text("finding");
@@ -2102,8 +2102,8 @@ fn depth_sentence(status: &Value) -> &str {
         .unwrap_or("The review queue's depth could not be read.")
 }
 
-/// The word the stylesheet colours by. The only thing this face adds to the resource's own
-/// answer, because a colour is presentation and a count is not.
+/// The word the stylesheet colors by. The only thing this face adds to the resource's own
+/// answer, because a color is presentation and a count is not.
 ///
 /// ⚠ **`in_flight` is asked BEFORE the count, and that ordering is a bug fix.** It used to be
 /// a guard on the `Some(_)` arm, so a pass running against an EMPTY inbox — which is the
@@ -2266,7 +2266,7 @@ impl Endpoint for Badge {
         // ★★ THE TWO NUMBERS (ledger #496): how many findings are waiting for a HUMAN, split
         // the way the Queue page splits them — the serious ones it asks about, and the rest
         // it only counts. The request depth (tuples waiting for a PASS) stays in the sentence
-        // and in the colour; it is the liveness half and it is unchanged.
+        // and in the color; it is the liveness half and it is unchanged.
         //
         // ⚠ The cost, stated: one findings read per readable root per poll was ~40ms a root
         // (measured 2026-09-21), fine at seven roots and ~1.9 s a poll at 47 (ledger #667,

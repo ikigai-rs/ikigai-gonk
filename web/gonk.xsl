@@ -49,7 +49,7 @@
               <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@stylesheet"/></xsl:attribute></link>
             </xsl:if>
             <!-- …and that family's LAYOUT sheet (urn:repo:style:layout, ikigai-browse 0.4.2+),
-                 which is the one that makes its markup legible: the theme above only colours
+                 which is the one that makes its markup legible: the theme above only colors
                  the hl- classes inside a file view. Same gate, same reason. Ledger #441. -->
             <xsl:if test="@layout-stylesheet">
               <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@layout-stylesheet"/></xsl:attribute></link>
@@ -214,7 +214,7 @@
   <!-- Where a shell's rows go: a comment src/render.rs::splice replaces with the rows it
        rendered in chunks. A comment because it is the one node that can stand inside any
        element without being markup, and because xrust writes xsl:comment verbatim. Each
-       view applies the slot by NAME (`view:slot[@name = '…']`, a filter xrust honours —
+       view applies the slot by NAME (`view:slot[@name = '…']`, a filter xrust honors —
        measured 2026-09-26), so a page carries exactly one marker for each slot it cut. -->
   <xsl:template match="view:slot">
     <xsl:comment>gonk-slot:<xsl:value-of select="@name"/></xsl:comment>

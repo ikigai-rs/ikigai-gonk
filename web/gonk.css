@@ -163,18 +163,18 @@ summary { cursor: pointer; color: var(--accent); }
 /* The cross-graph example. Deliberately NOT a sample: it is a collapsed `details` below the
  * buttons, with a dashed edge rather than the buttons' filled one, so nothing about it invites
  * a click that would load it into the editor (the page sends one graph; see web::CROSS_GRAPH).
- * No colour is invented — --surface, --line and --muted are the ones the contrast test already
+ * No color is invented — --surface, --line and --muted are the ones the contrast test already
  * holds to ikigai-a11y's floor. It scrolls sideways at phone width rather than wrapping a
  * query mid-token; the page body never scrolls, the block does. */
 .cross-graph-text { white-space: pre; overflow-x: auto; background: var(--surface); border: 1px dashed var(--line); padding: 0.75rem; border-radius: var(--radius); margin: 0; }
 /* ★ The ACTIVE sample (#370). The STATE is `aria-pressed` on the button — web/gonk.js sets it
  * on click and clears it the moment the editor is typed in — so a screen reader hears which
  * sample the editor holds; this rule is only how that looks. Two signals, because the render
- * arc set the bar that a control is never signalled by colour alone (WCAG 1.4.1): the button
+ * arc set the bar that a control is never signaled by color alone (WCAG 1.4.1): the button
  * fills, AND its label goes bold, the same weight change `[aria-current]` already uses for the
  * current ledger and the current filter. --accent on --accent-fg is the pairing
  * `the_palette_clears_the_contrast_floor` already holds to ikigai-a11y's floor in both
- * schemes — no colour is invented here. */
+ * schemes — no color is invented here. */
 .samples button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); font-weight: 700; }
 
 /* ★ A result cell sets NO `overflow-wrap`, and that is the whole of #368's fix.
@@ -207,8 +207,8 @@ td.unbound { color: var(--muted); }
 /* A cell the render rules turned into a control (see src/rules.rs). It is a real anchor:
  * keyboard-reachable in reading order, activated by Enter, and wearing the global
  * :focus-visible ring. The color is --accent, the one the contrast test already holds to
- * ikigai-a11y's floor in BOTH schemes — a link colour invented here would not be checked.
- * Underlined always, so the control is not signalled by colour alone (WCAG 1.4.1); a
+ * ikigai-a11y's floor in BOTH schemes — a link color invented here would not be checked.
+ * Underlined always, so the control is not signaled by color alone (WCAG 1.4.1); a
  * `query` link is dotted because it does something rather than going somewhere. */
 a.cell-link { color: var(--accent); text-decoration: underline; text-underline-offset: 0.15em; }
 a.cell-link[data-action="query"] { text-decoration-style: dotted; }
@@ -231,8 +231,8 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  *
  * Ledger #444. No new color token: every rule here reuses one the contrast test above
  * already holds to ikigai-a11y's 4.5:1 floor in BOTH schemes (see
- * `tests/web.rs::the_palette_clears_the_contrast_floor`). A severity is never signalled by
- * colour alone — the badge carries its word — so the palette here is emphasis, not meaning
+ * `tests/web.rs::the_palette_clears_the_contrast_floor`). A severity is never signaled by
+ * color alone — the badge carries its word — so the palette here is emphasis, not meaning
  * (WCAG 1.4.1). */
 .queue-head { margin: 0 0 var(--gap); }
 .intray { border-left: 4px solid var(--line); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
@@ -240,16 +240,16 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .intray.count, .intray.working { border-left-color: var(--accent); }
 .intray.error, .intray.stuck { border-left-color: var(--danger); }
 
-/* The header's live depth badge (ledger #466). ⚠ Colour is emphasis and never the message:
+/* The header's live depth badge (ledger #466). ⚠ Color is emphasis and never the message:
  * the number is the number, and the whole sentence — including "NONE IN FLIGHT", which is
  * what tells a stuck reviewer from a slow one — is the `title`, so nothing here is carried
  * by hue alone (WCAG 1.4.1). It is `:empty`-collapsed so the header does not jump between
  * the first paint and the first poll. */
 .queue-badge:empty { display: none; }
 /* The badge sits INSIDE the Queue link. As an inline-block with its own line-height it grew the
- * link's line box to the pill's height, the header's align-items:center centred that taller box,
- * and the word "Queue" rode above its neighbours while the pill hung below (Brian, 2026-09-22:
- * "this UI layout is janky"). The link is a flex row, so the word and the pill centre on each
+ * link's line box to the pill's height, the header's align-items:center centered that taller box,
+ * and the word "Queue" rode above its neighbors while the pill hung below (Brian, 2026-09-22:
+ * "this UI layout is janky"). The link is a flex row, so the word and the pill center on each
  * other and the link's box is the same height as Browse's and SPARQL's. The gap replaces the
  * pill's own margin; the tighter line-height keeps the pill from re-growing the row. */
 .navlink { display: inline-flex; align-items: center; gap: 0.35rem; }
@@ -295,7 +295,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .decision-line { margin: 0; font-weight: 600; }
 .decision-note { margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The prior-decision mark (ledger #475): quiet, but not a note — it changes what the form
- * beside it means, so it keeps the text colour and a left rule rather than the muted tone. */
+ * beside it means, so it keeps the text color and a left rule rather than the muted tone. */
 .prior-decision { margin: 0.4rem 0 0; padding: 0.2rem 0.75rem; border-left: 4px solid var(--accent); font-size: 0.95em; }
 .prior-note { white-space: pre-wrap; overflow-wrap: anywhere; }
 .prior-twin { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; opacity: 0.7; }
@@ -304,7 +304,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .decide label { display: flex; flex-direction: column; gap: 0.2rem; }
 .decide-reason { flex: 1 1 18rem; }
 .decide-buttons { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-/* ★ Declining is not destructive and must not wear the danger colour: it is a RECORD that a
+/* ★ Declining is not destructive and must not wear the danger color: it is a RECORD that a
  * human looked and said no, and the finding is kept. Publishing is the consequential act. */
 .decide-button.decline { background: transparent; color: var(--accent); }
 /* The decline reason word, grouped with its button so it reads as Decline's and nothing

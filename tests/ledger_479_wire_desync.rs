@@ -12,7 +12,7 @@
 //! own positive test into `ikigai-ipc` (`a_missed_deadline_does_not_poison_the_connection`
 //! in its `lib.rs`), so the "move it there" half of the original instruction was done for
 //! us; what stays HERE is the consumer's half — proof that THIS binary's dependency graph
-//! actually delivers the fixed behaviour, through this crate's own resolved `ikigai-ipc`,
+//! actually delivers the fixed behavior, through this crate's own resolved `ikigai-ipc`,
 //! with this crate's own describe bound. The mechanism below is kept as written because
 //! it is still the accurate account of what 0.1.24 did and why gonk was the host it hurt.
 //!
@@ -26,7 +26,7 @@
 //! Neither this crate nor `ikigai-browse` can produce it. The read is scoped by the `repo`
 //! binding, which `ikigai-browse`'s `RootRow` grammar inserts as a CONSTANT per bound row,
 //! and `annotate::list_findings` then keeps only records whose own `repo` field equals it —
-//! so a row labelled `ikigai-core` can only come back from an invocation whose target WAS
+//! so a row labeled `ikigai-core` can only come back from an invocation whose target WAS
 //! `urn:repo:ikigai-core:findings`. `EndpointSpace::resolve` is a linear scan over an
 //! immutable table, and the listing is `Expiry::Always`, so neither resolution nor the
 //! kernel cache can substitute one root for another. The substitution is on the WIRE.
@@ -257,7 +257,7 @@ fn a_timed_out_describe_no_longer_poisons_the_connection() {
 /// The incident's own payload, kept because it is the only copy: it was saved to a session
 /// scratchpad that temp cleanup will take. What it pins is the part that makes this a
 /// read-confinement question rather than a mix-up — every row is a *valid* `ikigai-core`
-/// finding, correctly labelled, in the state that was asked for. Nothing in the answer is
+/// finding, correctly labeled, in the state that was asked for. Nothing in the answer is
 /// malformed, so nothing downstream can notice.
 #[test]
 fn the_leaked_payload_is_entirely_another_repos_published_findings() {
