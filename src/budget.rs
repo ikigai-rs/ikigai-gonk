@@ -318,15 +318,11 @@ pub fn anonymous_runs_per_minute(value: Option<&str>) -> Result<u32, String> {
 /// the door cannot tell anonymous callers apart and they all cost the same thing, a caller's
 /// own query evaluated.
 ///
-/// An `ikigai-throttle` `RateLimit` over a space holding one name ([`ANONYMOUS_RUNS_IRI`]):
-/// the limiter keys its window by the PREFIX it matched, so two families under two prefixes
-/// would be two windows. Built once in `main` and handed to both the script family and the
-/// natural-language family, so they share it; a clone shares the window.
+/// A [`Window`] keyed [`ANONYMOUS_RUNS_IRI`]. Built once in `main` and handed to both the script
+/// family and the natural-language family, so they share it; a clone shares the window.
 #[derive(Clone)]
 pub struct AnonymousRuns {
-    limiter: Arc<RateLimit<Gate>>,
-    pass: Arc<dyn Endpoint>,
-    rate: Rate,
+    window: Window,
 }
 
 impl AnonymousRuns {
@@ -337,22 +333,14 @@ impl AnonymousRuns {
 
     /// A window of `rate`.
     pub fn new(rate: Rate) -> AnonymousRuns {
-        let pass: Arc<dyn Endpoint> = Arc::new(Pass);
         AnonymousRuns {
-            limiter: Arc::new(
-                RateLimit::new(Gate {
-                    pass: Arc::clone(&pass),
-                })
-                .limit(ANONYMOUS_RUNS_IRI, rate),
-            ),
-            pass,
-            rate,
+            window: Window::new(ANONYMOUS_RUNS_IRI, rate),
         }
     }
 
     /// The rate this window holds.
     pub fn rate(&self) -> Rate {
-        self.rate
+        self.window.rate()
     }
 
     /// `work`, an anonymous caller's run, counted against the window and run within the door's
@@ -367,18 +355,76 @@ impl AnonymousRuns {
     where
         F: std::future::Future<Output = ikigai_core::Result<Representation>>,
     {
+        if let Some(refused) = self.window.admit(inv).await {
+            return refused;
+        }
+        within_run(door_ms, work).await
+    }
+}
+
+/// ONE sliding window over many callers and many names: an `ikigai-throttle` `RateLimit` over
+/// a space holding one name, `key`. The limiter keys its window by the PREFIX it matched, so
+/// two families limited by their own prefixes would be two windows; counting every admission
+/// under one fixed name is what makes it one. A clone shares the window.
+///
+/// ★ **Consulted on INVOKE, never at resolution** ([`Window::admit`]). The kernel checks a
+/// caller's capability against the resolved endpoint's declaration after resolution and
+/// before the invoke, so a window consulted in the invoke counts only callers the kernel
+/// let through. Counted at resolution — `RateLimit` composed as a space — a caller refused
+/// for want of a grant would still spend a slot, and anyone who could reach the door could
+/// empty the window for everyone who may use it.
+#[derive(Clone)]
+pub struct Window {
+    limiter: Arc<RateLimit<Gate>>,
+    pass: Arc<dyn Endpoint>,
+    key: &'static str,
+    rate: Rate,
+}
+
+impl Window {
+    /// A window of `rate`, counted and refused under the name `key` (an IRI that names no
+    /// resource anyone can request: it is the window's key, and the refusal names it).
+    ///
+    /// # Panics
+    ///
+    /// When `key` is not an IRI — a constant of this crate, so a programming error.
+    pub fn new(key: &'static str, rate: Rate) -> Window {
+        Iri::parse(key).expect("a window's key is an IRI");
+        let pass: Arc<dyn Endpoint> = Arc::new(Pass);
+        Window {
+            limiter: Arc::new(
+                RateLimit::new(Gate {
+                    pass: Arc::clone(&pass),
+                })
+                .limit(key, rate),
+            ),
+            pass,
+            key,
+            rate,
+        }
+    }
+
+    /// The rate this window holds.
+    pub fn rate(&self) -> Rate {
+        self.rate
+    }
+
+    /// Count one admission. `None` when it is under the rate (and now counted); otherwise the
+    /// limiter's refusal — `rate-limited: `{key}` is capped at {max}/{window}s — retry after
+    /// {n}s` — which the caller returns instead of doing the work.
+    pub async fn admit(&self, inv: &Invocation<'_>) -> Option<ikigai_core::Result<Representation>> {
         let count = Request::new(
             Verb::Source,
-            Iri::parse(ANONYMOUS_RUNS_IRI).expect("the anonymous runs' name is an IRI"),
+            Iri::parse(self.key).expect("checked in Window::new"),
         );
         if let Resolution::Hit(hit) = self.limiter.resolve(&count, &Scope::empty()) {
             // Over the rate the limiter answers its stand-in, which refuses whatever it is
             // handed; under it, the gate's own endpoint, which is never invoked.
             if !Arc::ptr_eq(&hit.endpoint, &self.pass) {
-                return hit.endpoint.invoke(inv).await;
+                return Some(hit.endpoint.invoke(inv).await);
             }
         }
-        within_run(door_ms, work).await
+        None
     }
 }
 
@@ -388,7 +434,7 @@ impl Default for AnonymousRuns {
     }
 }
 
-/// The space the limiter counts in: every request resolves to [`Pass`].
+/// The space a [`Window`]'s limiter counts in: every request resolves to [`Pass`].
 struct Gate {
     pass: Arc<dyn Endpoint>,
 }
@@ -406,7 +452,66 @@ struct Pass;
 impl Endpoint for Pass {
     async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
         Err(Error::Endpoint(
-            "the anonymous run gate is a counter, not a resource".to_string(),
+            "a rate window's gate is a counter, not a resource".to_string(),
         ))
     }
+}
+
+// ------------------------------------------------------------------ the model-call rate
+
+/// How many calls an hour reach the mounted model through this server, every caller and every
+/// family together, unless `gonk.mount.calls_per_hour` says otherwise: **2,000** (ledger
+/// [#308](http://localhost:1062/l/default/item/308)).
+///
+/// ★ **Why a rate at all.** Before this, nothing counted spend over time: a call's
+/// `max_tokens` bounds ONE call, the archive makes a re-read of the same content free, and a
+/// net grant decides who may spend — so a caller holding one could walk new content versions,
+/// or ask `urn:llm:ask` directly (neither archived nor bounded by the explain ceilings), with
+/// no aggregate limit anywhere.
+///
+/// ★ **Why counted at the mount, not at each derivation.** Every derivation — a file or
+/// directory explanation, a review pass, a pull request's layers, the judge, a natural-language
+/// draft — reaches the model through the one `urn:llm:` mount, and so does a direct ask. A rate
+/// on the derivation endpoints would count archive hits (a re-read costs nothing) and miss the
+/// direct ask; a rate on the mount counts exactly the calls that spend.
+///
+/// ★ **Why 2,000.** The busiest hour on record is 728 derivation activities (`prov:Activity`
+/// in browse's graph, 2026-10-02 19:00 UTC, during the review-value experiments), and the
+/// busiest minute of the three busiest hours held 16. An activity can be more than one call (a review pass over a long file is
+/// several), so the ceiling is about 2.7 times that hour: it does not bind the heaviest work
+/// this server has done, and it does bind a runaway, which can issue a short call every
+/// second or two. ⚠ It is a ceiling, not a meter: an operator who pays per token sets their
+/// own (`0` refuses every call).
+pub const DEFAULT_MODEL_CALLS_PER_HOUR: u32 = 2_000;
+
+/// The name the model-call rate is counted under, and the one its refusal names:
+/// `rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000/3600s — retry after …`.
+pub const MODEL_CALLS_IRI: &str = "urn:iki:gonk:mount:calls";
+
+/// `gonk.mount.calls_per_hour`, checked: a whole number of calls an hour, `0` for none;
+/// absent means [`DEFAULT_MODEL_CALLS_PER_HOUR`].
+///
+/// ```
+/// use ikigai_gonk::budget::model_calls_per_hour;
+/// assert_eq!(model_calls_per_hour(None), Ok(2000));
+/// assert_eq!(model_calls_per_hour(Some("500")), Ok(500));
+/// assert_eq!(model_calls_per_hour(Some("0")), Ok(0));
+/// assert!(model_calls_per_hour(Some("-1")).is_err());
+/// assert!(model_calls_per_hour(Some("2000/h")).is_err());
+/// ```
+pub fn model_calls_per_hour(value: Option<&str>) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_MODEL_CALLS_PER_HOUR);
+    };
+    value.trim().parse::<u32>().map_err(|_| {
+        format!(
+            "gonk.mount.calls_per_hour = `{value}` is not a whole number of calls an hour (0 \
+             for none: nothing then reaches the mounted model)"
+        )
+    })
+}
+
+/// The model-call window: [`Window`] keyed [`MODEL_CALLS_IRI`], `max` calls an hour.
+pub fn model_calls(max: u32) -> Window {
+    Window::new(MODEL_CALLS_IRI, Rate::new(max, Duration::from_secs(3600)))
 }

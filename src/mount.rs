@@ -76,6 +76,8 @@ use ikigai_core::{
 };
 use ikigai_resolve::{CacheStatus, MountedRemote, Resolver};
 
+use crate::budget::Window;
+
 /// The only prefix this server mounts.
 ///
 /// A mount is composed IN FRONT of the local spaces and its catalog is surfaced through
@@ -397,17 +399,35 @@ pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
 /// it and then denied, and `urn:llm:ask` declares the offering wildcard `urn:cap:net:*`, which a
 /// grant naming another host satisfies. Every resource under the prefix now also declares the
 /// exact token the mount checks.
-pub fn space(mount: &Mount) -> Arc<dyn Space> {
+///
+/// ★ **And every call it forwards is counted against `calls`** (ledger
+/// [#308](http://localhost:1062/l/default/item/308), [`crate::budget::model_calls`]): one
+/// window over every caller and every family that reaches the model, consulted when the call
+/// is invoked — after the kernel has checked the caller's grant, so a refused caller spends
+/// nothing — and never for a `Meta`, which the kernel answers from the description without
+/// invoking anything.
+pub fn space(mount: &Mount, calls: &Window) -> Arc<dyn Space> {
     let origin = mount.target.to_string();
     let remote = Arc::new(MountedRemote::overriding(
         Arc::new(LazyMount::new(mount.target.clone())) as Arc<dyn Resolver>,
         mount.prefix.clone(),
         origin,
     ));
+    declaring(
+        remote,
+        &mount.prefix,
+        format!("urn:cap:net:{}", mount.target.net_host()),
+        calls,
+    )
+}
+
+/// [`space`]'s overlay over any `inner`: what it adds to a mount, apart from the mount.
+fn declaring(inner: Arc<dyn Space>, prefix: &str, scope: String, calls: &Window) -> Arc<dyn Space> {
     Arc::new(Declaring {
-        inner: remote,
-        prefix: mount.prefix.clone(),
-        scope: format!("urn:cap:net:{}", mount.target.net_host()),
+        inner,
+        prefix: prefix.to_string(),
+        scope,
+        calls: calls.clone(),
     })
 }
 
@@ -422,6 +442,8 @@ struct Declaring {
     prefix: String,
     /// `urn:cap:net:{host}`, exactly what [`net_grant`] checks.
     scope: String,
+    /// The model-call window every forwarded call counts against.
+    calls: Window,
 }
 
 impl Space for Declaring {
@@ -436,6 +458,7 @@ impl Space for Declaring {
             Arc::new(NetDeclared {
                 inner: endpoint,
                 scope: self.scope.clone(),
+                calls: self.calls.clone(),
             }) as Arc<dyn Endpoint>
         })
     }
@@ -453,16 +476,21 @@ impl Space for Declaring {
     }
 }
 
-/// A mounted endpoint, unchanged but for its description: every action also requires the
-/// mount's net token ([`crate::nl::declare`]).
+/// A mounted endpoint, unchanged but for its description — every action also requires the
+/// mount's net token ([`crate::nl::declare`]) — and for the model-call window its invoke
+/// counts against ([`space`]).
 struct NetDeclared {
     inner: Arc<dyn Endpoint>,
     scope: String,
+    calls: Window,
 }
 
 #[async_trait]
 impl Endpoint for NetDeclared {
     async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        if let Some(refused) = self.calls.admit(inv).await {
+            return refused;
+        }
         self.inner.invoke(inv).await
     }
 
@@ -899,6 +927,65 @@ impl Resolver for LazyMount {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The peer, standing in: `urn:llm:ask` answers `ok`.
+    struct Ask;
+
+    #[async_trait]
+    impl Endpoint for Ask {
+        async fn invoke(&self, _inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+            Ok(Representation::new(
+                ikigai_core::ReprType::new("text/plain"),
+                b"ok".to_vec(),
+            ))
+        }
+
+        fn describe(&self) -> Description {
+            Description::new("llm-ask").verb(Verb::Source)
+        }
+    }
+
+    /// Ledger #308: every call the mount forwards counts against ONE window, and a caller the
+    /// kernel refuses for want of the net grant spends none of it.
+    #[test]
+    fn the_mount_counts_calls_and_a_refused_caller_spends_none() {
+        let peer =
+            ikigai_core::EndpointSpace::new().bind(ikigai_core::Exact::new("urn:llm:ask"), Ask);
+        let calls = crate::budget::Window::new(
+            crate::budget::MODEL_CALLS_IRI,
+            ikigai_throttle::Rate::new(2, Duration::from_secs(3600)),
+        );
+        let kernel = ikigai_core::Kernel::new(declaring(
+            Arc::new(peer),
+            LLM_PREFIX,
+            "urn:cap:net:localhost".to_string(),
+            &calls,
+        ));
+        let ask = || Request::new(Verb::Source, Iri::parse("urn:llm:ask").unwrap());
+        let issue = |cap: &Capability| futures::executor::block_on(kernel.issue(ask(), cap));
+
+        // A caller holding no grant for the host is refused by the kernel, five times over,
+        // before the mount is invoked: none of it is counted.
+        let stranger = Capability::scoped(["urn:cap:net:elsewhere.example"]);
+        for _ in 0..5 {
+            let refused = issue(&stranger).unwrap_err();
+            assert!(matches!(refused, Error::Denied(_)), "{refused:?}");
+        }
+        // So the two calls the window allows are still there…
+        let holder = Capability::scoped(["urn:cap:net:localhost"]);
+        for _ in 0..2 {
+            assert_eq!(issue(&holder).unwrap().bytes, b"ok");
+        }
+        // …and the third is refused, naming the window. Root is counted too: the window is
+        // spend, whoever spends it.
+        for cap in [&holder, &Capability::root()] {
+            let over = issue(cap).unwrap_err().to_string();
+            assert!(
+                over.contains("rate-limited") && over.contains(crate::budget::MODEL_CALLS_IRI),
+                "{over}"
+            );
+        }
+    }
 
     fn home() -> PathBuf {
         PathBuf::from("/home/u")

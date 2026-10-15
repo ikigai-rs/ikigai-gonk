@@ -19,6 +19,8 @@
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+//! # gonk.mount.calls_per_hour = 2000   # calls that reach the mounted model, every caller
+//!                                       # together (this IS the default; 0 for none)
 //! # a ledger bound to a task layer, offering its items (or taking them: `take`); repeatable
 //! # gonk.layer = "tasks-bobby offer quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=bobby collab=bobby"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
@@ -105,7 +107,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 32] = [
+const KEYS: [&str; 33] = [
     "gonk.log.access",
     "gonk.layer",
     "gonk.queue.serious",
@@ -117,6 +119,7 @@ const KEYS: [&str; 32] = [
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.browse.root",
     "gonk.mount",
+    "gonk.mount.calls_per_hour",
     "gonk.explain.file.provider",
     "gonk.explain.file.max_tokens",
     "gonk.explain.dir.provider",
@@ -601,6 +604,10 @@ pub struct Settings {
     /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
     /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
     pub nl_ask: String,
+    /// How many calls an hour reach the mounted model, every caller and every family together
+    /// (`gonk.mount.calls_per_hour`, default [`crate::budget::DEFAULT_MODEL_CALLS_PER_HOUR`];
+    /// `0` for none) — see [`crate::budget::model_calls`].
+    pub model_calls_per_hour: u32,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -1550,6 +1557,9 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, "gonk.script.anonymous_runs_per_minute").as_deref(),
         )?,
         nl_ask: nl_ask(text)?,
+        model_calls_per_hour: crate::budget::model_calls_per_hour(
+            value_for(text, "gonk.mount.calls_per_hour").as_deref(),
+        )?,
     })
 }
 
@@ -2138,6 +2148,29 @@ mod tests {
                 "{bad}: {refused}"
             );
         }
+    }
+
+    /// Ledger #308: the model-call rate defaults to 2,000 an hour, takes any whole number (0 for
+    /// none), and refuses anything else rather than reading it as the default. Its key is not
+    /// read as a `gonk.mount` line.
+    #[test]
+    fn the_model_call_rate_defaults_to_two_thousand_an_hour() {
+        let rate = |text: &str| {
+            settings(&Flags::default(), text, &homes()).map(|s| s.model_calls_per_hour)
+        };
+        assert_eq!(rate(""), Ok(2000));
+        assert_eq!(rate("gonk.mount.calls_per_hour = 120"), Ok(120));
+        assert_eq!(rate("gonk.mount.calls_per_hour = \"0\""), Ok(0));
+        for bad in ["-1", "1.5", "2000/h", "\"many\""] {
+            let refused = rate(&format!("gonk.mount.calls_per_hour = {bad}")).unwrap_err();
+            assert!(
+                refused.contains("whole number of calls an hour"),
+                "{bad}: {refused}"
+            );
+        }
+        let mounts = settings(&Flags::default(), "gonk.mount.calls_per_hour = 5", &homes())
+            .map(|s| s.mounts.len());
+        assert_eq!(mounts, Ok(0));
     }
 
     #[test]

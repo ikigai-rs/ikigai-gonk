@@ -649,8 +649,10 @@ Use --force to replace it, which changes every identity enrolled under it
 
 A reordering of the same scopes is no change, and is written without `--force`.
 
-⚠ **A click on Explain spends inference, and nothing here counts it.** The per-face token
-ceilings (`gonk.explain.*.max_tokens`) bound ONE call. A directory-grain explanation fans out
+⚠ **A click on Explain spends inference.** The per-face token ceilings
+(`gonk.explain.*.max_tokens`) bound ONE call; what bounds them over time is one window on the
+mount, `gonk.mount.calls_per_hour` (2,000 by default; [explaining](#explaining-what-it-browses)
+says how it counts). A directory-grain explanation fans out
 per child inside `ikigai-browse` — each child's own explanation, recursively, with unchanged
 children as archive hits — so one click on a large directory is many model calls, and the
 door cannot see that from outside. `/k` issues exactly one kernel request per HTTP request
@@ -1781,6 +1783,22 @@ read. Measured on a scratch repository against `quic://127.0.0.1:4433`: the file
 derived in **10.2s** on `qwen3-coder:30b` and came back from the archive in **13ms**; the
 directory rollup derived in 61s on a 70B model, because a rollup asks the default tier.
 
+**And over time, one window on the mount** (ledger #308): at most `gonk.mount.calls_per_hour`
+calls an hour reach the model, **2,000** unless the config says otherwise, every caller and
+every family together. The archive helps once per content version and not at all against a
+caller walking new versions, or asking `urn:llm:ask` directly, which is neither archived nor
+bounded by the ceilings above; the window bounds both. It counts at the mount because that is
+where spend leaves: an explanation, a review pass, a pull request's layers, the judge and a
+natural-language draft all reach the model there, and an archive hit never does. A call is
+counted when it is invoked, after the kernel has checked the caller's grant, so a caller
+without the net grant spends none of it; a `describe` is never counted. Past the window a call
+is refused with ``rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000/3600s — retry
+after Ns`` (an `Error::Endpoint`, since core has no typed rate-limit error). Why 2,000: the
+busiest hour on record is 728 derivations (2026-10-02, the review-value experiments), and a
+long file's review is several calls, so the ceiling does not bind the heaviest work this
+server has done and does bind a runaway. ⚠ It is a ceiling, not a meter: on a metered peer, set
+your own (`0` refuses every call). The banner's `llm` line names it.
+
 A model swap on the peer re-keys the archive by itself: the version tag folds the model
 identity `ikigai-browse` resolves through `urn:llm:{provider}:model` at explain time, which
 is why gonk sets no model label. A `provider=` argument may name only the tiers this server
@@ -2445,8 +2463,10 @@ draft carries where it came from into the version a person publishes.
   person, published and run, anonymous refused with the model never called, and a QUIC
   machine drafting. A real model drafts differently; the check and the repair are the part
   that does not.
-- **Not built:** `urn:nl:script` (a plan, then Lisp; ledger #959), a page for drafting (it is
-  the mechanical route today), and any rate limit on drafting beyond the per-ask bound.
+- **A draft's calls count against the mount's hourly window** (`gonk.mount.calls_per_hour`,
+  ledger #308) with every other call that reaches the model.
+- **Not built:** `urn:nl:script` (a plan, then Lisp; ledger #959) and a page for drafting (it
+  is the mechanical route today).
 
 ## The three doors
 

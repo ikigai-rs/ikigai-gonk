@@ -295,8 +295,14 @@ fn serve(flags: &config::Flags) -> ! {
     // The mounts are built before the kernel and dialled by neither: `crate::mount` dials on
     // first use, so a peer that is down costs this server nothing at startup and the ledger
     // is served whether or not a model can be reached.
-    let mut mounted: Vec<Arc<dyn ikigai_core::Space>> =
-        settings.mounts.iter().map(mount::space).collect();
+    // ★ ONE model-call window for every mount line (ledger #308): spend is counted where it
+    // leaves for the model, whoever and whatever is spending it (`budget::model_calls`).
+    let model_calls = ikigai_gonk::budget::model_calls(settings.model_calls_per_hour);
+    let mut mounted: Vec<Arc<dyn ikigai_core::Space>> = settings
+        .mounts
+        .iter()
+        .map(|m| mount::space(m, &model_calls))
+        .collect();
     // ★ The layer bindings' mounts (ledger #1190): `urn:layer:{layer}` per `gonk.layer` line,
     // then `urn:layers:` and `urn:collab:`, on one door nothing dials until it is used.
     let layer_mounts = layer::mount(&settings.layers);
@@ -915,7 +921,8 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
     let tiers = &settings.explain;
     format!(
         "{} (prefer; dialed on first use) — explain/review bound; file {} @{}, dir {} @{}, \
-         review {} @{}, pr {} @{} tokens. Deriving needs urn:cap:net:{}, which \
+         review {} @{}, pr {} @{} tokens; at most {} model calls an hour, every caller \
+         together (gonk.mount.calls_per_hour). Deriving needs urn:cap:net:{}, which \
          `--browse derive` mints and nothing else does",
         mount.target,
         tiers.file.provider,
@@ -926,6 +933,7 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
         tiers.review.max_tokens,
         tiers.pr.provider,
         tiers.pr.max_tokens,
+        settings.model_calls_per_hour,
         mount.target.net_host(),
     )
 }
