@@ -113,6 +113,31 @@ pub const SPARQL_IDS: [&str; 14] = [
     "sparql-describe",
 ];
 
+/// The store's HOST RESERVE grant, `urn:cap:store:reserve`, which every scoped job this server
+/// runs on its own behalf holds: the scheduled backup ([`crate::backup::JOB_SCOPES`]), the judge
+/// backfill ([`crate::backfill::scopes`]), the armed reviewer
+/// ([`crate::trigger::reviewer_capability`]), and a layer binding's mirror and taker
+/// ([`crate::mirror::capability`], [`crate::taker::capability`]). Root jobs hold it already.
+///
+/// ★ Why (ledger [#1598](http://localhost:1062/l/default/item/1598)): from the `ikigai-store`
+/// release after 0.2.23 (ikigai-rs/ikigai-store PR 63, ledger #1002) the store's cap on SPARQL
+/// evaluations in flight is split into a reserve that only root and holders of this grant may
+/// use, a pool every other caller shares, and a per-caller share of that pool, keyed by
+/// principal. Every capability that names NO principal is one caller, so without this grant
+/// the backup would count against the same share as every anonymous HTTP request: on plasma's
+/// default cap of 4 (reserve 1, pool 3, share 1), one anonymous runaway query would refuse it.
+///
+/// It is a PRIORITY, not an authority. No endpoint requires it and it reaches no resource; it
+/// only lets an evaluation the caller may already run use the host's slots, and on store 0.2.23
+/// (the published release gonk pins) it is inert. ⚠ Spelled as a literal because 0.2.23 has no
+/// constant for it: when gonk takes the store release that adds `ikigai_store::budget::
+/// CAP_RESERVE`, use that instead and pin the two equal in a test.
+///
+/// ```
+/// assert_eq!(ikigai_gonk::budget::STORE_RESERVE, "urn:cap:store:reserve");
+/// ```
+pub const STORE_RESERVE: &str = "urn:cap:store:reserve";
+
 /// The marker an anonymous HTTP caller's capability carries.
 ///
 /// ```

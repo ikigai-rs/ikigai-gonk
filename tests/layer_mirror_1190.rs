@@ -555,6 +555,25 @@ fn the_mirror_holds_about_and_not_close() {
     }
 }
 
+/// The mirror and the taker are this server's own jobs, so both hold the store's host reserve
+/// (ledger #1598), spelled as the store spells it, beside the binding's principal: from the
+/// store release after 0.2.23 their ledger reads use the host's slots, not a caller's share.
+#[test]
+fn the_mirror_and_the_taker_hold_the_stores_host_reserve() {
+    let binding = World::new().binding(LAYER);
+    for (who, capability) in [
+        ("mirror", mirror::capability(&binding).unwrap()),
+        ("taker", taker::capability(&binding).unwrap()),
+    ] {
+        assert!(capability.allows("urn:cap:store:reserve"), "the {who}");
+        assert_eq!(
+            capability.principal(),
+            Some(binding.principal().as_str()),
+            "the {who} still acts as the binding's principal"
+        );
+    }
+}
+
 #[test]
 fn a_replayed_hand_back_comments_once() {
     let w = World::new();

@@ -368,7 +368,8 @@ fn serve(flags: &config::Flags) -> ! {
     // ★ The judge backfill (ledger #696), bound only where judge-finding is — beside the
     // explain families, so only with a peer to judge on. It runs under exactly the browse read
     // and a net grant naming the mounted peer's host: what judge-finding declares, and nothing
-    // a store write, an annotation or `gh` would need.
+    // a store write, an annotation or `gh` would need — plus the store's host reserve (ledger
+    // #1598), a priority rather than an authority; see `backfill::scopes`.
     let backfill = explains.then(|| {
         Arc::new(backfill::Backfill::new(
             settings
@@ -378,10 +379,7 @@ fn serve(flags: &config::Flags) -> ! {
                 .collect(),
             settings.queue.clone(),
             settings.explain.judge.clone(),
-            vec![
-                ikigai_browse::CAP_WILDCARD.to_string(),
-                format!("urn:cap:net:{}", mount_host(&settings)),
-            ],
+            backfill::scopes(&mount_host(&settings)),
             Arc::clone(&activity),
             settings.review.clone(),
         ))
