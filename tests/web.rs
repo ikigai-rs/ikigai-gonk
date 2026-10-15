@@ -67,6 +67,12 @@ impl Server {
     /// may read no ledger. (A rebound `Host` used to be that caller; since ledger #864 it is
     /// refused outright, so it holds nothing to render a page with.)
     fn start_configured(rules: &str, anonymous: Vec<String>) -> Server {
+        Server::start_with_roots(rules, anonymous, Vec::new())
+    }
+
+    /// [`Server::start_configured`] with browse ROOT NAMES configured: the header's entry
+    /// points are computed from them. No browse family is mounted behind them.
+    fn start_with_roots(rules: &str, anonymous: Vec<String>, browse_roots: Vec<String>) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -79,7 +85,7 @@ impl Server {
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
-            browse_roots: Vec::new(),
+            browse_roots,
             passkeys: Arc::clone(&passkeys),
             rules: rules.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
@@ -2517,5 +2523,123 @@ fn a_stored_link_to_gonk_at_port_1060_renders_onto_this_server() {
                 .body
                 .contains("http://localhost:1060/queue?state=published&group=file"),
         "the store holds the bodies as written: {stored:?}"
+    );
+}
+
+/// Ledger [#505](http://localhost:1062/l/default/item/505): the item page's "Close as" menu is
+/// `urn:iki:ledger:close`'s own `reason` set, in the contract's order and nothing else — read
+/// from the hub's contract, never a copy in the stylesheet.
+#[test]
+fn the_close_menu_is_the_ledger_contracts_reason_set_in_order() {
+    let server = Server::start();
+    let (_iri, id) = file(&server, "Close me some way");
+    let item = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(item.status, 200, "{item:?}");
+    let at = item
+        .body
+        .find("id='close-reason'")
+        .unwrap_or_else(|| panic!("a close menu: {item:?}"));
+    let start = item.body[..at]
+        .rfind("<select")
+        .expect("the menu is a select");
+    let end = start
+        + item.body[start..]
+            .find("</select>")
+            .expect("the menu closes");
+    let menu = &item.body[start..end];
+    let offered: Vec<&str> = menu
+        .split("<option")
+        .skip(1)
+        .map(|option| {
+            let at = option.find("value='").expect("an option carries a value") + 7;
+            &option[at..at + option[at..].find('\'').expect("the value closes")]
+        })
+        .collect();
+    let declared: Vec<&str> = ikigai_ledger::vocabulary::CLOSE_REASONS
+        .iter()
+        .map(|(word, _)| *word)
+        .collect();
+    assert_eq!(offered, declared, "{menu}");
+    for word in &declared {
+        assert!(menu.contains(&format!(">{word}</option>")), "{menu}");
+    }
+}
+
+/// Ledger [#666](http://localhost:1062/l/default/item/666): `#flash` is cleared before a
+/// request a person made, and NOT before the header badge's timed poll — which runs on every
+/// page every few seconds and used to empty `#flash` before anyone had read it.
+///
+/// There is no JavaScript runtime in this suite (see
+/// `the_active_sample_is_cleared_by_typing_in_the_editor`), so what is pinned is the wiring:
+/// the clearing listener returns early for a request from inside `.queue-badge`, before it
+/// clears. The behavior was checked under node with a stubbed DOM before merging.
+#[test]
+fn the_badge_poll_does_not_clear_the_flash() {
+    let js = include_str!("../web/gonk.js");
+    let at = js
+        .find("addEventListener(\"htmx:beforeRequest\"")
+        .expect("the clearing listener");
+    let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
+    let skip = body
+        .find(".closest(\".queue-badge\")) return;")
+        .unwrap_or_else(|| panic!("the badge's request is skipped: {body}"));
+    let clear = body
+        .find("flash(\"\", \"ok\")")
+        .unwrap_or_else(|| panic!("other requests still clear: {body}"));
+    assert!(skip < clear, "the skip comes before the clear: {body}");
+    assert_eq!(
+        js.matches("htmx:beforeRequest").count(),
+        1,
+        "one clearing listener, so no second one clears on the poll"
+    );
+    // The badge's markup still carries the class the listener keys on.
+    assert!(
+        include_str!("../web/gonk.xsl").contains("<span class=\"queue-badge\""),
+        "the badge is a .queue-badge span"
+    );
+}
+
+/// Ledger [#446](http://localhost:1062/l/default/item/446): when the header leaves out a section
+/// this server has because the caller's grant does not reach it, the header says so — one
+/// generic sentence, never which section — and says nothing when nothing was left out.
+#[test]
+fn the_header_says_when_a_section_is_withheld_and_only_then() {
+    let hidden = "Some sections are hidden";
+    let rules = ikigai_gonk::rules::DEFAULT_RULES;
+
+    // Everything this server has is in the header: nothing to say.
+    let whole = Server::start();
+    let page = whole.page("/", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(!page.body.contains(hidden), "{page:?}");
+
+    // A configured ledger the caller may not read.
+    let no_ledger = Server::start_configured(rules, Vec::new());
+    let page = no_ledger.page("/", None);
+    assert!(
+        page.body.contains(web::WITHHELD_SIGNED_OUT) && page.body.contains(web::WITHHELD_SIGNED_IN),
+        "both halves are drawn, the script picks one: {page:?}"
+    );
+    assert!(
+        page.body.contains("data-withheld-notice='true'"),
+        "drawn as a notice web/gonk.js switches: {page:?}"
+    );
+    assert!(
+        include_str!("../web/gonk.js").contains("[data-signin-notice], [data-withheld-notice]"),
+        "the script switches it with the sign-in notices"
+    );
+
+    // Browse roots configured, none readable: Browse and the Queue are left out.
+    let roots = Server::start_with_roots(
+        rules,
+        grants_for("default", Authority::Write).unwrap(),
+        vec!["demo".to_string()],
+    );
+    let page = roots.page("/", None);
+    assert!(!page.body.contains(">Browse</a>"), "{page:?}");
+    assert!(page.body.contains(web::WITHHELD_SIGNED_OUT), "{page:?}");
+    assert!(
+        !page.body.contains("demo"),
+        "the sentence never names what is hidden: {page:?}"
     );
 }

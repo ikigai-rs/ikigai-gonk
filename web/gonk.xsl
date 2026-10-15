@@ -68,6 +68,7 @@
               <xsl:apply-templates select="view:queue"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <div id="auth" class="auth">
+                <xsl:apply-templates select="view:withheld"/>
                 <span id="auth-who" class="who" hidden="hidden"></span>
                 <button id="auth-login" type="button" class="quiet" hidden="hidden">Sign in with passkey</button>
                 <button id="auth-logout" type="button" class="quiet" hidden="hidden">Sign out</button>
@@ -94,6 +95,17 @@
         <xsl:call-template name="body"/>
       </xsl:otherwise>
     </xsl:choose>
+  </xsl:template>
+
+  <!-- A section this caller's grant does not reach was left out of the header (ledger #446,
+       src/web.rs::withholds). One generic sentence, never which section; signed out or signed
+       in is web/gonk.js's call from /auth/session, like the sign-in notices below; its own
+       attribute, so a page's sign-in notice is still the one `[data-signin-notice]`. -->
+  <xsl:template match="view:withheld">
+    <span class="note withheld" data-withheld-notice="true">
+      <span class="signed-out"><xsl:value-of select="@signed-out"/></span>
+      <span class="signed-in" hidden="hidden"><xsl:value-of select="@signed-in"/></span>
+    </span>
   </xsl:template>
 
   <xsl:template match="view:ledger">
@@ -1382,7 +1394,7 @@
             <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
             <button type="submit" class="quiet small">
-              <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> as done</xsl:attribute>
+              <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> with the ledger's default reason</xsl:attribute>
               Close
             </button>
           </form>
@@ -1579,14 +1591,14 @@
             <xsl:when test="view:status = 'open'">
               <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'close'"/></xsl:call-template>
-                <label for="close-reason">Close as</label>
-                <select id="close-reason" name="reason">
-                  <option value="done">done</option>
-                  <option value="wontfix">wontfix</option>
-                  <option value="duplicate">duplicate</option>
-                  <option value="superseded">superseded</option>
-                  <option value="audit-no-change">audit-no-change</option>
-                </select>
+                <!-- The words are urn:iki:ledger:close's own `reason` set, in contract order
+                     (ledger #505, src/web.rs::enrich_close_reasons): this file spells none. -->
+                <xsl:if test="view:closeReason">
+                  <label for="close-reason">Close as</label>
+                  <select id="close-reason" name="reason">
+                    <xsl:apply-templates select="view:closeReason"/>
+                  </select>
+                </xsl:if>
                 <button type="submit">Close</button>
               </form>
             </xsl:when>
@@ -1717,6 +1729,15 @@
         </form>
       </section>
     </xsl:if>
+  </xsl:template>
+
+  <!-- One close reason: `NN word`, the position first so the RDF/XML keeps the contract's
+       order (src/web.rs::enrich_close_reasons); the option is the word alone. -->
+  <xsl:template match="view:closeReason">
+    <option>
+      <xsl:attribute name="value"><xsl:value-of select="substring-after(., ' ')"/></xsl:attribute>
+      <xsl:value-of select="substring-after(., ' ')"/>
+    </option>
   </xsl:template>
 
   <!-- The hidden fields every item form carries. Context: the ledger:Item. -->

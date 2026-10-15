@@ -624,6 +624,8 @@ pub enum QuicDoor {
         trusted: Vec<String>,
         /// How many fingerprints `clients.json` enrols.
         enrolled: usize,
+        /// The banner's line per client, from the same read ([`client_lines`]).
+        clients: Vec<String>,
     },
 }
 
@@ -692,7 +694,72 @@ pub fn open_door(layout: &Layout, bind: QuicBind) -> Result<QuicDoor, String> {
         identity,
         trusted,
         enrolled: enrolment.map_or(0, |e| e.len()),
+        clients: client_lines(layout)?,
     })
+}
+
+/// How much of a certificate fingerprint the banner prints: the leading 16 of its 64 hex
+/// characters (ledger [#427](http://localhost:1062/l/default/item/427)). Sixteen because the
+/// cli chose it first (ledger #426) for its own banner, a PREFIX of the id `client list` and
+/// `clients.json` spell in full, so one id is never truncated two ways in one ecosystem.
+pub const FINGERPRINT_SHOWN: usize = 16;
+
+/// The banner's line per QUIC client: label, short fingerprint, the file that makes it one,
+/// and what a connection from it gets — every row [`list_clients`] answers, so a trusted
+/// certificate that is NOT enrolled, and an enrolled fingerprint with no bundle, are named
+/// too rather than counted together.
+///
+/// ⚠ A fingerprint is not a secret: it is a hash of a PUBLIC certificate, which a client sends
+/// in the clear at every handshake, and it admits nobody without the private key. That is why
+/// it may sit on a banner that lands in a log.
+///
+/// ```
+/// let config = tempfile::tempdir().unwrap();
+/// let layout = ikigai_gonk::quic::Layout::in_config_home(config.path());
+/// let pem = ikigai_quic::generate().cert_pem;
+/// let full = ikigai_quic::fingerprint_of_pem(&pem).unwrap().to_lowercase();
+/// let bundle = layout.clients_dir().join("laptop");
+/// std::fs::create_dir_all(&bundle).unwrap();
+/// std::fs::write(bundle.join("client.crt"), &pem).unwrap();
+/// let lines = ikigai_gonk::quic::client_lines(&layout).unwrap();
+/// assert_eq!(
+///     lines,
+///     [format!(
+///         "client  laptop  {}  {}  trusted, NOT enrolled (refused at connection)",
+///         &full[..16],
+///         bundle.join("client.crt").display()
+///     )]
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The reasons [`list_clients`] gives.
+pub fn client_lines(layout: &Layout) -> Result<Vec<String>, String> {
+    let (rows, default) = list_clients(layout)?;
+    let label = |row: &ClientRow| row.name.clone().unwrap_or_else(|| "-".to_string());
+    let width = rows.iter().map(|row| label(row).len()).max().unwrap_or(0);
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let file = match &row.name {
+                Some(name) => layout.clients_dir().join(name).join("client.crt"),
+                None => layout.clients_json(),
+            };
+            let state = match (&row.grant, &default) {
+                (None, Some(grant)) if row.name.is_some() => {
+                    format!("trusted, under the default grant `{grant}`")
+                }
+                _ => row.state().to_string(),
+            };
+            format!(
+                "client  {:width$}  {}  {}  {state}",
+                label(row),
+                &row.fingerprint[..row.fingerprint.len().min(FINGERPRINT_SHOWN)],
+                file.display(),
+            )
+        })
+        .collect())
 }
 
 /// Parse `grants.json` — the cli's shape: grant name → an array of scopes, or an object

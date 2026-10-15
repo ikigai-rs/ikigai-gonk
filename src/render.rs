@@ -675,6 +675,12 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 ///   prose, field guide 9i).
 /// - **A link to gonk at its OLD port** (`http://localhost:1060/l/…`, gonk's own routes only)
 ///   gets a root-relative href onto this server ([`rehome`]); its text stays as written.
+/// - **A GitHub reference in the 9i notation** (ledger
+///   [#925](http://localhost:1062/l/default/item/925)): `owner/repo#N` links to
+///   `https://github.com/owner/repo/issues/N` (GitHub sends an issue number that is a pull
+///   request on to it), and `owner/repo PR N` or `owner/repo PR #N` to
+///   `https://github.com/owner/repo/pull/N` ([`github_ref_at`]). A bare `#N` or `PR N` names
+///   no repository, so it stays text.
 /// - Everything else is text: no markdown, no HTML.
 ///
 /// ```
@@ -687,6 +693,12 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 ///      <a href='https://a.example/x?y=1&amp;z=2'>https://a.example/x?y=1&amp;z=2</a>). \
 ///      and <a href='/l/default/item/12'>ledger #12</a>, not javascript:alert(1) or \
 ///      &lt;b&gt;</div>"
+/// );
+/// let prs = "<p data-linkify='default'>Fixed in ikigai-rs/ikigai-lisp PR 28 and o/r#7.</p>";
+/// assert_eq!(
+///     linkify(prs),
+///     "<p data-linkify='default'>Fixed in <a href='https://github.com/ikigai-rs/ikigai-lisp/pull/28'>\
+///      ikigai-rs/ikigai-lisp PR 28</a> and <a href='https://github.com/o/r/issues/7'>o/r#7</a>.</p>"
 /// );
 /// // Text outside a marked element is never touched.
 /// assert_eq!(linkify("<p>https://a.example</p>"), "<p>https://a.example</p>");
@@ -755,6 +767,18 @@ fn linkify_text(text: &str, ledger: &str) -> String {
                 out.push_str(&format!("<a href='{href}'>{url}</a>"));
                 i += len;
                 continue;
+            }
+            // Not inside a path or a name: `a.example/x/y#3` and `urn:a/b#3` are not references.
+            let joined = text[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| matches!(c, '/' | '.' | '-' | '_' | ':' | '@' | '#'));
+            if !joined {
+                if let Some((len, href)) = github_ref_at(here) {
+                    out.push_str(&format!("<a href='{href}'>{}</a>", &here[..len]));
+                    i += len;
+                    continue;
+                }
             }
             if ledger_ok {
                 if let Some(len) = ledger_ref_at(here) {
@@ -857,6 +881,77 @@ fn url_at(text: &str) -> Option<usize> {
         url = trimmed;
     }
     (url.len() > scheme.len()).then_some(url.len())
+}
+
+/// The length and the GitHub URL of the `owner/repo#N`, `owner/repo PR N` or `owner/repo PR #N`
+/// reference that `text` starts with, if it does (ledger
+/// [#925](http://localhost:1062/l/default/item/925); field guide 9i is the notation).
+///
+/// The owner is GitHub's: ASCII letters, digits and inner hyphens. The repository adds `.` and
+/// `_`. The number is 1 to 9 digits and must end the token, so `o/r#12abc` is text.
+///
+/// ```
+/// use ikigai_gonk::render::github_ref_at;
+/// let at = |t: &str| github_ref_at(t).map(|(len, href)| (t[..len].to_string(), href));
+/// assert_eq!(
+///     at("ikigai-rs/ikigai-gonk#158, merged"),
+///     Some(("ikigai-rs/ikigai-gonk#158".into(), "https://github.com/ikigai-rs/ikigai-gonk/issues/158".into()))
+/// );
+/// assert_eq!(
+///     at("ikigai-rs/ikigai-lisp PR #28."),
+///     Some(("ikigai-rs/ikigai-lisp PR #28".into(), "https://github.com/ikigai-rs/ikigai-lisp/pull/28".into()))
+/// );
+/// assert_eq!(at("o/r PR 7"), Some(("o/r PR 7".into(), "https://github.com/o/r/pull/7".into())));
+/// assert_eq!(at("o/r#12abc"), None);
+/// assert_eq!(at("o/r pr 7"), None);
+/// assert_eq!(at("-o/r#1"), None);
+/// assert_eq!(at("o/r/x#1"), None);
+/// assert_eq!(at("#12"), None);
+/// ```
+pub fn github_ref_at(text: &str) -> Option<(usize, String)> {
+    let bytes = text.as_bytes();
+    let run = |from: usize, ok: fn(u8) -> bool| {
+        from + bytes[from..].iter().take_while(|&&b| ok(b)).count()
+    };
+    let owner_end = run(0, |b| b.is_ascii_alphanumeric() || b == b'-');
+    let owner = &text[..owner_end];
+    if owner.is_empty() || owner.len() > 39 || owner.starts_with('-') || owner.ends_with('-') {
+        return None;
+    }
+    if bytes.get(owner_end) != Some(&b'/') {
+        return None;
+    }
+    let repo_end = run(owner_end + 1, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')
+    });
+    let repo = &text[owner_end + 1..repo_end];
+    if repo.is_empty() || repo.len() > 100 {
+        return None;
+    }
+    let (kind, digits_at) = if bytes.get(repo_end) == Some(&b'#') {
+        ("issues", repo_end + 1)
+    } else if text[repo_end..].starts_with(" PR #") {
+        ("pull", repo_end + 5)
+    } else if text[repo_end..].starts_with(" PR ") {
+        ("pull", repo_end + 4)
+    } else {
+        return None;
+    };
+    let end = run(digits_at, |b| b.is_ascii_digit());
+    let digits = end - digits_at;
+    let after_ok = text[end..]
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric());
+    (digits > 0 && digits <= 9 && after_ok).then(|| {
+        (
+            end,
+            format!(
+                "https://github.com/{owner}/{repo}/{kind}/{}",
+                &text[digits_at..end]
+            ),
+        )
+    })
 }
 
 /// The length of the `ledger #N` reference that `text` starts with, if it does.

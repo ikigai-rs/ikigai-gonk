@@ -464,3 +464,44 @@ fn all_on_a_directory_that_does_not_exist_clones_and_creates_nothing() {
     assert_eq!(both.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&both.stderr).contains("not both"));
 }
+
+/// Ledger #814: a path under `HOME` reads as `~/…` everywhere this command prints one — the
+/// config file in the coverage header and the "not written" line as well as the checkouts.
+#[test]
+fn config_paths_are_abbreviated_under_home_like_checkout_paths() {
+    let world = World::new();
+    let home = world.root.join("home");
+    let (dir, config) = (
+        home.join("checkouts"),
+        home.join(".config/ikigai/config.toml"),
+    );
+    let run = |extra: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+        command
+            .arg("checkout")
+            .args(extra)
+            .arg("--dir")
+            .arg(&dir)
+            .arg("--config")
+            .arg(&config);
+        isolate(&mut command, &world.root);
+        command.output().expect("run ikigai-gonk")
+    };
+
+    let first = ok(&run(&[&world.url()]));
+    assert!(first.contains("  ~/checkouts/demo"), "{first}");
+    assert!(
+        first.contains("not written: add the lines above to ~/.config/ikigai/config.toml,"),
+        "{first}"
+    );
+
+    let all = ok(&run(&["--all"]));
+    assert!(
+        all.contains("\ncoverage of ~/checkouts by the roots in ~/.config/ikigai/config.toml:"),
+        "{all}"
+    );
+    assert!(
+        !all.contains(&home.display().to_string()),
+        "no path under HOME is printed absolute: {all}"
+    );
+}

@@ -85,7 +85,14 @@
     flash(text, "error");
   });
   document.addEventListener("htmx:sendError", () => flash("The server did not answer.", "error"));
-  document.addEventListener("htmx:beforeRequest", () => flash("", "ok"));
+  // A request clears the last message, unless nobody made it (ledger #666): the header's queue
+  // badge polls on a timer, on every page, so clearing on its request emptied #flash within
+  // one poll of anything being written there, often before anyone had read it.
+  document.addEventListener("htmx:beforeRequest", (e) => {
+    const elt = e.detail && e.detail.elt;
+    if (elt && elt.closest && elt.closest(".queue-badge")) return;
+    flash("", "ok");
+  });
 
   // ---------------------------------------------- the /k/ adapter's path spelling
   //
@@ -368,7 +375,8 @@
 
   function drawNotices(root) {
     const scope = root && root.querySelectorAll ? root : document;
-    scope.querySelectorAll("[data-signin-notice]").forEach((notice) => {
+    // The header's withheld-sections sentence (ledger #446) switches the same way.
+    scope.querySelectorAll("[data-signin-notice], [data-withheld-notice]").forEach((notice) => {
       const out = notice.querySelector(".signed-out");
       const inside = notice.querySelector(".signed-in");
       const button = notice.querySelector(".signin-here");

@@ -393,7 +393,8 @@ pub(crate) fn nav(
             )
         })
         .collect();
-    if !crate::k::readable_roots(web, inv).is_empty() {
+    let reads_a_root = !crate::k::readable_roots(web, inv).is_empty();
+    if reads_a_root {
         out.push_str(&element("browse", &[("href", crate::k::ROOTS_PATH)], ""));
     }
     // ★ And the Queue, on the same rule one step stronger: a caller is offered it only when
@@ -407,7 +408,8 @@ pub(crate) fn nav(
     // ([#466](http://localhost:1060/l/default/item/466)). The badge is on the nav rather
     // than the Queue page because the page is where you go once you already suspect
     // something.
-    if crate::queue::offers_queue(web, inv) {
+    let offers_queue = crate::queue::offers_queue(web, inv);
+    if offers_queue {
         out.push_str(&element(
             "queue",
             &[
@@ -418,7 +420,47 @@ pub(crate) fn nav(
             "",
         ));
     }
+    if withholds(web, inv, reads_a_root, offers_queue) {
+        out.push_str(&element(
+            "withheld",
+            &[
+                ("signed-out", WITHHELD_SIGNED_OUT),
+                ("signed-in", WITHHELD_SIGNED_IN),
+            ],
+            "",
+        ));
+    }
     out
+}
+
+/// What the header says when `nav` has left out a section this server has (ledger
+/// [#446](http://localhost:1062/l/default/item/446)) — signed out, and signed in under a grant
+/// that does not reach it. Which of the two shows is `web/gonk.js`'s call, as for the sign-in
+/// notices (`Lacking`).
+///
+/// ★ **An absence has no affordance to explain itself.** A section gated well is simply not
+/// drawn, so a caller without the grant saw a complete-looking, smaller application and
+/// concluded a feature was broken (Brian, signed out, looking for Browse). The header is the
+/// one component present on every page that knows the caller's state, so it says so there.
+///
+/// ⚠ **Generic on purpose: it never says WHICH section.** Naming them would tell an
+/// unauthenticated caller what this server offers, and a count says nearly as much. Nor does it
+/// draw disabled links: that re-creates the door that answers a 403, which ledger #442 removed.
+pub const WITHHELD_SIGNED_OUT: &str = "Some sections are hidden until you sign in.";
+
+/// The signed-in half of [`WITHHELD_SIGNED_OUT`].
+pub const WITHHELD_SIGNED_IN: &str = "Some sections are hidden: your grant does not include them.";
+
+/// Whether [`nav`] left out a section this server HAS for want of this caller's grant: a
+/// configured ledger it may not read, Browse when roots are configured and it reads none, or
+/// the Queue when roots are configured and it is not offered one. A server with no roots has
+/// no Browse or Queue to withhold, so their absence there says nothing.
+fn withholds(web: &Web, inv: &Invocation<'_>, reads_a_root: bool, offers_queue: bool) -> bool {
+    let unread_ledger = web.ledgers.iter().any(|name| {
+        Ledger::parse(name).is_ok_and(|ledger| !inv.capability.allows(&ledger.cap_read()))
+    });
+    let has_roots = !web.browse_roots.is_empty();
+    unread_ledger || (has_roots && (!reads_a_root || !offers_queue))
 }
 
 /// What a page says when the caller's grant does not reach what it shows — ONE shape for
@@ -590,6 +632,30 @@ fn flag(yes: bool) -> &'static str {
         "true"
     } else {
         "false"
+    }
+}
+
+/// The "Close as" menu's words: `urn:iki:ledger:close`'s own `reason` set, read from the
+/// contract this hub binds (ledger [#505](http://localhost:1062/l/default/item/505)), the way
+/// the Queue reads its severity, decision and reason words (`crate::queue::one_of`). Before
+/// this the stylesheet held a copy of `ikigai-ledger`'s close reasons that nothing guarded, so
+/// a ledger release adding or renaming one left the page offering a word the ledger refuses.
+///
+/// ⚠ Each word is written as `view:closeReason "NN word"`, its place in the contract first:
+/// [`Graph::rdfxml`] sorts a subject's values lexically, and xrust cannot sort by a sibling
+/// (the module docs of `crate::render`), so a zero-padded position is what keeps the
+/// contract's order, its default first. The stylesheet shows the part after the space.
+/// A contract that declares no set adds nothing, and the form then sends no `reason` at all,
+/// which the ledger reads as its own default.
+fn enrich_close_reasons(graph: &mut Graph, hub: &Kernel, ledger: &Ledger) {
+    let Some(words) = crate::queue::one_of(hub, &ledger.resource("close"), Verb::Sink, "reason")
+    else {
+        return;
+    };
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        for (at, word) in words.iter().enumerate() {
+            graph.view(&item, "closeReason", format!("{at:02} {word}"));
+        }
     }
 }
 
@@ -1411,6 +1477,7 @@ async fn item_card(
     );
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, "open");
+    enrich_close_reasons(&mut graph, &web.hub, ledger);
     enrich_children(&mut graph);
     enrich_authors(&mut graph, &web.passkeys);
     // The ledger a comment's `ledger #N` references resolve in (`render::linkify`, ledger #989).

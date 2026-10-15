@@ -283,12 +283,12 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         let _ = writeln!(
             out,
             "\nnot written: add the lines above to {}, or run again with --write-config",
-            config.display()
+            display(&config, &homes.home)
         );
         return Ok(all_ok);
     }
     let (results, backup) = append_roots(&config, &roots, &homes.home)?;
-    let _ = writeln!(out, "\n{}:", config.display());
+    let _ = writeln!(out, "\n{}:", display(&config, &homes.home));
     let mut added = false;
     for ((name, path), result) in roots.iter().zip(&results) {
         let _ = match result {
@@ -309,7 +309,7 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         };
     }
     if let Some(backup) = backup {
-        let _ = writeln!(out, "  backup     {}", backup.display());
+        let _ = writeln!(out, "  backup     {}", display(&backup, &homes.home));
     }
     if added {
         // ⚠ No supervisor command (ledger #1093): it used to print a `launchctl kickstart` of
@@ -423,7 +423,7 @@ fn run_all(
         out,
         "\ncoverage of {} by the roots in {}:",
         display(dir, &homes.home),
-        config.display()
+        display(&config, &homes.home)
     );
     if coverage.is_empty() {
         let _ = writeln!(
@@ -574,7 +574,6 @@ fn checkout(git: &Git, repo: &Repo, path: &Path) -> Outcome {
     }
 }
 
-/// Fetch and fast-forward an existing clone — or say why not, having changed nothing.
 /// Why an update did not happen.
 enum Stop {
     /// The checkout's state says no.
@@ -589,6 +588,7 @@ impl From<String> for Stop {
     }
 }
 
+/// Fetch and fast-forward an existing clone — or say why not, having changed nothing.
 fn update(git: &Git, repo: &Repo, path: &Path) -> Result<Outcome, Stop> {
     let top = git
         .run(Some(path), &["rev-parse", "--show-toplevel"])
