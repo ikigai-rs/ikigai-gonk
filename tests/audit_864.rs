@@ -709,7 +709,14 @@ fn a_plain_text_author_is_kept_and_another_principal_is_refused_on_every_route()
 
     // The QUIC door: a client holding ledger write cannot name a passkey either.
     let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-    let door = doors::quic_kernel_with(Arc::clone(&hub), None);
+    // The capability below names no client, so the door's per-call re-read (ledger #1710) has
+    // no enrollment to read and an empty config home serves.
+    let home = tempfile::tempdir().unwrap();
+    let door = doors::quic_kernel_with(
+        Arc::clone(&hub),
+        None,
+        quic::Layout::in_config_home(home.path()),
+    );
     let writer = Capability::scoped(grants_for("default", Authority::Write).unwrap());
     let append = |author: &str| {
         block_on(Kernel::issue(
@@ -985,12 +992,19 @@ fn a_quic_write_is_logged_attributed_and_may_name_only_its_own_client() {
     let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
     let sink = Arc::clone(&lines);
     let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
+    // The door re-reads the client's enrollment on every call (ledger #1710), so it is on disk
+    // too, as `rw`, exactly as parsed above.
+    let home = tempfile::tempdir().unwrap();
+    let layout = quic::Layout::in_config_home(home.path());
+    std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+    quic::enrol(&layout, "rw", FP, &grants["rw"], false).unwrap();
     let door = doors::quic_kernel_with(
         Arc::clone(&hub),
         Some(ikigai_gonk::access::AccessLog::to(
             ikigai_gonk::access::Door::Quic,
             Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
         )),
+        layout,
     );
     let append = |author: Option<&str>| {
         let mut args: Vec<(&str, &[u8])> =

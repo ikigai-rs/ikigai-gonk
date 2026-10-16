@@ -44,8 +44,9 @@ fn hub() -> Arc<Kernel> {
     ))
 }
 
-/// The capability a QUIC session carries for `FP`, minted the way the door mints it.
-fn session() -> Capability {
+/// The capability a QUIC session carries for `FP`, minted the way the door mints it, and the
+/// config home it is enrolled in (the door re-reads it on every call, ledger #1710).
+fn session() -> (tempfile::TempDir, Capability) {
     let dir = tempfile::tempdir().unwrap();
     let layout = quic::Layout::in_config_home(dir.path());
     std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
@@ -62,12 +63,12 @@ fn session() -> Capability {
         .expect("an enrolment");
     let grants = quic::read_grants(&layout.grants_json()).unwrap();
     let (_grant, capability) = quic::authority(&enrolment, &grants, FP).unwrap();
-    capability
+    (dir, capability)
 }
 
 #[test]
 fn a_new_connection_is_named_in_the_hosts_convention() {
-    let capability = session();
+    let (_home, capability) = session();
     assert_eq!(
         capability.principal(),
         Some("urn:iki:host:gonk:client:6f1c00aa"),
@@ -84,14 +85,15 @@ fn an_unnamed_quic_write_is_filled_and_logged_with_the_new_form() {
     let hub = hub();
     let lines: Arc<Mutex<Vec<String>>> = Arc::default();
     let sink = Arc::clone(&lines);
+    let (home, capability) = session();
     let door = doors::quic_kernel_with(
         Arc::clone(&hub),
         Some(AccessLog::to(
             Door::Quic,
             Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
         )),
+        quic::Layout::in_config_home(home.path()),
     );
-    let capability = session();
     block_on(door.issue(
         request(
             Verb::Sink,
@@ -131,8 +133,12 @@ fn an_unnamed_quic_write_is_filled_and_logged_with_the_new_form() {
 #[test]
 fn the_old_spelling_of_another_machine_is_refused_and_ones_own_is_not() {
     let hub = hub();
-    let door = doors::quic_kernel_with(Arc::clone(&hub), None);
-    let capability = session();
+    let (home, capability) = session();
+    let door = doors::quic_kernel_with(
+        Arc::clone(&hub),
+        None,
+        quic::Layout::in_config_home(home.path()),
+    );
     let append = |author: &str| {
         block_on(door.issue(
             request(

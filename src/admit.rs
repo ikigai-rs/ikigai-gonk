@@ -1,9 +1,10 @@
 //! What a door refuses BEFORE a request reaches anything it names — and who a request is
 //! from, as far as the door itself can say.
 //!
-//! Four decisions live here, made at the outermost endpoint of a door's kernel
+//! Five decisions live here, made at the outermost endpoint of a door's kernel
 //! ([`Admitting`]). The first three are made once per host-issued request and none of them is
-//! a capability question; the fourth reads the capability for a token no endpoint requires:
+//! a capability question; the fourth reads the capability for a token no endpoint requires; the
+//! fifth re-reads the capability itself:
 //!
 //! 1. **Is this request one the door answers at all?** The HTTP door used to answer a foreign
 //!    `Host` (DNS rebinding) and a cross-site write (a form on another site posting here) by
@@ -60,6 +61,19 @@
 //!    by a depth test: `ikigai-ledger` issues its `graph-update` sub-requests inside the HUB
 //!    kernel, under the caller's capability, and the hub has no admission layer — this one
 //!    wraps only what arrives at a door.
+//!
+//! 5. **Does the client still hold this authority?** (ledger
+//!    [#1710](http://localhost:1062/l/default/item/1710).) `ikigai-quic` mints a connection's
+//!    authority ONCE, from `clients.json` and `grants.json` as they read at the handshake, and a
+//!    client answering the door's keep-alive holds its connection until one side restarts: through
+//!    9d4e722 a removed grant kept answering Hermes until gonk restarted. So the QUIC door re-reads
+//!    both files on every call that arrives ([`standing_scopes`], the same read the minter makes):
+//!    a client whose enrollment or grant is gone is refused, and one whose grant NARROWED is
+//!    answered under the narrower authority, by issuing the call again one level down under the
+//!    capability attenuated to the grant as it reads now. It cannot WIDEN a call (there is no
+//!    such operation on a capability, by design), so a widened grant waits for the connection to
+//!    age out ([`crate::quic::MAX_CONNECTION_AGE`]). The HTTP door has re-read `grants.json` per
+//!    request since it had grants; this brings the QUIC door to the same rule.
 //!
 //! ★ **The socket runs rule 4 and nothing else** (ledger
 //! [#899](http://localhost:1060/l/default/item/899)). Its caller is the owner (`0600`, peer UID
@@ -673,18 +687,95 @@ pub fn machine_publish_refusal(id: &str, request: &Request) -> Option<String> {
     }
 }
 
+/// What a call that ARRIVED on a QUIC connection under `capability` may use, as the client's
+/// enrollment and grant read NOW ([`crate::quic::current_authority`]): `Ok(None)` when the
+/// connection's authority stands, `Ok(Some(scopes))` when the grant has narrowed since the
+/// client connected (answer the call under `capability` attenuated to `scopes`), and `Err` with
+/// the reason when the client holds no authority any more.
+///
+/// A capability naming no QUIC client ([`crate::quic::client_fingerprint`] of its principal)
+/// stands: gonk's minter names every client it admits, so such a capability came from a door
+/// whose minter is not gonk's, and there is no enrollment to re-read for it.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_gonk::grants::{grants_for, Authority};
+/// use ikigai_gonk::{admit::standing_scopes, quic};
+/// let home = tempfile::tempdir().unwrap();
+/// let layout = quic::Layout::in_config_home(home.path());
+/// std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+/// let write = grants_for("default", Authority::Write).unwrap();
+/// quic::enrol(&layout, "hermes", "ab12", &write, false).unwrap();
+/// let (_, minted) = quic::current_authority(&layout, "ab12").unwrap();
+/// // Unchanged: the connection's authority stands.
+/// assert_eq!(standing_scopes(&layout, &minted), Ok(None));
+/// // Narrowed to read: the call is answered under the read grant.
+/// let read = grants_for("default", Authority::Read).unwrap();
+/// quic::enrol(&layout, "hermes", "ab12", &read, true).unwrap();
+/// let narrowed = standing_scopes(&layout, &minted).unwrap().expect("narrowed");
+/// assert!(read.iter().all(|scope| narrowed.contains(scope)));
+/// assert!(!narrowed.contains(&"urn:cap:ledger:write:default".to_string()));
+/// // Unenrolled: refused.
+/// assert!(quic::unenrol(&layout, "ab12").unwrap());
+/// assert!(standing_scopes(&layout, &minted).is_err());
+/// // A capability naming no client is not this rule's.
+/// assert_eq!(standing_scopes(&layout, &Capability::scoped(write)), Ok(None));
+/// ```
+///
+/// # Errors
+///
+/// The sentence the call is refused with: the client's enrollment or grant is gone, or a file
+/// does not parse (fail closed, as the minter does).
+pub fn standing_scopes(
+    layout: &crate::quic::Layout,
+    capability: &Capability,
+) -> std::result::Result<Option<Vec<String>>, String> {
+    let Some(fingerprint) = capability
+        .principal()
+        .and_then(crate::quic::client_fingerprint)
+    else {
+        return Ok(None);
+    };
+    let (_, current) = crate::quic::current_authority(layout, fingerprint).map_err(|why| {
+        format!(
+            "this client no longer holds any authority here: {why}. A QUIC client's enrollment \
+             (gonk/clients.json) and grant (gonk/grants.json) are read again on every call, and \
+             one of them changed after this connection was opened"
+        )
+    })?;
+    let Some(scopes) = current.scopes() else {
+        return Ok(None);
+    };
+    let scopes: Vec<String> = scopes.iter().cloned().collect();
+    let narrowed = capability.attenuate(scopes.iter().cloned());
+    Ok((narrowed != *capability).then_some(scopes))
+}
+
 /// A space that answers a door's refusals before anything it binds runs: an overlay with no
 /// identity or structure of its own (it forwards [`Space::id`], [`Space::topology`] and
 /// [`Space::entries`], so `urn:kernel:topology` reads the same with it or without it).
 pub struct Admitting {
     inner: Arc<dyn Space>,
     door: Door,
+    grants: Option<crate::quic::Layout>,
 }
 
 impl Admitting {
     /// Guard `inner` for requests that arrive through `door`.
     pub fn new(inner: Arc<dyn Space>, door: Door) -> Admitting {
-        Admitting { inner, door }
+        Admitting {
+            inner,
+            door,
+            grants: None,
+        }
+    }
+
+    /// Hold every request that arrives through the QUIC door to the client's authority as
+    /// `grants`' files read when it arrives (rule 5, [`standing_scopes`]). `None`, and any
+    /// other door, re-reads nothing.
+    pub fn rechecking(mut self, grants: Option<crate::quic::Layout>) -> Admitting {
+        self.grants = grants;
+        self
     }
 }
 
@@ -694,6 +785,7 @@ impl Space for Admitting {
             Arc::new(Admitted {
                 inner: endpoint,
                 door: self.door,
+                grants: self.grants.clone(),
             }) as Arc<dyn Endpoint>
         })
     }
@@ -716,6 +808,27 @@ impl Space for Admitting {
 struct Admitted {
     inner: Arc<dyn Endpoint>,
     door: Door,
+    grants: Option<crate::quic::Layout>,
+}
+
+impl Admitted {
+    /// Answer `request` (this invocation's own, or the author-filled one) under the
+    /// invocation's capability, or one level down under the narrower one rule 5 found.
+    async fn answer(
+        &self,
+        inv: &Invocation<'_>,
+        filled: Option<Request>,
+        narrowed: Option<Vec<String>>,
+    ) -> Result<Representation> {
+        match (filled, narrowed) {
+            (None, None) => self.inner.invoke(inv).await,
+            (Some(filled), None) => inv.issue(filled).await,
+            (filled, Some(scopes)) => {
+                let request = filled.unwrap_or_else(|| inv.request.clone());
+                inv.issue_attenuated(request, scopes).await
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -733,8 +846,17 @@ impl Endpoint for Admitted {
                 return Err(Error::Denied(why.to_string()));
             }
         }
+        // Rule 5 (ledger #1710): the client's authority as its files read NOW. Refused here
+        // when it has none; narrowed below, where the call is answered, after every other
+        // rule has read the request as it arrived.
+        let narrowed = match &self.grants {
+            Some(layout) if arrived && self.door == Door::Quic => {
+                standing_scopes(layout, inv.capability).map_err(Error::Denied)?
+            }
+            _ => None,
+        };
         if !inv.request.verb.is_mutating() {
-            let answer = self.inner.invoke(inv).await;
+            let answer = self.answer(inv, None, narrowed).await;
             // A derivation refused because the request came from another page reads, from
             // the kernel, as "does not grant `urn:cap:net:*`" — to a person whose grant does.
             // Say which half of the authority went missing, and why.
@@ -776,10 +898,10 @@ impl Endpoint for Admitted {
             // that arrived.
             if let Some(filled) = fill_author(self.door, inv.capability, inv.request, &description)
             {
-                return inv.issue(filled).await;
+                return self.answer(inv, Some(filled), narrowed).await;
             }
         }
-        self.inner.invoke(inv).await
+        self.answer(inv, None, narrowed).await
     }
 
     fn name(&self) -> &str {

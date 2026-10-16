@@ -171,7 +171,7 @@ usage:
   ikigai-gonk client remove <name> | --fingerprint <fp> [--config PATH]
                                    remove a client's bundle and its enrollment (or one enrolled
                                    fingerprint with no bundle). grants.json is left alone: a
-                                   grant name may be shared. Effective at its next connection;
+                                   grant name may be shared. Effective at its next call;
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey list [--config PATH]
                                    every enrolled passkey: its label, grant, credential id

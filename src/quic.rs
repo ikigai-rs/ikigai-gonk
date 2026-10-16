@@ -9,15 +9,20 @@
 //!    client takes a restart.
 //! 2. **What may it do?** The certificate's SHA-256 fingerprint maps to a grant name in
 //!    `clients.json`, and the grant name maps to capability scopes in `grants.json` — the
-//!    cli's two files in the cli's two shapes. Re-read on EVERY connection, so editing either
-//!    file changes a client's authority on its next connection, and deleting its entry
-//!    revokes it.
+//!    cli's two files in the cli's two shapes. Read when a client connects, and read AGAIN on
+//!    every call that arrives on its connection ([`current_authority`], ledger
+//!    [#1710](http://localhost:1062/l/default/item/1710)): deleting a client's entry in either
+//!    file refuses its next call, and narrowing its grant answers its next call under the
+//!    narrower authority — on the connection it already holds, which a client answering the
+//!    door's keep-alive may hold for days. A WIDENED grant waits for a new connection (a
+//!    session only narrows), and the door closes every connection at
+//!    [`MAX_CONNECTION_AGE`], so it arrives within that bound.
 //!
 //! **Fail closed at every step.** A trusted certificate with no grant is refused. A grant
 //! that names no scopes (a typo, or one deleted from `grants.json`) is refused, not treated
 //! as unrestricted. A grant naming a broad store token, an offering wildcard or the backup
-//! family is refused ([`grant_refusal`]) — at startup, and again per connection in case the
-//! file was edited after. An enrollment file
+//! family is refused ([`grant_refusal`]) — at startup, and again on every connection and
+//! every call in case the file was edited after. An enrollment file
 //! that does not parse stops the server rather than degrading it.
 //!
 //! Everything lives under `<config home>/gonk/`:
@@ -38,6 +43,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ikigai_core::Capability;
 use ikigai_quic::{Identity, Minter, PeerIdentity, Session};
@@ -292,9 +298,11 @@ pub fn planned_fingerprint(
 /// Take `fingerprint` out of `clients.json`'s `clients`, leaving passkeys, the default and
 /// `grants.json` alone. `Ok(false)` when it was not enrolled.
 ///
-/// Takes effect at the fingerprint's next connection: `clients.json` is re-read per
-/// connection. A certificate's TRUST is read at startup, so a removed bundle is still
-/// accepted by the TLS handshake until a restart — and then refused for want of a grant.
+/// Takes effect at the fingerprint's next call, on the connection it already holds:
+/// `clients.json` is re-read on every call (ledger
+/// [#1710](http://localhost:1062/l/default/item/1710)). A certificate's TRUST is read at
+/// startup, so a removed bundle is still accepted by the TLS handshake until a restart — and
+/// then refused for want of a grant.
 pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
     let mut doc = read_object(&layout.clients_json())?;
     let Some(Value::Object(mut clients)) = doc.remove("clients") else {
@@ -837,7 +845,7 @@ pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String
 ///
 /// ⚠ Audit round 4 (ledger [#864](http://localhost:1060/l/default/item/864), R1) found the
 /// third family checked at STARTUP and nowhere else: `grants.json` is re-read per connection
-/// precisely so an edit takes effect, and an edit after startup put `urn:cap:gonk:restore` on
+/// (and, since ledger #1710, per call) precisely so an edit takes effect, and an edit after startup put `urn:cap:gonk:restore` on
 /// a QUIC client, which then wrote a RocksDB store at a path it chose. The list lived in four
 /// places and one of them had all three; this function is the list, once.
 pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
@@ -911,7 +919,7 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
 /// `ikigai-repo` declares `urn:cap:exec:*` and `ikigai-browse` declares `urn:cap:net:*` to
 /// mean "holds some grant under this prefix"; copied into `grants.json` each means the
 /// opposite of the narrowing a reader would take it for. Both are refused at startup and
-/// again per connection, because the file is re-read per connection and an edit after
+/// again per connection and per call, because the file is re-read then and an edit after
 /// startup is exactly when this would slip in.
 fn wildcard_refusal(name: &str, scopes: &[String]) -> Option<String> {
     let exec = crate::grants::unbounded_exec_scopes(scopes);
@@ -978,8 +986,9 @@ pub fn authority(
 
 /// A grant name's scopes, **fail closed** — the one rule both identity doors apply: a grant
 /// that is unknown, that names no scopes, or that names any token [`grant_refusal`] refuses
-/// is refused. The QUIC door calls it per connection; the HTTP door per request carrying a
-/// passkey session; the trigger once, for the reviewer.
+/// is refused. The QUIC door calls it per connection and again per call
+/// ([`current_authority`]); the HTTP door per request carrying a passkey session; the trigger
+/// once, for the reviewer.
 pub fn scopes_for_grant(
     grants: &BTreeMap<String, Vec<String>>,
     grant: &str,
@@ -1145,8 +1154,42 @@ pub fn put_grant(
     write_private(&layout.grants_json(), &text)
 }
 
-/// The per-connection minter: re-reads both files, and refuses — logging the full
-/// fingerprint and the fix — whenever [`authority`] does.
+/// How old a QUIC connection may grow before the door closes it and the client reconnects
+/// under an authority minted afresh: ten minutes (ledger
+/// [#1710](http://localhost:1062/l/default/item/1710), through `ikigai-quic`'s ledger #1179
+/// seam).
+///
+/// ★ **Not the revocation bound.** A removed or narrowed grant reaches a standing connection on
+/// its next call ([`current_authority`], read per call by [`crate::admit`]), so nothing about
+/// taking authority away waits on this. What does wait is GIVING it: a call can only be
+/// narrowed below the authority its connection was minted with, never widened above it, so a
+/// widened grant reaches a client that never reconnects only when this bound closes its
+/// connection. Ten minutes and not two, because each close costs a handshake and opens the one
+/// race the library documents (a write opened in the instant the door closes fails as a lost
+/// reply and is not replayed), and nothing security-relevant is left behind it to hurry.
+pub const MAX_CONNECTION_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// The authority the client with `fingerprint` holds NOW, read from `clients.json` and
+/// `grants.json` as they are on disk: what [`minter`] mints a connection from, and what
+/// [`crate::admit`] re-reads on every call that arrives on one. Fail closed: a missing or
+/// unparsable file, an unenrolled fingerprint, or a grant [`scopes_for_grant`] refuses is the
+/// reason, never a fallback.
+///
+/// # Errors
+///
+/// Why the fingerprint holds no authority, in a sentence that names the file to look at.
+pub fn current_authority(
+    layout: &Layout,
+    fingerprint: &str,
+) -> Result<(String, Capability), String> {
+    let enrolment = read_enrolment(&layout.clients_json())?
+        .ok_or_else(|| format!("no enrollment file at {}", layout.clients_json().display()))?;
+    let grants = read_grants(&layout.grants_json())?;
+    authority(&enrolment, &grants, fingerprint)
+}
+
+/// The per-connection minter: re-reads both files ([`current_authority`]), and refuses —
+/// logging the full fingerprint and the fix — whenever [`authority`] does.
 ///
 /// An admitted connection's [`Session`] carries the grant's capability with the client's name
 /// ([`client_iri`]) minted into it ([`authority`], core 0.1.93's `urn:cap:principal:`), and the
@@ -1155,18 +1198,8 @@ pub fn put_grant(
 /// ([`crate::admit::principal`]): `clamp` keeps the session's principal whatever capability the
 /// client carries.
 pub fn minter(layout: Layout) -> Minter {
-    Arc::new(move |peer: &PeerIdentity| {
-        let decided = read_enrolment(&layout.clients_json())
-            .and_then(|enrolment| {
-                enrolment.ok_or_else(|| {
-                    format!("no enrollment file at {}", layout.clients_json().display())
-                })
-            })
-            .and_then(|enrolment| {
-                let grants = read_grants(&layout.grants_json())?;
-                authority(&enrolment, &grants, &peer.fingerprint)
-            });
-        match decided {
+    Arc::new(
+        move |peer: &PeerIdentity| match current_authority(&layout, &peer.fingerprint) {
             Ok((grant, capability)) => {
                 eprintln!(
                     "ikigai-gonk: quic client {} → grant \"{grant}\"",
@@ -1187,8 +1220,8 @@ pub fn minter(layout: Layout) -> Minter {
                 );
                 None
             }
-        }
-    })
+        },
+    )
 }
 
 /// Everything [`enrol`] would refuse, checked WITHOUT writing — so `client add` can ask

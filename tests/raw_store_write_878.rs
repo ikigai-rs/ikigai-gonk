@@ -284,7 +284,7 @@ fn quic_door(grant: &[String], access: Option<AccessLog>) -> QuicDoor {
         .map(|(_, pem)| pem)
         .collect();
     let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-    let door = doors::quic_kernel_with(Arc::clone(&hub), access);
+    let door = doors::quic_kernel_with(Arc::clone(&hub), access, layout.clone());
     // Bound here and handed to the door, so the port is the one the kernel chose and nothing
     // picks one by bind-and-release (ledger #1300, field guide 9h).
     let udp = ikigai_quic::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -884,7 +884,14 @@ fn the_socket_keeps_no_author_rule() {
 #[test]
 fn the_whole_dataset_doors_are_refused_at_a_network_door() {
     let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-    let quic = doors::quic_kernel_with(Arc::clone(&hub), None);
+    // A capability naming no client: the door's per-call re-read (ledger #1710) has nothing
+    // to read, so an empty config home serves.
+    let home = tempfile::tempdir().unwrap();
+    let quic = doors::quic_kernel_with(
+        Arc::clone(&hub),
+        None,
+        quic::Layout::in_config_home(home.path()),
+    );
     let broad = Capability::scoped([ikigai_store::CAP_WRITE, ikigai_store::CAP_READ]);
     for (iri, args) in [
         (
