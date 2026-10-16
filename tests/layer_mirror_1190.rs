@@ -928,7 +928,23 @@ fn a_ledger_write_offers_without_waiting_for_the_sweep() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(w.pending().len(), 1, "{:?}", w.pending());
+    eprintln!(
+        "DBG {} test files crew#2",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100000
+    );
     w.file("Arrives later\n\nOffered by the listener.", &[]);
+    eprintln!(
+        "DBG {} test filed crew#2",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 100000
+    );
     let deadline = Instant::now() + Duration::from_secs(20);
     while w.pending().len() < 2 {
         assert!(
