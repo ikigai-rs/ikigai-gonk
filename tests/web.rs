@@ -2600,6 +2600,55 @@ fn the_badge_poll_does_not_clear_the_flash() {
     );
 }
 
+/// Ledger [#1718](http://localhost:1062/l/default/item/1718): a failed poll of the header's
+/// Queue badge writes nothing into `#flash`, as a failed poll of the Layers badge does not
+/// (ledger #1705). During a gonk restart the badge's every-ten-seconds poll fails each time, and
+/// each failure was an ALERT (`role="alert"`), so a screen reader was interrupted every ten
+/// seconds for as long as gonk was down. The badge retries on its own; its next answer is the
+/// news.
+///
+/// No JavaScript runtime here (see `the_badge_poll_does_not_clear_the_flash`): this pins the
+/// wiring. Both page-wide failure handlers return for a request the badge made before they
+/// write into `#flash`, and the predicate they ask covers both badges.
+#[test]
+fn a_failed_badge_poll_is_not_an_alert() {
+    let js = include_str!("../web/gonk.js");
+    let function = |name: &str| {
+        let at = js
+            .find(&format!("function {name}("))
+            .unwrap_or_else(|| panic!("no function {name}"));
+        &js[at..at + js[at..].find("\n  }\n").expect("the function ends")]
+    };
+    let own = function("isOwnRetry");
+    assert!(own.contains("isBadge(elt)"), "{own}");
+    let badge = function("isBadge");
+    for class in [".queue-badge", ".layers-badge"] {
+        assert!(
+            badge.contains(&format!(".closest(\"{class}\")")),
+            "{class}: {badge}"
+        );
+    }
+    for event in ["htmx:sendError", "htmx:responseError"] {
+        let mut from = 0;
+        let mut general = None;
+        while let Some(at) = js[from..].find(&format!("addEventListener(\"{event}\"")) {
+            let at = from + at;
+            let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
+            if body.contains("flash(") {
+                general = Some(body);
+            }
+            from = at + 1;
+        }
+        let general = general.unwrap_or_else(|| panic!("no {event} listener writes #flash"));
+        let skip = general
+            .find("if (isOwnRetry(")
+            .unwrap_or_else(|| panic!("{event}: {general}"));
+        let write = general.find("flash(").expect("it writes otherwise");
+        assert!(skip < write, "{event}: the badge returns first: {general}");
+    }
+    assert!(include_str!("../web/gonk.xsl").contains("<span class=\"queue-badge\""));
+}
+
 /// Ledger [#446](http://localhost:1062/l/default/item/446): when the header leaves out a section
 /// this server has because the caller's grant does not reach it, the header says so — one
 /// generic sentence, never which section — and says nothing when nothing was left out.

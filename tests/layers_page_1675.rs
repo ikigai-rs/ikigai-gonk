@@ -20,6 +20,7 @@
 //! - [`the_page_reaches_a_scratch_door_over_quic`]
 //! - [`the_long_poll_does_not_clear_the_flash`]
 //! - [`an_unreachable_door_is_one_banner`]
+//! - [`a_layer_not_yet_read_has_lists_for_what_arrives`] (ledger #1718)
 //!
 //! And the header's unread count (ledger [#1700](http://localhost:1062/l/default/item/1700)) and
 //! the access log's quiet polls (ledger [#1694](http://localhost:1062/l/default/item/1694)):
@@ -934,6 +935,80 @@ fn the_poll_answers_at_once_and_brings_a_new_entry() {
     );
 }
 
+/// A door that refuses every read of a layer's entries or tuples until it is opened: the copy
+/// discovers the layers and reads none of them, the state a page drawn mid-read sees.
+struct Gated {
+    inner: Arc<dyn Door>,
+    open: std::sync::atomic::AtomicBool,
+}
+
+impl Door for Gated {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        let target = request.target.as_str();
+        let content = target.ends_with(":entries") || target.ends_with(":tuples");
+        if content && !self.open.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Unavailable("not yet".to_string()));
+        }
+        self.inner.call(request)
+    }
+}
+
+/// ★ Ledger #1718: a layer the copy had not read yet when its page was drawn had no entries list
+/// (and a task layer no tuple lists), so the poll's new entries, which are added INTO
+/// `#layer-entries`, had nowhere to land until a reload. The page now draws the lists empty, and
+/// without the "nothing has been said" sentence, which would be a claim nobody checked.
+#[test]
+fn a_layer_not_yet_read_has_lists_for_what_arrives() {
+    let host = Host::open();
+    host.message("bobby", "talk", "said before the read");
+    let gated = Arc::new(Gated {
+        inner: host.door("brian"),
+        open: std::sync::atomic::AtomicBool::new(false),
+    });
+    let view = LayersView::new(
+        Arc::clone(&gated) as Arc<dyn Door>,
+        "scratch-door".to_string(),
+        None,
+        quick(),
+    );
+    assert!(view.refresh().is_err(), "the gate refuses the first read");
+    let gonk = Gonk::start(Some(Arc::clone(&view)), tokens());
+
+    let talk = gonk.page("/layers/talk");
+    assert_eq!(talk.status, 200, "{talk:?}");
+    assert!(
+        talk.body.contains("Reading Talk from the door"),
+        "{}",
+        talk.body
+    );
+    assert!(talk.body.contains("id='layer-entries'"), "{}", talk.body);
+    assert!(
+        !talk.body.contains("Nothing has been said here yet"),
+        "{}",
+        talk.body
+    );
+    let tasks = gonk.page("/layers/tasks");
+    assert_eq!(tasks.status, 200, "{tasks:?}");
+    assert!(tasks.body.contains("id='layer-tuples'"), "{}", tasks.body);
+    assert!(tasks.body.contains("id='layer-receipts'"), "{}", tasks.body);
+
+    // Once the copy has read the layer, the page's poll hands the entry over INTO that list.
+    gated.open.store(true, std::sync::atomic::Ordering::SeqCst);
+    view.refresh().expect("the door answers now");
+    let answer = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=ok");
+    assert_eq!(answer.status, 200, "{answer:?}");
+    assert!(
+        answer.body.contains("afterbegin:#layer-entries"),
+        "{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("said before the read"),
+        "{}",
+        answer.body
+    );
+}
+
 /// A page that shows the door in another state than the copy (here, a page rendered before
 /// gonk restarted, whose watcher carries no `door=`, or one that showed "reading") gets the
 /// banner; a page whose banner is current does not, so a poll replaces nothing a person may be
@@ -1548,8 +1623,9 @@ fn the_layers_polls_write_sampled_lines() {
             })
             .count()
     };
-    // The first of the polls is the one sampled; after it, only a slow one is written (a debug
-    // build's render under a parallel test run can take a second).
+    // The first poll of each resource is the one sampled (per resource and by time since ledger
+    // #1718); after it, only a slow one is written (a debug build's render under a parallel test
+    // run can take a second).
     let quick_lines = |subject: &str| {
         lines
             .iter()
@@ -1567,10 +1643,12 @@ fn the_layers_polls_write_sampled_lines() {
         of(layers_view::WAIT_IRI, "ok") >= 1,
         "the first poll is sampled: {lines:#?}"
     );
-    assert!(
-        quick_lines(layers_view::WAIT_IRI) + quick_lines(layers_view::COUNT_IRI) <= 1,
-        "of eight quick polls, at most the first is written: {lines:#?}"
-    );
+    for subject in [layers_view::WAIT_IRI, layers_view::COUNT_IRI] {
+        assert!(
+            quick_lines(subject) <= 1,
+            "of four quick polls of {subject}, at most the first is written: {lines:#?}"
+        );
+    }
     assert_eq!(
         of(layers_view::WAIT_IRI, "invalid-argument"),
         1,
