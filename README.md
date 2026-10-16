@@ -479,7 +479,7 @@ there.
 | `POST /queue/batch` | `urn:iki:gonk:queue:batch` | one batch decline, one decision per ticked finding |
 | `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
 | `/layers` · `/layers/{layer}` | `urn:iki:gonk:page:layers` · `…:page:layer:{layer}` | the Layers page: every layer the configured identity reads, and one layer (see "The Layers page") |
-| `/layers/~/wait` | `urn:iki:gonk:fragment:layers-wait` | the Layers page's long poll, answered from gonk's copy |
+| `/layers/~/wait` | `urn:iki:gonk:fragment:layers-wait` | what an open Layers page asks every 3 s, answered at once from gonk's copy |
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
 | `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
 
@@ -2025,7 +2025,7 @@ this line.
   offers `say` only on a channel the identity's grant (read from `urn:layers:me` and each
   collaboration's manifest) holds it on.
 - **Who may use it: a signed-in passkey holding the page's own tokens.** Reading (the page, its
-  long poll, a file) needs `urn:cap:gonk:layers:read`; posting needs `urn:cap:gonk:layers:say`.
+  poll, a file) needs `urn:cap:gonk:layers:read`; posting needs `urn:cap:gonk:layers:say`.
   gonk mints neither for an anonymous caller, so put them in the grant of YOUR passkey in
   `grants.json` (the grant `ikigai-gonk passkey invite` named):
 
@@ -2040,9 +2040,13 @@ this line.
   `urn:layers:feed after=<cursor> wait=50` for every layer the identity follows, on a QUIC
   connection of its own (a door answers one call per connection at a time, so a post must
   not queue behind a 50-second wait), and reads only what an event says is new
-  (`entries after=<last read>`; never from 0 on every load). An open page long-polls gonk's
-  copy (`/layers/~/wait`, up to 45 s) and gets the new entries, a sentence for its live
-  region, and the banner. An unreachable door is one banner over what was read before.
+  (`entries after=<last read>`; never from 0 on every load). An open page asks gonk's copy
+  every 3 seconds (`/layers/~/wait`, answered at once, so an open tab holds none of the
+  browser's six connections to gonk between asks) and gets the new entries, a sentence for
+  its live region, and the banner when the door's state changed. If an ask fails (a network
+  error, gonk restarting) the page says "Reconnecting" once and asks again less often, up to
+  a minute apart; after a restart it says to sign in again, since gonk keeps sign-ins in
+  memory. An unreachable door is one banner over what was read before.
 - **Unread** is per viewer (the signed-in passkey) and per layer: the last feed position that
   viewer was shown, kept in `<data home>/layers-view/cursors.json`. Opening a layer, or a live
   update reaching its open page, marks it read; the overview counts the events after it.

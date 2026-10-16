@@ -1111,11 +1111,11 @@ fn routes() -> Vec<Route> {
         // both match: this one has no segment after `/browse`) but because reading
         // the table top to bottom should meet the door before its depths.
         route("/browse", crate::k::ROOTS_IRI),
-        // The Layers page (ledger #1675). The long poll is a literal path listed first: `~` is
+        // The Layers page (ledger #1675). Its poll is a literal path listed first: `~` is
         // not a layer-name character, so it can never be a layer's page. No per-route `cap`,
         // for the reason the Queue's rows take none.
         route(crate::layers_view::WAIT_PATH, crate::layers_view::WAIT_IRI),
-        // The header's unread count (ledger #1700), a literal path beside the long poll.
+        // The header's unread count (ledger #1700), a literal path beside the page's poll.
         route(
             crate::layers_view::COUNT_PATH,
             crate::layers_view::COUNT_IRI,

@@ -535,7 +535,7 @@ fn serve(flags: &config::Flags) -> ! {
     // One access line per request at every door (ledger #739), unless `gonk.log.access`
     // turns it off — off means not wrapped at all, not wrapped and silent. gonk's polls are
     // sampled: the Queue badge and the header's layers count, which every open page polls every
-    // ten seconds (ledger #767, #1700), and the Layers page's long poll (ledger #1694).
+    // ten seconds (ledger #767, #1700), and an open Layers page's poll (ledger #1694, #1705).
     let access = |door: access::Door| {
         settings
             .access_log

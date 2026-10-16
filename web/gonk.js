@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does eight things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does nine things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -17,7 +17,9 @@
 // page a caller's grant does not reach says "sign in" to a signed-out visitor and "your grant
 // doesn't include it" to a signed-in one, and which of the two is a question about the
 // session that only this script asks of the server on a read (ledger #739). (8) the Layers page's
-// post form, replaced by its answer, gives focus back to its text box (ledger #1675).
+// post form, replaced by its answer, gives focus back to its text box (ledger #1675). (9) the
+// Layers page's poll, which htmx would leave dead after one failed ask, is re-armed with a
+// backoff and its state said in words (ledger #1705).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -79,13 +81,29 @@
     return true;
   }
 
+  // The Layers page's watcher (ledger #1705): its failures are its own, said once in
+  // `#layers-reconnect` (section 9 below), never an alert in #flash on every retry.
+  function isWatch(elt) {
+    return !!(elt && elt.closest && elt.closest(".layers-watch"));
+  }
+
+  // The header's Layers badge polls on a timer and retries on its own, so its failure is not a
+  // message either: during a gonk restart it would write an alert into #flash every ten seconds.
+  function isOwnRetry(elt) {
+    return isWatch(elt) || !!(elt && elt.closest && elt.closest(".layers-badge"));
+  }
+
   document.addEventListener("htmx:responseError", (e) => {
+    if (isOwnRetry(e.detail.elt)) return;
     const xhr = e.detail.xhr;
     const text = ((xhr && xhr.responseText) || "The server refused that.").trim();
     if (denyAt(e.detail.elt, text, xhr && xhr.status)) return;
     flash(text, "error");
   });
-  document.addEventListener("htmx:sendError", () => flash("The server did not answer.", "error"));
+  document.addEventListener("htmx:sendError", (e) => {
+    if (isOwnRetry(e.detail && e.detail.elt)) return;
+    flash("The server did not answer.", "error");
+  });
   // A request clears the last message, unless nobody made it (ledger #666): the header's queue
   // badge polls on a timer, on every page, so clearing on its request emptied #flash within
   // one poll of anything being written there, often before anyone had read it.
@@ -94,7 +112,7 @@
   document.addEventListener("htmx:beforeRequest", (e) => {
     const elt = e.detail && e.detail.elt;
     if (elt && elt.closest && elt.closest(".queue-badge")) return;
-    if (elt && elt.closest && elt.closest(".layers-watch")) return;
+    if (isWatch(elt)) return;
     if (elt && elt.closest && elt.closest(".layers-badge")) return;
     flash("", "ok");
   });
@@ -271,6 +289,87 @@
     if (!elt || elt.id !== "say") return;
     const box = $("say-body");
     if (box) box.focus();
+  });
+
+  // --------------------------------- the Layers page's poll survives a failure (ledger #1705)
+  //
+  // The page's watcher asks once, a few seconds after it lands, and the answer carries the next
+  // one. htmx swaps nothing on a failed ask, so one network error, or gonk restarting, used to
+  // end the chain for good and the page silently stopped updating. Here a failed ask puts a new
+  // watcher in its place that asks again after a backoff (5 s, doubling, at most 60 s), and the
+  // page says so ONCE, in words, in its `#layers-reconnect` status (a polite live region, so
+  // nothing moves focus and a retry is not re-announced). The first answer after that says
+  // "Reconnected", and the next one empties the status.
+  // ⚠ A 403 or a 404 is not retried: no retry can fix it. gonk keeps sign-ins in memory, so
+  // after a restart this page's session is gone and every ask is refused; the status says to
+  // sign in again and reload, and nothing asks again.
+  const WATCH_RETRY_FIRST = 5;
+  const WATCH_RETRY_MAX = 60;
+  const WATCH_PATH = "/layers/~/wait";
+
+  function reconnectSay(text, state) {
+    const status = $("layers-reconnect");
+    if (!status) return;
+    status.setAttribute("data-state", state);
+    if (status.textContent !== text) status.textContent = text;
+  }
+
+  function watchFailed(elt, status) {
+    if (status === 403) {
+      reconnectSay(
+        "Live updates stopped: gonk no longer accepts this page's sign-in (the session " +
+          "ended, or gonk restarted). Sign in again, then reload the page.",
+        "stopped"
+      );
+      return;
+    }
+    if (status === 404) {
+      reconnectSay("Live updates stopped: gonk no longer serves them here. Reload the page.", "stopped");
+      return;
+    }
+    const failures = Number(elt.getAttribute("data-failures") || "0") + 1;
+    const delay = Math.min(WATCH_RETRY_MAX, WATCH_RETRY_FIRST * Math.pow(2, failures - 1));
+    reconnectSay(
+      "Reconnecting: gonk did not answer, so new entries are not arriving. This page keeps " +
+        "trying, less often as time goes on.",
+      "retrying"
+    );
+    const next = document.createElement("div");
+    next.className = "layers-watch";
+    next.hidden = true;
+    next.setAttribute("hx-get", elt.getAttribute("hx-get"));
+    next.setAttribute("hx-swap", "outerHTML");
+    next.setAttribute("hx-trigger", "load delay:" + delay + "s");
+    next.setAttribute("data-failures", String(failures));
+    // On a tick: htmx is still finishing the failed request on the old element.
+    window.setTimeout(() => {
+      if (!elt.isConnected) return;
+      elt.replaceWith(next);
+      if (window.htmx) window.htmx.process(next);
+    }, 0);
+  }
+
+  document.addEventListener("htmx:sendError", (e) => {
+    const elt = e.detail && e.detail.elt;
+    if (isWatch(elt)) watchFailed(elt.closest(".layers-watch"), 0);
+  });
+  document.addEventListener("htmx:responseError", (e) => {
+    const elt = e.detail && e.detail.elt;
+    const xhr = e.detail && e.detail.xhr;
+    if (isWatch(elt)) watchFailed(elt.closest(".layers-watch"), xhr ? xhr.status : 0);
+  });
+  // ⚠ Matched by the request's PATH, not by `detail.elt`: a successful answer swaps the watcher
+  // out (outerHTML) before htmx fires this, so htmx fires it on the nearest ancestor still in
+  // the page and names THAT as `elt` (seen in a browser check, where an `isWatch(elt)` test
+  // here never matched and the status said "Reconnecting" forever).
+  document.addEventListener("htmx:afterRequest", (e) => {
+    const detail = e.detail || {};
+    const path = String((detail.pathInfo && detail.pathInfo.requestPath) || "");
+    if (path.indexOf(WATCH_PATH) !== 0 || !detail.successful) return;
+    const status = $("layers-reconnect");
+    const state = status && status.getAttribute("data-state");
+    if (state === "retrying") reconnectSay("Reconnected: live updates are back.", "back");
+    else if (state === "back") reconnectSay("", "");
   });
 
   // ------------------------------------ a selected line fills the annotate quote (ledger #658)

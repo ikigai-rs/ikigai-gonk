@@ -303,22 +303,29 @@
     reads at its layer door, and one layer's entries. Everything here is computed in Rust and
     arrives as attributes; the page reads gonk's copy, never the door.
 
-    ★ Live: a hidden `view:watch` element long-polls /layers/~/wait and is replaced by the
-    answer (outerHTML); what changed comes OUT OF BAND (new entries before the first, a task
-    layer's lists, the overview's rows, the banner, and one sentence for the live region).
+    ★ Live: a hidden `view:watch` element asks /layers/~/wait a few seconds after it lands (a
+    short poll, ledger #1705: it holds no connection between asks) and is replaced by the
+    answer (outerHTML), which carries the next one; what changed comes OUT OF BAND (new entries
+    before the first, a task layer's lists, the overview's rows, the banner, and one sentence for
+    the live region). A failed ask is re-armed by web/gonk.js with a backoff, and
+    `#layers-reconnect` says so in words, once.
     ★ Color is never the only signal: "New" is a word, an unread count is a number and a word.
   -->
   <!-- The header's Layers link and its unread count (ledger #1700). The count is TEXT in the
        link's accessible name ("Layers, 3 new"): the number shows, and the comma and the word are
        there for a screen reader (`sr-only`). The first poll is at load; each answer is a new
        badge carrying the next (`every`, the Queue badge's cadence, src/layers_view.rs::Count),
-       so a failed poll is simply tried again and nothing here keeps a timer of its own.
+       so a failed poll is simply tried again and nothing here keeps a timer of its own. The
+       first badge asks at load AND every interval, so a first poll that fails is tried again
+       too (ledger #1705); the answer replaces it, and its timer with it. A failed poll is not
+       written into #flash (web/gonk.js): the badge retries on its own.
        ★ The live region is OUTSIDE the link, so a sentence in it never becomes part of the
        link's name; the count's answer writes it (out of band) only when the count rose. -->
   <xsl:template match="view:layers-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Layers<xsl:if test="@count-url">
-      <span class="layers-badge" hx-swap="outerHTML" hx-trigger="load" hx-sync="this:drop">
+      <span class="layers-badge" hx-swap="outerHTML" hx-sync="this:drop">
         <xsl:attribute name="hx-get"><xsl:value-of select="@count-url"/></xsl:attribute>
+        <xsl:attribute name="hx-trigger">load, every <xsl:value-of select="@every"/></xsl:attribute>
       </span>
     </xsl:if></a>
     <xsl:if test="@count-url">
@@ -369,6 +376,7 @@
         <xsl:apply-templates select="view:layer-row"/>
       </ul>
       <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
+      <p id="layers-reconnect" class="note live" role="status" aria-live="polite"></p>
       <xsl:apply-templates select="view:watch"/>
     </section>
   </xsl:template>
@@ -407,6 +415,7 @@
       <xsl:if test="@reading"><p class="note"><xsl:value-of select="@reading"/></p></xsl:if>
       <xsl:apply-templates select="view:say"/>
       <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
+      <p id="layers-reconnect" class="note live" role="status" aria-live="polite"></p>
       <xsl:if test="@entries">
         <h2 id="entries-title">Entries, newest first</h2>
         <xsl:if test="@older-unread"><p class="note"><xsl:value-of select="@older-unread"/></p></xsl:if>
@@ -542,7 +551,7 @@
     </div>
   </xsl:template>
 
-  <!-- The long poll's answer: the next watcher in place of this one, and what changed, out of
+  <!-- The poll's answer: the next watcher in place of this one, and what changed, out of
        band. Only parts an open page has are sent: a task layer's lists, a channel's new
        entries (before the first), the overview's rows. -->
   <xsl:template name="layers-wait">
