@@ -106,7 +106,8 @@ const PAGE: usize = 1000;
 ///
 /// ★ Found by the audit of 2026-10-11: the listing followed pages for as long as the host said
 /// a page was full and its positions rose, so a hostile or broken host held a pass (and its
-/// memory) for ever. A listing past the bound is refused, and says so.
+/// memory) for ever. A listing past the bound is refused, and says so. The same bound holds
+/// the pages of the ledger's own items one pass reads (`collect_items`, ledger #1740).
 pub const MAX_PAGES: usize = 100;
 
 /// The most bytes one listing reads, whatever the page count: one wire answer is already
@@ -643,31 +644,17 @@ impl Mirror {
 
     /// Every item of the ledger, open and closed, and whether the listing was the whole set.
     fn items(&self) -> Result<(Vec<Item>, bool), String> {
-        let mut items: Vec<Item> = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut total = 0;
-        loop {
+        collect_items(|offset| {
             let bytes = self.ledger_issue(
                 self.ledger_request(Verb::Source, "items")
                     .with_arg("status", inline("all"))
                     .with_arg("limit", inline("0"))
-                    .with_arg("offset", inline(&items.len().to_string()))
+                    .with_arg("offset", inline(&offset.to_string()))
                     .with_arg("as", inline("application/json")),
             )?;
-            let page: ItemsDocument = serde_json::from_slice(&bytes)
-                .map_err(|e| format!("the ledger's items are not its JSON document: {e}"))?;
-            total = page.total.unwrap_or(page.count).max(total);
-            let got = page.items.len();
-            for item in page.items {
-                if seen.insert(item.iri.clone()) {
-                    items.push(item);
-                }
-            }
-            if got == 0 || items.len() >= total {
-                let complete = items.len() == total;
-                return Ok((items, complete));
-            }
-        }
+            serde_json::from_slice(&bytes)
+                .map_err(|e| format!("the ledger's items are not its JSON document: {e}"))
+        })
     }
 
     /// The offers recorded on each item: `item IRI → offer IRIs`, from its `about` edges to
@@ -1118,6 +1105,46 @@ impl Mirror {
     }
 }
 
+/// Page through the ledger's items with `page(offset)`: every item once, and whether the
+/// listing reached the total the ledger counted.
+///
+/// ★ The offset advances by the rows each page HELD, never by the distinct items collected
+/// (ledger #1740). The ledger reads a page and counts the set in two reads, so a write landing
+/// between them tears the listing: a page of one item beside a total of two, and, newest
+/// first, the next offset holding that same item again. Counted by distinct items the offset
+/// never moved, the same page was asked for forever, and the mirror's thread spun in this loop
+/// while every later kick queued behind it. A torn listing now ends, marked partial (so no
+/// item is withdrawn as gone on its evidence); the write that tore it cut a thread under the
+/// ledger's names, and that kick runs the pass that reads it whole. [`MAX_PAGES`] bounds a
+/// ledger that grows faster than it can be paged.
+fn collect_items(
+    mut page: impl FnMut(usize) -> Result<ItemsDocument, String>,
+) -> Result<(Vec<Item>, bool), String> {
+    let mut items: Vec<Item> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut total = 0;
+    let mut offset = 0;
+    for _ in 0..MAX_PAGES {
+        let page = page(offset)?;
+        total = page.total.unwrap_or(page.count).max(total);
+        let got = page.items.len();
+        offset += got;
+        for item in page.items {
+            if seen.insert(item.iri.clone()) {
+                items.push(item);
+            }
+        }
+        if got == 0 || offset >= total {
+            let complete = items.len() == total;
+            return Ok((items, complete));
+        }
+    }
+    Err(format!(
+        "the ledger's items still had more after {MAX_PAGES} pages: refused rather than \
+         followed"
+    ))
+}
+
 /// The comment key a report is applied under: the report's own IRI (design section 10), or,
 /// when the taker minted one a ledger key cannot spell (keys are `[A-Za-z0-9-._~:]`, at most
 /// 256 characters), `layer:{layer}:report:sha256:<hex>` of it.
@@ -1538,18 +1565,21 @@ pub(crate) fn spawn_listener(
     let listener = hub
         .listen(ListenSpec::new().prefix(prefix), &Capability::root())
         .map_err(|e| format!("no cut listener ({e}): the feed and the sweep remain"))?;
+    // Built here, not on the thread: a runtime that cannot be built is an `Err` the caller
+    // logs, where the thread used to return without a word and leave writes unheard until the
+    // sweep (ledger #1740).
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|e| {
+            format!("no cut listener (its runtime: {e}): the feed and the sweep remain")
+        })?;
     std::thread::Builder::new()
         .name(thread)
-        .spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+        .spawn(move || loop {
+            runtime.block_on(listener.wait());
+            let _ = listener.drain();
+            if !nudge(&kick) {
                 return;
-            };
-            loop {
-                runtime.block_on(listener.wait());
-                let _ = listener.drain();
-                if !nudge(&kick) {
-                    return;
-                }
             }
         })
         .expect("spawning a ledger listener thread");
@@ -1734,5 +1764,74 @@ mod tests {
         assert_eq!(a.tuple.dropper.as_deref(), Some("urn:p:us"));
         assert!(a.tuple.is("Offer"));
         assert_eq!(tuples(&triples).len(), 1, "the receipt is not a tuple");
+    }
+
+    /// A page of the ledger's items as its JSON face writes one: `numbers`, newest first, out
+    /// of `total`, `offset` skipped.
+    fn page(numbers: &[u64], total: usize, offset: usize) -> ItemsDocument {
+        let items: Vec<serde_json::Value> = numbers
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "number": n, "display": format!("crew#{n}"), "iri": format!("urn:item:{n}"),
+                    "kind": null, "title": "t", "body": "b", "status": "open",
+                    "closed_reason": null, "priority": null, "deferred": false, "labels": [],
+                    "about": [], "key": null, "author": null, "revision": null, "claim": null,
+                    "created": "", "modified": "", "links": [], "comments": [], "defects": [],
+                    "state": null, "awaiting": null
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "schema": ikigai_ledger::json::SCHEMA, "ledger": "crew", "count": items.len(), "total": total,
+            "offset": offset, "items": items, "unreadable": []
+        }))
+        .unwrap()
+    }
+
+    fn numbers(items: &[Item]) -> Vec<i64> {
+        items.iter().map(|i| i.number).collect()
+    }
+
+    /// ★ Ledger #1740: an append that lands between the ledger's read of a page and its COUNT
+    /// tears the listing: the page holds the one older item, the total says two. Newest first,
+    /// every later offset holds that same older item again. Paging by how many DISTINCT items
+    /// were collected asked for offset 1 forever, so the pass never ended and nothing after it
+    /// ran (CI, Linux, 4 cores: the mirror's thread spun in `items` while the kick for the
+    /// append sat queued behind it). The listing ends, and says it is partial; the append's own
+    /// kick runs the next pass, which reads it whole.
+    #[test]
+    fn a_listing_torn_by_a_concurrent_append_ends_and_says_it_is_partial() {
+        let asked = std::cell::Cell::new(0);
+        let (items, complete) = collect_items(|offset| {
+            asked.set(asked.get() + 1);
+            assert!(
+                asked.get() <= MAX_PAGES,
+                "asked for offset {offset} {} times: the pass never ends",
+                asked.get()
+            );
+            Ok(match offset {
+                0 => page(&[1], 2, 0),
+                n => page(&[1], 2, n),
+            })
+        })
+        .unwrap();
+        assert_eq!(numbers(&items), [1]);
+        assert!(!complete, "a torn listing is not the whole set");
+    }
+
+    /// Pages that overlap (an item moved up a page between two reads) are collected once each,
+    /// and a listing that reaches its total is the whole set.
+    #[test]
+    fn overlapping_pages_are_collected_once_and_whole() {
+        let (items, complete) = collect_items(|offset| {
+            Ok(match offset {
+                0 => page(&[3, 2], 3, 0),
+                _ => page(&[2, 1], 3, offset),
+            })
+        })
+        .unwrap();
+        assert_eq!(numbers(&items), [3, 2, 1]);
+        assert!(complete);
     }
 }
