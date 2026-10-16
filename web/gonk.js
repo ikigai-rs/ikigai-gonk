@@ -95,6 +95,7 @@
     const elt = e.detail && e.detail.elt;
     if (elt && elt.closest && elt.closest(".queue-badge")) return;
     if (elt && elt.closest && elt.closest(".layers-watch")) return;
+    if (elt && elt.closest && elt.closest(".layers-badge")) return;
     flash("", "ok");
   });
 

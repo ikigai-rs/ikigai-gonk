@@ -79,6 +79,16 @@
 //! [`POLL_SAMPLE`] polls (one line per ten minutes per open page), so a quiet poll still shows
 //! it is alive. A sampled line is an ordinary line: the grammar does not change.
 //!
+//! ★ **A LONG poll is sampled too, by count alone** (ledger
+//! [#1694](http://localhost:1062/l/default/item/1694)). The Layers page's
+//! (`crate::layers_view::WAIT_IRI`) waits up to 45 seconds by design, so the slow rule above
+//! wrote every one of them: one line per change or per 45 seconds per open Layers tab. A subject
+//! named by [`AccessLog::sampling_long_polls`] writes when it FAILED or once every
+//! [`POLL_SAMPLE`] polls; its duration is the wait, not a symptom, and says nothing. A refusal is
+//! an outcome other than `ok`, so it is always written (a capability floor's refusal is the
+//! kernel's, before dispatch, and is not a line at all: see above).
+//! [`AccessLog::gonk_polls`] names gonk's polls, both kinds, for every door.
+//!
 //! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
 //! what an access log is for, and a server that is slow for a long time logs every slow poll
 //! for as long as it is slow — on purpose: that is the incident. Rotation of the file is
@@ -149,6 +159,9 @@ pub struct AccessLog {
 #[derive(Default)]
 struct Polls {
     subjects: Vec<String>,
+    /// Long polls: their duration is the wait they were asked for, so it is never a reason to
+    /// write.
+    long: Vec<String>,
     seen: AtomicU64,
 }
 
@@ -191,21 +204,65 @@ impl AccessLog {
         AccessLog {
             polls: Arc::new(Polls {
                 subjects: subjects.into_iter().map(Into::into).collect(),
+                long: self.polls.long.clone(),
                 seen: AtomicU64::new(0),
             }),
             ..self
         }
     }
 
+    /// Sample the lines of `subjects` — LONG polls, which wait for news by design — as
+    /// [`AccessLog::sampling_polls`] does, but never write one for its duration: a long poll's
+    /// request writes its line when it fails, or once every [`POLL_SAMPLE`] polls (the first
+    /// included). Ledger #1694.
+    pub fn sampling_long_polls<S: Into<String>>(
+        self,
+        subjects: impl IntoIterator<Item = S>,
+    ) -> AccessLog {
+        AccessLog {
+            polls: Arc::new(Polls {
+                subjects: self.polls.subjects.clone(),
+                long: subjects.into_iter().map(Into::into).collect(),
+                seen: AtomicU64::new(0),
+            }),
+            ..self
+        }
+    }
+
+    /// gonk's own polls, sampled: the Queue badge and the header's layers count (short polls),
+    /// and the Layers page's long poll. What `main` gives every door.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_gonk::access::{AccessLog, Door};
+    ///
+    /// let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).gonk_polls();
+    /// assert!(log.samples(ikigai_gonk::queue::BADGE_IRI));
+    /// assert!(log.samples(ikigai_gonk::layers_view::COUNT_IRI));
+    /// assert!(log.samples(ikigai_gonk::layers_view::WAIT_IRI));
+    /// assert!(!log.samples("urn:iki:gonk:page:layers"));
+    /// ```
+    pub fn gonk_polls(self) -> AccessLog {
+        self.sampling_polls([crate::queue::BADGE_IRI, crate::layers_view::COUNT_IRI])
+            .sampling_long_polls([crate::layers_view::WAIT_IRI])
+    }
+
+    /// Whether `subject`'s lines are sampled rather than written for every request.
+    pub fn samples(&self, subject: &str) -> bool {
+        self.polls.subjects.iter().any(|polled| polled == subject)
+            || self.polls.long.iter().any(|polled| polled == subject)
+    }
+
     /// Whether a request for `subject` that ended `ok` (or not) after `dur_ms` writes a line.
     fn writes(&self, subject: &str, ok: bool, dur_ms: u128) -> bool {
-        if !self.polls.subjects.iter().any(|polled| polled == subject) {
+        let long = self.polls.long.iter().any(|polled| polled == subject);
+        if !long && !self.polls.subjects.iter().any(|polled| polled == subject) {
             return true;
         }
         // Counted whether or not it is written, so the sample is one in N POLLS, not one in N
         // quiet ones.
         let nth = self.polls.seen.fetch_add(1, Ordering::Relaxed);
-        !ok || dur_ms >= POLL_SLOW_MS || nth.is_multiple_of(POLL_SAMPLE)
+        !ok || (!long && dur_ms >= POLL_SLOW_MS) || nth.is_multiple_of(POLL_SAMPLE)
     }
 
     /// The door this log describes.
@@ -560,6 +617,30 @@ mod tests {
         // Without `sampling_polls`, nothing is sampled — the badge included.
         let plain = AccessLog::to(Door::Http, Arc::new(|_: &str| {}));
         assert!((0..POLL_SAMPLE * 2).all(|_| plain.writes(BADGE, true, 3)));
+    }
+
+    /// Ledger #1694: a long poll's 45-second wait is not slowness, so it is sampled by count
+    /// alone; a failed one is still written. Before, the Layers page's long poll was not named
+    /// at all, and naming it a short poll would not have helped: its every answer is "slow".
+    #[test]
+    fn a_long_poll_is_sampled_whatever_it_waited() {
+        let wait = crate::layers_view::WAIT_IRI;
+        let short_only = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).sampling_polls([wait]);
+        assert!(
+            (0..POLL_SAMPLE).all(|_| short_only.writes(wait, true, 45_000)),
+            "as a short poll, every 45-second wait is written"
+        );
+        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).gonk_polls();
+        let waited = (0..POLL_SAMPLE * 2)
+            .filter(|_| log.writes(wait, true, 45_000))
+            .count();
+        assert_eq!(waited, 2, "two lines in {} long polls", POLL_SAMPLE * 2);
+        assert!(log.writes(wait, false, 45_000), "a failed one is written");
+        assert!(log.writes(wait, false, 3), "a refused one is written");
+        // The short polls keep their slow rule beside it.
+        assert!(log.writes(crate::queue::BADGE_IRI, true, POLL_SLOW_MS));
+        assert!(log.writes(crate::layers_view::COUNT_IRI, true, POLL_SLOW_MS));
+        assert!((0..POLL_SAMPLE).all(|_| log.writes("urn:iki:gonk:page:layers", true, 45_000)));
     }
 
     #[test]

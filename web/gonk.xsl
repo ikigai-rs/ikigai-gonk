@@ -236,6 +236,7 @@
       <xsl:when test="@view = 'layers'"><xsl:call-template name="layers"/></xsl:when>
       <xsl:when test="@view = 'layer'"><xsl:call-template name="layer"/></xsl:when>
       <xsl:when test="@view = 'layers-wait'"><xsl:call-template name="layers-wait"/></xsl:when>
+      <xsl:when test="@view = 'layers-count'"><xsl:call-template name="layers-count"/></xsl:when>
       <xsl:when test="@view = 'layers-say'"><xsl:call-template name="layers-say"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
@@ -307,8 +308,35 @@
     layer's lists, the overview's rows, the banner, and one sentence for the live region).
     ★ Color is never the only signal: "New" is a word, an unread count is a number and a word.
   -->
+  <!-- The header's Layers link and its unread count (ledger #1700). The count is TEXT in the
+       link's accessible name ("Layers, 3 new"): the number shows, and the comma and the word are
+       there for a screen reader (`sr-only`). The first poll is at load; each answer is a new
+       badge carrying the next (`every`, the Queue badge's cadence, src/layers_view.rs::Count),
+       so a failed poll is simply tried again and nothing here keeps a timer of its own.
+       ★ The live region is OUTSIDE the link, so a sentence in it never becomes part of the
+       link's name; the count's answer writes it (out of band) only when the count rose. -->
   <xsl:template match="view:layers-link">
-    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Layers</a>
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Layers<xsl:if test="@count-url">
+      <span class="layers-badge" hx-swap="outerHTML" hx-trigger="load" hx-sync="this:drop">
+        <xsl:attribute name="hx-get"><xsl:value-of select="@count-url"/></xsl:attribute>
+      </span>
+    </xsl:if></a>
+    <xsl:if test="@count-url">
+      <span id="layers-badge-live" class="sr-only" role="status" aria-live="polite"></span>
+    </xsl:if>
+  </xsl:template>
+
+  <xsl:template name="layers-count">
+    <span class="layers-badge" hx-swap="outerHTML" hx-sync="this:drop">
+      <xsl:if test="@url">
+        <xsl:attribute name="hx-get"><xsl:value-of select="@url"/></xsl:attribute>
+        <xsl:attribute name="hx-trigger">every <xsl:value-of select="@every"/></xsl:attribute>
+      </xsl:if>
+      <xsl:if test="@count"><span class="sr-only">, </span><span class="layers-count"><xsl:value-of select="@count"/></span><span class="sr-only"> new</span></xsl:if>
+    </span>
+    <xsl:if test="@announce">
+      <span id="layers-badge-live" hx-swap-oob="innerHTML"><xsl:value-of select="@announce"/></span>
+    </xsl:if>
   </xsl:template>
 
   <xsl:template match="view:notice">
