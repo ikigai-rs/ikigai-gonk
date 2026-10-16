@@ -3748,8 +3748,10 @@ body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) h
 `/queue/depth` every ten seconds, so one forgotten tab wrote 360 lines an hour into a file
 launchd never rotates — 64% of the live log's lines on 2026-10-10. A poll now writes its line
 only when it fails, when it takes a second or more (so the `dur=[0-9]\{4,\}` grep above still
-finds every slow one), or once in 60 polls (one line per ten minutes per open page, to show the
-poll is alive). Every other request is still one line. The file itself is still unrotated:
+finds every slow one), or when that poll has written no quiet line for ten minutes, to show it
+is alive. The sample is per polled resource and by time (ledger #1718): the Queue badge, the
+header's Layers count and an open Layers page's three-second poll each write one quiet line per
+ten minutes, however many pages ask. Every other request is still one line. The file itself is still unrotated:
 that is the launchd install's to do (`newsyslog`), not gonk's.
 
 ## Upgrading past audit round 4 (ledger #864)

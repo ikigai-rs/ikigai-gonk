@@ -2035,8 +2035,18 @@ impl Endpoint for LayerPage {
                     ),
                 ));
             }
+            // ★ A layer not yet read still gets its (empty) lists (ledger #1718): the page's poll
+            // adds what arrives INTO them (`afterbegin:#layer-entries`, and the tuplespace's two
+            // lists by id), so a page drawn before the first read had nowhere for live entries
+            // to land until it was reloaded. `entries="pending"` draws the list without the
+            // "nothing has been said" sentence, which would be a claim nobody has checked.
             match found.info.model {
-                Model::Channel if found.synced => {
+                Model::Channel if !found.synced => {
+                    attributes.push(("entries", "pending".to_string()));
+                    children.push_str(&render::slot("entries"));
+                    slots.push(("entries".to_string(), rendered(inv, &[]).await?));
+                }
+                Model::Channel => {
                     let rows: Vec<String> = found
                         .entries
                         .iter()
@@ -2059,7 +2069,7 @@ impl Endpoint for LayerPage {
                     children.push_str(&render::slot("entries"));
                     slots.push(("entries".to_string(), rendered(inv, &rows).await?));
                 }
-                Model::Tuplespace if found.synced => {
+                Model::Tuplespace => {
                     attributes.push(("tuplespace", "true".to_string()));
                     let (tuples, receipts) = tuple_rows(found, me, seen);
                     children.push_str(&render::slot("tuples"));

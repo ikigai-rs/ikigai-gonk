@@ -422,6 +422,8 @@
       <xsl:apply-templates select="view:say"/>
       <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
       <p id="layers-reconnect" class="note live" role="status" aria-live="polite"></p>
+      <!-- `@entries` is true, false (read, and empty) or pending (not read yet: the list is
+           drawn empty so the poll's entries have somewhere to land, ledger #1718). -->
       <xsl:if test="@entries">
         <h2 id="entries-title">Entries, newest first</h2>
         <xsl:if test="@older-unread"><p class="note"><xsl:value-of select="@older-unread"/></p></xsl:if>

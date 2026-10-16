@@ -87,10 +87,16 @@
     return !!(elt && elt.closest && elt.closest(".layers-watch"));
   }
 
-  // The header's Layers badge polls on a timer and retries on its own, so its failure is not a
-  // message either: during a gonk restart it would write an alert into #flash every ten seconds.
+  // The header's two badges, Queue and Layers, poll on a timer and retry on their own, so their
+  // failures are not messages either: during a gonk restart each would write an alert into
+  // #flash every ten seconds (ledger #1718 for the Queue badge). The badge keeps its last
+  // number; the next poll that is answered replaces it.
+  function isBadge(elt) {
+    return !!(elt && elt.closest && (elt.closest(".queue-badge") || elt.closest(".layers-badge")));
+  }
+
   function isOwnRetry(elt) {
-    return isWatch(elt) || !!(elt && elt.closest && elt.closest(".layers-badge"));
+    return isWatch(elt) || isBadge(elt);
   }
 
   document.addEventListener("htmx:responseError", (e) => {

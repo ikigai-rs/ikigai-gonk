@@ -1032,6 +1032,13 @@ oxigraph = { version = "0.5", default-features = false }
 # and `SELECT*{…}` need no whitespace — and answered 400 for queries the store would run
 # (ledger #864, R3). No features: `oxigraph` enables the ones it needs, and they unify.
 spargebra = { version = "0.4.7", default-features = false }
+# ★ The restore verifier counts an archive's literals as the store keeps them, by VALUE for the
+# XSD datatypes it encodes natively (`"01"` and `"1"` as `xsd:integer` are one object there,
+# ledger #1718), so it parses them with the types the store's encoder parses them with:
+# `oxigraph` 0.5.11's `oxrdf` pins `oxsdatatypes = "=0.2.3"`, so this is an edge to a crate
+# already in the graph and no compile. The floor is that pin: the canonical forms are THAT
+# release's, and a different one would count by different rules than the store it verifies.
+oxsdatatypes = "0.2.3"
 # Passkey challenges and session tokens: 32 bytes from the OS.
 getrandom = "0.3"
 # base64url for WebAuthn's byte fields (credential ids, challenges, keys).

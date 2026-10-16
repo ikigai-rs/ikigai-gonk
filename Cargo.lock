@@ -1413,6 +1413,7 @@ dependencies = [
  "ikigai-xslt",
  "notify",
  "oxigraph",
+ "oxsdatatypes",
  "p256",
  "serde",
  "serde_json",

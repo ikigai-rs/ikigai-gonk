@@ -75,19 +75,25 @@
 //!
 //! So a subject named by [`AccessLog::sampling_polls`] writes its line only when the line says
 //! something: when it FAILED, when it took [`POLL_SLOW_MS`] or more (the same second
-//! `grep ' dur=[0-9]\{4,\} '` finds — the reason this log exists, ledger #739), or once every
-//! [`POLL_SAMPLE`] polls (one line per ten minutes per open page), so a quiet poll still shows
-//! it is alive. A sampled line is an ordinary line: the grammar does not change.
+//! `grep ' dur=[0-9]\{4,\} '` finds — the reason this log exists, ledger #739), or when that
+//! subject has written no quiet line for [`POLL_SAMPLE_EVERY`] (ten minutes), so a quiet poll
+//! still shows it is alive. A sampled line is an ordinary line: the grammar does not change.
+//!
+//! ★ **The sample is per subject and by TIME** (ledger
+//! [#1718](http://localhost:1062/l/default/item/1718)). It was one line in 60 polls, counted
+//! across every polled subject together: tuned for the badge's ten-second poll, it became one
+//! line per three minutes for the Layers page's three-second poll, and a busy subject could use
+//! up a quiet one's sample. A clock does not care how often a page asks.
 //!
 //! ★ **A LONG poll is sampled too, by count alone** (ledger
 //! [#1694](http://localhost:1062/l/default/item/1694)). The Layers page's
 //! (`crate::layers_view::WAIT_IRI`) waited up to 45 seconds by design, so the slow rule above
 //! wrote every one of them: one line per change or per 45 seconds per open Layers tab. (Since
 //! ledger [#1705](http://localhost:1062/l/default/item/1705) it is a short poll every three
-//! seconds, sampled by the rule above: one quiet line per three minutes per open Layers page,
-//! and every slow one; gonk names no long poll now.) A subject
-//! named by [`AccessLog::sampling_long_polls`] writes when it FAILED or once every
-//! [`POLL_SAMPLE`] polls; its duration is the wait, not a symptom, and says nothing. A refusal is
+//! seconds, sampled by the rule above: one quiet line per ten minutes, and every slow one; gonk
+//! names no long poll now.) A subject
+//! named by [`AccessLog::sampling_long_polls`] writes when it FAILED or once per
+//! [`POLL_SAMPLE_EVERY`]; its duration is the wait, not a symptom, and says nothing. A refusal is
 //! an outcome other than `ok`, so it is always written (a capability floor's refusal is the
 //! kernel's, before dispatch, and is not a line at all: see above).
 //! [`AccessLog::gonk_polls`] names gonk's polls for every door.
@@ -97,11 +103,11 @@
 //! for as long as it is slow — on purpose: that is the incident. Rotation of the file is
 //! launchd's (or `newsyslog`'s) and is not this module's to do.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -115,9 +121,9 @@ pub const CLASS: &str = "gonk:Access";
 /// The longest subject or `q` written whole, in characters.
 pub const MAX_FIELD: usize = 200;
 
-/// A polled subject ([`AccessLog::sampling_polls`]) writes one line in this many — once per ten
-/// minutes per open page, for the Queue badge's ten-second poll.
-pub const POLL_SAMPLE: u64 = 60;
+/// A polled subject ([`AccessLog::sampling_polls`]) writes at most one QUIET line per this long,
+/// whatever its poll's interval and however many pages ask it (ledger #1718).
+pub const POLL_SAMPLE_EVERY: Duration = Duration::from_secs(600);
 
 /// A polled subject's request that took this many milliseconds or more always writes its line.
 pub const POLL_SLOW_MS: u128 = 1000;
@@ -158,14 +164,16 @@ pub struct AccessLog {
     polls: Arc<Polls>,
 }
 
-/// The subjects a page polls on a timer, and how many of their requests this log has seen.
+/// The subjects a page polls on a timer, and when each last wrote a quiet line.
 #[derive(Default)]
 struct Polls {
     subjects: Vec<String>,
     /// Long polls: their duration is the wait they were asked for, so it is never a reason to
     /// write.
     long: Vec<String>,
-    seen: AtomicU64,
+    /// Keyed by subject, so one entry per configured poll at most: the map is bounded by the
+    /// two lists above, never by what callers ask for.
+    sampled: Mutex<HashMap<String, Instant>>,
 }
 
 impl AccessLog {
@@ -198,8 +206,9 @@ impl AccessLog {
 
     /// Sample the lines of `subjects` — resources a page polls on a timer — instead of writing
     /// one per request: a polled request writes its line when it fails, when it took
-    /// [`POLL_SLOW_MS`] or more, or once every [`POLL_SAMPLE`] polls (the first included). Every
-    /// other subject is unaffected. See the module docs for why (ledger #767).
+    /// [`POLL_SLOW_MS`] or more, or when its subject has written no quiet line for
+    /// [`POLL_SAMPLE_EVERY`] (its first poll included). Every other subject is unaffected. See
+    /// the module docs for why (ledger #767, #1718).
     pub fn sampling_polls<S: Into<String>>(
         self,
         subjects: impl IntoIterator<Item = S>,
@@ -208,7 +217,7 @@ impl AccessLog {
             polls: Arc::new(Polls {
                 subjects: subjects.into_iter().map(Into::into).collect(),
                 long: self.polls.long.clone(),
-                seen: AtomicU64::new(0),
+                sampled: Mutex::default(),
             }),
             ..self
         }
@@ -216,7 +225,7 @@ impl AccessLog {
 
     /// Sample the lines of `subjects` — LONG polls, which wait for news by design — as
     /// [`AccessLog::sampling_polls`] does, but never write one for its duration: a long poll's
-    /// request writes its line when it fails, or once every [`POLL_SAMPLE`] polls (the first
+    /// request writes its line when it fails, or once per [`POLL_SAMPLE_EVERY`] (the first
     /// included). Ledger #1694.
     pub fn sampling_long_polls<S: Into<String>>(
         self,
@@ -226,7 +235,7 @@ impl AccessLog {
             polls: Arc::new(Polls {
                 subjects: self.polls.subjects.clone(),
                 long: subjects.into_iter().map(Into::into).collect(),
-                seen: AtomicU64::new(0),
+                sampled: Mutex::default(),
             }),
             ..self
         }
@@ -262,14 +271,29 @@ impl AccessLog {
 
     /// Whether a request for `subject` that ended `ok` (or not) after `dur_ms` writes a line.
     fn writes(&self, subject: &str, ok: bool, dur_ms: u128) -> bool {
+        self.writes_at(subject, ok, dur_ms, Instant::now())
+    }
+
+    /// [`writes`](Self::writes), at `now`: a test's clock.
+    fn writes_at(&self, subject: &str, ok: bool, dur_ms: u128, now: Instant) -> bool {
         let long = self.polls.long.iter().any(|polled| polled == subject);
         if !long && !self.polls.subjects.iter().any(|polled| polled == subject) {
             return true;
         }
-        // Counted whether or not it is written, so the sample is one in N POLLS, not one in N
-        // quiet ones.
-        let nth = self.polls.seen.fetch_add(1, Ordering::Relaxed);
-        !ok || (!long && dur_ms >= POLL_SLOW_MS) || nth.is_multiple_of(POLL_SAMPLE)
+        if !ok || (!long && dur_ms >= POLL_SLOW_MS) {
+            return true;
+        }
+        // A quiet poll: written when this subject's last quiet line is a sample period old (or
+        // there was none). A failure or a slow line does not reset the period: it says something
+        // else, and a quiet line after it still says the poll is alive.
+        let mut sampled = self.polls.sampled.lock().unwrap_or_else(|e| e.into_inner());
+        match sampled.get(subject) {
+            Some(at) if now.saturating_duration_since(*at) < POLL_SAMPLE_EVERY => false,
+            _ => {
+                sampled.insert(subject.to_string(), now);
+                true
+            }
+        }
     }
 
     /// The door this log describes.
@@ -599,16 +623,35 @@ mod tests {
         request
     }
 
-    /// Ledger #767: a polled subject writes the first poll and one in [`POLL_SAMPLE`] after it,
-    /// every failure and every slow one; any other subject writes every request.
+    /// Polls of `subject` every `every` for `span`, from `start`: how many quiet lines `log`
+    /// writes.
+    fn quiet_lines(
+        log: &AccessLog,
+        subject: &str,
+        dur_ms: u128,
+        every: Duration,
+        span: Duration,
+    ) -> usize {
+        let start = Instant::now();
+        let polls = (span.as_millis() / every.as_millis()) as u32;
+        (0..polls)
+            .filter(|n| log.writes_at(subject, true, dur_ms, start + every * *n))
+            .count()
+    }
+
+    /// Ledger #767, #1718: a polled subject writes its first quiet poll and then one per
+    /// [`POLL_SAMPLE_EVERY`], whatever its interval; every failure and every slow one; any other
+    /// subject writes every request.
     #[test]
     fn a_poll_is_sampled_and_nothing_else_is() {
         const BADGE: &str = "urn:iki:gonk:fragment:queue-depth";
         let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).sampling_polls([BADGE]);
-        let quiet = (0..POLL_SAMPLE * 2)
-            .filter(|_| log.writes(BADGE, true, 3))
-            .count();
-        assert_eq!(quiet, 2, "two quiet lines in {} polls", POLL_SAMPLE * 2);
+        let twenty = POLL_SAMPLE_EVERY * 2;
+        assert_eq!(
+            quiet_lines(&log, BADGE, 3, Duration::from_secs(10), twenty),
+            2,
+            "two quiet lines in twenty minutes of a ten-second poll"
+        );
         assert!(
             log.writes(BADGE, false, 3),
             "a failed poll is always written"
@@ -618,15 +661,57 @@ mod tests {
             "a slow poll is always written"
         );
         assert!(
-            (0..POLL_SAMPLE * 2).all(|_| log.writes("urn:iki:gonk:page:home", true, 3)),
+            (0..200).all(|_| log.writes("urn:iki:gonk:page:home", true, 3)),
             "a page is never sampled"
         );
         // Without `sampling_polls`, nothing is sampled — the badge included.
         let plain = AccessLog::to(Door::Http, Arc::new(|_: &str| {}));
-        assert!((0..POLL_SAMPLE * 2).all(|_| plain.writes(BADGE, true, 3)));
+        assert!((0..200).all(|_| plain.writes(BADGE, true, 3)));
     }
 
-    /// Ledger #1694: a long poll's 45-second wait is not slowness, so it is sampled by count
+    /// Ledger #1718, on the real clock: sixty-one polls of the Layers page in a row write ONE
+    /// quiet line (a count of one in 60 wrote two), and they do not spend the Queue badge's
+    /// sample, whose first poll is still written (a count shared by every subject skipped it).
+    #[test]
+    fn a_busy_poll_does_not_spend_another_subjects_sample() {
+        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).gonk_polls();
+        let quiet = (0..61)
+            .filter(|_| log.writes(crate::layers_view::WAIT_IRI, true, 3))
+            .count();
+        assert_eq!(quiet, 1, "one quiet line in a burst of 61 polls");
+        assert!(
+            log.writes(crate::queue::BADGE_IRI, true, 3),
+            "the badge's first poll is its own"
+        );
+    }
+
+    /// ★ Ledger #1718: the sample is by TIME and per SUBJECT. The count it replaced (one in 60
+    /// polls, across every subject) wrote a three-second poll's quiet line every three minutes,
+    /// and let a busy subject spend a quiet one's sample: here a ten-second badge beside a
+    /// three-second page poll each write one line per period, the first included.
+    #[test]
+    fn the_sample_is_per_subject_and_by_time() {
+        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).gonk_polls();
+        let wait = crate::layers_view::WAIT_IRI;
+        let badge = crate::queue::BADGE_IRI;
+        let thirty = POLL_SAMPLE_EVERY * 3;
+        assert_eq!(
+            quiet_lines(&log, wait, 3, Duration::from_secs(3), thirty),
+            3,
+            "a three-second poll writes once per period, not once per 60 polls"
+        );
+        // The busy subject did not spend the other's sample: its first poll is written.
+        assert!(log.writes_at(badge, true, 3, Instant::now()));
+        assert!(!log.writes_at(badge, true, 3, Instant::now()));
+        assert!(log.writes_at(
+            badge,
+            true,
+            3,
+            Instant::now() + POLL_SAMPLE_EVERY + Duration::from_secs(1)
+        ));
+    }
+
+    /// Ledger #1694: a long poll's 45-second wait is not slowness, so it is sampled by time
     /// alone; a failed one is still written. Named as a short poll it would not have helped: its
     /// every answer is "slow". (gonk serves no long poll since ledger #1705; the rule stays for
     /// a host that does.)
@@ -635,21 +720,28 @@ mod tests {
         let wait = "urn:example:long-poll";
         let short_only = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).sampling_polls([wait]);
         assert!(
-            (0..POLL_SAMPLE).all(|_| short_only.writes(wait, true, 45_000)),
+            (0..60).all(|_| short_only.writes(wait, true, 45_000)),
             "as a short poll, every 45-second wait is written"
         );
         let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {}))
             .sampling_polls([crate::queue::BADGE_IRI])
             .sampling_long_polls([wait]);
-        let waited = (0..POLL_SAMPLE * 2)
-            .filter(|_| log.writes(wait, true, 45_000))
-            .count();
-        assert_eq!(waited, 2, "two lines in {} long polls", POLL_SAMPLE * 2);
+        assert_eq!(
+            quiet_lines(
+                &log,
+                wait,
+                45_000,
+                Duration::from_secs(45),
+                POLL_SAMPLE_EVERY * 2
+            ),
+            2,
+            "two lines in twenty minutes of long polls"
+        );
         assert!(log.writes(wait, false, 45_000), "a failed one is written");
         assert!(log.writes(wait, false, 3), "a refused one is written");
         // The short polls keep their slow rule beside it.
         assert!(log.writes(crate::queue::BADGE_IRI, true, POLL_SLOW_MS));
-        assert!((0..POLL_SAMPLE).all(|_| log.writes("urn:iki:gonk:page:layers", true, 45_000)));
+        assert!((0..60).all(|_| log.writes("urn:iki:gonk:page:layers", true, 45_000)));
     }
 
     /// Ledger #1705: an open Layers page's poll answers at once, so it is sampled as the short

@@ -609,17 +609,41 @@ fn a_blank_node_graph_restores_and_verifies() {
     assert!(report.contains("match the archive exactly"), "{report}");
 }
 
-/// A document the store loads but the verifier refuses: the store keeps ONE of two integer
-/// literals that are the same value (`"1"` and `"01"`), the archive side counts two distinct
-/// terms, and the restore is refused as a mismatch AFTER the load has written a store. That is
-/// the refusal ledger #1698 is about; if the verifier ever learns to count as the store does,
-/// the `expect_err` below fails loudly and the test needs another load-time refusal.
-const REFUSED_AFTER_LOAD: &str = "\
-<urn:a> <urn:p> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g:1> .
-<urn:a> <urn:p> \"01\"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g:1> .
-";
-
-const RESTORES: &str = "<urn:a> <urn:p> \"x\" <urn:g:1> .\n<urn:b> <urn:p> \"y\" .\n";
+/// ★ Ledger [#1718](http://localhost:1062/l/default/item/1718): the verifier counts an archive's
+/// literals as the store keeps them. The store holds a literal of an XSD datatype it knows by
+/// its VALUE, so `"1"` and `"01"` as `xsd:integer` (and `"1"` as `xsd:int`) are one object
+/// there; the verifier counted the terms as written, and a hand-written archive holding such a
+/// pair was refused as a mismatch although it had restored correctly. A lexical form its
+/// datatype does not parse (`"abc"` as `xsd:integer`) is kept as written, by both.
+#[test]
+fn equal_values_written_differently_restore_and_verify() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let target = scratch.path().join("restored");
+    let xsd = "http://www.w3.org/2001/XMLSchema#";
+    let doc = format!(
+        "<urn:a> <urn:p> \"1\"^^<{xsd}integer> <urn:g:1> .\n\
+         <urn:a> <urn:p> \"01\"^^<{xsd}integer> <urn:g:1> .\n\
+         <urn:a> <urn:p> \"1\"^^<{xsd}int> <urn:g:1> .\n\
+         <urn:a> <urn:p> \"2\"^^<{xsd}integer> <urn:g:1> .\n\
+         <urn:b> <urn:p> \"1.0\"^^<{xsd}decimal> .\n\
+         <urn:b> <urn:p> \"1\"^^<{xsd}decimal> .\n\
+         <urn:b> <urn:p> \"true\"^^<{xsd}boolean> .\n\
+         <urn:b> <urn:p> \"1\"^^<{xsd}boolean> .\n\
+         <urn:b> <urn:p> \"abc\"^^<{xsd}integer> .\n"
+    );
+    let report = String::from_utf8(
+        restore_into(&hub, &doc, &target).expect("equal values verify as the store holds them"),
+    )
+    .expect("utf-8");
+    assert!(report.contains("restored 5 quads"), "{report}");
+    assert!(report.contains("match the archive exactly"), "{report}");
+    assert_eq!(
+        counts_on_disk(&target),
+        BTreeMap::from([("urn:g:1".to_string(), 2), (String::new(), 3)])
+    );
+}
 
 fn restore_into(hub: &Kernel, doc: &str, into: &Path) -> Result<Vec<u8>, Error> {
     try_issue(
@@ -633,74 +657,10 @@ fn restore_into(hub: &Kernel, doc: &str, into: &Path) -> Result<Vec<u8>, Error> 
     )
 }
 
-fn entries(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .expect("the directory reads")
-        .map(|entry| {
-            entry
-                .expect("an entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect()
-}
-
-/// ★ A restore refused after its load leaves nothing behind: not the store it half-built, not
-/// a temporary, not the parent directories it created for `into`. And so a retry into the same
-/// path restores, where before ledger #1698 it was refused as a MERGE into a "not empty"
-/// directory holding the refused attempt's store.
-#[test]
-fn a_refused_restore_leaves_nothing_and_a_retry_into_the_same_path_restores() {
-    let backups = tempfile::tempdir().expect("tempdir");
-    let hub = hub(backups.path(), 5);
-    let scratch = tempfile::tempdir().expect("tempdir");
-    let target = scratch.path().join("new").join("restored");
-
-    let refused = restore_into(&hub, REFUSED_AFTER_LOAD, &target)
-        .expect_err("the verifier refuses a document whose two values the store merges");
-    assert!(refused.to_string().contains("does not match"), "{refused}");
-    assert!(
-        entries(scratch.path()).is_empty(),
-        "a refused restore left {:?} behind",
-        entries(scratch.path())
-    );
-
-    let report = String::from_utf8(restore_into(&hub, RESTORES, &target).expect("the retry"))
-        .expect("utf-8");
-    assert!(report.contains("restored 2 quads"), "{report}");
-    assert_eq!(
-        counts_on_disk(&target),
-        BTreeMap::from([("urn:g:1".to_string(), 1), (String::new(), 1)])
-    );
-    assert_eq!(
-        entries(&scratch.path().join("new")),
-        vec!["restored".to_string()],
-        "the store was renamed into place, and no temporary is left beside it"
-    );
-}
-
-/// `into` may already exist as an EMPTY directory. A refused restore leaves it as it was, empty
-/// and in place, and a retry renames the verified store over it.
-#[test]
-fn a_refused_restore_into_an_empty_directory_leaves_it_empty_and_a_retry_restores() {
-    let backups = tempfile::tempdir().expect("tempdir");
-    let hub = hub(backups.path(), 5);
-    let scratch = tempfile::tempdir().expect("tempdir");
-    let target = scratch.path().join("restored");
-    std::fs::create_dir(&target).expect("an empty target");
-
-    restore_into(&hub, REFUSED_AFTER_LOAD, &target).expect_err("the verifier refuses");
-    assert_eq!(entries(scratch.path()), vec!["restored".to_string()]);
-    assert!(entries(&target).is_empty(), "{:?}", entries(&target));
-
-    restore_into(&hub, RESTORES, &target).expect("the retry restores");
-    assert_eq!(
-        counts_on_disk(&target),
-        BTreeMap::from([("urn:g:1".to_string(), 1), (String::new(), 1)])
-    );
-    assert_eq!(entries(scratch.path()), vec!["restored".to_string()]);
-}
+// A restore refused AFTER its store was opened leaves nothing behind (ledger #1698): those tests
+// are in `src/backup.rs` (`a_refused_restore_leaves_nothing_…`), where the verifier can be
+// handed counts the load cannot meet. Through this resource no valid document can do that any
+// more (the equal-values test above was the one that did), and that is the point of #1718.
 
 // ------------------------------------------------------------------ retention and status
 

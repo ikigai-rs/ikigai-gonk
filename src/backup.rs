@@ -483,14 +483,23 @@ fn quad_from_solution(solution: &oxigraph::sparql::QuerySolution) -> Result<Quad
 /// It counts distinct QUADS, not lines: a dataset is a set, a document may repeat a
 /// statement, and the store keeps one — so a line count reports a correct restore as a
 /// mismatch (ledger #737).
+///
+/// ★ And distinct as the STORE tells them apart (ledger
+/// [#1718](http://localhost:1062/l/default/item/1718)): it keeps a literal of a datatype it
+/// knows as its VALUE, so `"1"` and `"01"` as `xsd:integer` (or `"1"` as `xsd:int`) are one
+/// object there and were two here, and a document holding both was refused as a mismatch
+/// although it restored correctly. Each object is counted in [`as_stored`]'s form. gonk's own
+/// backups never hold such a pair (they are written from the store); a hand-written or
+/// foreign archive can.
 fn counts_in_nquads(bytes: &[u8]) -> Result<BTreeMap<String, u64>> {
     let mut graphs: BTreeMap<String, u64> = BTreeMap::new();
     let mut seen: std::collections::HashSet<Quad> = std::collections::HashSet::new();
     for quad in RdfParser::from_format(RdfFormat::NQuads).for_reader(bytes) {
-        let quad = quad.map_err(|e| Error::InvalidArgument {
+        let mut quad = quad.map_err(|e| Error::InvalidArgument {
             name: "content".to_string(),
             detail: format!("parsing N-Quads: {e}"),
         })?;
+        quad.object = as_stored(quad.object);
         if !seen.insert(quad.clone()) {
             continue;
         }
@@ -502,6 +511,66 @@ fn counts_in_nquads(bytes: &[u8]) -> Result<BTreeMap<String, u64>> {
         *graphs.entry(key).or_default() += 1;
     }
     Ok(graphs)
+}
+
+/// `term` as the store gives it back: a literal of an XSD datatype the store keeps as a VALUE
+/// (oxigraph 0.5's `EncodedTerm` from a literal: boolean, the numbers, the date and time types,
+/// the durations, and every derived integer type, all of which come back as `xsd:integer`) in
+/// that value's canonical form; anything else, including a lexical form its datatype does not
+/// parse, unchanged. Two terms the store holds as one object are equal here, and two it keeps
+/// apart are not, so [`counts_in_nquads`] counts the quads a load will hold (ledger #1718).
+fn as_stored(term: Term) -> Term {
+    use oxigraph::model::Literal;
+    use oxsdatatypes::{
+        Boolean, Date, DateTime, DayTimeDuration, Decimal, Double, Duration as XsdDuration, Float,
+        GDay, GMonth, GMonthDay, GYear, GYearMonth, Integer, Time, YearMonthDuration,
+    };
+    fn value<T: std::str::FromStr>(lexical: &str) -> Option<Literal>
+    where
+        Literal: From<T>,
+    {
+        lexical.parse::<T>().ok().map(Literal::from)
+    }
+    let Term::Literal(literal) = &term else {
+        return term;
+    };
+    let lexical = literal.value();
+    let stored = match literal.datatype().as_str() {
+        "http://www.w3.org/2001/XMLSchema#boolean" => value::<Boolean>(lexical),
+        "http://www.w3.org/2001/XMLSchema#float" => value::<Float>(lexical),
+        "http://www.w3.org/2001/XMLSchema#double" => value::<Double>(lexical),
+        "http://www.w3.org/2001/XMLSchema#integer"
+        | "http://www.w3.org/2001/XMLSchema#byte"
+        | "http://www.w3.org/2001/XMLSchema#short"
+        | "http://www.w3.org/2001/XMLSchema#int"
+        | "http://www.w3.org/2001/XMLSchema#long"
+        | "http://www.w3.org/2001/XMLSchema#unsignedByte"
+        | "http://www.w3.org/2001/XMLSchema#unsignedShort"
+        | "http://www.w3.org/2001/XMLSchema#unsignedInt"
+        | "http://www.w3.org/2001/XMLSchema#unsignedLong"
+        | "http://www.w3.org/2001/XMLSchema#positiveInteger"
+        | "http://www.w3.org/2001/XMLSchema#negativeInteger"
+        | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger"
+        | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger" => value::<Integer>(lexical),
+        "http://www.w3.org/2001/XMLSchema#decimal" => value::<Decimal>(lexical),
+        "http://www.w3.org/2001/XMLSchema#dateTime"
+        | "http://www.w3.org/2001/XMLSchema#dateTimeStamp" => value::<DateTime>(lexical),
+        "http://www.w3.org/2001/XMLSchema#time" => value::<Time>(lexical),
+        "http://www.w3.org/2001/XMLSchema#date" => value::<Date>(lexical),
+        "http://www.w3.org/2001/XMLSchema#gYearMonth" => value::<GYearMonth>(lexical),
+        "http://www.w3.org/2001/XMLSchema#gYear" => value::<GYear>(lexical),
+        "http://www.w3.org/2001/XMLSchema#gMonthDay" => value::<GMonthDay>(lexical),
+        "http://www.w3.org/2001/XMLSchema#gDay" => value::<GDay>(lexical),
+        "http://www.w3.org/2001/XMLSchema#gMonth" => value::<GMonth>(lexical),
+        "http://www.w3.org/2001/XMLSchema#duration" => value::<XsdDuration>(lexical),
+        "http://www.w3.org/2001/XMLSchema#yearMonthDuration" => value::<YearMonthDuration>(lexical),
+        "http://www.w3.org/2001/XMLSchema#dayTimeDuration" => value::<DayTimeDuration>(lexical),
+        _ => None,
+    };
+    match stored {
+        Some(literal) => Term::Literal(literal),
+        None => term,
+    }
 }
 
 // ---------------------------------------------------------------- archives
@@ -2447,6 +2516,134 @@ fn civil(millis: u64) -> (i64, u32, u32, u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RESTORES: &str = "<urn:a> <urn:p> \"x\" <urn:g:1> .\n<urn:b> <urn:p> \"y\" .\n";
+
+    /// The names in `dir`.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("the directory reads")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// What `RESTORES` restores to, per graph.
+    fn restores_counts() -> BTreeMap<String, u64> {
+        BTreeMap::from([("urn:g:1".to_string(), 1), (String::new(), 1)])
+    }
+
+    /// One restore into `into`, as `Restore::restore` runs it once the archive is counted:
+    /// staged, loaded, verified against `expected`, and renamed into place on success.
+    fn staged(into: &Path, expected: &BTreeMap<String, u64>) -> Result<BTreeMap<String, u64>> {
+        let staging = Staging::begin(into)?;
+        let total = expected.values().sum();
+        let actual = futures::executor::block_on(load_and_verify(
+            staging.path(),
+            RESTORES.as_bytes().to_vec(),
+            expected,
+            total,
+        ))?;
+        staging.finish(into)?;
+        Ok(actual)
+    }
+
+    /// ★ Ledger #1698: a restore refused after its store was opened leaves nothing behind: not
+    /// the store it half-built, not a temporary, not the parent directories it created for
+    /// `into`. And so a retry into the same path restores, where before it was refused as a
+    /// MERGE into a "not empty" directory holding the refused attempt's store.
+    ///
+    /// The refusal is the verifier's, handed counts the load cannot meet. Through the resource
+    /// no valid archive produces one since ledger #1718 (it counts as the store does), so this
+    /// is where the path is driven; `tests/backup.rs` drives the rest through the resource.
+    #[test]
+    fn a_refused_restore_leaves_nothing_and_a_retry_into_the_same_path_restores() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let target = scratch.path().join("new").join("restored");
+        let wrong = BTreeMap::from([("urn:g:1".to_string(), 2), (String::new(), 1)]);
+
+        let refused = staged(&target, &wrong).expect_err("the verifier refuses");
+        assert!(refused.to_string().contains("does not match"), "{refused}");
+        assert!(
+            entries(scratch.path()).is_empty(),
+            "a refused restore left {:?} behind",
+            entries(scratch.path())
+        );
+
+        let restored = staged(&target, &restores_counts()).expect("the retry restores");
+        assert_eq!(restored, restores_counts());
+        assert_eq!(
+            entries(&scratch.path().join("new")),
+            vec!["restored".to_string()],
+            "the store was renamed into place, and no temporary is left beside it"
+        );
+    }
+
+    /// `into` may already exist as an EMPTY directory. A refused restore leaves it as it was,
+    /// empty and in place, and a retry renames the verified store over it.
+    #[test]
+    fn a_refused_restore_into_an_empty_directory_leaves_it_empty_and_a_retry_restores() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let target = scratch.path().join("restored");
+        std::fs::create_dir(&target).expect("an empty target");
+        let wrong = BTreeMap::from([("urn:g:1".to_string(), 1)]);
+
+        staged(&target, &wrong).expect_err("the verifier refuses");
+        assert_eq!(entries(scratch.path()), vec!["restored".to_string()]);
+        assert!(entries(&target).is_empty(), "{:?}", entries(&target));
+
+        staged(&target, &restores_counts()).expect("the retry restores");
+        assert_eq!(entries(scratch.path()), vec!["restored".to_string()]);
+        assert!(!entries(&target).is_empty(), "the store is in place");
+    }
+
+    /// ★ Ledger #1718: the verifier's count keys each literal as the store keeps it.
+    #[test]
+    fn a_literal_is_counted_in_the_form_the_store_keeps() {
+        let xsd = "http://www.w3.org/2001/XMLSchema#";
+        let counted = |doc: String| counts_in_nquads(doc.as_bytes()).expect("parses");
+        let one = BTreeMap::from([(String::new(), 1)]);
+        for (a, b) in [
+            ("\"1\"", "\"01\""),
+            ("\"1\"", "\"+1\""),
+            ("\"1.0\"^^<D>", "\"1\"^^<D>"),
+            ("\"true\"^^<B>", "\"1\"^^<B>"),
+            ("\"1\"^^<I>", "\"1\"^^<{xsd}long>"),
+        ] {
+            let typed = |t: &str| {
+                let t = t.replace("<D>", &format!("<{xsd}decimal>"));
+                let t = t.replace("<B>", &format!("<{xsd}boolean>"));
+                let t = t.replace("<I>", &format!("<{xsd}integer>"));
+                let t = t.replace("{xsd}", xsd);
+                if t.contains("^^") {
+                    t
+                } else {
+                    format!("{t}^^<{xsd}integer>")
+                }
+            };
+            let doc = format!(
+                "<urn:a> <urn:p> {} .\n<urn:a> <urn:p> {} .\n",
+                typed(a),
+                typed(b)
+            );
+            assert_eq!(counted(doc.clone()), one, "{doc}");
+        }
+        // Kept apart, as the store keeps them: another value, another type, an unparsed form.
+        for doc in [
+            format!("<urn:a> <urn:p> \"1\"^^<{xsd}integer> .\n<urn:a> <urn:p> \"1\"^^<{xsd}decimal> .\n"),
+            format!("<urn:a> <urn:p> \"1\" .\n<urn:a> <urn:p> \"1\"^^<{xsd}integer> .\n"),
+            format!("<urn:a> <urn:p> \"x\"^^<{xsd}integer> .\n<urn:a> <urn:p> \"x \"^^<{xsd}integer> .\n"),
+        ] {
+            assert_eq!(counted(doc.clone()), BTreeMap::from([(String::new(), 2)]), "{doc}");
+        }
+    }
 
     /// ★ Ledger #1664: the store a restore builds loads everything the decompressor may hand
     /// it. Before the fix it opened with the store's default load cap (256 MiB) under a 1 GiB
