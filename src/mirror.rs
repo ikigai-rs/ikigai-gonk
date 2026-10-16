@@ -79,6 +79,19 @@ use crate::layer::{self, Binding, Door};
 /// How long a taker's claim is held between its reports: renewed by every `Progress`.
 pub const LEASE: &str = "7d";
 
+fn step(what: &str) {
+    if std::thread::current()
+        .name()
+        .is_some_and(|n| n.starts_with("gonk-layer-"))
+    {
+        let _ = writeln!(
+            std::io::stderr(),
+            "DBG {} step {what}",
+            now_millis() % 100000
+        );
+    }
+}
+
 macro_rules! dbgl {
     ($($t:tt)*) => {{
         let _ = writeln!(std::io::stderr(), $($t)*);
@@ -785,13 +798,20 @@ impl Mirror {
     /// read cannot be read; an action that fails is a [`Report::problems`] line instead, and
     /// the next pass tries again.
     pub fn pass(&self) -> Result<Report, String> {
+        step("ready");
         let context = self.layer.ready()?;
         let mut report = Report::default();
+        step("kinds");
         self.refresh_kinds(&mut report);
+        step("pending");
         let mut pending = self.layer.pending()?;
+        step("receipts");
         let mut taken = self.layer.receipts()?;
+        step("recorded");
         let recorded = self.recorded()?;
+        step("items");
         let (mut items, complete) = self.items()?;
+        step(&format!("read {} items", items.len()));
         dbgl!(
             "DBG {} items {} pending {} recorded {} complete {complete}",
             now_millis() % 100000,
@@ -951,6 +971,7 @@ impl Mirror {
         // Who we are at the door: what it says (`urn:layers:me`), and only from a host that
         // does not serve that, the dropper of an offer we recorded, which knows nothing until
         // we have one (ledger #1316).
+        step("me");
         let known_offerer = match self.layer.me() {
             Ok(me) => Some(me),
             Err(e) => {
@@ -1030,6 +1051,7 @@ impl Mirror {
             }
         }
 
+        step("orphans");
         // 4. Our offers pending in the layer for an item that is no longer live (deleted).
         if let (true, Some(us)) = (complete, known_offerer) {
             let live: BTreeSet<&str> = items.iter().map(|i| i.iri.as_str()).collect();
@@ -1060,6 +1082,7 @@ impl Mirror {
             .cloned()
             .unwrap_or_else(|| format!("{}:offer:{}", self.binding.layer_iri(), mint_id()));
         // Built first: an item that cannot be offered records nothing.
+        step("build");
         if let Err(e) = self.build_offer(item, &offer, context) {
             report.failed(format!("not offering {}: {e}", item.display));
             return;
@@ -1068,11 +1091,13 @@ impl Mirror {
             let record = self
                 .ledger_request(Verb::Sink, &format!("item:{}:about", item.number))
                 .with_arg("content", inline(&offer));
+            step("record");
             if let Err(e) = self.ledger_issue(record) {
                 report.failed(format!("recording the offer of {}: {e}", item.display));
                 return;
             }
         }
+        step("drop");
         match self.drop_offer(item, &offer, context) {
             Ok(()) => report.did(format!("offered {} as <{offer}>", item.display)),
             Err(e) => report.failed(e),
