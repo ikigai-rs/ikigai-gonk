@@ -1439,12 +1439,23 @@ pub fn mint_id() -> String {
 
 /// Run `mirror` for the life of the process: a pass now, on every event in the layer's feed, on
 /// every cut under the ledger's names, and every [`SWEEP`] whatever happens.
-pub fn start(mirror: Mirror) {
+///
+/// `feed` is the door the feed's long poll runs on, and it must be a door OF ITS OWN
+/// ([`layer::feed_door`]), never the one the passes use.
+///
+/// ★ Ledger [#1743](http://localhost:1060/l/default/item/1743): a QUIC door answers one
+/// connection's calls one at a time (ikigai-quic through 0.1.63), and one [`LazyMount`] is one
+/// connection. With the feed's `wait=50` read on the passes' door, every pass call queued behind
+/// it and missed the 15 s deadline ([`layer::CALL_TIMEOUT`]): the binding read the layer's
+/// definition, timed out on its context, and offered nothing, pass after pass.
+///
+/// [`LazyMount`]: crate::mount::LazyMount
+pub fn start(mirror: Mirror, feed: Arc<dyn Door>) {
     let mirror = Arc::new(mirror);
     let (kick, kicks) = sync_channel::<()>(1);
     let layer = mirror.binding.layer.clone();
     spawn_feed(
-        mirror.layer.door(),
+        feed,
         layer.clone(),
         format!("gonk-layer-feed-{layer}"),
         kick.clone(),
@@ -1466,7 +1477,7 @@ pub fn start(mirror: Mirror) {
 }
 
 fn run_passes(mirror: &Mirror, kicks: &Receiver<()>) {
-    let mut last = String::new();
+    let mut problems = Problems::default();
     loop {
         match kicks.recv_timeout(SWEEP) {
             Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -1481,12 +1492,82 @@ fn run_passes(mirror: &Mirror, kicks: &Receiver<()>) {
             }
             Err(e) => e,
         };
-        // A problem is said once, and again only when it changes: a door that is down for an
-        // hour must not fill the log.
-        if !said.is_empty() && said != last {
-            log(mirror, &said);
+        if let Some(line) = problems.after(said, std::time::Instant::now(), now_millis()) {
+            log(mirror, &line);
         }
-        last = said;
+    }
+}
+
+/// How often a pass loop says again a problem that has not changed ([`Problems`]).
+pub const STILL_FAILING_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// What a binding's pass loop says about its passes' problems (the mirror's and the taker's).
+///
+/// A problem is said once, and again when it changes: a door that is down for an hour must not
+/// fill the log. But a problem that never changes must not vanish either. ★ Ledger
+/// [#1743](http://localhost:1060/l/default/item/1743): a pass failing the same way every five
+/// minutes looked exactly like a pass with nothing to do, and a stuck binding went unseen. So an
+/// unchanged problem is said again every [`STILL_FAILING_EVERY`], with when it began and how
+/// many passes it has failed.
+///
+/// ```
+/// use std::time::{Duration, Instant};
+/// use ikigai_gonk::mirror::{Problems, STILL_FAILING_EVERY};
+/// let mut problems = Problems::default();
+/// let t0 = Instant::now();
+/// let at = |d: Duration| t0 + d;
+/// let down = "reading urn:layer:t:context: timeout".to_string();
+/// assert_eq!(problems.after(down.clone(), at(Duration::ZERO), 0).as_deref(), Some(down.as_str()));
+/// assert_eq!(problems.after(down.clone(), at(Duration::from_secs(300)), 300_000), None);
+/// assert_eq!(
+///     problems.after(down.clone(), at(STILL_FAILING_EVERY), 3_600_000).unwrap(),
+///     "still failing since 1970-01-01T00:00:00Z (3 passes): reading urn:layer:t:context: timeout"
+/// );
+/// assert_eq!(problems.after(String::new(), at(STILL_FAILING_EVERY * 2), 7_200_000), None);
+/// ```
+#[derive(Debug, Default)]
+pub struct Problems {
+    /// The problem the last pass had, `""` for none.
+    last: String,
+    /// When it began (milliseconds since the epoch).
+    since: u64,
+    /// The passes that have had it, the first included.
+    passes: u64,
+    /// When it was last said.
+    said: Option<std::time::Instant>,
+}
+
+impl Problems {
+    /// The line to log after a pass whose problems read `said` (`""` for none), at `now` (for
+    /// the interval) and `wall` (milliseconds since the epoch, for the "since"): `None` when
+    /// there is nothing to say.
+    pub fn after(&mut self, said: String, now: std::time::Instant, wall: u64) -> Option<String> {
+        if said.is_empty() {
+            *self = Problems::default();
+            return None;
+        }
+        if said != self.last {
+            *self = Problems {
+                since: wall,
+                passes: 1,
+                said: Some(now),
+                last: said.clone(),
+            };
+            return Some(said);
+        }
+        self.passes += 1;
+        let due = self
+            .said
+            .is_none_or(|at| now.saturating_duration_since(at) >= STILL_FAILING_EVERY);
+        if !due {
+            return None;
+        }
+        self.said = Some(now);
+        Some(format!(
+            "still failing since {} ({} passes): {said}",
+            crate::backup::stamp_iso(self.since),
+            self.passes
+        ))
     }
 }
 

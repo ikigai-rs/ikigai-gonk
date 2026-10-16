@@ -294,7 +294,8 @@ pub fn parse_all(lines: &[String], home: &Path) -> Result<Vec<Binding>, String> 
 
 /// The door the bindings share, connected lazily, and the mount spaces in front of the hub.
 pub struct Mounted {
-    /// The one connection to the layer host, shared by the mounts and the bindings' workers.
+    /// The one connection to the layer host, shared by the mounts and the bindings' passes (each
+    /// binding's feed long-polls on a door of its own, [`feed_door`]).
     pub door: Option<Arc<LazyMount>>,
     /// The spaces to compose in front of the hub (none without a binding).
     pub spaces: Vec<Arc<dyn Space>>,
@@ -332,6 +333,72 @@ pub fn mount(bindings: &[Binding]) -> Mounted {
         door: Some(door),
         spaces,
     }
+}
+
+/// The door a binding's FEED long-polls on: a [`LazyMount::fresh`] of its own on the binding's
+/// target, under [`CALL_TIMEOUT`] (a feed read gets its wait on top), that nothing dials until
+/// the feed first reads. One per binding, never the door its passes use.
+///
+/// ★ Ledger [#1743](http://localhost:1060/l/default/item/1743): a QUIC door answers the calls on
+/// one connection ONE AT A TIME (ikigai-quic through 0.1.63), and a [`LazyMount`] is one
+/// connection. A feed's `wait=50` read on the passes' door held every pass call past its
+/// deadline. Two bindings' feeds on one door would hold each other the same way, hence one each.
+/// (The Layers page learned this first: its follower has a door of its own,
+/// [`crate::layers_view::LayersView::connect`].)
+pub fn feed_door(binding: &Binding) -> Arc<dyn Door> {
+    Arc::new(LazyMount::fresh(binding.target.clone()).with_call_timeout(CALL_TIMEOUT))
+}
+
+/// Start each binding's worker on `mounted`'s door, and say what is bound (ledger #1190): what
+/// `ikigai-gonk serve` calls.
+///
+/// The offer role runs the mirror ([`crate::mirror::start`]), the take role the taker
+/// ([`crate::taker::start`]), each with its feed on a door of its own ([`feed_door`]); nothing
+/// is dialled here, so a layer door that is down stops
+/// nothing (each worker says so once, and keeps trying).
+///
+/// # Errors
+///
+/// A binding whose worker cannot be built (its capability, or its role).
+pub fn start(
+    bindings: &[Binding],
+    mounted: &Mounted,
+    hub: &Arc<ikigai_core::Kernel>,
+) -> Result<String, String> {
+    let Some(door) = mounted.door.as_ref() else {
+        return Ok("no gonk.layer, so no ledger is bound to a layer".to_string());
+    };
+    let mut lines = Vec::new();
+    for binding in bindings {
+        match binding.role {
+            Role::Offer => {
+                let worker = crate::mirror::Mirror::new(
+                    binding.clone(),
+                    Arc::clone(door) as Arc<dyn Door>,
+                    Arc::clone(hub),
+                )?;
+                crate::mirror::start(worker, feed_door(binding));
+                lines.push(format!(
+                    "ledger `{}` offered into layer `{}` on {}",
+                    binding.ledger, binding.layer, binding.target
+                ));
+            }
+            Role::Take => {
+                let ledger = crate::taker::hub_ledger(binding, Arc::clone(hub))?;
+                let worker = crate::taker::Taker::new(
+                    binding.clone(),
+                    Arc::clone(door) as Arc<dyn Door>,
+                    ledger,
+                )?;
+                crate::taker::start(worker, hub, feed_door(binding));
+                lines.push(format!(
+                    "layer `{}` on {} taken into ledger `{}` (`ikigai-gonk layer take <offer>`)",
+                    binding.layer, binding.target, binding.ledger
+                ));
+            }
+        }
+    }
+    Ok(lines.join("; "))
 }
 
 /// One layer's names and nothing else: `urn:layer:{layer}` itself and everything under
