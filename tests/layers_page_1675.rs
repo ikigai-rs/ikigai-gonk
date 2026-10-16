@@ -1603,13 +1603,28 @@ fn the_layers_polls_write_sampled_lines() {
     )
     .gonk_polls();
     let gonk = Gonk::start_logged(Some(view), tokens(), Some(log));
-    // Four of the page's polls and four counts, all short polls since ledger #1705.
-    for _ in 0..4 {
-        let wait = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=ok");
-        assert_eq!(wait.status, 200, "{wait:?}");
-    }
-    for _ in 0..4 {
-        assert_eq!(gonk.htmx("/layers/~/count").status, 200);
+    // The page's polls and counts, all short polls since ledger #1705, until three of each
+    // were QUICK as this side timed them, which bounds the server's own time from above.
+    // ★ Ledger #1730: four polls used to be sent and "at most the first quick one is written"
+    // asserted, which a loaded machine made vacuous: when all four were slow, none counted as
+    // quick, and a log that wrote every poll passed. Now the quick polls are known to exist.
+    for path in [
+        "/layers/~/wait?layer=talk&after=0&door=ok",
+        "/layers/~/count",
+    ] {
+        let mut quick = 0;
+        for _ in 0..200 {
+            let started = Instant::now();
+            let poll = gonk.htmx(path);
+            assert_eq!(poll.status, 200, "{poll:?}");
+            if started.elapsed().as_millis() < ikigai_gonk::access::POLL_SLOW_MS {
+                quick += 1;
+                if quick == 3 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(quick, 3, "{path}: three quick polls in 200");
     }
     // An error is still written, and so is a page.
     assert_eq!(gonk.htmx("/layers/~/wait?layer=talk&after=x").status, 400);
@@ -1646,7 +1661,7 @@ fn the_layers_polls_write_sampled_lines() {
     for subject in [layers_view::WAIT_IRI, layers_view::COUNT_IRI] {
         assert!(
             quick_lines(subject) <= 1,
-            "of four quick polls of {subject}, at most the first is written: {lines:#?}"
+            "of three or more quick polls of {subject}, at most the first is written: {lines:#?}"
         );
     }
     assert_eq!(

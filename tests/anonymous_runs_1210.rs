@@ -12,8 +12,10 @@
 //! 1.01 s for the same query sent straight to the store, and 45 of 45 plans passed in 0.9 s;
 //! the check, 5.05 s and 35 of 35.
 //!
-//! The slow query carries its own data, a cross product of `VALUES` tables each row of which
-//! pays for a `SHA512`, as in `tests/anonymous_scripts_1175.rs`. The check's variant keeps NO
+//! The slow query carries its own data, `tests/slow/mod.rs`'s product of `VALUES` tables each
+//! row of which grows a million-character string, so no size bound can stop it before the clock
+//! (ledger [#1730](http://localhost:1062/l/default/item/1730): the `SHA512` cross product it
+//! replaces finished inside the store's base in a release build). The check's variant keeps NO
 //! row, so the check's own `LIMIT` cannot stop it early: a `LIMIT` bounds rows, not work.
 
 use std::io::{Read, Write};
@@ -35,6 +37,7 @@ use ikigai_store::budget::TimeBudget;
 use ikigai_store::DurableStore;
 
 mod scratch_gonk;
+mod slow;
 
 /// The store's base in these servers: smaller than the real 5 s so a test is quick, and well
 /// above the door budget.
@@ -45,25 +48,6 @@ const DOOR_MS: u64 = 400;
 
 /// A person's principal, as the HTTP door mints one.
 const PERSON: &str = "urn:iki:gonk:passkey:QlJJQU4";
-
-/// One `VALUES` table of `n` quoted numbers, written with no whitespace at all, so the same
-/// text survives `/k`'s whitespace-separated command grammar.
-fn table(var: &str, n: usize) -> String {
-    let values: String = (0..n).map(|i| format!("\"{i}\"")).collect();
-    format!("VALUES?{var}{{{values}}}")
-}
-
-/// A 3,375,000-row cross product, each row hashed, filtered by `keep` on the hash's prefix.
-/// No `FROM`: a plan's step names its graph with `graph=`, and the store refuses both.
-fn slow(keep: &str) -> String {
-    format!(
-        "SELECT*WHERE{{{}{}{}\
-         FILTER(STRSTARTS(SHA512(CONCAT(?a,?b,?c)),\"{keep}\"))}}",
-        table("a", 150),
-        table("b", 150),
-        table("c", 150)
-    )
-}
 
 /// A query that answers at once; `n` makes each text distinct, so no answer is a cache hit.
 fn fast(n: u32) -> String {
@@ -201,7 +185,7 @@ fn an_anonymous_plan_is_held_to_the_anonymous_budget() {
     let hub = hub(AnonymousRuns::default());
     for forked in [false, true] {
         let started = Instant::now();
-        let why = eval(&hub, &plan(&slow("000"), forked), &anonymous())
+        let why = eval(&hub, &plan(&slow::rows(), forked), &anonymous())
             .map(|answer| text(&answer))
             .expect_err("the slow plan answered");
         let took = started.elapsed();
@@ -212,7 +196,7 @@ fn an_anonymous_plan_is_held_to_the_anonymous_budget() {
         );
         assert!(took < BASE, "forked={forked}: {took:?}");
     }
-    let why = eval(&hub, &plan(&slow("000"), false), &person())
+    let why = eval(&hub, &plan(&slow::rows(), false), &person())
         .map(|answer| text(&answer))
         .expect_err("the slow plan answered a person");
     assert!(
@@ -229,7 +213,7 @@ fn an_anonymous_draft_check_dry_run_is_held_to_the_anonymous_budget() {
     let hub = hub(AnonymousRuns::default());
     let started = Instant::now();
     let answer =
-        text(&check(&hub, &from_ledger(&slow("zzz")), &anonymous()).expect("a check answers"));
+        text(&check(&hub, &from_ledger(&slow::no_rows()), &anonymous()).expect("a check answers"));
     let took = started.elapsed();
     assert!(
         answer.contains(&format!("time budget of {DOOR_MS} ms")),
@@ -237,7 +221,7 @@ fn an_anonymous_draft_check_dry_run_is_held_to_the_anonymous_budget() {
     );
     assert!(took < BASE, "{took:?}");
     let answer =
-        text(&check(&hub, &from_ledger(&slow("zzz")), &person()).expect("a check answers"));
+        text(&check(&hub, &from_ledger(&slow::no_rows()), &person()).expect("a check answers"));
     assert!(
         answer.contains(&format!("time budget of {} ms", BASE.as_millis())),
         "a signed-in check gets the store's base: {answer}"
@@ -366,10 +350,10 @@ fn over_http_an_anonymous_plan_and_check_stop_at_the_door_budget() {
         ))
     });
 
-    let plan = plan(&slow("000"), false);
+    let plan = plan(&slow::rows(), false);
     let command = format!(
         "source urn:nl:sparql:check content={}",
-        from_ledger(&slow("zzz"))
+        from_ledger(&slow::no_rows())
     );
     for path in [
         format!("/plan/eval?{}", query(&[("in", &plan)])),

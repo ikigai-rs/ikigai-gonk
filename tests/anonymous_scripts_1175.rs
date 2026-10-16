@@ -9,10 +9,10 @@
 //! Before this change an anonymous run's query ran to the store's BASE (here 2.5 s; 5 s live),
 //! and any number of runs could be sent back to back.
 //!
-//! The slow script carries its own data — a cross product of `VALUES` tables, each row paying
-//! for a `SHA512` and almost none kept — so it needs no graph to be slow and keeps nothing the
-//! store's answer bound would refuse first. The store answers its caller at the budget whatever
-//! the evaluation does after (ikigai-store's `budget` module).
+//! The slow script carries its own data, `tests/slow/mod.rs`'s product of `VALUES` tables each
+//! row of which grows a million-character string, so it needs no graph to be slow and no size
+//! bound can stop it before the clock (ledger [#1730](http://localhost:1062/l/default/item/1730):
+//! the `SHA512` cross product it replaces finished inside the store's base in a release build).
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -30,6 +30,8 @@ use ikigai_gonk::{budget, compose_with, doors, quic, web};
 use ikigai_store::budget::TimeBudget;
 use ikigai_store::DurableStore;
 
+mod slow;
+
 /// The store's base in these servers: smaller than the real 5 s so a test is quick, and well
 /// above the door budget.
 const BASE: Duration = Duration::from_millis(2_500);
@@ -40,20 +42,9 @@ const DOOR_MS: u64 = 400;
 /// A person's principal, as the HTTP door mints one.
 const PERSON: &str = "urn:iki:gonk:passkey:QlJJQU4";
 
-/// Three 150-row tables: 3,375,000 rows, each hashed, about one in 4,096 kept.
+/// The slow query, reading the default ledger by its own `FROM`.
 fn slow_query() -> String {
-    let table = |var: &str| {
-        let values: String = (0..150).map(|n| format!(" \"{n}\"")).collect();
-        format!("VALUES ?{var} {{{values} }}\n")
-    };
-    format!(
-        "# A cross product that costs seconds and keeps almost nothing.\n\
-         SELECT ?a ?b ?c\nFROM <urn:iki:ledger:graph:default>\nWHERE {{\n{}{}{}\
-         FILTER(STRSTARTS(SHA512(CONCAT(?a, ?b, ?c)), \"000\"))\n}}\n",
-        table("a"),
-        table("b"),
-        table("c")
-    )
+    slow::rows().replacen("SELECT*", "SELECT*FROM<urn:iki:ledger:graph:default>", 1)
 }
 
 /// A query that answers at once, with a parameter so that each run can miss the cache.
