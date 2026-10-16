@@ -893,16 +893,44 @@ fn the_mirror_cannot_close() {
     }
 }
 
+/// A door that answers every feed read `Unavailable`, so a mirror's feed never kicks a pass
+/// (it holds off [`mirror::FEED_RETRY`] after each failure).
+struct NoFeed(AsParticipant);
+
+impl Door for NoFeed {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        if request.target.as_str().ends_with(":feed") {
+            return Err(Error::Unavailable("no feed in this test".to_string()));
+        }
+        self.0.call(request)
+    }
+}
+
 /// The triggers: a pass on start, and one on a write to the ledger (the cut listener), with
 /// no sweep in between.
+///
+/// ★ Ledger #1730: the write used to follow a 300 ms sleep standing for "the start pass is
+/// done". On a loaded machine the start pass had not read the ledger yet, offered the item
+/// itself, and the test passed with the listener never used. Now an item filed BEFORE the start
+/// is the started marker: once its offer is pending, the start pass has read the ledger, and
+/// with the feed silenced only the listener (or the five-minute sweep) can offer the second.
 #[test]
 fn a_ledger_write_offers_without_waiting_for_the_sweep() {
     let w = World::new();
-    mirror::start(w.mirror());
-    std::thread::sleep(Duration::from_millis(300));
+    w.file("Here first\n\nOffered by the start pass.", &[]);
+    mirror::start(w.mirror_through(Arc::new(NoFeed(w.door(&us())))));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while w.pending().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the start pass offered nothing within 60 s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(w.pending().len(), 1, "{:?}", w.pending());
     w.file("Arrives later\n\nOffered by the listener.", &[]);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while w.pending().is_empty() {
+    while w.pending().len() < 2 {
         assert!(
             Instant::now() < deadline,
             "no offer within 20 s of the write"

@@ -4,19 +4,18 @@
 //! gets the store's base; and gonk's own queries are never capped by the door.
 //!
 //! Driven over real HTTP, the server built as `main` builds it. The slow query carries its own
-//! data — a three-way cross product of 100-row `VALUES` tables, a million solutions — so it
-//! needs no graph to be slow, and costs the store nothing it could refuse by its algebra bounds
-//! (`VALUES` rows are free there), so only the clock can stop it. Written with no whitespace
-//! outside its literals, so it also fits `/k`'s command grammar.
+//! data, a product of two 150-row `VALUES` tables each row of which grows a million-character
+//! string, so it needs no graph to be slow, and costs the store nothing it could refuse by its
+//! algebra bounds (`VALUES` rows are free there), so only the clock can stop it.
 //!
 //! ⚠ Since store 0.2.9 (ledger [#993](http://localhost:1060/l/default/item/993)) every answer is
-//! also bounded at 100,000 rows, and a debug build streamed this product's 100,001st row in
-//! 0.59–0.70 s — so a door budget near that could have been refused on SIZE instead. Each row now
-//! pays for a `SHA512` in a filter that keeps it, which slows the stream without widening the
-//! answer (the 100,001st row at 1.07 s on the same machine, against door budgets of 300–600 ms;
-//! a slower runner only widens that, since the budgets are wall-clock),
-//! and the signed-in caller's grant carries the store's answer grants, so the clock is the only
-//! bound in play for it. The size bound has its own test at the end of this file.
+//! also bounded at 100,000 rows. This file's query used to be a million-row product with a
+//! `SHA512` a row, and under `cargo test --release` the 100,001st row arrived after 155 ms, so
+//! every door-budget test here was refused on SIZE instead, and the signed-in caller's read
+//! finished inside the base (ledger [#1730](http://localhost:1062/l/default/item/1730)). The
+//! query is now `tests/slow/mod.rs`'s, which no size bound can stop, and the signed-in
+//! caller's grant still carries the store's answer grants, so the clock is the only bound in
+//! play for it. The size bound has its own test at the end of this file.
 //!
 //! Why not a `COUNT` or a filter that keeps nothing: oxigraph checks its cancellation token only
 //! where it touches the dataset, and a `VALUES` join never does, so an evaluation that emits no
@@ -29,6 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod common;
+mod slow;
 
 use common::Authenticator;
 use futures::executor::block_on;
@@ -46,19 +46,9 @@ const GRAPH: &str = "urn:iki:ledger:graph:default";
 /// and well above every door budget used here.
 const BASE: Duration = Duration::from_millis(2_500);
 
-/// A million solutions from 1.8 KB of query, and no graph read at all, each one paying for a
-/// hash it does not return (see the module docs).
+/// The slow query (see the module docs).
 fn cross_product() -> String {
-    let table = |var: &str| {
-        let values: String = (0..100).map(|n| format!("\"{n}\"")).collect();
-        format!("VALUES?{var}{{{values}}}")
-    };
-    format!(
-        "SELECT*{{{}{}{}FILTER(STRLEN(SHA512(CONCAT(?a,?b,?c)))>0)}}",
-        table("a"),
-        table("b"),
-        table("c")
-    )
+    slow::rows()
 }
 
 struct Server {

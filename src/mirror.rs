@@ -1607,12 +1607,31 @@ mod tests {
         ))
     }
 
-    /// Follow a feed through a door answering with `answer` for a moment; the reads it made.
-    fn reads_in_a_moment<F>(answer: F) -> usize
+    /// A feed followed through a door answering with `answer`, its kicks drained. Dropped, it
+    /// stops draining, so a feed that kicks ends at its next kick.
+    struct Followed {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Followed {
+        fn reads(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Followed {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn follow<F>(answer: F) -> Followed
     where
         F: Fn(u64) -> Result<ikigai_core::Representation, Error> + Send + Sync + 'static,
     {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let door = Arc::new(AtOnce {
             calls: Arc::clone(&calls),
             answer,
@@ -1620,38 +1639,81 @@ mod tests {
         let (kick, kicks) = sync_channel::<()>(1);
         spawn_feed(door, "t".to_string(), "test-feed".to_string(), kick);
         // Drain the kicks so a feed that kicks is never stopped by a full channel.
-        let drained = std::thread::spawn(move || while kicks.recv().is_ok() {});
-        std::thread::sleep(Duration::from_millis(300));
-        drop(drained);
-        calls.load(std::sync::atomic::Ordering::SeqCst)
+        let stopping = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) =
+                    kicks.recv_timeout(Duration::from_millis(10))
+                {
+                    return;
+                }
+            }
+        });
+        Followed { calls, stop }
+    }
+
+    /// Wait for `check`, failing as `what` past `within`.
+    fn until(within: Duration, what: &str, check: impl Fn() -> bool) {
+        let end = std::time::Instant::now() + within;
+        while !check() {
+            assert!(std::time::Instant::now() < end, "{what} within {within:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// The audit of 2026-10-11: an answer that came back at once and did not move the cursor
     /// (not JSON, events with no `last`, a host that ignores `wait`, a `Conflict` at 0) was
     /// read again at once, for ever, and kicked a whole pass each time it named events.
+    ///
+    /// ★ Judged against a MOVING feed run beside them, never a stopwatch (ledger #1730): each
+    /// held-off feed must have made its first read (so it had its chance), then the moving feed
+    /// twenty more, and by then the held-off ones have read at most twice. Before, each feed got
+    /// 300 ms of wall clock: on a loaded machine a feed thread that had not started yet read 0
+    /// times and passed whatever its hold-off did, and the moving feed's "more than 10 reads"
+    /// depended on how much of those 300 ms it was scheduled. The moving feed's twenty reads
+    /// fit well inside [`FEED_RETRY`], so a moving feed that is held off even once fails here.
     #[test]
     fn a_feed_that_answers_at_once_without_moving_is_held_off() {
-        let garbage = reads_in_a_moment(|_| json("not json".to_string()));
-        let unmoving = reads_in_a_moment(|_| json(r#"{"events":[{"seq":1}]}"#.to_string()));
-        let no_wait = reads_in_a_moment(|after| json(format!(r#"{{"last":{after},"events":[]}}"#)));
-        let conflict = reads_in_a_moment(|_| Err(Error::Conflict("another feed".to_string())));
-        for (what, reads) in [
-            ("not JSON", garbage),
-            ("events that do not move the cursor", unmoving),
-            ("an empty answer at once", no_wait),
-            ("a Conflict at 0", conflict),
-        ] {
-            assert!(reads <= 2, "{what}: {reads} reads in 300 ms");
-        }
-        // And a feed that MOVES is followed at once, however fast it answers.
-        let moving = reads_in_a_moment(|after| {
+        let held = [
+            ("not JSON", follow(|_| json("not json".to_string()))),
+            (
+                "events that do not move the cursor",
+                follow(|_| json(r#"{"events":[{"seq":1}]}"#.to_string())),
+            ),
+            (
+                "an empty answer at once",
+                follow(|after| json(format!(r#"{{"last":{after},"events":[]}}"#))),
+            ),
+            (
+                "a Conflict at 0",
+                follow(|_| Err(Error::Conflict("another feed".to_string()))),
+            ),
+        ];
+        let moving = follow(|after| {
             json(format!(
                 r#"{{"last":{},"events":[{{"seq":{}}}]}}"#,
                 after + 1,
                 after + 1
             ))
         });
-        assert!(moving > 10, "a moving feed was held off: {moving} reads");
+        let within = FEED_RETRY * 2 / 3;
+        until(within, "every held-off feed's first read", || {
+            held.iter().all(|(_, feed)| feed.reads() >= 1)
+        });
+        let from = moving.reads();
+        // And a feed that MOVES is followed at once, however fast it answers.
+        until(
+            within,
+            "a moving feed was held off: twenty more reads",
+            || moving.reads() >= from + 20,
+        );
+        for (what, feed) in &held {
+            let reads = feed.reads();
+            assert!(
+                reads <= 2,
+                "{what}: {reads} reads while a moving feed made twenty"
+            );
+        }
     }
 
     #[test]

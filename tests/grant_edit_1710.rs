@@ -215,27 +215,58 @@ fn a_narrowed_grant_narrows_the_next_call_on_the_same_connection() {
 /// narrows), so it takes effect when the door's age bound closes that connection and the
 /// client heals onto a new one, minted from the files as they are then. Scaled down from
 /// [`quic::MAX_CONNECTION_AGE`] to one second.
+///
+/// ★ Ledger #1730: "inside the bound" is a claim about the clock, so it is only asserted when
+/// it held. The clock starts BEFORE the door is built (so the connection is never older than
+/// it says), and when building it and making three calls took longer than the bound, as it can
+/// on a loaded machine, that attempt says nothing and the next one doubles the bound; none
+/// conclusive is a failure. Past the bound, a READ (replayed on a new connection) drives the
+/// heal, rather than a sleep and the hope that the door has closed the old connection by then.
 #[test]
 fn a_widened_grant_takes_effect_when_the_connection_ages_out() {
-    let bound = Duration::from_secs(1);
-    let door = door(Authority::Read, Some(bound));
-    door.call(items()).expect("a reader reads");
-    denied(door.call(append("too soon")), "a write under a read grant");
+    let bounds = [1, 2, 4, 8].map(Duration::from_secs);
+    for bound in bounds {
+        let started = Instant::now();
+        let door = door(Authority::Read, Some(bound));
+        door.call(items()).expect("a reader reads");
+        let too_soon = door.call(append("too soon"));
 
-    door.set_grant(Some(grants_for("default", Authority::Write).unwrap()));
-    // Inside the bound the connection still holds the authority it was minted with.
-    denied(
-        door.call(append("still too soon")),
-        "a write on the connection minted under read",
-    );
-    assert_eq!(door.minted(), 1);
+        door.set_grant(Some(grants_for("default", Authority::Write).unwrap()));
+        let still_too_soon = door.call(append("still too soon"));
+        let minted = door.minted();
+        if started.elapsed() >= bound {
+            println!(
+                "{bound:?}: the first calls took {:?}, not inside the bound; trying a longer one",
+                started.elapsed()
+            );
+            continue;
+        }
+        denied(too_soon, "a write under a read grant");
+        // Inside the bound the connection still holds the authority it was minted with.
+        denied(
+            still_too_soon,
+            "a write on the connection minted under read",
+        );
+        assert_eq!(minted, 1);
 
-    std::thread::sleep(bound + Duration::from_millis(500));
-    door.call(append("after the age bound"))
-        .expect("a write on the connection minted under the widened grant");
-    assert_eq!(
-        door.minted(),
-        2,
-        "the client healed onto a second connection"
-    );
+        std::thread::sleep(bound.saturating_sub(started.elapsed()));
+        let healing = Instant::now();
+        while door.minted() < 2 {
+            assert!(
+                healing.elapsed() < Duration::from_secs(30),
+                "the client never healed onto a second connection"
+            );
+            door.call(items())
+                .expect("a read heals onto a new connection");
+        }
+        door.call(append("after the age bound"))
+            .expect("a write on the connection minted under the widened grant");
+        assert_eq!(
+            door.minted(),
+            2,
+            "the client healed onto a second connection"
+        );
+        return;
+    }
+    panic!("no bound in {bounds:?} held three calls, so nothing was measured");
 }

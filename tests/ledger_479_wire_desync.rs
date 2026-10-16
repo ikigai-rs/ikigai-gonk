@@ -66,11 +66,30 @@ use ikigai_core::{
 use ikigai_resolve::Resolver;
 use ikigai_vocab::TurtleRenderer;
 
-/// The client's I/O deadline. Generous enough that an instant round trip on a loaded
-/// runner is never mistaken for a miss.
+/// The client's I/O deadline at scale 1. Generous enough that an instant round trip on an idle
+/// machine is never mistaken for a miss; [`conclusively`] scales it up when it is.
 const DEADLINE: Duration = Duration::from_millis(500);
-/// How long the slow endpoint takes — well past [`DEADLINE`], so the miss is not a guess.
+/// How long the slow endpoint takes at scale 1: well past [`DEADLINE`], so the miss is not a
+/// guess.
 const SLOW: Duration = Duration::from_millis(2500);
+
+/// The scales a scenario is tried at (its deadline and its slow call both multiplied).
+const SCALES: [u32; 4] = [1, 2, 4, 8];
+
+/// Run `attempt` at each of [`SCALES`] until its preconditions hold (it returns `true`), and
+/// FAIL if they never do. ★ Ledger #1730: these tests used to return early and PASS when a
+/// loaded machine made the fast call miss its deadline or the slow one meet it, so under load
+/// they could pass having measured nothing. Now a loaded machine gets a longer deadline, and
+/// a machine on which no scale is conclusive is a failure that says so.
+fn conclusively(what: &str, attempt: impl Fn(u32) -> bool) {
+    for scale in SCALES {
+        if attempt(scale) {
+            return;
+        }
+        println!("{what}: preconditions not met at scale {scale}; trying a longer deadline");
+    }
+    panic!("{what}: preconditions never met at scales {SCALES:?}, so nothing was measured");
+}
 
 /// `urn:test:{name}` answers its own name, after `delay`.
 fn space(rows: &[(&str, u64)]) -> EndpointSpace {
@@ -154,49 +173,51 @@ fn read(client: &ikigai_ipc::IpcResolver, name: &str) -> Result<String, String> 
 /// spent the old one — and a further clean call proves there is no shift to go away.
 /// Through 0.1.24 these two assertions read `Ok("b")` and `Ok("c")`.
 ///
-/// The preconditions are checked rather than assumed: if a loaded runner made the first
-/// call slow or the second call fast, this says so and stops instead of flaking.
+/// The preconditions are checked rather than assumed: if a loaded machine made the first call
+/// slow or the second call fast, the scenario runs again at a longer deadline
+/// ([`conclusively`]), and fails if no deadline is conclusive.
 #[test]
 fn a_timed_out_ipc_call_no_longer_poisons_the_connection() {
-    let path = socket("a");
-    let _ = std::fs::remove_file(&path);
-    let serving = path.clone();
-    std::thread::spawn(move || {
-        let kernel = Kernel::new(Arc::new(space(&[
-            ("a", 0),
-            ("b", SLOW.as_millis() as u64),
-            ("c", 0),
-        ])));
-        let _ = ikigai_ipc::serve(kernel, &serving);
-    });
-    let client = client_for(&path, DEADLINE);
+    conclusively("a timed-out call", |scale| {
+        let (deadline, slow) = (DEADLINE * scale, SLOW * scale);
+        let path = socket(&format!("a{scale}"));
+        let _ = std::fs::remove_file(&path);
+        let serving = path.clone();
+        std::thread::spawn(move || {
+            let kernel = Kernel::new(Arc::new(space(&[
+                ("a", 0),
+                ("b", slow.as_millis() as u64),
+                ("c", 0),
+            ])));
+            let _ = ikigai_ipc::serve(kernel, &serving);
+        });
+        let client = client_for(&path, deadline);
 
-    let first = read(&client, "a");
-    let second = read(&client, "b");
-    // The server finishes B and writes its reply into a socket nobody is reading.
-    std::thread::sleep(SLOW + DEADLINE);
-    let third = read(&client, "c");
-    let fourth = read(&client, "a");
-    let _ = std::fs::remove_file(&path);
+        let first = read(&client, "a");
+        let second = read(&client, "b");
+        // The server finishes B and writes its reply into a socket nobody is reading.
+        std::thread::sleep(slow + deadline);
+        let third = read(&client, "c");
+        let fourth = read(&client, "a");
+        let _ = std::fs::remove_file(&path);
 
-    if first.as_deref() != Ok("a") || second.is_ok() {
-        println!(
-            "preconditions not met on this runner (a -> {first:?}, b -> {second:?}); \
-             nothing was measured"
+        if first.as_deref() != Ok("a") || second.is_ok() {
+            println!("a -> {first:?}, b -> {second:?}");
+            return false;
+        }
+        assert_eq!(
+            third.as_deref(),
+            Ok("c"),
+            "a Source of urn:test:c after a deadline miss must answer for urn:test:c — \
+             the previous call's answer means the connection was KEPT (ikigai-ipc < 0.1.25)"
         );
-        return;
-    }
-    assert_eq!(
-        third.as_deref(),
-        Ok("c"),
-        "a Source of urn:test:c after a deadline miss must answer for urn:test:c — \
-         the previous call's answer means the connection was KEPT (ikigai-ipc < 0.1.25)"
-    );
-    assert_eq!(
-        fourth.as_deref(),
-        Ok("a"),
-        "and the call after that must be unshifted too"
-    );
+        assert_eq!(
+            fourth.as_deref(),
+            Ok("a"),
+            "and the call after that must be unshifted too"
+        );
+        true
+    });
 }
 
 /// The same fix reached through the SELF-DESCRIPTION deadline, which is the bound that
@@ -208,50 +229,55 @@ fn a_timed_out_ipc_call_no_longer_poisons_the_connection() {
 /// configures.
 #[test]
 fn a_timed_out_describe_no_longer_poisons_the_connection() {
-    let path = socket("m");
-    let _ = std::fs::remove_file(&path);
-    let serving = path.clone();
-    std::thread::spawn(move || {
-        let space = EndpointSpace::new()
-            .bind(
-                Exact::new("urn:test:a"),
-                FnEndpoint::new("e-a", |_inv| {
-                    Ok(Representation::new(ReprType::new("text/plain"), "a"))
-                }),
-            )
-            .bind(
-                Exact::new("urn:test:b"),
-                SlowDescribe {
-                    name: "e-b".to_string(),
-                    delay: SLOW,
-                },
-            );
-        let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer));
-        let _ = ikigai_ipc::serve(kernel, &serving);
+    conclusively("a timed-out describe", |scale| {
+        let (deadline, slow) = (DEADLINE * scale, SLOW * scale);
+        let path = socket(&format!("m{scale}"));
+        let _ = std::fs::remove_file(&path);
+        let serving = path.clone();
+        std::thread::spawn(move || {
+            let space = EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:test:a"),
+                    FnEndpoint::new("e-a", |_inv| {
+                        Ok(Representation::new(ReprType::new("text/plain"), "a"))
+                    }),
+                )
+                .bind(
+                    Exact::new("urn:test:b"),
+                    SlowDescribe {
+                        name: "e-b".to_string(),
+                        delay: slow,
+                    },
+                );
+            let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer));
+            let _ = ikigai_ipc::serve(kernel, &serving);
+        });
+        // The connection's own deadline is left long, so only the DESCRIBE bound can fire.
+        let client =
+            client_for(&path, Duration::from_secs(60)).with_describe_timeout(Some(deadline));
+
+        let meta = client.issue(Request::new(
+            Verb::Meta,
+            Iri::parse("urn:test:b").expect("a valid test IRI"),
+        ));
+        std::thread::sleep(slow + deadline);
+        let after = read(&client, "a");
+        let _ = std::fs::remove_file(&path);
+
+        if meta.is_ok() {
+            println!("the describe did not miss its deadline");
+            return false;
+        }
+        let after = after
+            .expect("the read after a missed describe deadline answers, on a fresh connection");
+        assert!(
+            !after.contains("urn:ikigai:endpoint:e-b"),
+            "a Source of urn:test:a came back with the abandoned CONTRACT — the describe bound \
+             kept the connection (ikigai-ipc < 0.1.25): {after}"
+        );
+        assert_eq!(after, "a", "and it must be the resource that was asked for");
+        true
     });
-    // The connection's own deadline is left long, so only the DESCRIBE bound can fire.
-    let client = client_for(&path, Duration::from_secs(60)).with_describe_timeout(Some(DEADLINE));
-
-    let meta = client.issue(Request::new(
-        Verb::Meta,
-        Iri::parse("urn:test:b").expect("a valid test IRI"),
-    ));
-    std::thread::sleep(SLOW + DEADLINE);
-    let after = read(&client, "a");
-    let _ = std::fs::remove_file(&path);
-
-    if meta.is_ok() {
-        println!("the describe did not miss its deadline on this runner; nothing was measured");
-        return;
-    }
-    let after =
-        after.expect("the read after a missed describe deadline answers, on a fresh connection");
-    assert!(
-        !after.contains("urn:ikigai:endpoint:e-b"),
-        "a Source of urn:test:a came back with the abandoned CONTRACT — the describe bound \
-         kept the connection (ikigai-ipc < 0.1.25): {after}"
-    );
-    assert_eq!(after, "a", "and it must be the resource that was asked for");
 }
 
 /// The incident's own payload, kept because it is the only copy: it was saved to a session
