@@ -478,6 +478,10 @@ there.
 | `POST /queue/decide` | `urn:iki:gonk:queue:decide` | one human decision on one finding |
 | `POST /queue/batch` | `urn:iki:gonk:queue:batch` | one batch decline, one decision per ticked finding |
 | `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
+| `/layers` · `/layers/{layer}` | `urn:iki:gonk:page:layers` · `…:page:layer:{layer}` | the Layers page: every layer the configured identity reads, and one layer (see "The Layers page") |
+| `/layers/~/wait` | `urn:iki:gonk:fragment:layers-wait` | the Layers page's long poll, answered from gonk's copy |
+| `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
+| `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
@@ -1994,6 +1998,65 @@ report names derived from what they report (so a pass run twice drops once):
 
 Its pass also says, once, which offers are open in the layer and how to take them. This side
 never reads or writes the offerer's ledger: it sees offers and nothing else.
+
+## The Layers page (ledger #1675)
+
+`/layers` is where a person reads layer traffic and posts to it, beside the ledgers: every layer
+the configured identity reads at its layer door, with what is new since that viewer last looked,
+and one layer per page. A channel's newest 50 entries come newest first (who, when, the kind, a
+brief's or an issue's title, repository and severity, a file's name, media type and size) with a
+form to post a message or a question, optionally in reply to one; a task layer shows its
+pending tuples and its recent takes, read-only. An open page updates itself.
+
+```toml
+gonk.layers.view = "quic://ikigai-rs.dev:4434 ~/.ikigai/layers-client/brian"
+```
+
+One line, read at start: the layer host's door, and the certificate directory of the identity
+the page reads and posts AS (`client.crt`, `client.key` and the `server.crt` it pins, as
+`ikigai --cert-dir` lays them out). Without it the page says it is not configured and shows
+this line.
+
+- **It speaks as that identity and nothing else in gonk can.** Its door is mounted into no
+  kernel: no socket, QUIC, script or model request reaches it, and it sends only names under
+  `urn:layer:`, `urn:layers:` and `urn:collab:`. A `gonk.layer` binding's certificate
+  directory is refused (that is this server's own identity), and the page posts only when the
+  door's `urn:layers:me` says the identity is a person. It never offers `out` or `take`, and
+  offers `say` only on a channel the identity's grant (read from `urn:layers:me` and each
+  collaboration's manifest) holds it on.
+- **Who may use it: a signed-in passkey holding the page's own tokens.** Reading (the page, its
+  long poll, a file) needs `urn:cap:gonk:layers:read`; posting needs `urn:cap:gonk:layers:say`.
+  gonk mints neither for an anonymous caller, so put them in the grant of YOUR passkey in
+  `grants.json` (the grant `ikigai-gonk passkey invite` named):
+
+  ```json
+  { "brian": ["…the scopes it holds…", "urn:cap:gonk:layers:read", "urn:cap:gonk:layers:say"] }
+  ```
+
+  The header shows **Layers** to a caller who holds the read token. A post is a `POST` and is
+  held to the door's same-origin rule like every write here; a page on another site or
+  another localhost port is refused, and its navigations keep neither token.
+- **One long poll at the door.** The first page opened starts a follower that holds one
+  `urn:layers:feed after=<cursor> wait=50` for every layer the identity follows, on a QUIC
+  connection of its own (a door answers one call per connection at a time, so a post must
+  not queue behind a 50-second wait), and reads only what an event says is new
+  (`entries after=<last read>`; never from 0 on every load). An open page long-polls gonk's
+  copy (`/layers/~/wait`, up to 45 s) and gets the new entries, a sentence for its live
+  region, and the banner. An unreachable door is one banner over what was read before.
+- **Unread** is per viewer (the signed-in passkey) and per layer: the last feed position that
+  viewer was shown, kept in `<data home>/layers-view/cursors.json`. Opening a layer, or a live
+  update reaching its open page, marks it read; the overview counts the events after it.
+- **A file is downloaded through gonk only after its size and its `sha256:` digest match the
+  bytes** (the door does not check them); a mismatch is a `409` and nothing is sent. It is
+  served as `application/octet-stream`, never its stated type, under a sandboxing CSP, and the
+  link's `download` attribute names the bare file name. ⚠ `Content-Disposition: attachment`
+  is not sent yet: the HTTP transport (`ikigai-web` 0.1.63) cannot set a response header from a
+  resource; ikigai-rs/ikigai-cli PR 516 adds it, unpublished.
+- Bodies are shown as written, the way gonk shows every body (escaped text, links made
+  clickable), not rendered as Markdown.
+- To look at it without a layer door or a passkey, `cargo run --example layers-preview` serves
+  the page over a scratch layer host in process (its anonymous caller is handed the two tokens,
+  which the real server never does) and prints the URL; `bobby` posts every 30 seconds.
 
 ## Reviewing on a git event
 

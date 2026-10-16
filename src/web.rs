@@ -420,6 +420,15 @@ pub(crate) fn nav(
             "",
         ));
     }
+    // ★ The Layers page (ledger #1675), on the browse rule: offered only to a caller whose grant
+    // reads it, so nobody is shown a door that answers a sign-in notice.
+    if inv.capability.allows(crate::layers_view::CAP_READ) {
+        out.push_str(&element(
+            "layers-link",
+            &[("href", crate::layers_view::PAGE_PATH)],
+            "",
+        ));
+    }
     if withholds(web, inv, reads_a_root, offers_queue) {
         out.push_str(&element(
             "withheld",
