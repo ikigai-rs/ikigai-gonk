@@ -563,7 +563,11 @@ fn serve(flags: &config::Flags) -> ! {
             clients,
         } => {
             let (door, minter) = (
-                doors::quic_kernel_with(Arc::clone(&hub), access(access::Door::Quic)),
+                doors::quic_kernel_with(
+                    Arc::clone(&hub),
+                    access(access::Door::Quic),
+                    layout.clone(),
+                ),
                 quic::minter(layout.clone()),
             );
             // ★ Bound HERE, before the banner (ledger #1300, the gonk half of ledger #1188), so
@@ -595,7 +599,9 @@ fn serve(flags: &config::Flags) -> ! {
                     &trusted,
                     minter,
                     ikigai_quic::DEFAULT_IDLE_TIMEOUT,
-                    None,
+                    // A widened grant reaches a standing connection within this bound; a
+                    // removed or narrowed one does not wait for it (ledger #1710).
+                    Some(quic::MAX_CONNECTION_AGE),
                 )
                 .err();
                 fail(&format!("the QUIC door on {bound} stopped: {error:?}"))
@@ -1363,14 +1369,14 @@ fn client_add(
         }
     }
     // ★ A rotation says what it REPLACED (ledger #864, R7): the old certificate is no longer
-    // enrolled, so the deployed bundle stops working at its next connection — on purpose.
+    // enrolled, so the deployed bundle stops working at its next call — on purpose.
     if let Some(old) = &bundle.replaced {
         // Already moved to the new certificate when the enrollment was carried over.
         let unenrolled =
             carried.is_some() || quic::unenrol(&layout, old).unwrap_or_else(|e| fail(&e));
         println!(
             "  ROTATED      the old certificate {old} {} — a client still holding the old \
-             bundle is refused from its next connection; give it this one",
+             bundle is refused from its next call; give it this one",
             if unenrolled {
                 "was unenrolled"
             } else {
@@ -1441,7 +1447,7 @@ fn client_remove(key: &str, by_name: bool, flags: &config::Flags) {
     }
     match &removed.unenrolled {
         Some(fingerprint) => println!(
-            "unenrolled {fingerprint} from {} — refused from its next connection",
+            "unenrolled {fingerprint} from {} — refused from its next call",
             layout.clients_json().display()
         ),
         None => println!("  (its certificate was not enrolled)"),

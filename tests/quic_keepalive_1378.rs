@@ -47,7 +47,13 @@ fn door_over_a_slow_hub() -> (std::net::SocketAddr, ikigai_quic::Identity, Strin
         Arc::new(EndpointSpace::new().bind(Exact::new("urn:test:slow"), slow)),
         Arc::new(TurtleRenderer),
     ));
-    let door = doors::quic_kernel_with(hub, None);
+    // The minter below names nobody, so the door's per-call re-read (ledger #1710) has no
+    // enrollment to read: any config home serves, and this one is never written.
+    let door = doors::quic_kernel_with(
+        hub,
+        None,
+        ikigai_gonk::quic::Layout::in_config_home(&std::env::temp_dir().join("gonk-1378-unused")),
+    );
     let (server, client) = (ikigai_quic::generate(), ikigai_quic::generate());
     let server_pem = server.cert_pem.clone();
     let trusted = vec![client.cert_pem.clone()];

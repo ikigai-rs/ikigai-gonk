@@ -1706,8 +1706,14 @@ in the current form. Enrollment is unchanged: `clients.json` is keyed by fingerp
 
 What admission means today: a client holding a trusted certificate and an enrolment is
 admitted until it is removed (`client remove`, or its entry deleted from `clients.json`),
-which takes effect on its next connection; its certificate stays trusted at the TLS handshake
-until a restart. There is no certificate authority, no expiry and no automated trust
+which takes effect on its next CALL, on the connection it already holds; its certificate stays
+trusted at the TLS handshake until a restart. Both files are re-read on every call that arrives
+(ledger #1710): a removed grant or enrollment refuses the call, and a narrowed grant answers it
+under the narrower authority. A connection only narrows, so a WIDENED grant reaches a client
+when its connection is next opened, and the door closes every connection at ten minutes old
+(the client reconnects on its next call, unnoticed) so that is never longer than ten minutes.
+Through `9d4e722` a standing connection (Hermes's MCP mount, a worker) kept the authority it
+connected with until gonk restarted. There is no certificate authority, no expiry and no automated trust
 distribution — the server certificate is pinned by copying it.
 
 **A remote WORKER** (ledger #1143, ikigai-ledger 0.8.0) is a client that takes work from a

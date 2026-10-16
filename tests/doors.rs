@@ -620,6 +620,7 @@ fn a_narrowed_quic_client_is_still_named_and_authors_its_writes() {
             ikigai_gonk::access::Door::Quic,
             Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
         )),
+        layout.clone(),
     );
     // Bound here and handed to the door, so the port is the one the kernel chose and nothing
     // picks one by bind-and-release (ledger #1300, field guide 9h).

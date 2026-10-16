@@ -345,16 +345,25 @@ pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
     over(
         Arc::new(HubSpace::over_wire(hub).naming_nobody()),
         Some(crate::access::Door::Socket),
+        None,
         access,
     )
 }
 
 /// The QUIC door's kernel: [`door_kernel_with`] behind [`crate::admit::Admitting`], so a
-/// write naming another identity as its `author` is refused before it runs (ledger #864, R4).
-pub fn quic_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
+/// write naming another identity as its `author` is refused before it runs (ledger #864, R4),
+/// and every call that arrives is held to the client's authority as `layout`'s `clients.json`
+/// and `grants.json` read NOW, not as they read when it connected (ledger
+/// [#1710](http://localhost:1062/l/default/item/1710); [`crate::admit`], rule 5).
+pub fn quic_kernel_with(
+    hub: Arc<Kernel>,
+    access: Option<AccessLog>,
+    layout: crate::quic::Layout,
+) -> Kernel {
     over(
         Arc::new(HubSpace::over_wire(hub)),
         Some(crate::access::Door::Quic),
+        Some(layout),
         access,
     )
 }
@@ -367,10 +376,13 @@ pub fn quic_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
 fn over(
     space: Arc<dyn Space>,
     door: Option<crate::access::Door>,
+    grants: Option<crate::quic::Layout>,
     access: Option<AccessLog>,
 ) -> Kernel {
     let space = match door {
-        Some(door) => Arc::new(crate::admit::Admitting::new(space, door)) as Arc<dyn Space>,
+        Some(door) => {
+            Arc::new(crate::admit::Admitting::new(space, door).rechecking(grants)) as Arc<dyn Space>
+        }
         None => space,
     };
     let space = match access {
@@ -418,7 +430,12 @@ pub fn http_kernel_with(
         Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
     ])
     .named(spaces::iri(spaces::HTTP_DOOR));
-    over(Arc::new(space), Some(crate::access::Door::Http), access)
+    over(
+        Arc::new(space),
+        Some(crate::access::Door::Http),
+        None,
+        access,
+    )
 }
 
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —
