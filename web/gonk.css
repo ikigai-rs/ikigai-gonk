@@ -407,3 +407,8 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 /* The live region stays in the page, empty, so a screen reader is already listening when a
  * sentence arrives in it. */
 .live { margin: 0.25rem 0; }
+/* The header's unread count (ledger #1700): a number in a pill, inside the Layers link. The
+ * number is the message and "new" is in the link's name, so the accent only repeats it; no
+ * animation, so there is nothing for reduced motion to stop. Collapsed when there is no count. */
+.layers-badge:empty { display: none; }
+.layers-count { display: inline-block; padding: 0 0.35rem; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font-size: 0.8em; font-weight: 600; line-height: 1.3; }

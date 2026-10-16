@@ -20,18 +20,30 @@
 //! - [`the_page_reaches_a_scratch_door_over_quic`]
 //! - [`the_long_poll_does_not_clear_the_flash`]
 //! - [`an_unreachable_door_is_one_banner`]
+//!
+//! And the header's unread count (ledger [#1700](http://localhost:1062/l/default/item/1700)) and
+//! the access log's quiet polls (ledger [#1694](http://localhost:1062/l/default/item/1694)):
+//!
+//! - [`the_header_counts_what_is_unread_and_falls_when_a_layer_is_opened`]
+//! - [`the_overview_and_an_open_layer_do_not_announce_twice`]
+//! - [`only_a_reader_of_the_layers_gets_a_count`]
+//! - [`the_layers_polls_write_sampled_lines`]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::Authenticator;
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Error, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock,
     Verb,
 };
-use ikigai_gonk::identity::Passkeys;
+use ikigai_gonk::access::{AccessLog, Door as AccessDoor};
+use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::layer::Door;
 use ikigai_gonk::layers_view::{self, LayersView, Waits, CAP_READ, CAP_SAY};
 use ikigai_gonk::{compose, doors, quic, web};
@@ -316,11 +328,21 @@ const CHROME_ACCEPT: &str =
 /// A scratch gonk HTTP door with the Layers page bound over `view`.
 struct Gonk {
     addr: SocketAddr,
+    layout: quic::Layout,
     _config: tempfile::TempDir,
 }
 
 impl Gonk {
     fn start(view: Option<Arc<LayersView>>, anonymous: Vec<String>) -> Gonk {
+        Gonk::start_logged(view, anonymous, None)
+    }
+
+    /// [`Gonk::start`], writing its HTTP door's access lines to `access`.
+    fn start_logged(
+        view: Option<Arc<LayersView>>,
+        anonymous: Vec<String>,
+        access: Option<AccessLog>,
+    ) -> Gonk {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -329,7 +351,7 @@ impl Gonk {
         let config = tempfile::tempdir().unwrap();
         let layout = quic::Layout::in_config_home(config.path());
         let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-        let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
+        let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
@@ -340,7 +362,7 @@ impl Gonk {
             epochs: None,
         });
         let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, view);
-        let http = Arc::new(doors::http_kernel(Arc::clone(&hub), pages));
+        let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, access));
         let door = doors::HttpDoor {
             anonymous,
             bind: addr,
@@ -357,8 +379,88 @@ impl Gonk {
         });
         Gonk {
             addr,
+            layout,
             _config: config,
         }
+    }
+
+    /// Enroll a passkey under a grant of `scopes` with a software authenticator, sign in, and
+    /// answer the session token.
+    fn sign_in(&self, grant: &str, scopes: &[String]) -> String {
+        let authenticator = Authenticator::named(grant);
+        let invite = identity::invite(
+            &self.layout,
+            grant,
+            scopes,
+            false,
+            30,
+            identity::now_seconds(),
+        )
+        .unwrap();
+        let json = |path: &str, body: &str| {
+            let answer = self.raw(
+                "POST",
+                path,
+                &[
+                    ("Accept", "application/json".to_string()),
+                    ("Content-Type", "application/json".to_string()),
+                    ("Origin", self.origin()),
+                    ("Sec-Fetch-Site", "same-origin".to_string()),
+                ],
+                body,
+            );
+            assert_eq!(answer.status, 200, "{answer:?}");
+            serde_json::from_str::<serde_json::Value>(&answer.body).unwrap()
+        };
+        let challenge = |op: &str| {
+            json(&format!("/auth/{op}"), "{}")["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let c = challenge("register-options");
+        json(
+            "/auth/register",
+            &authenticator.register_body(&c, &invite, &self.origin()),
+        );
+        let c = challenge("login-options");
+        json(
+            "/auth/login",
+            &authenticator.login_body(&c, &self.origin(), 1),
+        )["session"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// A person opening a page, signed in with `session`.
+    fn page_as(&self, path: &str, session: &str) -> Response {
+        self.raw(
+            "GET",
+            path,
+            &[
+                ("Accept", CHROME_ACCEPT.to_string()),
+                ("Sec-Fetch-Site", "none".to_string()),
+                ("Cookie", format!("{}={session}", identity::SESSION_COOKIE)),
+            ],
+            "",
+        )
+    }
+
+    /// An htmx GET from gonk's own page, signed in with `session`.
+    fn htmx_as(&self, path: &str, session: &str) -> Response {
+        self.raw(
+            "GET",
+            path,
+            &[
+                ("Accept", "*/*".to_string()),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+                ("Sec-Fetch-Mode", "cors".to_string()),
+                ("HX-Request", "true".to_string()),
+                ("Cookie", format!("{}={session}", identity::SESSION_COOKIE)),
+            ],
+            "",
+        )
     }
 
     fn origin(&self) -> String {
@@ -1034,4 +1136,281 @@ fn an_unreachable_door_is_one_banner() {
         "{}",
         wait.body
     );
+}
+
+// ------------------------------------------------------------------ the header's count (#1700)
+
+/// The number the header's badge shows, or `None` when it shows none.
+fn badge_count(body: &str) -> Option<u64> {
+    let marker = "class='layers-count'>";
+    let at = body.find(marker)? + marker.len();
+    body[at..].split('<').next()?.parse().ok()
+}
+
+/// The sentence the count writes into the header's live region, if any.
+fn badge_announcement(body: &str) -> Option<String> {
+    let marker = "hx-swap-oob='innerHTML' id='layers-badge-live'>";
+    let at = body.find(marker)? + marker.len();
+    body[at..].split('<').next().map(str::to_string)
+}
+
+#[test]
+fn the_header_counts_what_is_unread_and_falls_when_a_layer_is_opened() {
+    let host = Host::open();
+    host.message("bobby", "talk", "one");
+    host.message("bobby", "talk", "two");
+    let view = view_as(&host, "brian", None);
+    let mut caps = tokens();
+    caps.extend(ikigai_gonk::grants::anonymous_http_grants(&["default".to_string()]).unwrap());
+    let gonk = Gonk::start(Some(Arc::clone(&view)), caps);
+
+    // Any page carries ONE count poll in its header, whatever the number of layers (three).
+    let ledger = gonk.page("/l/default");
+    assert_eq!(ledger.status, 200, "{ledger:?}");
+    assert_eq!(
+        ledger.body.matches("/layers/~/count").count(),
+        1,
+        "{}",
+        ledger.body
+    );
+    assert!(
+        ledger.body.contains(
+            "<span class='layers-badge' hx-get='/layers/~/count' hx-swap='outerHTML' \
+             hx-sync='this:drop' hx-trigger='load'></span>"
+        ),
+        "{}",
+        ledger.body
+    );
+    assert!(
+        ledger.body.contains("id='layers-badge-live'"),
+        "the header's live region is in the page before anything is said in it"
+    );
+
+    // The first answer: the count as text in the link's name ("Layers, 2 new"), the next poll,
+    // and no announcement: a page load is not news.
+    let first = gonk.htmx("/layers/~/count");
+    assert_eq!(first.status, 200, "{first:?}");
+    assert_eq!(badge_count(&first.body), Some(2), "{}", first.body);
+    assert!(
+        first.body.contains(
+            "<span class='sr-only'>, </span><span class='layers-count'>2</span><span class='sr-only'> new</span>"
+        ),
+        "{}",
+        first.body
+    );
+    assert_eq!(badge_announcement(&first.body), None);
+    assert!(
+        first.body.contains("/layers/~/count?seen=2"),
+        "{}",
+        first.body
+    );
+    assert!(first.body.contains("every 10s"), "{}", first.body);
+
+    // A new entry: the follower (started by that poll) brings it, and the count rises, said once.
+    host.message("bobby", "talk", "three");
+    assert!(
+        eventually(Duration::from_secs(10), || view.unread("anonymous", None)
+            == Some(3)),
+        "the follower counts the new entry"
+    );
+    let rose = gonk.htmx("/layers/~/count?seen=2");
+    assert_eq!(badge_count(&rose.body), Some(3), "{}", rose.body);
+    assert_eq!(
+        badge_announcement(&rose.body).as_deref(),
+        Some("3 new entries in the layers."),
+        "{}",
+        rose.body
+    );
+    let again = gonk.htmx("/layers/~/count?seen=3");
+    assert_eq!(badge_count(&again.body), Some(3));
+    assert_eq!(
+        badge_announcement(&again.body),
+        None,
+        "an unchanged count says nothing"
+    );
+
+    // Opening the layer is reading it: the count falls to none, silently.
+    let talk = gonk.page("/layers/talk");
+    assert_eq!(talk.status, 200, "{talk:?}");
+    let fell = gonk.htmx("/layers/~/count?seen=3");
+    assert_eq!(badge_count(&fell.body), None, "{}", fell.body);
+    assert_eq!(
+        badge_announcement(&fell.body),
+        None,
+        "a fall is not announced"
+    );
+    assert!(
+        fell.body.contains("/layers/~/count?seen=0"),
+        "{}",
+        fell.body
+    );
+}
+
+#[test]
+fn the_overview_and_an_open_layer_do_not_announce_twice() {
+    let host = Host::open();
+    let view = view_as(&host, "brian", None);
+    let gonk = Gonk::start(Some(Arc::clone(&view)), tokens());
+    // Each Layers page names itself to its header's count.
+    let overview = gonk.page("/layers");
+    assert!(
+        overview.body.contains("/layers/~/count?quiet=1"),
+        "{}",
+        overview.body
+    );
+    let talk = gonk.page("/layers/talk");
+    assert!(
+        talk.body.contains("/layers/~/count?open=talk"),
+        "{}",
+        talk.body
+    );
+    assert_eq!(
+        gonk.htmx("/layers/~/count").status,
+        200,
+        "starts the follower"
+    );
+
+    host.message("bobby", "talk", "on the open page");
+    assert!(eventually(Duration::from_secs(10), || view
+        .unread("anonymous", None)
+        == Some(1)));
+    // The overview announces its own news: the header shows the count and says nothing.
+    let quiet = gonk.htmx("/layers/~/count?seen=0&quiet=1");
+    assert_eq!(badge_count(&quiet.body), Some(1), "{}", quiet.body);
+    assert_eq!(badge_announcement(&quiet.body), None);
+    assert!(quiet.body.contains("quiet=1"), "the next poll stays quiet");
+    // The open layer reads its own entries as they arrive: the header counts the others.
+    let open = gonk.htmx("/layers/~/count?seen=0&open=talk");
+    assert_eq!(badge_count(&open.body), None, "{}", open.body);
+    assert_eq!(badge_announcement(&open.body), None);
+    host.message("bobby", "notes", "elsewhere");
+    assert!(eventually(Duration::from_secs(10), || view
+        .unread("anonymous", Some("talk"))
+        == Some(1)));
+    let other = gonk.htmx("/layers/~/count?seen=0&open=talk");
+    assert_eq!(badge_count(&other.body), Some(1), "{}", other.body);
+    assert_eq!(
+        badge_announcement(&other.body).as_deref(),
+        Some("1 new entry in the layers."),
+        "{}",
+        other.body
+    );
+    assert!(
+        other.body.contains("open=talk"),
+        "the next poll keeps the open layer"
+    );
+    let refused = gonk.htmx("/layers/~/count?open=..");
+    assert_eq!(refused.status, 400, "{refused:?}");
+}
+
+#[test]
+fn only_a_reader_of_the_layers_gets_a_count() {
+    let host = Host::open();
+    host.message("bobby", "talk", "private words");
+    // What gonk mints for any loopback process: the ledgers' tokens, never the page's.
+    let ledger_grants =
+        ikigai_gonk::grants::anonymous_http_grants(&["default".to_string()]).unwrap();
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), ledger_grants);
+
+    // Anonymous: no badge in the header, and the count itself refuses.
+    let page = gonk.page("/l/default");
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(!page.body.contains("layers-badge"), "{}", page.body);
+    let refused = gonk.htmx("/layers/~/count");
+    assert_eq!(refused.status, 403, "{refused:?}");
+    assert!(
+        !refused.body.contains("class='layers-count'"),
+        "{}",
+        refused.body
+    );
+
+    // A signed-in passkey whose grant does not include the page: the same.
+    let ledger_only =
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Write).unwrap();
+    let without = gonk.sign_in("ledger-only", &ledger_only);
+    let page = gonk.page_as("/l/default", &without);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(!page.body.contains("layers-badge"), "{}", page.body);
+    let refused = gonk.htmx_as("/layers/~/count", &without);
+    assert_eq!(refused.status, 403, "{refused:?}");
+
+    // A passkey whose grant reads the layers gets the badge and its own count.
+    let mut reader = ledger_only.clone();
+    reader.push(CAP_READ.to_string());
+    let with = gonk.sign_in("layers-reader", &reader);
+    let page = gonk.page_as("/l/default", &with);
+    assert!(page.body.contains("/layers/~/count"), "{}", page.body);
+    let count = gonk.htmx_as("/layers/~/count", &with);
+    assert_eq!(count.status, 200, "{count:?}");
+    assert_eq!(badge_count(&count.body), Some(1), "{}", count.body);
+}
+
+#[test]
+fn the_layers_polls_write_sampled_lines() {
+    let host = Host::open();
+    let view = LayersView::new(
+        host.door("brian"),
+        "scratch-door".to_string(),
+        None,
+        Waits {
+            feed_secs: 1,
+            client: Duration::from_millis(1200),
+        },
+    );
+    view.refresh().unwrap();
+    let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let into = Arc::clone(&lines);
+    let log = AccessLog::to(
+        AccessDoor::Http,
+        Arc::new(move |line: &str| into.lock().unwrap().push(line.to_string())),
+    )
+    .gonk_polls();
+    let gonk = Gonk::start_logged(Some(view), tokens(), Some(log));
+    // Four long polls that each wait their whole bound (over a second, so "slow" by the short
+    // polls' rule), and four counts.
+    for _ in 0..4 {
+        let wait = gonk.htmx("/layers/~/wait?layer=talk&after=0&down=0");
+        assert_eq!(wait.status, 200, "{wait:?}");
+    }
+    for _ in 0..4 {
+        assert_eq!(gonk.htmx("/layers/~/count").status, 200);
+    }
+    // An error is still written, and so is a page.
+    assert_eq!(gonk.htmx("/layers/~/wait?layer=talk&after=x").status, 400);
+    assert_eq!(gonk.page("/layers").status, 200);
+    let lines = lines.lock().unwrap().clone();
+    let of = |subject: &str, outcome: &str| {
+        lines
+            .iter()
+            .filter(|l| {
+                l.contains(&format!(" {subject} ")) && l.contains(&format!(" outcome={outcome} "))
+            })
+            .count()
+    };
+    // The first poll is the one sampled; a long poll is never written for its wait. (A count
+    // that took a second or more is written, by the short polls' rule: a debug build's render
+    // under a parallel test run can.)
+    assert_eq!(
+        of(layers_view::WAIT_IRI, "ok"),
+        1,
+        "four long polls, one sampled line: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.contains(&format!(" {} ", layers_view::COUNT_IRI)))
+            .all(|l| l
+                .split(" dur=")
+                .nth(1)
+                .and_then(|d| d.split(' ').next())
+                .and_then(|d| d.parse::<u128>().ok())
+                .is_some_and(|d| d >= ikigai_gonk::access::POLL_SLOW_MS)),
+        "a quick count is not written: {lines:#?}"
+    );
+    assert_eq!(
+        of(layers_view::WAIT_IRI, "invalid-argument"),
+        1,
+        "{lines:#?}"
+    );
+    assert_eq!(of(layers_view::PAGE_IRI, "ok"), 1, "{lines:#?}");
 }

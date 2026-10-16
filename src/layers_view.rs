@@ -14,6 +14,7 @@
 //! /layers                    urn:iki:gonk:page:layers                    Source  every layer the identity reads
 //! /layers/{layer}            urn:iki:gonk:page:layer:{layer}             Source  one layer: entries, or tuples and takes
 //! /layers/~/wait             urn:iki:gonk:fragment:layers-wait           Source  the browser's long poll (layer=, after=)
+//! /layers/~/count            urn:iki:gonk:fragment:layers-count          Source  the header's unread count (seen=, open=, quiet=)
 //! /layers/{layer}/say        urn:iki:gonk:layers:say:{layer}             Sink    a form → one entry, said as the identity
 //! /layers/{layer}/file/{id}  urn:iki:gonk:layers:file:{layer}:{id}       Source  a file entry's bytes, checked first
 //! ```
@@ -52,6 +53,18 @@
 //! Per viewer (the signed-in passkey's IRI) and per layer, the last feed position the viewer
 //! was shown, kept in `<data home>/layers-view/cursors.json`: opening a layer, or a live update
 //! arriving on its open page, moves it. The overview counts the events after it.
+//!
+//! # ★ The header's count: a short poll of this process's copy (ledger [#1700](http://localhost:1062/l/default/item/1700))
+//!
+//! Every gonk page a reader of the layers opens carries the unread total in its header's Layers
+//! link ("Layers 3", named "Layers, 3 new"). It is [`COUNT_IRI`], polled at the Queue badge's
+//! cadence (`crate::queue::BADGE_EVERY`, one request per open page whatever the number of
+//! layers), and it reads ONLY this process's copy and the cursors: never the door, which the
+//! follower alone reads. ⚠ **Not a long poll, on purpose.** A long poll on every page holds one
+//! of the browser's six HTTP/1.1 connections to this origin per open tab for up to
+//! [`CLIENT_WAIT`], so six open gonk tabs would leave none for a click; a ten-second answer from
+//! memory holds none. The cost is up to ten seconds of latency, which a header indicator can
+//! afford and the open layer's own page (its long poll) does not pay.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -92,6 +105,10 @@ pub const LAYER_PAGE_TEMPLATE: &str = "urn:iki:gonk:page:layer:{layer}";
 pub const WAIT_IRI: &str = "urn:iki:gonk:fragment:layers-wait";
 /// Its path: `~` is not a layer-name character, so no layer's page can shadow it.
 pub const WAIT_PATH: &str = "/layers/~/wait";
+/// The header's unread count.
+pub const COUNT_IRI: &str = "urn:iki:gonk:fragment:layers-count";
+/// Its path, beside the long poll's.
+pub const COUNT_PATH: &str = "/layers/~/count";
 /// The say adapter.
 pub const SAY_TEMPLATE: &str = "urn:iki:gonk:layers:say:{layer}";
 /// A checked file download.
@@ -669,6 +686,25 @@ impl LayersView {
                 .unwrap_or_else(|p| p.into_inner())
                 .0;
         }
+    }
+
+    /// What `viewer` has not been shown yet, across every layer but `except` (the layer whose
+    /// page is open, which reads its entries as they arrive): `None` until the door has been
+    /// read once, so "nothing known" is never drawn as "nothing new". Read from this process's
+    /// copy and the cursors, never the door.
+    pub fn unread(&self, viewer: &str, except: Option<&str>) -> Option<u64> {
+        let state = lock(&self.state);
+        if !state.discovered {
+            return None;
+        }
+        Some(
+            state
+                .layers
+                .values()
+                .filter(|l| Some(l.info.name.as_str()) != except)
+                .map(|l| l.last - self.cursors.get(viewer, &l.info.name).min(l.last))
+                .sum(),
+        )
     }
 
     /// Read the door now: discover when due, sync what is unsynced, catch up the layers no
@@ -1768,6 +1804,7 @@ pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: Option<Arc<LayersView>>)
             },
         )
         .bind(Exact::new(WAIT_IRI), Wait { view: view.clone() })
+        .bind(Exact::new(COUNT_IRI), Count { view: view.clone() })
         .bind(template(SAY_TEMPLATE), Say { view: view.clone() })
         .bind(template(FILE_TEMPLATE), File { view: view.clone() })
         .bind(
@@ -1858,7 +1895,8 @@ impl Endpoint for Overview {
         }
         web::html_only(inv)?;
         let ledgers = web::readable_ledgers(&self.web, inv);
-        let mut children = web::nav(&self.web, inv, &ledgers, None);
+        // The overview announces what is new itself, so the header's count stays quiet here.
+        let mut children = web::nav_on_layers(&self.web, inv, &ledgers, "quiet=1");
         let mut attributes = vec![
             ("view", "layers".to_string()),
             ("full", "true".to_string()),
@@ -1932,7 +1970,8 @@ impl Endpoint for LayerPage {
         web::html_only(inv)?;
         let layer = layer_binding(inv)?;
         let ledgers = web::readable_ledgers(&self.web, inv);
-        let mut children = web::nav(&self.web, inv, &ledgers, None);
+        // The open layer reads its entries as they arrive: the header counts the others.
+        let mut children = web::nav_on_layers(&self.web, inv, &ledgers, &format!("open={layer}"));
         let mut attributes = vec![
             ("view", "layer".to_string()),
             ("full", "true".to_string()),
@@ -2258,6 +2297,129 @@ impl Endpoint for Wait {
             .input(arg("layer", "the layer the page shows; absent for the overview").optional())
             .input(arg("down", "`1` when the page shows the door as unreachable").optional())
             .input(arg("seen", "the overview's unread total as the page shows it").optional())
+            .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:fragment:layers-count`: the header's unread count for the viewer, from this
+/// process's copy (see the module docs for why it is a short poll). It answers at once, the
+/// badge and the URL of the next poll; a sentence for the header's live region only when the
+/// count ROSE past `seen`, so a poll that brings nothing new says nothing.
+struct Count {
+    view: Option<Arc<LayersView>>,
+}
+
+/// The URL the header's count polls: `seen` is the count the page shows (`None`: none known).
+fn count_url(seen: Option<u64>, open: Option<&str>, quiet: bool) -> String {
+    let mut url = format!(
+        "{COUNT_PATH}?seen={}",
+        seen.map_or_else(|| "-".to_string(), |n| n.to_string())
+    );
+    if let Some(layer) = open {
+        url.push_str(&format!("&open={layer}"));
+    }
+    if quiet {
+        url.push_str("&quiet=1");
+    }
+    url
+}
+
+#[async_trait]
+impl Endpoint for Count {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(
+                "the header's layers count answers Source only".to_string(),
+            ));
+        }
+        // The floor refuses first (`describe` requires it); said again here so the count can
+        // never answer a caller the Layers page would not.
+        if !inv.capability.allows(CAP_READ) {
+            return Err(Error::Denied(format!(
+                "the layers' unread count needs {CAP_READ}"
+            )));
+        }
+        let seen: Option<u64> = optional_arg(inv, "seen").and_then(|v| v.parse().ok());
+        let open = optional_arg(inv, "open");
+        if let Some(name) = &open {
+            if !crate::layer::is_layer_name(name) {
+                return Err(Error::InvalidArgument {
+                    name: "open".to_string(),
+                    detail: format!("`{name}` is not a layer name"),
+                });
+            }
+        }
+        let quiet = optional_arg(inv, "quiet").as_deref() == Some("1");
+        let mut attributes: Vec<(&str, String)> = vec![("view", "layers-count".to_string())];
+        // Not configured: an inert badge, and no next poll.
+        if let Some(view) = &self.view {
+            // The first count a reader of the layers asks for starts the follower; until it
+            // has read the door once there is no count to show.
+            view.start();
+            let count = view.unread(&viewer(inv), open.as_deref());
+            if let Some(n) = count.filter(|n| *n > 0) {
+                attributes.push(("count", n.to_string()));
+            }
+            if let (Some(before), Some(now)) = (seen, count) {
+                if now > before && !quiet {
+                    attributes.push((
+                        "announce",
+                        match now {
+                            1 => "1 new entry in the layers.".to_string(),
+                            n => format!("{n} new entries in the layers."),
+                        },
+                    ));
+                }
+            }
+            attributes.push(("url", count_url(count, open.as_deref(), quiet)));
+            attributes.push(("every", crate::queue::BADGE_EVERY.to_string()));
+        }
+        let attributes: Vec<(&str, &str)> =
+            attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let doc = envelope("page", &attributes, "");
+        Ok(web::html(
+            render::render(&doc, false).map_err(web::render_err)?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-layers-count"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-layers-count")
+            .title("The layers' unread count, for the header")
+            .summary(
+                "How many layer entries this viewer has not been shown, across every layer the \
+                 configured identity reads (but `open`, the layer whose page is open), polled by \
+                 the header's Layers link at the Queue badge's cadence. Read from gonk's copy, \
+                 never the door. Answers the badge, the next poll, and a sentence for a polite \
+                 live region only when the count rose past `seen`.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(CAP_READ)
+            .input(
+                arg(
+                    "seen",
+                    "the count the page shows; `-` or absent when it shows none",
+                )
+                .optional(),
+            )
+            .input(
+                arg(
+                    "open",
+                    "the layer whose page is open, which is not counted; absent elsewhere",
+                )
+                .optional(),
+            )
+            .input(
+                arg(
+                    "quiet",
+                    "`1` on the overview, which announces what is new itself",
+                )
+                .optional(),
+            )
             .output("text/html")
     }
 }

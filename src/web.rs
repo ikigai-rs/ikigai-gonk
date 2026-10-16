@@ -372,6 +372,27 @@ pub(crate) fn nav(
     ledgers: &[Ledger],
     current: Option<&str>,
 ) -> String {
+    nav_with(web, inv, ledgers, current, None)
+}
+
+/// [`nav`] on a Layers page, whose header count polls with `count_query` (`quiet=1` on the
+/// overview, `open={layer}` on a layer's page: see `crate::layers_view::Count`).
+pub(crate) fn nav_on_layers(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledgers: &[Ledger],
+    count_query: &str,
+) -> String {
+    nav_with(web, inv, ledgers, None, Some(count_query))
+}
+
+fn nav_with(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledgers: &[Ledger],
+    current: Option<&str>,
+    count_query: Option<&str>,
+) -> String {
     let mut out: String = ledgers
         .iter()
         .map(|l| {
@@ -421,11 +442,20 @@ pub(crate) fn nav(
         ));
     }
     // ★ The Layers page (ledger #1675), on the browse rule: offered only to a caller whose grant
-    // reads it, so nobody is shown a door that answers a sign-in notice.
+    // reads it, so nobody is shown a door that answers a sign-in notice. ★ And its unread count
+    // (ledger #1700): `count-url` is what the stylesheet turns into the badge's first poll, one
+    // per page whatever the number of layers; each answer carries the next.
     if inv.capability.allows(crate::layers_view::CAP_READ) {
+        let count_url = match count_query {
+            Some(query) => format!("{}?{query}", crate::layers_view::COUNT_PATH),
+            None => crate::layers_view::COUNT_PATH.to_string(),
+        };
         out.push_str(&element(
             "layers-link",
-            &[("href", crate::layers_view::PAGE_PATH)],
+            &[
+                ("href", crate::layers_view::PAGE_PATH),
+                ("count-url", &count_url),
+            ],
             "",
         ));
     }

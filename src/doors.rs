@@ -1115,6 +1115,11 @@ fn routes() -> Vec<Route> {
         // not a layer-name character, so it can never be a layer's page. No per-route `cap`,
         // for the reason the Queue's rows take none.
         route(crate::layers_view::WAIT_PATH, crate::layers_view::WAIT_IRI),
+        // The header's unread count (ledger #1700), a literal path beside the long poll.
+        route(
+            crate::layers_view::COUNT_PATH,
+            crate::layers_view::COUNT_IRI,
+        ),
         route(crate::layers_view::PAGE_PATH, crate::layers_view::PAGE_IRI),
         route("/layers/{layer}", crate::layers_view::LAYER_PAGE_TEMPLATE),
         route("/layers/{layer}/say", crate::layers_view::SAY_TEMPLATE),
