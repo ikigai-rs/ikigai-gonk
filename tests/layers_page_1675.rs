@@ -624,6 +624,18 @@ fn positions(page: &str, needles: &[&str]) -> Vec<usize> {
         .collect()
 }
 
+/// The bound on a poll answered AT ONCE (ledger #1705), given how long this machine took to
+/// render a whole Layers page just before (`page`).
+///
+/// ★ Ledger #1730: a fixed 5 s said "a render" on plasma, where the poll takes 0.5 to 1.2 s in
+/// a debug build under 144 busy loops, and would say "held" on a machine four times slower.
+/// What it rules out is a HELD poll, which lasts as long as its hold (45 s in production before
+/// ledger #1705) however fast the machine; a render scales with the machine, and a poll renders
+/// less than the page. So the bound is the page's own time twice over, plus 5 s.
+fn at_once(page: Duration) -> Duration {
+    Duration::from_secs(5) + page * 2
+}
+
 /// Poll `check` for up to `within`.
 fn eventually(within: Duration, mut check: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + within;
@@ -881,7 +893,9 @@ fn the_poll_answers_at_once_and_brings_a_new_entry() {
     let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
     // Open the page: it starts the follower and carries the watcher at the layer's end, which
     // asks a few seconds after it lands.
+    let rendering = Instant::now();
     let page = gonk.page("/layers/talk");
+    let bound = at_once(rendering.elapsed());
     assert!(
         page.body
             .contains("/layers/~/wait?layer=talk&amp;after=1&amp;door=ok"),
@@ -896,10 +910,10 @@ fn the_poll_answers_at_once_and_brings_a_new_entry() {
     let quiet = gonk.htmx("/layers/~/wait?layer=talk&after=1&door=ok");
     assert_eq!(quiet.status, 200, "{quiet:?}");
     // At once: a render (milliseconds in release, a second or more in a debug build under a
-    // parallel test run), never the 8 seconds `quick()` held a long poll for.
+    // parallel test run), never a hold.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "a poll is answered at once, not held: {:?}",
+        started.elapsed() < bound,
+        "a poll is answered at once, not held: {:?} (bound {bound:?})",
         started.elapsed()
     );
     assert!(!quiet.body.contains("layer-entries"), "{}", quiet.body);
@@ -1053,12 +1067,14 @@ fn an_open_overview_sees_a_layer_read_in_another_tab() {
     assert!(!quiet.body.contains("layers-list"), "{}", quiet.body);
 
     // Another tab opens the layer.
+    let rendering = Instant::now();
     assert_eq!(gonk.page("/layers/talk").status, 200);
+    let bound = at_once(rendering.elapsed());
     let started = Instant::now();
     let woken = gonk.htmx(&format!("/layers/~/wait?after={epoch}&seen=1&door=ok"));
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "answered at once: {:?}",
+        started.elapsed() < bound,
+        "answered at once: {:?} (bound {bound:?})",
         started.elapsed()
     );
     assert!(woken.body.contains("layers-list"), "{}", woken.body);
