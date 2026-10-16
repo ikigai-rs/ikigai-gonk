@@ -444,7 +444,9 @@ fn nav_with(
     // ★ The Layers page (ledger #1675), on the browse rule: offered only to a caller whose grant
     // reads it, so nobody is shown a door that answers a sign-in notice. ★ And its unread count
     // (ledger #1700): `count-url` is what the stylesheet turns into the badge's first poll, one
-    // per page whatever the number of layers; each answer carries the next.
+    // per page whatever the number of layers; each answer carries the next. `every` re-asks the
+    // first one too, so a first poll that fails (gonk restarting) is not the badge's last
+    // (ledger #1705).
     if inv.capability.allows(crate::layers_view::CAP_READ) {
         let count_url = match count_query {
             Some(query) => format!("{}?{query}", crate::layers_view::COUNT_PATH),
@@ -455,6 +457,7 @@ fn nav_with(
             &[
                 ("href", crate::layers_view::PAGE_PATH),
                 ("count-url", &count_url),
+                ("every", crate::queue::BADGE_EVERY),
             ],
             "",
         ));

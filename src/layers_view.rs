@@ -13,7 +13,7 @@
 //! ```text
 //! /layers                    urn:iki:gonk:page:layers                    Source  every layer the identity reads
 //! /layers/{layer}            urn:iki:gonk:page:layer:{layer}             Source  one layer: entries, or tuples and takes
-//! /layers/~/wait             urn:iki:gonk:fragment:layers-wait           Source  the browser's long poll (layer=, after=)
+//! /layers/~/wait             urn:iki:gonk:fragment:layers-wait           Source  an open page's short poll (layer=, after=, door=)
 //! /layers/~/count            urn:iki:gonk:fragment:layers-count          Source  the header's unread count (seen=, open=, quiet=)
 //! /layers/{layer}/say        urn:iki:gonk:layers:say:{layer}             Sink    a form → one entry, said as the identity
 //! /layers/{layer}/file/{id}  urn:iki:gonk:layers:file:{layer}:{id}       Source  a file entry's bytes, checked first
@@ -48,6 +48,19 @@
 //! at the door, and nothing is ever removed). A page and its long poll read this process's
 //! copy; an unreachable door is one banner ([`Snapshot::down`]), not an error per read.
 //!
+//! # ★ An open page asks every three seconds, and holds nothing in between (ledger [#1705](http://localhost:1062/l/default/item/1705))
+//!
+//! The page's watcher asks [`WAIT_PATH`] [`LIVE_EVERY_SECS`] after it lands, and the answer
+//! comes AT ONCE from this process's copy, carrying the next watcher. It used to be a long poll
+//! that gonk held for up to 45 seconds: one of the browser's six HTTP/1.1 connections to this
+//! origin per open Layers tab, so six open tabs left none for a click. A short poll holds none
+//! between asks, and the cost is up to three seconds before a new entry shows, which a
+//! conversation can afford. And it used to be a chain that a single failed ask (a network
+//! error, gonk restarting) ended for good, silently; now `web/gonk.js` re-arms a failed ask
+//! with a backoff (5 seconds, doubling, at most 60) and says so once, in words, in the page's
+//! `#layers-reconnect` status, and stops with a sentence saying why when the answer is a
+//! refusal no retry can fix (a 403 after gonk restarted and forgot the sign-in, a 404).
+//!
 //! # Unread
 //!
 //! Per viewer (the signed-in passkey's IRI) and per layer, the last feed position the viewer
@@ -61,10 +74,10 @@
 //! cadence (`crate::queue::BADGE_EVERY`, one request per open page whatever the number of
 //! layers), and it reads ONLY this process's copy and the cursors: never the door, which the
 //! follower alone reads. ⚠ **Not a long poll, on purpose.** A long poll on every page holds one
-//! of the browser's six HTTP/1.1 connections to this origin per open tab for up to
-//! [`CLIENT_WAIT`], so six open gonk tabs would leave none for a click; a ten-second answer from
-//! memory holds none. The cost is up to ten seconds of latency, which a header indicator can
-//! afford and the open layer's own page (its long poll) does not pay.
+//! of the browser's six HTTP/1.1 connections to this origin per open tab for as long as it
+//! waits, so six open gonk tabs would leave none for a click; a ten-second answer from memory
+//! holds none. The cost is up to ten seconds of latency, which a header indicator can afford;
+//! the open layer's own page polls every three seconds (above).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -89,7 +102,7 @@ use crate::web::{self, Web};
 /// The config key.
 pub const KEY: &str = "gonk.layers.view";
 
-/// Reading the page, its long poll and a file: held by no anonymous caller.
+/// Reading the page, its short poll and a file: held by no anonymous caller.
 pub const CAP_READ: &str = "urn:cap:gonk:layers:read";
 
 /// Posting through the page, as the configured identity.
@@ -101,13 +114,13 @@ pub const PAGE_IRI: &str = "urn:iki:gonk:page:layers";
 pub const PAGE_PATH: &str = "/layers";
 /// One layer's page.
 pub const LAYER_PAGE_TEMPLATE: &str = "urn:iki:gonk:page:layer:{layer}";
-/// The browser's long poll.
+/// What an open Layers page asks every few seconds.
 pub const WAIT_IRI: &str = "urn:iki:gonk:fragment:layers-wait";
 /// Its path: `~` is not a layer-name character, so no layer's page can shadow it.
 pub const WAIT_PATH: &str = "/layers/~/wait";
 /// The header's unread count.
 pub const COUNT_IRI: &str = "urn:iki:gonk:fragment:layers-count";
-/// Its path, beside the long poll's.
+/// Its path, beside the page's own poll.
 pub const COUNT_PATH: &str = "/layers/~/count";
 /// The say adapter.
 pub const SAY_TEMPLATE: &str = "urn:iki:gonk:layers:say:{layer}";
@@ -125,8 +138,12 @@ pub const PREFIXES: [&str; 3] = ["urn:layer:", "urn:layers:", "urn:collab:"];
 /// under the door's bound of 60.
 pub const FEED_WAIT_SECS: u64 = 50;
 
-/// How long the browser's long poll waits at gonk before it is answered with nothing new.
-pub const CLIENT_WAIT: Duration = Duration::from_secs(45);
+/// How long an open Layers page waits between asks of gonk what changed: a SHORT poll of this
+/// process's copy, answered at once (ledger [#1705](http://localhost:1062/l/default/item/1705)).
+pub const LIVE_EVERY_SECS: u64 = 3;
+
+/// The same while the door cannot be reached: nothing will change until it answers again.
+pub const DOWN_EVERY_SECS: u64 = 15;
 
 /// How many entries of a channel the page shows (and this process keeps), newest first.
 pub const WINDOW: usize = 50;
@@ -520,7 +537,6 @@ pub struct LayersView {
     feed_door: Confined,
     origin: String,
     feed_wait: u64,
-    client_wait: Duration,
     cursors: Cursors,
     state: Mutex<Snapshot>,
     discovered_at: Mutex<Option<Instant>>,
@@ -535,15 +551,12 @@ pub struct LayersView {
 pub struct Waits {
     /// The follower's `wait=` at the door, in seconds.
     pub feed_secs: u64,
-    /// The browser's long poll at gonk.
-    pub client: Duration,
 }
 
 impl Default for Waits {
     fn default() -> Waits {
         Waits {
             feed_secs: FEED_WAIT_SECS,
-            client: CLIENT_WAIT,
         }
     }
 }
@@ -573,7 +586,6 @@ impl LayersView {
             feed_door: Confined(feed),
             origin,
             feed_wait: waits.feed_secs.min(60),
-            client_wait: waits.client,
             cursors: Cursors::open(cursors),
             state: Mutex::new(Snapshot::default()),
             discovered_at: Mutex::new(None),
@@ -647,35 +659,6 @@ impl LayersView {
         let deadline = Instant::now() + within;
         let mut state = lock(&self.state);
         while !state.discovered && state.down.is_none() {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return;
-            }
-            state = self
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(|p| p.into_inner())
-                .0;
-        }
-    }
-
-    /// Block until something a waiter cares about changed, at most the client wait: for one
-    /// layer, a feed position past `after` or the door's reachability flipping from `was_down`;
-    /// for the overview (`layer` = `None`), any change past epoch `after`.
-    pub fn wait_change(&self, layer: Option<&str>, after: u64, was_down: bool) {
-        let deadline = Instant::now() + self.client_wait;
-        let mut state = lock(&self.state);
-        loop {
-            let moved = match layer {
-                Some(name) => {
-                    state.layers.get(name).is_some_and(|l| l.last > after)
-                        || state.down.is_some() != was_down
-                }
-                None => state.epoch > after,
-            };
-            if moved {
-                return;
-            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return;
@@ -1730,17 +1713,32 @@ fn may_post(snapshot: &Snapshot, info: &LayerInfo) -> bool {
             .is_some_and(|m| m.kind.as_deref() == Some("person"))
 }
 
+/// What the page's banner says about the door, as its watcher carries it (`door=`): an answer
+/// sends the banner only when this differs, so a poll that changes nothing replaces nothing a
+/// person may be reading.
+fn door_state(snapshot: &Snapshot) -> &'static str {
+    if snapshot.down.is_some() {
+        "down"
+    } else if !snapshot.discovered {
+        "reading"
+    } else {
+        "ok"
+    }
+}
+
+/// The page's watcher: asks `url` once, [`LIVE_EVERY_SECS`] after it is put on the page
+/// ([`DOWN_EVERY_SECS`] while the door is down), and is replaced by the answer, which carries
+/// the next one. A failed ask is re-armed by `web/gonk.js` with a backoff (ledger #1705).
 fn watch(url: String, down: bool) -> String {
-    element(
-        "watch",
-        &[
-            ("url", &url),
-            // When the door is down the next poll waits a little at the browser too, so a
-            // page left open does not ask gonk again the instant it answers.
-            ("trigger", if down { "load delay:15s" } else { "load" }),
-        ],
-        "",
-    )
+    let trigger = format!(
+        "load delay:{}s",
+        if down {
+            DOWN_EVERY_SECS
+        } else {
+            LIVE_EVERY_SECS
+        }
+    );
+    element("watch", &[("url", &url), ("trigger", &trigger)], "")
 }
 
 async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
@@ -1921,7 +1919,11 @@ impl Endpoint for Overview {
                     ));
                 }
                 children.push_str(&watch(
-                    format!("{WAIT_PATH}?after={}&seen={total}", snapshot.epoch),
+                    format!(
+                        "{WAIT_PATH}?after={}&seen={total}&door={}",
+                        snapshot.epoch,
+                        door_state(&snapshot)
+                    ),
                     snapshot.down.is_some(),
                 ));
             }
@@ -2073,9 +2075,9 @@ impl Endpoint for LayerPage {
             }
             children.push_str(&watch(
                 format!(
-                    "{WAIT_PATH}?layer={layer}&after={}&down={}",
+                    "{WAIT_PATH}?layer={layer}&after={}&door={}",
                     found.last,
-                    u8::from(snapshot.down.is_some())
+                    door_state(&snapshot)
                 ),
                 snapshot.down.is_some(),
             ));
@@ -2145,9 +2147,11 @@ fn say_form(layer: &str, label: &str, reply: Option<&str>) -> String {
     element("say", &attributes, "")
 }
 
-/// `urn:iki:gonk:fragment:layers-wait`: the browser's long poll. Answers a new watcher, and
-/// whatever changed out of band: the new entries, a task layer's lists, the overview's rows,
-/// the banner, a sentence for the live region.
+/// `urn:iki:gonk:fragment:layers-wait`: what an open Layers page asks every few seconds. It
+/// answers AT ONCE, from this process's copy and the cursors (never the door), with a new watcher
+/// and whatever changed since the page's: the new entries, a task layer's lists, the overview's
+/// rows, the banner, a sentence for the live region. A poll that brings nothing new sends only
+/// the next watcher. The name is from when it was a long poll (ledger #1705 says why it is not).
 struct Wait {
     view: Option<Arc<LayersView>>,
 }
@@ -2176,22 +2180,21 @@ impl Endpoint for Wait {
                 });
             }
         }
-        let was_down = optional_arg(inv, "down").as_deref() == Some("1");
+        // What the page's banner shows; absent (a page from before ledger #1705), it differs.
+        let door_was = optional_arg(inv, "door");
+        // The follower is started by the page; after a restart of gonk it is this ask that
+        // starts it again, and until it has read the door the copy says "reading".
         view.start();
-        let waiting = Arc::clone(view);
-        let on = layer.clone();
-        let snapshot = off_thread(move || {
-            waiting.wait_change(on.as_deref(), after, was_down);
-            waiting.snapshot()
-        })
-        .await?;
+        let snapshot = view.snapshot();
         let down = snapshot.down.is_some();
+        let door_now = door_state(&snapshot);
         let mut attributes: Vec<(&str, String)> = vec![("view", "layers-wait".to_string())];
         let mut children = String::new();
         let mut slots = Vec::new();
-        let banner = notices(Some(view), &snapshot);
-        attributes.push(("banner", "true".to_string()));
-        children.push_str(&banner);
+        if door_was.as_deref() != Some(door_now) {
+            attributes.push(("banner", "true".to_string()));
+            children.push_str(&notices(Some(view), &snapshot));
+        }
         let who_views = viewer(inv);
         match &layer {
             None => {
@@ -2199,13 +2202,23 @@ impl Endpoint for Wait {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
                 let (rows, total) = overview_rows(&snapshot, view, &who_views);
-                attributes.push(("rows", "true".to_string()));
-                children.push_str(&rows);
+                // ★ The rows are replaced only when they changed: the copy moved (`after` is
+                // the epoch the page shows; a restarted gonk counts from 0 again, so any
+                // difference counts), or the viewer's unread total did, which is how a layer
+                // opened in ANOTHER tab reaches this one. Replacing them on every poll would
+                // take the keyboard focus out of the list every few seconds.
+                if snapshot.epoch != after || total != seen_before {
+                    attributes.push(("rows", "true".to_string()));
+                    children.push_str(&rows);
+                }
                 if total > seen_before {
                     attributes.push(("announce", format!("{total} new in the layers.")));
                 }
                 children.push_str(&watch(
-                    format!("{WAIT_PATH}?after={}&seen={total}", snapshot.epoch),
+                    format!(
+                        "{WAIT_PATH}?after={}&seen={total}&door={door_now}",
+                        snapshot.epoch
+                    ),
                     down,
                 ));
             }
@@ -2254,10 +2267,7 @@ impl Endpoint for Wait {
                     view.cursors.set(&who_views, name, found.last);
                 }
                 children.push_str(&watch(
-                    format!(
-                        "{WAIT_PATH}?layer={name}&after={last}&down={}",
-                        u8::from(down)
-                    ),
+                    format!("{WAIT_PATH}?layer={name}&after={last}&door={door_now}"),
                     down,
                 ));
             }
@@ -2277,12 +2287,14 @@ impl Endpoint for Wait {
 
     fn describe(&self) -> Description {
         Description::new("gonk-layers-wait")
-            .title("The Layers page's long poll")
+            .title("What changed on an open Layers page")
             .summary(
-                "Waits until a layer moves past `after` (or, without `layer`, until anything \
-                 the overview shows changes), at most 45 seconds, and answers the fragment that \
-                 brings an open page up to date. gonk holds the one long poll at the door; this \
-                 waits on gonk's copy.",
+                "Answers at once, from gonk's copy, the fragment that brings an open Layers \
+                 page up to date: what a layer holds past `after` (or, without `layer`, the \
+                 overview's rows when they changed), the banner when the door's state differs \
+                 from `door`, and the next watcher, which asks again in 3 seconds (15 while the \
+                 door is down). A short poll: it never holds a connection. gonk holds the one \
+                 long poll at the door.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -2295,7 +2307,11 @@ impl Endpoint for Wait {
                     .class(XSD_NON_NEGATIVE),
             )
             .input(arg("layer", "the layer the page shows; absent for the overview").optional())
-            .input(arg("down", "`1` when the page shows the door as unreachable").optional())
+            .input(
+                arg("door", "what the page's banner shows about the door")
+                    .one_of(["ok", "down", "reading"])
+                    .optional(),
+            )
             .input(arg("seen", "the overview's unread total as the page shows it").optional())
             .output("text/html")
     }

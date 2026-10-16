@@ -593,10 +593,7 @@ impl std::fmt::Debug for Response {
 }
 
 fn quick() -> Waits {
-    Waits {
-        feed_secs: 1,
-        client: Duration::from_secs(8),
-    }
+    Waits { feed_secs: 1 }
 }
 
 /// A view through `slug`'s door, settled (read once) before it is served.
@@ -709,11 +706,16 @@ fn the_unread_marker_moves_when_the_layer_is_opened() {
     assert_eq!(again.body.matches(">New<").count(), 0, "{}", again.body);
 
     // A live update delivered to the open page is read too: the follower (started by the
-    // page) brings it, and the long poll hands it over.
+    // page) brings it, and the page's poll hands it over.
     host.message("bobby", "talk", "three");
-    let wait = gonk.htmx("/layers/~/wait?layer=talk&after=2&down=0");
-    assert_eq!(wait.status, 200, "{wait:?}");
-    assert!(wait.body.contains("three"), "{}", wait.body);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            let wait = gonk.htmx("/layers/~/wait?layer=talk&after=2&door=ok");
+            assert_eq!(wait.status, 200, "{wait:?}");
+            wait.body.contains("three")
+        }),
+        "the poll hands the new entry over"
+    );
     let overview = gonk.page("/layers");
     assert!(
         overview.body.contains("nothing new"),
@@ -867,32 +869,59 @@ fn a_file_downloads_only_when_its_digest_matches() {
     assert!(!refused.body.contains("alert(1)"), "nothing was sent");
 }
 
+/// ★ Ledger #1705: the page's poll answers AT ONCE, from gonk's copy, whether or not anything
+/// changed, so an open Layers tab holds none of the browser's six HTTP/1.1 connections to this
+/// origin between asks. Before, it was a long poll held up to 45 seconds (8 in these tests then),
+/// and six open tabs left none for a click.
 #[test]
-fn the_long_poll_wakes_on_a_new_entry() {
+fn the_poll_answers_at_once_and_brings_a_new_entry() {
     let host = Host::open();
     host.message("bobby", "talk", "before");
-    let gonk = Arc::new(Gonk::start(Some(view_as(&host, "brian", None)), tokens()));
-    // Open the page: it starts the follower and carries the watcher at the layer's end.
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    // Open the page: it starts the follower and carries the watcher at the layer's end, which
+    // asks a few seconds after it lands.
     let page = gonk.page("/layers/talk");
     assert!(
         page.body
-            .contains("/layers/~/wait?layer=talk&amp;after=1&amp;down=0"),
+            .contains("/layers/~/wait?layer=talk&amp;after=1&amp;door=ok"),
         "{}",
         page.body
     );
-    let waiting = Arc::clone(&gonk);
+    assert!(page.body.contains("load delay:3s"), "{}", page.body);
+
+    // Nothing new: answered at once, with the next watcher and nothing else (no entries, and no
+    // banner, since the door's state is the one the page shows).
     let started = Instant::now();
-    let poll = std::thread::spawn(move || waiting.htmx("/layers/~/wait?layer=talk&after=1&down=0"));
-    std::thread::sleep(Duration::from_millis(500));
-    host.message("bobby", "talk", "after, live");
-    let answer = poll.join().unwrap();
-    assert_eq!(answer.status, 200, "{answer:?}");
+    let quiet = gonk.htmx("/layers/~/wait?layer=talk&after=1&door=ok");
+    assert_eq!(quiet.status, 200, "{quiet:?}");
+    // At once: a render (milliseconds in release, a second or more in a debug build under a
+    // parallel test run), never the 8 seconds `quick()` held a long poll for.
     assert!(
-        started.elapsed() < Duration::from_secs(7),
-        "it woke on the entry, not at its timeout: {:?}",
+        started.elapsed() < Duration::from_secs(5),
+        "a poll is answered at once, not held: {:?}",
         started.elapsed()
     );
-    assert!(answer.body.contains("after, live"), "{}", answer.body);
+    assert!(!quiet.body.contains("layer-entries"), "{}", quiet.body);
+    assert!(!quiet.body.contains("layers-banner"), "{}", quiet.body);
+    assert!(
+        quiet.body.contains("after=1&amp;door=ok"),
+        "the next watcher: {}",
+        quiet.body
+    );
+
+    host.message("bobby", "talk", "after, live");
+    let mut answer = None;
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            let got = gonk.htmx("/layers/~/wait?layer=talk&after=1&door=ok");
+            let arrived = got.body.contains("after, live");
+            answer = Some(got);
+            arrived
+        }),
+        "the follower brings the entry and the next poll hands it over"
+    );
+    let answer = answer.unwrap();
+    assert_eq!(answer.status, 200, "{answer:?}");
     assert!(answer.body.contains("afterbegin:#layer-entries"));
     assert!(
         answer.body.contains("1 new entry in Talk."),
@@ -903,10 +932,67 @@ fn the_long_poll_wakes_on_a_new_entry() {
         "the next watcher is past it: {}",
         answer.body
     );
-    // With nothing new, it answers at its bound with a watcher and no entries.
-    let quiet = gonk.htmx("/layers/~/wait?layer=talk&after=2&down=0");
-    assert_eq!(quiet.status, 200);
-    assert!(!quiet.body.contains("layer-entries"), "{}", quiet.body);
+}
+
+/// A page that shows the door in another state than the copy (here, a page rendered before
+/// gonk restarted, whose watcher carries no `door=`, or one that showed "reading") gets the
+/// banner; a page whose banner is current does not, so a poll replaces nothing a person may be
+/// reading.
+#[test]
+fn the_banner_is_sent_only_when_the_door_state_differs() {
+    let host = Host::open();
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    let current = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=ok");
+    assert!(!current.body.contains("layers-banner"), "{}", current.body);
+    for stale in ["door=reading", "door=down", "after=0"] {
+        let got = gonk.htmx(&format!("/layers/~/wait?layer=talk&after=0&{stale}"));
+        assert_eq!(got.status, 200, "{got:?}");
+        assert!(
+            got.body.contains("id='layers-banner'") || got.body.contains("id=\"layers-banner\""),
+            "{stale}: {}",
+            got.body
+        );
+    }
+}
+
+/// Ledger #1705's last part: opening a layer in ANOTHER tab moves this viewer's cursor and not
+/// the copy's epoch, so an open overview whose poll waited on the epoch was never woken by it.
+/// Its poll now answers at once, and sends the rows when the viewer's unread total differs from
+/// the one the page shows.
+#[test]
+fn an_open_overview_sees_a_layer_read_in_another_tab() {
+    let host = Host::open();
+    host.message("bobby", "talk", "one");
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    let overview = gonk.page("/layers");
+    assert!(overview.body.contains("1 new"), "{}", overview.body);
+    let epoch = overview
+        .body
+        .split("/layers/~/wait?after=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("the overview's watcher")
+        .to_string();
+    // Unchanged: nothing but the next watcher.
+    let quiet = gonk.htmx(&format!("/layers/~/wait?after={epoch}&seen=1&door=ok"));
+    assert!(!quiet.body.contains("layers-list"), "{}", quiet.body);
+
+    // Another tab opens the layer.
+    assert_eq!(gonk.page("/layers/talk").status, 200);
+    let started = Instant::now();
+    let woken = gonk.htmx(&format!("/layers/~/wait?after={epoch}&seen=1&door=ok"));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "answered at once: {:?}",
+        started.elapsed()
+    );
+    assert!(woken.body.contains("layers-list"), "{}", woken.body);
+    assert!(woken.body.contains("nothing new"), "{}", woken.body);
+    assert!(
+        woken.body.contains("seen=0"),
+        "the next watcher carries the new total: {}",
+        woken.body
+    );
 }
 
 #[test]
@@ -1073,25 +1159,98 @@ fn the_page_reaches_a_scratch_door_over_quic() {
     assert!(stored.contains("urn:collab:participant:brian"), "{stored}");
 }
 
-/// The long poll answers whenever a layer moves, so it must not empty `#flash` the way a
-/// person's request does (a post's "Posted" would vanish before anyone read it). No JavaScript
-/// runtime here, as in `tests/web.rs::the_badge_poll_does_not_clear_the_flash`: what is pinned
-/// is the wiring, the skip before the clear, and the class the watcher carries.
+/// The page's poll is nobody's request, so it must not empty `#flash` the way a person's request
+/// does (a post's "Posted" would vanish before anyone read it). No JavaScript runtime here, as in
+/// `tests/web.rs::the_badge_poll_does_not_clear_the_flash`: what is pinned is the wiring, the
+/// skip before the clear, and the class the watcher carries.
 #[test]
-fn the_long_poll_does_not_clear_the_flash() {
+fn the_page_poll_does_not_clear_the_flash() {
     let js = include_str!("../web/gonk.js");
     let at = js
         .find("addEventListener(\"htmx:beforeRequest\"")
         .expect("the clearing listener");
     let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
     let skip = body
-        .find(".closest(\".layers-watch\")) return;")
-        .unwrap_or_else(|| panic!("the long poll is skipped: {body}"));
+        .find("if (isWatch(elt)) return;")
+        .unwrap_or_else(|| panic!("the page's poll is skipped: {body}"));
     let clear = body
         .find("flash(\"\", \"ok\")")
         .expect("other requests clear");
     assert!(skip < clear, "{body}");
+    assert!(
+        js.contains(".closest(\".layers-watch\")"),
+        "isWatch names the class"
+    );
     assert!(include_str!("../web/gonk.xsl").contains("<div class=\"layers-watch\""));
+}
+
+/// The listener `web/gonk.js` registers for `event`, up to its end.
+fn listener<'a>(js: &'a str, event: &str, containing: &str) -> &'a str {
+    let mut from = 0;
+    while let Some(at) = js[from..].find(&format!("addEventListener(\"{event}\"")) {
+        let at = from + at;
+        let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
+        if body.contains(containing) {
+            return body;
+        }
+        from = at + 1;
+    }
+    panic!("no {event} listener containing `{containing}`")
+}
+
+/// ★ Ledger #1705: htmx swaps nothing on a failed ask, so one network error or a gonk restart
+/// used to end the page's chain of watchers for good, silently. `web/gonk.js` re-arms a failed
+/// ask with a bounded backoff, says so once in the page's `#layers-reconnect` status (polite,
+/// not an alert in #flash per retry), and stops with a sentence on a 403 or a 404, which no
+/// retry fixes. No JavaScript runtime here: this pins the wiring, and the browser check in
+/// ACCESSIBILITY.md is what ran it.
+#[test]
+fn a_failed_poll_is_rearmed_with_a_backoff_and_said_once() {
+    let js = include_str!("../web/gonk.js");
+    // Both failures reach the re-arm, for the watcher only.
+    for event in ["htmx:sendError", "htmx:responseError"] {
+        let body = listener(js, event, "watchFailed(");
+        assert!(body.contains("if (isWatch(elt)) watchFailed("), "{body}");
+        // And the page-wide handler for the same event leaves the watcher alone.
+        let general = listener(js, event, "flash(");
+        assert!(general.contains("if (isOwnRetry("), "{general}");
+    }
+    let at = js.find("function watchFailed(").expect("the re-arm");
+    let body = &js[at..at + js[at..].find("\n  }\n").expect("its end")];
+    // A refusal no retry can fix stops, with a sentence, before anything is re-armed.
+    let stops = body.find("status === 403").expect("a 403 stops");
+    assert!(body.contains("status === 404"), "{body}");
+    let rearm = body
+        .find("htmx.process(next)")
+        .expect("the re-arm processes a new watcher");
+    assert!(stops < rearm, "{body}");
+    assert!(body.contains("\"load delay:\" + delay + \"s\""), "{body}");
+    assert!(
+        body.contains("Math.min(WATCH_RETRY_MAX,"),
+        "the backoff is bounded: {body}"
+    );
+    assert!(js.contains("const WATCH_RETRY_MAX = 60;"));
+    assert!(
+        body.contains("Reconnecting:"),
+        "the state is a word: {body}"
+    );
+    // Recovery is said too.
+    // By the request's path: after a successful swap htmx names an ancestor as `elt`.
+    let after = listener(js, "htmx:afterRequest", "Reconnected");
+    assert!(after.contains("path.indexOf(WATCH_PATH) !== 0"), "{after}");
+    assert!(js.contains(&format!(
+        "const WATCH_PATH = \"{}\";",
+        layers_view::WAIT_PATH
+    )));
+    // The status is on both Layers pages, a polite live region outside every link.
+    let xsl = include_str!("../web/gonk.xsl");
+    assert_eq!(
+        xsl.matches(
+            "<p id=\"layers-reconnect\" class=\"note live\" role=\"status\" aria-live=\"polite\"></p>"
+        )
+        .count(),
+        2
+    );
 }
 
 /// A door that answers nothing: every call is the transport's `Unavailable`.
@@ -1104,7 +1263,8 @@ impl Door for Down {
 }
 
 /// An unreachable door is ONE banner on a page that still renders (200), never an error per
-/// read; the long poll carries the banner and backs off at the browser.
+/// read; the page's poll carries the banner to a page that showed the door reachable, asks
+/// again less often (15 seconds), and says nothing more to a page that already shows it.
 #[test]
 fn an_unreachable_door_is_one_banner() {
     let view = LayersView::new(
@@ -1128,7 +1288,7 @@ fn an_unreachable_door_is_one_banner() {
         "the next poll waits: {}",
         page.body
     );
-    let wait = gonk.htmx("/layers/~/wait?layer=talk&after=0&down=1");
+    let wait = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=ok");
     assert_eq!(wait.status, 200, "{wait:?}");
     assert_eq!(
         wait.body.matches("cannot be reached").count(),
@@ -1136,6 +1296,11 @@ fn an_unreachable_door_is_one_banner() {
         "{}",
         wait.body
     );
+    assert!(wait.body.contains("door=down"), "{}", wait.body);
+    assert!(wait.body.contains("load delay:15s"), "{}", wait.body);
+    let shown = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=down");
+    assert_eq!(shown.status, 200, "{shown:?}");
+    assert!(!shown.body.contains("cannot be reached"), "{}", shown.body);
 }
 
 // ------------------------------------------------------------------ the header's count (#1700)
@@ -1176,9 +1341,9 @@ fn the_header_counts_what_is_unread_and_falls_when_a_layer_is_opened() {
     assert!(
         ledger.body.contains(
             "<span class='layers-badge' hx-get='/layers/~/count' hx-swap='outerHTML' \
-             hx-sync='this:drop' hx-trigger='load'></span>"
+             hx-sync='this:drop' hx-trigger='load, every 10s'></span>"
         ),
-        "{}",
+        "the first poll is asked again if it fails (ledger #1705): {}",
         ledger.body
     );
     assert!(
@@ -1352,10 +1517,7 @@ fn the_layers_polls_write_sampled_lines() {
         host.door("brian"),
         "scratch-door".to_string(),
         None,
-        Waits {
-            feed_secs: 1,
-            client: Duration::from_millis(1200),
-        },
+        Waits { feed_secs: 1 },
     );
     view.refresh().unwrap();
     let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -1366,10 +1528,9 @@ fn the_layers_polls_write_sampled_lines() {
     )
     .gonk_polls();
     let gonk = Gonk::start_logged(Some(view), tokens(), Some(log));
-    // Four long polls that each wait their whole bound (over a second, so "slow" by the short
-    // polls' rule), and four counts.
+    // Four of the page's polls and four counts, all short polls since ledger #1705.
     for _ in 0..4 {
-        let wait = gonk.htmx("/layers/~/wait?layer=talk&after=0&down=0");
+        let wait = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=ok");
         assert_eq!(wait.status, 200, "{wait:?}");
     }
     for _ in 0..4 {
@@ -1387,25 +1548,28 @@ fn the_layers_polls_write_sampled_lines() {
             })
             .count()
     };
-    // The first poll is the one sampled; a long poll is never written for its wait. (A count
-    // that took a second or more is written, by the short polls' rule: a debug build's render
-    // under a parallel test run can.)
-    assert_eq!(
-        of(layers_view::WAIT_IRI, "ok"),
-        1,
-        "four long polls, one sampled line: {lines:#?}"
-    );
-    assert!(
+    // The first of the polls is the one sampled; after it, only a slow one is written (a debug
+    // build's render under a parallel test run can take a second).
+    let quick_lines = |subject: &str| {
         lines
             .iter()
-            .filter(|l| l.contains(&format!(" {} ", layers_view::COUNT_IRI)))
-            .all(|l| l
-                .split(" dur=")
-                .nth(1)
-                .and_then(|d| d.split(' ').next())
-                .and_then(|d| d.parse::<u128>().ok())
-                .is_some_and(|d| d >= ikigai_gonk::access::POLL_SLOW_MS)),
-        "a quick count is not written: {lines:#?}"
+            .filter(|l| l.contains(&format!(" {subject} ")) && l.contains(" outcome=ok "))
+            .filter(|l| {
+                l.split(" dur=")
+                    .nth(1)
+                    .and_then(|d| d.split(' ').next())
+                    .and_then(|d| d.parse::<u128>().ok())
+                    .is_some_and(|d| d < ikigai_gonk::access::POLL_SLOW_MS)
+            })
+            .count()
+    };
+    assert!(
+        of(layers_view::WAIT_IRI, "ok") >= 1,
+        "the first poll is sampled: {lines:#?}"
+    );
+    assert!(
+        quick_lines(layers_view::WAIT_IRI) + quick_lines(layers_view::COUNT_IRI) <= 1,
+        "of eight quick polls, at most the first is written: {lines:#?}"
     );
     assert_eq!(
         of(layers_view::WAIT_IRI, "invalid-argument"),

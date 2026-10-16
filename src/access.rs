@@ -81,13 +81,16 @@
 //!
 //! ★ **A LONG poll is sampled too, by count alone** (ledger
 //! [#1694](http://localhost:1062/l/default/item/1694)). The Layers page's
-//! (`crate::layers_view::WAIT_IRI`) waits up to 45 seconds by design, so the slow rule above
-//! wrote every one of them: one line per change or per 45 seconds per open Layers tab. A subject
+//! (`crate::layers_view::WAIT_IRI`) waited up to 45 seconds by design, so the slow rule above
+//! wrote every one of them: one line per change or per 45 seconds per open Layers tab. (Since
+//! ledger [#1705](http://localhost:1062/l/default/item/1705) it is a short poll every three
+//! seconds, sampled by the rule above: one quiet line per three minutes per open Layers page,
+//! and every slow one; gonk names no long poll now.) A subject
 //! named by [`AccessLog::sampling_long_polls`] writes when it FAILED or once every
 //! [`POLL_SAMPLE`] polls; its duration is the wait, not a symptom, and says nothing. A refusal is
 //! an outcome other than `ok`, so it is always written (a capability floor's refusal is the
 //! kernel's, before dispatch, and is not a line at all: see above).
-//! [`AccessLog::gonk_polls`] names gonk's polls, both kinds, for every door.
+//! [`AccessLog::gonk_polls`] names gonk's polls for every door.
 //!
 //! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
 //! what an access log is for, and a server that is slow for a long time logs every slow poll
@@ -229,8 +232,9 @@ impl AccessLog {
         }
     }
 
-    /// gonk's own polls, sampled: the Queue badge and the header's layers count (short polls),
-    /// and the Layers page's long poll. What `main` gives every door.
+    /// gonk's own polls, sampled: the Queue badge, the header's layers count and an open Layers
+    /// page's poll, all short polls (the Layers page's was a long poll until ledger #1705). What
+    /// `main` gives every door.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -243,8 +247,11 @@ impl AccessLog {
     /// assert!(!log.samples("urn:iki:gonk:page:layers"));
     /// ```
     pub fn gonk_polls(self) -> AccessLog {
-        self.sampling_polls([crate::queue::BADGE_IRI, crate::layers_view::COUNT_IRI])
-            .sampling_long_polls([crate::layers_view::WAIT_IRI])
+        self.sampling_polls([
+            crate::queue::BADGE_IRI,
+            crate::layers_view::COUNT_IRI,
+            crate::layers_view::WAIT_IRI,
+        ])
     }
 
     /// Whether `subject`'s lines are sampled rather than written for every request.
@@ -620,17 +627,20 @@ mod tests {
     }
 
     /// Ledger #1694: a long poll's 45-second wait is not slowness, so it is sampled by count
-    /// alone; a failed one is still written. Before, the Layers page's long poll was not named
-    /// at all, and naming it a short poll would not have helped: its every answer is "slow".
+    /// alone; a failed one is still written. Named as a short poll it would not have helped: its
+    /// every answer is "slow". (gonk serves no long poll since ledger #1705; the rule stays for
+    /// a host that does.)
     #[test]
     fn a_long_poll_is_sampled_whatever_it_waited() {
-        let wait = crate::layers_view::WAIT_IRI;
+        let wait = "urn:example:long-poll";
         let short_only = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).sampling_polls([wait]);
         assert!(
             (0..POLL_SAMPLE).all(|_| short_only.writes(wait, true, 45_000)),
             "as a short poll, every 45-second wait is written"
         );
-        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).gonk_polls();
+        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {}))
+            .sampling_polls([crate::queue::BADGE_IRI])
+            .sampling_long_polls([wait]);
         let waited = (0..POLL_SAMPLE * 2)
             .filter(|_| log.writes(wait, true, 45_000))
             .count();
@@ -639,8 +649,28 @@ mod tests {
         assert!(log.writes(wait, false, 3), "a refused one is written");
         // The short polls keep their slow rule beside it.
         assert!(log.writes(crate::queue::BADGE_IRI, true, POLL_SLOW_MS));
-        assert!(log.writes(crate::layers_view::COUNT_IRI, true, POLL_SLOW_MS));
         assert!((0..POLL_SAMPLE).all(|_| log.writes("urn:iki:gonk:page:layers", true, 45_000)));
+    }
+
+    /// Ledger #1705: an open Layers page's poll answers at once, so it is sampled as the short
+    /// poll it is: a slow answer is a symptom again, and is written.
+    #[test]
+    fn the_layers_page_poll_is_a_short_poll() {
+        let log = AccessLog::to(Door::Http, Arc::new(|_: &str| {})).gonk_polls();
+        for subject in [
+            crate::queue::BADGE_IRI,
+            crate::layers_view::COUNT_IRI,
+            crate::layers_view::WAIT_IRI,
+        ] {
+            assert!(
+                log.writes(subject, true, POLL_SLOW_MS),
+                "{subject}: slow is written"
+            );
+            assert!(
+                log.writes(subject, false, 3),
+                "{subject}: a failure is written"
+            );
+        }
     }
 
     #[test]
