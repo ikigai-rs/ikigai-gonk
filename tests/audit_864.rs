@@ -76,8 +76,13 @@ fn r1_a_grant_naming_the_restore_token_is_refused_per_use_as_it_is_at_startup() 
     // And what that capability reaches through the QUIC door's kernel: a restore that
     // writes a RocksDB store at a path the REMOTE caller chose.
     let backups_dir = tempfile::tempdir().unwrap();
+    let (store, handle) = ikigai_store::DurableStore::in_memory_shared_declaring(
+        ikigai_store::SharerWrites::only_the_default_graph(),
+    )
+    .expect("an in-memory store");
+    let dataset = ikigai_gonk::backup::Dataset::new(&store, handle);
     let hub = Arc::new(compose_with(
-        DurableStore::in_memory().unwrap(),
+        store,
         None,
         Vec::new(),
         Vec::new(),
@@ -91,6 +96,7 @@ fn r1_a_grant_naming_the_restore_token_is_refused_per_use_as_it_is_at_startup() 
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         None,
         None,

@@ -18,7 +18,6 @@ use ikigai_gonk::compose_with;
 use ikigai_gonk::grants::{grants_for, script_grants, Authority, ScriptAuthority};
 use ikigai_gonk::script::Scripts;
 use ikigai_script::Backend as _;
-use ikigai_store::DurableStore;
 
 const PERSON: &str = "urn:iki:gonk:passkey:QlJJQU4";
 
@@ -64,8 +63,13 @@ fn person() -> Capability {
 /// `DirBackend` at `scripts`, which the backup snapshots.
 fn server(backups: &Path, scripts: &Path, keep: usize) -> (Arc<Kernel>, Scripts) {
     let family = Scripts::open(scripts, Default::default()).expect("the scripts directory");
+    let (store, handle) = ikigai_store::DurableStore::in_memory_shared_declaring(
+        ikigai_store::SharerWrites::only_the_default_graph(),
+    )
+    .expect("an in-memory store");
+    let dataset = ikigai_gonk::backup::Dataset::new(&store, handle);
     let hub = Arc::new(compose_with(
-        DurableStore::in_memory().expect("an in-memory store"),
+        store,
         None,
         Vec::new(),
         Vec::new(),
@@ -79,6 +83,7 @@ fn server(backups: &Path, scripts: &Path, keep: usize) -> (Arc<Kernel>, Scripts)
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         Some(&family),
         None,

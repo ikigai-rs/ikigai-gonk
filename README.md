@@ -2972,16 +2972,25 @@ statements in the default graph with the tenancy boundary gone — which is also
 shape a browse-graph migration has to avoid producing.
 
 So an archive is N-Quads, gzipped, and every comparison this server makes about one is
-**per graph**. The dump is `urn:iki:store:select` read back through oxigraph's own
-SPARQL-results parser and written by oxigraph's own N-Quads serializer — neither end is
-string surgery, which matters because ledger bodies contain newlines, quotation marks and
-trailing periods, and those are exactly the rows a hand-rolled writer corrupts.
+**per graph**. The dump reads every quad of every graph from one snapshot of the store and
+writes it with oxigraph's own N-Quads serializer — never string surgery, which matters because
+ledger bodies contain newlines, quotation marks and trailing periods, and those are exactly the
+rows a hand-rolled writer corrupts.
 
-Compression is `urn:compress:gzip`, resolved **through the kernel**, which is why
-[`ikigai-compress`](https://github.com/ikigai-rs/ikigai-compress) is a dependency rather
-than `flate2`. Its header is pinned, so two backups of unchanged data are byte-identical and
-"has anything changed" is a digest comparison; the dump is `ORDER BY`ed to make that true of
-the input as well.
+★ **The dump is streamed** (ledger #1699). It used to be `urn:iki:store:select` with
+`ORDER BY`, so the store sorted the whole dataset and answered it as SPARQL JSON, and the backup
+held the N-Quads parsed out of that plus a copy of them for `urn:compress:gzip`: about 517 MB
+of peak memory for 375,000 quads, 1.8 GB for 1.5 million, and at 3 million the sorted query ran
+past the store's 120 s ceiling, so no backup could be taken at all. Now each quad goes straight
+into a gzip encoder and what is held is the archive: 129 MB, 233 MB and 276 MB for the same three
+stores, in 2.8 s, 11–13 s and 20 s (`examples/backup-memory.rs`, synthetic RocksDB stores, release
+build, 2026-10-16). The encoder writes the level and the pinned header `urn:compress:gzip`
+writes, and a test pins that an archive is byte for byte what `urn:compress:gzip` gives for its
+N-Quads, so two backups of unchanged data are still byte-identical and "has anything changed" is
+still a digest comparison. The order is the store's own (a function of the contents on RocksDB),
+not the sorted one, so the first backup after this change differs from the one before it even
+over unchanged data. The store's time and answer bounds still apply, read from the caller's
+grants as the store reads them; the byte bound now counts the N-Quads, not SPARQL JSON.
 
 ### A merge is not a restore
 
@@ -3271,7 +3280,9 @@ The manifest is the module manifest: gonk links
 [`ikigai-repo`](https://github.com/ikigai-rs/ikigai-repo), the `ikigai-web`, `ikigai-ipc` and
 `ikigai-quic` transports, and `ikigai-resolve` for the mount. For the backup family it adds
 [`ikigai-compress`](https://github.com/ikigai-rs/ikigai-compress) — whose four resources ARE
-bound, because an archive reaches gzip by resolving `urn:compress:gzip` through this kernel —
+bound, because the scripts archive is gzipped and every archive is expanded on restore by
+resolving them through this kernel (the store archive is streamed into the same encoder,
+ledger #1699) —
 and `ikigai-time`, whose `JobRegistry` fires the schedule and whose `urn:time:*` control plane
 is deliberately **not** bound. For the browser face it adds two libraries it calls as
 functions and binds no resources from: `ikigai-xslt` (the stylesheet engine) and

@@ -937,6 +937,15 @@ ikigai-web = "0.1.62"
 # binds more is a red test.
 # 0.2.0 (ledger #987): the space names itself `urn:iki:space:compress`; `^0.1.0` was `<0.2.0`.
 ikigai-compress = "0.2.0"
+# ★ The backup's archive is STREAMED into a gzip encoder (ledger #1699) instead of handed whole to
+# `urn:compress:gzip`: the dump held the dataset several times over (the SPARQL JSON answer, the
+# N-Quads, a copy of them for the call), so it now writes each quad into this encoder as it reads
+# it. The encoder is the one `ikigai-compress` 0.2.0 uses, with its level and its pinned header
+# (`crate::backup::GZIP_LEVEL`), and `tests/backup.rs` pins that the archive is byte for byte what
+# `urn:compress:gzip` writes for the same N-Quads. An edge to a crate already in the graph.
+# The floor is the one `ikigai-compress` 0.2.0 asks for (1.1.10, `rust_backend`, which unifies
+# here): the archive's bytes are the encoder's, so this is the same encoder, not merely its API.
+flate2 = "1.1.10"
 # The timer that fires the backup. gonk holds the store, so gonk schedules the backup:
 # an external scheduler's failure mode is "gonk healthy, data changing, backups stopped,
 # nobody knows", and a backup job must not be able to outlive the thing it protects.

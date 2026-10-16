@@ -30,20 +30,28 @@
 //! zero — so today's data would survive a Turtle dump by luck. The format does not depend
 //! on today's data shape.
 //!
-//! # ★ The dump is the engine's own words in both directions
+//! # ★ The dump is the engine's own words, and it is STREAMED
 //!
-//! A backup is `urn:iki:store:select` over `{ GRAPH ?g { ?s ?p ?o } } UNION { ?s ?p ?o }`,
-//! read back with **oxigraph's own SPARQL-results parser** and written with **oxigraph's
-//! own N-Quads serializer**. Neither end is string surgery. That matters more than it
-//! looks: this dataset holds ledger item bodies with newlines, quotation marks and
-//! trailing periods in them, and a hand-rolled `?s ?p ?o .` writer corrupts exactly those
-//! rows — in the one file nobody reads until the day they need it.
+//! A backup reads every quad of every graph from ONE snapshot of the store (oxigraph's own
+//! `Store::iter`, through the handle a [`Dataset`] holds) and writes each with **oxigraph's own
+//! N-Quads serializer** straight into a gzip encoder, hashing and counting the N-Quads as they
+//! pass (ledger [#1699](http://localhost:1062/l/default/item/1699)). It is never string
+//! surgery: this dataset holds ledger item bodies with newlines, quotation marks and trailing
+//! periods in them, and a hand-rolled `?s ?p ?o .` writer corrupts exactly those rows, in the
+//! one file nobody reads until the day they need it.
 //!
-//! `ORDER BY ?g ?s ?p ?o` is on the query on purpose. `urn:compress:gzip` pins its header
-//! fields, so identical bytes compress to identical archives; a stable row order is the
-//! other half of making "the data has not changed since the last backup" a digest
-//! comparison rather than a belief. The cost is that the whole result is sorted — which is
-//! fine at this dataset's scale (megabytes) and is the first thing to revisit if it is not.
+//! ★ Until #1699 it was `urn:iki:store:select` over `{ GRAPH ?g { ?s ?p ?o } } UNION
+//! { ?s ?p ?o } ORDER BY ?g ?s ?p ?o`: the store sorted the whole dataset and held the answer
+//! as SPARQL JSON (121 MB at 361,607 quads), and the backup held the N-Quads it parsed out of
+//! that and a copy of them for `urn:compress:gzip` beside it. Now what is held is the
+//! compressed archive and one quad at a time; `examples/backup-memory.rs` measures it.
+//!
+//! The order is the store's own index order, a function of the dataset's contents on RocksDB,
+//! so an unchanged dataset still dumps to identical bytes; the gzip header and level are the
+//! ones `urn:compress:gzip` writes (`GZIP_LEVEL`), so identical bytes still compress to an
+//! identical archive and "the data has not changed since the last backup" stays a digest
+//! comparison. ⚠ It is not the sorted order of the backups before #1699, so the first backup
+//! after that change is not "identical to the previous" even over unchanged data.
 //!
 //! # Capability posture — the two most dangerous grants in the system
 //!
@@ -103,9 +111,10 @@
 //! `failures_in_a_row`. Neither reads as "fine".
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -114,7 +123,7 @@ use ikigai_core::{
 };
 use ikigai_time::JobRegistry;
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
-use oxigraph::model::{GraphName, NamedOrBlankNode, Quad, Term};
+use oxigraph::model::{GraphName, Quad, Term};
 use oxigraph::sparql::results::{
     QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput,
 };
@@ -174,8 +183,12 @@ pub const JOB_SCOPES: [&str; 6] = [
     crate::budget::STORE_RESERVE,
 ];
 
-/// How long the scheduled backup's whole-dataset query may run, in milliseconds: **120 s**,
-/// which is also `ikigai-store`'s ceiling (ledger [#979](http://localhost:1060/l/default/item/979)).
+/// How long the scheduled backup's dump may run, in milliseconds: **120 s**, which is also
+/// `ikigai-store`'s ceiling (ledger [#979](http://localhost:1060/l/default/item/979)). Since
+/// ledger #1699 the dump reads the store directly and applies the store's own rule to the grant
+/// ([`Dataset`]): the caller's largest `urn:cap:store:budget:<ms>`, never below the store's base
+/// and never above its ceiling. The measurements below are of the sorted SPARQL query it
+/// replaced, which is why the grant is this generous.
 ///
 /// ★ Since store 0.2.8 every SPARQL evaluation runs within a time budget, and a capability
 /// with no `urn:cap:store:budget:<ms>` grant gets the store's 5 s BASE. The job fires under
@@ -200,7 +213,10 @@ pub const JOB_BUDGET_MS: u64 = 120_000;
 pub const JOB_BUDGET: &str = "urn:cap:store:budget:120000";
 
 /// How many rows the scheduled backup's answer may hold: **10,000,000**, `ikigai-store`'s
-/// ceiling (ledger [#993](http://localhost:1060/l/default/item/993)).
+/// ceiling (ledger [#993](http://localhost:1060/l/default/item/993)). Since ledger #1699 a row
+/// is a quad of the dump and the bytes are its N-Quads (no longer SPARQL JSON), counted as they
+/// are written and refused, never truncated, at the bound the store would set for the caller
+/// ([`Dataset`]). The history below is of the SPARQL answer the dump replaced.
 ///
 /// ★ Since store 0.2.9 every SPARQL answer is bounded in SIZE as well as time, and a
 /// capability with no `urn:cap:store:answer:*` grant gets the store's BASE: 100,000 rows and
@@ -263,9 +279,10 @@ pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 /// `urn:iki:store:load`: a backup that could not be restored. Nothing failed at backup time,
 /// which is when it could have been noticed.
 ///
-/// ★ Why 1 GiB covers every archive a backup can write: the backup's first bound is its answer,
-/// [`JOB_ANSWER_BYTES_MAX`] (1 GiB of SPARQL JSON), and a quad's N-Quads line is always shorter
-/// than its JSON row, which spells out the same terms inside `{"type":…,"value":…}` objects.
+/// ★ Why 1 GiB covers every archive a backup can write: since ledger #1699 the backup's byte
+/// bound is on the N-Quads themselves, at most [`JOB_ANSWER_BYTES_MAX`] (1 GiB), so every dump
+/// the backup writes is one this restore takes. (Before, it bounded the SPARQL JSON answer, and
+/// a quad's N-Quads line is always shorter than its JSON row.)
 /// The two assertions below are checked at COMPILE time: raising the backup's bound past this
 /// one, or a decompressor whose ceiling moved, is a build that fails rather than a backup that
 /// cannot be restored.
@@ -310,6 +327,8 @@ pub struct Backups {
     /// When the scheduled job fires next, as its [`BackupTimer`] records it — what
     /// [`STATUS`] says is due (ledger #1087). Never written when nothing is scheduled.
     pub next: NextRun,
+    /// What [`BACKUP`] reads, and the store's bounds on it (ledger #1699).
+    pub dataset: Dataset,
 }
 
 /// The backup family's space: [`BACKUP`], [`STATUS`], [`ARCHIVE`], [`RESTORE`] and
@@ -349,9 +368,53 @@ pub fn space(backups: Backups) -> EndpointSpace {
 /// One graph's name as it appears in a count table: the IRI, or `""` for the default graph.
 const DEFAULT_GRAPH_KEY: &str = "";
 
-/// A dump: the N-Quads bytes, and the per-graph counts measured while writing them.
+/// The deflate level and the two pinned header fields `urn:compress:gzip` writes
+/// (`ikigai-compress` 0.2.0: level 6, mtime 0, OS byte 255 "unknown"), so a streamed archive is
+/// byte for byte what resolving `urn:compress:gzip` over the same N-Quads gives, and two
+/// backups of an unchanged dataset are the same bytes. `tests/backup.rs`'s
+/// `a_streamed_archive_is_what_urn_compress_gzip_writes` pins the equality.
+const GZIP_LEVEL: u32 = 6;
+const GZIP_MTIME: u32 = 0;
+const GZIP_OS: u8 = 255;
+
+/// How many quads are written between two looks at the clock.
+const CLOCK_EVERY: u64 = 64;
+
+/// What a backup reads, and the store's own bounds on how much of it a caller may take
+/// (ledger [#1699](http://localhost:1062/l/default/item/1699)).
+///
+/// `handle` is the `Arc<Store>` the store's shared constructor handed out
+/// (`DurableStore::open_shared_declaring`), and the two budgets are that store's, so the dump
+/// is bounded by exactly the grants, bases and ceilings the store applies to a SPARQL answer.
+///
+/// ⚠ Nothing here can check that `handle` is `store`'s: a handle to another dataset backs up
+/// that dataset. Build one on the line that opens the store, from what that line returned.
+#[derive(Clone)]
+pub struct Dataset {
+    handle: Arc<ikigai_store::Store>,
+    time: ikigai_store::TimeBudget,
+    answer: ikigai_store::AnswerBudget,
+}
+
+impl Dataset {
+    /// The dataset `store` holds, read through `handle` (the handle `store`'s shared
+    /// constructor returned), under `store`'s time and answer budgets as they are now.
+    pub fn new(store: &ikigai_store::DurableStore, handle: Arc<ikigai_store::Store>) -> Dataset {
+        Dataset {
+            handle,
+            time: store.time_budget(),
+            answer: store.answer_budget(),
+        }
+    }
+}
+
+/// A dump: the gzipped N-Quads, what the N-Quads were, and the per-graph counts measured while
+/// writing them.
+#[derive(Debug)]
 struct Dump {
-    nquads: Vec<u8>,
+    archive: Vec<u8>,
+    nquads_bytes: u64,
+    nquads_sha256: String,
     graphs: BTreeMap<String, u64>,
 }
 
@@ -361,117 +424,189 @@ impl Dump {
     }
 }
 
-/// The whole dataset, every graph, as N-Quads — through the kernel, under the caller's
-/// capability.
-///
-/// The UNION is not decoration. `{ ?s ?p ?o }` alone reads the DEFAULT graph only (this
-/// store does not evaluate a bare pattern over the union of graphs — `ikigai-store`'s
-/// `a_property_path_cannot_walk_out_of_the_scope` pins that), and `GRAPH ?g { ?s ?p ?o }`
-/// alone never sees the default graph. A backup missing either half is a backup that
-/// restores to a different dataset.
-async fn dump(inv: &Invocation<'_>) -> Result<Dump> {
-    let query = "SELECT ?g ?s ?p ?o WHERE { { GRAPH ?g { ?s ?p ?o } } UNION { ?s ?p ?o } } \
-                 ORDER BY ?g ?s ?p ?o";
-    let results = inv
-        .issue(
-            Request::new(Verb::Source, iri(BACKUP_SELECT)?)
-                .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
-                .with_arg(
-                    "as",
-                    ArgRef::Inline(b"application/sparql-results+json".to_vec()),
-                ),
-        )
-        .await?;
-    quads_from_results(&results.bytes)
+/// The bounds one dump runs under: the caller's grants as the store reads them.
+#[derive(Clone, Copy)]
+struct Bounds {
+    time: Duration,
+    rows: u64,
+    bytes: u64,
 }
 
-/// `urn:iki:store:select`, the one resource a backup reads.
-const BACKUP_SELECT: &str = "urn:iki:store:select";
-
-/// Parse a SPARQL SELECT result set into N-Quads, counting per graph as it goes.
-fn quads_from_results(bytes: &[u8]) -> Result<Dump> {
-    let parser = QueryResultsParser::from_format(QueryResultsFormat::Json);
-    let solutions = match parser.for_reader(bytes) {
-        Ok(ReaderQueryResultsParserOutput::Solutions(solutions)) => solutions,
-        Ok(ReaderQueryResultsParserOutput::Boolean(_)) => {
-            return Err(Error::Endpoint(
-                "the store answered a boolean to a SELECT — the backup query was rewritten \
-                 somewhere it should not have been"
-                    .to_string(),
-            ))
+impl Bounds {
+    fn for_caller(dataset: &Dataset, capability: &Capability) -> Bounds {
+        let answer = dataset.answer.for_capability(capability);
+        Bounds {
+            time: dataset.time.for_capability(capability),
+            rows: answer.rows(),
+            bytes: answer.bytes(),
         }
-        Err(e) => return Err(Error::Endpoint(format!("reading the store's results: {e}"))),
+    }
+}
+
+/// The N-Quads on their way into gzip: hashed, counted and bounded as they pass, never held.
+struct Tee<W: Write> {
+    inner: W,
+    hasher: Sha256,
+    bytes: u64,
+    cap: u64,
+}
+
+impl<W: Write> Write for Tee<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes + buf.len() as u64 > self.cap {
+            return Err(std::io::Error::other(PastBound));
+        }
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Tee<W> {
+    fn new(inner: W, cap: u64) -> Self {
+        Tee {
+            inner,
+            hasher: Sha256::new(),
+            bytes: 0,
+            cap,
+        }
+    }
+}
+
+/// What a [`Tee`] answers at its byte bound, so the dump can tell its own refusal from an
+/// encoder that failed.
+#[derive(Debug)]
+struct PastBound;
+
+impl std::fmt::Display for PastBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the dump is past its byte bound")
+    }
+}
+
+impl std::error::Error for PastBound {}
+
+/// Whether `error` is a [`Tee`]'s refusal at its byte bound, passed on by the writers above it.
+fn is_past_bound(error: &std::io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<PastBound>())
+}
+
+/// The refusal of a dump past its row or byte bound: the store's own answer-bound refusal
+/// (`ikigai_store::budget::too_large`, the shape a backup was refused with before ledger #1699),
+/// saying first what was being answered.
+fn past(measure: ikigai_store::budget::Measure, bound: u64) -> Error {
+    match ikigai_store::budget::too_large(measure, bound) {
+        Error::InvalidArgument { name, detail } => Error::InvalidArgument {
+            name,
+            detail: format!("the backup's dump of every quad: {detail}. Nothing was written."),
+        },
+        other => other,
+    }
+}
+
+/// The refusal of a dump past its time budget.
+fn past_time(budget: Duration) -> Error {
+    Error::Timeout(format!(
+        "the backup's dump of every quad ran past its time budget of {} ms and was stopped; \
+         nothing was written. A `urn:cap:store:budget:<ms>` grant raises it, up to the store's \
+         ceiling",
+        budget.as_millis()
+    ))
+}
+
+/// The key of `graph` in a count table.
+fn graph_key(graph: &GraphName) -> String {
+    match graph {
+        GraphName::DefaultGraph => DEFAULT_GRAPH_KEY.to_string(),
+        GraphName::NamedNode(node) => node.as_str().to_string(),
+        GraphName::BlankNode(node) => format!("_:{}", node.as_str()),
+    }
+}
+
+/// The whole dataset, every graph, as gzipped N-Quads, within `bounds` (ledger #1699).
+///
+/// One snapshot: `Store::iter` reads every quad, default graph and named graphs alike, from the
+/// snapshot it opens, so a write landing meanwhile is wholly in the dump or wholly not. The
+/// N-Quads are never held: each quad is serialized into a small buffer that drains through a
+/// [`Tee`] (hash, count, byte bound) into the gzip encoder, and what is held is the archive.
+///
+/// The UNION the SPARQL dump needed is gone with it: `Store::iter` is every quad of every graph,
+/// the default graph included, where `{ ?s ?p ?o }` alone reads the default graph only and
+/// `GRAPH ?g { … }` alone never sees it.
+///
+/// Every bound REFUSES rather than truncates (a short archive that verifies against its own
+/// short sidecar is the failure a backup exists to prevent): past the rows, the bytes or the
+/// time, the dump stops and nothing is written.
+fn dump(dataset: &Dataset, bounds: Bounds) -> Result<Dump> {
+    use ikigai_store::budget::Measure;
+    let deadline = Instant::now() + bounds.time;
+    let encoder = flate2::GzBuilder::new()
+        .mtime(GZIP_MTIME)
+        .operating_system(GZIP_OS)
+        .write(Vec::new(), flate2::Compression::new(GZIP_LEVEL));
+    let buffered = std::io::BufWriter::with_capacity(64 << 10, Tee::new(encoder, bounds.bytes));
+    let mut writer = RdfSerializer::from_format(RdfFormat::NQuads).for_writer(buffered);
+    let failed = |e: std::io::Error| {
+        if is_past_bound(&e) {
+            past(Measure::Bytes, bounds.bytes)
+        } else {
+            Error::Endpoint(format!("writing the dump: {e}"))
+        }
     };
     let mut graphs: BTreeMap<String, u64> = BTreeMap::new();
-    let mut out: Vec<u8> = Vec::new();
-    let mut writer = RdfSerializer::from_format(RdfFormat::NQuads).for_writer(&mut out);
-    for solution in solutions {
-        let solution = solution.map_err(|e| Error::Endpoint(format!("a result row: {e}")))?;
-        let quad = quad_from_solution(&solution)?;
-        let key = match &quad.graph_name {
-            GraphName::DefaultGraph => DEFAULT_GRAPH_KEY.to_string(),
-            GraphName::NamedNode(node) => node.as_str().to_string(),
-            GraphName::BlankNode(node) => format!("_:{}", node.as_str()),
-        };
-        *graphs.entry(key).or_default() += 1;
-        writer
-            .serialize_quad(&quad)
-            .map_err(|e| Error::Endpoint(format!("writing a quad: {e}")))?;
+    let mut quads: u64 = 0;
+    for quad in dataset.handle.iter() {
+        let quad = quad.map_err(|e| Error::Endpoint(format!("reading the store: {e}")))?;
+        quads += 1;
+        if quads > bounds.rows {
+            return Err(past(Measure::Rows, bounds.rows));
+        }
+        if quads.is_multiple_of(CLOCK_EVERY) && Instant::now() >= deadline {
+            return Err(past_time(bounds.time));
+        }
+        *graphs.entry(graph_key(&quad.graph_name)).or_default() += 1;
+        writer.serialize_quad(&quad).map_err(failed)?;
     }
-    writer
+    let buffered = writer.finish().map_err(failed)?;
+    let tee = buffered.into_inner().map_err(|e| failed(e.into_error()))?;
+    if Instant::now() >= deadline {
+        return Err(past_time(bounds.time));
+    }
+    let nquads_bytes = tee.bytes;
+    let nquads_sha256 = hex(&tee.hasher.finalize());
+    let archive = tee
+        .inner
         .finish()
-        .map_err(|e| Error::Endpoint(format!("finishing the dump: {e}")))?;
+        .map_err(|e| Error::Endpoint(format!("finishing the archive: {e}")))?;
     Ok(Dump {
-        nquads: out,
+        archive,
+        nquads_bytes,
+        nquads_sha256,
         graphs,
     })
 }
 
-/// One `?g ?s ?p ?o` row as a [`Quad`].
-///
-/// Every refusal here is a shape the store cannot actually produce (a literal subject, a
-/// blank-node predicate). They are errors rather than skips because a backup that silently
-/// dropped a row would be a backup with a hole in it, and the count would agree with
-/// itself.
-fn quad_from_solution(solution: &oxigraph::sparql::QuerySolution) -> Result<Quad> {
-    let subject = match solution.get("s") {
-        Some(Term::NamedNode(node)) => NamedOrBlankNode::NamedNode(node.clone()),
-        Some(Term::BlankNode(node)) => NamedOrBlankNode::BlankNode(node.clone()),
-        other => {
-            return Err(Error::Endpoint(format!(
-                "a row's subject is not an IRI or a blank node: {other:?}"
-            )))
-        }
-    };
-    let predicate = match solution.get("p") {
-        Some(Term::NamedNode(node)) => node.clone(),
-        other => {
-            return Err(Error::Endpoint(format!(
-                "a row's predicate is not an IRI: {other:?}"
-            )))
-        }
-    };
-    let object = solution
-        .get("o")
-        .ok_or_else(|| Error::Endpoint("a row has no object".to_string()))?
-        .clone();
-    let graph_name = match solution.get("g") {
-        None => GraphName::DefaultGraph,
-        Some(Term::NamedNode(node)) => GraphName::NamedNode(node.clone()),
-        Some(Term::BlankNode(node)) => GraphName::BlankNode(node.clone()),
-        other => {
-            return Err(Error::Endpoint(format!(
-                "a row's graph is not an IRI: {other:?}"
-            )))
-        }
-    };
-    Ok(Quad {
-        subject,
-        predicate,
-        object,
-        graph_name,
-    })
+/// [`dump`] on a thread of its own: seconds of CPU at the live dataset's size, which the door
+/// that asked should not spend from its runtime's workers.
+async fn dump_off_thread(dataset: Dataset, bounds: Bounds) -> Result<Dump> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("gonk-backup-dump".to_string())
+        .spawn(move || {
+            let _ = tx.send(dump(&dataset, bounds));
+        })
+        .map_err(|e| Error::Endpoint(format!("no thread for the backup's dump: {e}")))?;
+    rx.await
+        .map_err(|_| Error::Endpoint("the backup's dump panicked".to_string()))?
 }
+
+/// `urn:iki:store:select`, which the backup's after-count and the restore's verifier read.
+const BACKUP_SELECT: &str = "urn:iki:store:select";
 
 /// The per-graph counts of an N-Quads document, measured by parsing it — the independent
 /// half of the restore comparison.
@@ -503,12 +638,7 @@ fn counts_in_nquads(bytes: &[u8]) -> Result<BTreeMap<String, u64>> {
         if !seen.insert(quad.clone()) {
             continue;
         }
-        let key = match &quad.graph_name {
-            GraphName::DefaultGraph => DEFAULT_GRAPH_KEY.to_string(),
-            GraphName::NamedNode(node) => node.as_str().to_string(),
-            GraphName::BlankNode(node) => format!("_:{}", node.as_str()),
-        };
-        *graphs.entry(key).or_default() += 1;
+        *graphs.entry(graph_key(&quad.graph_name)).or_default() += 1;
     }
     Ok(graphs)
 }
@@ -874,8 +1004,9 @@ impl Endpoint for TakeBackup {
         Description::new("gonk-backup")
             .title("Take a backup of the whole dataset")
             .summary(
-                "Serializes EVERY graph as N-Quads through `urn:iki:store:select`, gzips it \
-                 by resolving `urn:compress:gzip`, writes it into this server's backup \
+                "Streams EVERY graph as N-Quads from one snapshot of the store into a gzip \
+                 archive (the bytes `urn:compress:gzip` writes for them), within the store's \
+                 time and answer bounds for the caller, writes it into this server's backup \
                  directory with a sidecar recording the per-graph counts and both digests, \
                  and prunes the rotation set oldest-first. Quad-shaped on purpose: a Turtle \
                  or N-Triples dump collapses every named graph into one and destroys the \
@@ -898,21 +1029,26 @@ impl TakeBackup {
             Some(dir) => Some(snapshot_scripts(dir)?),
             None => None,
         };
-        let dump = dump(inv).await?;
+        // The kernel's floor has refused a caller without these already (they are declared);
+        // checked again here because the dump reads the store through a handle, not a door.
+        for scope in [CAP_BACKUP, ikigai_store::CAP_READ] {
+            if !inv.capability.allows(scope) {
+                return Err(Error::Denied(format!(
+                    "a backup reads every graph, which needs {scope}"
+                )));
+            }
+        }
+        // ★ Streamed (ledger #1699): the N-Quads go straight into a gzip encoder with the
+        // header `urn:compress:gzip` pins, rather than being held whole and handed to it. The
+        // archive is the same bytes either way (`tests/backup.rs` pins that); what is no longer
+        // held is the dataset, two or three times over.
+        let bounds = Bounds::for_caller(&self.backups.dataset, inv.capability);
+        let dump = dump_off_thread(self.backups.dataset.clone(), bounds).await?;
         let quads = dump.quads();
-        let nquads_digest = digest(&dump.nquads);
-        let nquads_bytes = dump.nquads.len();
-
-        // Compression through the kernel, not through a gzip crate: the archive is a
-        // composition of resources, and `urn:compress:gzip` is where determinism and the
-        // decompression bound are argued.
-        let archive = inv
-            .issue(
-                Request::new(Verb::Source, iri("urn:compress:gzip")?)
-                    .with_arg("content", ArgRef::Inline(dump.nquads.clone())),
-            )
-            .await?;
-        let archive_digest = digest(&archive.bytes);
+        let nquads_digest = dump.nquads_sha256.clone();
+        let nquads_bytes = usize::try_from(dump.nquads_bytes).unwrap_or(usize::MAX);
+        let archive = &dump.archive;
+        let archive_digest = digest(archive);
         let scripts_archive = match &scripts {
             Some(snapshot) => Some(
                 inv.issue(
@@ -949,7 +1085,7 @@ impl TakeBackup {
             graphs: &dump.graphs,
             nquads_bytes,
             nquads_sha256: &nquads_digest,
-            archive_bytes: archive.bytes.len(),
+            archive_bytes: archive.len(),
             archive_sha256: &archive_digest,
             store_quads_after_dump: after,
             scripts: match (&scripts, &scripts_archive) {
@@ -970,7 +1106,7 @@ impl TakeBackup {
         // A crash between them leaves an archive without a sidecar, which `STATUS` reports
         // as exactly that; the reverse order would leave a sidecar describing a file that
         // does not exist, which reads as a good backup.
-        write_atomic(&settings.dir.join(&name), &archive.bytes)?;
+        write_atomic(&settings.dir.join(&name), archive)?;
         if let Some(archive) = &scripts_archive {
             write_atomic(&settings.dir.join(&scripts_name), archive)?;
         }
@@ -992,7 +1128,7 @@ impl TakeBackup {
         report.push_str(&format!(
             "  {quads} quads in {} graph(s), {nquads_bytes} bytes of N-Quads -> {} bytes gzipped\n",
             dump.graphs.len(),
-            archive.bytes.len()
+            archive.len()
         ));
         for (graph, count) in &dump.graphs {
             let shown = if graph.is_empty() {
@@ -1105,7 +1241,6 @@ fn prune(dir: &Path, keep: usize, taken: &str) -> Vec<String> {
 /// a directory, so the rotation set never holds a half-written archive that a later restore
 /// would discover was short.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
     let temporary = path.with_extension("partial");
     let mut file = create_private(&temporary)
         .map_err(|e| Error::Endpoint(format!("creating {}: {e}", temporary.display())))?;
@@ -2316,11 +2451,11 @@ fn unsupported(id: &str, verb: Verb) -> Error {
 fn digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&hasher.finalize())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// A duration as an operator reads it.
@@ -2516,6 +2651,13 @@ fn civil(millis: u64) -> (i64, u32, u32, u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dataset over an empty in-memory store, for a test that never takes a backup.
+    fn scratch_dataset() -> Dataset {
+        let (store, handle) =
+            ikigai_store::DurableStore::in_memory_shared().expect("an in-memory store");
+        Dataset::new(&store, handle)
+    }
 
     const RESTORES: &str = "<urn:a> <urn:p> \"x\" <urn:g:1> .\n<urn:b> <urn:p> \"y\" .\n";
 
@@ -2934,49 +3076,145 @@ mod tests {
         assert_eq!(quote("\u{1}"), "\"\\u0001\"");
     }
 
+    /// A dataset holding `nquads`, and the dump of it under the store's ceilings.
+    fn dumped(nquads: &str) -> (Dump, String) {
+        let (store, handle) =
+            ikigai_store::DurableStore::in_memory_shared().expect("an in-memory store");
+        handle
+            .load_from_slice(RdfFormat::NQuads, nquads.as_bytes())
+            .expect("the fixture loads");
+        let dataset = Dataset::new(&store, handle);
+        let dump =
+            dump(&dataset, Bounds::for_caller(&dataset, &Capability::root())).expect("dumps");
+        let mut text = String::new();
+        std::io::Read::read_to_string(
+            &mut flate2::read::GzDecoder::new(dump.archive.as_slice()),
+            &mut text,
+        )
+        .expect("the archive is gzip");
+        (dump, text)
+    }
+
     /// ★ The N-Quads writer is oxigraph's, and this is the row it exists for: a literal
     /// holding a quotation mark, a newline and a trailing period, in a named graph.
     #[test]
     fn a_literal_with_a_trailing_period_survives_the_dump() {
-        let results = br#"{"head":{"vars":["g","s","p","o"]},"results":{"bindings":[
-            {"g":{"type":"uri","value":"urn:iki:ledger:graph:default"},
-             "s":{"type":"uri","value":"urn:iki:ledger:default:item:1"},
-             "p":{"type":"uri","value":"urn:ik:body"},
-             "o":{"type":"literal","value":"he said \"stop\".\nThen ."}},
-            {"s":{"type":"uri","value":"urn:a"},
-             "p":{"type":"uri","value":"urn:b"},
-             "o":{"type":"uri","value":"urn:c"}}]}}"#;
-        let dump = quads_from_results(results).expect("parses");
+        let (dump, text) = dumped(
+            "<urn:iki:ledger:default:item:1> <urn:ik:body> \"he said \\\"stop\\\".\\nThen .\" \
+             <urn:iki:ledger:graph:default> .\n<urn:a> <urn:b> <urn:c> .\n",
+        );
         assert_eq!(dump.quads(), 2);
         assert_eq!(dump.graphs["urn:iki:ledger:graph:default"], 1);
         assert_eq!(dump.graphs[DEFAULT_GRAPH_KEY], 1, "the default-graph row");
         // The round trip is the assertion: re-reading the bytes gives the same shape back.
-        let back = counts_in_nquads(&dump.nquads).expect("re-parses");
+        let back = counts_in_nquads(text.as_bytes()).expect("re-parses");
         assert_eq!(back, dump.graphs);
-        let text = String::from_utf8(dump.nquads.clone()).unwrap();
         assert_eq!(text.lines().count(), 2, "one line per quad: {text}");
         assert!(
             text.contains("<urn:iki:ledger:graph:default> ."),
             "the named-graph row is graph-qualified: {text}"
         );
+        assert!(text.contains(r#"he said \"stop\".\nThen ."#), "{text}");
+        // What the sidecar records is what the archive holds.
+        assert_eq!(dump.nquads_bytes, text.len() as u64);
+        assert_eq!(dump.nquads_sha256, digest(text.as_bytes()));
     }
 
     /// The whole point of the format, as one test: a graph-qualified dump keeps the
     /// partition, and the count alone would not have noticed if it had not.
     #[test]
     fn the_dump_keeps_the_graph_partition_that_a_triple_format_would_collapse() {
-        let results = br#"{"head":{"vars":["g","s","p","o"]},"results":{"bindings":[
-            {"g":{"type":"uri","value":"urn:iki:ledger:graph:a"},
-             "s":{"type":"uri","value":"urn:x"},"p":{"type":"uri","value":"urn:p"},
-             "o":{"type":"uri","value":"urn:y"}},
-            {"g":{"type":"uri","value":"urn:iki:ledger:graph:b"},
-             "s":{"type":"uri","value":"urn:x"},"p":{"type":"uri","value":"urn:p"},
-             "o":{"type":"uri","value":"urn:y"}}]}}"#;
-        let dump = quads_from_results(results).expect("parses");
+        let (dump, text) = dumped(
+            "<urn:x> <urn:p> <urn:y> <urn:iki:ledger:graph:a> .\n\
+             <urn:x> <urn:p> <urn:y> <urn:iki:ledger:graph:b> .\n",
+        );
         assert_eq!(dump.quads(), 2);
         assert_eq!(dump.graphs.len(), 2, "two tenants, two graphs");
-        let back = counts_in_nquads(&dump.nquads).expect("re-parses");
+        let back = counts_in_nquads(text.as_bytes()).expect("re-parses");
         assert_eq!(back.len(), 2, "and the file still says so");
+    }
+
+    /// ★ Ledger #1699: every bound refuses, by name, and is never a short archive. The rows and
+    /// bytes are the dump's quads and N-Quads; the time is checked as it goes.
+    #[test]
+    fn a_dump_past_a_bound_is_refused_not_truncated() {
+        let (store, handle) =
+            ikigai_store::DurableStore::in_memory_shared().expect("an in-memory store");
+        let mut doc = String::new();
+        for n in 0..1_000 {
+            doc.push_str(&format!("<urn:s:{n}> <urn:p> \"{n}\" <urn:g> .\n"));
+        }
+        handle
+            .load_from_slice(RdfFormat::NQuads, doc.as_bytes())
+            .expect("loads");
+        let dataset = Dataset::new(&store, handle);
+        let ceiling = Bounds::for_caller(&dataset, &Capability::root());
+        let whole = dump(&dataset, ceiling).expect("within the ceiling");
+        assert_eq!(whole.quads(), 1_000);
+
+        let rows = dump(
+            &dataset,
+            Bounds {
+                rows: 999,
+                ..ceiling
+            },
+        )
+        .expect_err("one row over");
+        assert!(
+            rows.to_string().contains("the answer exceeds 999 rows"),
+            "{rows}"
+        );
+        assert!(
+            rows.to_string().contains("refused, not truncated"),
+            "{rows}"
+        );
+        let exact = dump(
+            &dataset,
+            Bounds {
+                rows: 1_000,
+                ..ceiling
+            },
+        )
+        .expect("exactly at it");
+        assert_eq!(exact.archive, whole.archive);
+
+        let at = whole.nquads_bytes;
+        let bytes = dump(
+            &dataset,
+            Bounds {
+                bytes: at - 1,
+                ..ceiling
+            },
+        )
+        .expect_err("a byte over");
+        assert!(
+            bytes
+                .to_string()
+                .contains(&format!("the answer exceeds {} bytes", at - 1)),
+            "{bytes}"
+        );
+        dump(
+            &dataset,
+            Bounds {
+                bytes: at,
+                ..ceiling
+            },
+        )
+        .expect("exactly at it");
+
+        match dump(
+            &dataset,
+            Bounds {
+                time: Duration::ZERO,
+                ..ceiling
+            },
+        ) {
+            Err(Error::Timeout(why)) => assert!(why.contains("time budget"), "{why}"),
+            other => panic!(
+                "past its time budget, a Timeout; got {:?}",
+                other.map(|d| d.quads())
+            ),
+        }
     }
 
     /// ★ The temporary is owner-only from the moment it exists, before a byte is in it —
@@ -3057,6 +3295,7 @@ mod tests {
                 }),
                 jobs: None,
                 next: Default::default(),
+                dataset: scratch_dataset(),
             },
         };
         let text = status.text();
@@ -3078,6 +3317,7 @@ mod tests {
                 }),
                 jobs: None,
                 next: Default::default(),
+                dataset: scratch_dataset(),
             },
         };
         let text = status.text();

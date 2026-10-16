@@ -19,7 +19,7 @@ use ikigai_conformance::{Fixture, Suite};
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
 use ikigai_gonk::backup::{self, Backups};
 use ikigai_gonk::{compose_with, doors};
-use ikigai_store::DurableStore;
+use ikigai_store::{DurableStore, SharerWrites, Store};
 
 /// The stopgap the hub took on 2026-09-16, through `urn:iki:store:select` with no downtime,
 /// and recorded as a backup on the strength of STRUCTURAL checks alone — 2850 rows became
@@ -98,10 +98,25 @@ const COMPRESS_IDS: [&str; 4] = [
     "decompress-zlib",
 ];
 
+/// An in-memory store opened as `main` opens the live one, shared with a declaration, and the
+/// handle the backup reads it through (ledger #1699).
+fn shared() -> (DurableStore, Arc<Store>) {
+    DurableStore::in_memory_shared_declaring(SharerWrites::only_the_default_graph())
+        .expect("an in-memory store")
+}
+
+/// [`shared`], with the backup's view of it.
+fn shared_dataset() -> (DurableStore, backup::Dataset) {
+    let (store, handle) = shared();
+    let dataset = backup::Dataset::new(&store, handle);
+    (store, dataset)
+}
+
 /// A hub with the backup family bound over an in-memory store, rotating into `dir`.
 fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
+    let (store, dataset) = shared_dataset();
     Arc::new(compose_with(
-        DurableStore::in_memory().expect("an in-memory store"),
+        store,
         None,
         Vec::new(),
         Vec::new(),
@@ -116,6 +131,7 @@ fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         None,
         None,
@@ -460,8 +476,43 @@ fn an_awkward_literal_survives_the_whole_round_trip() {
     );
 }
 
-/// An archive of unchanged data is byte-identical to the one before it, because
-/// `urn:compress:gzip` pins its header and the dump is ordered. That is what makes
+/// ★ Ledger #1699: the backup streams its N-Quads into a gzip encoder of its own instead of
+/// holding them whole for `urn:compress:gzip`, and the archive is the same bytes resolving
+/// `urn:compress:gzip` over those N-Quads gives (its level, its pinned mtime and OS byte). So
+/// the archive format did not change, and an archive is still a pure function of its N-Quads.
+#[test]
+fn a_streamed_archive_is_what_urn_compress_gzip_writes() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    seed(&hub);
+    issue(&hub, Verb::Source, backup::BACKUP, &[]);
+    let archive = newest_archive(&hub, backups.path());
+    let nquads = try_issue(
+        &hub,
+        Verb::Source,
+        "urn:decompress:gzip",
+        &[("content", &archive)],
+    )
+    .expect("the archive expands");
+    let composed = try_issue(
+        &hub,
+        Verb::Source,
+        "urn:compress:gzip",
+        &[("content", &nquads)],
+    )
+    .expect("urn:compress:gzip answers");
+    assert_eq!(archive, composed, "the same bytes urn:compress:gzip writes");
+    let meta = backup::archives(backups.path())
+        .last()
+        .and_then(|a| a.meta.clone())
+        .expect("a sidecar");
+    let value: serde_json::Value = serde_json::from_str(&meta).expect("the sidecar is JSON");
+    assert_eq!(value["nquads_bytes"], nquads.len() as u64, "{meta}");
+    assert_eq!(value["archive_bytes"], archive.len() as u64, "{meta}");
+}
+
+/// An archive of unchanged data is byte-identical to the one before it, because the gzip
+/// header is pinned and the dump's order is the store's. That is what makes
 /// "has anything changed since the last backup" a digest comparison.
 #[test]
 fn two_backups_of_unchanged_data_are_the_same_bytes() {
@@ -523,8 +574,9 @@ fn restoring_into_a_non_empty_store_is_refused() {
 #[test]
 fn restoring_over_the_live_store_is_refused() {
     let backups = tempfile::tempdir().expect("tempdir");
+    let (store, dataset) = shared_dataset();
     let hub = Arc::new(compose_with(
-        DurableStore::in_memory().expect("an in-memory store"),
+        store,
         None,
         Vec::new(),
         Vec::new(),
@@ -538,6 +590,7 @@ fn restoring_over_the_live_store_is_refused() {
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         None,
         None,
@@ -857,8 +910,9 @@ fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_du
         std::time::Duration::from_millis(13 * HOUR),
         "the first run is one cadence after the newest archive, not one after the restart"
     );
+    let (store, dataset) = shared_dataset();
     let restarted: Arc<Kernel> = Arc::new(compose_with(
-        DurableStore::in_memory().expect("an in-memory store"),
+        store,
         None,
         Vec::new(),
         Vec::new(),
@@ -866,6 +920,7 @@ fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_du
             settings: Arc::clone(&settings),
             jobs: Some(jobs.clone()),
             next: next.clone(),
+            dataset,
         }),
         None,
         None,
@@ -1077,7 +1132,10 @@ fn the_stopgap_archive_the_hub_took_actually_restores() {
 // ------------------------------------------------------------------ the time budget
 
 /// A hub over `store` with the backup family bound, rotating into `dir`.
-fn hub_over(store: DurableStore, dir: &Path) -> Arc<Kernel> {
+/// `handle` is the one `store`'s shared constructor returned, and `store` carries whatever budgets
+/// the test set on it: the backup's dump reads them (ledger #1699).
+fn hub_over(store: DurableStore, handle: Arc<Store>, dir: &Path) -> Arc<Kernel> {
+    let dataset = backup::Dataset::new(&store, handle);
     Arc::new(compose_with(
         store,
         None,
@@ -1093,14 +1151,15 @@ fn hub_over(store: DurableStore, dir: &Path) -> Arc<Kernel> {
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         None,
         None,
     ))
 }
 
-/// Twenty thousand quads in two named graphs: enough that the backup's sorted whole-dataset
-/// SELECT cannot finish inside a 1 ms budget on any machine CI runs on.
+/// Twenty thousand quads in two named graphs: enough that the backup's dump cannot finish
+/// inside a 1 ms budget on any machine CI runs on.
 fn bulk_nquads() -> Vec<u8> {
     let mut out = String::new();
     for n in 0..20_000 {
@@ -1125,18 +1184,17 @@ fn bulk_nquads() -> Vec<u8> {
 #[test]
 fn the_scheduled_backup_holds_a_budget_grant_and_completes_past_the_base() {
     let rotation = tempfile::tempdir().expect("tempdir");
-    let store = DurableStore::in_memory()
-        .expect("an in-memory store")
-        .with_time_budget(
-            ikigai_store::budget::TimeBudget::new(std::time::Duration::from_millis(1))
-                // The refused run below goes on evaluating after its caller is answered (an
-                // `ORDER BY` does not check the cancellation token), and the store refuses new
-                // work while `max_overdue` runs are overdue — a quarter of the cores, which is
-                // ONE on a CI runner. So the cap is lifted here, or the second backup would be
-                // refused `Unavailable` for the first one's sake.
-                .with_max_overdue(64),
-        );
-    let hub = hub_over(store, rotation.path());
+    let (store, handle) = shared();
+    let store = store.with_time_budget(
+        ikigai_store::budget::TimeBudget::new(std::time::Duration::from_millis(1))
+            // The refused run below goes on evaluating after its caller is answered (an
+            // `ORDER BY` does not check the cancellation token), and the store refuses new
+            // work while `max_overdue` runs are overdue — a quarter of the cores, which is
+            // ONE on a CI runner. So the cap is lifted here, or the second backup would be
+            // refused `Unavailable` for the first one's sake.
+            .with_max_overdue(64),
+    );
+    let hub = hub_over(store, handle, rotation.path());
     issue(
         &hub,
         Verb::Sink,
@@ -1211,12 +1269,11 @@ fn job_scopes_without(dropped: &[&str]) -> Capability {
 fn the_scheduled_backup_holds_both_answer_grants_and_completes_past_the_base() {
     use ikigai_store::budget::{AnswerBound, AnswerBudget};
     let rotation = tempfile::tempdir().expect("tempdir");
-    let store = DurableStore::in_memory()
-        .expect("an in-memory store")
-        .with_answer_budget(AnswerBudget::new(
-            AnswerBound::new(1_000, 1 << 20).expect("a valid base"),
-        ));
-    let hub = hub_over(store, rotation.path());
+    let (store, handle) = shared();
+    let store = store.with_answer_budget(AnswerBudget::new(
+        AnswerBound::new(1_000, 1 << 20).expect("a valid base"),
+    ));
+    let hub = hub_over(store, handle, rotation.path());
     issue(
         &hub,
         Verb::Sink,
@@ -1249,7 +1306,7 @@ fn the_scheduled_backup_holds_both_answer_grants_and_completes_past_the_base() {
         &job_scopes_without(&[backup::JOB_ANSWER_ROWS, backup::JOB_ANSWER_BYTES]),
         "1000 rows",
     );
-    // A row grant raises rows and nothing else: 20,000 rows of SPARQL JSON are past 1 MiB.
+    // A row grant raises rows and nothing else: 20,000 quads of N-Quads are past 1 MiB.
     refused_on(
         &job_scopes_without(&[backup::JOB_ANSWER_BYTES]),
         "1048576 bytes",
@@ -1299,10 +1356,8 @@ fn live_sized_nquads() -> Vec<u8> {
 #[ignore = "measurement-sized: run in release with --ignored"]
 fn a_full_backup_of_a_live_sized_dataset_completes_at_the_stores_own_bounds() {
     let rotation = tempfile::tempdir().expect("tempdir");
-    let hub = hub_over(
-        DurableStore::in_memory().expect("an in-memory store"),
-        rotation.path(),
-    );
+    let (store, handle) = shared();
+    let hub = hub_over(store, handle, rotation.path());
     issue(
         &hub,
         Verb::Sink,

@@ -26,7 +26,7 @@ use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::backup::{self, Backups};
 use ikigai_gonk::compose_with;
-use ikigai_store::DurableStore;
+use ikigai_store::{DurableStore, SharerWrites, Store};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -43,7 +43,10 @@ fn main() {
     // 1. Restore, through the resource, into a RocksDB store — timed, because the verifier's
     //    per-graph count is a whole-dataset query too.
     let bytes = std::fs::read(&archive).expect("the archive");
-    let loader = hub(DurableStore::in_memory().expect("in-memory"), &rotation);
+    let (memory, handle) =
+        DurableStore::in_memory_shared_declaring(SharerWrites::only_the_default_graph())
+            .expect("in-memory");
+    let loader = hub(memory, handle, &rotation);
     let started = Instant::now();
     let report = issue(
         &loader,
@@ -69,8 +72,10 @@ fn main() {
     }
 
     // 2. Back it up, under each capability.
-    let store = DurableStore::open(&store_dir).expect("the restored store");
-    let kernel = hub(store, &rotation);
+    let (store, handle) =
+        DurableStore::open_shared_declaring(&store_dir, SharerWrites::only_the_default_graph())
+            .expect("the restored store");
+    let kernel = hub(store, handle, &rotation);
     let without_grant: Vec<&str> = backup::JOB_SCOPES
         .iter()
         .copied()
@@ -109,7 +114,8 @@ fn main() {
     }
 }
 
-fn hub(store: DurableStore, rotation: &Path) -> Arc<Kernel> {
+fn hub(store: DurableStore, handle: Arc<Store>, rotation: &Path) -> Arc<Kernel> {
+    let dataset = backup::Dataset::new(&store, handle);
     Arc::new(compose_with(
         store,
         None,
@@ -125,6 +131,7 @@ fn hub(store: DurableStore, rotation: &Path) -> Arc<Kernel> {
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         None,
         None,
