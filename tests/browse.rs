@@ -313,6 +313,10 @@ const REPO_IDS: [&str; 10] = [
     "system-exec",
 ];
 
+/// gonk's own git-history series over the same roots (ledger #1631, `crate::history`) —
+/// bound with the browse family, because they compose over its `state` probe.
+const HISTORY_IDS: [&str; 2] = ["gonk-history", "gonk-history-at"];
+
 /// The new families' description ids in a kernel's catalog, sorted and deduplicated (browse
 /// enumerates per-root rows, so one endpoint appears under several patterns).
 fn new_family_ids(kernel: &Kernel, expected: &[String]) -> Vec<String> {
@@ -336,6 +340,7 @@ fn the_served_catalog_is_exactly_what_this_manifest_links() {
     let mut expected: Vec<String> = BROWSE_IDS
         .iter()
         .chain(REPO_IDS.iter())
+        .chain(HISTORY_IDS.iter())
         .map(|id| id.to_string())
         .collect();
     expected.sort();
@@ -364,6 +369,7 @@ fn a_mount_binds_the_explanation_families_and_nothing_else_does() {
     let mut everything: Vec<String> = BROWSE_IDS
         .iter()
         .chain(REPO_IDS.iter())
+        .chain(HISTORY_IDS.iter())
         .chain(EXPLAIN_IDS.iter())
         .map(|id| id.to_string())
         .collect();
