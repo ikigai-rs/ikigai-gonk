@@ -25,6 +25,12 @@
   ⚠ No `{` or `}` in any literal attribute value: they are AVT delimiters.
 -->
   <xsl:output method="html" omit-xml-declaration="yes"/>
+  <!-- ⚠ A space between two elements is <xsl:value-of select="' '"/>, never
+       <xsl:text> </xsl:text> and never &#160;: xrust 2.2 drops a whitespace-only xsl:text
+       (it never preserves xsl:text) and any text node of only no-break spaces (its test is
+       str::trim), so either renders as nothing and two words run together (ledger #1693).
+       A space INSIDE other text (<xsl:text> · </xsl:text>) survives.
+       tests/xsl_spaces_1693.rs refuses the two dropped shapes. -->
 
   <xsl:template match="/">
     <xsl:apply-templates select="view:page"/>
@@ -279,7 +285,7 @@
     <div class="signin-notice" data-signin-notice="true">
       <p class="signed-out">
         <xsl:value-of select="@signed-out"/>
-        <xsl:text> </xsl:text>
+        <xsl:value-of select="' '"/>
         <button type="button" class="signin-here" hidden="hidden">Sign in with passkey</button>
       </p>
       <div class="signed-in" hidden="hidden">
@@ -812,7 +818,7 @@
     <p class="note steers">
       <xsl:value-of select="@label"/>
       <xsl:for-each select="view:pending">
-        <xsl:text> </xsl:text>
+        <xsl:value-of select="' '"/>
         <a class="finding-link"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="."/></a>
       </xsl:for-each>
     </p>
@@ -1081,7 +1087,7 @@
         <p class="note unticked-why">
           <xsl:value-of select="@unticked-why"/>
           <xsl:if test="@walk-href">
-            <xsl:text> </xsl:text>
+            <xsl:value-of select="' '"/>
             <a class="walk-link"><xsl:attribute name="href"><xsl:value-of select="@walk-href"/></xsl:attribute><xsl:value-of select="@walk-label"/></a>
           </xsl:if>
         </p>
@@ -1090,7 +1096,7 @@
         <p class="note warn">
           <xsl:value-of select="@untickable"/>
           <xsl:if test="@untickable-link">
-            <xsl:text> </xsl:text>
+            <xsl:value-of select="' '"/>
             <a class="finding-link"><xsl:attribute name="href"><xsl:value-of select="@finding-href"/></xsl:attribute><xsl:value-of select="@untickable-link"/></a>
           </xsl:if>
         </p>
@@ -1202,7 +1208,7 @@
     <p>
       <xsl:attribute name="class">note hidden-rows <xsl:value-of select="@kind"/></xsl:attribute>
       <xsl:value-of select="."/>
-      <xsl:text> </xsl:text>
+      <xsl:value-of select="' '"/>
       <a hx-target="#queue" hx-swap="outerHTML">
         <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
         <xsl:attribute name="hx-get"><xsl:value-of select="@rows-url"/></xsl:attribute>
@@ -1382,7 +1388,7 @@
        form left to draw it back into (ledger #657): shown, never silently dropped. -->
   <xsl:template match="view:unsaved">
     <p class="problem unsaved">
-      <xsl:value-of select="@label"/><xsl:text> </xsl:text><span class="prior-note"><xsl:value-of select="."/></span>
+      <xsl:value-of select="@label"/><xsl:value-of select="' '"/><span class="prior-note"><xsl:value-of select="."/></span>
     </p>
   </xsl:template>
 
@@ -1477,7 +1483,7 @@
         <xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute>
         <xsl:if test="@checked = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if>
       </input>
-      <xsl:text> </xsl:text><xsl:value-of select="@label"/>
+      <xsl:value-of select="' '"/><xsl:value-of select="@label"/>
     </label>
   </xsl:template>
 
@@ -1730,7 +1736,7 @@
             <xsl:for-each select="view:problem">
               <li>
                 <span class="badge"><xsl:value-of select="@check"/></span>
-                <xsl:text> </xsl:text>
+                <xsl:value-of select="' '"/>
                 <a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@item"/></a>
                 <p class="detail"><xsl:value-of select="view:detail"/></p>
                 <p class="remedy"><xsl:text>remedy: </xsl:text><code><xsl:value-of select="view:remedy"/></code></p>
