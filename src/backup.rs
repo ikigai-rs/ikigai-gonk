@@ -252,13 +252,34 @@ pub const SCRIPTS_SUFFIX: &str = ".json.gz";
 /// What a scripts archive's document says it is, under `format`.
 pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 
-/// The ceiling handed to `urn:decompress:gzip` on a restore: 4 GiB of N-Quads, which is
-/// above the module's own 1 GiB ceiling and therefore means "the module's maximum".
+/// The most bytes of N-Quads a restore takes: **1 GiB**. It is the ceiling handed to
+/// `urn:decompress:gzip` (`ikigai-compress`'s own maximum, `MAX_BYTES_CEILING`), AND the load
+/// cap of the store a restore builds, so one number bounds both halves (ledger
+/// [#1664](http://localhost:1062/l/default/item/1664)).
+///
+/// ⚠ The second half is the one that was missing. The restored store used to open with
+/// `ikigai-store`'s DEFAULT load cap, 256 MiB (`ikigai_store::limits::MAX_LOAD_BYTES`), so an
+/// archive past 256 MiB of N-Quads gunzipped cleanly and was then refused by
+/// `urn:iki:store:load`: a backup that could not be restored. Nothing failed at backup time,
+/// which is when it could have been noticed.
+///
+/// ★ Why 1 GiB covers every archive a backup can write: the backup's first bound is its answer,
+/// [`JOB_ANSWER_BYTES_MAX`] (1 GiB of SPARQL JSON), and a quad's N-Quads line is always shorter
+/// than its JSON row, which spells out the same terms inside `{"type":…,"value":…}` objects.
+/// The two assertions below are checked at COMPILE time: raising the backup's bound past this
+/// one, or a decompressor whose ceiling moved, is a build that fails rather than a backup that
+/// cannot be restored.
 ///
 /// ⚠ The bound REFUSES rather than truncates, which is the property that matters: a
 /// truncated restore would load cleanly and be short, and the per-graph comparison below
 /// would be the only thing that noticed.
 const RESTORE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+// Every archive a backup can write is one a restore takes (ledger #1664).
+const _: () = assert!(RESTORE_MAX_BYTES >= JOB_ANSWER_BYTES_MAX);
+// The decompressor refuses a `max-bytes` over its ceiling, so this cannot be larger, and a
+// smaller one would refuse archives the decompressor could expand.
+const _: () = assert!(RESTORE_MAX_BYTES == ikigai_compress::MAX_BYTES_CEILING as u64);
 
 /// Where backups land, how many are kept, and how often one is taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1423,6 +1444,17 @@ impl Endpoint for Restore {
     }
 }
 
+/// Open the NEW store a restore builds, at `into`, with its load cap raised to
+/// [`RESTORE_MAX_BYTES`] so that every document the decompressor hands over can be loaded
+/// (ledger [#1664](http://localhost:1062/l/default/item/1664)). Only this store: the live
+/// store keeps the default cap, because its load door serves callers, not an archive.
+fn restore_store(into: &Path) -> Result<ikigai_store::DurableStore> {
+    let store = ikigai_store::DurableStore::open(into)
+        .map_err(|e| Error::Endpoint(format!("opening a store at {}: {e}", into.display())))?;
+    let cap = usize::try_from(RESTORE_MAX_BYTES).unwrap_or(usize::MAX);
+    Ok(store.with_max_load_bytes(cap))
+}
+
 impl Restore {
     async fn restore(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let into = PathBuf::from(inv.inline_str("into")?);
@@ -1449,18 +1481,19 @@ impl Restore {
 
         std::fs::create_dir_all(&into)
             .map_err(|e| Error::Endpoint(format!("creating {}: {e}", into.display())))?;
-        let store = ikigai_store::DurableStore::open(&into)
-            .map_err(|e| Error::Endpoint(format!("opening a store at {}: {e}", into.display())))?;
+        let store = restore_store(&into)?;
         // A kernel of its own over the NEW store. The restore goes through
         // `urn:iki:store:load` — the same door a bulk load comes in by anywhere else —
         // rather than through a private back entrance, and it runs under exactly the write
         // token that door enforces.
         let restored = Kernel::new(Arc::new(ikigai_store::space(store)));
         let write = Capability::scoped([ikigai_store::CAP_WRITE]);
+        // Moved, not cloned: nothing below reads the document again, and at the bound it is a
+        // gibibyte held twice for nothing.
         restored
             .issue(
                 Request::new(Verb::Sink, iri("urn:iki:store:load")?)
-                    .with_arg("content", ArgRef::Inline(nquads.clone()))
+                    .with_arg("content", ArgRef::Inline(nquads))
                     .with_arg("format", ArgRef::Inline(N_QUADS.as_bytes().to_vec())),
                 &write,
             )
@@ -2292,6 +2325,18 @@ fn civil(millis: u64) -> (i64, u32, u32, u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger #1664: the store a restore builds loads everything the decompressor may hand
+    /// it. Before the fix it opened with the store's default load cap (256 MiB) under a 1 GiB
+    /// decompression bound. `tests/backup.rs`'s
+    /// `a_backup_past_the_stores_default_load_cap_restores` runs the whole path past 256 MiB.
+    #[test]
+    fn the_restored_store_loads_everything_the_decompressor_hands_over() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = restore_store(&dir.path().join("store")).expect("a scratch store opens");
+        assert_eq!(store.max_load_bytes() as u64, RESTORE_MAX_BYTES);
+        assert!(store.max_load_bytes() > ikigai_store::limits::MAX_LOAD_BYTES);
+    }
 
     /// The literal grant is the store's own spelling of [`JOB_BUDGET_MS`], and the job's scope
     /// list holds it (ledger #979).
