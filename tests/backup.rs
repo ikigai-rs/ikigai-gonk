@@ -1276,3 +1276,122 @@ fn a_full_backup_of_a_live_sized_dataset_completes_at_the_stores_own_bounds() {
     assert!(report.contains("361607 quads in 2 graph(s)"), "{report}");
     assert_eq!(backup::archives(rotation.path()).len(), 1);
 }
+
+// ------------------------------------------------------------------ past the store's load cap
+
+/// A dataset whose N-Quads are past `ikigai-store`'s default load cap
+/// (`ikigai_store::limits::MAX_LOAD_BYTES`, 256 MiB) by a margin: 4,400 quads in three graphs,
+/// each carrying the same 64 KiB literal, so the document is about 275 MiB while the store
+/// holds the literal once and has only a few thousand quads to index. The cost is in bytes,
+/// not quads, which is what keeps a restore past the cap cheap enough to run on every push.
+fn past_the_load_cap_nquads() -> Vec<u8> {
+    let filler = "x".repeat(64 * 1024);
+    let mut out = String::with_capacity(4_400 * (64 * 1024 + 96));
+    for n in 0..4_400u32 {
+        let graph = match n % 3 {
+            0 => "urn:iki:browse:graph:default",
+            1 => "urn:iki:ledger:graph:default",
+            _ => "urn:iki:ledger:graph:acme",
+        };
+        out.push_str(&format!(
+            "<urn:item:{n}> <urn:ik:body> \"{filler}\" <{graph}> .\n"
+        ));
+    }
+    let out = out.into_bytes();
+    assert!(
+        out.len() > ikigai_store::limits::MAX_LOAD_BYTES,
+        "the fixture must be past the default load cap: {} bytes",
+        out.len()
+    );
+    out
+}
+
+/// What [`past_the_load_cap_nquads`] restores to, per graph.
+fn past_the_load_cap_counts() -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        ("urn:iki:browse:graph:default".to_string(), 1467),
+        ("urn:iki:ledger:graph:default".to_string(), 1467),
+        ("urn:iki:ledger:graph:acme".to_string(), 1466),
+    ])
+}
+
+/// ★ Ledger [#1664](http://localhost:1062/l/default/item/1664): a dump over 256 MiB of N-Quads
+/// restores. The restore built its new store with the DEFAULT load cap (256 MiB) while it
+/// gunzips up to `RESTORE_MAX_BYTES` (1 GiB), so a dump past 256 MiB was refused by
+/// `urn:iki:store:load` at the last step: "this document is 288643292 bytes, and this store
+/// loads none over 268435456". A backup that cannot be restored.
+///
+/// Plain N-Quads, not gzip, so this runs on every push: the document reaches the same load
+/// door either way, and gzip in a debug build is most of the cost of the whole path (measured
+/// 2026-10-15: the backup of this fixture, gzip included, took 39 s of the end-to-end test's
+/// 58 s). The end-to-end path is the ignored test below.
+#[test]
+fn a_dump_past_the_stores_default_load_cap_restores() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    let into = tempfile::tempdir().expect("tempdir");
+    let restored = into.path().join("store");
+    let answer = issue(
+        &hub,
+        Verb::Sink,
+        backup::RESTORE,
+        &[
+            ("content", &past_the_load_cap_nquads()),
+            ("into", restored.to_string_lossy().as_bytes()),
+        ],
+    );
+    assert!(answer.contains("restored 4400 quads"), "{answer}");
+    assert!(answer.contains("plain n-quads"), "{answer}");
+    assert_eq!(counts_on_disk(&restored), past_the_load_cap_counts());
+}
+
+/// ★ Ledger [#1664](http://localhost:1062/l/default/item/1664), the whole path: a dataset that
+/// grew past 256 MiB of N-Quads by many small writes, backed up through the scheduled job's own
+/// resource, read back as its gzip archive and restored. The claim is about what a backup can
+/// PRODUCE, so this is the proof that what it produces comes back; the test above is the same
+/// load door, fast enough for CI.
+///
+/// Ignored because it is measurement-sized: 58 s in a debug build on an 18-core machine (39 s
+/// of it the backup, gzip in debug). Run it with
+/// `cargo test --release --test backup -- --ignored a_backup_past`.
+#[test]
+#[ignore = "measurement-sized: run in release with --ignored"]
+fn a_backup_past_the_stores_default_load_cap_restores() {
+    let doc = past_the_load_cap_nquads();
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    // Seeded in four loads, each under the live store's own default cap, the way a live
+    // dataset grows past it: by many small writes, never one document this size.
+    let lines: Vec<&[u8]> = doc.split_inclusive(|b| *b == b'\n').collect();
+    for chunk in lines.chunks(1_100) {
+        issue(
+            &hub,
+            Verb::Sink,
+            "urn:iki:store:load",
+            &[
+                ("content", &chunk.concat()),
+                ("format", b"application/n-quads"),
+            ],
+        );
+    }
+    drop(lines);
+    drop(doc);
+    let report = issue(&hub, Verb::Source, backup::BACKUP, &[]);
+    assert!(report.contains("4400 quads in 3 graph(s)"), "{report}");
+
+    let archive = newest_archive(&hub, backups.path());
+    let into = tempfile::tempdir().expect("tempdir");
+    let restored = into.path().join("store");
+    let answer = issue(
+        &hub,
+        Verb::Sink,
+        backup::RESTORE,
+        &[
+            ("content", &archive),
+            ("into", restored.to_string_lossy().as_bytes()),
+        ],
+    );
+    assert!(answer.contains("restored 4400 quads"), "{answer}");
+    assert!(answer.contains("(gzip,"), "{answer}");
+    assert_eq!(counts_on_disk(&restored), past_the_load_cap_counts());
+}
