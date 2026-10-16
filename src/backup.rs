@@ -1422,8 +1422,11 @@ impl Endpoint for Restore {
                  total is exactly what a collapsed-to-one-graph dump preserves. `into` must \
                  not exist or must be empty, and may not be the live store: a merge into a \
                  non-empty dataset is a UNION, which resurrects deleted items and can never \
-                 reproduce the state that was backed up. Swapping the restored directory \
-                 into place is an operator's act with this server stopped.",
+                 reproduce the state that was backed up. The store is built under a \
+                 temporary name beside `into` and renamed to `into` only once it verifies, \
+                 so a refused restore leaves nothing there and a retry into the same path \
+                 is not refused as a merge. Swapping the restored directory into place is an \
+                 operator's act with this server stopped.",
             )
             .verb(Verb::Sink)
             .verb(Verb::Meta)
@@ -1479,63 +1482,14 @@ impl Restore {
         let expected = blank_graphs_by_shape(counts_in_nquads(&nquads)?);
         let expected_total: u64 = expected.values().sum();
 
-        std::fs::create_dir_all(&into)
-            .map_err(|e| Error::Endpoint(format!("creating {}: {e}", into.display())))?;
-        let store = restore_store(&into)?;
-        // A kernel of its own over the NEW store. The restore goes through
-        // `urn:iki:store:load` — the same door a bulk load comes in by anywhere else —
-        // rather than through a private back entrance, and it runs under exactly the write
-        // token that door enforces.
-        let restored = Kernel::new(Arc::new(ikigai_store::space(store)));
-        let write = Capability::scoped([ikigai_store::CAP_WRITE]);
-        // Moved, not cloned: nothing below reads the document again, and at the bound it is a
-        // gibibyte held twice for nothing.
-        restored
-            .issue(
-                Request::new(Verb::Sink, iri("urn:iki:store:load")?)
-                    .with_arg("content", ArgRef::Inline(nquads))
-                    .with_arg("format", ArgRef::Inline(N_QUADS.as_bytes().to_vec())),
-                &write,
-            )
-            .await?;
-
-        // ★ The verifier's count is a whole-dataset query too, so it holds the backup's
-        // budget grant (ledger #979): on the restored store's 5 s base, a dataset that grew
-        // past it would fail the verification of a restore that succeeded. Measured
-        // 2026-10-09: the whole restore of the live dataset, count included, took 2.9 s.
-        // It needs no ANSWER grant (ledger #993): its answer is one row per graph, far
-        // inside the store's base of 100,000 rows and 16 MiB.
-        let read = Capability::scoped([ikigai_store::CAP_READ, JOB_BUDGET]);
-        let actual = blank_graphs_by_shape(graph_counts(&restored, &read).await?);
-        let actual_total: u64 = actual.values().sum();
-        // Drop the store so the RocksDB lock is released before the caller is told the
-        // directory is ready to be moved into place.
-        drop(restored);
-
-        let mut differences: Vec<String> = Vec::new();
-        for (graph, count) in &expected {
-            match actual.get(graph) {
-                Some(got) if got == count => {}
-                Some(got) => {
-                    differences.push(format!("{}: archive {count}, restored {got}", shown(graph)))
-                }
-                None => differences.push(format!("{}: in the archive, MISSING", shown(graph))),
-            }
-        }
-        for graph in actual.keys() {
-            if !expected.contains_key(graph) {
-                differences.push(format!("{}: restored, NOT in the archive", shown(graph)));
-            }
-        }
-        if !differences.is_empty() {
-            return Err(Error::Endpoint(format!(
-                "the restored dataset does not match the archive:\n  {}\n  (archive \
-                 {expected_total} quads in {} graph(s); restored {actual_total} in {})",
-                differences.join("\n  "),
-                expected.len(),
-                actual.len()
-            )));
-        }
+        // ★ Built under a temporary name beside `into`, renamed to `into` only once it has
+        // verified (ledger #1698). Every refusal from here on, the load's and the verifier's,
+        // drops `staging`, which removes what this restore wrote; before, the directory was
+        // left holding a half-built store, and a retry into the same path was refused as a
+        // MERGE by `check_target`.
+        let staging = Staging::begin(&into)?;
+        let actual = load_and_verify(staging.path(), nquads, &expected, expected_total).await?;
+        staging.finish(&into)?;
 
         let mut report = format!(
             "restored {expected_total} quads into {} ({how}, sha256 {})\n",
@@ -1595,6 +1549,174 @@ impl Restore {
         }
         Ok(())
     }
+}
+
+/// The directory a restore builds, under a temporary name beside `into`, until it has
+/// verified (ledger [#1698](http://localhost:1062/l/default/item/1698)).
+///
+/// Dropped without [`finish`](Self::finish), on any refusal or a panic, it removes the
+/// temporary directory and every ancestor of `into` it created, so a refused restore leaves
+/// the filesystem as it found it. The name is visible, not a dotfile, so a restore killed
+/// outright (where no destructor runs) leaves something an operator can see and delete:
+/// `<into>.restoring-<pid>-<n>`.
+struct Staging {
+    temporary: PathBuf,
+    /// Whether this restore created `temporary`: a name that was already there is never
+    /// removed, since it is not this restore's.
+    made: bool,
+    /// The ancestors of `into` that did not exist, deepest first.
+    created: Vec<PathBuf>,
+    finished: bool,
+}
+
+impl Staging {
+    fn begin(into: &Path) -> Result<Staging> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let name = into.file_name().ok_or_else(|| Error::InvalidArgument {
+            name: "into".to_string(),
+            detail: format!("{} does not name a directory to create", into.display()),
+        })?;
+        let parent = match into.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let mut created = Vec::new();
+        let mut ancestor = Some(parent.as_path());
+        while let Some(dir) = ancestor {
+            if dir.as_os_str().is_empty() || dir.exists() {
+                break;
+            }
+            created.push(dir.to_path_buf());
+            ancestor = dir.parent();
+        }
+        let temporary = parent.join(format!(
+            "{}.restoring-{}-{}",
+            name.to_string_lossy(),
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        // From here a refusal drops `staging`, which removes whatever was created.
+        let mut staging = Staging {
+            temporary,
+            made: false,
+            created,
+            finished: false,
+        };
+        std::fs::create_dir_all(&parent)
+            .map_err(|e| Error::Endpoint(format!("creating {}: {e}", parent.display())))?;
+        // `create_dir`, not `create_dir_all`: a name that already exists is not this restore's.
+        std::fs::create_dir(&staging.temporary).map_err(|e| {
+            Error::Endpoint(format!("creating {}: {e}", staging.temporary.display()))
+        })?;
+        staging.made = true;
+        Ok(staging)
+    }
+
+    fn path(&self) -> &Path {
+        &self.temporary
+    }
+
+    /// Rename the verified store to `into`. `into` is absent or an empty directory
+    /// ([`Restore::check_target`]), and POSIX `rename` replaces an empty directory and refuses
+    /// a non-empty one, so a directory filled meanwhile by someone else is refused here, not
+    /// merged, and this restore's copy is removed.
+    fn finish(mut self, into: &Path) -> Result<()> {
+        std::fs::rename(&self.temporary, into).map_err(|e| {
+            Error::Endpoint(format!(
+                "moving the restored store from {} to {}: {e}. Nothing was left behind",
+                self.temporary.display(),
+                into.display()
+            ))
+        })?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // Best effort, and quiet: the refusal that brought us here is the answer.
+        if self.made {
+            let _ = std::fs::remove_dir_all(&self.temporary);
+        }
+        for dir in &self.created {
+            // `remove_dir`, never `_all`: an ancestor someone else wrote into meanwhile stays.
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// Load `nquads` into a new store at `dir` and compare its graph set and per-graph counts
+/// with `expected`; the restored counts on success. The store is closed when this returns,
+/// either way, so its directory can be renamed or removed.
+async fn load_and_verify(
+    dir: &Path,
+    nquads: Vec<u8>,
+    expected: &BTreeMap<String, u64>,
+    expected_total: u64,
+) -> Result<BTreeMap<String, u64>> {
+    let store = restore_store(dir)?;
+    // A kernel of its own over the NEW store. The restore goes through
+    // `urn:iki:store:load` — the same door a bulk load comes in by anywhere else —
+    // rather than through a private back entrance, and it runs under exactly the write
+    // token that door enforces.
+    let restored = Kernel::new(Arc::new(ikigai_store::space(store)));
+    let write = Capability::scoped([ikigai_store::CAP_WRITE]);
+    // Moved, not cloned: nothing below reads the document again, and at the bound it is a
+    // gibibyte held twice for nothing.
+    restored
+        .issue(
+            Request::new(Verb::Sink, iri("urn:iki:store:load")?)
+                .with_arg("content", ArgRef::Inline(nquads))
+                .with_arg("format", ArgRef::Inline(N_QUADS.as_bytes().to_vec())),
+            &write,
+        )
+        .await?;
+
+    // ★ The verifier's count is a whole-dataset query too, so it holds the backup's
+    // budget grant (ledger #979): on the restored store's 5 s base, a dataset that grew
+    // past it would fail the verification of a restore that succeeded. Measured
+    // 2026-10-09: the whole restore of the live dataset, count included, took 2.9 s.
+    // It needs no ANSWER grant (ledger #993): its answer is one row per graph, far
+    // inside the store's base of 100,000 rows and 16 MiB.
+    let read = Capability::scoped([ikigai_store::CAP_READ, JOB_BUDGET]);
+    let actual = blank_graphs_by_shape(graph_counts(&restored, &read).await?);
+    let actual_total: u64 = actual.values().sum();
+    // Drop the store so the RocksDB lock is released before the directory is renamed into
+    // place, or removed.
+    drop(restored);
+
+    let mut differences: Vec<String> = Vec::new();
+    for (graph, count) in expected {
+        match actual.get(graph) {
+            Some(got) if got == count => {}
+            Some(got) => {
+                differences.push(format!("{}: archive {count}, restored {got}", shown(graph)))
+            }
+            None => differences.push(format!("{}: in the archive, MISSING", shown(graph))),
+        }
+    }
+    for graph in actual.keys() {
+        if !expected.contains_key(graph) {
+            differences.push(format!("{}: restored, NOT in the archive", shown(graph)));
+        }
+    }
+    if !differences.is_empty() {
+        return Err(Error::Endpoint(format!(
+            "the restored dataset does not match the archive:\n  {}\n  (archive \
+             {expected_total} quads in {} graph(s); restored {actual_total} in {}; nothing \
+             was left behind)",
+            differences.join("\n  "),
+            expected.len(),
+            actual.len()
+        )));
+    }
+    Ok(actual)
 }
 
 /// The per-graph counts of a dataset, read through `urn:iki:store:select`.
