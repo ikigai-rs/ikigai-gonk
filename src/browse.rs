@@ -396,6 +396,8 @@ pub fn wire(
     config_home: Option<PathBuf>,
 ) -> Wired {
     let first = roots.first().map(|(name, _)| name.clone());
+    // The git-history series (ledger #1631) over the same roots, before the mount takes them.
+    let history = crate::history::space(&roots);
     // The explain archive is built on the WRITER'S handle: browse refuses at mount time an
     // `ExplainConfig` on any other `Arc<Store>`, even one over the same dataset.
     let store = Arc::clone(writer.store());
@@ -417,7 +419,8 @@ pub fn wire(
             None => cached_reads(space, &[], None),
         }
         .writing_to(graph)
-        .reading_contracts_through(first),
+        .reading_contracts_through(first)
+        .with_history(Arc::new(history)),
         style,
     }
 }
@@ -532,6 +535,7 @@ pub fn cached_reads(
         graph: None,
         reviews: None,
         contract_root: None,
+        history: None,
     }
 }
 
@@ -562,6 +566,8 @@ pub struct CachedReads {
     reviews: Option<Arc<crate::trigger::Activity>>,
     /// A configured root to read the family's contracts through ([`Self::first_root`]).
     contract_root: Option<String>,
+    /// The git-history series over the same roots ([`Self::with_history`]).
+    history: Option<Arc<dyn Space>>,
 }
 
 impl CachedReads {
@@ -588,6 +594,26 @@ impl CachedReads {
     pub fn observing_reviews(mut self, activity: Arc<crate::trigger::Activity>) -> Self {
         self.reviews = Some(activity);
         self
+    }
+
+    /// Carry the git-history series over the same roots ([`crate::history`], ledger
+    /// [#1631](http://localhost:1062/l/default/item/1631)), for [`crate::compose_with`] to
+    /// bind beside this family.
+    ///
+    /// ★ Beside it, not inside it: this overlay is the browse family AS GONK COMPOSES IT and
+    /// forwards that space's name, and the history names are gonk's own
+    /// (`urn:iki:gonk:history:…`), answered by a space named for them. They travel together
+    /// because they are bound together: the series read `urn:repo:{root}:state`, and a root
+    /// is a root for both or for neither.
+    #[must_use]
+    pub fn with_history(mut self, history: Arc<dyn Space>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// The git-history series to bind beside this family, when [`wire`] built one.
+    pub fn history(&self) -> Option<Arc<dyn Space>> {
+        self.history.clone()
     }
 
     /// Name the configured root the family's contracts are read through — [`wire`]'s first.

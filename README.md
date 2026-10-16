@@ -586,6 +586,49 @@ nothing, another page's link reads and never derives (ledger #880), and the anon
 repository at all, let alone spend inference on explaining one. A signed-in identity can do
 exactly what its grant names, and browsing needs a role beyond a ledger's grant.
 
+### A root's git history as weekly series (ledger #1631)
+
+The delivery dashboard's git source (ledger [#1630](http://localhost:1062/l/default/item/1630)):
+commits per week, and test functions added and removed per week, per language, for every
+browse root.
+
+```sh
+ikigai --mount "urn:iki:gonk:=$HOME/.ikigai/gonk.sock" \
+  -c 'source urn:iki:gonk:history:ikigai-cli:weekly as=text/csv'
+```
+
+| name | what it is |
+|---|---|
+| `urn:iki:gonk:history:{root}:weekly` | the series at the root's HEAD now: reads `urn:repo:{root}:state` for the HEAD and answers the name below with the same arguments |
+| `urn:iki:gonk:history:{root}:weekly:at:{sha}` | the series as at one commit (a full id): a constant, so cached as long as the kernel keeps it |
+
+Arguments: `weeks` (1 to 520, default 52; the window ends with the week holding the commit's
+own committer date) and `as` (`text/plain`, the default, with the method stated under the
+table; `text/csv`, one row per week, every week present; `text/turtle`, an RDF Data Cube
+dataset with one observation per week and one measure property per column, named
+`urn:iki:gonk:measure:{column}`).
+
+**The method** is in each resource's description and on its text face: commits are non-merge
+commits by committer week (weeks begin Monday 00:00 UTC); a test added or removed is an added
+or removed diff line that begins `#[test]` or `#[tokio::test` in a `.rs` file, `def test_` or
+`async def test_` in a `.py` file, or `Deno.test(` (`.only(`, `.ignore(`) in a TypeScript or
+JavaScript file.
+
+**Cacheable per HEAD, without a thread of its own.** A commit id names an immutable history,
+so the series as at a commit never changes, and a new commit is a NEW NAME rather than a cut.
+The HEAD-relative name hangs from `state`, which the root watch cuts on every change to the
+root's refs (and on every working-tree edit, since that thread is coarse): after an edit that
+moves no HEAD only the `git status` probe reruns. Measured over ikigai-cli's history on plasma
+(520 commits in 52 weeks): about 0.3 s cold, about 10 µs warm, about 25 ms after a cut
+(`cargo run --release --example history-cost -- ikigai-cli=<path>`).
+
+**Bounded, and the bound refuses.** Both `git log` passes share a 30 s budget; past it the
+child is killed and the read is refused as a timeout, never answered with a partial count.
+
+**Authority is browse's.** Reading a root's history is reading the root: both names declare
+`urn:cap:browse:read:*` and enforce `urn:cap:browse:read:{root}`, so the anonymous loopback
+caller reads none of it, as it reads no browse row.
+
 ### Provisioning a browsing identity: the `--browse` roles
 
 `passkey invite` and `client add` take `--browse <read|derive>`: the repositories as a ROLE,

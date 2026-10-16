@@ -45,6 +45,7 @@ pub mod config;
 pub mod doors;
 pub mod findings;
 pub mod grants;
+pub mod history;
 pub mod identity;
 pub mod k;
 pub mod kata;
@@ -114,6 +115,10 @@ pub mod spaces {
     /// The repository browse family AS GONK COMPOSES IT — `ikigai-browse`'s doors with
     /// this server's cacheable overlay in front ([`browse::cached_reads`](crate::browse::cached_reads)).
     pub const BROWSE: &str = "urn:iki:gonk:space:browse";
+    /// A browse root's git history as weekly series ([`history::space`](crate::history::space),
+    /// ledger [#1631](http://localhost:1062/l/default/item/1631)) — bound beside the browse
+    /// family, over the same roots.
+    pub const HISTORY: &str = "urn:iki:gonk:space:history";
 
     /// One of the constants above as an [`Iri`].
     pub fn iri(name: &str) -> Iri {
@@ -275,6 +280,11 @@ pub fn compose_with(
         .as_ref()
         .and_then(|b| b.first_root().map(str::to_string));
     if let Some(browse) = browse {
+        // ★ The git-history series (ledger #1631, [`crate::history`]) ride with the family
+        // whose roots, authority and `state` probe they compose over.
+        if let Some(history) = browse.history() {
+            spaces.push(history);
+        }
         spaces.push(browse as Arc<dyn Space>);
         spaces.push(Arc::new(ikigai_repo::space()));
     }
