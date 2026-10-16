@@ -380,3 +380,30 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .signin-notice .signed-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
 .signin-notice .grant-needed > summary { color: var(--muted); }
 .signin-notice .grant-needed code { overflow-wrap: anywhere; }
+
+/* The Layers page (ledger #1675). Every state is a WORD first ("New", "3 new"); the weight and
+ * the accent only repeat it. No color here that is not a palette token. */
+.layer-list, .entries { list-style: none; margin: 0 0 var(--gap); padding: 0; }
+.layer-row { padding: 0.6rem 0; border-bottom: 1px solid var(--line); }
+.layer-row .layer-name { margin: 0 0 0.25rem; }
+.layer-facts { margin: 0 0 0.25rem; }
+.unread.has-unread { font-weight: 700; color: var(--fg); }
+.entry { border-bottom: 1px solid var(--line); padding: 0.6rem 0; overflow-wrap: anywhere; }
+.entry article { min-width: 0; }
+.entry-head { font-size: 1rem; margin: 0 0 0.2rem; }
+.entry-link { text-decoration: none; }
+.entry-link:hover, .entry-link:focus-visible { text-decoration: underline; }
+.entry-meta { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.35rem; }
+.entry-title { font-weight: 600; margin: 0 0 0.35rem; }
+.entry-file { margin: 0 0 0.35rem; }
+.entry-actions { margin: 0; font-size: 0.9rem; }
+.badge.new { color: var(--accent); border-color: var(--accent); font-weight: 600; margin-left: 0.4rem; }
+.config-line { display: block; margin-top: 0.35rem; overflow-wrap: anywhere; }
+.say { display: grid; gap: 0.5rem; }
+.say h2 { margin: 0; }
+.say fieldset { border: 0; padding: 0; margin: 0; }
+.say legend { font-size: 0.9rem; color: var(--muted); padding: 0; margin-right: 0.5rem; float: left; }
+.say button { justify-self: start; }
+/* The live region stays in the page, empty, so a screen reader is already listening when a
+ * sentence arrives in it. */
+.live { margin: 0.25rem 0; }

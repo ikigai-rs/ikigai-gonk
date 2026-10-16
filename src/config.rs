@@ -23,6 +23,8 @@
 //!                                       # together (this IS the default; 0 for none)
 //! # a ledger bound to a task layer, offering its items (or taking them: `take`); repeatable
 //! # gonk.layer = "tasks-bobby offer quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=bobby collab=bobby"
+//! # the Layers page: a layer door, and the certificates of the PERSON it reads and posts as
+//! # gonk.layers.view = "quic://ikigai-rs.dev:4434 ~/.ikigai/layers-client/brian"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
 //! # bind the git-event review QUEUE (urn:space:reviews)
 //! gonk.review.space = "reviews"
@@ -107,9 +109,10 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 33] = [
+const KEYS: [&str; 34] = [
     "gonk.log.access",
     "gonk.layer",
+    "gonk.layers.view",
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -585,6 +588,9 @@ pub struct Settings {
     pub mounts: Vec<Mount>,
     /// The ledgers bound to task layers, one per `gonk.layer` line ([`crate::layer`]).
     pub layers: Vec<crate::layer::Binding>,
+    /// The Layers page's door and identity (`gonk.layers.view`, [`crate::layers_view`]), or
+    /// `None`: the page says it is not configured.
+    pub layers_view: Option<crate::layers_view::ViewConfig>,
     /// The per-kind providers and spend ceilings the explanation families derive under.
     pub explain: ExplainTiers,
     /// Where backups land, how many are kept, and how often one is taken.
@@ -1541,6 +1547,22 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     let browse_roots = browse_roots(flags, text, homes)?;
     let mounts = mounts(flags, text, homes)?;
     let layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
+    let view_lines = values_for(text, crate::layers_view::KEY);
+    if view_lines.len() > 1 {
+        return Err(format!(
+            "{} is given {} times: the Layers page reads and posts as ONE identity",
+            crate::layers_view::KEY,
+            view_lines.len()
+        ));
+    }
+    let layers_view = match view_lines.into_iter().next() {
+        None => None,
+        Some(line) => {
+            let view = crate::layers_view::parse(&line, &homes.home)?;
+            crate::layers_view::check_not_a_binding(&view, &layers)?;
+            Some(view)
+        }
+    };
     let explain = explain_tiers(text)?;
     let backup = backup_policy(flags, text, homes)?;
     let review = review_trigger(text, homes)?;
@@ -1556,6 +1578,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         browse_roots,
         mounts,
         layers,
+        layers_view,
         explain,
         backup,
         review,

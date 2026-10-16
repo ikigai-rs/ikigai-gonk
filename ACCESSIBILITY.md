@@ -12,14 +12,14 @@ Adapted from the [ACCESSIBILITY.md template](https://github.com/mgifford/ACCESSI
 
 | Field | Value |
 |---|---|
-| Project | ikigai-gonk: the work-ledger server's browser face (ledgers, items, SPARQL, the browse pages and the review Queue) |
+| Project | ikigai-gonk: the work-ledger server's browser face (ledgers, items, SPARQL, the browse pages, the review Queue and the Layers page) |
 | Published at | not published: each operator runs it locally, at `http://localhost:1062/` by default |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-gonk/issues/new) with the `accessibility` label |
 | Private channel | [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-gonk/security/advisories/new), for anything security-sensitive |
 | Target | WCAG 2.2 Level AA |
 | Status | Evaluation in progress. No conformance claim. |
-| Last reviewed | 2026-10-15 |
+| Last reviewed | 2026-10-16 |
 | Next review | when `web/gonk.css`, `web/gonk.xsl`, `web/gonk.js` or the vendored htmx changes in a way a person sees, when `ikigai-web` or `ikigai-browse` moves to a new minor version, or when a page is added |
 
 ## Commitment
@@ -39,7 +39,9 @@ is fixed.
   list and its filters and search, an item page with every form on it (comment, edit, close,
   reopen, claim, defer, label, link, delete, purge), the doctor, the SPARQL editor and its
   result tables, the browse landing page, the review Queue (scopes, batch and walk views), the
-  passkey sign-in and enrollment controls, and the empty and refusal states each one can show.
+  Layers page (the overview, a channel with its post form, a task layer, the live updates and
+  the unreachable-door banner), the passkey sign-in and enrollment controls, and the empty and
+  refusal states each one can show.
   All of it is rendered by `web/gonk.xsl` and styled by `web/gonk.css`.
 - **The page scripts**: `web/gonk.js` (status and refusal messages, sample-query toggles, the
   passkey ceremonies, the Queue's held refresh) and the htmx swaps they drive, with and without
@@ -80,6 +82,8 @@ conformance claim from a green build or from this file.
 |---|---|---|---|
 | `tests/web.rs::the_palette_clears_the_contrast_floor` (`cargo test`, every pull request) | `ikigai-a11y` 0.2.2 (locked; 0.2.1 is the floor) | 12 text pairs of `web/gonk.css`'s palette (foreground, muted, accent, danger and ok on the background and the surface; the two button pairs) at 4.5:1 (SC 1.4.3), in the light and the dark scheme | `--line`, which draws borders and is not held to any floor; any color changed by `opacity`; non-text contrast (SC 1.4.11) |
 | The page-shape tests in `tests/web.rs` and `tests/queue.rs` (`cargo test`, every pull request) | none | A cell link's accessible name contains its visible text (SC 2.5.3); a sample query is a toggle with `aria-pressed`, rendered unpressed; the Queue badge's state is a word and a sentence, not only a color (SC 1.4.1); pages are HTML with no self-closed elements | Everything else about the markup: no test reads `lang`, headings, landmarks or labels as a rule |
+| `tests/layers_page_1675.rs` (`cargo test`, every pull request) | none | The Layers page: "New" and an unread count are words, a refused post's reason is the answer, an unreachable door is one banner, the long poll does not clear `#flash` | Everything about how it reads aloud; no test reads labels or landmarks as a rule |
+| The Layers page in the desktop app's built-in browser (Chromium), over `cargo run --example layers-preview` (a scratch layer host, no passkey), by hand, once | the Claude desktop app's browser pane, 2026-10-16 | Dark and light scheme; 320 px wide with no sideways scroll (`scrollWidth` 320 of 320); Tab reaches every entry (its heading is a link to itself), every Reply link, the download link and the links in bodies, in reading order; posting by keyboard (type, Tab, Enter) adds the entry live, writes "Posted to …" in `#flash`, "1 new entry in Talk." in the page's polite live region, and puts focus back in the new form's text box | No axe-core run on this page; no screen reader, so nobody has heard the live region; the task layer and the overview were looked at, not stepped through by keyboard; Firefox and Safari |
 | axe-core in Google Chrome over a scratch gonk (one run by hand, not in CI) | axe-core 4.10.3, playwright-core 1.63.0, Chrome 153.0.8010.54 on macOS | 9 paths anonymous (ledger, an open and a closed item, the doctor, SPARQL with and without a query, browse, two not-found answers) and 8 signed in through a virtual passkey (ledger, item, browse landing, a tree and two file views, the Queue at two scopes); each in light and dark, at 1280×900 and 320×640, with every `<details>` opened; plus the page's sideways scroll and the first Tab stop | The Queue with findings in it (the scratch Queue was empty); forms after submission and htmx swaps; focus after a swap; a ledger of realistic size; Firefox and Safari |
 
 On 2026-10-15, on main at `182e604`, `cargo test` passed (the full suite, through `just gates`),
@@ -115,6 +119,7 @@ engine has been run.
 | Several states are dimmed with `opacity` (a refused control, a folded or kept finding, the empty badge), which the palette test cannot see | the Queue, refused controls | Unmeasured: the browser run saw only an empty Queue | none |
 | Signing in needs JavaScript and a passkey, so without JavaScript the browse pages and the Queue are out of reach; the browse region itself is loaded by script | browse, the Queue | No access to them with scripting off. The ledger's own forms post to `/act`, but no one has checked that path without JavaScript | none |
 | The browse pages have no `h1` once the browse region loads, and their crumb navigation is a second, unnamed navigation landmark (axe `page-has-heading-one`, `landmark-unique`, advisory) | every `/browse/...` page (`ikigai-browse`'s markup) | A heading list starts at a lower level; two landmarks share a name | Tab order and the crumbs' text |
+| The Layers page's live region and its "New" markers have not been heard by any screen reader; an entry arriving live is announced as a count ("1 new entry in Talk."), not read out | the Layers page | Unknown how it sounds; the entries are in the list in reading order | Move to the list; each new entry's heading says "New" |
 | Where focus lands after a form submits and htmx swaps the item or ledger in place has not been checked | item and ledger forms, the Queue | Unknown; a keyboard user may have to find their place again | none known |
 
 No list like this is complete. Please report what you find.
@@ -200,7 +205,8 @@ before any conformance claim.
 | 2026-09-14 | The HTML face: a skip link, a focus ring, labeled forms, a live status region, and the palette held to 4.5:1 in both schemes by a test | PR #2 |
 | 2026-09-16 | A result cell that is a link keeps its visible text in its accessible name | PR #8 |
 | 2026-09-16 | The active sample query is a toggle state (`aria-pressed`), not only a color | PR #10 |
-| 2026-10-15 | This file, and the browser run it reports | this pull request |
+| 2026-10-15 | This file, and the browser run it reports | PR #168 |
+| 2026-10-16 | The Layers page: labeled post form, every entry and action keyboard reachable, a polite live region for new entries, words rather than color for what is new, focus kept after a post | `tests/layers_page_1675.rs` and the browser-pane check above (ledger #1675) |
 
 ## References
 

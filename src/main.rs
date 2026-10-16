@@ -417,6 +417,26 @@ fn serve(flags: &config::Flags) -> ! {
     ));
     scripts.attach(&hub);
     let layer_line = start_layers(&settings, layer_mounts.door.as_ref(), &hub);
+    // ★ The Layers page (ledger #1675): its own door under its own identity, mounted into
+    // nothing, and dialled by nothing until a page is first opened.
+    let layers_view = settings.layers_view.as_ref().map(|view| {
+        ikigai_gonk::layers_view::LayersView::connect(
+            view,
+            Some(homes.data.join("layers-view").join("cursors.json")),
+        )
+    });
+    let layers_line = match (&settings.layers_view, &layers_view) {
+        (Some(_), Some(view)) => format!(
+            "/layers reads and posts at {} as the identity its certificates name (asked of the              door on first use); a passkey grant needs {} (and {} to post)",
+            view.origin(),
+            ikigai_gonk::layers_view::CAP_READ,
+            ikigai_gonk::layers_view::CAP_SAY
+        ),
+        _ => format!(
+            "no {} line, so /layers says it is not configured",
+            ikigai_gonk::layers_view::KEY
+        ),
+    };
 
     // ★ The Queue's serious set, checked against the finding contract THIS kernel binds
     // (ledger #496): a word the contract does not declare stops this server naming both
@@ -614,9 +634,14 @@ fn serve(flags: &config::Flags) -> ! {
             queue: settings.queue.clone(),
             epochs: Some(Arc::clone(&epochs)),
         });
+        let pages = ikigai_gonk::layers_view::bind(
+            web::space(Arc::clone(&face)),
+            &face,
+            layers_view,
+        );
         let http = Arc::new(doors::http_kernel_with(
             Arc::clone(&hub),
-            web::space(face),
+            pages,
             access(access::Door::Http),
         ));
         eprintln!(
@@ -664,6 +689,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  backup  {backup_line}");
         eprintln!("  llm     {mount_line}");
         eprintln!("  layer   {layer_line}");
+        eprintln!("  layers  {layers_line}");
         eprintln!("  review  {review_line}");
         eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");

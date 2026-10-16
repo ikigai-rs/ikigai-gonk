@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does seven things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does eight things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -16,7 +16,8 @@
 // quote — browse ships no scripts, and the selection is browse's own  (ledger #658). (7) a
 // page a caller's grant does not reach says "sign in" to a signed-out visitor and "your grant
 // doesn't include it" to a signed-in one, and which of the two is a question about the
-// session that only this script asks of the server on a read (ledger #739).
+// session that only this script asks of the server on a read (ledger #739). (8) the Layers page's
+// post form, replaced by its answer, gives focus back to its text box (ledger #1675).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -88,9 +89,12 @@
   // A request clears the last message, unless nobody made it (ledger #666): the header's queue
   // badge polls on a timer, on every page, so clearing on its request emptied #flash within
   // one poll of anything being written there, often before anyone had read it.
+  // The Layers page's long poll (ledger #1675) is nobody's request either: it answers whenever
+  // a layer moves, and would wipe a post's "Posted" before anyone read it.
   document.addEventListener("htmx:beforeRequest", (e) => {
     const elt = e.detail && e.detail.elt;
     if (elt && elt.closest && elt.closest(".queue-badge")) return;
+    if (elt && elt.closest && elt.closest(".layers-watch")) return;
     flash("", "ok");
   });
 
@@ -257,6 +261,16 @@
   });
   // Every swap that can bring a batch form in: the list's own refresh, a decision, a refusal.
   document.addEventListener("htmx:afterSettle", checkAllWords);
+
+  // The Layers page's post form is replaced by its answer (a fresh form, ledger #1675), and the
+  // element that had focus goes with it. Focus goes back to the new form's text box, so a
+  // keyboard user keeps their place; the "Posted" sentence is announced from #flash.
+  document.addEventListener("htmx:afterSettle", (e) => {
+    const elt = e.detail && e.detail.elt;
+    if (!elt || elt.id !== "say") return;
+    const box = $("say-body");
+    if (box) box.focus();
+  });
 
   // ------------------------------------ a selected line fills the annotate quote (ledger #658)
   //

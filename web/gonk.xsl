@@ -66,6 +66,7 @@
               </nav>
               <xsl:apply-templates select="view:browse"/>
               <xsl:apply-templates select="view:queue"/>
+              <xsl:apply-templates select="view:layers-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <div id="auth" class="auth">
                 <xsl:apply-templates select="view:withheld"/>
@@ -232,6 +233,10 @@
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
       <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
+      <xsl:when test="@view = 'layers'"><xsl:call-template name="layers"/></xsl:when>
+      <xsl:when test="@view = 'layer'"><xsl:call-template name="layer"/></xsl:when>
+      <xsl:when test="@view = 'layers-wait'"><xsl:call-template name="layers-wait"/></xsl:when>
+      <xsl:when test="@view = 'layers-say'"><xsl:call-template name="layers-say"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
            only its own element, which is what makes a chunk's rows render as the page's. -->
@@ -240,6 +245,9 @@
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
         <xsl:apply-templates select="view:walk-group"/>
+        <xsl:apply-templates select="view:entry"/>
+        <xsl:apply-templates select="view:tuple"/>
+        <xsl:apply-templates select="view:receipt"/>
         <xsl:apply-templates select="rdf:RDF/ledger:Item">
           <xsl:sort select="dcterms:modified" order="descending"/>
         </xsl:apply-templates>
@@ -285,6 +293,248 @@
         </details>
       </div>
     </div>
+  </xsl:template>
+
+  <!-- ============================================================ layers -->
+
+  <!--
+    The Layers page (ledger #1675, src/layers_view.rs): every layer the CONFIGURED identity
+    reads at its layer door, and one layer's entries. Everything here is computed in Rust and
+    arrives as attributes; the page reads gonk's copy, never the door.
+
+    ★ Live: a hidden `view:watch` element long-polls /layers/~/wait and is replaced by the
+    answer (outerHTML); what changed comes OUT OF BAND (new entries before the first, a task
+    layer's lists, the overview's rows, the banner, and one sentence for the live region).
+    ★ Color is never the only signal: "New" is a word, an unread count is a number and a word.
+  -->
+  <xsl:template match="view:layers-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Layers</a>
+  </xsl:template>
+
+  <xsl:template match="view:notice">
+    <p>
+      <xsl:attribute name="class">flash <xsl:value-of select="@kind"/></xsl:attribute>
+      <xsl:value-of select="."/>
+      <xsl:if test="@config">
+        <code class="config-line"><xsl:value-of select="@config"/></code>
+      </xsl:if>
+    </p>
+  </xsl:template>
+
+  <xsl:template match="view:watch">
+    <div class="layers-watch" hidden="hidden" hx-swap="outerHTML">
+      <xsl:attribute name="hx-get"><xsl:value-of select="@url"/></xsl:attribute>
+      <xsl:attribute name="hx-trigger"><xsl:value-of select="@trigger"/></xsl:attribute>
+    </div>
+  </xsl:template>
+
+  <xsl:template name="layers">
+    <section class="panel layers" aria-labelledby="layers-title">
+      <h1 id="layers-title"><xsl:value-of select="@title"/></h1>
+      <xsl:apply-templates select="view:signin"/>
+      <div id="layers-banner"><xsl:apply-templates select="view:notice"/></div>
+      <xsl:if test="@me">
+        <p class="note">The door says this page reads and posts as <code class="iri"><xsl:value-of select="@me"/></code>, <xsl:value-of select="@me-kind"/>.</p>
+      </xsl:if>
+      <xsl:if test="@empty"><p class="empty"><xsl:value-of select="@empty"/></p></xsl:if>
+      <ul id="layers-list" class="layer-list">
+        <xsl:apply-templates select="view:layer-row"/>
+      </ul>
+      <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
+      <xsl:apply-templates select="view:watch"/>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:layer-row">
+    <li class="layer-row">
+      <h2 class="layer-name">
+        <a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@label"/></a>
+        <span class="note"> (<xsl:value-of select="@name"/>)</span>
+      </h2>
+      <p class="layer-facts">
+        <span>
+          <xsl:attribute name="class">unread <xsl:if test="@has-unread = 'true'">has-unread</xsl:if></xsl:attribute>
+          <xsl:value-of select="@unread"/>
+        </span>
+        <xsl:if test="@when != ''">
+          <xsl:text> · last entry </xsl:text>
+          <time><xsl:attribute name="datetime"><xsl:value-of select="@datetime"/></xsl:attribute><xsl:value-of select="@when"/></time>
+        </xsl:if>
+      </p>
+      <p class="note"><xsl:value-of select="@model"/>. <xsl:value-of select="@verbs"/></p>
+    </li>
+  </xsl:template>
+
+  <xsl:template name="layer">
+    <section class="panel layer" aria-labelledby="layer-title">
+      <p class="crumbs"><a href="/layers">Layers</a></p>
+      <h1 id="layer-title"><xsl:value-of select="@title"/></h1>
+      <xsl:apply-templates select="view:signin"/>
+      <div id="layers-banner"><xsl:apply-templates select="view:notice"/></div>
+      <xsl:if test="@model"><p class="note"><xsl:value-of select="@model"/>. <xsl:value-of select="@verbs"/></p></xsl:if>
+      <xsl:if test="@me">
+        <p class="note">The door says this page reads and posts as <code class="iri"><xsl:value-of select="@me"/></code>, <xsl:value-of select="@me-kind"/>.</p>
+      </xsl:if>
+      <xsl:if test="@no-post"><p class="note"><xsl:value-of select="@no-post"/></p></xsl:if>
+      <xsl:if test="@reading"><p class="note"><xsl:value-of select="@reading"/></p></xsl:if>
+      <xsl:apply-templates select="view:say"/>
+      <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
+      <xsl:if test="@entries">
+        <h2 id="entries-title">Entries, newest first</h2>
+        <xsl:if test="@older-unread"><p class="note"><xsl:value-of select="@older-unread"/></p></xsl:if>
+        <xsl:if test="@entries = 'false'"><p class="empty">Nothing has been said here yet.</p></xsl:if>
+        <ol id="layer-entries" class="entries" aria-labelledby="entries-title">
+          <xsl:apply-templates select="view:slot[@name = 'entries']"/>
+        </ol>
+      </xsl:if>
+      <xsl:if test="@tuplespace">
+        <h2 id="tuples-title">Pending, newest first</h2>
+        <ol id="layer-tuples" class="entries" aria-labelledby="tuples-title">
+          <xsl:apply-templates select="view:slot[@name = 'tuples']"/>
+        </ol>
+        <h2 id="receipts-title">Recent takes, newest first</h2>
+        <ol id="layer-receipts" class="entries" aria-labelledby="receipts-title">
+          <xsl:apply-templates select="view:slot[@name = 'receipts']"/>
+        </ol>
+      </xsl:if>
+      <xsl:apply-templates select="view:watch"/>
+    </section>
+  </xsl:template>
+
+  <!-- One entry of a channel (`view:entry`) or one pending tuple (`view:tuple`): its heading is
+       a link to itself, so every entry is one Tab stop and has an address. -->
+  <xsl:template match="view:entry"><xsl:call-template name="entry-card"/></xsl:template>
+  <xsl:template match="view:tuple"><xsl:call-template name="entry-card"/></xsl:template>
+
+  <xsl:template name="entry-card">
+    <li class="entry">
+      <xsl:attribute name="id"><xsl:value-of select="@anchor"/></xsl:attribute>
+      <article>
+        <xsl:attribute name="aria-labelledby"><xsl:value-of select="@anchor"/>-head</xsl:attribute>
+        <h3 class="entry-head">
+          <xsl:attribute name="id"><xsl:value-of select="@anchor"/>-head</xsl:attribute>
+          <a class="entry-link"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@kind-label"/> from <xsl:value-of select="@who"/></a>
+          <xsl:if test="@new = 'true'"><span class="badge new"><span class="sr-only">, </span>New</span></xsl:if>
+        </h3>
+        <p class="entry-meta">
+          <time><xsl:attribute name="datetime"><xsl:value-of select="@datetime"/></xsl:attribute><xsl:value-of select="@when"/></time>
+          <xsl:text> · number </xsl:text><xsl:value-of select="@seq"/>
+          <xsl:if test="@reply-href">
+            <xsl:text> · in reply to </xsl:text>
+            <a><xsl:attribute name="href"><xsl:value-of select="@reply-href"/></xsl:attribute><xsl:value-of select="@reply-label"/></a>
+          </xsl:if>
+          <xsl:if test="@supersedes-href">
+            <xsl:text> · replaces </xsl:text>
+            <a><xsl:attribute name="href"><xsl:value-of select="@supersedes-href"/></xsl:attribute><xsl:value-of select="@supersedes-label"/></a>
+          </xsl:if>
+          <xsl:if test="@addressed-to"><xsl:text> · addressed to </xsl:text><xsl:value-of select="@addressed-to"/></xsl:if>
+          <xsl:if test="@offer"><xsl:text> · about the offer </xsl:text><code><xsl:value-of select="@offer"/></code></xsl:if>
+        </p>
+        <xsl:if test="@title"><p class="entry-title"><xsl:value-of select="@title"/></p></xsl:if>
+        <xsl:if test="@repository or @severity">
+          <p class="entry-meta">
+            <xsl:if test="@repository">
+              <xsl:text>Repository: </xsl:text>
+              <xsl:choose>
+                <xsl:when test="@repository-href"><a><xsl:attribute name="href"><xsl:value-of select="@repository-href"/></xsl:attribute><xsl:value-of select="@repository"/></a></xsl:when>
+                <xsl:otherwise><code><xsl:value-of select="@repository"/></code></xsl:otherwise>
+              </xsl:choose>
+            </xsl:if>
+            <xsl:if test="@repository and @severity"><xsl:text> · </xsl:text></xsl:if>
+            <xsl:if test="@severity"><xsl:text>Severity: </xsl:text><span class="severity"><xsl:value-of select="@severity"/></span></xsl:if>
+          </p>
+        </xsl:if>
+        <xsl:if test="@file-name">
+          <p class="entry-file">
+            <xsl:text>File </xsl:text><code><xsl:value-of select="@file-name"/></code>
+            <xsl:text>, </xsl:text><xsl:value-of select="@media-type"/>
+            <xsl:text>, </xsl:text><xsl:value-of select="@size"/>
+            <xsl:text>. </xsl:text>
+            <a>
+              <xsl:attribute name="href"><xsl:value-of select="@download-href"/></xsl:attribute>
+              <xsl:attribute name="download"><xsl:value-of select="@file-name"/></xsl:attribute>
+              <xsl:text>Download </xsl:text><xsl:value-of select="@file-name"/>
+            </a>
+            <span class="note"> (checked against its size and its digest, <code class="iri"><xsl:value-of select="@digest"/></code>, before it is sent)</span>
+          </p>
+        </xsl:if>
+        <xsl:if test="view:body"><div class="body" data-linkify="default"><xsl:value-of select="view:body"/></div></xsl:if>
+        <xsl:if test="@answer-href">
+          <p class="entry-actions"><a><xsl:attribute name="href"><xsl:value-of select="@answer-href"/></xsl:attribute>Reply<span class="sr-only"> to the <xsl:value-of select="@kind-label"/> from <xsl:value-of select="@who"/>, number <xsl:value-of select="@seq"/></span></a></p>
+        </xsl:if>
+      </article>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:receipt">
+    <li class="entry receipt">
+      <p>
+        <strong><xsl:value-of select="@taker"/></strong>
+        <xsl:text> took </xsl:text><xsl:value-of select="@what"/>
+        <xsl:text>, </xsl:text>
+        <time><xsl:attribute name="datetime"><xsl:value-of select="@datetime"/></xsl:attribute><xsl:value-of select="@when"/></time>
+        <xsl:text> (number </xsl:text><xsl:value-of select="@seq"/><xsl:text>)</xsl:text>
+        <xsl:if test="@new = 'true'"><span class="badge new"><span class="sr-only">, </span>New</span></xsl:if>
+      </p>
+    </li>
+  </xsl:template>
+
+  <!-- The say form: a message or a question, and the entry it answers when one was chosen.
+       It posts with htmx and is replaced by the answer: a fresh form, and the flash. -->
+  <xsl:template match="view:say">
+    <form id="say" class="say panel" method="post" hx-target="this" hx-swap="outerHTML" aria-labelledby="say-title">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+      <h2 id="say-title">Post to <xsl:value-of select="@label"/></h2>
+      <fieldset class="row kind">
+        <legend>Kind</legend>
+        <label><input type="radio" name="kind" value="message" checked="checked"/> Message</label>
+        <label><input type="radio" name="kind" value="question"/> Question</label>
+      </fieldset>
+      <xsl:if test="@reply-to">
+        <input type="hidden" name="reply_to"><xsl:attribute name="value"><xsl:value-of select="@reply-to"/></xsl:attribute></input>
+        <p class="note">
+          <xsl:text>Replying to </xsl:text>
+          <a><xsl:attribute name="href"><xsl:value-of select="@reply-href"/></xsl:attribute><xsl:value-of select="@reply-label"/></a>
+          <xsl:text>. </xsl:text>
+          <a><xsl:attribute name="href"><xsl:value-of select="@cancel-href"/></xsl:attribute>Do not reply to it</a>
+        </p>
+      </xsl:if>
+      <label for="say-body">Text (Markdown is shown as written)</label>
+      <textarea id="say-body" name="body" rows="4" required="required"></textarea>
+      <p class="row"><button type="submit">Post</button></p>
+    </form>
+  </xsl:template>
+
+  <!-- A post's answer: a fresh form in place of the one that posted, and the flash. -->
+  <xsl:template name="layers-say">
+    <xsl:apply-templates select="view:say"/>
+    <div id="flash" hx-swap-oob="innerHTML">
+      <p class="flash ok" role="status"><xsl:value-of select="@flash"/></p>
+    </div>
+  </xsl:template>
+
+  <!-- The long poll's answer: the next watcher in place of this one, and what changed, out of
+       band. Only parts an open page has are sent: a task layer's lists, a channel's new
+       entries (before the first), the overview's rows. -->
+  <xsl:template name="layers-wait">
+    <xsl:apply-templates select="view:watch"/>
+    <xsl:if test="@banner">
+      <div id="layers-banner" hx-swap-oob="innerHTML"><xsl:apply-templates select="view:notice"/></div>
+    </xsl:if>
+    <xsl:if test="@announce">
+      <p id="layers-live" hx-swap-oob="innerHTML"><xsl:value-of select="@announce"/></p>
+    </xsl:if>
+    <xsl:if test="@entries">
+      <ol hx-swap-oob="afterbegin:#layer-entries"><xsl:apply-templates select="view:slot[@name = 'entries']"/></ol>
+    </xsl:if>
+    <xsl:if test="@tuplespace">
+      <ol id="layer-tuples" class="entries" aria-labelledby="tuples-title" hx-swap-oob="true"><xsl:apply-templates select="view:slot[@name = 'tuples']"/></ol>
+      <ol id="layer-receipts" class="entries" aria-labelledby="receipts-title" hx-swap-oob="true"><xsl:apply-templates select="view:slot[@name = 'receipts']"/></ol>
+    </xsl:if>
+    <xsl:if test="@rows">
+      <ul id="layers-list" class="layer-list" hx-swap-oob="true"><xsl:apply-templates select="view:layer-row"/></ul>
+    </xsl:if>
   </xsl:template>
 
   <!-- ======================================================== browse shell -->

@@ -1111,6 +1111,22 @@ fn routes() -> Vec<Route> {
         // both match: this one has no segment after `/browse`) but because reading
         // the table top to bottom should meet the door before its depths.
         route("/browse", crate::k::ROOTS_IRI),
+        // The Layers page (ledger #1675). The long poll is a literal path listed first: `~` is
+        // not a layer-name character, so it can never be a layer's page. No per-route `cap`,
+        // for the reason the Queue's rows take none.
+        route(crate::layers_view::WAIT_PATH, crate::layers_view::WAIT_IRI),
+        route(crate::layers_view::PAGE_PATH, crate::layers_view::PAGE_IRI),
+        route("/layers/{layer}", crate::layers_view::LAYER_PAGE_TEMPLATE),
+        route("/layers/{layer}/say", crate::layers_view::SAY_TEMPLATE),
+        // ★ A layer file is someone else's bytes: served as `application/octet-stream`, and
+        // SANDBOXED besides, so an HTML "file" opened by address runs no script as this origin.
+        Route {
+            csp: Some(crate::layers_view::FILE_CSP.to_string()),
+            ..route(
+                "/layers/{layer}/file/{id}",
+                crate::layers_view::FILE_TEMPLATE,
+            )
+        },
     ]
     .into_iter()
     .chain(browse_routes())
@@ -1125,7 +1141,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 14] = [
+pub const GONK_PATHS: [&str; 15] = [
     "/",
     "/l/",
     "/act",
@@ -1136,6 +1152,7 @@ pub const GONK_PATHS: [&str; 14] = [
     "/k",
     "/queue",
     "/browse",
+    "/layers",
     "/iki/",
     "/script/",
     "/nl/",
