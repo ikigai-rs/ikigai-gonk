@@ -79,6 +79,12 @@ use crate::layer::{self, Binding, Door};
 /// How long a taker's claim is held between its reports: renewed by every `Progress`.
 pub const LEASE: &str = "7d";
 
+macro_rules! dbgl {
+    ($($t:tt)*) => {{
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+
 /// The backstop: a pass at least this often, whatever the feed and the ledger say.
 pub const SWEEP: Duration = Duration::from_secs(5 * 60);
 
@@ -786,7 +792,13 @@ impl Mirror {
         let mut taken = self.layer.receipts()?;
         let recorded = self.recorded()?;
         let (mut items, complete) = self.items()?;
-        eprintln!("DBG {} items {}", now_millis() % 100000, items.len());
+        dbgl!(
+            "DBG {} items {} pending {} recorded {} complete {complete}",
+            now_millis() % 100000,
+            items.len(),
+            pending.len(),
+            recorded.len()
+        );
 
         // Our offers: every offer recorded on a live item.
         let mut ours: BTreeMap<String, String> = BTreeMap::new();
@@ -1446,7 +1458,7 @@ fn run_passes(mirror: &Mirror, kicks: &Receiver<()>) {
             Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        eprintln!("DBG {} pass start", now_millis() % 100000);
+        dbgl!("DBG {} pass start", now_millis() % 100000);
         let said = match mirror.pass() {
             Ok(report) => {
                 for line in &report.actions {
@@ -1456,7 +1468,7 @@ fn run_passes(mirror: &Mirror, kicks: &Receiver<()>) {
             }
             Err(e) => e,
         };
-        eprintln!("DBG {} pass end {said:?}", now_millis() % 100000);
+        dbgl!("DBG {} pass end {said:?}", now_millis() % 100000);
         // A problem is said once, and again only when it changes: a door that is down for an
         // hour must not fill the log.
         if !said.is_empty() && said != last {
@@ -1547,16 +1559,16 @@ pub(crate) fn spawn_listener(
             let runtime = match tokio::runtime::Builder::new_current_thread().build() {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("DBG {} listener runtime failed: {e}", now_millis() % 100000);
+                    dbgl!("DBG {} listener runtime failed: {e}", now_millis() % 100000);
                     return;
                 }
             };
-            eprintln!("DBG {} listener up", now_millis() % 100000);
+            dbgl!("DBG {} listener up", now_millis() % 100000);
             loop {
                 let b = runtime.block_on(listener.wait());
                 let _ = listener.drain();
                 let r = kick.try_send(());
-                eprintln!(
+                dbgl!(
                     "DBG {} cut {:?} -> {:?}",
                     now_millis() % 100000,
                     b.events
