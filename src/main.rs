@@ -235,13 +235,16 @@ fn serve(flags: &config::Flags) -> ! {
     // unbounded staleness (reads of a graph the sharer does write, cached against threads its
     // write never cuts), and `tests/browse.rs` fingerprints the reserved graphs around a real
     // browse WRITE and a real browse READ to keep the derivation honest at both ends.
+    //
+    // ★ And the handle leaves ALWAYS since ledger #1699, because the backup reads through it: it
+    // streams every quad from one snapshot into its archive (`backup::Dataset`) instead of
+    // holding the whole dataset as a SPARQL answer. The backup writes nothing, so the promise
+    // is the same derived one with or without a browse face; without one it promises graphs
+    // nobody writes, which costs only the caching of reads that can see the default graph (the
+    // ledgers live in named graphs, so their scoped reads stay cached).
     let browse_graph = browse::Graph::chosen();
-    let opened = if settings.browse_roots.is_empty() {
-        DurableStore::open(&store_path).map(|store| (store, None))
-    } else {
-        DurableStore::open_shared_declaring(&store_path, browse_graph.sharer_writes())
-            .map(|(store, handle)| (store, Some(handle)))
-    };
+    let browses = !settings.browse_roots.is_empty();
+    let opened = DurableStore::open_shared_declaring(&store_path, browse_graph.sharer_writes());
     let (store, handle) = opened.unwrap_or_else(|e| {
         fail(&format!(
             "cannot hold the store at {}: {e}\n  gonk is the one process on a machine that opens the dataset. If \
@@ -259,10 +262,12 @@ fn serve(flags: &config::Flags) -> ! {
     // to any of them, and NOTHING anywhere reports that — an empty annotation list and an
     // empty archive are legitimate answers. So this server counts them and says so, in
     // browse's own numbers.
-    if let Some(handle) = handle.as_deref() {
-        warn_unmigrated(handle, &browse_graph, &store_path, &settings.socket);
+    if browses {
+        warn_unmigrated(&handle, &browse_graph, &store_path, &settings.socket);
     }
-    let browse = handle.map(|_| {
+    // What the backup reads, and under which of the store's bounds (ledger #1699).
+    let dataset = backup::Dataset::new(&store, Arc::clone(&handle));
+    let browse = browses.then(|| {
         browse::wire(
             settings.browse_roots.clone(),
             // ★ The store's OWN writer (ledger #1252): browse's writes commit on the thread and
@@ -411,6 +416,7 @@ fn serve(flags: &config::Flags) -> ! {
             settings: Arc::clone(&backup_settings),
             jobs: jobs.clone(),
             next: backup_next.clone(),
+            dataset,
         }),
         Some(&scripts),
         Some(&nl),

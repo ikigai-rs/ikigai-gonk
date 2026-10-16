@@ -429,8 +429,13 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         .unwrap();
     let addr = listener.local_addr().unwrap();
     let config = tempfile::tempdir().unwrap();
+    let (store, handle) = ikigai_store::DurableStore::in_memory_shared_declaring(
+        ikigai_store::SharerWrites::only_the_default_graph(),
+    )
+    .expect("an in-memory store");
+    let dataset = ikigai_gonk::backup::Dataset::new(&store, handle);
     let hub = Arc::new(ikigai_gonk::compose_with(
-        DurableStore::in_memory().expect("an in-memory store"),
+        store,
         None,
         Vec::new(),
         Vec::new(),
@@ -444,6 +449,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
             }),
             jobs: None,
             next: Default::default(),
+            dataset,
         }),
         None,
         None,

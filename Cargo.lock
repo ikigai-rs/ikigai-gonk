@@ -1384,6 +1384,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "flate2",
  "futures",
  "getrandom 0.3.4",
  "ignore",

@@ -180,9 +180,11 @@ pub fn compose(store: DurableStore) -> Kernel {
 /// `backups` is [`crate::backup::space`]'s family — `urn:iki:gonk:backup`, its status, its
 /// archives and `urn:iki:gonk:restore` — together with the compression module they reach
 /// gzip through. Bound TOGETHER, and only together, because `urn:compress:*` is linked for
-/// them: a backup compresses by resolving `urn:compress:gzip` through this kernel rather
-/// than by calling a gzip crate, which is the whole reason a module was built instead of a
-/// helper. A gonk composed without them serves exactly the catalog it served before.
+/// them: a restore expands an archive by resolving `urn:decompress:gzip`, and the scripts
+/// archive is gzipped by resolving `urn:compress:gzip`, through this kernel. (The store archive
+/// is streamed into the same encoder since ledger #1699, and a test pins that its bytes are what
+/// `urn:compress:gzip` writes.) A gonk composed without them serves exactly the catalog it served
+/// before.
 ///
 /// ⚠ **The timer's control plane is NOT bound, and that is a security decision rather than
 /// an omission.** `ikigai-time` is linked and the backup job runs in a [`JobRegistry`]
