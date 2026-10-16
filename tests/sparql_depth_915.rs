@@ -29,11 +29,12 @@ use scratch_gonk::Gonk;
 ///
 /// - The review space, so its `match` door is bound (no grant, not armed: nothing runs).
 /// - ★ The anonymous SPARQL budget at its ceiling (ledger
-///   [#1028](http://localhost:1060/l/default/item/1028)). A debug build answers
-///   [`deep_chain`]'s 1,000 UNIONs in about 0.2 s, and on a saturated machine past the 1,000 ms
-///   default: 17 of 480 runs of the HTTP chain test, at 24 concurrent copies beside 24 copies
-///   of another test binary, were refused `503 … ran past its time budget of 1000 ms`. What
-///   is under test here is the stack, not the budget, which `tests/door_budget_964.rs` owns.
+///   [#1028](http://localhost:1060/l/default/item/1028)). A debug build answers a chain of
+///   1,000 UNIONs (now [`longest_admitted_chain`]'s 1,023) in about 0.2 s, and on a saturated
+///   machine past the 1,000 ms default: 17 of 480 runs of the HTTP chain test, at 24 concurrent
+///   copies beside 24 copies of another test binary, were refused `503 … ran past its time
+///   budget of 1000 ms`. What is under test here is the stack, not the budget, which
+///   `tests/door_budget_964.rs` owns.
 const CONFIG: &str = "gonk.review.space = \"reviews\"\n\
                       gonk.http.anonymous_sparql_budget_ms = 5000\n";
 
@@ -66,14 +67,43 @@ fn chain(n: usize) -> String {
     format!("SELECT*{{{{}}{}}}", "UNION{}".repeat(n))
 }
 
-/// A chain long enough to abort a 2 MiB stack in this build and short enough to be answered on
-/// [`ikigai_gonk::stack::THREAD_STACK_BYTES`]. Measured with `examples/sparql-depth.rs`
-/// (store, `union`): a release build aborts past 1,127 at 2 MiB, a debug build past 163, and
-/// 64 MiB holds 32 times either. Release: 3,500 (28 KB, under the length bound); debug: 1,000.
-/// Both were checked to ABORT a 2 MiB thread and to be answered on a 64 MiB one, in 0.2 s.
-fn deep_chain() -> String {
-    chain(if cfg!(debug_assertions) { 1_000 } else { 3_500 })
+/// The algebra nodes the store counts in `query`, as its `MAX_ALGEBRA_NODES` check counts them
+/// ([`ikigai_store::budget::measure_query`]). Only for SHORT queries: the walk recurses, and this
+/// runs on a test thread.
+fn algebra_nodes(query: &str) -> usize {
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(query)
+        .unwrap_or_else(|e| panic!("{query}: {e}"));
+    ikigai_store::budget::measure_query(&parsed).nodes()
 }
+
+/// The longest [`chain`] the store's algebra bound admits, from the store's own count: a chain
+/// costs a fixed base plus a fixed step per `UNION` (measured on short chains, where the walk is
+/// cheap, and checked to be linear), so the longest is `(MAX_ALGEBRA_NODES - base) / step`.
+/// 1,023 with `ikigai-store` 0.2.23 (`n + 1` nodes). Sized from the bound, not written down, so
+/// the next change to the bound or the count moves it rather than flipping a test (ledger #1736).
+fn longest_admitted_chain() -> usize {
+    let base = algebra_nodes(&chain(0));
+    let step = algebra_nodes(&chain(1)) - base;
+    assert!(
+        step > 0,
+        "a UNION costs nothing; the bound cannot size this chain"
+    );
+    for n in [2, 10, 50] {
+        assert_eq!(
+            algebra_nodes(&chain(n)),
+            base + step * n,
+            "the count is linear"
+        );
+    }
+    (ikigai_store::budget::MAX_ALGEBRA_NODES - base) / step
+}
+
+/// The chain these tests sent before ledger #1736: past the store's algebra bound, and long
+/// enough that the store's whole read of it aborted a 2 MiB thread in either build (measured
+/// with `examples/sparql-depth.rs`, store, `union`: release past 1,127, debug past 163). 3,500 is
+/// 28 KB, under the length bound. Now refused by name after it is parsed and measured.
+const STACK_CHAIN: usize = 3_500;
 
 /// The checks and requests these tests make of a [`Gonk`]: the harness itself, readiness and
 /// all, is `tests/scratch_gonk/mod.rs`.
@@ -298,28 +328,16 @@ fn a_query_at_the_bound_is_answered_at_every_door() {
     gonk.assert_serving("a query at the bound");
 }
 
-/// ★ The half of #915 no bracket scan sees: a chain with no nesting at all, which the store
-/// walks by recursion, sent through one door to a fresh gonk. Answered, because the thread
-/// serving it is larger than 2 MiB: the socket's per-connection thread and the QUIC runtime are
-/// spawned inside their transport crates and reached only through `stack::enlarge_default`;
-/// the HTTP runtime is `main`'s builder. One test per door, so each one is proven on its own —
-/// with `THREAD_STACK_BYTES` set back to 2 MiB, all three abort the child.
-fn a_chain_is_answered_through(door: &str) {
-    let mut gonk = if door == "quic" {
-        Gonk::with_quic(CONFIG)
-    } else {
-        Gonk::start(CONFIG)
-    };
-    let query = deep_chain();
-    assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
-    assert_eq!(ikigai_gonk::sparql::nesting_depth(query.as_bytes()), 2);
-    let answer = match door {
-        "socket" => gonk.over_socket(select(&query)).map(|_| ()),
-        "quic" => gonk.over_quic(select(&query)).map(|_| ()),
+/// One request through `door` of a fresh gonk: a `graph-select` of `query` over the default
+/// ledger's graph. The HTTP door's non-200 is an `Error::Endpoint` carrying status and body.
+fn through(gonk: &Gonk, door: &str, query: &str) -> Result<(), Error> {
+    match door {
+        "socket" => gonk.over_socket(select(query)).map(|_| ()),
+        "quic" => gonk.over_quic(select(query)).map(|_| ()),
         _ => {
             let (status, body) = gonk.get(&format!(
                 "/iki/store/graph-select?graph={GRAPH}&query={}",
-                encoded(&query)
+                encoded(query)
             ));
             if status == 200 {
                 Ok(())
@@ -327,9 +345,38 @@ fn a_chain_is_answered_through(door: &str) {
                 Err(Error::Endpoint(format!("{status} {body}")))
             }
         }
-    };
-    gonk.assert_serving(&format!("a chain over {door}"));
-    answer.unwrap_or_else(|e| panic!("a chain over {door}: {e}"));
+    }
+}
+
+fn gonk_for(door: &str) -> Gonk {
+    if door == "quic" {
+        Gonk::with_quic(CONFIG)
+    } else {
+        Gonk::start(CONFIG)
+    }
+}
+
+/// ★ The half of #915 no bracket scan sees: a chain with no nesting at all, which the store
+/// walks by recursion, sent through one door to a fresh gonk. The chain is the LONGEST the
+/// store's algebra bound admits ([`longest_admitted_chain`]), so it is ANSWERED in both builds.
+///
+/// ⚠ Through ledger #1736 this sent 3,500 UNIONs in release, past the algebra bound the store
+/// gained in 0.2.8 (ledger #979), so a release run refused it and failed; CI builds debug only and
+/// never saw it. And this used to say that, with `THREAD_STACK_BYTES` set back to 2 MiB, every
+/// door aborted the child. Not since the store parses and evaluates on a thread it sizes itself
+/// (`ikigai_store::limits::on_sparql_stack`): measured, with that mutation every test here passes
+/// in both builds. What each door proves now is that the longest admitted chain is answered and
+/// gonk keeps serving; gonk's own stack is
+/// [`the_editor_parses_a_path_chain_on_a_large_enough_stack`]'s.
+fn a_chain_is_answered_through(door: &str) {
+    let mut gonk = gonk_for(door);
+    let n = longest_admitted_chain();
+    let query = chain(n);
+    assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
+    assert_eq!(ikigai_gonk::sparql::nesting_depth(query.as_bytes()), 2);
+    let answer = through(&gonk, door, &query);
+    gonk.assert_serving(&format!("a chain of {n} over {door}"));
+    answer.unwrap_or_else(|e| panic!("a chain of {n} over {door}: {e}"));
 }
 
 #[test]
@@ -345,6 +392,54 @@ fn a_chain_with_no_nesting_is_answered_over_quic() {
 #[test]
 fn a_chain_with_no_nesting_is_answered_over_http() {
     a_chain_is_answered_through("http");
+}
+
+/// A chain one `UNION` past the algebra bound, then [`STACK_CHAIN`], through one door of a fresh
+/// gonk: each REFUSED by the store's algebra bound, by name, and gonk lives. The first pins the
+/// bound where [`longest_admitted_chain`] says it is, in both builds (so a release run cannot
+/// again pass one claim while failing another). The second is the chain release used to send:
+/// it is parsed and measured on the store's sized thread before the bound refuses it.
+fn a_chain_past_the_algebra_bound_is_refused_through(door: &str) {
+    let mut gonk = gonk_for(door);
+    for n in [longest_admitted_chain() + 1, STACK_CHAIN] {
+        let query = chain(n);
+        assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
+        let answer = through(&gonk, door, &query);
+        gonk.assert_serving(&format!("a chain of {n} over {door}"));
+        let detail = match answer {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "query", "a chain of {n} over {door}");
+                detail
+            }
+            Err(Error::Endpoint(detail)) if door == "http" => {
+                assert!(
+                    detail.starts_with("400 "),
+                    "a chain of {n} over http: {detail}"
+                );
+                detail
+            }
+            other => panic!("a chain of {n} over {door} must be refused, got {other:?}"),
+        };
+        assert!(
+            detail.contains("MAX_ALGEBRA_NODES"),
+            "a chain of {n} over {door}: refused by the algebra bound, by name: {detail}"
+        );
+    }
+}
+
+#[test]
+fn a_chain_past_the_algebra_bound_is_refused_over_the_socket() {
+    a_chain_past_the_algebra_bound_is_refused_through("socket");
+}
+
+#[test]
+fn a_chain_past_the_algebra_bound_is_refused_over_quic() {
+    a_chain_past_the_algebra_bound_is_refused_through("quic");
+}
+
+#[test]
+fn a_chain_past_the_algebra_bound_is_refused_over_http() {
+    a_chain_past_the_algebra_bound_is_refused_through("http");
 }
 
 /// `!` is the one prefix operator spargebra reads by recursion, so a run of them nests with no
@@ -401,28 +496,80 @@ fn a_multiplication_chain_is_answered_over_http() {
 }
 
 /// A property path `?s a/a/a/… ?o`: 6,000 steps (12 KB) abort a 2 MiB release PARSE, and the
-/// store's own walk aborts far sooner. On the larger stacks the parse and the walk both finish —
-/// and then the store EVALUATES the path in time that grows with the cube of its length (2,000
-/// steps took 168 s in release), which is not an abort and not this arc's to bound (reported). So
-/// the request is sent and left running, and what is asserted is that gonk survives the part
-/// that used to kill it and keeps serving beside it.
+/// store's own walk aborts far sooner. On the larger stacks the parse and the walk both finish.
+///
+/// ★ The marker is the ANSWER (ledger #1736). This used to send the path, sleep 3 s and check
+/// gonk still served, because the store then planned and evaluated a path in time that grows
+/// with the cube of its length (2,000 steps took 168 s in release) and the answer never came in
+/// a test's time; nothing said the parse and walk had finished, so a slow machine could pass it
+/// before they did. Since the store bounds the algebra before planning (ledger #964), a sequence
+/// path counts one join operand a step, so this path is refused by `MAX_JOIN_OPERANDS` after it is parsed and
+/// measured and before it is planned: the refusal arrives, it can only arrive once the parse and
+/// the walk are done, and gonk is checked after it. ⚠ This door no longer tests gonk's stack:
+/// the store parses on a thread it sizes itself, so with `THREAD_STACK_BYTES` set back to 2 MiB
+/// this still passes. [`the_editor_parses_a_path_chain_on_a_large_enough_stack`] is the path
+/// test that does.
 #[test]
 fn a_path_chain_does_not_abort_the_server() {
     let mut gonk = Gonk::start(CONFIG);
     let n = if cfg!(debug_assertions) { 2_000 } else { 6_000 };
     let query = format!("SELECT*{{?s a{} ?o}}", "/a".repeat(n));
     assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
-    // Left running, over the SOCKET (a thread of its own per connection); the child is killed
-    // when `gonk` drops.
+    // Over the SOCKET (a thread of its own per connection), on a thread of the test's own so a
+    // hang is a failure with a message rather than a test that never ends.
     let socket = gonk.socket.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        if let Ok(client) = ikigai_ipc::connect(&socket) {
-            let _ = client.issue(select(&query));
-        }
+        let answer = ikigai_ipc::connect(&socket)
+            .map_err(|e| Error::Endpoint(format!("connect: {e}")))
+            .and_then(|client| client.issue(select(&query)).map(|_| ()));
+        let _ = tx.send(answer);
     });
-    // Release aborts in milliseconds on a 2 MiB stack; a debug parse of 2,000 steps is slower.
-    std::thread::sleep(Duration::from_secs(3));
-    gonk.assert_serving("a path chain over the socket, still being evaluated");
+    // A refusal before planning takes milliseconds; the bound is only a hang guard, and running
+    // out of it FAILS the test.
+    let answer = rx
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap_or_else(|_| panic!("no answer to a path of {n} steps in 120 s:\n{}", gonk.log()));
+    gonk.assert_serving("a path chain over the socket, answered");
+    match answer {
+        Err(Error::InvalidArgument { name, detail }) => {
+            assert_eq!(name, "query");
+            assert!(detail.contains("MAX_JOIN_OPERANDS"), "{detail}");
+        }
+        other => panic!("a path of {n} steps must be refused before planning, got {other:?}"),
+    }
+}
+
+/// ★ Where gonk's OWN stack is still load-bearing (ledger #1736). The store parses and
+/// evaluates every query on a thread it sizes itself (`ikigai_store::limits::on_sparql_stack`),
+/// so no store door above depends on [`ikigai_gonk::stack::THREAD_STACK_BYTES`]: with it set
+/// back to 2 MiB, every other test in this file passes in both builds. But the SPARQL editor
+/// parses the caller's text with spargebra ITSELF, on the HTTP runtime's thread, to learn its
+/// form ([`ikigai_gonk::web::query_form`]) before the store sees it, and a path chain is the
+/// densest shape that parser recurses on with no nesting: measured with
+/// `examples/sparql-depth.rs` (`apath`, `parse`), a 2 MiB thread aborts past 763 steps in a
+/// debug build and past 4,369 in release. So this path, inside the length bound, aborts a
+/// 2 MiB gonk in either build — the test fails, with the child's `has overflowed its stack` —
+/// and on the stacks `main` sets it is parsed, handed to the store, and refused there before planning
+/// (`MAX_JOIN_OPERANDS`), which the page shows as the error it is. The refusal in the page is
+/// the marker that the parse finished.
+#[test]
+fn the_editor_parses_a_path_chain_on_a_large_enough_stack() {
+    let mut gonk = Gonk::start(CONFIG);
+    let n = if cfg!(debug_assertions) { 2_000 } else { 6_000 };
+    let query = format!("SELECT*{{?s a{} ?o}}", "/a".repeat(n));
+    assert!(query.len() <= ikigai_gonk::sparql::MAX_QUERY_BYTES);
+    assert_eq!(ikigai_gonk::sparql::nesting_depth(query.as_bytes()), 1);
+    let (status, body) = gonk.get_as(
+        &format!("/sparql/results?ledger=default&query={}", encoded(&query)),
+        "text/html",
+    );
+    gonk.assert_serving(&format!("a path of {n} steps through the editor"));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("MAX_JOIN_OPERANDS"),
+        "parsed by the editor, then refused by the store before planning: {body}"
+    );
 }
 
 /// One element past what the length bound admits is refused, never parsed.
