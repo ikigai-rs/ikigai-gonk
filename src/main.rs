@@ -13,8 +13,7 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{
-    access, browse, compose_with, doors, layer, mirror, mount, queue, quic, trigger, verdict,
-    watch, web,
+    access, browse, compose_with, doors, layer, mount, queue, quic, trigger, verdict, watch, web,
 };
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
@@ -422,7 +421,8 @@ fn serve(flags: &config::Flags) -> ! {
         Some(&nl),
     ));
     scripts.attach(&hub);
-    let layer_line = start_layers(&settings, layer_mounts.door.as_ref(), &hub);
+    let layer_line =
+        layer::start(&settings.layers, &layer_mounts, &hub).unwrap_or_else(|e| fail(&e));
     // ★ The Layers page (ledger #1675): its own door under its own identity, mounted into
     // nothing, and dialled by nothing until a page is first opened.
     let layers_view = settings.layers_view.as_ref().map(|view| {
@@ -1125,54 +1125,6 @@ fn findings_file(args: &ikigai_gonk::findings::FileArgs) {
     let issue = ikigai_gonk::keys::over_socket(&settings.socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::findings::run(&issue, args, &settings.queue, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
-}
-
-/// Start each `gonk.layer` binding's worker, and say what is bound (ledger #1190).
-///
-/// The offer role runs the mirror ([`mirror::start`]); nothing is dialled here, so a layer door
-/// that is down stops nothing (the mirror says so once, and keeps trying).
-fn start_layers(
-    settings: &config::Settings,
-    door: Option<&Arc<ikigai_gonk::mount::LazyMount>>,
-    hub: &Arc<ikigai_core::Kernel>,
-) -> String {
-    let Some(door) = door else {
-        return "no gonk.layer, so no ledger is bound to a layer".to_string();
-    };
-    let mut lines = Vec::new();
-    for binding in &settings.layers {
-        match binding.role {
-            layer::Role::Offer => {
-                let worker = mirror::Mirror::new(
-                    binding.clone(),
-                    Arc::clone(door) as Arc<dyn layer::Door>,
-                    Arc::clone(hub),
-                )
-                .unwrap_or_else(|e| fail(&e));
-                mirror::start(worker);
-                lines.push(format!(
-                    "ledger `{}` offered into layer `{}` on {}",
-                    binding.ledger, binding.layer, binding.target
-                ));
-            }
-            layer::Role::Take => {
-                let ledger = ikigai_gonk::taker::hub_ledger(binding, Arc::clone(hub))
-                    .unwrap_or_else(|e| fail(&e));
-                let worker = ikigai_gonk::taker::Taker::new(
-                    binding.clone(),
-                    Arc::clone(door) as Arc<dyn layer::Door>,
-                    ledger,
-                )
-                .unwrap_or_else(|e| fail(&e));
-                ikigai_gonk::taker::start(worker, hub);
-                lines.push(format!(
-                    "layer `{}` on {} taken into ledger `{}` (`ikigai-gonk layer take <offer>`)",
-                    binding.layer, binding.target, binding.ledger
-                ));
-            }
-        }
-    }
-    lines.join("; ")
 }
 
 /// `ikigai-gonk layer take <offer>`: through the running gonk's socket (its layer mount is

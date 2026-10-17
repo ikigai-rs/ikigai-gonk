@@ -918,7 +918,10 @@ impl Door for NoFeed {
 fn a_ledger_write_offers_without_waiting_for_the_sweep() {
     let w = World::new();
     w.file("Here first\n\nOffered by the start pass.", &[]);
-    mirror::start(w.mirror_through(Arc::new(NoFeed(w.door(&us())))));
+    mirror::start(
+        w.mirror_through(Arc::new(NoFeed(w.door(&us())))),
+        Arc::new(NoFeed(w.door(&us()))),
+    );
     let deadline = Instant::now() + Duration::from_secs(60);
     while w.pending().is_empty() {
         assert!(

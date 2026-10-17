@@ -563,12 +563,15 @@ fn now_millis() -> u64 {
 
 /// Run `taker` for the life of the process: a pass now, on every event in the layer's feed, on
 /// every write to the bound ledger, and every [`mirror::SWEEP`].
-pub fn start(taker: Taker, hub: &Kernel) {
+///
+/// `feed` is the door the feed's long poll runs on: a door of its own ([`layer::feed_door`]),
+/// for the reason [`mirror::start`] gives.
+pub fn start(taker: Taker, hub: &Kernel, feed: Arc<dyn Door>) {
     let taker = Arc::new(taker);
     let (kick, kicks) = sync_channel::<()>(1);
     let layer = taker.binding.layer.clone();
     mirror::spawn_feed(
-        taker.client.door(),
+        feed,
         layer.clone(),
         format!("gonk-take-feed-{layer}"),
         kick.clone(),
@@ -590,7 +593,7 @@ pub fn start(taker: Taker, hub: &Kernel) {
 }
 
 fn run_passes(taker: &Taker, kicks: &Receiver<()>) {
-    let mut last = String::new();
+    let mut problems = mirror::Problems::default();
     let log = |line: &str| {
         let _ = writeln!(
             std::io::stderr(),
@@ -613,9 +616,8 @@ fn run_passes(taker: &Taker, kicks: &Receiver<()>) {
             }
             Err(e) => e,
         };
-        if !said.is_empty() && said != last {
-            log(&said);
+        if let Some(line) = problems.after(said, std::time::Instant::now(), now_millis()) {
+            log(&line);
         }
-        last = said;
     }
 }
