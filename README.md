@@ -155,7 +155,8 @@ What you will see:
    with passkey to use it.*
 3. **Sign in with passkey**, in the header, and approve the sheet a second time. The page
    reloads showing *Signed in as … (grant brian)*, and that browser holds the grant until it
-   signs out, the session's 12 hours end, or the server restarts.
+   signs out, the session's 12 hours end, an hour passes with no request from it
+   (`gonk.http.session_idle_minutes`, 1 to 720), or the server restarts.
 
 The second click is deliberate. When the creation sheet closes it still holds the window's
 focus, and a browser refuses a sign-in prompt from a page without focus, so gonk waits for
@@ -172,14 +173,26 @@ good until it expires.
 - **List and revoke** (ledger #313). `ikigai-gonk passkey list` prints every enrolled passkey:
   its label, grant, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
   `--credential <id>`, which a label two passkeys share requires) removes that one entry from
-  `clients.json`, with no restart: the door re-reads the file on every request that carries a
-  session, so the passkey's live sessions end at their next request. It appends one line to
+  `clients.json`, with no restart, and the passkey's live sessions are DELETED, not just
+  refused (ledger #1824): enrolling the same credential again, or restoring `clients.json`
+  from a backup, never brings one back, and only a new sign-in opens a session. It appends one line to
   `gonk/passkeys.log`, `<RFC 3339 ms> gonk:PasskeyRevoked urn:iki:gonk:passkey:<credential id>
   label=… grant=…`, after the change, so the record never claims a revocation that did not
   happen. A malformed `clients.json` is refused and left exactly as it is, and the file as it
   will be is checked against what both doors read before it replaces the old one (atomically),
   so the command cannot be the edit that leaves a door reading garbage. `grants.json` is left
-  alone, as `client remove` leaves it: a grant name may be shared.
+  alone, as `client remove` leaves it: a grant name may be shared. The running server reads
+  that line (the command runs in another process), which is how the sessions end.
+- **Sign out everywhere** (ledger #1824). `ikigai-gonk passkey logout --all <label>` (or
+  `--credential <id>`) ends every session of one passkey and leaves it enrolled: it appends a
+  `gonk:PasskeySessionsEnded` line to `gonk/passkeys.log`, and the server ends the sessions at
+  its next signed-in request or sign-in, with no restart. A signed-in page can do the same for
+  its own passkey with `POST /auth/logout-all` and its session token as the body.
+- **Sign-ins and sign-outs are logged** (ledger #1824), on stderr beside the access log and
+  in its grammar, whatever `gonk.log.access` says: `gonk:Login` or `gonk:Logout`, the passkey
+  resource, then `door`, `outcome`, `principal` (the passkey IRI, `-` for a refused sign-in),
+  `credential`, `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`,
+  `unenrolled`, `expired`, `idle`). A session token is never written.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
   grant plus its own, and `passkey invite` refuses a grant that adds nothing. The anonymous
   grant includes running and reading PUBLIC scripts; publishing one takes
@@ -201,8 +214,10 @@ good until it expires.
 - **Verification** is `ikigai-passkey`'s: ES256, the exact origin `http://localhost:<port>`,
   RP ID `localhost`, a single-use challenge, user verification required, and a signature
   counter that must not go backwards.
-- ⚠ **The session cookie is set by the page's script, so it is not `HttpOnly`.** The HTTP
-  transport builds every response from a resource representation and cannot add `Set-Cookie`.
+- ⚠ **The session cookie is set by the page's script, so it is not `HttpOnly`** (ledger
+  #1591). The HTTP transport this release builds on (ikigai-web 0.1.63) builds every response
+  from a resource representation and cannot add `Set-Cookie`; the seam that can
+  (`ikigai_web::with_headers`) is not in a published ikigai-web yet.
   What remains is `SameSite=Strict`, a same-origin Content-Security-Policy with no inline
   script, and a session table that lives in memory.
 
@@ -3174,6 +3189,7 @@ gonk.backup.every = "24h"
 # gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
 # gonk.log.access = false             # no access lines (they are ON by default)
 # gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
+# gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long ends, 1..720
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
@@ -3320,7 +3336,7 @@ root at that worktree by hand if that is what you want to read.
 | `gonk/clients.json` | identity → grant name: certificate fingerprints under `clients` (the same shape `ikigai serve quic://…` reads), passkeys under `passkeys` |
 | `gonk/grants.json` | grant name → capability scopes (the same shape as the cli's `grants.json`) |
 | `gonk/invites.json` | outstanding passkey invites, by the SHA-256 of their codes |
-| `gonk/passkeys.log` | one `gonk:PasskeyRevoked` line per `passkey revoke`, append-only, owner-only |
+| `gonk/passkeys.log` | one `gonk:PasskeyRevoked` line per `passkey revoke` and one `gonk:PasskeySessionsEnded` line per `passkey logout --all`, append-only, owner-only; the running server reads what is appended |
 | `gonk/render-rules.ttl` | this deployment's render rules, replacing the shipped table wholesale |
 | `gonk/quic/` | `server.crt`, `server.key`, and one `clients/<name>/` bundle per client |
 | `~/.ikigai/backups/` | the rotation: `gonk-store-<stamp>.nq.gz` and a `.meta.json` sidecar each, owner-only; any other file there is never listed or pruned |

@@ -2797,12 +2797,13 @@ fn require_graph(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
 
 // ----------------------------------------------------------------------------- passkeys
 
-const PASSKEY_OPS: [&str; 6] = [
+const PASSKEY_OPS: [&str; 7] = [
     "register-options",
     "register",
     "login-options",
     "login",
     "logout",
+    "logout-all",
     "session",
 ];
 
@@ -2872,6 +2873,14 @@ impl Endpoint for PasskeyDoor {
                 self.passkeys.logout(content.trim());
                 Ok(json_repr(json!({ "signedOut": true })))
             }
+            // Every session of the caller's own passkey, this one included (ledger #1824).
+            // The token is the proof of whose: a token that is no live session ends nothing.
+            "logout-all" => match self.passkeys.logout_all(content.trim(), now) {
+                Some(ended) => Ok(json_repr(json!({ "signedOut": true, "sessions": ended }))),
+                None => Err(Error::NotFound(
+                    "no live session for that token".to_string(),
+                )),
+            },
             "session" => match self.passkeys.identity(content.trim(), now) {
                 Some(who) => Ok(json_repr(json!({
                     "label": who.enrolled.label,
@@ -2901,8 +2910,9 @@ impl Endpoint for PasskeyDoor {
                 "The WebAuthn ceremonies and the session they open. `register-options` and \
                  `login-options` mint a single-use challenge; `register` enrolls a credential \
                  against a one-time invite; `login` verifies an assertion and opens a session \
-                 whose capability is its grant in gonk/grants.json; `session` and `logout` take \
-                 the session token as the body. Public by design — this is how a caller with no \
+                 whose capability is its grant in gonk/grants.json; `session`, `logout` and \
+                 `logout-all` (every session of that token's passkey) take the session token as \
+                 the body. Public by design — this is how a caller with no \
                  grant gets one — so it declares no capability. The HTTP door refuses a foreign \
                  Host or a cross-site POST before it reaches this resource (crate::admit), \
                  which is what keeps another site from filling the challenge table.",
@@ -2918,7 +2928,8 @@ impl Endpoint for PasskeyDoor {
             .input(
                 arg(
                     "content",
-                    "The step's JSON body, or the session token for `session` and `logout` — \
+                    "The step's JSON body, or the session token for `session`, `logout` and \
+                     `logout-all` — \
                      where a pipe's value lands.",
                 )
                 .optional(),

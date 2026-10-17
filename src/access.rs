@@ -156,6 +156,19 @@ impl Door {
 /// Where a line goes: one call per line, the line without its newline.
 pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Lines to this process's stderr, one `write_all` per line, newline included — what
+/// [`AccessLog::stderr`] writes through, and the passkey sign-in lines beside it
+/// ([`crate::identity::Passkeys::auditing`]).
+pub fn stderr_sink() -> Sink {
+    Arc::new(|line: &str| {
+        let mut out = String::with_capacity(line.len() + 1);
+        out.push_str(line);
+        out.push('\n');
+        // A full or closed stderr must not fail the request it is describing.
+        let _ = std::io::stderr().lock().write_all(out.as_bytes());
+    })
+}
+
 /// One door's access log.
 #[derive(Clone)]
 pub struct AccessLog {
@@ -183,16 +196,7 @@ impl AccessLog {
     /// straight into unbuffered stderr and can issue a write per piece, which lets two doors'
     /// lines interleave mid-line; a whole line in one write cannot.
     pub fn stderr(door: Door) -> AccessLog {
-        AccessLog::to(
-            door,
-            Arc::new(|line: &str| {
-                let mut out = String::with_capacity(line.len() + 1);
-                out.push_str(line);
-                out.push('\n');
-                // A full or closed stderr must not fail the request it is describing.
-                let _ = std::io::stderr().lock().write_all(out.as_bytes());
-            }),
-        )
+        AccessLog::to(door, stderr_sink())
     }
 
     /// Lines to `sink` — a test's collector, or anything else.
