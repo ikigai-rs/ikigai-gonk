@@ -8,13 +8,14 @@
 //! (`urn:layer:{layer}:feed … wait=50`), and it did so on the SAME [`LazyMount`] the passes
 //! use: one QUIC connection. ikigai-quic's door (through 0.1.63) answers one connection's
 //! calls one at a time, so a pass call queued behind the 50-second poll and missed its
-//! 15-second deadline. The mirror tests use a door with no feed, which hid it.
+//! 15-second deadline. The mirror and taker tests use doors with no feed, which hid it.
 //!
 //! The host here is the published `ikigai-layers` behind a real QUIC door (`ikigai-quic`'s
 //! `serve_shared_on`, the door the edge runs), with a scripted feed in front that holds every
 //! read for its `wait` and says when one is in progress, so the test knows the long poll is
 //! being served before it writes. The bindings are started by [`layer::start`], the function
-//! `ikigai-gonk serve` calls. In process, on `127.0.0.1:0` bound by the server itself; nothing
+//! `ikigai-gonk serve` calls, in both roles: the offer role (plasma's gonk) and the take role
+//! (Bobby's gonk, which showed the same symptom). In process, on `127.0.0.1:0` bound by the server itself; nothing
 //! here touches a live service.
 
 use std::net::SocketAddr;
@@ -27,7 +28,8 @@ use ikigai_core::{
     ArgRef, Capability, Description, EndpointSpace, Exact, Fallback, FnEndpoint, Iri, Kernel,
     ReprType, Representation, Request, Space, SystemClock, Verb,
 };
-use ikigai_gonk::layer::{self, Binding};
+use ikigai_gonk::layer::{self, Binding, Door};
+use ikigai_gonk::taker;
 use ikigai_resolve::Resolver;
 use ikigai_store::DurableStore;
 
@@ -35,7 +37,9 @@ const LAYER: &str = "tasks";
 const LEDGER: &str = "crew";
 const TUPLES: &str = "urn:layer:tasks:tuples";
 const FEED: &str = "urn:layer:tasks:feed";
-const US: &str = "urn:collab:participant:plasma-gonk";
+/// The offerer (plasma's gonk) and the taker (Bobby's).
+const OFFERER: &str = "urn:collab:participant:plasma-gonk";
+const TAKER: &str = "urn:collab:participant:bobby-gonk";
 
 const TASK_SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -54,6 +58,24 @@ const TASK_SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
               [ sh:path prov:wasAttributedTo ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
               [ sh:path dcterms:created ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] ,
               [ sh:path ik:seq ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:integer ] .
+
+<urn:example:shape:report> a sh:NodeShape ;
+  sh:targetClass ik:Progress , ik:Release , ik:Handback ;
+  sh:closed true ;
+  sh:ignoredProperties ( rdf:type ) ;
+  sh:property [ sh:path ik:offer ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+              [ sh:path ik:addressedTo ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+              [ sh:path ik:note ; sh:maxCount 1 ; sh:datatype xsd:string ] ,
+              [ sh:path ik:evidence ; sh:nodeKind sh:IRI ] ,
+              [ sh:path prov:wasAttributedTo ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+              [ sh:path dcterms:created ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] ,
+              [ sh:path ik:seq ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:integer ] .
+
+<urn:example:shape:handback> a sh:NodeShape ;
+  sh:targetClass ik:Handback ;
+  sh:closed true ;
+  sh:ignoredProperties ( rdf:type ik:offer ik:addressedTo ik:note prov:wasAttributedTo dcterms:created ik:seq ) ;
+  sh:property [ sh:path ik:evidence ; sh:minCount 1 ; sh:nodeKind sh:IRI ] .
 "#;
 
 const TASK_CONTEXT: &str = r#"{ "@context": {
@@ -61,10 +83,14 @@ const TASK_CONTEXT: &str = r#"{ "@context": {
   "dcterms": "http://purl.org/dc/terms/",
   "prov": "http://www.w3.org/ns/prov#",
   "xsd": "http://www.w3.org/2001/XMLSchema#",
-  "Offer": "ik:Offer",
+  "Offer": "ik:Offer", "Progress": "ik:Progress", "Release": "ik:Release", "Handback": "ik:Handback",
   "title": "dcterms:title",
   "brief": "ik:brief",
+  "note": "ik:note",
   "repository": { "@id": "ik:repository", "@type": "@id" },
+  "offer": { "@id": "ik:offer", "@type": "@id" },
+  "addressedTo": { "@id": "ik:addressedTo", "@type": "@id" },
+  "evidence": { "@id": "ik:evidence", "@type": "@id" },
   "attributedTo": { "@id": "prov:wasAttributedTo", "@type": "@id" },
   "created": { "@id": "dcterms:created", "@type": "xsd:dateTime" }
 } }
@@ -75,27 +101,32 @@ const PARTICIPANTS: &str = r#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix ik: <https://ikigai-rs.dev/ns#> .
 <urn:collab:participant:brian>       a foaf:Person .
 <urn:collab:participant:plasma-gonk> a ik:Machine ; prov:actedOnBehalfOf <urn:collab:participant:brian> .
+<urn:collab:participant:bobby>       a foaf:Person .
+<urn:collab:participant:bobby-gonk>  a ik:Machine ; prov:actedOnBehalfOf <urn:collab:participant:bobby> .
 "#;
 
 const CREW: &str = r#"[[mount]]
 layer = "tasks"
 plasma-gonk = ["read", "feed", "out", "take"]
+bobby-gonk  = ["read", "feed", "out", "take"]
 "#;
 
-/// What the enrollment of `plasma-gonk` gives its certificate at the door.
-fn grant() -> Capability {
+/// What the enrollment of `principal` gives its certificate at the door.
+fn grant(principal: &str) -> Capability {
     let mut scopes: Vec<String> = ["read", "feed", "out", "take"]
         .iter()
         .map(|v| format!("urn:cap:layer:{v}:{LAYER}"))
         .collect();
     scopes.push("urn:cap:collab:read:crew".to_string());
     Capability::scoped(scopes)
-        .with_principal(US)
+        .with_principal(principal)
         .expect("a principal")
 }
 
-/// The layer host, served over QUIC, and what the test reads of it.
+/// The layer host, served over QUIC to the certificate enrolled as `us`, and what the test
+/// reads of it.
 struct Host {
+    us: &'static str,
     addr: SocketAddr,
     certs: tempfile::TempDir,
     /// Feed reads the door is serving right now.
@@ -107,7 +138,7 @@ struct Host {
 }
 
 impl Host {
-    fn start() -> Host {
+    fn start(us: &'static str) -> Host {
         let config = tempfile::tempdir().unwrap();
         let write = |rel: &str, text: &str| {
             let path = config.path().join(rel);
@@ -177,11 +208,11 @@ impl Host {
         ] {
             std::fs::write(certs.path().join(file), pem).unwrap();
         }
-        let minter: ikigai_quic::Minter = Arc::new(|_| {
+        let minter: ikigai_quic::Minter = Arc::new(move |_| {
             Some(ikigai_quic::Session {
-                capability: grant(),
+                capability: grant(us),
                 file_segment: String::new(),
-                principal: Some(US.to_string()),
+                principal: Some(us.to_string()),
             })
         });
         // Bound by the server itself, never bind-and-release (field guide 9h).
@@ -201,6 +232,7 @@ impl Host {
             )
         });
         Host {
+            us,
             addr,
             certs,
             polling,
@@ -210,21 +242,53 @@ impl Host {
         }
     }
 
-    fn binding(&self) -> Binding {
+    fn binding(&self, role: &str) -> Binding {
         let line = format!(
-            "{LAYER} offer quic://{} {} ledger={LEDGER} collab=crew",
+            "{LAYER} {role} quic://{} {} ledger={LEDGER} collab=crew",
             self.addr,
             self.certs.path().display()
         );
         layer::parse(&line, std::path::Path::new("/nowhere")).unwrap()
     }
 
-    /// The pending tuples, read in process as the participant.
-    fn pending(&self) -> usize {
+    /// `principal`'s door to the host in process, not through the QUIC door under test.
+    fn in_process(&self, principal: &'static str) -> Arc<dyn Door> {
+        Arc::new(InProcess {
+            kernel: Arc::clone(&self.layers),
+            principal,
+        })
+    }
+
+    /// The lines of the pending tuples' listing that contain `needle`.
+    fn pending(&self, needle: &str) -> usize {
         let request = Request::new(Verb::Source, Iri::parse(TUPLES).unwrap())
             .with_arg("limit", ArgRef::Inline(b"1000".to_vec()));
-        let answer = block_on(Kernel::issue(&self.layers, request, &grant())).unwrap();
-        String::from_utf8_lossy(&answer.bytes).lines().count()
+        let answer = self.in_process(self.us).call(request).unwrap();
+        String::from_utf8_lossy(&answer.bytes)
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+
+    /// Wait until the door is serving a feed read (the long poll).
+    fn polling(&self) {
+        until(
+            Duration::from_secs(20),
+            "the door is serving the feed's long poll",
+            || self.polling.load(Ordering::SeqCst) > 0,
+        );
+    }
+}
+
+/// A participant at the host, in process: the door's mint of `principal`.
+struct InProcess {
+    kernel: Arc<Kernel>,
+    principal: &'static str,
+}
+
+impl Door for InProcess {
+    fn call(&self, request: Request) -> Result<Representation, ikigai_core::Error> {
+        block_on(Kernel::issue(&self.kernel, request, &grant(self.principal)))
     }
 }
 
@@ -246,31 +310,77 @@ fn until(within: Duration, what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// ★ The reproduction. The bindings are started the way `serve` starts them; once the door is
-/// serving the feed's long poll, an item is filed. Before: every pass call queued behind the
-/// poll on the one connection and failed at the 15 s deadline, so no offer appeared. After:
-/// the feed has a connection of its own and the offer appears at once.
+/// The deadline a pass's effect must show within: under the layer door's call deadline, since a
+/// pass call queued behind the poll fails AT it.
+fn within() -> Duration {
+    layer::CALL_TIMEOUT - Duration::from_secs(5)
+}
+
+/// ★ The reproduction, OFFER role. The bindings are started the way `serve` starts them; once
+/// the door is serving the feed's long poll, an item is filed. Before: every pass call queued
+/// behind the poll on the one connection and failed at the 15 s deadline (`reading
+/// urn:layer:tasks:context: timeout`), so no offer appeared. After: the feed has a connection
+/// of its own and the offer appears at once.
 #[test]
-fn a_pass_is_not_held_behind_the_feeds_long_poll() {
-    let host = Host::start();
-    let bindings = vec![host.binding()];
+fn an_offer_pass_is_not_held_behind_the_feeds_long_poll() {
+    let host = Host::start(OFFERER);
+    let bindings = vec![host.binding("offer")];
     let mounted = layer::mount(&bindings);
     let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
     layer::start(&bindings, &mounted, &hub).expect("the bindings start");
 
-    until(
-        Duration::from_secs(20),
-        "the door is serving the feed's long poll",
-        || host.polling.load(Ordering::SeqCst) > 0,
-    );
+    host.polling();
     file(&hub, "Offer me\n\nFiled while the feed waits.");
-    // Under the layer door's call deadline: a pass call queued behind the poll fails AT it.
-    let within = layer::CALL_TIMEOUT - Duration::from_secs(5);
-    let started = Instant::now();
-    until(within, "an offer in the layer", || host.pending() > 0);
+    until(within(), "an offer in the layer", || {
+        host.pending(":offer:") > 0
+    });
     assert!(
         host.polling.load(Ordering::SeqCst) > 0,
-        "the offer came while the feed's long poll was still held ({:?} after the write)",
-        started.elapsed()
+        "the offer came while the feed's long poll was still held"
+    );
+}
+
+/// ★ The same, TAKE role (seen on Bobby's gonk, 2026-10-16: the definition read, the context
+/// timed out, nothing since). An offer is dropped by the offerer and taken by hand; once the
+/// door is serving the taker's feed, the take files the item, and the taker's pass owes the
+/// offerer a `Progress`. Before: that pass queued behind the poll and failed at the deadline.
+#[test]
+fn a_take_pass_is_not_held_behind_the_feeds_long_poll() {
+    let host = Host::start(TAKER);
+    let offer = format!("urn:layer:{LAYER}:offer:held-behind-the-feed");
+    host.in_process(OFFERER)
+        .call(
+            Request::new(Verb::Sink, Iri::parse(TUPLES).unwrap()).with_arg(
+                "content",
+                ArgRef::Inline(
+                    format!(
+                        "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+                         @prefix dcterms: <http://purl.org/dc/terms/> .\n\
+                         <{offer}> a ik:Offer ; dcterms:title \"Take me\" ; \
+                         ik:brief \"Taken while the feed waits.\" .\n"
+                    )
+                    .into_bytes(),
+                ),
+            ),
+        )
+        .expect("the offerer drops an offer");
+    let binding = host.binding("take");
+    let bindings = vec![binding.clone()];
+    let mounted = layer::mount(&bindings);
+    let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
+    layer::start(&bindings, &mounted, &hub).expect("the bindings start");
+
+    host.polling();
+    // The take by hand, in process (the command goes through the running gonk's socket): it
+    // writes the ledger, and the write kicks the taker's pass.
+    let ledger = taker::hub_ledger(&binding, Arc::clone(&hub)).unwrap();
+    let took = taker::take(&binding, host.in_process(TAKER), &ledger, &offer).expect("the take");
+    assert!(matches!(took, taker::Took::Filed(_)), "{took:?}");
+    until(within(), "the taker's Progress in the layer", || {
+        host.pending(":progress:") > 0
+    });
+    assert!(
+        host.polling.load(Ordering::SeqCst) > 0,
+        "the report came while the feed's long poll was still held"
     );
 }
