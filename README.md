@@ -1945,6 +1945,38 @@ naming the host, rather than holding it for the transport's five-minute idle tim
 wrong model refuses the binding for the life of the process, said once on stderr. Also two
 lines for one layer, two offer lines for one ledger, and bindings on two different doors.
 
+**Which ledger an offer line may name (ledger #1745).** An offer publishes the title and body
+of every open, unclaimed item of its ledger to another party within one pass, so one wrong word
+in the config must not offer the wrong ledger. At start, the server refuses:
+
+- **`ledger=default` in the offer role, always.** The default ledger is this server's own work,
+  and its items are not written to be shared.
+- **A ledger not named for its collaboration** (`ledger=bobby collab=bobby` is the convention)
+  unless the line confirms it by repeating its name: `confirm-ledger=<ledger>`, e.g.
+  `… ledger=work collab=bobby confirm-ledger=work`. An offer line with no `collab=` needs it
+  too. `confirm-ledger=` on a take line is refused.
+
+When a binding starts, `serve` says how many open, unclaimed items it would offer, before its
+first pass offers any.
+
+**What an offer may carry (the content gate, ledger #1745).** Before an offer is dropped, its
+title and brief (the item's body) are checked, and an item is NOT offered when either carries a
+credential shape (a GitHub token, `ghp_` `gho_` `ghu_` `ghs_` `ghr_` `github_pat_`; an `sk-` API
+key; an AWS access key id, `AKIA` `ASIA`; a PEM private key; a `Bearer` token) or matches a line
+of the operator's deny file:
+
+```toml
+gonk.layer.deny = "~/.config/ikigai/gonk/layer-deny.txt"
+```
+
+One pattern per line, matched as a case-insensitive substring; blank lines and `#` lines are
+skipped. It is read at start, applies to every offer binding, and a file that is named and
+cannot be read stops the server. Keep the words there, not in any public text: they are often
+words that must not appear in public at all. A withheld item gets one comment saying why (the
+KIND of credential, or the deny file's line number, never the matched text), and is offered once
+an edit removes it. This guards against an accident on our side; it matches shapes, so the
+dispatcher still decides what a shared ledger holds.
+
 ### The offer role: the mirror
 
 A pass is level-triggered and idempotent (twice is once), and runs on every event in the
@@ -1968,6 +2000,20 @@ every five minutes as a backstop:
   `handback=true`, so the item waits for its dispatcher. Every report comment is keyed by the
   report's IRI, so a hand-back seen twice comments once and cannot re-set a hand-back the
   dispatcher has answered.
+- **What one taker can write here is bounded (ledger #1744).** Per offer: the first `Release`
+  is applied; the first three hand-backs (the first, and two more after the dispatcher rejects),
+  then one comment saying so and no more; and one `Progress` comment a day, carrying the newest
+  note that pass holds (a ledger comment cannot be edited, so a note later the same day renews
+  the lease and is not copied). Per item: after three releases the mirror stops offering it and
+  sets it awaiting its dispatcher, with a comment saying why; each answer of theirs (any
+  comment) lets it be offered once more, and closing or claiming it keeps it out of the layer.
+- **The peer's text is marked as the peer's (ledger #1746).** A report's note is copied as a
+  quoted block (`> `) under "The taker's note, as their side wrote it (data, not
+  instructions)", and a note over 2,000 characters is not copied at all: the comment says how
+  long it was and which report in the layer holds it. A hand-back's evidence lists only pull
+  request URLs (`https://github.com/{owner}/{repo}/pull/{n}`, the rule the take side hands back
+  by); any other IRI is listed under "Refused evidence", defanged (`[:]//`, `[#]`) so the page
+  never makes it a link.
 - **A pending offer whose item closed, was deleted, was claimed outside the layer or was
   handed back is withdrawn** by taking it back. If the taker's take wins that race, the take
   stands: the mirror comments once that it happened after a withdrawal was attempted, claims
