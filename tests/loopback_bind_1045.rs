@@ -210,7 +210,9 @@ fn a_scratch_gonk_bound_on_127_0_0_2_is_reachable_there() {
         let (status, body) = raw(gonk.http, "GET", target, &[("Host", &host)]);
         assert_eq!(status, 200, "GET {target} under Host {host}: {body}");
     }
-    // A write from its own page, labeled the way a browser labels it.
+    // A write from its own page, labeled the way a browser labels it: past the Host and Origin
+    // checks, and refused by the GRANT, because an anonymous caller only reads (ledger #1687)
+    // and no passkey can sign in on this bind.
     let origin = format!("http://{host}");
     let (status, body) = raw(
         gonk.http,
@@ -222,10 +224,11 @@ fn a_scratch_gonk_bound_on_127_0_0_2_is_reachable_there() {
             ("Sec-Fetch-Site", "same-origin"),
         ],
     );
-    assert_eq!(status, 200, "a same-origin write: {body}");
+    assert_eq!(status, 403, "a same-origin anonymous write: {body}");
+    assert!(body.contains("capability does not grant"), "{body}");
     let (status, body) = raw(gonk.http, "GET", "/iki/ledger/items", &[("Host", &host)]);
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains("Filed on another loopback IP"), "{body}");
+    assert!(!body.contains("Filed on another loopback IP"), "{body}");
 
     // A foreign spelling reaching the same socket is still misdirected.
     for foreign in [format!("127.0.0.3:{port}"), format!("evil.example:{port}")] {
