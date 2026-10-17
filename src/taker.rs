@@ -28,7 +28,7 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 use ikigai_core::{ArgRef, Capability, Error, Kernel, Request, Verb};
-use ikigai_ledger::json::{Item, ItemsDocument};
+use ikigai_ledger::json::Item;
 use ikigai_resolve::Resolver;
 
 use crate::layer::{self, Binding, Door, Role};
@@ -151,12 +151,20 @@ pub fn take(
     let client = LayerClient::new(door, &binding.layer);
     client.ready()?;
     let key = filed_key(&binding.layer, offer);
-    let items = keyed_items(binding, ledger)?;
+    let (items, complete) = keyed_items(binding, ledger)?;
     if let Some(item) = items
         .iter()
         .find(|i| i.key.as_deref() == Some(key.as_str()))
     {
         return Ok(Took::Already(item.number));
+    }
+    // A torn listing's items are real, so one found there is filed; one missing from it may
+    // be filed too, and a take is not undone, so nothing is taken on it (ledger #1742).
+    if !complete {
+        return Err(format!(
+            "{TORN}, so whether <{offer}> is filed here already is not known: nothing was \
+             taken; run the take again"
+        ));
     }
     // ★ Read before taking (ledger #1336): the host's take is by subject alone, with no
     // condition on what the tuple is, so a report's IRI given here by mistake was consumed and
@@ -274,12 +282,19 @@ fn ledger_request(binding: &Binding, verb: Verb, resource: &str) -> Request {
     )
 }
 
-/// The bound ledger's items filed from this layer (keyed `layer:{layer}:`), open and closed.
-fn keyed_items(binding: &Binding, ledger: &LedgerIssue) -> Result<Vec<Item>, String> {
+/// The bound ledger's items filed from this layer (keyed `layer:{layer}:`), open and closed,
+/// each once, and whether the listing was the whole set.
+///
+/// ★ Read as the mirror reads its ledger ([`mirror::collect_items`], ledger #1742): the ledger
+/// reads a page and counts the set in two reads, so an append landing between them tears the
+/// listing, and, newest first, the next offset holds an item already read. This loop paged by
+/// rows held, so it ended, but it kept every row: the torn listing held that item twice, and a
+/// pass reported on it twice. Now each item is kept once, a listing still growing after
+/// [`mirror::MAX_PAGES`] pages is refused, and a torn one ends marked partial, for the caller
+/// to act on only when it is whole: the append that tore it kicks the pass that reads it whole.
+fn keyed_items(binding: &Binding, ledger: &LedgerIssue) -> Result<(Vec<Item>, bool), String> {
     let prefix = format!("layer:{}:", binding.layer);
-    let mut items: Vec<Item> = Vec::new();
-    let mut offset = 0usize;
-    loop {
+    let (items, complete) = mirror::collect_items(|offset| {
         let bytes = ledger(
             ledger_request(binding, Verb::Source, "items")
                 .with_arg("status", inline("all"))
@@ -287,21 +302,18 @@ fn keyed_items(binding: &Binding, ledger: &LedgerIssue) -> Result<Vec<Item>, Str
                 .with_arg("offset", inline(&offset.to_string()))
                 .with_arg("as", inline("application/json")),
         )?;
-        let page: ItemsDocument = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("the ledger's items are not its JSON document: {e}"))?;
-        let got = page.items.len();
-        offset += got;
-        let total = page.total.unwrap_or(page.count);
-        items.extend(
-            page.items
-                .into_iter()
-                .filter(|i| i.key.as_deref().is_some_and(|k| k.starts_with(&prefix))),
-        );
-        if got == 0 || offset >= total {
-            return Ok(items);
-        }
-    }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("the ledger's items are not its JSON document: {e}"))
+    })?;
+    let filed = items
+        .into_iter()
+        .filter(|i| i.key.as_deref().is_some_and(|k| k.starts_with(&prefix)))
+        .collect();
+    Ok((filed, complete))
 }
+
+/// What a caller says when [`keyed_items`] was torn by a write landing while it was read.
+const TORN: &str = "the ledger's listing was torn by a write landing while it was read";
 
 /// The offer an item filed from `layer` is about.
 fn offer_of(item: &Item, layer: &str) -> Option<String> {
@@ -436,7 +448,15 @@ impl Taker {
         let mut report = mirror::Report::default();
         let pending = self.client.pending()?;
         let taken = self.client.receipts()?;
-        let items = keyed_items(&self.binding, &self.ledger)?;
+        let (items, complete) = keyed_items(&self.binding, &self.ledger)?;
+        // Reports follow a whole listing only (ledger #1742): the write that tore this one
+        // kicks the pass that reads it whole. The offers are still announced.
+        let items = if complete {
+            items
+        } else {
+            report.failed(format!("{TORN} (reports wait a pass)"));
+            Vec::new()
+        };
         // Who we are is what the door says (`urn:layers:me`), as for a take, and only that
         // (ledger #1336, #1328): a host that does not serve it is named in the report. Unknown,
         // nothing is reported this pass, and the offers are still announced.
@@ -643,5 +663,125 @@ fn run_passes(taker: &Taker, kicks: &Receiver<()>) {
         if let Some(line) = problems.after(said, std::time::Instant::now(), now_millis()) {
             log(&line);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LAYER: &str = "tasks";
+
+    fn binding() -> Binding {
+        Binding {
+            layer: LAYER.to_string(),
+            role: Role::Take,
+            target: crate::mount::Target::Quic {
+                authority: "127.0.0.1:1".to_string(),
+                certs: std::path::PathBuf::from("/nowhere"),
+            },
+            ledger: "default".to_string(),
+            collab: None,
+            deny: None,
+        }
+    }
+
+    /// One page of the ledger's items, each filed from [`LAYER`], with `total` as the count.
+    fn page(numbers: &[i64], total: usize, offset: usize) -> Vec<u8> {
+        let items: Vec<serde_json::Value> = numbers
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "number": n, "display": format!("#{n}"), "iri": format!("urn:item:{n}"),
+                    "kind": null, "title": "t", "body": "b", "status": "open",
+                    "closed_reason": null, "priority": null, "deferred": false, "labels": [],
+                    "about": [], "key": format!("layer:{LAYER}:offer:{n}"), "author": null,
+                    "revision": null, "claim": null, "created": "", "modified": "", "links": [],
+                    "comments": [], "defects": [], "state": null, "awaiting": null
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({
+            "schema": ikigai_ledger::json::SCHEMA, "ledger": "default", "count": items.len(),
+            "total": total, "offset": offset, "items": items, "unreadable": []
+        }))
+        .unwrap()
+    }
+
+    fn offset_of(request: &Request) -> usize {
+        match request.args.get("offset") {
+            Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).unwrap().parse().unwrap(),
+            other => panic!("no inline offset: {other:?}"),
+        }
+    }
+
+    /// A ledger whose pages are `pages(offset)`, counting how many it was asked for; past
+    /// `MAX_PAGES` asks the listing never ends, and the test says so rather than hanging.
+    fn ledger(
+        asked: Arc<AtomicUsize>,
+        pages: impl Fn(usize) -> Vec<u8> + Send + Sync + 'static,
+    ) -> LedgerIssue {
+        Arc::new(move |request: Request| {
+            let n = asked.fetch_add(1, Ordering::SeqCst) + 1;
+            let offset = offset_of(&request);
+            assert!(
+                n <= mirror::MAX_PAGES + 1,
+                "asked for offset {offset} {n} times: the listing never ends"
+            );
+            Ok(pages(offset))
+        })
+    }
+
+    fn numbers(items: &[Item]) -> Vec<i64> {
+        items.iter().map(|i| i.number).collect()
+    }
+
+    /// ★ Ledger #1742: an append landing between the ledger's read of a page and its count
+    /// tears the listing (ikigai-ledger reads the two in separate snapshots, ledger #1741): the
+    /// page holds the one older item, the total says two, and, newest first, the next offset
+    /// holds that same item again. The listing held it twice, so a pass dropped its report
+    /// twice and said so twice (the host answers the second drop as a replay of the first).
+    #[test]
+    fn a_torn_listing_holds_each_item_once() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let ledger = ledger(Arc::clone(&asked), |offset| page(&[1], 2, offset));
+        let (items, complete) = keyed_items(&binding(), &ledger).unwrap();
+        assert_eq!(numbers(&items), [1]);
+        assert!(!complete, "a torn listing is not the whole set");
+    }
+
+    /// Pages that overlap are collected once each, and a listing that reaches its total is
+    /// the whole set; an item filed from another layer is not this layer's.
+    #[test]
+    fn a_whole_listing_is_this_layers_items_once_each() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let ledger = ledger(Arc::clone(&asked), |offset| match offset {
+            0 => page(&[3, 2], 3, 0),
+            _ => page(&[2, 1], 3, offset),
+        });
+        let (items, complete) = keyed_items(&binding(), &ledger).unwrap();
+        assert_eq!(numbers(&items), [3, 2, 1]);
+        assert!(complete);
+        let other = Binding {
+            layer: "other".to_string(),
+            ..binding()
+        };
+        let (items, complete) = keyed_items(&other, &ledger).unwrap();
+        assert!(items.is_empty() && complete, "{:?}", numbers(&items));
+    }
+
+    /// A ledger that grows faster than it is paged (every page full, the total always ahead)
+    /// is refused after a bound, and the refusal says so, rather than followed for ever.
+    #[test]
+    fn a_listing_that_never_ends_is_refused_after_a_bound() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let ledger = ledger(Arc::clone(&asked), |offset| {
+            let n = offset as i64 + 1;
+            page(&[n], offset + 2, offset)
+        });
+        let e = keyed_items(&binding(), &ledger).unwrap_err();
+        assert!(e.contains("pages"), "{e}");
+        assert_eq!(asked.load(Ordering::SeqCst), mirror::MAX_PAGES);
     }
 }
