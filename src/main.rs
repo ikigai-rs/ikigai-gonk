@@ -105,6 +105,11 @@ fn main() {
             by_label,
             flags,
         } => passkey_revoke(&key, by_label, &flags),
+        Command::PasskeyLogoutAll {
+            key,
+            by_label,
+            flags,
+        } => passkey_logout_all(&key, by_label, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -631,7 +636,13 @@ fn serve(flags: &config::Flags) -> ! {
             .local_addr()
             .map(|a| a.port())
             .unwrap_or(settings.http.port());
-        let passkeys = Arc::new(Passkeys::new(layout.clone(), port));
+        // Sign-ins and sign-outs are written whatever `gonk.log.access` says: they are rare,
+        // and they are the audit of who held a session (ledger #1824).
+        let passkeys = Arc::new(
+            Passkeys::new(layout.clone(), port)
+                .with_idle_seconds(settings.session_idle_seconds)
+                .auditing(ikigai_gonk::access::stderr_sink()),
+        );
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: settings.http_ledgers.clone(),
@@ -669,11 +680,13 @@ fn serve(flags: &config::Flags) -> ! {
         // passkeys cannot work there.
         let bound = std::net::SocketAddr::new(settings.http.ip(), port);
         eprintln!(
-            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s); anonymous SPARQL budget {} ms",
+            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s), sessions {} h or {} min idle; anonymous SPARQL budget {} ms",
             doors::http_url(bound),
             settings.http,
             settings.http_ledgers.join(", "),
             passkeys.enrolled_count(),
+            identity::SESSION_SECONDS / 3600,
+            passkeys.idle_seconds() / 60,
             settings.anonymous_sparql_budget_ms
         );
         if let Some(caveat) = doors::passkey_caveat(bound) {
@@ -1453,8 +1466,8 @@ fn passkey_revoke(key: &str, by_label: bool, flags: &config::Flags) {
         .unwrap_or(0);
     let revoked = identity::revoke(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
     println!(
-        "revoked passkey `{}` ({}, grant `{}`) from {} — refused from its next request, live \
-         sessions included",
+        "revoked passkey `{}` ({}, grant `{}`) from {} — refused from its next request, and its \
+         live sessions are deleted",
         revoked.label,
         identity::passkey_iri(&revoked.credential_id),
         revoked.grant,
@@ -1463,6 +1476,34 @@ fn passkey_revoke(key: &str, by_label: bool, flags: &config::Flags) {
     println!(
         "  recorded in {}. grants.json is unchanged: a grant name may be shared by other \
          passkeys and certificates",
+        identity::audit_log(&layout).display()
+    );
+}
+
+/// `ikigai-gonk passkey logout --all <label> | --credential <id>` (ledger #1824): end every
+/// session of one passkey, and leave it enrolled.
+fn passkey_logout_all(key: &str, by_label: bool, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ended = identity::end_sessions(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
+    println!(
+        "every session of passkey `{}` ({}, grant `{}`) ends at the server's next signed-in \
+         request or sign-in; the passkey stays enrolled and can sign in again",
+        ended.label,
+        identity::passkey_iri(&ended.credential_id),
+        ended.grant,
+    );
+    println!(
+        "  recorded in {}, which the running server reads",
         identity::audit_log(&layout).display()
     );
 }

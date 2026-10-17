@@ -38,13 +38,38 @@
 //! key for the exact origin `http://localhost:<port>` and RP ID `localhost`, with user
 //! verification REQUIRED (an identity that grants authority is a biometric or a PIN, not a
 //! tap). Success mints a 256-bit session token, kept only as its SHA-256, for
-//! [`SESSION_SECONDS`]. Sessions live in memory: a restart signs everyone out, which is the
-//! safe direction to be wrong in.
+//! [`SESSION_SECONDS`] at most, and for [`DEFAULT_IDLE_SECONDS`] (`gonk.http.session_idle_minutes`)
+//! after the last request that carried it. Sessions live in memory: a restart signs everyone
+//! out, which is the safe direction to be wrong in.
 //!
-//! ⚠ **The cookie is set by the page's script, not by the server, so it is not HttpOnly.**
-//! `ikigai-web` builds every response from a kernel representation and has no way to add a
-//! `Set-Cookie` header. The mitigations are the ones that remain: `SameSite=Strict`, a
-//! strict same-origin CSP with no inline script, and a token that dies with the process.
+//! # Ending a session (ledger [#1824](http://localhost:1062/l/default/item/1824))
+//!
+//! A session caches AUTHENTICATION only: every request re-reads `clients.json` and
+//! `grants.json`, so a narrowed grant takes effect at the next request. A REVOKED credential
+//! goes further: its sessions are DELETED, never just refused, so nothing done to the files
+//! afterwards (enrolling the same credential again, restoring `clients.json` from a backup)
+//! brings one back. A fresh sign-in is the only way to a new session.
+//!
+//! `passkey revoke` runs in another process and cannot reach this table, so the cross-process
+//! channel is the file it already writes: `gonk/passkeys.log`. The server tails it
+//! ([`Passkeys::identity`] and [`Passkeys::login`] read what was appended since they last
+//! looked), and a `gonk:PasskeyRevoked` or `gonk:PasskeySessionsEnded` line ends every session
+//! of the credential it names. `passkey logout --all` writes the second; `/auth/logout-all`
+//! does the same for the signed-in caller's own credential. And a request whose credential is
+//! no longer enrolled deletes its session there and then, so a revoke whose log line could not
+//! be written still ends it at the next request.
+//!
+//! Every sign-in, sign-out and session ending writes one line in the access log's grammar
+//! ([`crate::access`]): `gonk:Login` or `gonk:Logout`, the passkey resource, then `door`,
+//! `outcome`, `principal`, `credential`, `sessions` and (on a logout) `why`. Never a token.
+//!
+//! ⚠ **The cookie is set by the page's script, not by the server, so it is not HttpOnly**
+//! ([#1591](http://localhost:1062/l/default/item/1591)). The `ikigai-web` release this server
+//! builds on (0.1.63) builds every response from a kernel representation and has no way to
+//! add a `Set-Cookie` header; `ikigai_web::with_headers` (ikigai-rs/ikigai-cli PR 516) is the
+//! seam, and it is not in a published release yet. The mitigations are the ones that remain:
+//! `SameSite=Strict`, a strict same-origin CSP with no inline script, and a token that dies
+//! with the process.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -65,8 +90,16 @@ pub const RP_ID: &str = "localhost";
 /// The cookie the page stores its session token in.
 pub const SESSION_COOKIE: &str = "gonk_session";
 
-/// How long a session lasts.
+/// How long a session lasts at most, however busy it is (the absolute bound).
 pub const SESSION_SECONDS: u64 = 12 * 60 * 60;
+
+/// How long a session lasts with no request carrying it (the idle bound), when no
+/// `gonk.http.session_idle_minutes` line says otherwise: one hour.
+///
+/// ⚠ An open gonk page polls (the Queue badge, the Layers count), and a poll carries the
+/// cookie, so a tab left open keeps its session alive to the absolute bound. The idle bound
+/// ends the session of a closed tab or a sleeping machine.
+pub const DEFAULT_IDLE_SECONDS: u64 = 60 * 60;
 
 /// How long a challenge may wait for its answer.
 pub const CHALLENGE_SECONDS: u64 = 5 * 60;
@@ -219,12 +252,74 @@ pub fn checked_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, S
 /// command can never be the edit that leaves the doors reading garbage.
 ///
 /// Takes effect at the passkey's next request: the HTTP door re-reads `clients.json` for every
-/// request that carries a session ([`Passkeys::identity`]), so a live session ends with it.
+/// request that carries a session ([`Passkeys::identity`]), and the server, reading this
+/// command's [`REVOKED`] line, DELETES every session of the passkey, so enrolling the same
+/// credential again or restoring the file cannot revive one (ledger #1824).
 /// `grants.json` is left alone, as `client remove` leaves it: a grant name may be shared.
 ///
 /// The audit line is written AFTER the change, so it never claims a revocation that did not
 /// happen; if it cannot be written the change stands and the error says so.
 pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
+    let target = pick(layout, which)?;
+    let mut doc = quic::read_object(&layout.clients_json())?;
+    let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
+        return Err("`passkeys` in clients.json must be an object".to_string());
+    };
+    passkeys.remove(&target.credential_id);
+    doc.insert("passkeys".to_string(), Value::Object(passkeys));
+    let text = quic::pretty(&Value::Object(doc))?;
+    quic::parse_enrolment(&text)?;
+    quic::write_private(&layout.clients_json(), &text)?;
+    record(layout, REVOKED, &target, now_ms).map_err(|e| {
+        format!(
+            "passkey `{}` WAS revoked, but its audit line could not be written to {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        )
+    })?;
+    Ok(target)
+}
+
+/// The class of the [`audit_log`] line [`revoke`] writes.
+pub const REVOKED: &str = "gonk:PasskeyRevoked";
+
+/// The class of the [`audit_log`] line [`end_sessions`] writes.
+pub const SESSIONS_ENDED: &str = "gonk:PasskeySessionsEnded";
+
+/// End every session of ONE passkey without revoking it — what `ikigai-gonk passkey logout
+/// --all` runs (ledger [#1824](http://localhost:1062/l/default/item/1824)). Returns the passkey.
+///
+/// The sessions live in the server's memory and this runs in another process, so it appends a
+/// [`SESSIONS_ENDED`] line to [`audit_log`] and the server ends them when it next reads the
+/// log: at its next request that carries any session, or its next sign-in, whichever comes
+/// first (see the module docs). `clients.json` is not written, so the passkey can sign in again
+/// at once. A passkey is named exactly as [`revoke`] names one, and refused the same way.
+pub fn end_sessions(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
+    let target = pick(layout, which)?;
+    record(layout, SESSIONS_ENDED, &target, now_ms).map_err(|e| {
+        format!(
+            "nothing was ended: the line for passkey `{}` could not be written to {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        )
+    })?;
+    Ok(target)
+}
+
+/// Append one `class` line naming `target` to [`audit_log`].
+fn record(layout: &Layout, class: &str, target: &Enrolled, now_ms: u64) -> std::io::Result<()> {
+    let line = format!(
+        "{} {class} {} label={} grant={}\n",
+        crate::backup::stamp_iso_ms(now_ms),
+        passkey_iri(&target.credential_id),
+        encoded(&target.label),
+        encoded(&target.grant),
+    );
+    append_line(&audit_log(layout), &line)
+}
+
+/// The ONE enrolled passkey `which` names, from a file that is whole ([`checked_passkeys`]).
+fn pick(layout: &Layout, which: Which<'_>) -> Result<Enrolled, String> {
     let enrolled = checked_passkeys(layout)?;
     let matches: Vec<&Enrolled> = enrolled
         .values()
@@ -256,29 +351,6 @@ pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled
             ));
         }
     };
-    let mut doc = quic::read_object(&layout.clients_json())?;
-    let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
-        return Err("`passkeys` in clients.json must be an object".to_string());
-    };
-    passkeys.remove(&target.credential_id);
-    doc.insert("passkeys".to_string(), Value::Object(passkeys));
-    let text = quic::pretty(&Value::Object(doc))?;
-    quic::parse_enrolment(&text)?;
-    quic::write_private(&layout.clients_json(), &text)?;
-    let line = format!(
-        "{} gonk:PasskeyRevoked {} label={} grant={}\n",
-        crate::backup::stamp_iso_ms(now_ms),
-        passkey_iri(&target.credential_id),
-        encoded(&target.label),
-        encoded(&target.grant),
-    );
-    append_line(&audit_log(layout), &line).map_err(|e| {
-        format!(
-            "passkey `{}` WAS revoked, but its audit line could not be written to {}: {e}",
-            target.label,
-            audit_log(layout).display()
-        )
-    })?;
     Ok(target)
 }
 
@@ -387,7 +459,23 @@ struct Pending {
 
 struct Session {
     credential_id: String,
+    /// The absolute end, [`SESSION_SECONDS`] after the sign-in.
     expires: u64,
+    /// The last request that carried this session, for the idle bound.
+    last_seen: u64,
+}
+
+impl Session {
+    /// Why this session is over at `now`, or `None` while it is live.
+    fn over(&self, now: u64, idle_seconds: u64) -> Option<&'static str> {
+        if self.expires <= now {
+            Some("expired")
+        } else if self.last_seen.saturating_add(idle_seconds) <= now {
+            Some("idle")
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -395,12 +483,48 @@ struct State {
     challenges: HashMap<String, Pending>,
     /// Keyed by the SHA-256 of the token — the token itself is never held.
     sessions: HashMap<String, Session>,
+    /// How many bytes of [`audit_log`] this server has read: the lines past it are news.
+    log_seen: u64,
+}
+
+impl State {
+    /// Delete every session of `credential_id`; how many there were.
+    fn end_sessions(&mut self, credential_id: &str) -> usize {
+        let before = self.sessions.len();
+        self.sessions
+            .retain(|_, s| s.credential_id != credential_id);
+        before - self.sessions.len()
+    }
+}
+
+/// The most of [`audit_log`] one read takes, in bytes. A larger backlog is read over the next
+/// requests, a whole line at a time, so a huge file costs a bounded read per request.
+const LOG_READ_MAX: u64 = 1 << 20;
+
+/// One sign-in or sign-out line's fields ([`Passkeys::audit`]).
+struct AuditLine<'a> {
+    /// The passkey resource's last segment: `login`, `logout`, `logout-all`, `session`.
+    op: &'a str,
+    /// `http`, or `cli` for a line read from [`audit_log`].
+    door: &'a str,
+    /// `ok`, or the refusal's kind.
+    outcome: &'a str,
+    /// The credential id, as enrolled or as a caller sent it.
+    credential: Option<&'a str>,
+    /// Whether `credential` was authenticated, so its IRI is the line's principal.
+    authenticated: bool,
+    /// How many sessions the event opened or ended.
+    sessions: usize,
+    /// Why a session ended.
+    why: Option<&'a str>,
 }
 
 /// The HTTP door's passkey relying party and session table.
 pub struct Passkeys {
     layout: Layout,
     origin: String,
+    idle_seconds: u64,
+    audit: Option<crate::access::Sink>,
     state: Mutex<State>,
 }
 
@@ -411,18 +535,155 @@ pub struct Identity {
     pub enrolled: Enrolled,
     /// The grant's scopes, resolved now.
     pub scopes: Vec<String>,
-    /// When the session ends, in seconds since the epoch.
+    /// When the session ends at the latest (the absolute bound), in seconds since the epoch.
+    /// It ends sooner if no request carries it for the idle bound.
     pub expires: u64,
 }
 
 impl Passkeys {
-    /// A relying party for the page served at `http://localhost:{port}`.
+    /// A relying party for the page served at `http://localhost:{port}`, with the
+    /// [`DEFAULT_IDLE_SECONDS`] idle bound and no audit lines.
+    ///
+    /// Lines already in [`audit_log`] are history: no session existed when they were written,
+    /// so this server reads only what is appended after it starts.
     pub fn new(layout: Layout, port: u16) -> Passkeys {
+        let log_seen = std::fs::metadata(audit_log(&layout))
+            .map(|m| m.len())
+            .unwrap_or(0);
         Passkeys {
             layout,
             origin: format!("http://localhost:{port}"),
-            state: Mutex::new(State::default()),
+            idle_seconds: DEFAULT_IDLE_SECONDS,
+            audit: None,
+            state: Mutex::new(State {
+                log_seen,
+                ..State::default()
+            }),
         }
+    }
+
+    /// The same relying party with an idle bound of `seconds` (`gonk.http.session_idle_minutes`).
+    pub fn with_idle_seconds(mut self, seconds: u64) -> Passkeys {
+        self.idle_seconds = seconds;
+        self
+    }
+
+    /// The same relying party, writing its sign-in and sign-out lines to `sink` (one call per
+    /// line, no newline): what `main` points at stderr, beside the access log.
+    pub fn auditing(mut self, sink: crate::access::Sink) -> Passkeys {
+        self.audit = Some(sink);
+        self
+    }
+
+    /// The idle bound, in seconds.
+    pub fn idle_seconds(&self) -> u64 {
+        self.idle_seconds
+    }
+
+    /// Write one `gonk:Login` / `gonk:Logout` line, in the access log's grammar: the passkey
+    /// resource `op` names, then `door`, `outcome`, `principal`, `credential`, `sessions`, and
+    /// for a logout `why`. `credential` is base64url when it came from an enrollment and is
+    /// encoded and cut when a caller sent it. Never a token.
+    fn audit(&self, class: &str, line: AuditLine<'_>) {
+        let Some(sink) = &self.audit else {
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let credential: String = match line.credential {
+            Some(id) => encoded(id).chars().take(crate::access::MAX_FIELD).collect(),
+            None => "-".to_string(),
+        };
+        // The principal is named only once the credential is authenticated: a refused sign-in
+        // names the credential it CLAIMED, and nobody.
+        let principal = if line.authenticated && line.credential.is_some() {
+            passkey_iri(&credential)
+        } else {
+            "-".to_string()
+        };
+        let mut text = format!(
+            "{} {class} urn:iki:gonk:passkey:{} door={} outcome={} principal={principal} \
+             credential={credential} sessions={}",
+            crate::backup::stamp_iso_ms(now_ms),
+            line.op,
+            line.door,
+            line.outcome,
+            line.sessions,
+        );
+        if let Some(why) = line.why {
+            text.push_str(" why=");
+            text.push_str(why);
+        }
+        sink(&text);
+    }
+
+    /// Read what was appended to [`audit_log`] since the last read, and end every session of a
+    /// credential a [`REVOKED`] or [`SESSIONS_ENDED`] line names. A file shorter than what was
+    /// read was replaced or cut: it is read again from the start, which can only end sessions.
+    fn read_log(&self, state: &mut State) {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = audit_log(&self.layout);
+        let Ok(len) = std::fs::metadata(&path).map(|m| m.len()) else {
+            state.log_seen = 0;
+            return;
+        };
+        if len < state.log_seen {
+            state.log_seen = 0;
+        }
+        if len == state.log_seen {
+            return;
+        }
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        if file.seek(SeekFrom::Start(state.log_seen)).is_err()
+            || file
+                .take((len - state.log_seen).min(LOG_READ_MAX))
+                .read_to_end(&mut bytes)
+                .is_err()
+        {
+            return;
+        }
+        // Whole lines only: a line still being written is read next time. A read that is all
+        // one unended line is no line this server writes, and is stepped over.
+        let Some(end) = bytes.iter().rposition(|&b| b == b'\n') else {
+            if bytes.len() as u64 == LOG_READ_MAX {
+                state.log_seen += LOG_READ_MAX;
+            }
+            return;
+        };
+        let whole = &bytes[..=end];
+        for line in String::from_utf8_lossy(whole).lines() {
+            let mut fields = line.split(' ');
+            let (Some(_at), Some(class), Some(iri)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let why = match class {
+                REVOKED => "revoked",
+                SESSIONS_ENDED => "logout-all",
+                _ => continue,
+            };
+            if let Some(credential) = passkey_credential(iri) {
+                let ended = state.end_sessions(credential);
+                self.audit(
+                    "gonk:Logout",
+                    AuditLine {
+                        op: "session",
+                        door: "cli",
+                        outcome: "ok",
+                        credential: Some(credential),
+                        authenticated: true,
+                        sessions: ended,
+                        why: Some(why),
+                    },
+                );
+            }
+        }
+        state.log_seen += whole.len() as u64;
     }
 
     /// The only origin a ceremony is accepted from.
@@ -526,7 +787,30 @@ impl Passkeys {
 
     /// Finish a login. The body: `{challenge, id, authenticatorData, clientDataJSON,
     /// signature}`. Returns the session token (the only copy) and the identity.
+    ///
+    /// Writes one `gonk:Login` line either way: `outcome=ok` naming the passkey, or
+    /// `outcome=denied` naming the credential the body claimed and no principal.
     pub fn login(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
+        let answer = self.sign_in(body, now);
+        let claimed = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
+        self.audit(
+            "gonk:Login",
+            AuditLine {
+                op: "login",
+                door: "http",
+                outcome: if answer.is_ok() { "ok" } else { "denied" },
+                credential: claimed.as_deref(),
+                authenticated: answer.is_ok(),
+                sessions: usize::from(answer.is_ok()),
+                why: None,
+            },
+        );
+        answer
+    }
+
+    fn sign_in(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
         let text = |name: &str| {
             v.get(name)
@@ -576,7 +860,11 @@ impl Passkeys {
         let token = random_b64(32)?;
         let expires = now + SESSION_SECONDS;
         let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
-        state.sessions.retain(|_, s| s.expires > now);
+        // ★ Before the new session exists: a revocation already in the log ends the OLD
+        // sessions of this credential, never the one this sign-in opens.
+        self.read_log(&mut state);
+        let idle = self.idle_seconds;
+        state.sessions.retain(|_, s| s.over(now, idle).is_none());
         if state.sessions.len() >= MAX_PENDING {
             return Err(format!("{MAX_PENDING} sessions are already open"));
         }
@@ -585,6 +873,7 @@ impl Passkeys {
             Session {
                 credential_id: id,
                 expires,
+                last_seen: now,
             },
         );
         Ok((
@@ -598,25 +887,105 @@ impl Passkeys {
     }
 
     /// End a session. Unknown tokens are not an error: signing out twice is still signed out.
+    /// Writes one `gonk:Logout` line, `sessions=0` for a token that named none.
     pub fn logout(&self, token: &str) {
-        if let Ok(mut state) = self.state.lock() {
-            state.sessions.remove(&sha256_hex(token.as_bytes()));
-        }
+        let ended = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.sessions.remove(&sha256_hex(token.as_bytes())));
+        self.audit(
+            "gonk:Logout",
+            AuditLine {
+                op: "logout",
+                door: "http",
+                outcome: "ok",
+                credential: ended.as_ref().map(|s| s.credential_id.as_str()),
+                authenticated: true,
+                sessions: usize::from(ended.is_some()),
+                why: Some("logout"),
+            },
+        );
+    }
+
+    /// End EVERY session of the passkey `token` signs in as, this one included — "sign out
+    /// everywhere" (ledger #1824). Returns how many ended; `None` when `token` is no live
+    /// session, which ends nothing (a stranger's token names nobody to sign out).
+    pub fn logout_all(&self, token: &str, now: u64) -> Option<usize> {
+        let who = self.identity(token, now)?;
+        let credential = who.enrolled.credential_id;
+        let ended = self.state.lock().ok()?.end_sessions(&credential);
+        self.audit(
+            "gonk:Logout",
+            AuditLine {
+                op: "logout-all",
+                door: "http",
+                outcome: "ok",
+                credential: Some(&credential),
+                authenticated: true,
+                sessions: ended,
+                why: Some("logout-all"),
+            },
+        );
+        Some(ended)
     }
 
     /// The identity behind a session token, re-resolved NOW: a session whose passkey was
     /// removed from `clients.json`, or whose grant no longer resolves, is no identity.
+    ///
+    /// ★ A session past either bound, or whose credential is not enrolled, is DELETED here,
+    /// not just refused, and so is every other session of a credential that is not enrolled:
+    /// nothing done to the files afterwards can bring one back. (A grant that no longer
+    /// resolves only refuses: a grant is authority, re-read on every request, and a session
+    /// holds authentication only.) A live session's idle clock restarts.
     pub fn identity(&self, token: &str, now: u64) -> Option<Identity> {
+        let key = sha256_hex(token.as_bytes());
         let (credential_id, expires) = {
-            let state = self.state.lock().ok()?;
-            let session = state.sessions.get(&sha256_hex(token.as_bytes()))?;
-            if session.expires <= now {
+            let mut state = self.state.lock().ok()?;
+            self.read_log(&mut state);
+            let session = state.sessions.get(&key)?;
+            if let Some(why) = session.over(now, self.idle_seconds) {
+                let ended = state.sessions.remove(&key);
+                drop(state);
+                self.audit(
+                    "gonk:Logout",
+                    AuditLine {
+                        op: "session",
+                        door: "http",
+                        outcome: "ok",
+                        credential: ended.as_ref().map(|s| s.credential_id.as_str()),
+                        authenticated: true,
+                        sessions: 1,
+                        why: Some(why),
+                    },
+                );
                 return None;
             }
             (session.credential_id.clone(), session.expires)
         };
-        let enrolled = read_passkeys(&self.layout).ok()?.remove(&credential_id)?;
+        let Some(enrolled) = read_passkeys(&self.layout).ok()?.remove(&credential_id) else {
+            let ended = self.state.lock().ok()?.end_sessions(&credential_id);
+            self.audit(
+                "gonk:Logout",
+                AuditLine {
+                    op: "session",
+                    door: "http",
+                    outcome: "ok",
+                    credential: Some(&credential_id),
+                    authenticated: true,
+                    sessions: ended,
+                    why: Some("unenrolled"),
+                },
+            );
+            return None;
+        };
         let scopes = scopes_of(&self.layout, &enrolled.grant).ok()?;
+        {
+            let mut state = self.state.lock().ok()?;
+            // Gone if it ended while this request was reading the files: no identity then.
+            let session = state.sessions.get_mut(&key)?;
+            session.last_seen = session.last_seen.max(now);
+        }
         Some(Identity {
             enrolled,
             scopes,
@@ -725,6 +1094,122 @@ mod tests {
         assert!(rp
             .take_challenge(&c, Purpose::Login, 10 + CHALLENGE_SECONDS)
             .is_err());
+    }
+
+    /// Enroll a passkey `id` under a fresh `brian` grant and open a session for it at `now`,
+    /// straight into the table (no assertion: these tests are about what a session does after).
+    fn session_for(rp: &Passkeys, id: &str, now: u64) -> String {
+        if quic::read_grants(&rp.layout.grants_json())
+            .map(|g| !g.contains_key("brian"))
+            .unwrap_or(true)
+        {
+            let scopes = grants_for("default", Authority::Write).unwrap();
+            quic::put_grant(&rp.layout, "brian", &scopes, false).unwrap();
+        }
+        write_passkey(
+            &rp.layout,
+            &Enrolled {
+                credential_id: id.to_string(),
+                grant: "brian".to_string(),
+                label: id.to_string(),
+                public_key: "AAAA".to_string(),
+                sign_count: 0,
+            },
+        )
+        .unwrap();
+        let token = random_b64(32).unwrap();
+        rp.state.lock().unwrap().sessions.insert(
+            sha256_hex(token.as_bytes()),
+            Session {
+                credential_id: id.to_string(),
+                expires: now + SESSION_SECONDS,
+                last_seen: now,
+            },
+        );
+        token
+    }
+
+    /// ★ The idle bound ends a session no request has carried for that long, and a request
+    /// restarts its clock; the absolute bound ends it however busy it is. Either way the
+    /// session is DELETED, so a later request inside the window cannot find it again.
+    #[test]
+    fn an_idle_session_ends_and_a_busy_one_ends_at_the_absolute_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060).with_idle_seconds(600);
+        let token = session_for(&rp, "Y3JlZA", 1_000);
+        assert!(
+            rp.identity(&token, 1_599).is_some(),
+            "inside the idle bound"
+        );
+        assert!(
+            rp.identity(&token, 2_198).is_some(),
+            "the last request restarted it"
+        );
+        assert!(
+            rp.identity(&token, 2_799).is_none(),
+            "600 s with no request"
+        );
+        assert!(
+            rp.identity(&token, 2_200).is_none(),
+            "deleted, not just refused"
+        );
+
+        let busy = session_for(&rp, "YnVzeQ", 1_000);
+        let mut now = 1_000;
+        while now < 1_000 + SESSION_SECONDS - 300 {
+            now += 300;
+            assert!(rp.identity(&busy, now).is_some(), "busy at {now}");
+        }
+        assert!(rp.identity(&busy, 1_000 + SESSION_SECONDS).is_none());
+    }
+
+    /// ★ A revocation is read from `passkeys.log`, so it reaches this server from another
+    /// process; but a line written before this server started is history, and a line that
+    /// ends sessions ends only the ones open when it is read, never one a later sign-in opens.
+    #[test]
+    fn the_log_ends_sessions_open_when_it_is_read_and_no_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        let old = Enrolled {
+            credential_id: "b2xk".to_string(),
+            grant: "brian".to_string(),
+            label: "old".to_string(),
+            public_key: "AAAA".to_string(),
+            sign_count: 0,
+        };
+        record(&layout, REVOKED, &old, 0).unwrap();
+        let rp = Passkeys::new(layout.clone(), 1060);
+        let token = session_for(&rp, "b2xk", 10);
+        assert!(
+            rp.identity(&token, 11).is_some(),
+            "a line from before this server started ends nothing"
+        );
+
+        let other = session_for(&rp, "b3RoZXI", 10);
+        end_sessions(&layout, Which::Credential("b2xk"), 0).unwrap();
+        assert!(rp.identity(&token, 12).is_none());
+        assert!(
+            rp.identity(&other, 12).is_some(),
+            "only the passkey the line names"
+        );
+        let fresh = session_for(&rp, "b2xk", 13);
+        assert!(rp.identity(&fresh, 14).is_some(), "a line is read once");
+
+        // A half-written line is read when it is whole, and a replaced file from its start.
+        append_line(
+            &audit_log(&layout),
+            "2026-10-17T00:00:00.000Z gonk:PasskeySessionsEnded ",
+        )
+        .unwrap();
+        assert!(rp.identity(&fresh, 15).is_some());
+        append_line(&audit_log(&layout), &format!("{}\n", passkey_iri("b2xk"))).unwrap();
+        assert!(rp.identity(&fresh, 16).is_none());
+        let again = session_for(&rp, "b2xk", 17);
+        std::fs::write(audit_log(&layout), "").unwrap();
+        assert!(rp.identity(&again, 18).is_some());
+        record(&layout, REVOKED, &old, 0).unwrap();
+        assert!(rp.identity(&again, 19).is_none());
     }
 
     /// ★ A bound refuses; it never evicts someone's ceremony.

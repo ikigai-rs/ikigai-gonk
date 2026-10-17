@@ -16,6 +16,8 @@
 //!                                       # UDP at the HTTP port once a certificate is enrolled
 //! # ledgers the HTTP door's anonymous loopback caller may READ; repeatable
 //! gonk.http.ledger = "default"
+//! # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long
+//!                                       # ends (this IS the default; 1 to 720, the 12 h bound)
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
@@ -110,7 +112,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 35] = [
+const KEYS: [&str; 36] = [
     "gonk.log.access",
     "gonk.layer",
     "gonk.layer.deny",
@@ -122,6 +124,7 @@ const KEYS: [&str; 35] = [
     "gonk.quic.bind",
     "gonk.http.ledger",
     "gonk.http.anonymous_sparql_budget_ms",
+    "gonk.http.session_idle_minutes",
     "gonk.browse.root",
     "gonk.mount",
     "gonk.mount.calls_per_hour",
@@ -183,8 +186,14 @@ usage:
                                    gonk:PasskeyRevoked line to gonk/passkeys.log. A label two
                                    passkeys share is refused (name the --credential); a
                                    malformed clients.json is refused, never rewritten.
-                                   grants.json is left alone. Effective at its next request,
-                                   live sessions included
+                                   grants.json is left alone. Effective at its next request;
+                                   its live sessions are deleted, so neither enrolling it
+                                   again nor restoring the file revives one
+  ikigai-gonk passkey logout --all <label> | --credential <id> [--config PATH]
+                                   end every session of one passkey and leave it enrolled:
+                                   appends a gonk:PasskeySessionsEnded line to
+                                   gonk/passkeys.log, which the running server reads at its
+                                   next signed-in request or sign-in
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
@@ -444,6 +453,15 @@ pub enum Command {
         /// `--config`.
         flags: Flags,
     },
+    /// End every session of one enrolled passkey and record it (ledger #1824).
+    PasskeyLogoutAll {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// `--config`.
+        flags: Flags,
+    },
     /// Invite a browser to enroll a passkey under a grant.
     PasskeyInvite {
         /// The grant name (and the default label).
@@ -583,6 +601,10 @@ pub struct Settings {
     /// [`crate::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS`], at most the store's 5 s base):
     /// see [`crate::budget`].
     pub anonymous_sparql_budget_ms: u64,
+    /// How long a passkey session lasts with no request carrying it, in seconds
+    /// (`gonk.http.session_idle_minutes`, default [`crate::identity::DEFAULT_IDLE_SECONDS`]):
+    /// see [`session_idle_seconds`].
+    pub session_idle_seconds: u64,
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
     pub browse_roots: Vec<(String, PathBuf)>,
@@ -1324,44 +1346,68 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             }
             return Ok(Command::PasskeyList { flags });
         }
-        Some("revoke") => {
+        Some(sub @ ("revoke" | "logout")) => {
             let mut flags = Flags::default();
-            let (mut label, mut credential) = (None, None);
+            let (mut label, mut credential, mut all) = (None, None, false);
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    "--all" if sub == "logout" => all = true,
                     flag @ ("--config" | "--config-home" | "--data-home") => {
                         home_flag(flag, &mut args, &mut flags)?
                     }
                     other if other.starts_with('-') => {
-                        return Err(format!("passkey revoke: unknown argument `{other}`"))
+                        return Err(format!("passkey {sub}: unknown argument `{other}`"))
                     }
                     other if label.is_none() => label = Some(other.to_string()),
-                    other => return Err(format!("passkey revoke: unexpected argument `{other}`")),
+                    other => return Err(format!("passkey {sub}: unexpected argument `{other}`")),
                 }
+            }
+            // ★ `--all` is required, not implied: this command cannot name one session (it
+            // never sees a token), and a bare `logout` reading as "this one" would end them all.
+            if sub == "logout" && !all {
+                return Err(
+                    "passkey logout: expected --all (every session of the passkey; a \
+                            single session is signed out from its own page)"
+                        .to_string(),
+                );
             }
             let (key, by_label) = match (label, credential) {
                 (Some(label), None) => (label, true),
                 (None, Some(credential)) => (credential, false),
                 _ => {
-                    return Err("passkey revoke: expected <label> or --credential <id> (as \
-                                `passkey list` prints them), not both"
-                        .to_string())
+                    return Err(format!(
+                        "passkey {sub}: expected <label> or --credential <id> (as `passkey \
+                         list` prints them), not both"
+                    ))
                 }
             };
-            return Ok(Command::PasskeyRevoke {
-                key,
-                by_label,
-                flags,
+            return Ok(if sub == "logout" {
+                Command::PasskeyLogoutAll {
+                    key,
+                    by_label,
+                    flags,
+                }
+            } else {
+                Command::PasskeyRevoke {
+                    key,
+                    by_label,
+                    flags,
+                }
             });
         }
         Some(other) => {
             return Err(format!(
-                "passkey: unknown subcommand `{other}` (expected `invite`, `list` or `revoke`)"
+                "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke` or \
+                 `logout --all`)"
             ))
         }
         None => {
-            return Err("passkey: expected `invite <name>`, `list` or `revoke <label>`".to_string())
+            return Err(
+                "passkey: expected `invite <name>`, `list`, `revoke <label>` or \
+                        `logout --all <label>`"
+                    .to_string(),
+            )
         }
     }
     let name = args
@@ -1586,6 +1632,9 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         quic,
         http_ledgers,
         anonymous_sparql_budget_ms,
+        session_idle_seconds: session_idle_seconds(
+            value_for(text, "gonk.http.session_idle_minutes").as_deref(),
+        )?,
         browse_roots,
         mounts,
         layers,
@@ -1606,6 +1655,42 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),
         )?,
     })
+}
+
+/// `gonk.http.session_idle_minutes`, checked and in seconds: a whole number of minutes from 1
+/// to 720, absent meaning [`crate::identity::DEFAULT_IDLE_SECONDS`] (an hour). Ledger
+/// [#1824](http://localhost:1062/l/default/item/1824).
+///
+/// The bound is beside the 12 h absolute one ([`crate::identity::SESSION_SECONDS`]), never
+/// instead of it: past 720 it could never be reached, and `0` would end every session at its
+/// first request, so both are refused rather than read as "off".
+///
+/// ```
+/// use ikigai_gonk::config::session_idle_seconds;
+/// assert_eq!(session_idle_seconds(None), Ok(3600));
+/// assert_eq!(session_idle_seconds(Some("15")), Ok(900));
+/// assert_eq!(session_idle_seconds(Some("720")), Ok(43_200));
+/// for bad in ["0", "721", "-5", "1h", ""] {
+///     assert!(session_idle_seconds(Some(bad)).is_err(), "{bad}");
+/// }
+/// ```
+///
+/// # Errors
+///
+/// When the value is not a whole number of minutes from 1 to 720.
+pub fn session_idle_seconds(value: Option<&str>) -> Result<u64, String> {
+    let Some(value) = value else {
+        return Ok(crate::identity::DEFAULT_IDLE_SECONDS);
+    };
+    let most = crate::identity::SESSION_SECONDS / 60;
+    match value.trim().parse::<u64>() {
+        Ok(minutes) if (1..=most).contains(&minutes) => Ok(minutes * 60),
+        _ => Err(format!(
+            "gonk.http.session_idle_minutes = `{value}` is not a whole number of minutes from 1 \
+             to {most} (a passkey session with no request for that long ends; it always ends \
+             {most} minutes after its sign-in)"
+        )),
+    }
 }
 
 /// `gonk.nl.ask`: the model door a draft is asked through. Refused unless it is a provider's
