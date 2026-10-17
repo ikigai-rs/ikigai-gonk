@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow read+write tokens, and the run and read of PUBLIC scripts ([`crate::script::ANONYMOUS`]), for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow READ tokens (never write, ledger #1687), and the run and read of PUBLIC scripts ([`crate::script::ANONYMOUS`]), for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME in the authority — `urn:iki:host:gonk:client:<fingerprint>` (`urn:iki:gonk:client:<fingerprint>` before 2026-10-10, still recognized; ledger #1183), minted into the session capability ([`crate::quic::authority`], ledger #1077), which core's clamp keeps whatever capability the client carries: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
@@ -447,8 +447,8 @@ pub fn is_loopback(ip: IpAddr) -> bool {
 /// What the HTTP door's capability is computed from.
 #[derive(Clone)]
 pub struct HttpDoor {
-    /// What an ANONYMOUS loopback caller holds — the first arc's grant, unchanged: read and
-    /// write on the ledgers in `gonk.http.ledger`.
+    /// What an ANONYMOUS loopback caller holds: READ on the ledgers in `gonk.http.ledger`
+    /// ([`crate::grants::anonymous_http_grants`]; write too until ledger #1687).
     pub anonymous: Vec<String>,
     /// The address the door is bound to, its port resolved (never the `0` a config may ask
     /// for), which the `Host` and `Origin` checks require: the loopback names, and this

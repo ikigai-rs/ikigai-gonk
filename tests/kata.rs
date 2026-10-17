@@ -21,8 +21,10 @@ use ikigai_store::DurableStore;
 
 const FIXTURE: &str = "tests/fixtures/kata-export.jsonl";
 
-/// The HTTP door exactly as `main` builds it, granting `ledger` read and write to an
-/// anonymous loopback caller. Returns the hub (to read back through) and the address.
+/// The HTTP door as `main` builds it, but granting `ledger` read AND write to an anonymous
+/// loopback caller, which `main` no longer does (ledger #1687: anonymous is read-only), so the
+/// command's own filing logic stays tested. Returns the hub (to read back through) and the
+/// address.
 fn serve(ledger: &str) -> (Arc<Kernel>, SocketAddr, tempfile::TempDir) {
     let grants = grants_for(ledger, Authority::Write).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -448,8 +450,8 @@ fn a_ledger_the_door_does_not_grant_is_refused_plainly() {
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("403"), "{stderr}");
     assert!(
-        stderr.contains("ikigai-gonk grants"),
-        "names the grant: {stderr}"
+        stderr.contains("ledger #1687"),
+        "says anonymous is read-only: {stderr}"
     );
     assert!(
         stderr.contains("gonk.http.ledger"),

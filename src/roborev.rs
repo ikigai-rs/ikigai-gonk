@@ -53,9 +53,11 @@
 //!
 //! # Authority
 //!
-//! The HTTP door grants an anonymous loopback caller the read and write tokens of the
-//! ledgers listed in `gonk.http.ledger`, and nothing else (`crate::doors`); filing runs
-//! under those. `ikigai-gonk grants <ledger> write` prints them (`urn:cap:ledger:write:<ledger>` and its siblings). A ledger the door does not
+//! The HTTP door grants an anonymous loopback caller the READ tokens of the ledgers listed in
+//! `gonk.http.ledger`, and nothing else (`crate::doors`). ⚠ Since ledger #1687 that caller
+//! writes nothing, and this command files through that door alone, so against a gonk from that
+//! release on a dry run works and filing answers 403; filing again needs a signed-in or socket
+//! path this command does not have yet. `ikigai-gonk grants <ledger> write` prints them (`urn:cap:ledger:write:<ledger>` and its siblings). A ledger the door does not
 //! grant answers 403, and this command says so and exits 1.
 
 use std::io::{Read, Write};
@@ -822,9 +824,10 @@ fn refused(method: &str, path: &str, status: u16, text: &str) -> Result<(), Stri
         200..=299 => Ok(()),
         403 => Err(format!(
             "gonk refused {method} {path} (403): {}. The HTTP door grants an anonymous \
-             loopback caller the read and write tokens of the ledgers in `gonk.http.ledger` \
-             and nothing else; filing needs both (`ikigai-gonk grants <ledger> write` \
-             prints them, and listing the ledger there grants them)",
+             loopback caller the READ tokens of the ledgers in `gonk.http.ledger` and nothing \
+             else; since ledger #1687 it writes nothing, and this command files through that \
+             door alone, so it can read (a dry run) but not file into a gonk from that release \
+             on",
             text.trim()
         )),
         _ => Err(format!(

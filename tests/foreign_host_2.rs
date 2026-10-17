@@ -149,7 +149,8 @@ fn every_spelling_of_our_own_name_is_answered() {
         let (status, body) = raw(&gonk, "OPTIONS", "/iki/ledger/append", Some(host), &[], "");
         assert_eq!(status, 204, "OPTIONS under Host {host}: {body}");
     }
-    // A write from a local process, under our name: still the door's whole point.
+    // A write from a local process, under our name: past the Host check, and refused by the
+    // GRANT (an anonymous loopback caller only reads since ledger #1687), not misdirected.
     let (status, body) = raw(
         &gonk,
         "POST",
@@ -158,7 +159,8 @@ fn every_spelling_of_our_own_name_is_answered() {
         &[],
         "Filed under our own name",
     );
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("capability does not grant"), "{body}");
 }
 
 #[test]

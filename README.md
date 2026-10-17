@@ -10,7 +10,7 @@ certificate and runs under the grant that certificate is enrolled for.
 ```text
 $ ikigai-gonk
 ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
-  http    http://localhost:1062/ — loopback (127.0.0.1:1062); anonymous read+write: default; 0 passkey(s)
+  http    http://localhost:1062/ — loopback (127.0.0.1:1062); anonymous read: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
   scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts and read-only plans, 30 a minute in all (draft checks too), each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
   llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
@@ -124,8 +124,13 @@ palette is held to the WCAG AA contrast floor in both by a test.
 
 ### Passkeys: who you are, and what that grants
 
-An anonymous caller on this machine can read and write the ledgers in `gonk.http.ledger` —
-exactly what the HTTP door granted before it had a face. Anything more, such as delete, purge,
+An anonymous caller on this machine can READ the ledgers in `gonk.http.ledger`, and write
+nothing: filing, commenting, labeling, claiming and closing all need an identity, a signed-in
+passkey here or a client certificate at the QUIC door (ledger #1687). Until then the HTTP door
+gave that caller the ledgers' write tokens too, so any process on this machine, and on every
+machine a reverse tunnel puts the door on, could write an item into instructions for an
+unattended worker. The passkey sign-in itself needs no ledger token and still runs
+anonymously. Anything more than reading, such as writing, delete, purge,
 another ledger, or browsing and explaining the repositories
 ([the `--browse` roles](#provisioning-a-browsing-identity-the---browse-roles)), belongs to an
 identity:
@@ -1043,8 +1048,10 @@ when the two match, and otherwise write the name in. `--dry-run` prints what wou
 (each append's arguments, the key among them) and touches nothing.
 
 **The grant.** The command speaks to the HTTP door, whose anonymous loopback caller holds the
-read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and nothing
-else; filing runs under them. To file into a ledger of its own, list it:
+READ tokens of the ledgers in `gonk.http.ledger` (default: `default`) and nothing else. ⚠ Since
+ledger #1687 that caller writes nothing, so against a gonk from that release on `--dry-run`
+works and filing answers `403`: filing again needs a signed-in or socket path this command does
+not have yet. To have it read (and, once it can file, file into) a ledger of its own, list it:
 
 ```toml
 gonk.http.ledger = "default"
@@ -1199,9 +1206,10 @@ exit 1, like the real run. ⚠ The one thing a read cannot tell: an issue whose 
 answers like one never filed, so the dry run says `would file` where the real run leaves it
 alone.
 
-**The grant** is `roborev file`'s: the door's anonymous loopback caller holds the read and
-write tokens of the ledgers in `gonk.http.ledger`, and an import needs both (write to file,
-read to converge on what is already there). To import into a ledger of its own, list it there
+**The grant** is `roborev file`'s: the door's anonymous loopback caller holds the READ tokens
+of the ledgers in `gonk.http.ledger`, and an import needs read and write (write to file, read to
+converge on what is already there). ⚠ Since ledger #1687 that caller writes nothing, so a dry run
+works and an import answers `403` until this command gains a signed-in or socket path. To import into a ledger of its own, list it there
 (`gonk.http.ledger = "kata"`) and restart. A ledger the door does not grant answers `403`, and
 the import (or the dry run) stops with exit 1 and names the setting.
 
@@ -2674,7 +2682,7 @@ draft carries where it came from into the version a person publishes.
 
 | door | reaches it | runs under |
 | --- | --- | --- |
-| **HTTP**, `127.0.0.1:1062` | any process on this machine | anonymously, the read and write tokens of the ledgers in `gonk.http.ledger` (default: `default`) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
+| **HTTP**, `127.0.0.1:1062` | any process on this machine | anonymously, the READ tokens of the ledgers in `gonk.http.ledger` (default: `default`; never write, ledger #1687) and the run and read of PUBLIC scripts; signed in, that plus the passkey's grant; nothing for a non-loopback peer, a foreign `Host`, or a cross-site write |
 | **socket**, `~/.ikigai/gonk.sock` | this user only (`0600`, peer UID checked) | root — the socket's owner can already read the dataset's files — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule here, the raw-write rule below; no `Host`/cross-site checks and no author rules |
 | **QUIC**, `udp 0.0.0.0:1062` | a certificate under `gonk/quic/clients/` | the grant its fingerprint maps to in `gonk/clients.json`; refused when it maps to none. Every request is named `urn:iki:host:gonk:client:<fingerprint>` |
 

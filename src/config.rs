@@ -14,7 +14,7 @@
 //! gonk.socket = "~/.ikigai/gonk.sock"
 //! # gonk.quic.bind = "0.0.0.0:1062"     # set it to REQUIRE the QUIC door; unset, it opens on
 //!                                       # UDP at the HTTP port once a certificate is enrolled
-//! # ledgers the HTTP door may read and write; repeatable
+//! # ledgers the HTTP door's anonymous loopback caller may READ; repeatable
 //! gonk.http.ledger = "default"
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
@@ -333,7 +333,7 @@ serve flags (each overrides its config key wholesale):
                         Unset, the door opens once a client certificate is enrolled; set,
                         it must open, and gonk refuses to start when no client can be admitted
   --no-quic             do not open the QUIC door this run
-  --http-ledger NAME    a ledger the HTTP door may read and write (repeatable; config
+  --http-ledger NAME    a ledger the HTTP door's anonymous caller may read (repeatable; config
                         `gonk.http.ledger`); default `default`
   --browse-root N=PATH  serve urn:repo:N:* over PATH (repeatable; config `gonk.browse.root`).
                         Unset, the browse family and ikigai-repo's git/gh facades are not
@@ -575,7 +575,8 @@ pub struct Settings {
     /// The QUIC door's address, and whether anyone asked for it. Whether it actually opens
     /// is [`crate::quic::open_door`]'s decision.
     pub quic: QuicBind,
-    /// The ledgers the HTTP door may read and write.
+    /// The ledgers the HTTP door's anonymous loopback caller may read (ledger #1687: and not
+    /// write; a signed-in passkey writes what its own grant names).
     pub http_ledgers: Vec<String>,
     /// The SPARQL time budget, in milliseconds, of an ANONYMOUS HTTP caller's evaluations
     /// (`gonk.http.anonymous_sparql_budget_ms`, default
@@ -2006,8 +2007,8 @@ pub fn resolve_bind(
 
 /// ★ **The HTTP door binds loopback, or the server does not start.**
 ///
-/// It is unauthenticated: it grants read and write on its ledgers to whatever reaches it,
-/// and on loopback that is this machine's own processes. On a LAN it would be everyone on
+/// It is unauthenticated: it grants READ on its ledgers to whatever reaches it (and write to
+/// nothing, ledger #1687), and on loopback that is this machine's own processes. On a LAN it would be everyone on
 /// the LAN, with the same grant — and HTTP to a LAN cannot do WebAuthn either (no secure
 /// context), so nothing could be layered on it to tell callers apart. A warning would scroll
 /// past in a launchd log while the door stayed open; a refusal is legible and has a fix, the
