@@ -676,9 +676,15 @@ pub fn nl_draft_grants(net_host: Option<&str>) -> Result<Vec<String>, String> {
     Ok(vec![format!("urn:cap:net:{host}")])
 }
 
-/// Everything an ANONYMOUS loopback caller of the HTTP door holds: the read and write tokens of
-/// the ledgers in `gonk.http.ledger`, and [`crate::script::ANONYMOUS`] (run and read a PUBLIC
-/// script).
+/// Everything an ANONYMOUS loopback caller of the HTTP door holds: the READ tokens of the
+/// ledgers in `gonk.http.ledger`, and [`crate::script::ANONYMOUS`] (run and read a PUBLIC
+/// script). Signing in (a passkey session) or a client certificate is what writes.
+///
+/// ★ Ledger [#1687](http://localhost:1062/l/default/item/1687): this was `Authority::Write`, so
+/// any process on this machine, and on every machine a reverse tunnel puts this door on, could
+/// file, comment and label items, and an unattended worker that selects by label and reads
+/// comments into its prompt would act on them. The passkey sign-in flow needs no ledger token
+/// (`urn:iki:gonk:passkey:*` are this server's own names), so it is unchanged.
 ///
 /// ```
 /// use ikigai_gonk::grants::anonymous_http_grants;
@@ -687,8 +693,6 @@ pub fn nl_draft_grants(net_host: Option<&str>) -> Result<Vec<String>, String> {
 ///     [
 ///         "urn:cap:ledger:read:default",
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
-///         "urn:cap:ledger:write:default",
-///         "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
 ///         "urn:cap:script:run:public",
 ///         "urn:cap:script:read:public",
 ///     ]
@@ -699,7 +703,7 @@ pub fn nl_draft_grants(net_host: Option<&str>) -> Result<Vec<String>, String> {
 ///
 /// When a ledger name cannot be a ledger, as [`grants_for`].
 pub fn anonymous_http_grants(ledgers: &[String]) -> Result<Vec<String>, String> {
-    let mut tokens = grants_for_all(ledgers, Authority::Write)?;
+    let mut tokens = grants_for_all(ledgers, Authority::Read)?;
     tokens.extend(crate::script::ANONYMOUS.iter().map(|s| s.to_string()));
     Ok(tokens)
 }

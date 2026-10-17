@@ -18,8 +18,10 @@ use ikigai_store::DurableStore;
 
 const FIXTURE: &str = include_str!("fixtures/roborev-review-completed.md");
 
-/// The HTTP door exactly as `main` builds it, granting `ledger` read and write to an
-/// anonymous loopback caller. Returns the hub (to read back through) and the address.
+/// The HTTP door as `main` builds it, but granting `ledger` read AND write to an anonymous
+/// loopback caller, which `main` no longer does (ledger #1687: anonymous is read-only), so the
+/// command's own filing logic stays tested. Returns the hub (to read back through) and the
+/// address.
 fn serve(ledger: &str) -> (Arc<Kernel>, SocketAddr, tempfile::TempDir) {
     let grants = grants_for(ledger, Authority::Write).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();

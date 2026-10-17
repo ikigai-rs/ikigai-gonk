@@ -1852,7 +1852,7 @@ fn the_shared_handle_costs_the_ledger_nothing() {
 /// as a README paragraph.
 ///
 /// An anonymous loopback caller on the HTTP door holds exactly the configured ledgers' narrow
-/// read+write tokens (`doors::HttpDoor::anonymous`). Browse and the facades are now COMPILED
+/// read tokens (`doors::HttpDoor::anonymous`; read+write until ledger #1687). Browse and the facades are now COMPILED
 /// IN and reachable — but reachable is a function of the grant, and that grant carries
 /// neither `urn:cap:browse:read:*` nor `urn:cap:exec:*`. Both halves are checked, because
 /// they fail differently: the manifold must not OFFER what the caller cannot invoke

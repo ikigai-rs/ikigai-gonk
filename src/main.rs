@@ -169,7 +169,7 @@ fn serve(flags: &config::Flags) -> ! {
     });
     // Before the store is opened: a socket the kernel cannot bind stops the server here.
     config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
-    // The anonymous loopback caller: its ledgers' read and write tokens, and the right to run
+    // The anonymous loopback caller: its ledgers' READ tokens (ledger #1687), and the right to run
     // and read a PUBLIC script (ledger #939, `script::ANONYMOUS`).
     let http_grants =
         grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
@@ -669,7 +669,7 @@ fn serve(flags: &config::Flags) -> ! {
         // passkeys cannot work there.
         let bound = std::net::SocketAddr::new(settings.http.ip(), port);
         eprintln!(
-            "  http    {} — loopback ({}); anonymous read+write: {}; {} passkey(s); anonymous SPARQL budget {} ms",
+            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s); anonymous SPARQL budget {} ms",
             doors::http_url(bound),
             settings.http,
             settings.http_ledgers.join(", "),
@@ -1500,7 +1500,7 @@ fn passkey_invite(
         .all(|scope| grants::implied_by(scope, &anonymous))
     {
         fail(&format!(
-            "that grant adds nothing: an anonymous loopback caller already reads and writes {}. \
+            "that grant adds nothing: an anonymous loopback caller already reads {}. \
              Invite with more — `--ledger {}=delete`, or a ledger outside `gonk.http.ledger`",
             settings.http_ledgers.join(", "),
             settings

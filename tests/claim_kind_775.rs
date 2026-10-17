@@ -12,7 +12,7 @@
 //! | --- | --- | --- |
 //! | socket | `doors::HubSpace::naming_nobody` removes it | machine |
 //! | QUIC | `ikigai-quic` replaces it with the connection's client IRI | machine |
-//! | HTTP, anonymous | `ikigai-web` drops `?principal=` and stamps none | machine |
+//! | HTTP, anonymous | refused: an anonymous caller only reads (ledger #1687) | no claim |
 //! | HTTP, signed in, mechanical | `ikigai-web` replaces it with the session's passkey | person |
 //! | HTTP, signed in, the item page's form | the form adapter forwards the door's | person |
 
@@ -222,7 +222,8 @@ fn no_door_lets_a_caller_choose_its_claim_kind() {
         .expect("claim over QUIC");
     assert_eq!(gonk.claim(2)["kind"], "machine", "quic: {}", gonk.claim(2));
 
-    // HTTP, anonymous, the mechanical door: `?principal=` and `?kind=` sent as a query.
+    // HTTP, anonymous, the mechanical door: `?principal=` and `?kind=` sent as a query. Since
+    // ledger #1687 an anonymous loopback caller writes nothing, so the forgery claims nothing.
     let (status, body) = gonk.raw(
         "POST",
         &format!(
@@ -232,11 +233,10 @@ fn no_door_lets_a_caller_choose_its_claim_kind() {
         &[("Content-Type", "text/plain".to_string())],
         "via-http",
     );
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        gonk.claim(3)["kind"],
-        "machine",
-        "anonymous http: {}",
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        gonk.claim(3).is_null(),
+        "anonymous http claimed: {}",
         gonk.claim(3)
     );
 
@@ -306,18 +306,19 @@ fn no_door_lets_a_caller_choose_its_claim_kind() {
     );
 
     // ★ The doctor: a MACHINE claim on an item that is not in flight is orphaned; a person's
-    // hold is left alone. Items 1–3 are machine claims in `filed`; 4 and 5 are people's.
+    // hold is left alone. Items 1 and 2 are machine claims in `filed`; 3 holds no claim (the
+    // anonymous one was refused, ledger #1687); 4 and 5 are people's.
     let (status, doctor) = gonk.page("/l/default/doctor", None);
     assert_eq!(status, 200, "{doctor}");
-    assert!(doctor.contains("3 problem(s)"), "{doctor}");
-    for n in 1..=3 {
+    assert!(doctor.contains("2 problem(s)"), "{doctor}");
+    for n in 1..=2 {
         assert!(
             doctor.contains(&format!(">#{n}</a>")),
             "#{n} is orphaned: {doctor}"
         );
     }
     assert!(
-        !doctor.contains(">#4</a>") && !doctor.contains(">#5</a>"),
+        !doctor.contains(">#3</a>") && !doctor.contains(">#4</a>") && !doctor.contains(">#5</a>"),
         "{doctor}"
     );
     assert!(doctor.contains("orphaned"), "{doctor}");
