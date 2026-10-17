@@ -103,7 +103,7 @@ fn bounded<T: Send + 'static>(within: Duration, work: impl FnOnce() -> T + Send 
 fn a_silent_layer_host_fails_the_pass_at_the_doors_deadline() {
     let (addr, certs) = silent_host(&["urn:layer:tasks"]);
     let line = format!(
-        "tasks offer quic://{addr} {} ledger=crew",
+        "tasks offer quic://{addr} {} ledger=crew collab=crew",
         certs.path().display()
     );
     let binding = layer::parse(&line, std::path::Path::new("/nowhere")).unwrap();

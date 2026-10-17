@@ -23,6 +23,7 @@
 //!                                       # together (this IS the default; 0 for none)
 //! # a ledger bound to a task layer, offering its items (or taking them: `take`); repeatable
 //! # gonk.layer = "tasks-bobby offer quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=bobby collab=bobby"
+//! # gonk.layer.deny = "~/.config/ikigai/gonk/layer-deny.txt"   # words an offer never carries
 //! # the Layers page: a layer door, and the certificates of the PERSON it reads and posts as
 //! # gonk.layers.view = "quic://ikigai-rs.dev:4434 ~/.ikigai/layers-client/brian"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
@@ -109,9 +110,10 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 34] = [
+const KEYS: [&str; 35] = [
     "gonk.log.access",
     "gonk.layer",
+    "gonk.layer.deny",
     "gonk.layers.view",
     "gonk.queue.serious",
     "gonk.bind",
@@ -1546,7 +1548,15 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     };
     let browse_roots = browse_roots(flags, text, homes)?;
     let mounts = mounts(flags, text, homes)?;
-    let layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
+    let mut layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
+    if let Some(deny) = layer_deny(text, homes)? {
+        let deny = std::sync::Arc::new(deny);
+        for binding in &mut layers {
+            if binding.role == crate::layer::Role::Offer {
+                binding.deny = Some(std::sync::Arc::clone(&deny));
+            }
+        }
+    }
     let view_lines = values_for(text, crate::layers_view::KEY);
     if view_lines.len() > 1 {
         return Err(format!(
@@ -2061,6 +2071,21 @@ fn value_for(text: &str, key: &str) -> Option<String> {
 }
 
 /// Every `key = value` line for `key`, in file order.
+/// `gonk.layer.deny = "<path>"`: the operator's deny file for offers ([`crate::egress::DenyList`],
+/// ledger #1745), read at start. Given once at most; a file that is named and cannot be read
+/// stops the server.
+fn layer_deny(text: &str, homes: &Homes) -> Result<Option<crate::egress::DenyList>, String> {
+    let lines = values_for(text, "gonk.layer.deny");
+    match lines.as_slice() {
+        [] => Ok(None),
+        [path] => crate::egress::DenyList::load(&expand_home(path, &homes.home)).map(Some),
+        _ => Err(format!(
+            "gonk.layer.deny is given {} times: one deny file, one pattern per line",
+            lines.len()
+        )),
+    }
+}
+
 pub(crate) fn values_for(text: &str, key: &str) -> Vec<String> {
     lines(text)
         .filter(|(name, _)| *name == key)
@@ -2951,5 +2976,42 @@ mod tests {
             "the scan found only {checked} documented lines"
         );
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Ledger #1745: `gonk.layer.deny` names the operator's deny file, which reaches every OFFER
+    /// binding (never a take binding), and a deny file that is named and missing stops the
+    /// server rather than denying nothing.
+    #[test]
+    fn the_deny_file_reaches_the_offer_bindings_and_a_missing_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let certs = dir.path().join("certs");
+        std::fs::create_dir(&certs).unwrap();
+        let deny = dir.path().join("deny.txt");
+        std::fs::write(&deny, "# kept home\nlantern\n").unwrap();
+        let text = format!(
+            "gonk.layer = \"tasks offer quic://h:1 {c} ledger=crew collab=crew\"\n\
+             gonk.layer = \"other take quic://h:1 {c} ledger=mine\"\n\
+             gonk.layer.deny = \"{d}\"\n",
+            c = certs.display(),
+            d = deny.display()
+        );
+        let got = settings(&Flags::default(), &text, &homes()).unwrap();
+        let offer = got.layers[0]
+            .deny
+            .as_ref()
+            .expect("the offer binding has the deny file");
+        assert_eq!(offer.matches("The Lantern demo"), Some(2));
+        assert!(
+            got.layers[1].deny.is_none(),
+            "a take binding offers nothing"
+        );
+
+        std::fs::remove_file(&deny).unwrap();
+        let refused = settings(&Flags::default(), &text, &homes()).unwrap_err();
+        assert!(refused.contains("gonk.layer.deny"), "{refused}");
+        let twice = format!("{text}gonk.layer.deny = \"/x\"\n");
+        assert!(settings(&Flags::default(), &twice, &homes())
+            .unwrap_err()
+            .contains("given 2 times"));
     }
 }

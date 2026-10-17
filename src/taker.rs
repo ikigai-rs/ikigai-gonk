@@ -342,23 +342,47 @@ pub fn evidence(item: &Item) -> Vec<String> {
                     || c == '_')
             });
             let url = url.trim_end_matches('.');
-            let is_pr = url
-                .strip_prefix("https://github.com/")
-                .map(|rest| rest.split('/').collect::<Vec<_>>())
-                .is_some_and(|parts| {
-                    parts.len() == 4
-                        && parts[2] == "pull"
-                        && !parts[0].is_empty()
-                        && !parts[1].is_empty()
-                        && parts[3].chars().all(|c| c.is_ascii_digit())
-                        && !parts[3].is_empty()
-                });
-            if is_pr && !found.iter().any(|f| f == url) {
+            if is_pull_request(url) && !found.iter().any(|f| f == url) {
                 found.push(url.to_string());
             }
         }
     }
     found
+}
+
+/// Whether `url` is, whole, a pull request URL: `https://github.com/{owner}/{repo}/pull/{n}`,
+/// in GitHub's own name characters (the [`crate::mirror::REPOSITORY`] rule, so no `?`, `#`, `%`
+/// or `@` can ride inside an owner or a repository).
+/// What [`evidence`] finds, and the only evidence the offer side copies into its ledger as
+/// evidence ([`crate::mirror`], ledger [#1746](http://localhost:1062/l/default/item/1746)).
+///
+/// ```
+/// use ikigai_gonk::taker::is_pull_request;
+/// assert!(is_pull_request("https://github.com/ikigai-rs/ikigai-core/pull/41"));
+/// assert!(!is_pull_request("http://github.com/o/r/pull/1"));
+/// assert!(!is_pull_request("https://github.com/o/r/pull/1/files"));
+/// assert!(!is_pull_request("https://github.com/o/r/pull/x"));
+/// assert!(!is_pull_request("https://example.com/o/r/pull/1"));
+/// assert!(!is_pull_request("https://github.com/o/r?token=x/pull/1"));
+/// assert!(!is_pull_request("javascript:alert(1)"));
+/// ```
+pub fn is_pull_request(url: &str) -> bool {
+    url.strip_prefix("https://github.com/")
+        .map(|rest| rest.split('/').collect::<Vec<_>>())
+        .is_some_and(|parts| {
+            parts.len() == 4
+                && parts[2] == "pull"
+                && !parts[0].is_empty()
+                && !parts[1].is_empty()
+                && parts[0]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                && parts[1]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+                && parts[3].chars().all(|c| c.is_ascii_digit())
+                && !parts[3].is_empty()
+        })
 }
 
 /// One binding's take side, run by the server.

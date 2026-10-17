@@ -43,6 +43,7 @@ pub mod budget;
 pub mod checkout;
 pub mod config;
 pub mod doors;
+pub mod egress;
 pub mod findings;
 pub mod grants;
 pub mod history;

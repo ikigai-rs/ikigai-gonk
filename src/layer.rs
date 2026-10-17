@@ -43,6 +43,8 @@
 //!   (`urn:layer:{layer}`, `ik:layerModel`) when the binding first runs, not at start (a door
 //!   that is down must not stop this server), and a binding to any other model is refused for
 //!   the life of the process, said once on stderr.
+//! - An OFFER line naming the `default` ledger, or a ledger not named for its collaboration
+//!   unless confirmed (`confirm-ledger=<ledger>`): [`check_offered_ledger`], ledger #1745.
 //! - Two lines for one layer; two OFFER lines for one ledger (an item would be offered twice);
 //!   bindings that name different doors (one layer host per gonk, so `urn:layers:` and
 //!   `urn:collab:` have one place to resolve).
@@ -121,6 +123,10 @@ pub struct Binding {
     pub ledger: String,
     /// The collaboration whose participants graph names the takers' kinds.
     pub collab: Option<String>,
+    /// The operator's deny file (`gonk.layer.deny`), for an offer binding: an item whose title
+    /// or body matches a line of it is not offered ([`crate::egress`]). Set by the config from
+    /// its own key, never from the line.
+    pub deny: Option<Arc<crate::egress::DenyList>>,
 }
 
 impl Binding {
@@ -154,8 +160,65 @@ pub fn is_layer_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// The word on an offer line that confirms a ledger whose name is not its collaboration's:
+/// `confirm-ledger=<the ledger's name, again>`.
+pub const CONFIRM_LEDGER: &str = "confirm-ledger";
+
+/// Whether an OFFER binding may offer `ledger` (ledger
+/// [#1745](http://localhost:1062/l/default/item/1745)): every open, unclaimed item of the ledger
+/// it names is published to another party within one pass, so one wrong word must not offer the
+/// wrong ledger.
+///
+/// - **The default ledger is never offered**, confirmed or not: it is this server's own work,
+///   and its items are not written to be shared.
+/// - **Any other ledger is offered when it is named for its collaboration** (`ledger=bobby
+///   collab=bobby`, the convention a collaboration's ledger follows), or when the line repeats
+///   its name as `confirm-ledger=<name>`, a deliberate second word for an unusual pairing.
+///
+/// ```
+/// use ikigai_gonk::layer::check_offered_ledger;
+/// assert!(check_offered_ledger("…", "bobby", Some("bobby"), None).is_ok());
+/// assert!(check_offered_ledger("…", "work", Some("bobby"), Some("work")).is_ok());
+/// assert!(check_offered_ledger("…", "work", Some("bobby"), None).unwrap_err().contains("confirm-ledger=work"));
+/// assert!(check_offered_ledger("…", "work", None, Some("wrok")).is_err());
+/// assert!(check_offered_ledger("…", "default", Some("default"), Some("default")).unwrap_err().contains("never offered"));
+/// ```
+///
+/// # Errors
+///
+/// The default ledger; a ledger neither named for its collaboration nor confirmed.
+pub fn check_offered_ledger(
+    line: &str,
+    ledger: &str,
+    collab: Option<&str>,
+    confirm: Option<&str>,
+) -> Result<(), String> {
+    if ledger == crate::config::DEFAULT_LEDGER {
+        return Err(format!(
+            "gonk.layer `{line}`: the `{ledger}` ledger is never offered into a layer: an offer \
+             publishes every open, unclaimed item's title and body to another party, and the \
+             default ledger is this server's own work. Offer a ledger kept for the collaboration \
+             (`ledger=<collab> collab=<collab>`)"
+        ));
+    }
+    if collab == Some(ledger) || confirm == Some(ledger) {
+        return Ok(());
+    }
+    Err(format!(
+        "gonk.layer `{line}`: ledger `{ledger}` is offered {}, and an offer publishes every \
+         open, unclaimed item of it to another party. Name the ledger for its collaboration \
+         (`ledger={ledger} collab={ledger}`), or confirm this one by repeating its name: \
+         `{CONFIRM_LEDGER}={ledger}`",
+        match collab {
+            Some(c) => format!("to collaboration `{c}`"),
+            None => "with no collaboration named".to_string(),
+        }
+    ))
+}
+
 /// Parse one `gonk.layer` line: `<layer> <offer|take> <quic url> <cert dir> ledger=<name>
-/// [collab=<name>]`. `home` is `$HOME`, for `~/` in the certificate directory.
+/// [collab=<name>] [confirm-ledger=<name>]`. `home` is `$HOME`, for `~/` in the certificate
+/// directory. An offer line is checked by [`check_offered_ledger`].
 ///
 /// ```
 /// use ikigai_gonk::layer::{parse, Role};
@@ -177,7 +240,7 @@ pub fn is_layer_name(name: &str) -> bool {
 /// certificate directory that is not one, or a ledger name the ledger refuses.
 pub fn parse(line: &str, home: &Path) -> Result<Binding, String> {
     let shape = "expected `<layer> <offer|take> <quic://host:port> <cert dir> ledger=<name> \
-                 [collab=<name>]`";
+                 [collab=<name>] [confirm-ledger=<name>]`";
     let mut words = line.split_whitespace();
     let mut next = |what: &str| {
         words
@@ -215,10 +278,11 @@ pub fn parse(line: &str, home: &Path) -> Result<Binding, String> {
             certs.display()
         ));
     }
-    let (mut ledger, mut collab) = (None, None);
+    let (mut ledger, mut collab, mut confirm) = (None, None, None);
     for word in words {
         match word.split_once('=') {
             Some(("ledger", name)) if ledger.is_none() => ledger = Some(name.to_string()),
+            Some((CONFIRM_LEDGER, name)) if confirm.is_none() => confirm = Some(name.to_string()),
             Some(("collab", name)) if collab.is_none() => {
                 if !is_layer_name(name) {
                     return Err(format!(
@@ -233,6 +297,14 @@ pub fn parse(line: &str, home: &Path) -> Result<Binding, String> {
     let ledger =
         ledger.ok_or_else(|| format!("gonk.layer `{line}`: no `ledger=<name>`; {shape}"))?;
     Ledger::parse(&ledger).map_err(|e| format!("gonk.layer `{line}`: ledger={ledger}: {e}"))?;
+    if role == Role::Offer {
+        check_offered_ledger(line, &ledger, collab.as_deref(), confirm.as_deref())?;
+    } else if confirm.is_some() {
+        return Err(format!(
+            "gonk.layer `{line}`: `{CONFIRM_LEDGER}=` confirms an OFFER binding's ledger, and \
+             this line takes"
+        ));
+    }
     Ok(Binding {
         layer,
         role,
@@ -242,6 +314,7 @@ pub fn parse(line: &str, home: &Path) -> Result<Binding, String> {
         },
         ledger,
         collab,
+        deny: None,
     })
 }
 
@@ -377,9 +450,15 @@ pub fn start(
                     Arc::clone(door) as Arc<dyn Door>,
                     Arc::clone(hub),
                 )?;
+                // ★ Ledger #1745: how much one binding would publish, said before its first
+                // pass, so a binding to the wrong ledger is seen in the log.
+                let eligible = match worker.eligible() {
+                    Ok(n) => format!("{n} open, unclaimed item(s) it would offer"),
+                    Err(e) => format!("its items could not be counted: {e}"),
+                };
                 crate::mirror::start(worker, feed_door(binding));
                 lines.push(format!(
-                    "ledger `{}` offered into layer `{}` on {}",
+                    "ledger `{}` offered into layer `{}` on {} ({eligible})",
                     binding.ledger, binding.layer, binding.target
                 ));
             }
@@ -553,7 +632,11 @@ mod tests {
     #[test]
     fn a_line_parses_with_and_without_a_collaboration() {
         let certs = tempfile::tempdir().unwrap();
-        let bare = parse(&line("ledger=bobby", certs.path()), &home()).unwrap();
+        let bare = parse(
+            &line("ledger=bobby confirm-ledger=bobby", certs.path()),
+            &home(),
+        )
+        .unwrap();
         assert_eq!(bare.layer, "tasks-bobby");
         assert_eq!(bare.collab, None);
         assert_eq!(bare.target.to_string(), "quic://127.0.0.1:4434");
@@ -604,33 +687,85 @@ mod tests {
         refused("t offer", "no door");
     }
 
+    /// ★ Ledger #1745: `ledger=default` in the offer role was accepted, and nothing tied
+    /// `ledger=` to `collab=`, so one wrong word offered every open, unclaimed item of the main
+    /// ledger to another party within one pass.
+    #[test]
+    fn the_default_ledger_is_never_offered_and_another_is_offered_only_when_paired() {
+        let certs = tempfile::tempdir().unwrap();
+        let c = certs.path().display();
+        let refused = |l: String, needle: &str| {
+            let e = parse(&l, &home()).unwrap_err();
+            assert!(e.contains(needle), "{l}: {e}");
+        };
+        refused(
+            format!("t offer quic://h:1 {c} ledger=default collab=bobby"),
+            "never offered",
+        );
+        refused(
+            format!("t offer quic://h:1 {c} ledger=default collab=default confirm-ledger=default"),
+            "never offered",
+        );
+        refused(
+            format!("t offer quic://h:1 {c} ledger=work collab=bobby"),
+            "confirm-ledger=work",
+        );
+        refused(
+            format!("t offer quic://h:1 {c} ledger=work"),
+            "no collaboration named",
+        );
+        refused(
+            format!("t offer quic://h:1 {c} ledger=work collab=bobby confirm-ledger=wrok"),
+            "confirm-ledger=work",
+        );
+        refused(
+            format!("t take quic://h:1 {c} ledger=work confirm-ledger=work"),
+            "OFFER binding",
+        );
+        let paired = parse(
+            &format!("t offer quic://h:1 {c} ledger=bobby collab=bobby"),
+            &home(),
+        )
+        .unwrap();
+        assert_eq!(paired.ledger, "bobby");
+        let confirmed = parse(
+            &format!("t offer quic://h:1 {c} ledger=work collab=bobby confirm-ledger=work"),
+            &home(),
+        )
+        .unwrap();
+        assert_eq!(confirmed.ledger, "work");
+        // The take role is untouched: a collaborator takes into whatever ledger it keeps.
+        let take = parse(&format!("t take quic://h:1 {c} ledger=default"), &home()).unwrap();
+        assert_eq!(take.role, Role::Take);
+    }
+
     #[test]
     fn one_layer_once_one_ledger_offered_once_one_door() {
         let certs = tempfile::tempdir().unwrap();
         let c = certs.path().display();
         let twice = vec![
-            format!("a offer quic://h:1 {c} ledger=x"),
+            format!("a offer quic://h:1 {c} ledger=x collab=x"),
             format!("a take quic://h:1 {c} ledger=y"),
         ];
         assert!(parse_all(&twice, &home())
             .unwrap_err()
             .contains("bound twice"));
         let offered_twice = vec![
-            format!("a offer quic://h:1 {c} ledger=x"),
-            format!("b offer quic://h:1 {c} ledger=x"),
+            format!("a offer quic://h:1 {c} ledger=x collab=x"),
+            format!("b offer quic://h:1 {c} ledger=x collab=x"),
         ];
         assert!(parse_all(&offered_twice, &home())
             .unwrap_err()
             .contains("offered into"));
         let two_doors = vec![
-            format!("a offer quic://h:1 {c} ledger=x"),
+            format!("a offer quic://h:1 {c} ledger=x collab=x"),
             format!("b take quic://h:2 {c} ledger=x"),
         ];
         assert!(parse_all(&two_doors, &home())
             .unwrap_err()
             .contains("one layer host"));
         let fine = vec![
-            format!("a offer quic://h:1 {c} ledger=x"),
+            format!("a offer quic://h:1 {c} ledger=x collab=x"),
             format!("b take quic://h:1 {c} ledger=x"),
         ];
         assert_eq!(parse_all(&fine, &home()).unwrap().len(), 2);
@@ -639,7 +774,7 @@ mod tests {
     #[test]
     fn a_layer_space_claims_its_own_names_only() {
         let certs = tempfile::tempdir().unwrap();
-        let binding = parse(&line("ledger=bobby", certs.path()), &home()).unwrap();
+        let binding = parse(&line("ledger=bobby collab=bobby", certs.path()), &home()).unwrap();
         let mounted = mount(&[binding]);
         assert_eq!(
             mounted.spaces.len(),
