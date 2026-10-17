@@ -1739,6 +1739,17 @@ Through `9d4e722` a standing connection (Hermes's MCP mount, a worker) kept the 
 connected with until gonk restarted. There is no certificate authority, no expiry and no automated trust
 distribution — the server certificate is pinned by copying it.
 
+**`default` applies only to an enrolled client that names no grant** (ledger #1825). A
+`"default": "<grant>"` in `clients.json` is the grant for an entry of `clients` that names none
+(`{"<fingerprint>": {"label": "spare laptop"}}`); an entry like that in a file with no
+`default` is refused with the file. It is never the grant for a certificate with no entry:
+removing a client's entry refuses it at its next call and its next connection whatever
+`default` says, though its certificate is still trusted at the handshake. Through 0.1.x a
+removal under a `default` moved the client to the default grant instead, and a `default` alone
+opened the QUIC door; now a `default` alone admits nobody. ⚠ Adding a client still takes a
+restart: trusted certificates are read at startup, and the `ikigai-quic` release gonk builds on
+has no trust list it can re-read per handshake.
+
 **A remote WORKER** (ledger #1143, ikigai-ledger 0.8.0) is a client that takes work from a
 ledger and hands it back, and never decides that the work is done:
 

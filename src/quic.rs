@@ -320,9 +320,9 @@ pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
 
 /// Move `old`'s enrollment in `clients.json` to `new`, in ONE write: the same grant, the same
 /// label, nothing in `grants.json` touched. `Ok(Some(grant))` names the grant the new
-/// certificate is now enrolled under; `Ok(None)` when `old` had no entry of its own (a
-/// certificate admitted only through the shared `default` grant, or not at all), in which case
-/// nothing is written.
+/// certificate is now served under (its entry's, or the file's `default` for an entry that
+/// names none); `Ok(None)` when `old` had no entry of its own, in which case nothing is
+/// written.
 ///
 /// ★ This is what `client add <name> --rotate` does when it is given no scopes (ledger
 /// [#918](http://localhost:1060/l/default/item/918)): a rotation replaces a client's IDENTITY,
@@ -340,19 +340,26 @@ pub fn rotate_enrolment(layout: &Layout, old: &str, new: &str) -> Result<Option<
     let Some(entry) = clients.remove(&normalize(old)) else {
         return Ok(None);
     };
-    let grant = entry
-        .as_str()
-        .or_else(|| entry.get("grant").and_then(Value::as_str))
-        .ok_or("the old certificate's enrollment names no grant")?
-        .to_string();
-    if let Some(existing) = clients.get(&normalize(new)) {
-        let current = existing
+    let named = |entry: &Value| {
+        entry
             .as_str()
-            .or_else(|| existing.get("grant").and_then(Value::as_str));
-        if current != Some(grant.as_str()) {
+            .or_else(|| entry.get("grant").and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    // An entry that names no grant is served under `default` (ledger #1825), and is carried
+    // the same way: the new certificate is served under it too.
+    let grant = named(&entry)
+        .or_else(|| {
+            doc.get("default")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or("the old certificate's enrollment names no grant")?;
+    if let Some(existing) = clients.get(&normalize(new)) {
+        if named(existing) != named(&entry) {
             return Err(format!(
                 "the new certificate is already enrolled under grant `{}` — nothing was written",
-                current.unwrap_or("?")
+                named(existing).unwrap_or_else(|| "(the default)".to_string())
             ));
         }
     }
@@ -371,32 +378,39 @@ pub struct ClientRow {
     pub name: Option<String>,
     /// The certificate's fingerprint.
     pub fingerprint: String,
-    /// The grant `clients.json` enrolls it under, when it is enrolled.
+    /// Whether `clients.json` has an entry for it: the one thing that admits a certificate
+    /// (ledger #1825).
+    pub enrolled: bool,
+    /// The grant its own entry names. `None` for an entry that names none (it is served under
+    /// the file's `default`) or for no entry at all (see `enrolled`).
     pub grant: Option<String>,
 }
 
 impl ClientRow {
     /// What this row means for a connection from that certificate.
     pub fn state(&self) -> &'static str {
-        match (&self.name, &self.grant) {
-            (Some(_), Some(_)) => "trusted and enrolled",
-            (Some(_), None) => "trusted, NOT enrolled (refused at connection)",
-            (None, Some(_)) => "enrolled, NO bundle (not trusted after a restart)",
-            (None, None) => "unknown",
+        match (&self.name, self.enrolled) {
+            (Some(_), true) => "trusted and enrolled",
+            (Some(_), false) => "trusted, NOT enrolled (refused at connection)",
+            (None, true) => "enrolled, NO bundle (not trusted after a restart)",
+            (None, false) => "unknown",
         }
     }
 }
 
 /// Every QUIC client this server knows of — each bundle under `clients/`, and each
 /// fingerprint `clients.json` enrolls — joined on the fingerprint, bundles first by name.
-/// The `String` is `clients.json`'s explicit shared `default` grant, when one is set.
+/// The `String` is `clients.json`'s explicit `default` grant, when one is set: the grant an
+/// enrolled entry that names none is served under.
 pub fn list_clients(layout: &Layout) -> Result<(Vec<ClientRow>, Option<String>), String> {
     let enrolment = read_enrolment(&layout.clients_json())?.unwrap_or_default();
     let mut rows: Vec<ClientRow> = Vec::new();
     for (name, pem) in trusted_client_certs(layout)? {
         let fingerprint = fingerprint_of(&pem, &name)?;
+        let entry = enrolment.clients.get(&fingerprint);
         rows.push(ClientRow {
-            grant: enrolment.clients.get(&fingerprint).cloned(),
+            enrolled: entry.is_some(),
+            grant: entry.cloned().flatten(),
             name: Some(name),
             fingerprint,
         });
@@ -406,7 +420,8 @@ pub fn list_clients(layout: &Layout) -> Result<(Vec<ClientRow>, Option<String>),
             rows.push(ClientRow {
                 name: None,
                 fingerprint: fingerprint.clone(),
-                grant: Some(grant.clone()),
+                enrolled: true,
+                grant: grant.clone(),
             });
         }
     }
@@ -531,10 +546,19 @@ pub fn same_client(a: &str, b: &str) -> bool {
         )
 }
 
-/// The parsed `clients.json`: fingerprint → grant name, plus an explicit shared default.
+/// The parsed `clients.json`: fingerprint → the grant its entry names (`None`: it names none),
+/// plus an explicit default for an entry that names none.
+///
+/// ★ **`default` applies only to an enrolled client that names no grant** (ledger
+/// [#1825](http://localhost:1062/l/default/item/1825)), and never to anyone else. Through
+/// 0.1.x it was the grant for every TRUSTED certificate with no entry, so removing a client's
+/// entry under a `default` moved that client to the default grant instead of refusing it, and
+/// a certificate still trusted at the TLS handshake (trust is read at startup) kept a grant
+/// after `client remove`. Now a certificate with no entry is refused whatever `default` says,
+/// at its next connection and at its next call on a connection it already holds.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Enrolment {
-    clients: BTreeMap<String, String>,
+    clients: BTreeMap<String, Option<String>>,
     default_grant: Option<String>,
 }
 
@@ -549,30 +573,54 @@ impl Enrolment {
         self.clients.is_empty()
     }
 
-    /// Whether this file admits any client certificate at all: one enrolled fingerprint, or
-    /// an explicit shared default. Passkeys do not count — they are the HTTP door's.
+    /// Whether this file admits any client certificate at all: one enrolled fingerprint. A
+    /// `default` alone admits nobody, since it covers enrolled entries only. Passkeys do not
+    /// count — they are the HTTP door's.
     pub fn admits_certificates(&self) -> bool {
-        !self.clients.is_empty() || self.default_grant.is_some()
+        !self.clients.is_empty()
     }
 
-    /// The explicitly configured shared default, if any. Absence is never a default.
+    /// The explicitly configured default, if any: the grant an enrolled entry that names none
+    /// is served under. Absence is never a default.
     pub fn default_grant(&self) -> Option<&str> {
         self.default_grant.as_deref()
     }
 
-    /// The grant for a fingerprint: its own entry, else the explicit default.
+    /// Whether `fingerprint` has an entry of its own (normalized the way every key is).
+    pub fn is_enrolled(&self, fingerprint: &str) -> bool {
+        self.clients.contains_key(&normalize(fingerprint))
+    }
+
+    /// The grant for a fingerprint: the one its own entry names, else the explicit default
+    /// when its entry names none. `None` for a fingerprint with no entry, whatever `default`
+    /// says: `default` applies only to an enrolled client that names no grant.
+    ///
+    /// ```
+    /// use ikigai_gonk::quic::parse_enrolment;
+    /// let fp = "6f1c00000000000000000000000000000000000000000000000000000000abcd";
+    /// let stranger = "0".repeat(64);
+    /// let e = parse_enrolment(&format!(
+    ///     r#"{{"clients": {{"{fp}": {{"label": "spare laptop"}}}}, "default": "shared"}}"#
+    /// ))
+    /// .unwrap();
+    /// assert_eq!(e.grant_for(fp), Some("shared"));
+    /// assert_eq!(e.grant_for(&stranger), None);
+    /// ```
     pub fn grant_for(&self, fingerprint: &str) -> Option<&str> {
         self.clients
-            .get(&normalize(fingerprint))
-            .map(String::as_str)
+            .get(&normalize(fingerprint))?
+            .as_deref()
             .or(self.default_grant.as_deref())
     }
 }
 
-/// Parse `clients.json` — the cli's shape: `{"clients": {fp: "grant" | {"grant": …}},
-/// "default": "grant"}`. Fingerprints are normalized, so `openssl`'s `AB:CD:…` pastes in.
+/// Parse `clients.json` — the cli's shape: `{"clients": {fp: "grant" | {"grant": …} |
+/// {"label": …}}, "default": "grant"}`. Fingerprints are normalized, so `openssl`'s
+/// `AB:CD:…` pastes in. An object entry that names no grant is served under `default`, and
+/// is refused with the file when the file sets none.
 pub fn parse_enrolment(text: &str) -> Result<Enrolment, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    let has_default = matches!(v.get("default"), Some(Value::String(_)));
     let mut clients = BTreeMap::new();
     if let Some(map) = v.get("clients") {
         let map = map
@@ -580,12 +628,20 @@ pub fn parse_enrolment(text: &str) -> Result<Enrolment, String> {
             .ok_or("`clients` must be an object of fingerprint → grant")?;
         for (fingerprint, entry) in map {
             let grant = match entry {
-                Value::String(name) => name.clone(),
-                Value::Object(_) => entry
-                    .get("grant")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| format!("client `{fingerprint}` has no `grant`"))?
-                    .to_string(),
+                Value::String(name) => Some(name.clone()),
+                Value::Object(_) => match entry.get("grant") {
+                    Some(Value::String(name)) => Some(name.clone()),
+                    None if has_default => None,
+                    None => {
+                        return Err(format!(
+                            "client `{fingerprint}` has no `grant`, and the file sets no \
+                             `default` to serve it under"
+                        ))
+                    }
+                    Some(_) => {
+                        return Err(format!("client `{fingerprint}`'s `grant` must be a name"))
+                    }
+                },
                 _ => {
                     return Err(format!(
                         "client `{fingerprint}` must be a grant name or an object with one"
@@ -640,7 +696,7 @@ pub enum QuicDoor {
 /// Decide whether the QUIC door opens, and prepare it if so.
 ///
 /// ★ **The door opens only on a decision to face the network**: an enrolled client
-/// certificate (a fingerprint under `clients`, or a `default` grant), or a bind the operator
+/// certificate (a fingerprint under `clients`; a `default` alone admits nobody), or a bind the operator
 /// named. `clients.json` EXISTING is not one — a browser enrolling a passkey writes that file
 /// too, and through 0.1.0 that made the next start refuse (gonk PENDING §3).
 ///
@@ -755,8 +811,8 @@ pub fn client_lines(layout: &Layout) -> Result<Vec<String>, String> {
                 None => layout.clients_json(),
             };
             let state = match (&row.grant, &default) {
-                (None, Some(grant)) if row.name.is_some() => {
-                    format!("trusted, under the default grant `{grant}`")
+                (None, Some(grant)) if row.enrolled => {
+                    format!("{}, under the default grant `{grant}`", row.state())
                 }
                 _ => row.state().to_string(),
             };
@@ -1548,8 +1604,22 @@ mod tests {
         let e = parse_enrolment(&format!(r#"{{"clients": {{"{colons}": "rw"}}}}"#)).unwrap();
         assert_eq!(e.grant_for(FP), Some("rw"));
         assert_eq!(e.grant_for(&"00".repeat(32)), None);
+        // ★ A default covers an enrolled entry that names no grant, never a certificate with
+        // no entry (ledger #1825).
         let with_default = parse_enrolment(r#"{"default": "rw"}"#).unwrap();
-        assert_eq!(with_default.grant_for(FP), Some("rw"));
+        assert_eq!(with_default.grant_for(FP), None);
+        let unnamed = parse_enrolment(&format!(
+            r#"{{"clients": {{"{FP}": {{"label": "spare"}}}}, "default": "rw"}}"#
+        ))
+        .unwrap();
+        assert!(unnamed.is_enrolled(FP));
+        assert_eq!(unnamed.grant_for(FP), Some("rw"));
+        assert_eq!(unnamed.grant_for(&"00".repeat(32)), None);
+        let refused = parse_enrolment(&format!(
+            r#"{{"clients": {{"{FP}": {{"label": "spare"}}}}}}"#
+        ))
+        .unwrap_err();
+        assert!(refused.contains("no `default`"), "{refused}");
         assert!(parse_enrolment("{ nope").is_err());
         assert!(parse_grants(r#"{"x": [1]}"#).is_err());
     }
@@ -1765,8 +1835,8 @@ mod tests {
             layout.server_cert().is_file(),
             "generated on the path that serves"
         );
-        // A shared default grant is a certificate decision too.
-        assert!(parse_enrolment(r#"{"default": "rw"}"#)
+        // A default alone admits nobody: it covers enrolled entries only (ledger #1825).
+        assert!(!parse_enrolment(r#"{"default": "rw"}"#)
             .unwrap()
             .admits_certificates());
     }

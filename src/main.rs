@@ -1396,14 +1396,18 @@ fn client_list(flags: &config::Flags) {
             "{:<16} {}  grant {:<12} {}",
             row.name.as_deref().unwrap_or("-"),
             row.fingerprint,
-            row.grant.as_deref().unwrap_or("-"),
+            match (&row.grant, &default) {
+                (Some(grant), _) => grant.clone(),
+                (None, Some(default)) if row.enrolled => format!("{default} (default)"),
+                _ => "-".to_string(),
+            },
             row.state()
         );
     }
     if let Some(default) = default {
         println!(
-            "default grant `{default}`: ANY trusted certificate without its own entry is \
-             admitted under it"
+            "default grant `{default}`: an ENROLLED certificate whose entry names no grant is \
+             served under it; a certificate with no entry is refused whatever it says"
         );
     }
 }
