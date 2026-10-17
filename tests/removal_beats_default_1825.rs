@@ -158,10 +158,9 @@ fn a_removed_client_is_refused_whatever_default_says() {
     // What `ikigai-gonk client remove --fingerprint <fp>` runs.
     assert!(quic::unenrol(&door.layout, &door.fingerprint).unwrap());
     match call(&client, items()) {
-        Err(Error::Denied(why)) => assert!(
-            why.contains("no grant is configured for this certificate"),
-            "{why}"
-        ),
+        Err(Error::Denied(why)) => {
+            assert!(why.contains("this certificate is not enrolled"), "{why}")
+        }
         other => panic!("the next call on the held connection must be Denied, got {other:?}"),
     }
     assert!(

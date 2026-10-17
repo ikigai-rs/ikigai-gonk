@@ -631,8 +631,8 @@ pub fn parse_enrolment(text: &str) -> Result<Enrolment, String> {
                 Value::String(name) => Some(name.clone()),
                 Value::Object(_) => match entry.get("grant") {
                     Some(Value::String(name)) => Some(name.clone()),
-                    None if has_default => None,
-                    None => {
+                    None | Some(Value::Null) if has_default => None,
+                    None | Some(Value::Null) => {
                         return Err(format!(
                             "client `{fingerprint}` has no `grant`, and the file sets no \
                              `default` to serve it under"
@@ -1030,6 +1030,15 @@ pub fn authority(
     grants: &BTreeMap<String, Vec<String>>,
     fingerprint: &str,
 ) -> Result<(String, Capability), String> {
+    // ★ The order is the rule, the same as `ikigai_embedded::clients::authorize` (ledger
+    // #1825): an entry of its own FIRST, and only then the grant it names or the default.
+    if !enrolment.is_enrolled(fingerprint) {
+        return Err(
+            "this certificate is not enrolled: the `clients` map has no entry for it (a \
+             `default` grant serves only enrolled entries that name no grant)"
+                .to_string(),
+        );
+    }
     let grant = enrolment
         .grant_for(fingerprint)
         .ok_or("no grant is configured for this certificate")?;
@@ -1620,6 +1629,12 @@ mod tests {
         ))
         .unwrap_err();
         assert!(refused.contains("no `default`"), "{refused}");
+        // `"grant": null` is no grant, as the cli reads it.
+        let null = parse_enrolment(&format!(
+            r#"{{"clients": {{"{FP}": {{"grant": null}}}}, "default": "rw"}}"#
+        ))
+        .unwrap();
+        assert_eq!(null.grant_for(FP), Some("rw"));
         assert!(parse_enrolment("{ nope").is_err());
         assert!(parse_grants(r#"{"x": [1]}"#).is_err());
     }
