@@ -1304,8 +1304,9 @@ impl Mirror {
 /// while every later kick queued behind it. A torn listing now ends, marked partial (so no
 /// item is withdrawn as gone on its evidence); the write that tore it cut a thread under the
 /// ledger's names, and that kick runs the pass that reads it whole. [`MAX_PAGES`] bounds a
-/// ledger that grows faster than it can be paged.
-fn collect_items(
+/// ledger that grows faster than it can be paged. The taker reads its filed items through
+/// this too ([`crate::taker`], ledger #1742).
+pub(crate) fn collect_items(
     mut page: impl FnMut(usize) -> Result<ItemsDocument, String>,
 ) -> Result<(Vec<Item>, bool), String> {
     let mut items: Vec<Item> = Vec::new();

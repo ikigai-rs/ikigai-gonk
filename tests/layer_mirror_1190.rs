@@ -2108,3 +2108,113 @@ fn a_binding_says_how_many_items_it_would_offer() {
         "open, unclaimed, not awaiting"
     );
 }
+
+// ---- ledger #1742: the taker's listing, torn by an append ------------------------------------
+
+impl World {
+    /// Their side, through a ledger whose listing of items is TORN while `tear` is set: read
+    /// as the ledger reads it when an append lands between its read of a page and its count
+    /// (ikigai-ledger reads the two apart, ledger #1741). Every total says one more item than
+    /// the page was read from, and every page after the first is read as if that item had been
+    /// prepended, so, newest first, it holds again the item the page before ended on.
+    fn theirs_tearing(&self) -> (Theirs, Arc<AtomicBool>) {
+        let tear = Arc::new(AtomicBool::new(false));
+        let certs = tempfile::tempdir().unwrap();
+        let line = format!(
+            "{LAYER} take quic://127.0.0.1:1 {} ledger=ikigai",
+            certs.path().display()
+        );
+        let binding = layer::parse(&line, std::path::Path::new("/nowhere")).unwrap();
+        let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
+        let real = taker::hub_ledger(&binding, Arc::clone(&hub)).unwrap();
+        let torn = Arc::clone(&tear);
+        let ledger: taker::LedgerIssue = Arc::new(move |mut request: Request| {
+            if !torn.load(Ordering::SeqCst) || !request.target.as_str().ends_with(":items") {
+                return real(request);
+            }
+            let offset: usize = match request.args.get("offset") {
+                Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).unwrap().parse().unwrap(),
+                _ => 0,
+            };
+            let read_at = offset.saturating_sub(1);
+            request.args.insert(
+                "offset".to_string(),
+                ArgRef::Inline(read_at.to_string().into_bytes()),
+            );
+            let mut page: serde_json::Value = serde_json::from_slice(&real(request)?).unwrap();
+            let total = page["total"]
+                .as_u64()
+                .or_else(|| page["count"].as_u64())
+                .unwrap();
+            page["total"] = serde_json::json!(total + 1);
+            page["offset"] = serde_json::json!(offset);
+            Ok(serde_json::to_vec(&page).unwrap())
+        });
+        let taker = Taker::new(binding, Arc::new(self.door(&them())), ledger).unwrap();
+        (Theirs { hub, taker }, tear)
+    }
+}
+
+/// ★ Ledger #1742: a torn listing held the item it repeated twice, so a pass reported on it
+/// twice. Now a pass on a torn listing reports nothing and says why; the next pass, on a whole
+/// listing, reports once.
+#[test]
+fn a_pass_on_a_torn_listing_reports_nothing_and_the_next_reports_once() {
+    let w = World::new();
+    let mirror = w.mirror();
+    w.file(
+        "Port the importer\n\nThe importer reads the old format.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let (theirs, tear) = w.theirs_tearing();
+    assert!(matches!(theirs.taker.take(&offer).unwrap(), Took::Filed(_)));
+
+    tear.store(true, Ordering::SeqCst);
+    let report = theirs.taker.pass().unwrap();
+    let progress = report
+        .actions
+        .iter()
+        .filter(|a| a.starts_with("reported Progress"))
+        .count();
+    assert_eq!(
+        progress, 0,
+        "reported on a torn listing: {:?}",
+        report.actions
+    );
+    assert!(
+        report.problems.iter().any(|p| p.contains("torn")),
+        "{:?}",
+        report.problems
+    );
+
+    tear.store(false, Ordering::SeqCst);
+    assert_eq!(theirs.reported("Progress"), 1);
+}
+
+/// ★ Ledger #1742: a torn listing may be missing the item a take would find, and a take is not
+/// undone, so a take on one refuses and takes nothing; run again on a whole listing, it files.
+#[test]
+fn a_take_on_a_torn_listing_takes_nothing() {
+    let w = World::new();
+    let mirror = w.mirror();
+    w.file(
+        "Port the importer\n\nThe importer reads the old format.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let (theirs, tear) = w.theirs_tearing();
+
+    tear.store(true, Ordering::SeqCst);
+    let e = theirs.taker.take(&offer).unwrap_err();
+    assert!(e.contains("torn") && e.contains("nothing was taken"), "{e}");
+    assert!(w.pending().contains(&offer), "the offer was taken");
+
+    tear.store(false, Ordering::SeqCst);
+    let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
+        panic!("not filed")
+    };
+    // Filed, a torn listing still finds it: its items are real.
+    tear.store(true, Ordering::SeqCst);
+    assert_eq!(theirs.taker.take(&offer).unwrap(), Took::Already(local));
+}
