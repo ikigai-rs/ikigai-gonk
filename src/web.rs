@@ -1220,7 +1220,7 @@ fn ledger_total(json: &[u8]) -> Result<usize> {
 /// Percent-encode a query-string VALUE. Nothing here builds a URL from anything but a
 /// filter the caller already typed, and a search for `a & b` must not become two
 /// parameters.
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         match byte {

@@ -214,6 +214,7 @@ before any conformance claim.
 | 2026-10-16 | The header's Layers link carries the viewer's unread count as text in its name, with a polite announcement only when it rises; no animation | `tests/layers_page_1675.rs` and the browser-pane check above (ledger #1700) |
 | 2026-10-16 | The Layers page polls every three seconds instead of holding a connection, survives a network error or a gonk restart with one polite "Reconnecting" status and a bounded backoff, and the header's count and the page's poll no longer write an alert into `#flash` when they fail | `tests/layers_page_1675.rs` and the restart check above (ledger #1705) |
 | 2026-10-16 | A failed poll of the header's Queue badge no longer writes an alert into `#flash` (during a restart it did, every ten seconds), as the Layers count's already did not; a layer the page had not read yet when it was drawn has its (empty) lists, so its live entries arrive without a reload | `tests/web.rs` and `tests/layers_page_1675.rs` (wiring and page shape only; no browser run) (ledger #1718) |
+| 2026-10-17 | A task layer's tuple or take that this gonk tracks as an item links to it with the item's ledger and number as the link's visible text ("tracked here as crew #1"), never a bare number | `tests/layer_links_1856.rs` (page shape only; no browser run) (ledger #1856) |
 
 ## References
 

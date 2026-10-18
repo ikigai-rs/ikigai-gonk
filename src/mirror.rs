@@ -662,7 +662,9 @@ impl Mirror {
     pub fn build_offer(&self, item: &Item, offer: &str, context: &str) -> Result<Vec<u8>, String> {
         self.built(item, offer, context)
             .map_err(|refusal| match refusal {
-                Refusal::Withheld(w) => format!("{} is withheld: {}", item.display, w.why),
+                Refusal::Withheld(w) => {
+                    format!("{} is withheld: {}", layer::item_words(item), w.why)
+                }
                 Refusal::Failed(e) => e,
             })
     }
@@ -689,7 +691,7 @@ impl Mirror {
         if !triples.iter().any(|(_, p, _)| *p == ik("brief")) {
             return Err(Refusal::Failed(format!(
                 "{} has no body, and the body is an offer's brief: nothing to offer",
-                item.display
+                layer::item_words(item)
             )));
         }
         let title = literal("http://purl.org/dc/terms/title");
@@ -817,7 +819,7 @@ impl Mirror {
             .and_then(|j| j.get("outcome")?.as_str().map(str::to_string));
         let wrote = outcome.as_deref() != Some("existing");
         if wrote {
-            report.did(format!("commented on {} ({key})", item.display));
+            report.did(format!("commented on {} ({key})", layer::item_words(item)));
         }
         Ok(wrote)
     }
@@ -1013,10 +1015,15 @@ impl Mirror {
                 if commented.is_ok() && held && newest.get(&item.iri) == Some(&offer) {
                     match self.release(item, &taker) {
                         Ok(()) => {
-                            report.did(format!("released {} from <{taker}>", item.display));
+                            report.did(format!(
+                                "released {} from <{taker}>",
+                                layer::item_words(item)
+                            ));
                             touched = true;
                         }
-                        Err(e) => report.failed(format!("releasing {}: {e}", item.display)),
+                        Err(e) => {
+                            report.failed(format!("releasing {}: {e}", layer::item_words(item)))
+                        }
                     }
                 }
                 commented.map(|_| ())
@@ -1027,10 +1034,13 @@ impl Mirror {
                 if fresh.contains(subject) && held && item.status == "open" {
                     match self.claim(item, &taker, true) {
                         Ok(()) => {
-                            report.did(format!("renewed {} for <{taker}>", item.display));
+                            report
+                                .did(format!("renewed {} for <{taker}>", layer::item_words(item)));
                             touched = true;
                         }
-                        Err(e) => report.failed(format!("renewing {}: {e}", item.display)),
+                        Err(e) => {
+                            report.failed(format!("renewing {}: {e}", layer::item_words(item)))
+                        }
                     }
                 }
                 match progress_days.get(&(offer.clone(), day_of(&r.time).to_string())) {
@@ -1137,7 +1147,10 @@ impl Mirror {
                             );
                             let key = format!("layer:{}:conflict:{newest}", self.binding.layer);
                             if let Err(e) = self.comment(item, &key, &text, false, &mut report) {
-                                report.failed(format!("commenting on {}: {e}", item.display));
+                                report.failed(format!(
+                                    "commenting on {}: {e}",
+                                    layer::item_words(item)
+                                ));
                             }
                         }
                     }
@@ -1186,12 +1199,12 @@ impl Mirror {
                 );
                 let key = withheld_key(&self.binding.layer, &item.iri, &w.reason);
                 if let Err(e) = self.comment(item, &key, &text, false, report) {
-                    report.failed(format!("commenting on {}: {e}", item.display));
+                    report.failed(format!("commenting on {}: {e}", layer::item_words(item)));
                 }
                 return;
             }
             Err(Refusal::Failed(e)) => {
-                report.failed(format!("not offering {}: {e}", item.display));
+                report.failed(format!("not offering {}: {e}", layer::item_words(item)));
                 return;
             }
         }
@@ -1200,12 +1213,15 @@ impl Mirror {
                 .ledger_request(Verb::Sink, &format!("item:{}:about", item.number))
                 .with_arg("content", inline(&offer));
             if let Err(e) = self.ledger_issue(record) {
-                report.failed(format!("recording the offer of {}: {e}", item.display));
+                report.failed(format!(
+                    "recording the offer of {}: {e}",
+                    layer::item_words(item)
+                ));
                 return;
             }
         }
         match self.drop_offer(item, &offer, context) {
-            Ok(()) => report.did(format!("offered {} as <{offer}>", item.display)),
+            Ok(()) => report.did(format!("offered {} as <{offer}>", layer::item_words(item))),
             Err(e) => report.failed(e),
         }
     }
@@ -1235,7 +1251,7 @@ impl Mirror {
         ) {
             Ok(wrote) => !wrote,
             Err(e) => {
-                report.failed(format!("commenting on {}: {e}", item.display));
+                report.failed(format!("commenting on {}: {e}", layer::item_words(item)));
                 false
             }
         }
@@ -1246,7 +1262,10 @@ impl Mirror {
     fn withdraw(&self, item: &Item, offer: &str, why: &str, report: &mut Report) {
         match self.layer.take(offer) {
             Ok(true) => {
-                report.did(format!("withdrew <{offer}> ({} is {why})", item.display));
+                report.did(format!(
+                    "withdrew <{offer}> ({} is {why})",
+                    layer::item_words(item)
+                ));
                 return;
             }
             Ok(false) => {}
@@ -1274,7 +1293,7 @@ impl Mirror {
         );
         let key = format!("layer:{}:late-take:{offer}", self.binding.layer);
         if let Err(e) = self.comment(item, &key, &text, false, report) {
-            report.failed(format!("commenting on {}: {e}", item.display));
+            report.failed(format!("commenting on {}: {e}", layer::item_words(item)));
         }
         let free = item.status == "open" && item.claim.is_none() && item.awaiting.is_none();
         if free {
@@ -1286,9 +1305,12 @@ impl Mirror {
         match self.claim(item, taker, false) {
             Ok(()) => report.did(format!(
                 "claimed {} for <{taker}> (took <{offer}>)",
-                item.display
+                layer::item_words(item)
             )),
-            Err(e) => report.failed(format!("claiming {} for <{taker}>: {e}", item.display)),
+            Err(e) => report.failed(format!(
+                "claiming {} for <{taker}>: {e}",
+                layer::item_words(item)
+            )),
         }
     }
 }

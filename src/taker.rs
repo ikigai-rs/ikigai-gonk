@@ -519,7 +519,7 @@ impl Taker {
                     report.failed(format!(
                         "{} is closed done with no pull request URL in its body or comments, so \
                          there is nothing to hand back: comment one",
-                        item.display
+                        layer::item_words(item)
                     ));
                     continue;
                 }
@@ -556,7 +556,10 @@ impl Taker {
                  ik:offer <{offer}> ; ik:addressedTo <{offerer}>{extra} .\n"
             );
             match self.client.out(content.into_bytes()) {
-                Ok(()) => report.did(format!("reported {class} on <{offer}> ({})", item.display)),
+                Ok(()) => report.did(format!(
+                    "reported {class} on <{offer}> ({})",
+                    layer::item_words(item)
+                )),
                 Err(e) => report.failed(format!("reporting {class} on <{offer}>: {e}")),
             }
         }

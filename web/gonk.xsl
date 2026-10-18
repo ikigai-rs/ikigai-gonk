@@ -447,7 +447,9 @@
   </xsl:template>
 
   <!-- One entry of a channel (`view:entry`) or one pending tuple (`view:tuple`): its heading is
-       a link to itself, so every entry is one Tab stop and has an address. -->
+       a link to itself, so every entry is one Tab stop and has an address. A tuple whose offer
+       is about an item of this gonk's ledgers links to that item in its own ledger
+       (`@item-href`, built from the store's answer, never from the layer; ledger #1856). -->
   <xsl:template match="view:entry"><xsl:call-template name="entry-card"/></xsl:template>
   <xsl:template match="view:tuple"><xsl:call-template name="entry-card"/></xsl:template>
 
@@ -474,6 +476,7 @@
           </xsl:if>
           <xsl:if test="@addressed-to"><xsl:text> · addressed to </xsl:text><xsl:value-of select="@addressed-to"/></xsl:if>
           <xsl:if test="@offer"><xsl:text> · about the offer </xsl:text><code><xsl:value-of select="@offer"/></code></xsl:if>
+          <xsl:if test="@item-href"><xsl:text> · tracked here as </xsl:text><a class="entry-item"><xsl:attribute name="href"><xsl:value-of select="@item-href"/></xsl:attribute><xsl:value-of select="@item-label"/></a></xsl:if>
         </p>
         <xsl:if test="@title"><p class="entry-title"><xsl:value-of select="@title"/></p></xsl:if>
         <xsl:if test="@repository or @severity">
@@ -519,6 +522,7 @@
         <xsl:text>, </xsl:text>
         <time><xsl:attribute name="datetime"><xsl:value-of select="@datetime"/></xsl:attribute><xsl:value-of select="@when"/></time>
         <xsl:text> (number </xsl:text><xsl:value-of select="@seq"/><xsl:text>)</xsl:text>
+        <xsl:if test="@item-href"><xsl:text> · tracked here as </xsl:text><a class="entry-item"><xsl:attribute name="href"><xsl:value-of select="@item-href"/></xsl:attribute><xsl:value-of select="@item-label"/></a></xsl:if>
         <xsl:if test="@new = 'true'"><span class="badge new"><span class="sr-only">, </span>New</span></xsl:if>
       </p>
     </li>
