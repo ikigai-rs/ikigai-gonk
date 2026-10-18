@@ -408,6 +408,8 @@ pub struct Receipt {
     pub tuple: String,
     /// The tuple's title, when the receipt carries it.
     pub title: Option<String>,
+    /// The tuple's `ik:offer`, when the receipt carries it (a report on an offer).
+    pub offer: Option<String>,
 }
 
 /// One layer as this process has read it.
@@ -1314,6 +1316,7 @@ fn receipts_of(graph: &Graph) -> Vec<Receipt> {
                 taker: graph.value(s, PROV_ASSOCIATED).unwrap_or_default(),
                 ended: graph.value(s, PROV_ENDED).unwrap_or_default(),
                 title: graph.value(&tuple, DCT_TITLE),
+                offer: graph.value(&tuple, &ik("offer")),
                 tuple,
             })
         })
@@ -1511,6 +1514,7 @@ fn entry_row(
     me: Option<&Me>,
     new: bool,
     replies: bool,
+    item: Option<&ItemLink>,
 ) -> String {
     let anchor = format!("entry-{}", entry.id);
     let mut attributes: Vec<(&str, String)> = vec![
@@ -1567,6 +1571,10 @@ fn entry_row(
     if let Some(offer) = &entry.offer {
         attributes.push(("offer", local(offer)));
     }
+    if let Some((words, path)) = item {
+        attributes.push(("item-label", words.clone()));
+        attributes.push(("item-href", path.clone()));
+    }
     if let Some(file) = &entry.file {
         let name = bare_name(&file.name);
         attributes.push(("file-name", name));
@@ -1593,22 +1601,24 @@ fn entry_row(
     wrap(name, &attributes, &body)
 }
 
-fn receipt_row(receipt: &Receipt, me: Option<&Me>, new: bool) -> String {
-    element(
-        "receipt",
-        &[
-            ("taker", &who(&receipt.taker, me)),
-            ("datetime", &receipt.ended),
-            ("when", &web::when(&receipt.ended)),
-            ("seq", &receipt.seq.to_string()),
-            (
-                "what",
-                receipt.title.as_deref().unwrap_or(&local(&receipt.tuple)),
-            ),
-            ("new", if new { "true" } else { "false" }),
-        ],
-        "",
-    )
+fn receipt_row(receipt: &Receipt, me: Option<&Me>, new: bool, item: Option<&ItemLink>) -> String {
+    let taker = who(&receipt.taker, me);
+    let seq = receipt.seq.to_string();
+    let when = web::when(&receipt.ended);
+    let fallback = local(&receipt.tuple);
+    let mut attributes: Vec<(&str, &str)> = vec![
+        ("taker", &taker),
+        ("datetime", &receipt.ended),
+        ("when", &when),
+        ("seq", &seq),
+        ("what", receipt.title.as_deref().unwrap_or(&fallback)),
+        ("new", if new { "true" } else { "false" }),
+    ];
+    if let Some((words, path)) = item {
+        attributes.push(("item-label", words));
+        attributes.push(("item-href", path));
+    }
+    element("receipt", &attributes, "")
 }
 
 /// Rows as chunk documents of at most [`render::CHUNK_ROWS`] rows and about half of
@@ -1801,7 +1811,13 @@ pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: Option<Arc<LayersView>>)
                 view: view.clone(),
             },
         )
-        .bind(Exact::new(WAIT_IRI), Wait { view: view.clone() })
+        .bind(
+            Exact::new(WAIT_IRI),
+            Wait {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
         .bind(Exact::new(COUNT_IRI), Count { view: view.clone() })
         .bind(template(SAY_TEMPLATE), Say { view: view.clone() })
         .bind(template(FILE_TEMPLATE), File { view: view.clone() })
@@ -2051,7 +2067,7 @@ impl Endpoint for LayerPage {
                         .entries
                         .iter()
                         .rev()
-                        .map(|e| entry_row("entry", e, &layer, me, e.seq > seen, posts))
+                        .map(|e| entry_row("entry", e, &layer, me, e.seq > seen, posts, None))
                         .collect();
                     let unread_shown = found.entries.iter().filter(|e| e.seq > seen).count() as u64;
                     let unread = found.last - seen;
@@ -2071,7 +2087,8 @@ impl Endpoint for LayerPage {
                 }
                 Model::Tuplespace => {
                     attributes.push(("tuplespace", "true".to_string()));
-                    let (tuples, receipts) = tuple_rows(found, me, seen);
+                    let links = item_links(&self.web, inv, &layer).await;
+                    let (tuples, receipts) = tuple_rows(found, me, seen, &links);
                     children.push_str(&render::slot("tuples"));
                     children.push_str(&render::slot("receipts"));
                     slots.push(("tuples".to_string(), rendered(inv, &tuples).await?));
@@ -2125,20 +2142,111 @@ impl Endpoint for LayerPage {
     }
 }
 
-fn tuple_rows(layer: &LayerView, me: Option<&Me>, seen: u64) -> (Vec<String>, Vec<String>) {
+fn tuple_rows(
+    layer: &LayerView,
+    me: Option<&Me>,
+    seen: u64,
+    links: &ItemLinks,
+) -> (Vec<String>, Vec<String>) {
     let tuples = layer
         .tuples
         .iter()
         .rev()
-        .map(|t| entry_row("tuple", t, &layer.info.name, me, t.seq > seen, false))
+        .map(|t| {
+            // An offer is its own subject; a report names the offer it is on.
+            let offer = if t.kind == "Offer" {
+                Some(&t.iri)
+            } else {
+                t.offer.as_ref()
+            };
+            let item = offer.and_then(|o| links.get(o));
+            entry_row("tuple", t, &layer.info.name, me, t.seq > seen, false, item)
+        })
         .collect();
     let receipts = layer
         .receipts
         .iter()
         .rev()
-        .map(|r| receipt_row(r, me, r.seq > seen))
+        .map(|r| {
+            let offer = r.offer.as_ref().unwrap_or(&r.tuple);
+            receipt_row(r, me, r.seq > seen, links.get(offer))
+        })
         .collect();
     (tuples, receipts)
+}
+
+/// An item of this gonk's ledgers, as [`crate::layer::item_link`] words it: `(words, path)`.
+type ItemLink = (String, String);
+
+/// The items of this gonk's ledgers that a task layer's tuples are about: offer IRI → item.
+type ItemLinks = BTreeMap<String, ItemLink>;
+
+/// Which item of this gonk's ledgers each of `layer`'s offers belongs to (ledger
+/// [#1856](http://localhost:1062/l/default/item/1856)): the item an OFFERING gonk offered under
+/// it, or the item a TAKING gonk filed from it. Both sides record the offer's IRI on the item
+/// as an `about` edge ([`crate::mirror`], [`crate::taker`]), and an offering gonk from before
+/// ikigai-ledger 0.10 as a comment keyed [`crate::mirror::offered_key`], so one query per ledger
+/// finds every pairing.
+///
+/// ★ **Only this gonk's own ledgers, and only what the viewer may read.** A tuple never carries
+/// an item or a ledger (the mirror's egress rule), so the other side's item is not named on the
+/// page and nothing here comes from the layer: the offer IRI is only a lookup key, and the link
+/// is built from the item's IRI and number as this gonk's store answers them, in the ledger the
+/// item's OWN IRI names ([`crate::layer::item_link`]). A ledger the viewer cannot read, or whose
+/// graph it cannot query, is skipped; a failed query leaves its links out rather than failing
+/// the page.
+async fn item_links(web: &Web, inv: &Invocation<'_>, layer: &str) -> ItemLinks {
+    use ikigai_ledger::vocabulary as v;
+    let mut links = ItemLinks::new();
+    if !crate::layer::is_layer_name(layer) {
+        return links;
+    }
+    let offers = format!("urn:layer:{layer}:");
+    let keyed = crate::mirror::offered_key(layer, "");
+    let query = format!(
+        "SELECT ?item ?n ?about ?key WHERE {{ \
+         {{ ?item <{about}> ?about . FILTER(STRSTARTS(STR(?about), \"{offers}\")) }} \
+         UNION {{ ?c <{on}> ?item ; <{key}> ?key . FILTER(STRSTARTS(STR(?key), \"{keyed}\")) }} \
+         ?item <{number}> ?n . }}",
+        about = v::ABOUT,
+        on = v::ON_ITEM,
+        key = v::COMMENT_KEY,
+        number = v::NUMBER,
+    );
+    for ledger in web::readable_ledgers(web, inv) {
+        let graph = ledger.graph();
+        if !inv.capability.allows(&ikigai_store::cap_read_graph(&graph)) {
+            continue;
+        }
+        let request = Request::new(
+            Verb::Source,
+            Iri::parse("urn:iki:store:graph-select").expect("a constant IRI"),
+        )
+        .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec()))
+        .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()));
+        let Ok(answer) = inv.issue(request).await else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&answer.bytes) else {
+            continue;
+        };
+        for row in json
+            .pointer("/results/bindings")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let value = |name: &str| row.pointer(&format!("/{name}/value"))?.as_str();
+            let offer = value("about").or_else(|| value("key")?.strip_prefix(&keyed));
+            let number = value("n").and_then(|n| n.parse::<i64>().ok());
+            if let (Some(item), Some(offer), Some(number)) = (value("item"), offer, number) {
+                if let Some(link) = crate::layer::item_link(item, number) {
+                    links.entry(offer.to_string()).or_insert(link);
+                }
+            }
+        }
+    }
+    links
 }
 
 fn say_form(layer: &str, label: &str, reply: Option<&str>) -> String {
@@ -2163,6 +2271,7 @@ fn say_form(layer: &str, label: &str, reply: Option<&str>) -> String {
 /// rows, the banner, a sentence for the live region. A poll that brings nothing new sends only
 /// the next watcher. The name is from when it was a long poll (ledger #1705 says why it is not).
 struct Wait {
+    web: Arc<Web>,
     view: Option<Arc<LayersView>>,
 }
 
@@ -2246,7 +2355,7 @@ impl Endpoint for Wait {
                                 .iter()
                                 .rev()
                                 .filter(|e| e.seq > after)
-                                .map(|e| entry_row("entry", e, name, me, true, posts))
+                                .map(|e| entry_row("entry", e, name, me, true, posts, None))
                                 .collect();
                             if !rows.is_empty() {
                                 attributes.push((
@@ -2263,7 +2372,8 @@ impl Endpoint for Wait {
                         }
                         Model::Tuplespace => {
                             let seen = view.cursors.get(&who_views, name).min(found.last);
-                            let (tuples, receipts) = tuple_rows(found, me, seen.min(after));
+                            let links = item_links(&self.web, inv, name).await;
+                            let (tuples, receipts) = tuple_rows(found, me, seen.min(after), &links);
                             attributes.push(("tuplespace", "true".to_string()));
                             attributes.push(("announce", format!("{} changed.", found.info.label)));
                             children.push_str(&render::slot("tuples"));

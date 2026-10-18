@@ -1173,14 +1173,22 @@ fn layer_take(offer: &str, flags: &config::Flags) {
             .map_err(|e| format!("{target}: {e}"))
     });
     let door = Arc::new(ikigai_gonk::taker::ResolverDoor(client));
+    // The item named in its own ledger, with the page that shows it (ledger #1856).
+    let filed = |n: i64| match ikigai_ledger::Ledger::parse(&binding.ledger) {
+        Ok(ledger) => {
+            let (words, path) = ikigai_gonk::layer::number_link(&ledger, n);
+            format!("{words} ({path})")
+        }
+        Err(_) => format!("{}#{n}", binding.ledger),
+    };
     match ikigai_gonk::taker::take(binding, door, &ledger, offer) {
         Ok(ikigai_gonk::taker::Took::Filed(n)) => {
-            println!("took <{offer}>; filed as {}#{n}", binding.ledger)
+            println!("took <{offer}>; filed as {}", filed(n))
         }
         Ok(ikigai_gonk::taker::Took::Already(n)) => {
             println!(
-                "<{offer}> is already taken by this server; filed as {}#{n}",
-                binding.ledger
+                "<{offer}> is already taken by this server; filed as {}",
+                filed(n)
             )
         }
         Err(e) => fail(&e),

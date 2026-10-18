@@ -160,6 +160,59 @@ pub fn is_layer_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// An item of THIS gonk's ledgers as a task layer's readers see it (ledger
+/// [#1856](http://localhost:1062/l/default/item/1856)): its words, `{ledger} #{number}`, and the
+/// page that shows it, `/l/{ledger}/item/{number}`.
+///
+/// The ledger is the one the item's OWN IRI names, never an assumed `default`: numbers are per
+/// ledger, so a bare `#12` is ambiguous the moment a second ledger exists (field guide 9i). The
+/// ledger's name is percent-encoded into the path. `None` when `iri` is not a ledger item's
+/// IRI, since then there is no ledger to name.
+///
+/// ```
+/// use ikigai_gonk::layer::item_link;
+/// assert_eq!(
+///     item_link("urn:iki:ledger:bobby:item:01abc", 12),
+///     Some(("bobby #12".to_string(), "/l/bobby/item/12".to_string()))
+/// );
+/// // The default ledger is named too: `#12` alone could be any ledger's.
+/// assert_eq!(
+///     item_link("urn:iki:ledger:item:01abc", 7),
+///     Some(("default #7".to_string(), "/l/default/item/7".to_string()))
+/// );
+/// assert_eq!(item_link("urn:layer:tasks:offer:01abc", 1), None);
+/// ```
+pub fn item_link(iri: &str, number: i64) -> Option<(String, String)> {
+    let (ledger, _) = Ledger::item_iri(iri)?;
+    Some(number_link(&ledger, number))
+}
+
+/// [`item_link`] for an item known by its ledger and number.
+///
+/// ```
+/// use ikigai_gonk::layer::number_link;
+/// let ledger = ikigai_ledger::Ledger::parse("ikigai").unwrap();
+/// assert_eq!(number_link(&ledger, 3).1, "/l/ikigai/item/3");
+/// ```
+pub fn number_link(ledger: &Ledger, number: i64) -> (String, String) {
+    (
+        format!("{} #{number}", ledger.name()),
+        format!(
+            "/l/{}/item/{number}",
+            crate::web::percent_encode(ledger.name())
+        ),
+    )
+}
+
+/// An item in a mirror's or a taker's log line: [`item_link`]'s words and page, `bobby #12
+/// (/l/bobby/item/12)`, or the ledger's own display form when the item's IRI names no ledger.
+pub fn item_words(item: &ikigai_ledger::json::Item) -> String {
+    match item_link(&item.iri, item.number) {
+        Some((words, path)) => format!("{words} ({path})"),
+        None => item.display.clone(),
+    }
+}
+
 /// The word on an offer line that confirms a ledger whose name is not its collaboration's:
 /// `confirm-ledger=<the ledger's name, again>`.
 pub const CONFIRM_LEDGER: &str = "confirm-ledger";
