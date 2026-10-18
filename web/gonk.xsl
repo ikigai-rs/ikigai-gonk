@@ -67,9 +67,7 @@
             <a class="skip" href="#main">Skip to content</a>
             <header class="top">
               <a class="brand" href="/">gonk</a>
-              <nav class="ledgers" aria-label="Ledgers">
-                <xsl:apply-templates select="view:ledger"/>
-              </nav>
+              <xsl:apply-templates select="view:ledger-menu"/>
               <xsl:apply-templates select="view:browse"/>
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
@@ -115,7 +113,59 @@
     </span>
   </xsl:template>
 
-  <xsl:template match="view:ledger">
+  <!-- The header's ledger picker (ledger #1888, src/web.rs::ledger_menu). Every value here is
+       computed there: the set is the ledgers the caller may read, in `default`-then-by-name
+       order. No counts: they cost every page a read per ledger, so they are on /l only.
+
+       ★ A menu of LINKS, never a navigating <select> (WCAG 3.2.2): without a script it is this
+       <details>, which opens and closes on its own; web/gonk.js replaces the <summary> with a
+       disclosure button (aria-expanded, aria-controls) and adds Escape and a click outside.
+       One readable ledger is its name and no menu. The filter is drawn only past
+       web::MENU_FILTER_PAST ledgers and stays hidden until the script that runs it is here. -->
+  <xsl:template match="view:ledger-menu">
+    <nav class="ledgers" aria-label="Ledgers">
+      <xsl:choose>
+        <xsl:when test="@single = 'true'">
+          <span class="ledger-only"><xsl:text>Ledger:</xsl:text><xsl:value-of select="' '"/><xsl:apply-templates select="view:menu-ledger" mode="only"/></span>
+        </xsl:when>
+        <xsl:otherwise>
+          <details class="ledger-menu" data-ledger-menu="true">
+            <summary class="ledger-summary"><xsl:value-of select="@label"/></summary>
+            <div id="ledger-panel" class="ledger-panel">
+              <xsl:if test="@filter = 'true'">
+                <div class="ledger-filter" data-ledger-filter="true" hidden="hidden">
+                  <label for="ledger-filter">Filter ledgers</label>
+                  <input id="ledger-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="ledger-filter-status"/>
+                  <p id="ledger-filter-status" class="note" role="status" aria-live="polite"></p>
+                </div>
+              </xsl:if>
+              <ul class="ledger-list">
+                <xsl:apply-templates select="view:menu-ledger"/>
+              </ul>
+              <a class="all-ledgers">
+                <xsl:attribute name="href"><xsl:value-of select="@all-href"/></xsl:attribute>
+                <xsl:if test="@all-current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>
+                <xsl:text>All ledgers</xsl:text>
+              </a>
+            </div>
+          </details>
+        </xsl:otherwise>
+      </xsl:choose>
+    </nav>
+  </xsl:template>
+
+  <xsl:template match="view:menu-ledger">
+    <li>
+      <xsl:attribute name="data-ledger-name"><xsl:value-of select="@name"/></xsl:attribute>
+      <a class="ledger-link">
+        <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>
+        <xsl:value-of select="@name"/>
+      </a>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:menu-ledger" mode="only">
     <a class="ledger-link">
       <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
       <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>
@@ -236,6 +286,7 @@
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
+      <xsl:when test="@view = 'ledgers'"><xsl:call-template name="ledgers"/></xsl:when>
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
       <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
@@ -601,6 +652,46 @@
     the browse family is reached from there. ⚠ A root the caller cannot read is not in
     this list at all — the page is built from `k::readable_roots`, not from the config.
   -->
+  <!-- /l (ledger #1888, src/web.rs::LedgersIndex): every ledger the caller may read, in the
+       header menu's order, with the counts the ledger itself answers. A count the caller may
+       not read says so in words rather than showing a number it does not have. -->
+  <xsl:template name="ledgers">
+    <section class="panel ledgers-index" aria-labelledby="ledgers-title">
+      <h1 id="ledgers-title"><xsl:value-of select="@title"/></h1>
+      <p class="note"><xsl:value-of select="@count"/></p>
+      <div class="table-wrap">
+        <table class="ledger-table">
+          <thead>
+            <tr><th scope="col">Ledger</th><th scope="col">Open</th><th scope="col">Total</th></tr>
+          </thead>
+          <tbody>
+            <xsl:apply-templates select="view:ledger-row"/>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:ledger-row">
+    <tr>
+      <th scope="row">
+        <a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a>
+      </th>
+      <td class="num">
+        <xsl:choose>
+          <xsl:when test="@open"><xsl:value-of select="@open"/></xsl:when>
+          <xsl:otherwise>not counted</xsl:otherwise>
+        </xsl:choose>
+      </td>
+      <td class="num">
+        <xsl:choose>
+          <xsl:when test="@total"><xsl:value-of select="@total"/></xsl:when>
+          <xsl:otherwise>not counted</xsl:otherwise>
+        </xsl:choose>
+      </td>
+    </tr>
+  </xsl:template>
+
   <xsl:template name="roots">
     <section class="panel roots" aria-labelledby="roots-title">
       <h1 id="roots-title"><xsl:value-of select="@title"/></h1>

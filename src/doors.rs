@@ -781,6 +781,7 @@ pub fn edge_verb(method: &str) -> Verb {
 /// ```
 /// use ikigai_gonk::doors::edge_subject;
 /// assert_eq!(edge_subject("/"), "urn:iki:gonk:page:home");
+/// assert_eq!(edge_subject("/l"), "urn:iki:gonk:page:ledgers");
 /// assert_eq!(edge_subject("/l/default"), "urn:iki:gonk:page:ledger:default");
 /// assert_eq!(edge_subject("/l/default/item/12"), "urn:iki:gonk:page:item:default:12");
 /// assert_eq!(edge_subject("/iki/ledger/append"), "urn:iki:ledger:append");
@@ -1089,6 +1090,8 @@ fn routes() -> Vec<Route> {
     };
     vec![
         route("/", "urn:iki:gonk:page:home"),
+        // Ledger #1888: every readable ledger, the header menu's "All ledgers".
+        route(crate::web::LEDGERS_PATH, crate::web::LEDGERS_IRI),
         route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
         route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
         // Ledger #775: the doctor, read-only (`web::DoctorView`).
@@ -1165,7 +1168,7 @@ fn routes() -> Vec<Route> {
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
 pub const GONK_PATHS: [&str; 15] = [
     "/",
-    "/l/",
+    "/l",
     "/act",
     "/sparql",
     "/render-rules",
@@ -1189,7 +1192,8 @@ pub const GONK_PATHS: [&str; 15] = [
 /// assert!(is_gonk_path("/browse"));
 /// assert!(is_gonk_path("/browse/urn:repo:x:tree"));
 /// assert!(is_gonk_path("/"));
-/// assert!(!is_gonk_path("/l"));
+/// assert!(is_gonk_path("/l"));
+/// assert!(!is_gonk_path("/lx"));
 /// assert!(!is_gonk_path("/iki"));
 /// assert!(!is_gonk_path("/browsex"));
 /// assert!(!is_gonk_path("/other/service/page"));
