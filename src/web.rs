@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! /                          urn:iki:gonk:page:home                 Source  the first readable ledger
+//! /l                         urn:iki:gonk:page:ledgers              Source  every readable ledger, counted
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
@@ -141,6 +142,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             LedgerView {
                 web: Arc::clone(&web),
                 shape: Shape::Home,
+            },
+        )
+        .bind(
+            Exact::new(LEDGERS_IRI),
+            LedgersIndex {
+                web: Arc::clone(&web),
             },
         )
         .bind(
@@ -372,7 +379,7 @@ pub(crate) fn nav(
     ledgers: &[Ledger],
     current: Option<&str>,
 ) -> String {
-    nav_with(web, inv, ledgers, current, None)
+    nav_with(web, inv, ledgers, Here::from(current), None)
 }
 
 /// [`nav`] on a Layers page, whose header count polls with `count_query` (`quiet=1` on the
@@ -383,17 +390,40 @@ pub(crate) fn nav_on_layers(
     ledgers: &[Ledger],
     count_query: &str,
 ) -> String {
-    nav_with(web, inv, ledgers, None, Some(count_query))
+    nav_with(web, inv, ledgers, Here::Elsewhere, Some(count_query))
+}
+
+/// Where in the ledgers a page is, for the header's menu: one ledger's page (its link carries
+/// `aria-current`), the `/l` index (its "All ledgers" link does), or anywhere else.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Here<'a> {
+    Ledger(&'a str),
+    Index,
+    Elsewhere,
+}
+
+impl<'a> From<Option<&'a str>> for Here<'a> {
+    fn from(current: Option<&'a str>) -> Here<'a> {
+        current.map_or(Here::Elsewhere, Here::Ledger)
+    }
 }
 
 fn nav_with(
     web: &Web,
     inv: &Invocation<'_>,
     ledgers: &[Ledger],
-    current: Option<&str>,
+    here: Here<'_>,
     count_query: Option<&str>,
 ) -> String {
-    let mut out: String = ledgers
+    let current = match here {
+        Here::Ledger(name) => Some(name),
+        _ => None,
+    };
+    // ★ The header's picker (ledger #1888), FIRST: the stylesheet draws it where the one link
+    // per ledger used to be. The `view:ledger` elements below stay for the SPARQL page's
+    // `<select>`, which is a form value and keeps its own order.
+    let mut out = ledger_menu(ledgers, here);
+    out += &ledgers
         .iter()
         .map(|l| {
             element(
@@ -413,7 +443,7 @@ fn nav_with(
                 "",
             )
         })
-        .collect();
+        .collect::<String>();
     let reads_a_root = !crate::k::readable_roots(web, inv).is_empty();
     if reads_a_root {
         out.push_str(&element("browse", &[("href", crate::k::ROOTS_PATH)], ""));
@@ -503,6 +533,190 @@ fn withholds(web: &Web, inv: &Invocation<'_>, reads_a_root: bool, offers_queue: 
     });
     let has_roots = !web.browse_roots.is_empty();
     unread_ledger || (has_roots && (!reads_a_root || !offers_queue))
+}
+
+// ------------------------------------------------------------------- the ledger picker
+
+/// The ledgers index page, `/l` (ledger [#1888](http://localhost:1062/l/default/item/1888)).
+pub const LEDGERS_IRI: &str = "urn:iki:gonk:page:ledgers";
+
+/// [`LEDGERS_IRI`]'s path: the header menu's last link, "All ledgers".
+pub const LEDGERS_PATH: &str = "/l";
+
+/// Past this many readable ledgers the header's menu carries a filter box. Eight links read
+/// at a glance; a ninth is where a person starts scanning.
+pub const MENU_FILTER_PAST: usize = 8;
+
+/// The header's ledger picker (ledger [#1888](http://localhost:1062/l/default/item/1888)):
+/// one `view:ledger-menu` holding a `view:menu-ledger` per ledger in [`menu_order`], or nothing
+/// at all when the caller may read no ledger.
+///
+/// ★ **A menu of LINKS, not a navigating `<select>`.** A select that navigates on change fails
+/// WCAG 3.2.2 (On Input): arrowing through its options with the keyboard leaves the page on the
+/// first press. The stylesheet draws a `<details>` that works with no script, and
+/// `web/gonk.js` turns it into a disclosure button with `aria-expanded` and `aria-controls`.
+///
+/// ★ **The set is `ledgers`, which every caller passes from [`readable_ledgers`]**, the same
+/// set the `/l` index lists, so nobody is offered a ledger the grant does not read.
+///
+/// ⚠ **No counts here, by measurement.** The menu first carried each ledger's open count, one
+/// cacheable `urn:iki:ledger:{L}:count` read per ledger on every page. Measured warm over HTTP
+/// on release builds (ledger #1888's PR, medians of 80): at 12 ledgers a ledger page took
+/// 41 ms on main, 57 ms with the counted menu and 47 ms with this one; at 4 ledgers 38, 45 and
+/// 42 ms. The counts were a cost every page paid per ledger, which is the thing that does not
+/// scale, so they are on `/l` only. What remains (about half a millisecond per ledger) is the
+/// stylesheet drawing the menu's markup.
+fn ledger_menu(ledgers: &[Ledger], here: Here<'_>) -> String {
+    let ordered = menu_order(ledgers);
+    if ordered.is_empty() {
+        return String::new();
+    }
+    let links: String = ordered
+        .iter()
+        .map(|ledger| {
+            element(
+                "menu-ledger",
+                &[
+                    ("name", ledger.name()),
+                    ("href", &ledger_href(ledger)),
+                    ("current", flag(here == Here::Ledger(ledger.name()))),
+                ],
+                "",
+            )
+        })
+        .collect();
+    let label = match here {
+        Here::Ledger(name) => format!("Ledger: {name}"),
+        _ => "Ledgers".to_string(),
+    };
+    render::wrap(
+        "ledger-menu",
+        &[
+            ("label", &label),
+            ("single", flag(ordered.len() == 1)),
+            ("filter", flag(ordered.len() > MENU_FILTER_PAST)),
+            ("all-href", LEDGERS_PATH),
+            ("all-current", flag(here == Here::Index)),
+        ],
+        &links,
+    )
+}
+
+/// The picker's order, and the `/l` index's: `default` first, then by name.
+fn menu_order(ledgers: &[Ledger]) -> Vec<&Ledger> {
+    let mut ordered: Vec<&Ledger> = ledgers.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.is_default()
+            .cmp(&a.is_default())
+            .then_with(|| a.name().cmp(b.name()))
+    });
+    ordered.dedup_by(|a, b| a.name() == b.name());
+    ordered
+}
+
+/// `/l/{ledger}`, through the shared encoder. A ledger name is already path-safe
+/// (`Ledger::parse` admits `a-z 0-9 - _`), so this is the rule stated once rather than a
+/// change in any URL.
+fn ledger_href(ledger: &Ledger) -> String {
+    format!("/l/{}", ikigai_fn::html::url_segment(ledger.name()))
+}
+
+/// How many of `ledger`'s items have `status` (`open`, `closed`, `all`), by the ledger's own
+/// COUNT under the caller's capability, or `None` when the caller may not read it.
+async fn ledger_count(inv: &Invocation<'_>, ledger: &Ledger, status: &str) -> Option<usize> {
+    let read = with(
+        with(
+            request(Verb::Source, &format!("{}count", ledger.prefix())).ok()?,
+            "as",
+            TOTAL_FACE,
+        ),
+        "status",
+        status,
+    );
+    ledger_total(&fetch(inv, read).await.ok()?).ok()
+}
+
+/// `/l`: every ledger the caller may read, with its open and total counts, in the header
+/// menu's order. Public like the home page: it lists only what [`readable_ledgers`] allows,
+/// and a caller who may read none is told how to get one.
+///
+/// ⚠ No graph IRI column: no page this server renders names a ledger's own graph, so this one
+/// does not start (the SPARQL page's cross-graph example names `default`'s, as text).
+struct LedgersIndex {
+    web: Arc<Web>,
+}
+
+#[async_trait]
+impl Endpoint for LedgersIndex {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledgers = readable_ledgers(&self.web, inv);
+        let mut children = nav_with(&self.web, inv, &ledgers, Here::Index, None);
+        if ledgers.is_empty() {
+            children.push_str(&Lacking::ledgers().element());
+            let doc = envelope(
+                "page",
+                &[
+                    ("view", "empty"),
+                    ("full", "true"),
+                    ("title", "No ledger to show"),
+                ],
+                &children,
+            );
+            return Ok(html(render::render(&doc, true).map_err(render_err)?));
+        }
+        let ordered = menu_order(&ledgers);
+        for ledger in &ordered {
+            let open = ledger_count(inv, ledger, "open")
+                .await
+                .map(|n| n.to_string());
+            let total = ledger_count(inv, ledger, "all")
+                .await
+                .map(|n| n.to_string());
+            let href = ledger_href(ledger);
+            let mut attributes = vec![("name", ledger.name()), ("href", href.as_str())];
+            if let Some(open) = open.as_deref() {
+                attributes.push(("open", open));
+            }
+            if let Some(total) = total.as_deref() {
+                attributes.push(("total", total));
+            }
+            children.push_str(&element("ledger-row", &attributes, ""));
+        }
+        let count = match ordered.len() {
+            1 => "1 ledger you may read".to_string(),
+            n => format!("{n} ledgers you may read"),
+        };
+        let doc = envelope(
+            "page",
+            &[
+                ("view", "ledgers"),
+                ("full", "true"),
+                ("title", "Ledgers"),
+                ("count", &count),
+            ],
+            &children,
+        );
+        Ok(html(render::render(&doc, true).map_err(render_err)?))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-page-ledgers"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title("Every ledger, as a page")
+            .summary(
+                "Every ledger this caller may read, with its open and total counts, as an HTML \
+                 page: the header menu's \"All ledgers\". A caller who may read none is told \
+                 how to get one.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(as_html_arg())
+            .output(HTML)
+    }
 }
 
 /// What a page says when the caller's grant does not reach what it shows — ONE shape for

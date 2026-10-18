@@ -483,6 +483,7 @@ there.
 | path | resource | |
 | --- | --- | --- |
 | `/` | `urn:iki:gonk:page:home` | the first readable ledger |
+| `/l` | `urn:iki:gonk:page:ledgers` | every ledger this grant may read, with its open and total counts: the header menu's "All ledgers" |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
@@ -516,6 +517,16 @@ nested a few hundred levels deep overflowed the worker's stack and **aborted gon
 #880, S2). It now refuses, before any parser sees it, a document nested more than 16 levels
 (`render::MAX_CHUNK_DEPTH`) or carrying any `<!` (a declaration can nest what a tag count
 cannot see); gonk's own chunks nest a handful of levels and carry neither.
+
+**The header picks a ledger from a menu of links** (ledger #1888). A button names the current
+ledger ("Ledger: default") and opens a panel with one link per ledger the caller may read,
+`default` first and then by name, and "All ledgers" last, which goes to `/l`. Without a script it is a `<details>`, and it works the same. Past eight ledgers the
+panel has a filter box that narrows the links as you type and says how many match. A caller who
+may read one ledger sees its name and no menu. It is links, not a `<select>` that navigates on
+change, which fails WCAG 3.2.2. The menu and `/l` are computed from the same set, so nobody is
+offered a ledger the grant does not read. The open and total counts are on `/l` only: in the
+menu they were one `count` read per ledger on every page, which took a 41 ms page to 57 ms at
+12 ledgers; without them it is 47 ms, the stylesheet drawing the menu.
 
 **Every form issues an action the ledger already declares.** `/act` builds the target from
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a

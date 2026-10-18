@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does nine things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does ten things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -19,7 +19,9 @@
 // session that only this script asks of the server on a read (ledger #739). (8) the Layers page's
 // post form, replaced by its answer, gives focus back to its text box (ledger #1675). (9) the
 // Layers page's poll, which htmx would leave dead after one failed ask, is re-armed with a
-// backoff and its state said in words (ledger #1705).
+// backoff and its state said in words (ledger #1705). (10) the header's ledger menu, a
+// <details> without this file, becomes a disclosure button that Escape and a click outside
+// close, with a filter that narrows its links past eight ledgers (ledger #1888).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -697,8 +699,91 @@
     });
   }
 
+  // ★ THE HEADER'S LEDGER MENU (ledger #1888). The server draws a <details>, which works with
+  // no script at all; this turns its <summary> into a real disclosure BUTTON, because a summary
+  // is not one to every screen reader, and the button says its state (aria-expanded) and what
+  // it opens (aria-controls). It stays a menu of LINKS: nothing navigates until a link is
+  // followed (WCAG 3.2.2, the reason it is not a <select>).
+  //
+  // Escape closes it from anywhere inside and puts focus back on the button, which is where a
+  // keyboard user opened it; a click outside closes it and moves no focus. Focus is not moved
+  // on opening either: the links are next in tab order.
+  function wireLedgerMenu() {
+    const details = document.querySelector("details[data-ledger-menu]");
+    const panel = $("ledger-panel");
+    if (!details || !panel) return;
+    const summary = details.querySelector("summary");
+    const menu = document.createElement("div");
+    menu.className = "ledger-menu";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = "ledger-toggle";
+    button.className = "ledger-toggle";
+    button.textContent = summary ? summary.textContent : "Ledgers";
+    const mark = document.createElement("span");
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "\u25BE";
+    button.appendChild(mark);
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", panel.id);
+    panel.hidden = true;
+    details.replaceWith(menu);
+    menu.append(button, panel);
+
+    const isOpen = () => button.getAttribute("aria-expanded") === "true";
+    const setOpen = (open) => {
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+      panel.hidden = !open;
+    };
+    button.addEventListener("click", () => setOpen(!isOpen()));
+    menu.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !isOpen()) return;
+      e.preventDefault();
+      setOpen(false);
+      button.focus();
+    });
+    document.addEventListener("click", (e) => {
+      if (isOpen() && !menu.contains(e.target)) setOpen(false);
+    });
+    wireLedgerFilter(panel);
+  }
+
+  // The filter, drawn by the server only past eight ledgers and hidden until here, because a
+  // box that does nothing without a script is worse than no box. It narrows the links by name
+  // as a person types, and says how many match in its polite live region, a moment after the
+  // typing stops so a screen reader is not handed one sentence per keystroke.
+  function wireLedgerFilter(panel) {
+    const box = panel.querySelector("[data-ledger-filter]");
+    const input = $("ledger-filter");
+    const status = $("ledger-filter-status");
+    if (!box || !input || !status) return;
+    const items = Array.from(panel.querySelectorAll("li[data-ledger-name]"));
+    box.hidden = false;
+    let pending = null;
+    input.addEventListener("input", () => {
+      const want = input.value.trim().toLowerCase();
+      let shown = 0;
+      for (const item of items) {
+        const match = !want || item.getAttribute("data-ledger-name").includes(want);
+        item.hidden = !match;
+        if (match) shown++;
+      }
+      const total = items.length;
+      const sentence = !want
+        ? total + " ledgers."
+        : shown === 0
+          ? "No ledger matches."
+          : shown + " of " + total + (shown === 1 ? " ledger matches." : " ledgers match.");
+      clearTimeout(pending);
+      pending = setTimeout(() => {
+        status.textContent = sentence;
+      }, 300);
+    });
+  }
+
   async function init() {
     wireSamples();
+    wireLedgerMenu();
     checkAllWords();
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page

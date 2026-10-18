@@ -1009,6 +1009,12 @@ serde = "1"
 # gonk names its own (`render::RENDER_BUDGET`, 60 s in release, 10 min in debug): the 5 s
 # default refused ordinary pages in a debug build on a loaded machine. `^0.1.3` was `<0.2.0`.
 ikigai-xslt = "0.2.1"
+# The ecosystem's one HTML helper (`ikigai_fn::html`): the header's ledger menu and the `/l`
+# index build their links with `url_segment` (ledger #1888) rather than a private encoder, the
+# field guide's "do not reimplement" rule. 0.5.0 is the floor: the release that added the
+# `html` module (ledger #1813). Light: its only runtime dependencies are ikigai-core (already
+# here), async-trait and futures-util. `"0.5.0"` is `<0.6.0`.
+ikigai-fn = "0.5.0"
 # The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
 # only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so
 # nothing here needs a CBOR decoder. Present from 0.1.14; the verifier has not changed since
