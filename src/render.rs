@@ -904,7 +904,8 @@ fn url_at(text: &str) -> Option<usize> {
 /// [#925](http://localhost:1062/l/default/item/925); field guide 9i is the notation).
 ///
 /// The owner is GitHub's: ASCII letters, digits and inner hyphens. The repository adds `.` and
-/// `_`. The number is 1 to 9 digits and must end the token, so `o/r#12abc` is text.
+/// `_`, but is never `.` or `..` alone. The number is 1 to 9 digits and must end the token, so
+/// `o/r#12abc` is text.
 ///
 /// ```
 /// use ikigai_gonk::render::github_ref_at;
@@ -922,6 +923,7 @@ fn url_at(text: &str) -> Option<usize> {
 /// assert_eq!(at("o/r pr 7"), None);
 /// assert_eq!(at("-o/r#1"), None);
 /// assert_eq!(at("o/r/x#1"), None);
+/// assert_eq!(at("bobby/..#2"), None);
 /// assert_eq!(at("#12"), None);
 /// ```
 pub fn github_ref_at(text: &str) -> Option<(usize, String)> {
@@ -941,7 +943,10 @@ pub fn github_ref_at(text: &str) -> Option<(usize, String)> {
         b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')
     });
     let repo = &text[owner_end + 1..repo_end];
-    if repo.is_empty() || repo.len() > 100 {
+    // `.` and `..` are dot segments, which a browser removes from the path (RFC 3986 §5.2.4):
+    // `o/..#2` would link `https://github.com/issues/2`, a page that names no repository
+    // (ledger [#1867](http://localhost:1062/l/default/item/1867)). GitHub refuses both as names.
+    if repo.is_empty() || repo.len() > 100 || repo == "." || repo == ".." {
         return None;
     }
     let (kind, digits_at) = if bytes.get(repo_end) == Some(&b'#') {
@@ -1187,6 +1192,42 @@ pub fn html(xml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger [#1867](http://localhost:1062/l/default/item/1867): a GitHub reference's
+    /// repository is never a dot segment. `bobby/..#2` in a collaborator's layer text used to
+    /// become `https://github.com/bobby/../issues/2`, which a browser resolves (RFC 3986 §5.2.4)
+    /// to `https://github.com/issues/2`: a link built from someone else's words to a page that
+    /// names no repository at all.
+    #[test]
+    fn a_github_reference_names_no_dot_segment_repository() {
+        for hostile in [
+            "bobby/..#2",
+            "bobby/.#2",
+            "bobby/.. PR 2",
+            "bobby/. PR #2",
+            "o/..#1, then",
+        ] {
+            assert_eq!(github_ref_at(hostile), None, "{hostile}");
+        }
+        // Names GitHub does take, dots and all, still link.
+        for (text, href) in [
+            ("o/.github#3", "https://github.com/o/.github/issues/3"),
+            ("o/a..b#3", "https://github.com/o/a..b/issues/3"),
+            ("o/..x PR 4", "https://github.com/o/..x/pull/4"),
+            ("o/x_y.z#5", "https://github.com/o/x_y.z/issues/5"),
+        ] {
+            assert_eq!(
+                github_ref_at(text).map(|(_, h)| h).as_deref(),
+                Some(href),
+                "{text}"
+            );
+        }
+        // And the whole path: another side's layer entry links nothing out of it.
+        let entry = "<p data-linkify='layer::default'>see bobby/..#2 and bobby/.#3</p>";
+        let got = linkify(entry);
+        assert!(!got.contains("<a "), "{got}");
+        assert!(!got.contains("github.com"), "{got}");
+    }
 
     #[test]
     fn self_closed_non_void_elements_are_opened_and_closed() {
