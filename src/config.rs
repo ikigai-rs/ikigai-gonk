@@ -28,6 +28,9 @@
 //! # gonk.layer.deny = "~/.config/ikigai/gonk/layer-deny.txt"   # words an offer never carries
 //! # the Layers page: a layer door, and the certificates of the PERSON it reads and posts as
 //! # gonk.layers.view = "quic://ikigai-rs.dev:4434 ~/.ikigai/layers-client/brian"
+//! # who else writes on this host's side, so a bare `ledger #N` they write links to `default`
+//! # (default: only the page's own identity; anyone else's bare reference is their own ledger)
+//! # gonk.layers.local = "hub, plasma-gonk"
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
 //! # bind the git-event review QUEUE (urn:space:reviews)
 //! gonk.review.space = "reviews"
@@ -112,11 +115,12 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 36] = [
+const KEYS: [&str; 37] = [
     "gonk.log.access",
     "gonk.layer",
     "gonk.layer.deny",
     "gonk.layers.view",
+    "gonk.layers.local",
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -1612,11 +1616,31 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             view_lines.len()
         ));
     }
+    let local = match values_for(text, crate::layers_view::LOCAL_KEY).as_slice() {
+        [] => Vec::new(),
+        [line] => crate::layers_view::parse_local(line)?,
+        lines => {
+            return Err(format!(
+                "{} is given {} times: one line, the participants separated by commas",
+                crate::layers_view::LOCAL_KEY,
+                lines.len()
+            ))
+        }
+    };
     let layers_view = match view_lines.into_iter().next() {
+        None if !local.is_empty() => {
+            return Err(format!(
+                "{} is set and no {} line is: it says whose layer entries are this host's own \
+                 side on the Layers page, and there is no Layers page",
+                crate::layers_view::LOCAL_KEY,
+                crate::layers_view::KEY
+            ))
+        }
         None => None,
         Some(line) => {
-            let view = crate::layers_view::parse(&line, &homes.home)?;
+            let mut view = crate::layers_view::parse(&line, &homes.home)?;
             crate::layers_view::check_not_a_binding(&view, &layers)?;
+            view.local = local;
             Some(view)
         }
     };
@@ -3099,5 +3123,43 @@ mod tests {
         assert!(settings(&Flags::default(), &twice, &homes())
             .unwrap_err()
             .contains("given 2 times"));
+    }
+
+    /// Ledger #1856: `gonk.layers.local` names who else writes on this host's side of a layer.
+    /// It reaches the Layers page's config, is refused without a Layers page, given twice, or
+    /// naming nobody, and its absence means only the page's own identity.
+    #[test]
+    fn the_local_participants_reach_the_layers_view() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["client.crt", "client.key", "server.crt"] {
+            std::fs::write(dir.path().join(file), "pem").unwrap();
+        }
+        let view = format!(
+            "gonk.layers.view = \"quic://h:1 {}\"\n",
+            dir.path().display()
+        );
+        let local = "gonk.layers.local = \"hub, plasma-gonk\"\n";
+
+        let got = settings(&Flags::default(), &format!("{view}{local}"), &homes()).unwrap();
+        assert_eq!(
+            got.layers_view.unwrap().local,
+            vec![
+                "urn:collab:participant:hub".to_string(),
+                "urn:collab:participant:plasma-gonk".to_string()
+            ]
+        );
+        let none = settings(&Flags::default(), &view, &homes()).unwrap();
+        assert!(none.layers_view.unwrap().local.is_empty());
+
+        let alone = settings(&Flags::default(), local, &homes()).unwrap_err();
+        assert!(alone.contains("no gonk.layers.view"), "{alone}");
+        let twice = format!("{view}{local}{local}");
+        assert!(settings(&Flags::default(), &twice, &homes())
+            .unwrap_err()
+            .contains("given 2 times"));
+        let nobody = format!("{view}gonk.layers.local = \" , \"\n");
+        assert!(settings(&Flags::default(), &nobody, &homes())
+            .unwrap_err()
+            .contains("names nobody"));
     }
 }

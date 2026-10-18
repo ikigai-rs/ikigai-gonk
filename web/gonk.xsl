@@ -506,7 +506,10 @@
             <span class="note"> (checked against its size and its digest, <code class="iri"><xsl:value-of select="@digest"/></code>, before it is sent)</span>
           </p>
         </xsl:if>
-        <xsl:if test="view:body"><div class="body" data-linkify="default"><xsl:value-of select="view:body"/></div></xsl:if>
+        <!-- A layer entry's references link by CONTEXT (ledger #1856): `view:body/@linkify` is
+             src/render.rs::layer_refs's value, built from who wrote it and the ledgers this gonk
+             holds, never `default` by assumption and never a name from the layer. -->
+        <xsl:if test="view:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:body/@linkify"/></xsl:attribute><xsl:value-of select="view:body"/></div></xsl:if>
         <xsl:if test="@answer-href">
           <p class="entry-actions"><a><xsl:attribute name="href"><xsl:value-of select="@answer-href"/></xsl:attribute>Reply<span class="sr-only"> to the <xsl:value-of select="@kind-label"/> from <xsl:value-of select="@who"/>, number <xsl:value-of select="@seq"/></span></a></p>
         </xsl:if>

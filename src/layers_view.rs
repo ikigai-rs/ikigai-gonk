@@ -102,6 +102,19 @@ use crate::web::{self, Web};
 /// The config key.
 pub const KEY: &str = "gonk.layers.view";
 
+/// The config key naming who else, besides the page's own identity, writes on this host's side
+/// of a layer (ledger [#1856](http://localhost:1062/l/default/item/1856)):
+///
+/// ```toml
+/// gonk.layers.local = "hub, plasma-gonk"
+/// ```
+///
+/// A bare `ledger #N` in an entry one of them wrote links to this gonk's `default` ledger; in
+/// anyone else's entry it names THEIR ledger and is shown as text ([`crate::render::layer_refs`]).
+/// Default: nobody else, so only the page's own identity (`urn:layers:me`) counts as local.
+/// See [`parse_local`].
+pub const LOCAL_KEY: &str = "gonk.layers.local";
+
 /// Reading the page, its short poll and a file: held by no anonymous caller.
 pub const CAP_READ: &str = "urn:cap:gonk:layers:read";
 
@@ -185,6 +198,10 @@ fn ik(local: &str) -> String {
 pub struct ViewConfig {
     /// The layer host's door and the identity presented there.
     pub target: Target,
+    /// The principals besides the page's own identity whose entries are this host's own side
+    /// ([`LOCAL_KEY`]): a bare `ledger #N` they write links to `default`. Set by the config from
+    /// its own key, never from the view line.
+    pub local: Vec<String>,
 }
 
 /// Parse `gonk.layers.view`: `<quic://host:port> <cert dir>`. `home` is `$HOME`, for `~/`.
@@ -240,7 +257,62 @@ pub fn parse(line: &str, home: &Path) -> std::result::Result<ViewConfig, String>
             authority: authority.to_string(),
             certs,
         },
+        local: Vec::new(),
     })
+}
+
+/// Parse [`LOCAL_KEY`]: participants separated by commas or spaces. A bare name is a layer
+/// participant's, `urn:collab:participant:{name}`; a word holding a `:` is taken as the principal
+/// IRI itself (a machine's `urn:iki:host:…`, say).
+///
+/// ```
+/// use ikigai_gonk::layers_view::parse_local;
+/// assert_eq!(
+///     parse_local("hub, plasma-gonk urn:iki:host:plasma:gonk").unwrap(),
+///     vec![
+///         "urn:collab:participant:hub".to_string(),
+///         "urn:collab:participant:plasma-gonk".to_string(),
+///         "urn:iki:host:plasma:gonk".to_string(),
+///     ]
+/// );
+/// assert!(parse_local("Hub").is_err());
+/// assert!(parse_local("a b/c").is_err());
+/// assert!(parse_local(" , ").is_err());
+/// ```
+///
+/// # Errors
+///
+/// A word that is neither a participant's name (lowercase letters, digits, `-`, `_`) nor an
+/// IRI, or a line naming nobody.
+pub fn parse_local(line: &str) -> std::result::Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for word in line.split([',', ' ', '\t']).filter(|w| !w.is_empty()) {
+        let principal = if word.contains(':') {
+            Iri::parse(word)
+                .map(|_| word.to_string())
+                .map_err(|e| format!("{LOCAL_KEY} `{line}`: `{word}` is not an IRI: {e:?}"))?
+        } else if word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        {
+            format!("{PARTICIPANT_PREFIX}{word}")
+        } else {
+            return Err(format!(
+                "{LOCAL_KEY} `{line}`: `{word}` is not a participant's name (lowercase letters, \
+                 digits, `-` and `_`, as in `urn:collab:participant:{{name}}`) or a principal's IRI"
+            ));
+        };
+        if !out.contains(&principal) {
+            out.push(principal);
+        }
+    }
+    if out.is_empty() {
+        return Err(format!(
+            "{LOCAL_KEY} `{line}` names nobody; leave the line out for only the page's own \
+             identity"
+        ));
+    }
+    Ok(out)
 }
 
 /// Refuse a view whose certificates are a `gonk.layer` binding's: that is THIS SERVER's own
@@ -546,6 +618,8 @@ pub struct LayersView {
     started: AtomicBool,
     /// Serializes reads of the door that change the copy (the follower's, a post's catch-up).
     sync: Mutex<()>,
+    /// Who else writes on this host's side ([`LOCAL_KEY`]).
+    local: Mutex<BTreeSet<String>>,
 }
 
 /// How a test sizes the waits.
@@ -594,6 +668,7 @@ impl LayersView {
             changed: Condvar::new(),
             started: AtomicBool::new(false),
             sync: Mutex::new(()),
+            local: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -607,13 +682,22 @@ impl LayersView {
                     .with_call_timeout(crate::layer::CALL_TIMEOUT),
             ) as Arc<dyn Door>
         };
-        LayersView::with_feed_door(
+        let view = LayersView::with_feed_door(
             door(),
             door(),
             config.target.to_string(),
             cursors,
             Waits::default(),
-        )
+        );
+        view.treat_as_local(config.local.iter().cloned());
+        view
+    }
+
+    /// Count `principals` as this host's own side of every layer, beside the page's own
+    /// identity ([`LOCAL_KEY`]): a bare `ledger #N` in an entry one of them wrote links to
+    /// `default`.
+    pub fn treat_as_local(&self, principals: impl IntoIterator<Item = String>) {
+        lock(&self.local).extend(principals);
     }
 
     /// The door, as the page names it.
@@ -1507,15 +1591,58 @@ fn model_word(model: &Model) -> String {
     }
 }
 
+/// What every row of one page is drawn against: who the identity is, and how a layer entry's
+/// ledger references link (ledger [#1856](http://localhost:1062/l/default/item/1856)).
+struct Rows<'a> {
+    /// Who the door says the identity is.
+    me: Option<&'a Me>,
+    /// The ledgers this gonk holds that the viewer may read: a qualified `bobby#2` links only
+    /// into one of them.
+    held: Vec<String>,
+    /// The principals whose entries are this host's own side: the identity, and [`LOCAL_KEY`]'s.
+    local: BTreeSet<String>,
+}
+
+impl<'a> Rows<'a> {
+    /// The rows `inv`'s viewer is shown: the ledgers are the ones the header lists for it
+    /// ([`web::readable_ledgers`]), never a name from the layer.
+    fn new(web: &Web, inv: &Invocation<'_>, view: &LayersView, me: Option<&'a Me>) -> Rows<'a> {
+        let mut local = lock(&view.local).clone();
+        if let Some(me) = me {
+            local.insert(me.principal.clone());
+        }
+        Rows {
+            me,
+            held: web::readable_ledgers(web, inv)
+                .iter()
+                .map(|l| l.name().to_string())
+                .collect(),
+            local,
+        }
+    }
+
+    /// The [`render::LINKIFY_ATTR`] value of an entry `author` wrote: a bare `ledger #N` is
+    /// `default`'s on this host's side and the author's own ledger (not linked) on any other.
+    fn refs(&self, author: &str) -> String {
+        let held: Vec<&str> = self.held.iter().map(String::as_str).collect();
+        let bare = self
+            .local
+            .contains(author)
+            .then_some(crate::config::DEFAULT_LEDGER);
+        render::layer_refs(bare, &held)
+    }
+}
+
 fn entry_row(
     name: &str,
     entry: &Entry,
     layer: &str,
-    me: Option<&Me>,
+    cx: &Rows<'_>,
     new: bool,
     replies: bool,
     item: Option<&ItemLink>,
 ) -> String {
+    let me = cx.me;
     let anchor = format!("entry-{}", entry.id);
     let mut attributes: Vec<(&str, String)> = vec![
         ("id", entry.id.clone()),
@@ -1593,10 +1720,11 @@ fn entry_row(
         ));
     }
     let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let refs = cx.refs(&entry.who);
     let body = entry
         .body
         .as_deref()
-        .map(|b| element("body", &[], b))
+        .map(|b| element("body", &[("linkify", &refs)], b))
         .unwrap_or_default();
     wrap(name, &attributes, &body)
 }
@@ -2020,6 +2148,7 @@ impl Endpoint for LayerPage {
             let who_views = viewer(inv);
             let seen = view.cursors.get(&who_views, &layer).min(found.last);
             let me = snapshot.me.as_ref();
+            let cx = Rows::new(&self.web, inv, view, me);
             attributes[2].1 = found.info.label.clone();
             attributes.push(("model", model_word(&found.info.model)));
             attributes.push(("verbs", verbs_sentence(&found.info)));
@@ -2067,7 +2196,7 @@ impl Endpoint for LayerPage {
                         .entries
                         .iter()
                         .rev()
-                        .map(|e| entry_row("entry", e, &layer, me, e.seq > seen, posts, None))
+                        .map(|e| entry_row("entry", e, &layer, &cx, e.seq > seen, posts, None))
                         .collect();
                     let unread_shown = found.entries.iter().filter(|e| e.seq > seen).count() as u64;
                     let unread = found.last - seen;
@@ -2088,7 +2217,7 @@ impl Endpoint for LayerPage {
                 Model::Tuplespace => {
                     attributes.push(("tuplespace", "true".to_string()));
                     let links = item_links(&self.web, inv, &layer).await;
-                    let (tuples, receipts) = tuple_rows(found, me, seen, &links);
+                    let (tuples, receipts) = tuple_rows(found, &cx, seen, &links);
                     children.push_str(&render::slot("tuples"));
                     children.push_str(&render::slot("receipts"));
                     slots.push(("tuples".to_string(), rendered(inv, &tuples).await?));
@@ -2144,7 +2273,7 @@ impl Endpoint for LayerPage {
 
 fn tuple_rows(
     layer: &LayerView,
-    me: Option<&Me>,
+    cx: &Rows<'_>,
     seen: u64,
     links: &ItemLinks,
 ) -> (Vec<String>, Vec<String>) {
@@ -2160,7 +2289,7 @@ fn tuple_rows(
                 t.offer.as_ref()
             };
             let item = offer.and_then(|o| links.get(o));
-            entry_row("tuple", t, &layer.info.name, me, t.seq > seen, false, item)
+            entry_row("tuple", t, &layer.info.name, cx, t.seq > seen, false, item)
         })
         .collect();
     let receipts = layer
@@ -2169,7 +2298,7 @@ fn tuple_rows(
         .rev()
         .map(|r| {
             let offer = r.offer.as_ref().unwrap_or(&r.tuple);
-            receipt_row(r, me, r.seq > seen, links.get(offer))
+            receipt_row(r, cx.me, r.seq > seen, links.get(offer))
         })
         .collect();
     (tuples, receipts)
@@ -2345,7 +2474,7 @@ impl Endpoint for Wait {
                 let found = snapshot.layers.get(name);
                 let last = found.map_or(after, |l| l.last);
                 if let Some(found) = found.filter(|l| l.last > after) {
-                    let me = snapshot.me.as_ref();
+                    let cx = Rows::new(&self.web, inv, view, snapshot.me.as_ref());
                     match found.info.model {
                         Model::Channel => {
                             let posts =
@@ -2355,7 +2484,7 @@ impl Endpoint for Wait {
                                 .iter()
                                 .rev()
                                 .filter(|e| e.seq > after)
-                                .map(|e| entry_row("entry", e, name, me, true, posts, None))
+                                .map(|e| entry_row("entry", e, name, &cx, true, posts, None))
                                 .collect();
                             if !rows.is_empty() {
                                 attributes.push((
@@ -2373,7 +2502,8 @@ impl Endpoint for Wait {
                         Model::Tuplespace => {
                             let seen = view.cursors.get(&who_views, name).min(found.last);
                             let links = item_links(&self.web, inv, name).await;
-                            let (tuples, receipts) = tuple_rows(found, me, seen.min(after), &links);
+                            let (tuples, receipts) =
+                                tuple_rows(found, &cx, seen.min(after), &links);
                             attributes.push(("tuplespace", "true".to_string()));
                             attributes.push(("announce", format!("{} changed.", found.info.label)));
                             children.push_str(&render::slot("tuples"));

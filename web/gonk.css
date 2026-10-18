@@ -55,6 +55,8 @@ h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 .skip { position: absolute; left: -999px; top: 0; }
 .skip:focus { left: 0.5rem; top: 0.5rem; background: var(--bg); padding: 0.5rem; z-index: 10; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* A layer entry's bare `ledger #N` in another side's words: their ledger, not linked (ledger #1856). */
+.foreign-ref { text-decoration: underline dotted; cursor: help; }
 
 .top {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;

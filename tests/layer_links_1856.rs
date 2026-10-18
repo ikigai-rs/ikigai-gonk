@@ -9,6 +9,15 @@
 //! - [`the_offering_side_links_its_own_item_in_its_own_ledger`]
 //! - [`the_taking_side_links_the_item_it_filed`]
 //! - [`hostile_layer_content_is_text`]
+//!
+//! And the follow-up: a ledger reference in an entry's TEXT links by context, never to `default`
+//! by assumption (Brian's rules, 2026-10-18, on the item). The scratch gonk also holds `bobby`
+//! (readable) and `secret` (held, but not readable by the page's caller).
+//!
+//! - [`a_collaborators_bare_reference_is_their_ledger_not_default`]
+//! - [`a_qualified_reference_links_only_a_held_readable_ledger`]
+//! - [`this_hosts_own_side_links_a_bare_reference_to_default`]
+//! - [`hostile_references_are_text`]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -219,7 +228,9 @@ impl Gonk {
         let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
-            ledgers: vec!["default".to_string(), "crew".to_string()],
+            ledgers: ["default", "crew", "bobby", "secret"]
+                .map(str::to_string)
+                .to_vec(),
             browse_roots: Vec::new(),
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
@@ -229,7 +240,8 @@ impl Gonk {
         let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, Some(view));
         let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, None));
         let mut anonymous = vec![CAP_READ.to_string()];
-        for name in ["default", "crew"] {
+        // `secret` is held (the header's list names it) and NOT readable by this caller.
+        for name in ["default", "crew", "bobby"] {
             let ledger = Ledger::parse(name).unwrap();
             anonymous.push(ledger.cap_read());
             anonymous.push(ikigai_store::cap_read_graph(&ledger.graph()));
@@ -482,4 +494,139 @@ fn hostile_layer_content_is_text() {
     let unheld = row(&page, "onerror=alert(6)");
     assert!(!unheld.contains("tracked here as"), "{unheld}");
     assert!(!page.contains("<img src=x"), "{page}");
+}
+
+/// Whether `html` holds a link to `href`, in either quoting.
+fn links_to(html: &str, href: &str) -> bool {
+    html.contains(&format!("href='{href}'")) || html.contains(&format!("href=\"{href}\""))
+}
+
+/// Brian's rule 3: a bare `ledger #N` in a COLLABORATOR's entry names their ledger, which this
+/// gonk does not hold. It is text with a title, never a link to `default` (which holds a #2
+/// here, so the old assumption landed on a real, unrelated item). Fails on main, where every
+/// layer body was linkified as `default`.
+#[test]
+fn a_collaborators_bare_reference_is_their_ledger_not_default() {
+    let host = Host::open();
+    host.offer(
+        "bobby",
+        "5",
+        "Their task",
+        "Picks up where ledger #2 left off.",
+    );
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    gonk.file("default", "One\n\nIn default.", &[]);
+    gonk.file("default", "Two\n\nIn default.", &[]);
+
+    for (what, html) in [("page", gonk.page()), ("poll", gonk.poll())] {
+        let (status, html) = html;
+        assert_eq!(status, 200, "{what}: {html}");
+        let theirs = row(&html, "Picks up where");
+        assert!(!links_to(theirs, "/l/default/item/2"), "{what}: {theirs}");
+        assert!(!theirs.contains("<a href='/l/"), "{what}: {theirs}");
+        assert!(
+            theirs.contains(
+                "<span class='foreign-ref' title='A reference to an item in the author&apos;s \
+                 own ledger, which this gonk does not hold'>ledger #2"
+            ),
+            "{what}: the reference is text with a title: {theirs}"
+        );
+    }
+}
+
+/// Brian's rule 1: a qualified reference links to THAT ledger, whoever wrote it, when this gonk
+/// holds it AND the viewer may read it. `bobby` is held and readable; `secret` is held and not
+/// readable; `nosuch` is not held. Fails on main, where `bobby#2` was text.
+#[test]
+fn a_qualified_reference_links_only_a_held_readable_ledger() {
+    let host = Host::open();
+    host.offer(
+        "bobby",
+        "6",
+        "Qualified references",
+        "See bobby#2, crew #3, default:#4, secret#5 and nosuch#3.",
+    );
+    let gonk = Gonk::start(view_as(&host, "brian"));
+
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let r = row(&page, "Qualified references");
+    assert!(
+        r.contains("<a href='/l/bobby/item/2'>bobby#2</a>"),
+        "bobby#2 links into bobby: {r}"
+    );
+    assert!(r.contains("<a href='/l/crew/item/3'>crew #3</a>"), "{r}");
+    assert!(
+        r.contains("<a href='/l/default/item/4'>default:#4</a>"),
+        "{r}"
+    );
+    assert!(
+        !r.contains("/l/secret/") && r.contains("secret#5"),
+        "a ledger the viewer may not read is text: {r}"
+    );
+    assert!(
+        !r.contains("/l/nosuch/") && r.contains("nosuch#3"),
+        "a ledger this gonk does not hold is text: {r}"
+    );
+}
+
+/// Brian's rule 2: a bare `ledger #N` in an entry from THIS host's own side links to `default`:
+/// the page's own identity (brian here), and whoever `gonk.layers.local` names
+/// ([`LayersView::treat_as_local`]); everyone else's stays text.
+#[test]
+fn this_hosts_own_side_links_a_bare_reference_to_default() {
+    let host = Host::open();
+    host.offer("brian", "7", "Our own offer", "Follows ledger #12.");
+    host.offer("bobby", "8", "Their offer", "Their ledger #13.");
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let ours = row(&page, "Our own offer");
+    assert!(
+        ours.contains("<a href='/l/default/item/12'>ledger #12</a>"),
+        "{ours}"
+    );
+    let theirs = row(&page, "Their offer");
+    assert!(!links_to(theirs, "/l/default/item/13"), "{theirs}");
+
+    // With bobby named local (as `gonk.layers.local = "bobby"` would), the same entry links.
+    let view = view_as(&host, "brian");
+    view.treat_as_local(["urn:collab:participant:bobby".to_string()]);
+    let gonk = Gonk::start(view);
+    let (_, page) = gonk.page();
+    let theirs = row(&page, "Their offer");
+    assert!(
+        theirs.contains("<a href='/l/default/item/13'>ledger #13</a>"),
+        "{theirs}"
+    );
+    let (_, poll) = gonk.poll();
+    assert!(
+        links_to(row(&poll, "Their offer"), "/l/default/item/13"),
+        "{poll}"
+    );
+}
+
+/// Brian's rule 4: never a link built from the layer's text. Quotes, markup, `javascript:` and
+/// ledger-ish names with `/` or `..` around a held ledger's name are all text.
+#[test]
+fn hostile_references_are_text() {
+    let host = Host::open();
+    let hostile = "x ../bobby#1 ..bobby#2 bobby..#3 ../../l/default#4 'bobby'#5 \"crew\"#6 \
+                   javascript:bobby#7 <a href='javascript:alert(1)'>click</a> \
+                   bobby%2f..#9 ledger #10";
+    host.offer("bobby", "9", "Hostile refs", hostile);
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let r = row(&page, "Hostile refs");
+    assert!(!r.contains("<a href="), "no link at all: {r}");
+    assert!(!r.to_lowercase().contains("href='javascript:"), "{r}");
+    assert!(
+        r.contains("&lt;a href=&apos;javascript:alert(1)&apos;&gt;"),
+        "{r}"
+    );
+    assert!(
+        r.contains("class='foreign-ref'"),
+        "the bare one is their ledger's: {r}"
+    );
 }
