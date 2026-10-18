@@ -744,12 +744,10 @@ pub fn linkify(html: &str) -> String {
     out
 }
 
-/// One run of escaped text, linked. See [`linkify`].
-fn linkify_text(text: &str, ledger: &str) -> String {
-    let ledger_ok = !ledger.is_empty()
-        && ledger
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+/// One run of escaped text, linked. See [`linkify`]; `value` is the marker's value, a ledger's
+/// name or a [`layer_refs`] context.
+fn linkify_text(text: &str, value: &str) -> String {
+    let context = Refs::parse(value);
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let boundary = |at: usize| {
@@ -780,9 +778,27 @@ fn linkify_text(text: &str, ledger: &str) -> String {
                     continue;
                 }
             }
-            if ledger_ok {
-                if let Some(len) = ledger_ref_at(here) {
-                    let number = here[..len].rsplit('#').next().unwrap_or("");
+            if let Some(len) = ledger_ref_at(here) {
+                let number = here[..len].rsplit('#').next().unwrap_or("");
+                match context.bare {
+                    Some(ledger) => out.push_str(&format!(
+                        "<a href='/l/{ledger}/item/{number}'>{}</a>",
+                        &here[..len]
+                    )),
+                    // Layer text from the other side: their ledger, which is not one of ours.
+                    None if context.layer => out.push_str(&format!(
+                        "<span class='foreign-ref' title='{FOREIGN_REF_TITLE}'>{}<span \
+                         class='sr-only'> (in the author&apos;s own ledger, not linked)</span>\
+                         </span>",
+                        &here[..len]
+                    )),
+                    None => out.push_str(&here[..len]),
+                }
+                i += len;
+                continue;
+            }
+            if !joined {
+                if let Some((len, ledger, number)) = qualified_ref_at(here, &context.held) {
                     out.push_str(&format!(
                         "<a href='/l/{ledger}/item/{number}'>{}</a>",
                         &here[..len]
@@ -974,6 +990,134 @@ fn ledger_ref_at(text: &str) -> Option<usize> {
         .next()
         .is_none_or(|c| !c.is_alphanumeric());
     (digits > 0 && digits <= 12 && after_ok).then_some(end)
+}
+
+/// The marker value's prefix that makes it a layer entry's context ([`layer_refs`]) rather than
+/// one ledger's name. A ledger name has no `:`, so the two cannot be confused.
+const LAYER_CONTEXT: &str = "layer:";
+
+/// What a bare `ledger #N` in another side's layer entry says when it is pointed at: it names
+/// the author's ledger, which this gonk does not hold (ledger
+/// [#1856](http://localhost:1062/l/default/item/1856)). Escaped for a single-quoted attribute.
+pub const FOREIGN_REF_TITLE: &str =
+    "A reference to an item in the author&apos;s own ledger, which this gonk does not hold";
+
+/// The [`LINKIFY_ATTR`] value for one layer entry's text (ledger
+/// [#1856](http://localhost:1062/l/default/item/1856)): a layer entry is someone's prose, and a
+/// ledger reference in it means a ledger by CONTEXT, never `default` by assumption.
+///
+/// - `bare` is the ledger a bare `ledger #N` links to: `Some("default")` for an entry this
+///   host's own side wrote, `None` for another side's, whose bare reference names THEIR ledger
+///   and is shown as text with a title saying so ([`FOREIGN_REF_TITLE`]).
+/// - `held` are the ledgers this gonk holds that the viewer may read: a QUALIFIED reference
+///   (`bobby#2`, `bobby #2`, `bobby:#2`) links to `/l/bobby/item/2` only when `bobby` is one of
+///   them. Nothing in the layer's text ever names a ledger that is not.
+///
+/// The caller builds both from what this gonk knows, never from the layer: a name that is not a
+/// ledger name (`/`, `..`, a quote, a `:`) is dropped here, so it can neither reach an `href` nor
+/// break the attribute.
+///
+/// ```
+/// use ikigai_gonk::render::{layer_refs, linkify};
+/// let theirs = layer_refs(None, &["default", "bobby", "../x"]);
+/// assert_eq!(theirs, "layer::default,bobby");
+/// let page = |value: &str, text: &str| linkify(&format!("<p data-linkify='{value}'>{text}</p>"));
+/// // A collaborator's bare reference is their ledger's: text, with a title.
+/// let got = page(&theirs, "see ledger #2");
+/// assert!(!got.contains("href"), "{got}");
+/// assert!(got.contains("class='foreign-ref' title="), "{got}");
+/// // A qualified one links to a ledger this gonk holds, and only to one.
+/// assert_eq!(
+///     page(&theirs, "bobby#2, default #12, nosuch#3"),
+///     "<p data-linkify='layer::default,bobby'><a href='/l/bobby/item/2'>bobby#2</a>, \
+///      <a href='/l/default/item/12'>default #12</a>, nosuch#3</p>"
+/// );
+/// // This host's own side: a bare reference is `default`'s.
+/// let ours = layer_refs(Some("default"), &["default"]);
+/// assert_eq!(
+///     page(&ours, "ledger #12"),
+///     "<p data-linkify='layer:default:default'><a href='/l/default/item/12'>ledger #12</a></p>"
+/// );
+/// ```
+pub fn layer_refs(bare: Option<&str>, held: &[&str]) -> String {
+    let held: Vec<&str> = held
+        .iter()
+        .copied()
+        .filter(|name| is_ledger_word(name))
+        .collect();
+    let bare = bare.filter(|name| held.contains(name)).unwrap_or("");
+    format!("{LAYER_CONTEXT}{bare}:{}", held.join(","))
+}
+
+/// Whether `name` has a ledger name's shape: lowercase ASCII letters, digits, `-` and `_`
+/// (`ikigai_ledger::Ledger::parse` is the full rule; this is the part an `href` relies on).
+fn is_ledger_word(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// How one marked element's ledger references link: the marker's value, read.
+struct Refs<'a> {
+    /// The ledger a bare `ledger #N` links to.
+    bare: Option<&'a str>,
+    /// The ledgers a qualified `name#N` may link to: none outside a layer context.
+    held: Vec<&'a str>,
+    /// Whether the text is a layer entry's ([`layer_refs`]).
+    layer: bool,
+}
+
+impl<'a> Refs<'a> {
+    fn parse(value: &'a str) -> Refs<'a> {
+        match value.strip_prefix(LAYER_CONTEXT) {
+            None => Refs {
+                bare: Some(value).filter(|v| is_ledger_word(v)),
+                held: Vec::new(),
+                layer: false,
+            },
+            Some(rest) => {
+                let (bare, held) = rest.split_once(':').unwrap_or(("", ""));
+                let held: Vec<&str> = held.split(',').filter(|n| is_ledger_word(n)).collect();
+                Refs {
+                    bare: Some(bare).filter(|b| is_ledger_word(b) && held.contains(b)),
+                    held,
+                    layer: true,
+                }
+            }
+        }
+    }
+}
+
+/// The length, ledger and number of the QUALIFIED reference `text` starts with, when its ledger
+/// is one of `held`: `bobby#2`, `bobby #2` or `bobby:#2`. The name is matched against `held`,
+/// never taken from the text, so a ledger this gonk does not hold is never linked.
+fn qualified_ref_at<'h>(text: &str, held: &[&'h str]) -> Option<(usize, &'h str, String)> {
+    if held.is_empty() {
+        return None;
+    }
+    let name_len = text
+        .bytes()
+        .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+        .count();
+    let ledger = held.iter().copied().find(|h| *h == &text[..name_len])?;
+    let rest = &text[name_len..];
+    let sep = ["#", " #", ":#"]
+        .into_iter()
+        .find(|sep| rest.starts_with(sep))?;
+    let digits_at = name_len + sep.len();
+    let digits = text[digits_at..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    let end = digits_at + digits;
+    let after_ok = text[end..]
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric());
+    (digits > 0 && digits <= 12 && after_ok)
+        .then(|| (end, ledger, text[digits_at..end].to_string()))
 }
 
 /// XML serialization → HTML serialization: every self-closed NON-void element becomes an

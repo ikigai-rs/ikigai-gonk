@@ -2144,6 +2144,18 @@ this line.
   resource; ikigai-rs/ikigai-cli PR 516 adds it, unpublished.
 - Bodies are shown as written, the way gonk shows every body (escaped text, links made
   clickable), not rendered as Markdown.
+- **A ledger reference in an entry links by context** (ledger #1856). A qualified one
+  (`bobby#2`, `bobby #2`, `bobby:#2`) links to `/l/bobby/item/2` when this gonk holds `bobby` and
+  the viewer may read it, whoever wrote it; a ledger it does not hold stays text. A bare
+  `ledger #N` links to `default` only in an entry from this host's own side: the page's own
+  identity, and whoever `gonk.layers.local` names. In anyone else's entry it names THEIR
+  ledger, so it stays text, with a title saying so.
+
+  ```toml
+  # participants' names (urn:collab:participant:{name}) or principals' IRIs; default: nobody
+  # but the page's own identity
+  gonk.layers.local = "hub, plasma-gonk"
+  ```
 - To look at it without a layer door or a passkey, `cargo run --example layers-preview` serves
   the page over a scratch layer host in process (its anonymous caller is handed the two tokens,
   which the real server never does) and prints the URL; `bobby` posts every 30 seconds.
