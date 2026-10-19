@@ -2872,10 +2872,13 @@ SELECT DISTINCT ?item ?file ?note WHERE {
 Three things about it are worth knowing before you write one, and each is a test here
 (`a_scoped_token_reads_browse_and_both_tokens_run_the_join`):
 
-- ⚠ **The set is ONE `graph` value, separated by whitespace.** `graph=A graph=B` is a repeated
-  named argument, and the engine keeps the LAST value silently — so the repeated spelling asks
-  for one graph and the join comes back empty with nothing said. That is upstream of this
-  server (and of the store), and it is pinned here so a fix shows up as a red test.
+- ⚠ **The set is ONE `graph` value, separated by whitespace.** `graph=A&graph=B` is a repeated
+  named argument, and the HTTP door REFUSES it: `400 invalid argument `graph`: given twice; an
+  argument takes one value, so name it once` (ikigai-web 0.1.63+, ledger #387). Through the
+  0.1.62 door the last value won silently, so the repeated spelling asked for one graph and the
+  join came back empty with nothing said; that was upstream of this server, and the test that
+  pinned it went red when the fix arrived, as it was meant to
+  (`the_join_runs_through_the_http_door_under_a_signed_in_grant`).
 - **A graph you hold no token for refuses the WHOLE read**, naming every missing
   `urn:cap:store:read:graph:` token — never an answer computed over the half you do hold.
 - **The join is UNCACHED, and the ledger's own scoped read is not.** A multi-graph read is
