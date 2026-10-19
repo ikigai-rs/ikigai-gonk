@@ -45,6 +45,7 @@ pub mod config;
 pub mod doors;
 pub mod egress;
 pub mod findings;
+pub mod github;
 pub mod grants;
 pub mod history;
 pub mod identity;
@@ -121,6 +122,11 @@ pub mod spaces {
     /// ledger [#1631](http://localhost:1062/l/default/item/1631)) — bound beside the browse
     /// family, over the same roots.
     pub const HISTORY: &str = "urn:iki:gonk:space:history";
+    /// A browse root's repository on GitHub and each view's page there
+    /// ([`github::space`](crate::github::space), ledger
+    /// [#1907](http://localhost:1062/l/default/item/1907)) — bound beside the browse family,
+    /// over the same roots.
+    pub const GITHUB: &str = "urn:iki:gonk:space:github";
 
     /// One of the constants above as an [`Iri`].
     pub fn iri(name: &str) -> Iri {
@@ -288,6 +294,11 @@ pub fn compose_with(
         // whose roots, authority and `state` probe they compose over.
         if let Some(history) = browse.history() {
             spaces.push(history);
+        }
+        // ★ And "On GitHub" (ledger #1907, [`crate::github`]), which composes over the same
+        // `state` probe under the same authority.
+        if let Some(github) = browse.github() {
+            spaces.push(github);
         }
         spaces.push(browse as Arc<dyn Space>);
         spaces.push(Arc::new(ikigai_repo::space()));

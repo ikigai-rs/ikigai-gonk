@@ -701,13 +701,29 @@ impl Endpoint for BrowseShell {
             }
             attributes.push(("message", format!("loading {start}…")));
         }
+        // ★ "On GitHub" for the view this page opens on (ledger #1907, [`crate::github`]):
+        // read under the CALLER's capability, like everything else here, and drawn only beside
+        // a region this caller can load. Any refusal or miss draws no link: the link is a
+        // convenience, and its absence says nothing a reader needs to act on. `web/gonk.js`
+        // asks for the same resource's html face whenever the region moves to another view.
+        let github = match (&lacking, crate::github::link_iri(&start)) {
+            (None, Some(link)) => match Iri::parse(&link) {
+                Ok(link) => inv
+                    .source(&link)
+                    .await
+                    .map(|answer| crate::github::view(&String::from_utf8_lossy(&answer.bytes)))
+                    .unwrap_or_default(),
+                Err(_) => String::new(),
+            },
+            _ => String::new(),
+        };
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let doc = envelope(
             "page",
             &attributes,
             &format!(
-                "{}{}{}",
+                "{}{}{}{github}",
                 web::nav(&self.web, inv, &ledgers, None),
                 element("flash", &[], ""),
                 // The reason the region is empty, in `web::Lacking`'s words (ledger #739).

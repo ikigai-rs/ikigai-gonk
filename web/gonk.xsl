@@ -286,6 +286,7 @@
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
+      <xsl:when test="@view = 'github'"><xsl:call-template name="github"/></xsl:when>
       <xsl:when test="@view = 'ledgers'"><xsl:call-template name="ledgers"/></xsl:when>
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
       <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
@@ -724,6 +725,7 @@
       </xsl:if>
       <xsl:choose>
         <xsl:when test="@start-url">
+          <xsl:call-template name="github"/>
           <div id="browse" class="browse" hx-trigger="load" hx-swap="innerHTML">
             <xsl:attribute name="hx-get"><xsl:value-of select="@start-url"/></xsl:attribute>
             <p class="note"><xsl:value-of select="@message"/></p>
@@ -742,6 +744,37 @@
     </section>
   </xsl:template>
 
+
+  <!--
+    "On GitHub" (ledger #1907, src/github.rs): the same directory or file on GitHub, above
+    the region. The shell draws it for the view it opens on; web/gonk.js swaps in this same
+    template's fragment (urn:iki:gonk:github:…, as=text/html) whenever the region moves to
+    another view, and carries a file view's #L10 or #L10-L20 onto the link from data-base.
+    It opens like every other link here, in the same tab. With no link the paragraph is
+    still drawn, hidden, so the script has one place to swap into.
+  -->
+  <xsl:template name="github">
+    <xsl:choose>
+      <xsl:when test="view:github"><xsl:apply-templates select="view:github"/></xsl:when>
+      <xsl:otherwise><p id="github" class="github" hidden="hidden"></p></xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template match="view:github">
+    <p id="github" class="github">
+      <a class="github-link">
+        <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:attribute name="data-base"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:if test="@kind = 'file'">
+          <xsl:attribute name="data-lines">true</xsl:attribute>
+        </xsl:if>
+        <xsl:text>On GitHub</xsl:text>
+      </a>
+      <xsl:if test="@note">
+        <span class="note github-note"><xsl:value-of select="@note"/></span>
+      </xsl:if>
+    </p>
+  </xsl:template>
 
   <!-- ==================================================== the review queue -->
 

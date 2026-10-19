@@ -159,6 +159,12 @@ summary { cursor: pointer; color: var(--accent); }
 .root-list > li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
 .root-link { font-weight: 600; }
 
+/* "On GitHub" above a browse page's region (ledger #1907). The note wraps under the link at
+ * phone width rather than pushing the page sideways; a long branch name breaks anywhere. */
+.github { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: baseline; margin: 0 0 0.5rem; }
+.github-link { font-weight: 600; }
+.github-note { flex: 1 1 16rem; overflow-wrap: anywhere; }
+
 /* The sample-query buttons. `quiet small` reuses the palette the contrast test already
  * holds to the floor; the focus ring is the global :focus-visible outline, so they are
  * reachable and visible from the keyboard. They wrap at phone width rather than scroll. */

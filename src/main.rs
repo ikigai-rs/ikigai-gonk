@@ -295,7 +295,14 @@ fn serve(flags: &config::Flags) -> ! {
     let (browse_space, style) = match browse {
         Some(wired) => (
             Some(Arc::new(
-                wired.space.observing_reviews(Arc::clone(&activity)),
+                wired
+                    .space
+                    .observing_reviews(Arc::clone(&activity))
+                    // "On GitHub" with the operator's `gonk.browse.github` lines (ledger #1907).
+                    .with_github(Arc::new(ikigai_gonk::github::space(
+                        &settings.browse_roots,
+                        &settings.browse_github,
+                    ))),
             )),
             Some(wired.style),
         ),

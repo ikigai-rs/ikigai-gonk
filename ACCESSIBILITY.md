@@ -39,7 +39,7 @@ is fixed.
   ledger menu (its button, its links and its filter) and the `/l` ledgers index, the ledger
   list and its filters and search, an item page with every form on it (comment, edit, close,
   reopen, claim, defer, label, link, delete, purge), the doctor, the SPARQL editor and its
-  result tables, the browse landing page, the review Queue (scopes, batch and walk views), the
+  result tables, the browse landing page, the "On GitHub" link and its note above a browse page's region, the review Queue (scopes, batch and walk views), the
   Layers page (the overview, a channel with its post form, a task layer, the live updates, the
   "Reconnecting" status and the unreachable-door banner), the unread count on the header's Layers link, the passkey sign-in and enrollment controls, and the empty and
   refusal states each one can show.
