@@ -398,6 +398,9 @@ pub fn wire(
     let first = roots.first().map(|(name, _)| name.clone());
     // The git-history series (ledger #1631) over the same roots, before the mount takes them.
     let history = crate::history::space(&roots);
+    // "On GitHub" over the same roots (ledger #1907), with no override: `main` replaces it
+    // with [`CachedReads::with_github`] when a `gonk.browse.github` line names one.
+    let github = crate::github::space(&roots, &[]);
     // The explain archive is built on the WRITER'S handle: browse refuses at mount time an
     // `ExplainConfig` on any other `Arc<Store>`, even one over the same dataset.
     let store = Arc::clone(writer.store());
@@ -420,7 +423,8 @@ pub fn wire(
         }
         .writing_to(graph)
         .reading_contracts_through(first)
-        .with_history(Arc::new(history)),
+        .with_history(Arc::new(history))
+        .with_github(Arc::new(github)),
         style,
     }
 }
@@ -536,6 +540,7 @@ pub fn cached_reads(
         reviews: None,
         contract_root: None,
         history: None,
+        github: None,
     }
 }
 
@@ -568,6 +573,8 @@ pub struct CachedReads {
     contract_root: Option<String>,
     /// The git-history series over the same roots ([`Self::with_history`]).
     history: Option<Arc<dyn Space>>,
+    /// "On GitHub" over the same roots ([`Self::with_github`]).
+    github: Option<Arc<dyn Space>>,
 }
 
 impl CachedReads {
@@ -614,6 +621,22 @@ impl CachedReads {
     /// The git-history series to bind beside this family, when [`wire`] built one.
     pub fn history(&self) -> Option<Arc<dyn Space>> {
         self.history.clone()
+    }
+
+    /// Carry "On GitHub" over the same roots ([`crate::github`], ledger
+    /// [#1907](http://localhost:1062/l/default/item/1907)), for [`crate::compose_with`] to bind
+    /// beside this family, as [`Self::with_history`] does and for the same reason. A second
+    /// call replaces the first: [`wire`] carries one with no override, and `main` replaces it
+    /// when a `gonk.browse.github` line names a root's repository.
+    #[must_use]
+    pub fn with_github(mut self, github: Arc<dyn Space>) -> Self {
+        self.github = Some(github);
+        self
+    }
+
+    /// "On GitHub" to bind beside this family, when [`wire`] built it.
+    pub fn github(&self) -> Option<Arc<dyn Space>> {
+        self.github.clone()
     }
 
     /// Name the configured root the family's contracts are read through — [`wire`]'s first.
@@ -841,7 +864,7 @@ impl CachedReads {
 /// A `{path}` segment of a browse IRI decoded back to a root-relative path, the inverse of
 /// `ikigai-browse`'s percent-encoding. `None` — and so no cache — for anything that is not a
 /// plain relative path once decoded: a malformed escape, non-UTF-8, `..`, or a leading `/`.
-fn decode_rel(encoded: &str) -> Option<PathBuf> {
+pub(crate) fn decode_rel(encoded: &str) -> Option<PathBuf> {
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

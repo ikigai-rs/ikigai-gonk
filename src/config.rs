@@ -20,6 +20,8 @@
 //!                                       # ends (this IS the default; 1 to 720, the 12 h bound)
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
+//! # the GitHub repository a root's "On GitHub" links name, when its origin does not; repeatable
+//! # gonk.browse.github = "core=ikigai-rs/ikigai-core"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.mount.calls_per_hour = 2000   # calls that reach the mounted model, every caller
 //!                                       # together (this IS the default; 0 for none)
@@ -115,7 +117,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 37] = [
+const KEYS: [&str; 38] = [
     "gonk.log.access",
     "gonk.layer",
     "gonk.layer.deny",
@@ -130,6 +132,7 @@ const KEYS: [&str; 37] = [
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.http.session_idle_minutes",
     "gonk.browse.root",
+    "gonk.browse.github",
     "gonk.mount",
     "gonk.mount.calls_per_hour",
     "gonk.explain.file.provider",
@@ -612,6 +615,10 @@ pub struct Settings {
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
     pub browse_roots: Vec<(String, PathBuf)>,
+    /// `(root, repository)` for each `gonk.browse.github` line: the GitHub repository a
+    /// root's "On GitHub" links name in place of its origin's ([`crate::github`]), normalized
+    /// to `https://github.com/{owner}/{repo}`.
+    pub browse_github: Vec<(String, String)>,
     /// The mounted peers. Empty means `urn:llm:*` resolves nowhere, and the explanation
     /// families are therefore not bound — see [`Settings::explains`].
     pub mounts: Vec<Mount>,
@@ -1598,6 +1605,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         }
     };
     let browse_roots = browse_roots(flags, text, homes)?;
+    let browse_github = browse_github(text, &browse_roots)?;
     let mounts = mounts(flags, text, homes)?;
     let mut layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
     if let Some(deny) = layer_deny(text, homes)? {
@@ -1660,6 +1668,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, "gonk.http.session_idle_minutes").as_deref(),
         )?,
         browse_roots,
+        browse_github,
         mounts,
         layers,
         layers_view,
@@ -2068,6 +2077,40 @@ fn browse_roots(
     Ok(roots)
 }
 
+/// The `gonk.browse.github` lines: `<root>=<repository>`, the repository in any form
+/// [`crate::github::override_repository`] reads.
+///
+/// ★ Refused, not skipped, when the root is not one this server serves, when the repository is
+/// not one on GitHub, or when a root is named twice: an override that silently did nothing
+/// would look exactly like one that is in effect.
+fn browse_github(text: &str, roots: &[(String, PathBuf)]) -> Result<Vec<(String, String)>, String> {
+    let key = crate::github::OVERRIDE_KEY;
+    let mut overrides: Vec<(String, String)> = Vec::new();
+    for line in values_for(text, key) {
+        let (root, value) = line.split_once('=').ok_or_else(|| {
+            format!("{key} `{line}`: expected <root>=<repository>, e.g. core=ikigai-rs/ikigai-core")
+        })?;
+        let (root, value) = (root.trim(), value.trim());
+        if !roots.iter().any(|(name, _)| name == root) {
+            return Err(format!(
+                "{key} `{line}`: `{root}` is not a browse root this server serves                  (gonk.browse.root)"
+            ));
+        }
+        if overrides.iter().any(|(seen, _)| seen == root) {
+            return Err(format!(
+                "{key}: browse root `{root}` is named twice — one root, one repository"
+            ));
+        }
+        let repository = crate::github::override_repository(value).ok_or_else(|| {
+            format!(
+                "{key} `{line}`: `{value}` is not a repository on GitHub (owner/repo,                  https://github.com/owner/repo, or git@github.com:owner/repo.git)"
+            )
+        })?;
+        overrides.push((root.to_string(), repository));
+    }
+    Ok(overrides)
+}
+
 /// Parse an `IP:PORT` socket address — an IP, not a hostname: a bind is a listening
 /// posture, and a posture should not depend on what a resolver says today.
 pub fn parse_bind(spelled: &str) -> Result<SocketAddr, String> {
@@ -2230,6 +2273,50 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    /// Ledger #1907: a `gonk.browse.github` line names a SERVED root's repository on GitHub,
+    /// normalized, and every shape that would silently do nothing is refused at start.
+    #[test]
+    fn a_browse_github_line_names_a_served_roots_repository_or_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = format!("gonk.browse.root = \"core={}\"\n", dir.path().display());
+        let with = |line: &str| settings(&Flags::default(), &format!("{root}{line}\n"), &homes());
+        assert!(with("").unwrap().browse_github.is_empty());
+        for value in [
+            "ikigai-rs/ikigai-core",
+            "git@github.com:ikigai-rs/ikigai-core.git",
+            "https://token@github.com/ikigai-rs/ikigai-core",
+        ] {
+            assert_eq!(
+                with(&format!("gonk.browse.github = \"core={value}\""))
+                    .unwrap()
+                    .browse_github,
+                vec![(
+                    "core".to_string(),
+                    "https://github.com/ikigai-rs/ikigai-core".to_string()
+                )],
+                "{value}"
+            );
+        }
+        for (line, says) in [
+            ("gonk.browse.github = \"other=o/r\"", "not a browse root"),
+            (
+                "gonk.browse.github = \"core=https://gitlab.com/o/r\"",
+                "not a repository on GitHub",
+            ),
+            (
+                "gonk.browse.github = \"core\"",
+                "expected <root>=<repository>",
+            ),
+            (
+                "gonk.browse.github = \"core=o/r\"\ngonk.browse.github = \"core=o/s\"",
+                "named twice",
+            ),
+        ] {
+            let refused = with(line).map(|_| ()).unwrap_err();
+            assert!(refused.contains(says), "{line}: {refused}");
+        }
     }
 
     /// Ledger #496: absent, the line means exactly `DEFAULT_QUEUE_SERIOUS`; present, it is

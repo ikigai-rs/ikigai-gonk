@@ -1,6 +1,6 @@
 // gonk's only application script: error display for htmx, and the passkey ceremonies.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does ten things htmx
+// Everything the page SHOWS comes from the server as HTML; this file does eleven things htmx
 // cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
 // vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
 // can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
@@ -21,7 +21,9 @@
 // Layers page's poll, which htmx would leave dead after one failed ask, is re-armed with a
 // backoff and its state said in words (ledger #1705). (10) the header's ledger menu, a
 // <details> without this file, becomes a disclosure button that Escape and a click outside
-// close, with a filter that narrows its links past eight ledgers (ledger #1888).
+// close, with a filter that narrows its links past eight ledgers (ledger #1888). (11) a browse
+// page's "On GitHub" link follows the region to the view it now shows, which htmx swaps in
+// without changing the page's URL, and carries a selected line onto it (ledger #1907).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -97,8 +99,14 @@
     return !!(elt && elt.closest && (elt.closest(".queue-badge") || elt.closest(".layers-badge")));
   }
 
+  // The browse page's "On GitHub" link (section 11 below) is fetched by nobody's click: a
+  // failure hides the link, it is not a message.
+  function isGithub(elt) {
+    return !!(elt && elt.closest && elt.closest("#github"));
+  }
+
   function isOwnRetry(elt) {
-    return isWatch(elt) || isBadge(elt);
+    return isWatch(elt) || isBadge(elt) || isGithub(elt);
   }
 
   document.addEventListener("htmx:responseError", (e) => {
@@ -122,6 +130,7 @@
     if (elt && elt.closest && elt.closest(".queue-badge")) return;
     if (isWatch(elt)) return;
     if (elt && elt.closest && elt.closest(".layers-badge")) return;
+    if (isGithub(elt)) return;
     flash("", "ok");
   });
 
@@ -480,6 +489,76 @@
       fillQuote(m[1]);
     }
   });
+
+  // ---------------------------------- "On GitHub" follows the region (ledger #1907)
+  //
+  // The browse shell draws the link for the view it opens on (src/k.rs), and the region's own
+  // affordances then move it to other views by htmx, which never changes this page's URL. So
+  // when a swap into #browse came from `/k?c=source urn:repo:{root}:tree…` or `…:file:…`, this
+  // asks the server for the same view's link (`urn:iki:gonk:github:…`, src/github.rs) and
+  // swaps it in; a swap to any other view hides it. ⚠ The server builds and encodes every URL:
+  // this relays which view is showing, and appends a file view's selected line (`#L10`,
+  // `#L10-L20`, or the line an `#annotation-{id}` card names) to the server's own `data-base`,
+  // after checking it is exactly that shape.
+  const LINES_HASH = /^#L\d+(?:-L\d+)?$/;
+  const GITHUB_VIEW = /^urn:repo:[^:]+:(?:tree|tree:.+|file:.+)$/;
+
+  // The view a `/k?c=source {iri} …` read named, or null for anything else.
+  function viewOf(path) {
+    if (typeof path !== "string" || path.slice(0, 3) !== "/k?") return null;
+    const command = new URLSearchParams(path.slice(3)).get("c") || "";
+    const words = command.trim().split(/\s+/);
+    return words[0] === "source" && words[1] ? words[1] : null;
+  }
+
+  function lineFragment() {
+    const hash = location.hash;
+    if (LINES_HASH.test(hash)) return hash;
+    const m = hash.match(/^#annotation-(.+)$/);
+    const card = m && document.getElementById("annotation-" + m[1]);
+    const line = card && card.closest("#browse") && card.querySelector("a.browse-annotation-line");
+    const href = line ? line.getAttribute("href") || "" : "";
+    return LINES_HASH.test(href) ? href : "";
+  }
+
+  function carryLines() {
+    const a = document.querySelector("#github a.github-link[data-lines]");
+    if (a) a.setAttribute("href", (a.getAttribute("data-base") || "") + lineFragment());
+  }
+
+  function hideGithub() {
+    const p = $("github");
+    if (!p) return;
+    p.hidden = true;
+    p.textContent = "";
+  }
+
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target || target.id !== "browse" || !$("github")) return;
+    const config = e.detail.requestConfig;
+    const view = viewOf(config && config.path);
+    if (!view) return;
+    if (!GITHUB_VIEW.test(view)) {
+      hideGithub();
+      return;
+    }
+    const link = "urn:iki:gonk:github:" + view.slice("urn:repo:".length);
+    htmx.ajax("GET", "/k?c=" + encodeURIComponent("source " + link + " as=text/html"), {
+      target: "#github",
+      swap: "outerHTML",
+    });
+  });
+  document.addEventListener("htmx:responseError", (e) => {
+    if (isGithub(e.detail && e.detail.elt)) hideGithub();
+  });
+  document.addEventListener("htmx:sendError", (e) => {
+    if (isGithub(e.detail && e.detail.elt)) hideGithub();
+  });
+  // A new link, a view that brought an annotation card in, and a moved selection.
+  document.addEventListener("htmx:afterSettle", carryLines);
+  window.addEventListener("hashchange", carryLines);
+  carryLines();
 
   // ------------------------------------------------------------------ sign-in notices
 

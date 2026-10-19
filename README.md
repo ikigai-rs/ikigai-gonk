@@ -621,6 +621,48 @@ nothing, another page's link reads and never derives (ledger #880), and the anon
 repository at all, let alone spend inference on explaining one. A signed-in identity can do
 exactly what its grant names, and browsing needs a role beyond a ledger's grant.
 
+### "On GitHub" (ledger #1907)
+
+A browse page that shows a root, a directory or a file carries an **On GitHub** link above the
+region, to the same path on GitHub: `tree/{ref}/{path}` for a directory, `blob/{ref}/{path}` for a
+file. On a file view a selected line (`#L42`, a typed `#L10-L20`, or the line an annotation card's
+`#annotation-{id}` names) carries onto the link. It opens like every other link on these pages, in
+the same tab, and it follows the region: when a click moves the region to another directory or
+file, `web/gonk.js` asks for that view's link and swaps it in, and a view that is neither (an
+explanation, the pull requests) shows none.
+
+**The ref.** The HEAD commit, when a `refs/remotes/origin/…` ref contains it: a permalink, so
+GitHub shows exactly what the checkout holds. Otherwise the local tree is ahead, and the link
+names origin's default branch (`origin/HEAD`, else GitHub's own `HEAD`) with a note saying so.
+"Origin has it" is as of the last fetch or push: gonk runs no network `git`.
+
+**The repository** is the root's `remote.origin.url` in any form GitHub hands out
+(`git@github.com:owner/repo.git`, `ssh://git@github.com/owner/repo`,
+`https://github.com/owner/repo(.git)`, with or without userinfo), normalized to
+`https://github.com/owner/repo`; userinfo never reaches a page. A root whose origin is elsewhere,
+or that has none, names its repository in the config home:
+
+```toml
+# repeatable; <root>=<owner/repo, or any URL form above>
+gonk.browse.github = "core=ikigai-rs/ikigai-core"
+```
+
+A line naming a root this server does not serve, a repository that is not on GitHub, or a root
+twice stops the server at start. With no GitHub origin and no line, there is no link.
+
+The same facts are resources, under the root's browse grant like every browse row:
+
+| name | what it is |
+|---|---|
+| `urn:iki:gonk:github:{root}` | the repository, the ref, whether it is a permalink, and the root's place in its repository, one `key value` per line (or `none {reason}`); read after `urn:repo:{root}:state`, so it is cached until the root's HEAD, refs or config change |
+| `urn:iki:gonk:github:{root}:tree[:{path}]`, `…:file:{path}` | one view's page on GitHub (`href`, `ref`, `permalink`, `kind`, `note`), the path in browse's own spelling; `as=text/html` is the link the page shows |
+
+```sh
+# a mount prefix is replaced by `urn:`, so an alias carries the whole name across
+ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" \
+  -c 'source urn:gk:iki:gonk:github:ikigai-gonk:file:src/github.rs'
+```
+
 ### A root's git history as weekly series (ledger #1631)
 
 The delivery dashboard's git source (ledger [#1630](http://localhost:1062/l/default/item/1630)):
@@ -3203,6 +3245,8 @@ gonk.socket = "~/.ikigai/gonk.sock"
 gonk.http.ledger = "default"
 # repeatable; unset, no browse family
 gonk.browse.root = "core=~/git-personal/ikigai-core"
+# repeatable; the GitHub repository a root's "On GitHub" links name when its origin does not
+# gonk.browse.github = "core=ikigai-rs/ikigai-core"
 gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 # gonk.explain.file.provider = "urn:llm:coder:ask"     # the tiers, and the per-call ceilings
 # gonk.explain.file.max_tokens = 400                   # file 400, dir 600, review 800, pr 600
