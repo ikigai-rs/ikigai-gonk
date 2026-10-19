@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::executor::block_on;
-use ikigai_core::{ArgRef, Capability, Iri, Kernel, Representation, Request, Verb};
+use ikigai_core::{
+    ArgRef, Capability, Error, FailureClass, Iri, Kernel, Representation, Request, Verb,
+};
 use ikigai_gonk::budget::{self, AnonymousRuns};
 use ikigai_gonk::grants::{
     anonymous_http_grants, grants_for, script_grants, Authority, ScriptAuthority,
@@ -261,10 +263,20 @@ fn scripts_plans_and_checks_share_one_anonymous_window() {
         let why = refused
             .map(|answer| text(&answer))
             .expect_err("over the rate");
+        // ★ Typed since ikigai-throttle 0.2.0 (ledger #1546): a `RetryAfter` carrying the delay,
+        // class `retry-after`, so a door can say when; `is_transient()` does NOT cover it, and
+        // nothing above the window re-issues the run on its own.
         assert!(
-            why.to_string().contains("rate-limited")
+            matches!(why, Error::RetryAfter { delay: Some(_), .. }),
+            "{why:?}"
+        );
+        assert_eq!(why.class(), FailureClass::RetryAfter);
+        assert!(!why.is_transient(), "{why:?}");
+        assert!(
+            why.to_string().starts_with("retry after ")
+                && why.to_string().contains("rate-limited")
                 && why.to_string().contains(budget::ANONYMOUS_RUNS_IRI)
-                && why.to_string().contains("capped at 3/60s"),
+                && why.to_string().contains("capped at 3 per 60s"),
             "{why}"
         );
     }
@@ -376,6 +388,16 @@ fn over_http_an_anonymous_plan_and_check_stop_at_the_door_budget() {
 /// `gonk.script.anonymous_runs_per_minute` sets the window, through a REAL gonk (the binary, in
 /// a child process over scratch homes, on a port it picks): at 2 a minute, the third anonymous
 /// plan is refused, and the banner says the rate it serves.
+///
+/// ★ And the refusal is a **`429 Too Many Requests` with `Retry-After`** (ledger
+/// [#1216](http://localhost:1062/l/default/item/1216) part 1,
+/// [#1273](http://localhost:1062/l/default/item/1273)). Through ikigai-throttle 0.1.11 the window
+/// refused with a permanent `Error::Endpoint("rate-limited …")`, which `ikigai-web` could only
+/// answer `500 Internal Server Error`, with no header saying when to come back. Since throttle
+/// 0.2.0 the refusal is `Error::RetryAfter { delay, .. }` (core 0.1.108's class `retry-after`),
+/// and `ikigai-web` 0.1.66 answers that `429` with `Retry-After` in whole seconds, rounded up and
+/// never 0; the body is the error's text, which names the window and the cap. This is the FLOOR
+/// TEST for both pins: on the 0.1.62 door the third answer is a `500` with no `Retry-After`.
 #[test]
 fn the_anonymous_run_rate_is_configurable() {
     let gonk = scratch_gonk::Gonk::start("gonk.script.anonymous_runs_per_minute = 2\n");
@@ -395,9 +417,32 @@ fn the_anonymous_run_rate_is_configurable() {
     for answer in &answers[..2] {
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     }
+    let refused = &answers[2];
     assert!(
-        answers[2].contains("rate-limited") && answers[2].contains("capped at 2/60s"),
-        "{}",
-        answers[2]
+        refused.starts_with("HTTP/1.1 429 Too Many Requests\r\n"),
+        "a rate-limited run is a 429, not a 500: {refused}"
+    );
+    let (head, body) = refused.split_once("\r\n\r\n").expect("a head and a body");
+    let retry_after: u64 = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("Retry-After")
+                .then(|| value.trim().to_string())
+        })
+        .unwrap_or_else(|| panic!("a 429 carries Retry-After: {refused}"))
+        .parse()
+        .expect("Retry-After is delay-seconds, a whole number");
+    // The window is a minute and the third run came within moments of the first, so the wait
+    // is most of it; rounded UP and never 0, so a client told the number never retries at once.
+    assert!(
+        (1..=60).contains(&retry_after),
+        "Retry-After: {retry_after} s: {refused}"
+    );
+    assert!(
+        body.contains("rate-limited")
+            && body.contains(budget::ANONYMOUS_RUNS_IRI)
+            && body.contains("capped at 2 per 60s"),
+        "{refused}"
     );
 }

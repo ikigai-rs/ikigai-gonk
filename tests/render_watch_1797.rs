@@ -176,8 +176,11 @@ fn another_pages_navigation_cannot_render_a_page_that_requests_a_route_it_chose(
         ),
     ] {
         let (status, body) = server.navigate_from_another_page(&path);
+        // The reason arrives escaped (`command&#39;s`): a navigation's refusal is the door's
+        // HTML error page since ikigai-web 0.1.63 (ledger #117).
+        let why = ikigai_fn::html::html_text(why);
         assert!(
-            status == 400 && body.contains(why) && !would_fire(&body),
+            status == 400 && body.contains(&why) && !would_fire(&body),
             "GET {path} answered {status}, expected 400 naming {why:?}: {body}"
         );
     }

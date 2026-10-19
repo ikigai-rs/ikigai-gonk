@@ -106,7 +106,9 @@ fn broken() -> Vec<(&'static str, String, &'static str)> {
                 "ik:pipeFrom <urn:plan:good:step:1> ;\n    ik:binds \"9 lives\" .",
                 1,
             ),
-            "urn:ikigai:shape:step:binds",
+            // `ik:binds` is a STAGE property since vocab 0.1.105 (ik:Stage, ikigai-rs/ikigai-core
+            // PR 224, ledger #32): the shape moved from `shape:step:binds` with it.
+            "urn:ikigai:shape:stage:binds",
         ),
         // A SHACL-SPARQL constraint: a reference to a name the plan never binds. Both
         // validators report it under its shape (`urn:ikigai:shape:process`) with no

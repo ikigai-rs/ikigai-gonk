@@ -351,8 +351,8 @@ pub fn is_within(request: &Request, door_ms: u64) -> bool {
 pub const DEFAULT_ANONYMOUS_RUNS_PER_MINUTE: u32 = 30;
 
 /// The name the anonymous rate is counted under, and the one its refusal names:
-/// `rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30/60s — retry after …`. It names
-/// no resource anyone can request; it is the window's key.
+/// ``retry after N ms: rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30 per 60s``. It
+/// names no resource anyone can request; it is the window's key.
 pub const ANONYMOUS_RUNS_IRI: &str = "urn:iki:gonk:anonymous:runs";
 
 /// `gonk.script.anonymous_runs_per_minute`, checked: a whole number of runs a minute, `0` for
@@ -475,8 +475,19 @@ impl Window {
     }
 
     /// Count one admission. `None` when it is under the rate (and now counted); otherwise the
-    /// limiter's refusal — `rate-limited: `{key}` is capped at {max}/{window}s — retry after
-    /// {n}s` — which the caller returns instead of doing the work.
+    /// limiter's refusal, which the caller returns instead of doing the work.
+    ///
+    /// ★ **The refusal is typed** (ledger [#1216](http://localhost:1062/l/default/item/1216)
+    /// part 1, [#1546](http://localhost:1062/l/default/item/1546)): since `ikigai-throttle`
+    /// 0.2.0 it is [`Error::RetryAfter`] with the time until the window next opens, class
+    /// `retry-after` — ``retry after {n} ms: rate-limited: `{key}` is capped at {max} per
+    /// {window}`` — so the HTTP door (`ikigai-web` 0.1.66) answers it `429 Too Many Requests`
+    /// with `Retry-After` in whole seconds, and the access log writes `outcome=retry-after`.
+    /// Through 0.1.11 it was a permanent `Error::Endpoint("rate-limited …")`, a `500` at the
+    /// door with no header saying when. ⚠ A `RetryAfter` is NOT `is_transient()`: nothing above
+    /// the window re-issues the run; the caller owns the wait, which is what the header is for.
+    /// The refusal is one every caller of the window sees the same way: the anonymous runs
+    /// over HTTP, and a model call over the mount from any door.
     pub async fn admit(&self, inv: &Invocation<'_>) -> Option<ikigai_core::Result<Representation>> {
         let count = Request::new(
             Verb::Source,
@@ -553,7 +564,7 @@ impl Endpoint for Pass {
 pub const DEFAULT_MODEL_CALLS_PER_HOUR: u32 = 2_000;
 
 /// The name the model-call rate is counted under, and the one its refusal names:
-/// `rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000/3600s — retry after …`.
+/// ``retry after N ms: rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000 per 3600s``.
 pub const MODEL_CALLS_IRI: &str = "urn:iki:gonk:mount:calls";
 
 /// `gonk.mount.calls_per_hour`, checked: a whole number of calls an hour, `0` for none;

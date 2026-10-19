@@ -517,9 +517,12 @@ fn a_hostile_ledger_link_is_refused_never_resolved() {
         for path in pages(name) {
             let got = server.page(&path, None);
             assert_eq!(got.status, 400, "{path}: {got:?}");
+            // A browser's refusal is the door's minimal HTML page since ikigai-web 0.1.63
+            // (ledger #117), its sentence escaped: the same words, through the shared escaper.
             assert!(
-                got.body
-                    .contains(&format!("route variable {{ledger}} cannot carry '{delim}'")),
+                got.body.contains(&ikigai_fn::html::html_text(&format!(
+                    "route variable {{ledger}} cannot carry '{delim}'"
+                ))),
                 "refused at the edge, naming the variable: {path}: {got:?}"
             );
             assert!(
@@ -532,7 +535,9 @@ fn a_hostile_ledger_link_is_refused_never_resolved() {
     let got = server.page("/l/default/item/1%3A1", None);
     assert_eq!(got.status, 400, "{got:?}");
     assert!(
-        got.body.contains("route variable {id} cannot carry ':'"),
+        got.body.contains(&ikigai_fn::html::html_text(
+            "route variable {id} cannot carry ':'"
+        )),
         "{got:?}"
     );
 
@@ -855,26 +860,38 @@ fn a_caller_short_of_a_ledger_grant_reads_a_sentence_before_a_grant() {
         "{inside}"
     );
 
-    // A ledger this browser's grant does not name: the plain-text refusal. (Past the page's
-    // floor, `urn:cap:ledger:read:*`, which the default anonymous grant satisfies.)
+    // A ledger this browser's grant does not name: the typed refusal, which the door writes
+    // as its minimal HTML error page to a browser (ikigai-web 0.1.63+, ledger #117: a `main`
+    // landmark, an `h1` naming the status, the sentence escaped in one `p`; through 0.1.62 it
+    // was the sentence as `text/plain`). (Past the page's floor, `urn:cap:ledger:read:*`, which
+    // the default anonymous grant satisfies.)
     let server = Server::start();
     let refused = server.page("/l/acme", None);
     assert_eq!(refused.status, 403, "{refused:?}");
-    let lines: Vec<&str> = refused.body.lines().collect();
-    assert_eq!(
-        lines.first().copied(),
+    assert!(
+        refused.body.starts_with("<!DOCTYPE html>"),
+        "a browser gets a page: {refused:?}"
+    );
+    let (_, paragraph) = refused
+        .body
+        .split_once("<p>")
+        .expect("the sentence is the page's one paragraph");
+    let paragraph = paragraph.split("</p>").next().expect("a closed paragraph");
+    let escaped = |text: &str| ikigai_fn::html::html_text(text);
+    assert!(
         // `denied: ` is `ikigai-web`'s prefix for a typed refusal, not gonk's word.
-        Some("denied: Sign in to read the ledger \"acme\"."),
+        paragraph.starts_with(&escaped("denied: Sign in to read the ledger \"acme\".")),
         "{refused:?}"
     );
     assert!(
-        refused.body.contains(
+        paragraph.contains(&escaped(
             "Signed in already? Your passkey's grant doesn't include the ledger \"acme\"."
-        ),
+        )),
         "{refused:?}"
     );
     assert!(
-        lines
+        paragraph
+            .lines()
             .last()
             .is_some_and(|l| l.contains("urn:cap:ledger:read:acme")),
         "the grant comes LAST: {refused:?}"

@@ -591,8 +591,11 @@ fn the_refusal_names_the_other_page() {
         Some(&session),
     );
     assert_eq!(status, 403, "{body}");
+    // The sentence arrives escaped: a browser's refusal is the door's HTML error page since
+    // ikigai-web 0.1.63 (ledger #117).
     assert!(
-        body.contains("not this server's own") && body.contains("READ"),
+        body.contains(&ikigai_fn::html::html_text("not this server's own"))
+            && body.contains("READ"),
         "{body}"
     );
 }

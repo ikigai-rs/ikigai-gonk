@@ -1972,8 +1972,10 @@ grant, but spend nothing. Every other name under `urn:llm:` counts, a name the p
 included, because a spend ceiling fails closed. That matters from the cli release carrying
 ikigai-cli PR 513, which stops caching a mounted answer on this side: browse reads a
 provider's `:model` on every explain, so each would otherwise spend a call. Past the window a call
-is refused with ``rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000/3600s — retry
-after Ns`` (an `Error::Endpoint`, since core has no typed rate-limit error). Why 2,000: the
+is refused with ``retry after N ms: rate-limited: `urn:iki:gonk:mount:calls` is capped at 2000 per
+3600s`` — a typed `Error::RetryAfter` since ikigai-throttle 0.2.0 (ledger #1546; it was a plain
+`Error::Endpoint` while core had no typed rate-limit error), which the HTTP door answers `429 Too
+Many Requests` with `Retry-After`, and the access log writes `outcome=retry-after`. Why 2,000: the
 busiest hour on record is 728 derivations (2026-10-02, the review-value experiments), and a
 long file's review is several calls, so the ceiling does not bind the heaviest work this
 server has done and does bind a runaway. ⚠ It is a ceiling, not a meter: on a metered peer, set
@@ -2593,14 +2595,18 @@ could make one at a time.
   `RateLimit` window, `budget::AnonymousRuns`), refused past it with the time to retry; an
   answer from the hub's cache is not counted, and reading a script's source is not a run.
   Before this, an anonymous run's query took the store's base and could be sent without limit.
-  ⚠ **What the refusal looks like** (ledger #1273): over HTTP it is still `500 Internal Server
-  Error`, body ``endpoint error: rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30/60s
-  — retry after Ns``, with no `Retry-After` header. It should be `429 Too Many Requests` with
-  `Retry-After: N`, and gonk cannot say so alone: `ikigai-throttle` refuses with a plain
-  `Error::Endpoint` (core has no typed rate-limit error), which `ikigai-web` maps to 500, and the
-  one way a door answers 429 (its admission hook) runs before the request is known to be a run
-  and carries no header. The QUIC door and the socket never meet this window: their callers are
-  never anonymous (a certificate, the owner), so nothing there is counted or refused by it.
+  ★ **What the refusal looks like** (ledger #1273, #1216 part 1, fixed with ikigai-throttle 0.2.0
+  and ikigai-web 0.1.66): over HTTP it is `429 Too Many Requests` with `Retry-After: N` (whole
+  seconds, rounded up, never 0), body ``retry after N ms: rate-limited:
+  `urn:iki:gonk:anonymous:runs` is capped at 30 per 60s``, and the access log line says
+  `outcome=retry-after`. The window refuses with core 0.1.108's typed `Error::RetryAfter` (class
+  `retry-after`), which the door's error table maps to 429 and the header. Until then it was a
+  `500 Internal Server Error` with no header: `ikigai-throttle` refused with a plain
+  `Error::Endpoint` because core had no typed rate-limit error, and gonk could not say otherwise
+  alone. ⚠ A `RetryAfter` is not transient: nothing in gonk re-issues a refused run; the client
+  owns the wait the header names. The QUIC door and the socket never meet this window: their
+  callers are never anonymous (a certificate, the owner), so nothing there is counted or refused
+  by it.
 - **An ad hoc plan and a draft's dry run are runs too** (ledger #1210). An anonymous
   `urn:plan:eval` keeps the caller's capability, marker and all, but its steps are sub-requests
   the hub's front door never stamps, so a read-only plan whose step sent its own query to

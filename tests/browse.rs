@@ -2008,6 +2008,11 @@ fn the_retirement_mount_lines_reach_gonk_fresh_and_mint() {
     let tree = "urn:repo:demo:tree";
     let before = text(&client, Verb::Source, tree, &[]);
     assert!(!before.contains("added.rs"), "{before}");
+    // ★ The read arrives at the hub WITH `as=text/plain`: since core 0.1.104 (ledger #19) the
+    // mounting kernel fills the mounted contract's declared default before the request crosses
+    // the wire, so a mounted read is never argument-free here. gonk caches it all the same
+    // (`browse::CachedReads` reads the default face spelled out as the bare read); through the
+    // 0.1.103 lock it did not need to, and a `thread_for` that refused every argument held.
     assert!(
         cached(&hub).iter().any(|iri| iri == tree),
         "gonk caches the watched tree read — the half that makes this test worth having"
@@ -2296,12 +2301,13 @@ fn the_join_runs_through_the_http_door_under_a_signed_in_grant() {
     let (status, body) = door.get(&repeated, Some(&token));
     assert_eq!(
         status, 400,
-        "`graph=A&graph=B` is one argument, last value wins (ledger #387): the join narrows to \
-         one graph, and the store refuses its GRAPH on the other (ledger #388) — {body}"
+        "`graph=A&graph=B` is refused at the door (ledger #387, ikigai-web 0.1.63+): an argument \
+         takes one value. Through 0.1.62 the last value won, the join narrowed to one graph and \
+         the store refused its GRAPH on the other (ledger #388) — {body}"
     );
     assert!(
-        body.contains("<urn:iki:ledger:graph:default>"),
-        "the refusal names the graph the narrowing dropped: {body}"
+        body.contains("invalid argument `graph`: given twice"),
+        "the refusal names the argument given twice, before anything is evaluated: {body}"
     );
 }
 

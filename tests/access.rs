@@ -205,14 +205,25 @@ fn the_http_door_writes_one_line_per_request() {
         "-",
         "a read is never told: {page}"
     );
-    // The face the door negotiated is an argument too, so it is in `q` beside the query.
-    assert_eq!(value(&page, "q"), "as=text/html&status=all", "{page}");
+    // The face the door negotiated is an argument too, so it is in `q` beside the query — and
+    // so are the page's declared defaults (`limit`, `offset`), which the kernel fills in before
+    // dispatch since core 0.1.104 (ledger #19) as the inline argument a caller spelling them out
+    // would send: the line is the request AS SERVED, and nothing below the trace tells a filled
+    // default from a typed value. Before 0.1.104 this read `as=text/html&status=all`.
+    assert_eq!(
+        value(&page, "q"),
+        "as=text/html&limit=50&offset=0&status=all",
+        "{page}"
+    );
 
     assert_eq!(value(&write, "verb"), "sink");
     assert_eq!(value(&write, "principal"), "anon", "{write}");
+    // The body is `content`, never logged; what IS in `q` is the append's one declared default
+    // (`as=text/plain`), filled by the kernel before dispatch (core 0.1.104, ledger #19). Before
+    // 0.1.104 a write with no query logged `q=-`.
     assert_eq!(
         value(&write, "q"),
-        "-",
+        "as=text/plain",
         "the body is `content`, never logged: {write}"
     );
 
