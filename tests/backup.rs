@@ -335,6 +335,9 @@ fn the_backup_composition_conforms() {
         .iter()
         .fold(Suite::new(), |suite, id| suite.own(*id));
     let suite = suite
+        // FAILURES (conformance 0.10, ledger #1546), opted into as `tests/conformance.rs` does,
+        // ahead of 0.11.0 making it the default. The backup family declares no `fails` yet.
+        .check_failures()
         .opt_out(
             "gonk-restore",
             None,

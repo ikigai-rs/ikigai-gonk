@@ -27,7 +27,7 @@
 //! | `bytes` | the representation's body length; `-` on an error |
 //! | `dur` | milliseconds, from the door's issue to its answer |
 //! | `principal` | `owner` on the socket; a signed-in passkey's IRI on any HTTP request, `anon` on an anonymous write; the client's `urn:iki:host:gonk:client:<fingerprint>` on QUIC (`urn:iki:gonk:client:<fingerprint>` in lines written before 2026-10-10, which are never rewritten); `-` where the door names nobody |
-//! | `q` | HTTP only: the request's query arguments, percent-encoded; `-` when none |
+//! | `q` | HTTP only: the request's arguments AS SERVED, percent-encoded; `-` when none. The caller's query, plus every declared default the kernel filled in before dispatch (core 0.1.104+, ledger #19: a default arrives as the inline argument a caller spelling it out would send, so a ledger page's `limit=50&offset=0` is in the line whether or not the caller typed it; only the trace's `defaulted` note tells the two apart) |
 //!
 //! Past [`MAX_FIELD`] characters the subject and `q` are cut and end in `…` — a character
 //! the encoding never writes, so a cut is unambiguous.
@@ -483,7 +483,11 @@ pub fn line(
 ) -> String {
     let (outcome, bytes) = match answer {
         Ok(bytes) => ("ok", bytes.to_string()),
-        Err(e) => (outcome(e), "-".to_string()),
+        // The kind's word is core's (`Error::kind()`: `denied`, `retry-after`, …), never a
+        // table of this crate's: a copy here read every variant core added later as `error`,
+        // so a rate-limited run was attributed `endpoint` and would have been attributed
+        // nothing useful once it became `RetryAfter` (ledger #1546, #1923).
+        Err(e) => (e.kind(), "-".to_string()),
     };
     format!(
         "{} {CLASS} {} door={} verb={} outcome={outcome} bytes={bytes} dur={dur_ms} principal={} q={}",
@@ -494,24 +498,6 @@ pub fn line(
         principal(door, request, capability),
         query(door, request),
     )
-}
-
-/// The error kind, as a word.
-fn outcome(error: &Error) -> &'static str {
-    match error {
-        Error::Unresolved(_) => "unresolved",
-        Error::MissingArgument(_) => "missing-argument",
-        Error::InvalidArgument { .. } => "invalid-argument",
-        Error::Endpoint(_) => "endpoint",
-        Error::Denied(_) => "denied",
-        Error::NotFound(_) => "not-found",
-        Error::Conflict(_) => "conflict",
-        Error::Timeout(_) => "timeout",
-        Error::Unavailable(_) => "unavailable",
-        Error::DepthExceeded { .. } => "depth-exceeded",
-        // `Error` is non-exhaustive: a kind core adds later is still an error, not a crash.
-        _ => "error",
-    }
 }
 
 fn verb(verb: Verb) -> &'static str {
@@ -829,6 +815,35 @@ mod tests {
         let e = Error::Denied("no".to_string());
         let l = line(0, Door::Socket, &r, &nobody(), Err(&e), 4);
         assert!(l.contains(" outcome=denied bytes=- dur=4 "), "{l}");
+    }
+
+    /// ★ A rate-limited run is attributed as what it is (ledger #1216 part 1, #1923): the
+    /// window's refusal is `RetryAfter` since ikigai-throttle 0.2.0, and the line says
+    /// `outcome=retry-after`, core's word for the kind — not `endpoint` (what the 0.1.11
+    /// refusal was) and not the `error` a local table fell to for a kind it did not know.
+    #[test]
+    fn a_rate_limited_run_is_attributed_retry_after() {
+        let r = request(Verb::Source, "urn:plan:eval", &[]);
+        let e = Error::RetryAfter {
+            delay: Some(std::time::Duration::from_secs(42)),
+            detail: "rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30 per 60s".into(),
+        };
+        let l = line(0, Door::Http, &r, &nobody(), Err(&e), 1);
+        assert!(l.contains(" outcome=retry-after bytes=- dur=1 "), "{l}");
+        for (e, word) in [
+            (Error::OverBudget { detail: "x".into() }, "over-budget"),
+            (Error::Refused("x".into()), "refused"),
+            (
+                Error::Unsupported {
+                    verb: Some(Verb::Sink),
+                    detail: "x".into(),
+                },
+                "unsupported",
+            ),
+        ] {
+            let l = line(0, Door::Http, &r, &nobody(), Err(&e), 1);
+            assert!(l.contains(&format!(" outcome={word} ")), "{l}");
+        }
     }
 
     #[test]

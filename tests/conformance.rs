@@ -172,6 +172,11 @@ fn fixtures() -> Suite {
 /// The fixtures plus what the reads PROMISE about caching — for a kernel that caches.
 fn suite() -> Suite {
     fixtures()
+        // FAILURES (conformance 0.10, ledger #1546): an action that states its failure classes
+        // (`Description::fails`) is held to them. Opt-in for this one minor and the default from
+        // 0.11.0, so opting in now means the flip changes nothing here. gonk's own actions
+        // declare none yet; the check then judges nothing and the report says it ran.
+        .check_failures()
         // A chunk's HTML is a function of the document alone; the content-addressed
         // request is the cache key and nothing needs a thread to cut.
         .pure("gonk-render")

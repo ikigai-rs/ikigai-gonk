@@ -1033,8 +1033,11 @@ fn the_banner_is_sent_only_when_the_door_state_differs() {
     let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
     let current = gonk.htmx("/layers/~/wait?layer=talk&after=0&door=ok");
     assert!(!current.body.contains("layers-banner"), "{}", current.body);
-    for stale in ["door=reading", "door=down", "after=0"] {
-        let got = gonk.htmx(&format!("/layers/~/wait?layer=talk&after=0&{stale}"));
+    // Each query names `after` ONCE: since ikigai-web 0.1.63 (ikigai-cli PR 531, ledger #387)
+    // the door refuses a repeated argument with a 400 instead of keeping one value, so the
+    // "no `door=` at all" case is spelled as the bare `after=0`, not appended to it.
+    for stale in ["after=0&door=reading", "after=0&door=down", "after=0"] {
+        let got = gonk.htmx(&format!("/layers/~/wait?layer=talk&{stale}"));
         assert_eq!(got.status, 200, "{got:?}");
         assert!(
             got.body.contains("id='layers-banner'") || got.body.contains("id=\"layers-banner\""),

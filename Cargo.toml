@@ -80,7 +80,16 @@ path = "src/main.rs"
 # `pub(crate)`. Also in 0.1.102 and reaching this server: typed selection ends with every
 # input-free action (ledger #271), `want=` compares by media type, and every `urn:kernel:*`
 # operation records a trace event. `"0.1.102"` is `<0.2.0`.
-ikigai-core = "0.1.102"
+# ★ 0.1.108 is the floor now (ledger #1546, #1923), and an API one: the failure classes.
+# `Error::RetryAfter { delay, detail }`, `Error::OverBudget`, `Error::Refused`,
+# `Error::Unsupported` and `Error::class()`. `ikigai-throttle` 0.2.0 (below) refuses a window
+# with `RetryAfter`, `ikigai-web` 0.1.66 (below) answers it `429` with `Retry-After`, and the
+# access log (`src/access.rs`) writes `Error::kind()`'s word, which 0.1.108 gives the four new
+# variants (`retry-after`, `over-budget`, `refused`, `unsupported`). `is_transient()` is
+# unchanged: a `RetryAfter` is NOT transient. Not taken here: `Kernel::with_retry_budget` and
+# `issue_with_context` (a retry budget and a run deadline minted at the doors; the hand-back of
+# ledger #1923 says what that takes). `"0.1.108"` is `<0.2.0`.
+ikigai-core = "0.1.108"
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -91,7 +100,9 @@ ikigai-core = "0.1.102"
 # 0.1.96 (ledger #1287): a resolution floor, `ikigai-engine` 0.1.52 requires `^0.1.96`.
 # 0.1.98: core's lockstep release (0.1.97 is yanked here too).
 # 0.1.102: core's lockstep release.
-ikigai-vocab = "0.1.102"
+# 0.1.108: core's lockstep release (`ik:mayFail`, `ik:FailureClass` and its seven individuals,
+# which gonk's own descriptions do not yet use). `"0.1.108"` is `<0.2.0`.
+ikigai-vocab = "0.1.108"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
 # 0.2.4 is where the freshness half of this pin comes from, and it is the whole of what
@@ -265,7 +276,18 @@ ikigai-script = "0.3.5"
 # was built here). Its floor of core is 0.1.78, below the line above; it adds itself and five
 # small runtime-agnostic crates to the lock (`futures-timer`, `async-lock` and the
 # `event-listener` family `async-lock` is built on). ⚠ `"0.1.11"` is `<0.2.0`.
-ikigai-throttle = "0.1.11"
+# ★ 0.2.0 is the floor now, a BEHAVIOR one (ledger #1546, #1923, ikigai-rs/ikigai-throttle PR 24):
+# `RateLimit` refuses a resolution over its window with the typed `Error::RetryAfter { delay,
+# detail }` (class `retry-after`) in place of the permanent `Error::Endpoint("rate-limited …")`
+# 0.1.11 answered. Both of gonk's windows (`budget::Window`: the anonymous runs, the model
+# calls) are `RateLimit` overlays, so their refusal is typed now and the HTTP door answers it
+# `429` with `Retry-After` (see `ikigai-web` below) — ledger #1216 part (1). The refusal's text
+# changed with it: 0.1.11 said ``rate-limited: `key` is capped at 30/60s — retry after Ns``; 0.2.0
+# says ``retry after N ms: rate-limited: `key` is capped at 30 per 60s`` (the `Display` of the
+# variant, then throttle's detail). `tests/anonymous_runs_1210.rs` pins the new text. Its
+# `Retry`, `Failover` and `CircuitBreaker` overlays now decide from `Error::class()` and a run's
+# shared retry pool; gonk composes none of them. `"0.2.0"` is `<0.3.0`.
+ikigai-throttle = "0.2.0"
 # The plan doors a `language=plan` script reaches — `urn:plan:eval`, `urn:plan:validate`,
 # `urn:plan:requires` (`plan_space::space`, behind the `plan-reader` feature). 0.1.44 is where
 # they are published, so it is the true floor. ⚠ A fresh resolve takes 0.1.46, which needs
@@ -288,7 +310,10 @@ ikigai-throttle = "0.1.11"
 # 0.1.62 (ledger #1489): the one-release reason. 0.1.62's engine changes (a fan-out branch's panic
 # is that branch's error, a contract that could not be read is said, `cap` refuses a word that is
 # not a scope) are in the REPL grammar, not the plan runner this binary links.
-ikigai-engine = { version = "0.1.62", features = ["plan-reader"] }
+# 0.1.66 (ledger #1923): the one-release reason (see `ikigai-web` below). 0.1.66's engine
+# changes (wire v9's `IssueWith` on the transports, the edge statuses) are not in the plan
+# runner this binary links.
+ikigai-engine = { version = "0.1.66", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). It is linked for the plan
 # doors ALONE, and gonk never serves it to a caller: every door refuses `urn:shacl:*` as it
@@ -664,7 +689,8 @@ ikigai-repo = "0.2.0"
 # 0.1.60 (ledger #1408): the one-release reason (see `ikigai-web` below).
 # 0.1.61 (ledger #1411, #1426): the one-release reason; the intray's store floor is 0.2.21.
 # 0.1.62 (ledger #1489): the one-release reason; the intray did not change.
-ikigai-intray = "0.1.62"
+# 0.1.66 (ledger #1923): the one-release reason (see `ikigai-web` below); the intray did not change.
+ikigai-intray = "0.1.66"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -691,7 +717,10 @@ ikigai-intray = "0.1.62"
 # 0.1.59 -> 0.1.60 (ledger #1408): quic and ipc at 0.1.60 require `ikigai-resolve ^0.1.60`.
 # 0.1.60 -> 0.1.61 (ledger #1411, #1426): the one-release reason.
 # 0.1.61 -> 0.1.62 (ledger #1489): the one-release reason; resolve did not change.
-ikigai-resolve = "0.1.62"
+# 0.1.62 -> 0.1.66 (ledger #1923): quic and ipc at 0.1.66 require `ikigai-resolve ^0.1.66`. 0.1.66
+# adds `Resolver::issue_as_in_run` and `RunContext` (wire v9's issue context on a mount); gonk's
+# mount still calls `issue_as`, so nothing here mints or forwards a retry budget yet.
+ikigai-resolve = "0.1.66"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -738,7 +767,10 @@ ikigai-resolve = "0.1.62"
 # 0.1.60 (ledger #1408): the one-release reason (see `ikigai-web` below).
 # 0.1.61 (ledger #1411, #1426): the one-release reason.
 # 0.1.62 (ledger #1489): the one-release reason; the socket transport did not change.
-ikigai-ipc = "0.1.62"
+# 0.1.66 (ledger #1923, #1546): the one-release reason (see `ikigai-web` below). The socket door
+# speaks wire v9 (tags 9-13 for the four new error variants, `Call::IssueWith`), and still
+# serves a v7/v8 client, which receives each new variant downgraded to `Endpoint(display)`.
+ikigai-ipc = "0.1.66"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -826,7 +858,10 @@ ikigai-ipc = "0.1.62"
 # 0.1.61 (ledger #1411, #1426): the one-release reason; the QUIC door did not change.
 # 0.1.62 (ledger #1489): the one-release reason; the QUIC transport crate did not change (0.1.62's
 # QUIC key-file change is in the cli binary, not this crate).
-ikigai-quic = "0.1.62"
+# 0.1.66 (ledger #1923, #1546): the one-release reason (see `ikigai-web` below). The QUIC door and
+# the mounts speak wire v9, as `ikigai-ipc` above: a `RetryAfter` from a mounted model crosses to a
+# v9 peer typed, and to a v7/v8 peer as `Endpoint(display)`. 0.1.56 is still the behavior floor.
+ikigai-quic = "0.1.66"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -921,7 +956,16 @@ ikigai-quic = "0.1.62"
 # 0.1.62 (ledger #1489, #520): the one-release reason. Its one change to this door's crate: a
 # `PATCH` is stamped (`received`, `client`, `principal`) like every other write. gonk routes no
 # `PATCH` of its own; 0.1.60 is still the behavior floor above. `"0.1.62"` is `<0.2.0`.
-ikigai-web = "0.1.62"
+# ★ 0.1.66 is the floor now, a BEHAVIOR one again (ledger #1546, #1923, ikigai-cli PR 557): the
+# door's error table is the decided one. `Error::RetryAfter` → `429 Too Many Requests` with
+# `Retry-After` in whole seconds (rounded up, never 0); `Timeout` → `504` (was `503`);
+# `OverBudget` → `422`; `Refused` → `502`; `Unsupported` → `405` with `Allow` (a verb) or `501`
+# (a facility); `DepthExceeded` and `Endpoint` stay `500`. With `ikigai-throttle` 0.2.0 above
+# that is what makes a rate-limited anonymous run a `429` at this door instead of a `500`
+# (ledger #1216 part 1, #1273). `tests/anonymous_runs_1210.rs::the_anonymous_run_rate_is_configurable`
+# is the FLOOR TEST: on 0.1.62 the third run is `500 Internal Server Error` with no `Retry-After`.
+# `"0.1.66"` is `<0.2.0`.
+ikigai-web = "0.1.66"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -1030,7 +1074,8 @@ ikigai-fn = "0.5.0"
 # 0.1.60: the one-release reason; the verifier is unchanged.
 # 0.1.61: the one-release reason; the verifier is unchanged.
 # 0.1.62: the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.62"
+# 0.1.66 (ledger #1923): the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.66"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
@@ -1092,7 +1137,11 @@ ikigai-jsonld = "0.2.2"
 # must be refused, typed), VALIDATE, and `Suite::own`, which scopes every walk here to gonk's
 # own resources and pins the rest as inherited. `"0.6.1"` was `<0.7.0`, so gonk was held to
 # an old definition of "done"; `"0.8.0"` is `<0.9.0`.
-ikigai-conformance = "0.8.0"
+# 0.10.0 (ledger #1546, #1923): FAILURES (an action that states its failure classes is held to
+# them) and `Suite::fails_under`, OPT-IN through `Suite::check_failures()` for this one minor and
+# the default from 0.11.0. `tests/conformance.rs` and `tests/backup.rs` opt in now, so the flip
+# changes nothing here; gonk's own actions declare no `fails` yet. `"0.10.0"` is `<0.11.0`.
+ikigai-conformance = "0.10.0"
 futures = "0.3"
 tempfile = "3"
 # A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path

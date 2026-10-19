@@ -93,8 +93,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ikigai_browse::{ExplainConfig, Mount, StyleWatch};
 use ikigai_core::{
-    Description, Endpoint, EndpointSpace, Invocation, Iri, Representation, Request, Resolution,
-    Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Description, Endpoint, EndpointSpace, Invocation, Iri, Representation, Request,
+    Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 use ikigai_store::{SharedWriter, SharerWrites, Store};
 use oxigraph::model::{GraphName, NamedNode};
@@ -494,8 +494,23 @@ pub struct Wired {
 ///
 /// The argument test is deliberately blunt ("no arguments at all") rather than a list of the
 /// arguments that are safe. A new face in a later `ikigai-browse` arrives as a new argument,
-/// and the failure of the permissive rule is a silently stale read; the failure of this one
-/// is a read that is merely not cached.
+/// and the failure of the permissive rule is a silently stale read (the HTML face of a file
+/// reads the annotation overlay, which a Sink rewrites without cutting a root's thread); the
+/// failure of this one is a read that is merely not cached.
+///
+/// ★ The one spelling admitted besides "none" is the default face written out, `as=text/plain`
+/// (ledger #1923; core 0.1.104's declared defaults, ledger #19). The kernel fills an endpoint's
+/// declared defaults into the request BEFORE dispatch, and a MOUNTING kernel does so on its
+/// side, from the mounted contract, before the request crosses the wire — "as the inline
+/// argument a caller spelling them out sends", in core's words, so it is the same request and
+/// the same cache key. Every browse read declares `as` with that default, so a read through
+/// gonk's socket or QUIC door reaches this overlay spelled `as=text/plain` whether or not the
+/// client typed it, and "no arguments at all" stopped matching any mounted read: a long-lived
+/// client (`ikigai mcp`, `ikigai serve`, a config-home mount of the socket) recomputed the tree
+/// on every ask, the cost ledger #244's test measured in the other direction. Any other value
+/// of `as`, and any other argument, still means not cached. (This overlay sees the request at
+/// RESOLUTION, before the hub's own kernel fills a default, which is why a read issued on the
+/// hub itself still arrives argument-free.)
 ///
 /// # ★ Obligation 3, and why this table did not have to change for it
 ///
@@ -832,7 +847,12 @@ impl CachedReads {
     /// The golden thread this request's answer depends on, when it is one of the reads this
     /// server caches. See [`cached_reads`] for the table.
     fn thread_for(&self, request: &Request) -> Option<String> {
-        if request.verb != Verb::Source || !request.args.is_empty() {
+        // The only argument admitted is the default face spelled out, which is the bare read
+        // (see `cached_reads`): a kernel that fills declared defaults sends exactly this.
+        let only_the_default_face = request.args.iter().all(|(name, value)| {
+            name == "as" && matches!(value, ArgRef::Inline(bytes) if bytes == b"text/plain")
+        });
+        if request.verb != Verb::Source || !only_the_default_face {
             return None;
         }
         let (root, rest) = split_repo_iri(request.target.as_str())?;
@@ -1158,12 +1178,27 @@ mod tests {
 
     /// ★ An argument means a face whose inputs this thread does not track — the HTML and
     /// `annotations=include` faces read the annotation overlay, which a Source can rewrite.
+    /// The one exception is the default face spelled out, `as=text/plain`, which IS the bare
+    /// read: core 0.1.104 fills the declared default on a mounting kernel before the request
+    /// crosses the wire (ledger #1923), so every mounted read arrives that way.
     #[test]
-    fn a_read_with_any_argument_is_not_cached() {
+    fn a_read_with_any_argument_but_its_default_face_is_not_cached() {
         let (space, _dir) = space();
-        let html = request(Verb::Source, "urn:repo:core:file:src/lib.rs")
-            .with_arg("as", ArgRef::Inline(b"text/html".to_vec()));
-        assert_eq!(space.thread_for(&html), None);
+        let file = "urn:repo:core:file:src/lib.rs";
+        let face = |value: &[u8]| {
+            request(Verb::Source, file).with_arg("as", ArgRef::Inline(value.to_vec()))
+        };
+        assert_eq!(
+            space.thread_for(&face(b"text/plain")),
+            Some("urn:iki:gonk:browse:root:core".to_string()),
+            "the default face, spelled out, is the bare read"
+        );
+        assert_eq!(space.thread_for(&face(b"text/html")), None);
+        assert_eq!(space.thread_for(&face(b"text/turtle")), None);
+        let other = request(Verb::Source, file).with_arg("limit", ArgRef::Inline(b"5".to_vec()));
+        assert_eq!(space.thread_for(&other), None);
+        let both = face(b"text/plain").with_arg("limit", ArgRef::Inline(b"5".to_vec()));
+        assert_eq!(space.thread_for(&both), None);
     }
 
     #[test]
