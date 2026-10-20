@@ -24,6 +24,7 @@ mod scratch_gonk;
 
 use common::Authenticator;
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
+use ikigai_fn::html::url_segment as encode;
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity;
 use ikigai_resolve::Resolver;
@@ -174,17 +175,6 @@ fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {
         Request::new(verb, Iri::parse(iri).unwrap()),
         |request, (name, value)| request.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec())),
     )
-}
-
-fn encode(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }
 
 /// A forged claim: a passkey principal the caller made up, and a `kind` the ledger does not take.

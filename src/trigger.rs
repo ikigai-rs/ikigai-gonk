@@ -413,7 +413,7 @@ impl Tuple {
         format!(
             "urn:iki:gonk:review:request:{}:{}",
             self.repo,
-            iri_path(&self.path)
+            ikigai_browse::iri_encode(&self.path)
         )
     }
 }
@@ -451,30 +451,6 @@ pub fn tuple_turtle(tuple: &Tuple) -> String {
 
 /// The vocabulary namespace the tuple's two predicates come from.
 const IK_NS: &str = "https://ikigai-rs.dev/ns#";
-
-/// A git path as the `{path}` of a `urn:repo:{repo}:…` IRI: `/` and the URN-safe
-/// punctuation literal, every other byte (`%`, `[`, `#`, `?`, non-ASCII…) percent-encoded.
-///
-/// ⚠ **A MIRROR of `ikigai-browse`'s `iri_encode`, which is private to that crate** — the
-/// encoder its Review button builds `urn:repo:{repo}:review:{path}` with, and the inverse of
-/// the decode its `{path}` binding goes through. Both halves matter: the decode is why a raw
-/// path names the wrong file, and the button is why the encoding must be browse's exactly —
-/// the trigger and the button are one call ([`review_request`]). A path of plain characters
-/// encodes to itself, so the common case is byte-identical to the unencoded form.
-/// `tests/browse.rs::the_trigger_encodes_a_path_exactly_as_browse_does` reads browse's own
-/// encoding off a listing and goes red the day the two differ.
-fn iri_path(path: &str) -> String {
-    const SAFE: &[u8] = b"-._~/!$&'()*+,;=:@";
-    let mut out = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || SAFE.contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
 
 /// ⚠ **Refuse a request this module cannot express, rather than writing a tuple nothing can
 /// read back.**
@@ -880,11 +856,14 @@ fn now_ms() -> u64 {
 /// # Errors
 ///
 /// When `repo` and the encoded `path` do not make a resolvable IRI — a repository name
-/// carrying a space, say. The path itself is percent-encoded first, as browse's own Review
-/// button encodes it, because browse DECODES the `{path}` it binds: a raw `a%41.rs` would
-/// review `aA.rs`.
+/// carrying a space, say. The path itself is percent-encoded first with
+/// [`ikigai_browse::iri_encode`], the encoder browse's own Review button uses, because browse
+/// DECODES the `{path}` it binds: a raw `a%41.rs` would review `aA.rs`. One encoder, not a
+/// mirror of it: the trigger and the button are one call, so the bytes must be browse's
+/// exactly (`tests/browse.rs::the_trigger_encodes_a_path_exactly_as_browse_does` reads them
+/// off a listing). A path of plain characters encodes to itself.
 pub fn review_request(repo: &str, path: &str) -> Result<Request> {
-    let path = iri_path(path);
+    let path = ikigai_browse::iri_encode(path);
     let iri = Iri::parse(format!("urn:repo:{repo}:review:{path}")).map_err(|e| {
         Error::InvalidArgument {
             name: "path".to_string(),

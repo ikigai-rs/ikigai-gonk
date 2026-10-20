@@ -567,6 +567,17 @@ fn query(door: Door, request: &Request) -> String {
 }
 
 /// Percent-encode everything but what reads plainly in an IRI-ish value.
+///
+/// ⚠ **Deliberately NOT `ikigai_fn::html::url_segment`** (field guide, module design: a private
+/// copy states why the shared one cannot serve). This is a LOG-LINE rule, not a URL rule: the
+/// `q` column is read by a person grepping the access log, and an IRI argument
+/// (`urn:repo:x:file:src/lib.rs`) has to stay legible there, so `:` `/` `@` `,` `*` `+` `!` `(`
+/// `)` are kept. What the column needs is only that a value cannot split the line (space, tab,
+/// newline) or fake another field (`=`, `&`, `%`), and every one of those is encoded. The
+/// shared rule encodes the IRI's punctuation too, which would make every line read as
+/// `urn%3Arepo%3Ax%3Afile%3Asrc%2Flib.rs`; and `ikigai_browse::iri_encode` keeps `&`, `=` and
+/// `'`, which would let a value fake a `k=v` pair. Neither is a log format, so this one stays,
+/// and the module docs' `q=c=source%20urn:repo:x:tree%20as%3Dtext/html` example pins it.
 fn encode_into(out: &mut String, text: &str) {
     for b in text.bytes() {
         match b {

@@ -356,6 +356,11 @@ fn pick(layout: &Layout, which: Which<'_>) -> Result<Enrolled, String> {
 
 /// A value as one audit-line token: everything but unreserved IRI characters percent-encoded,
 /// so a label with a space (`Touch ID`) cannot split the line.
+///
+/// ⚠ **Deliberately NOT `ikigai_fn::html::url_segment`**: like `access.rs`'s `q` column this
+/// is a LOG-LINE rule, not a URL rule. It keeps `:` and `@` so a grant IRI or a principal
+/// reads plainly in the audit line, and spells an empty value `-`, the log's own "none". The
+/// shared rule would encode both characters and leave an empty field.
 fn encoded(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for b in text.bytes() {

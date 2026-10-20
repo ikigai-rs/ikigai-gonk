@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
+use ikigai_fn::html::url_segment as encoded;
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::render::{self, MAX_CHUNK_DEPTH};
@@ -95,17 +96,6 @@ impl Server {
             .unwrap_or_else(|| panic!("no status line for GET {path}: {response:?}"));
         (status, body.to_string())
     }
-}
-
-fn encoded(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }
 
 /// The reproduction. On `77ac767` the first request — sent then as an `<img>` — aborted the

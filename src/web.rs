@@ -1416,7 +1416,7 @@ impl Count {
             query.push_str(&format!("&offset={offset}"));
         }
         if let Some(text) = text.filter(|t| !t.is_empty()) {
-            query.push_str(&format!("&text={}", percent_encode(text)));
+            query.push_str(&format!("&text={}", ikigai_fn::html::url_segment(text)));
         }
         query
     }
@@ -1429,22 +1429,6 @@ fn ledger_total(json: &[u8]) -> Result<usize> {
     serde_json::from_slice::<ikigai_ledger::json::CountDocument>(json)
         .map(|doc| doc.total)
         .map_err(|e| Error::Endpoint(format!("the ledger's count: {e}")))
-}
-
-/// Percent-encode a query-string VALUE. Nothing here builds a URL from anything but a
-/// filter the caller already typed, and a search for `a & b` must not become two
-/// parameters.
-pub(crate) fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 /// Cut `graph` down to the `rows` most recently updated items, and say how many it kept and
@@ -1666,7 +1650,10 @@ impl Endpoint for DoctorView {
                 // through the mechanical `/iki/…` door — its plain face lists them in order.
                 (
                     "lifecycle-href",
-                    &format!("/iki/ledger/lifecycle/{}", percent_encode(&doc.lifecycle)),
+                    &format!(
+                        "/iki/ledger/lifecycle/{}",
+                        ikigai_fn::html::url_segment(&doc.lifecycle)
+                    ),
                 ),
                 ("checked", &when(&doc.checked_at)),
                 ("checked-at", &doc.checked_at),
@@ -2550,7 +2537,7 @@ async fn sparql_results(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> S
     let wrap = |summary: String, body: String| {
         format!(
             "<view:results summary=\"{}\">{body}</view:results>",
-            render::escape(&summary)
+            ikigai_fn::html::attr(&summary)
         )
     };
     let Some(form) = query_form(query) else {

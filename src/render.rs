@@ -62,6 +62,7 @@ use ikigai_core::{
     ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, ReprType,
     Representation, Request, Verb,
 };
+use ikigai_fn::html::{attr, html_text};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 
@@ -268,25 +269,6 @@ fn strip_declaration(xml: &str) -> &str {
     }
 }
 
-/// Escape text for an XML element or a double-quoted attribute.
-pub fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            // XML 1.0 cannot carry most C0 controls at all, even escaped; a ledger title
-            // containing one would make the whole page fail to parse.
-            c if (c as u32) < 0x20 && !matches!(c, '\n' | '\r' | '\t') => out.push('\u{FFFD}'),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// An envelope element: `<view:{name} a="…">children</view:{name}>`, namespaces declared.
 pub fn envelope(name: &str, attributes: &[(&str, &str)], children: &str) -> String {
     let mut out = format!(
@@ -294,7 +276,7 @@ pub fn envelope(name: &str, attributes: &[(&str, &str)], children: &str) -> Stri
          xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\""
     );
     for (key, value) in attributes {
-        out.push_str(&format!(" {key}=\"{}\"", escape(value)));
+        out.push_str(&format!(" {key}=\"{}\"", attr(value)));
     }
     out.push('>');
     out.push_str(children);
@@ -310,7 +292,7 @@ pub fn envelope(name: &str, attributes: &[(&str, &str)], children: &str) -> Stri
 pub fn wrap(name: &str, attributes: &[(&str, &str)], children: &str) -> String {
     let mut out = format!("<view:{name}");
     for (key, value) in attributes {
-        out.push_str(&format!(" {key}=\"{}\"", escape(value)));
+        out.push_str(&format!(" {key}=\"{}\"", attr(value)));
     }
     out.push('>');
     out.push_str(children);
@@ -322,10 +304,10 @@ pub fn wrap(name: &str, attributes: &[(&str, &str)], children: &str) -> String {
 pub fn element(name: &str, attributes: &[(&str, &str)], text: &str) -> String {
     let mut out = format!("<view:{name}");
     for (key, value) in attributes {
-        out.push_str(&format!(" {key}=\"{}\"", escape(value)));
+        out.push_str(&format!(" {key}=\"{}\"", attr(value)));
     }
     out.push('>');
-    out.push_str(&escape(text));
+    out.push_str(&html_text(text));
     out.push_str(&format!("</view:{name}>"));
     out
 }
@@ -354,7 +336,7 @@ pub fn slot(name: &str) -> String {
 /// `xsl:comment` verbatim (measured 2026-09-26) and a comment is the one node that can sit
 /// inside any element without being markup of its own.
 fn marker(name: &str) -> String {
-    format!("<!--gonk-slot:{}-->", escape(name))
+    format!("<!--gonk-slot:{}-->", html_text(name))
 }
 
 /// A chunk document: the page envelope around `rows` and nothing else.
@@ -781,8 +763,11 @@ fn linkify_text(text: &str, value: &str) -> String {
             if let Some(len) = ledger_ref_at(here) {
                 let number = here[..len].rsplit('#').next().unwrap_or("");
                 match context.bare {
+                    // The ledger passed `is_ledger_word`, so `url_segment` is the identity on
+                    // it: the shared rule stated once (D5), not a change in any href.
                     Some(ledger) => out.push_str(&format!(
-                        "<a href='/l/{ledger}/item/{number}'>{}</a>",
+                        "<a href='/l/{}/item/{number}'>{}</a>",
+                        ikigai_fn::html::url_segment(ledger),
                         &here[..len]
                     )),
                     // Layer text from the other side: their ledger, which is not one of ours.
@@ -800,7 +785,8 @@ fn linkify_text(text: &str, value: &str) -> String {
             if !joined {
                 if let Some((len, ledger, number)) = qualified_ref_at(here, &context.held) {
                     out.push_str(&format!(
-                        "<a href='/l/{ledger}/item/{number}'>{}</a>",
+                        "<a href='/l/{}/item/{number}'>{}</a>",
+                        ikigai_fn::html::url_segment(ledger),
                         &here[..len]
                     ));
                     i += len;
@@ -1372,11 +1358,15 @@ mod tests {
         );
     }
 
+    /// The envelope's builders escape by the shared rule (`ikigai_fn::html`, ledger #1813):
+    /// markup, both quotes and the C0 controls XML cannot carry. `'` is `&#39;`, which XML
+    /// reads exactly as it read the `&apos;` gonk's own copy wrote before.
     #[test]
-    fn escaping_covers_markup_quotes_and_controls() {
+    fn the_builders_escape_markup_quotes_and_controls() {
         assert_eq!(
-            escape("<a href=\"x\">'&'\u{1}</a>"),
-            "&lt;a href=&quot;x&quot;&gt;&apos;&amp;&apos;\u{FFFD}&lt;/a&gt;"
+            element("t", &[("a", "\"'<&")], "<a href=\"x\">'&'\u{1}</a>"),
+            "<view:t a=\"&quot;&#39;&lt;&amp;\">\
+             &lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;\u{FFFD}&lt;/a&gt;</view:t>"
         );
     }
 

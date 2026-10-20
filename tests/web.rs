@@ -456,9 +456,9 @@ fn a_browser_gets_html_pages_and_a_readable_404() {
 /// ★ **A hostile ledger link is refused and never resolved: at the edge when it carries a
 /// delimiter, at the page when it is merely not a ledger name.**
 ///
-/// `rules::percent` escapes a ledger name before it goes into a link, so a hostile name
-/// `../../etc` becomes `/l/..%2F..%2Fetc/item/244` (pinned in `rules`'s own unit test). Where
-/// that link is refused has moved with `ikigai-web` twice:
+/// `rules` escapes a ledger name with `ikigai_fn::html::url_segment` before it goes into a
+/// link, so a hostile name `../../etc` becomes `/l/..%2F..%2Fetc/item/244` (pinned in
+/// `rules`'s own unit test). Where that link is refused has moved with `ikigai-web` twice:
 ///
 /// - Through 0.1.29 the decoder turned `%2F` back into a separator, the path had six segments,
 ///   no route matched, and the mechanical mapping answered.
@@ -505,9 +505,9 @@ fn a_hostile_ledger_link_is_refused_never_resolved() {
 
     // What the renderer emits for a hostile ledger name — the exact href `rules` pins — and
     // the other delimiter-carrying spellings: refused by the edge, before any page runs.
-    let hostile = ikigai_gonk::rules::percent("../../etc");
+    let hostile = ikigai_fn::html::url_segment("../../etc");
     assert_eq!(hostile, "..%2F..%2Fetc");
-    let colon = ikigai_gonk::rules::percent("default:item:1");
+    let colon = ikigai_fn::html::url_segment("default:item:1");
     assert_eq!(colon, "default%3Aitem%3A1");
     for (name, delim) in [
         (hostile.as_str(), '/'),

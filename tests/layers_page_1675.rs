@@ -43,6 +43,7 @@ use ikigai_core::{
     ArgRef, Capability, Error, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock,
     Verb,
 };
+use ikigai_fn::html::url_segment as encode;
 use ikigai_gonk::access::{AccessLog, Door as AccessDoor};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::layer::Door;
@@ -543,17 +544,6 @@ impl Gonk {
             &body,
         )
     }
-}
-
-fn encode(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 struct Response {
