@@ -1145,6 +1145,19 @@ ignore = "0.4.33"
 # issues to: no door serves `urn:jsonld:*`. 0.2.2 is the release that has prune (ledger #1180).
 # `"0.2.2"` is `<0.3.0`.
 ikigai-jsonld = "0.2.2"
+# The RDF Toolbox at `/toolbox` (ledger #1933, `crate::toolbox`): turtle-lsp's in-browser
+# Validate, Format, SHACL and SPARQL page as `urn:toolbox:*`, over a build directory the operator
+# installs and names with `gonk.toolbox.dist`. Bound in the HTTP door ONLY, and only when that key
+# is set: no other door serves it, and with no key nothing is bound or routed. 0.1.0 is the first
+# release and what is built and tested; `"0.1.0"` is `<0.2.0`.
+ikigai-toolbox = "0.1.0"
+# The toolbox's build directory, bound at `ikigai_toolbox::DIST` with ikigai-fs's `FileEndpoint`:
+# a jail at the configured directory, read under the caller's capability, which the HTTP door's
+# anonymous caller holds for exactly the toolbox's files (`crate::grants::toolbox_read_grants`).
+# 0.1.9 is the current release and what is built and tested; ikigai-toolbox's own host test
+# mounts the same version. Its `ikigai-core` floor (0.1.89) is below this manifest's.
+# `"0.1.9"` is `<0.2.0`.
+ikigai-fs = "0.1.9"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a

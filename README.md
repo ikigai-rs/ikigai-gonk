@@ -503,6 +503,7 @@ there.
 | `/layers/~/wait` | `urn:iki:gonk:fragment:layers-wait` | what an open Layers page asks every 3 s, answered at once from gonk's copy |
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
 | `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
+| `/toolbox` · `/toolbox/{…}` | `urn:toolbox:page` · `urn:toolbox:{…}` | the RDF Toolbox, only when `gonk.toolbox.dist` is set (see "The RDF Toolbox") |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
@@ -532,6 +533,66 @@ menu they were one `count` read per ledger on every page, which took a 41 ms pag
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
 verb the target does not describe, and refuses any field that the verb's contract does not
 name. It runs under the caller's capability, so the ledger's checks decide.
+
+### The RDF Toolbox at `/toolbox` (ledger #1933)
+
+The [RDF Toolbox](https://github.com/ikigai-rs/ikigai-toolbox) is turtle-lsp's Validate, Format,
+SHACL and SPARQL page, by Abhishek Kundu (MIT), running in the browser tab. gonk serves it at
+`/toolbox` when a build is installed and named; with no `gonk.toolbox.dist` line there is no
+`/toolbox`, and nothing else changes.
+
+```text
+/toolbox                 urn:toolbox:page            the empty toolbox
+/toolbox/{name}          urn:toolbox:{name}          a built file (toolbox.html, app.js, engine.wasm, …)
+/toolbox/check/{iri}     urn:toolbox:check:{iri}     the toolbox checking one resource (shapes=, theme=)
+/toolbox/input/{iri}     urn:toolbox:input:{iri}     a resource's Turtle face, for the page to read
+```
+
+`/toolbox/check/urn%3Aiki%3Aledger%3Adefault%3Aitems` opens the toolbox on the default ledger's
+Turtle, read under YOUR capability: the toolbox shows a viewer only what that viewer could read
+anyway, and a resource you cannot read is a `403`. Nothing is uploaded; the checking runs in the
+page.
+
+**Installing the build.** The build is not in the crate (the engine is 8 MB of WebAssembly). Build
+it from [ikigai-toolbox](https://github.com/ikigai-rs/ikigai-toolbox) (it needs rustup, git and
+node) and copy `dist/` to the configured directory:
+
+```sh
+git clone --recurse-submodules https://github.com/ikigai-rs/ikigai-toolbox.git
+cd ikigai-toolbox
+./build.sh
+mkdir -p ~/.local/share/ikigai-toolbox
+rm -rf ~/.local/share/ikigai-toolbox/dist
+cp -R dist ~/.local/share/ikigai-toolbox/dist
+```
+
+```toml
+gonk.toolbox.dist = "~/.local/share/ikigai-toolbox/dist"
+```
+
+Then restart gonk; the banner's `toolbox` line names the directory. A line naming something that is
+not a directory stops gonk at start, naming the key. Files are read live on every request, so a
+new build copied over the old one is served at once, with no restart.
+
+**What it adds to the HTTP door, and only there:**
+
+- the `urn:toolbox:*` family and the build directory, bound with ikigai-fs at
+  `urn:iki:toolbox:dist:{path}` (a jail at the directory). The socket and QUIC doors serve exactly
+  what they served before.
+- a read on exactly the toolbox's files for the anonymous loopback caller, one
+  `urn:cap:fs:read:<dist>/<name>` for each name in `ikigai_toolbox::FILES`
+  (`grants::toolbox_read_grants`), because the toolbox reads its build under its caller's
+  capability. A signed-in passkey holds it too, since a passkey holds the anonymous grant plus its
+  own. Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
+  by `/toolbox/…` and by the directory's own name (`/iki/toolbox/dist/…`) alike.
+- the toolbox's own Content-Security-Policy (`ikigai_toolbox::TOOLBOX_CSP`) on the `/toolbox`
+  rows and no others: it adds `'wasm-unsafe-eval'`, which lets the page's worker compile the
+  engine. Every other page keeps the door's default policy.
+
+⚠ A link to `/toolbox` from another site arrives as a foreign navigation, which keeps only the
+READ half of a caller's authority, and the `fs` read is not in that half
+(`admit::FOREIGN_PAGE_KEEPS`), so the page is refused. Open it from gonk's own pages, or type
+the address.
 
 ### Links in prose (ledger #989)
 
@@ -3277,6 +3338,7 @@ gonk.backup.every = "24h"
 # gonk.log.access = false             # no access lines (they are ON by default)
 # gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
 # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long ends, 1..720
+# gonk.toolbox.dist = "~/.local/share/ikigai-toolbox/dist"  # the RDF Toolbox's build; unset, no /toolbox
 ```
 
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.

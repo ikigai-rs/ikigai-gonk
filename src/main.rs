@@ -176,8 +176,13 @@ fn serve(flags: &config::Flags) -> ! {
     config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
     // The anonymous loopback caller: its ledgers' READ tokens (ledger #1687), and the right to run
     // and read a PUBLIC script (ledger #939, `script::ANONYMOUS`).
-    let http_grants =
+    // And, when `gonk.toolbox.dist` is set, a read on exactly the toolbox's files (ledger #1933,
+    // `grants::toolbox_read_grants`): the toolbox reads its build under its caller's capability.
+    let mut http_grants =
         grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
+    if let Some(toolbox) = &settings.toolbox {
+        http_grants.extend(toolbox.grants());
+    }
 
     // Authority is decided before the store opens: a broken authority file stops the server
     // instead of degrading it. `grants.json` feeds BOTH identity doors (certificates and
@@ -670,9 +675,16 @@ fn serve(flags: &config::Flags) -> ! {
             &face,
             layers_view,
         );
-        let http = Arc::new(doors::http_kernel_with(
+        // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
+        let faces = settings
+            .toolbox
+            .as_ref()
+            .map(|toolbox| toolbox.spaces())
+            .unwrap_or_default();
+        let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
             pages,
+            faces,
             access(access::Door::Http),
         ));
         eprintln!(
@@ -700,6 +712,18 @@ fn serve(flags: &config::Flags) -> ! {
             eprintln!("          ⚠ {caveat}");
         }
         eprintln!("  browse  {browse_line}");
+        eprintln!(
+            "  toolbox {}",
+            match &settings.toolbox {
+                Some(toolbox) => format!(
+                    "{}{} — the RDF Toolbox over {}, read under the caller's capability",
+                    doors::http_url(bound).trim_end_matches('/'),
+                    ikigai_gonk::toolbox::PATH,
+                    toolbox.dist().display()
+                ),
+                None => format!("off (no {} line)", ikigai_gonk::toolbox::KEY),
+            }
+        );
         eprintln!(
             "  scripts urn:script:* in {} — sparql and plan, read-only (the ledgers' reads); \
              anonymous runs PUBLIC scripts and read-only plans, {} a minute in all (draft checks \
@@ -753,12 +777,17 @@ fn serve(flags: &config::Flags) -> ! {
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: settings.anonymous_sparql_budget_ms,
         };
+        // Edge refusals write their own access lines (ledger #894).
+        let edge = doors::edge_config_with(door.clone(), access(access::Door::Http));
+        let edge = match settings.toolbox {
+            Some(_) => ikigai_gonk::toolbox::route(edge),
+            None => edge,
+        };
         let error = ikigai_web::serve_with_listener(
             http,
-            doors::http_cap(door.clone()),
+            doors::http_cap(door),
             listener,
-            // Edge refusals write their own access lines (ledger #894).
-            doors::edge_config_with(door, access(access::Door::Http)),
+            edge,
         )
         .await;
         fail(&format!("the http door stopped: {error:?}"))
