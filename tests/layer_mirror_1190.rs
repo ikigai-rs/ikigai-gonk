@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod layers_key;
+
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Description, EndpointSpace, Error, Exact, Fallback, FnEndpoint, Iri,
@@ -221,7 +223,8 @@ impl World {
         write("participants.ttl", PARTICIPANTS);
         write("collabs/crew.toml", CREW);
         let state = tempfile::tempdir().unwrap();
-        let host = ikigai_layers::Host::open(config.path(), state.path()).expect("the host");
+        let key = layers_key::state_key(config.path());
+        let host = ikigai_layers::Host::open(config.path(), state.path(), &key).expect("the host");
         // `urn:collab:{name}:participants` is ikigai-layers 0.2.1's (merged, not published):
         // scripted here, in front, with the same graph it serves.
         let participants = FnEndpoint::new("collab-participants", |_inv| {

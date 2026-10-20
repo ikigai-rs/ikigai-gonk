@@ -18,6 +18,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+// The tests' state-key helper (ikigai-layers 0.3.0 seals a host's state at rest).
+#[path = "../tests/layers_key/mod.rs"]
+mod layers_key;
+
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Error, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock,
@@ -134,7 +138,8 @@ fn main() {
     write("participants.ttl", PARTICIPANTS);
     write("collabs/crew.toml", CREW);
     let state = tempfile::tempdir().unwrap();
-    let host = ikigai_layers::Host::open(config.path(), state.path()).expect("the host");
+    let key = layers_key::state_key(config.path());
+    let host = ikigai_layers::Host::open(config.path(), state.path(), &key).expect("the host");
     let spaces: Vec<Arc<dyn Space>> = vec![Arc::new(ikigai_layers::space(&host))];
     let kernel = Arc::new(
         Kernel::with_meta_renderer(

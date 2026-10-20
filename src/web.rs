@@ -527,6 +527,31 @@ fn nav_with(
     out
 }
 
+/// [`nav`] for a page drawn OUTSIDE any invocation: the refusal page the HTTP door writes for
+/// an error a browser navigated to (`crate::refusal`, ledger
+/// [#2021](http://localhost:1062/l/default/item/2021)), with the request's own capability.
+///
+/// ★ The header is a function of the caller's CAPABILITY alone: [`readable_ledgers`],
+/// `k::readable_roots`, `queue::offers_queue` and [`withholds`] read `inv.capability` and
+/// nothing else, and nothing in [`nav_with`] issues a request (it is not `async`). So a
+/// detached invocation over that capability draws exactly the header the refused page would
+/// have had, the same function deciding it. A header piece that ever needs the kernel has to
+/// come through a real invocation, and the detached one would refuse it rather than guess.
+pub(crate) fn nav_for(web: &Web, capability: &ikigai_core::Capability) -> String {
+    let request = Request::new(
+        Verb::Source,
+        Iri::parse(REFUSAL_PAGE).expect("a constant IRI"),
+    );
+    let bindings = ikigai_core::Bindings::new();
+    let inv = Invocation::detached(&request, &bindings, capability);
+    let ledgers = readable_ledgers(web, &inv);
+    nav_with(web, &inv, &ledgers, Here::Elsewhere, None)
+}
+
+/// The name [`nav_for`]'s detached invocation carries: the refusal page has no resource of its
+/// own, and nothing resolves this.
+const REFUSAL_PAGE: &str = "urn:iki:gonk:page:refusal";
+
 /// What the header says when `nav` has left out a section this server has (ledger
 /// [#446](http://localhost:1062/l/default/item/446)) — signed out, and signed in under a grant
 /// that does not reach it. Which of the two shows is `web/gonk.js`'s call, as for the sign-in
@@ -896,9 +921,13 @@ impl Lacking {
         } else {
             format!("{} {SIGN_IN_WHERE}", self.signed_out)
         };
-        format!("{sentence}\nThe grant it needs: {}", needs.join("; "))
+        format!("{sentence}\n{GRANT_LINE} {}", needs.join("; "))
     }
 }
+
+/// How `Lacking::plain` starts the line naming the grant, which comes last. The refusal
+/// page (`crate::refusal`) reads the line back by it, so the two cannot drift apart.
+pub const GRANT_LINE: &str = "The grant it needs:";
 
 /// Where a signed-out reader of a typed refusal finds the sign-in: the refusal is plain text
 /// and cannot carry the button itself (`Lacking::plain`).

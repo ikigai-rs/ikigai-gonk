@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod layers_key;
+
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Description, EndpointSpace, Exact, Fallback, FnEndpoint, Iri, Kernel,
@@ -154,7 +156,8 @@ impl Host {
         write("participants.ttl", PARTICIPANTS);
         write("collabs/crew.toml", CREW);
         let state = tempfile::tempdir().unwrap();
-        let host = ikigai_layers::Host::open(config.path(), state.path()).expect("the host");
+        let key = layers_key::state_key(config.path());
+        let host = ikigai_layers::Host::open(config.path(), state.path(), &key).expect("the host");
 
         // The feed, scripted: every read is held for its `wait` (the long poll an idle layer
         // gives), counted while it is held, and answers no events.

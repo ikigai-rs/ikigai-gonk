@@ -313,7 +313,8 @@ ikigai-throttle = "0.2.0"
 # 0.1.66 (ledger #1923): the one-release reason (see `ikigai-web` below). 0.1.66's engine
 # changes (wire v9's `IssueWith` on the transports, the edge statuses) are not in the plan
 # runner this binary links.
-ikigai-engine = { version = "0.1.66", features = ["plan-reader"] }
+# 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
+ikigai-engine = { version = "0.1.67", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). It is linked for the plan
 # doors ALONE, and gonk never serves it to a caller: every door refuses `urn:shacl:*` as it
@@ -705,7 +706,8 @@ ikigai-repo = "0.2.0"
 # 0.1.61 (ledger #1411, #1426): the one-release reason; the intray's store floor is 0.2.21.
 # 0.1.62 (ledger #1489): the one-release reason; the intray did not change.
 # 0.1.66 (ledger #1923): the one-release reason (see `ikigai-web` below); the intray did not change.
-ikigai-intray = "0.1.66"
+# 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below); the intray did not change.
+ikigai-intray = "0.1.67"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -735,7 +737,9 @@ ikigai-intray = "0.1.66"
 # 0.1.62 -> 0.1.66 (ledger #1923): quic and ipc at 0.1.66 require `ikigai-resolve ^0.1.66`. 0.1.66
 # adds `Resolver::issue_as_in_run` and `RunContext` (wire v9's issue context on a mount); gonk's
 # mount still calls `issue_as`, so nothing here mints or forwards a retry budget yet.
-ikigai-resolve = "0.1.66"
+# 0.1.66 -> 0.1.67 (ledger #2021): engine, intray, quic and ipc at 0.1.67 require
+# `ikigai-resolve ^0.1.67`.
+ikigai-resolve = "0.1.67"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -785,7 +789,8 @@ ikigai-resolve = "0.1.66"
 # 0.1.66 (ledger #1923, #1546): the one-release reason (see `ikigai-web` below). The socket door
 # speaks wire v9 (tags 9-13 for the four new error variants, `Call::IssueWith`), and still
 # serves a v7/v8 client, which receives each new variant downgraded to `Endpoint(display)`.
-ikigai-ipc = "0.1.66"
+# 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
+ikigai-ipc = "0.1.67"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -876,7 +881,8 @@ ikigai-ipc = "0.1.66"
 # 0.1.66 (ledger #1923, #1546): the one-release reason (see `ikigai-web` below). The QUIC door and
 # the mounts speak wire v9, as `ikigai-ipc` above: a `RetryAfter` from a mounted model crosses to a
 # v9 peer typed, and to a v7/v8 peer as `Endpoint(display)`. 0.1.56 is still the behavior floor.
-ikigai-quic = "0.1.66"
+# 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
+ikigai-quic = "0.1.67"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -979,8 +985,13 @@ ikigai-quic = "0.1.66"
 # that is what makes a rate-limited anonymous run a `429` at this door instead of a `500`
 # (ledger #1216 part 1, #1273). `tests/anonymous_runs_1210.rs::the_anonymous_run_rate_is_configurable`
 # is the FLOOR TEST: on 0.1.62 the third run is `500 Internal Server Error` with no `Retry-After`.
-# `"0.1.66"` is `<0.2.0`.
-ikigai-web = "0.1.66"
+# ★ 0.1.67 is the floor now, an API one (ledger #2021, #2025, ikigai-cli PR 562):
+# `EdgeConfig::error_page`, the door's own HTML for an error a browser navigates to. gonk's
+# (`crate::refusal`) puts a refusal in gonk's page shell, with the passkey sign-in on it when
+# signing in would cure it; the status and the error headers are the library's. Through 0.1.66
+# every text error became the library's fixed, unstyled page. 0.1.66's error table above still
+# holds. `"0.1.67"` is `<0.2.0`.
+ikigai-web = "0.1.67"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -1090,7 +1101,8 @@ ikigai-fn = "0.5.0"
 # 0.1.61: the one-release reason; the verifier is unchanged.
 # 0.1.62: the one-release reason; the verifier is unchanged.
 # 0.1.66 (ledger #1923): the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.66"
+# 0.1.67 (ledger #2021): the one-release reason; the verifier is unchanged.
+ikigai-passkey = "0.1.67"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
@@ -1194,4 +1206,10 @@ ikigai-a11y = "0.2.1"
 # host behind a default `host` feature (`default-features = false` is the participant surface);
 # the default is unchanged and these tests need the host, so the line keeps the defaults. 0.2.9
 # is still the build floor above. `"0.2.10"` is `<0.3.0`.
-ikigai-layers = "0.2.10"
+# ★ 0.3.0 (ledger #2021): the published head, moved with the cli 0.1.67 crates. It seals a host's
+# state at rest, so `Host::open` takes a `StateKey`: each test mints an age identity (`age` below)
+# and loads it, as the layers crate's own tests do. `"0.3.0"` is `<0.4.0`.
+ikigai-layers = "0.3.0"
+# An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
+# own `age` floor).
+age = "0.11.1"

@@ -388,6 +388,8 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .signin-notice .signed-out { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
 .signin-notice .grant-needed > summary { color: var(--muted); }
 .signin-notice .grant-needed code { overflow-wrap: anywhere; }
+/* The refusal page (ledger #2021): its grant line can be one long IRI. */
+.refusal .grant-needed code { overflow-wrap: anywhere; }
 
 /* The Layers page (ledger #1675). Every state is a WORD first ("New", "3 new"); the weight and
  * the accent only repeat it. No color here that is not a palette token. */
