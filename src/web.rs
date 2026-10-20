@@ -430,7 +430,7 @@ fn nav_with(
                 "ledger",
                 &[
                     ("name", l.name()),
-                    ("href", &format!("/l/{}", l.name())),
+                    ("href", &ledger_href(l)),
                     (
                         "current",
                         if Some(l.name()) == current {
@@ -616,7 +616,12 @@ fn menu_order(ledgers: &[Ledger]) -> Vec<&Ledger> {
 
 /// `/l/{ledger}`, through the shared encoder. A ledger name is already path-safe
 /// (`Ledger::parse` admits `a-z 0-9 - _`), so this is the rule stated once rather than a
-/// change in any URL.
+/// change in any URL. Every `/l/…` link this module builds starts here (UI conventions D5,
+/// ledger [#1958](http://localhost:1062/l/default/item/1958)).
+///
+/// ```text
+/// /l/default · /l/default/items · /l/default/item/12 · /l/default/doctor
+/// ```
 fn ledger_href(ledger: &Ledger) -> String {
     format!("/l/{}", ikigai_fn::html::url_segment(ledger.name()))
 }
@@ -966,9 +971,9 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
             "short",
             ledger.number(number.parse::<i64>().unwrap_or_default()),
         );
-        graph.view(&item, "href", format!("/l/{}/item/{id}", ledger.name()));
+        graph.view(&item, "href", format!("{}/item/{id}", ledger_href(ledger)));
         graph.view(&item, "ledger", ledger.name());
-        graph.view(&item, "ledgerHref", format!("/l/{}", ledger.name()));
+        graph.view(&item, "ledgerHref", ledger_href(ledger));
         graph.view(&item, "listStatus", list_status);
         graph.view(&item, "status", if open { "open" } else { "closed" });
         if let Some(reason) = reason {
@@ -1040,7 +1045,7 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
                         graph.view(
                             &node,
                             "href",
-                            format!("/l/{}/item/{target_id}", other.name()),
+                            format!("{}/item/{target_id}", ledger_href(&other)),
                         );
                         graph.view(&node, "text", format!("{} {target_id}", other.name()));
                     }
@@ -1093,7 +1098,7 @@ fn enrich_children(graph: &mut Graph) {
             graph.view(
                 &node,
                 "href",
-                format!("/l/{}/item/{child_id}", other.name()),
+                format!("{}/item/{child_id}", ledger_href(&other)),
             );
             graph.view(&node, "text", format!("{} {child_id}", other.name()));
         }
@@ -1273,8 +1278,8 @@ async fn ledger_listing(
     } else {
         format!("Ledger {}", ledger.name())
     };
-    let page_url = format!("/l/{}", ledger.name());
-    let items_url = format!("/l/{}/items", ledger.name());
+    let page_url = ledger_href(ledger);
+    let items_url = format!("{}/items", ledger_href(ledger));
     let query = count.more_query(status, text);
     let next = count.next_query(status, text);
     let doc = envelope(
@@ -1632,7 +1637,7 @@ impl Endpoint for DoctorView {
                 &[
                     ("check", &problem.check),
                     ("item", &number),
-                    ("href", &format!("/l/{}/item/{id}", ledger.name())),
+                    ("href", &format!("{}/item/{id}", ledger_href(&ledger))),
                 ],
                 &format!(
                     "{}{}",
@@ -1659,7 +1664,7 @@ impl Endpoint for DoctorView {
                 ("checked-at", &doc.checked_at),
                 ("checks", &doc.checks.join(", ")),
                 ("count", &doc.problems.len().to_string()),
-                ("ledger-href", &format!("/l/{}", ledger.name())),
+                ("ledger-href", &ledger_href(&ledger)),
             ],
             &problems,
         ));
@@ -1670,7 +1675,7 @@ impl Endpoint for DoctorView {
                 ("full", flag(true)),
                 ("title", &format!("doctor · {}", ledger.name())),
                 ("ledger", ledger.name()),
-                ("page-url", &format!("/l/{}/doctor", ledger.name())),
+                ("page-url", &format!("{}/doctor", ledger_href(&ledger))),
             ],
             &children,
         );
@@ -1751,7 +1756,7 @@ async fn item_card(
             ("full", flag(full)),
             ("title", &title),
             ("ledger", ledger.name()),
-            ("page-url", &format!("/l/{}", ledger.name())),
+            ("page-url", &ledger_href(ledger)),
         ],
         &children,
     );
@@ -2006,7 +2011,7 @@ impl Endpoint for Act {
                         ("view", "gone"),
                         ("full", "false"),
                         ("ledger", ledger.name()),
-                        ("page-url", &format!("/l/{}", ledger.name())),
+                        ("page-url", &ledger_href(&ledger)),
                     ],
                     &format!(
                         "{}{}",

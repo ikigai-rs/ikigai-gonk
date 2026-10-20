@@ -45,7 +45,14 @@
           <head>
             <meta charset="utf-8"/>
             <meta name="viewport" content="width=device-width, initial-scale=1"/>
-            <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false}</xsl:attribute></meta>
+            <!-- htmx's configuration, set once (UI conventions D7) and pinned by
+                 tests/htmx_config_1958.rs. allowScriptTags:false: htmx 2.0.4 would otherwise
+                 run a <script> inside swapped content, a src= one included, which CSP's
+                 script-src 'self' does not stop for a same-origin path (ledger #1948, #1958).
+                 Nothing gonk swaps carries a script: the two scripts are in this head, which a
+                 swap never takes. includeIndicatorStyles:false: htmx would inject a <style>
+                 element, which the CSP refuses; gonk styles no indicator. -->
+            <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}</xsl:attribute></meta>
             <title><xsl:value-of select="@title"/> · gonk</title>
             <link rel="stylesheet" href="/static/gonk.css"/>
             <!-- A page that hosts another family's faces links that family's own stylesheet
