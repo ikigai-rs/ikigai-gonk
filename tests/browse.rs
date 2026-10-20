@@ -55,6 +55,7 @@ use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock, Verb,
 };
+use ikigai_fn::html::url_segment as urlencode;
 use ikigai_gonk::config::ExplainTiers;
 use ikigai_gonk::grants::{
     browse_graph_grants, browse_role_grants, grants_for, grants_for_all, Authority, BrowseRole,
@@ -3183,19 +3184,6 @@ fn the_adapter_sinks_the_annotation_family_and_nothing_else() {
     assert_eq!(status, 400, "a POST does not carry a source: {body}");
 }
 
-/// Percent-encode everything but the unreserved set, so a query parameter carries an IRI,
-/// a space and a newline unchanged.
-fn urlencode(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
-}
-
 /// The REAL HTTP door over one hub: `doors::http_kernel` with gonk's pages in front,
 /// `doors::http_cap`'s per-request capability, and `doors::edge_config`'s route table — the
 /// three things `main` wires. Only the listener is a test's (an ephemeral loopback port).
@@ -3674,9 +3662,10 @@ fn the_trigger_names_the_file_that_changed_not_a_decoding_of_it() {
 }
 
 /// And it is the BUTTON's IRI, byte for byte: browse lists each file under the `file:` IRI
-/// it builds with the same private encoder its Review button uses, so the trigger's IRI with
-/// `review` for `file` must appear in the listing verbatim. The day browse changes its
-/// encoding, this goes red before a trigger quietly stops sharing the button's archive key.
+/// it builds with the encoder its Review button uses (`ikigai_browse::iri_encode`, which the
+/// trigger now calls rather than mirrors), so the trigger's IRI with `review` for `file` must
+/// appear in the listing verbatim. The day browse's listing and its encoder part ways, this
+/// goes red before a trigger quietly stops sharing the button's archive key.
 #[test]
 fn the_trigger_encodes_a_path_exactly_as_browse_does() {
     let dir = scratch_root();

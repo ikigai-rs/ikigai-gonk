@@ -34,13 +34,16 @@
 //! # ⚠ Two grammars, and the substitution is escaped for whichever it lands in
 //!
 //! The values come from the store and the store holds text other people wrote. A
-//! `render:link` template percent-encodes every substitution ([`percent`]); a
-//! `render:query` template escapes it for the SPARQL string-literal grammar
+//! `render:link` template percent-encodes every substitution
+//! ([`ikigai_fn::html::url_segment`], the ecosystem's one rule for a path segment or a query
+//! value); a `render:query` template escapes it for the SPARQL string-literal grammar
 //! ([`sparql_string`]) before the whole rendered query is percent-encoded into the editor's
 //! URL. A rule author writes `"{value}"` and cannot opt out of either: the templates carry
 //! placeholders, never concatenated text.
 
 use std::collections::BTreeSet;
+
+use ikigai_fn::html::url_segment;
 
 use crate::render::Graph;
 
@@ -222,14 +225,14 @@ impl Rules {
                 continue;
             }
             let (href, kind) = match &rule.template {
-                Template::Link(url) => (fill(url, &bindings, percent)?, "link"),
+                Template::Link(url) => (fill(url, &bindings, url_segment)?, "link"),
                 Template::Query(sparql) => {
                     let query = fill(sparql, &bindings, sparql_string)?;
                     (
                         format!(
                             "/sparql?ledger={}&query={}",
-                            percent(ledger),
-                            percent(&query)
+                            url_segment(ledger),
+                            url_segment(&query)
                         ),
                         "query",
                     )
@@ -313,28 +316,6 @@ fn fill(
     }
     out.push_str(rest);
     Some(out)
-}
-
-/// Percent-encode for a URL — path segment or query value alike. Everything but the
-/// unreserved set is encoded, so the result cannot add a segment, a parameter or a fragment
-/// to the template that carried it.
-///
-/// ```
-/// use ikigai_gonk::rules::percent;
-/// assert_eq!(percent("repo:a b/c?d#e&f=g"), "repo%3Aa%20b%2Fc%3Fd%23e%26f%3Dg");
-/// assert_eq!(percent("plain-Name_1.2~3"), "plain-Name_1.2~3");
-/// ```
-pub fn percent(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 /// Escape for the inside of a SPARQL double-quoted string literal (no quotes added).
@@ -529,8 +510,8 @@ mod tests {
             .is_none());
         // And where a value DOES reach one — the ledger a caller may name in the query
         // string — the encoder is what stands between it and the path.
-        assert_eq!(percent("../../etc"), "..%2F..%2Fetc");
-        assert_eq!(percent("a&b=c"), "a%26b%3Dc");
+        assert_eq!(url_segment("../../etc"), "..%2F..%2Fetc");
+        assert_eq!(url_segment("a&b=c"), "a%26b%3Dc");
         let escaped = rules
             .action("number", "literal", "244", "../../etc")
             .unwrap();

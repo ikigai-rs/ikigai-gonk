@@ -199,7 +199,7 @@ pub fn number_link(ledger: &Ledger, number: i64) -> (String, String) {
         format!("{} #{number}", ledger.name()),
         format!(
             "/l/{}/item/{number}",
-            crate::web::percent_encode(ledger.name())
+            ikigai_fn::html::url_segment(ledger.name())
         ),
     )
 }

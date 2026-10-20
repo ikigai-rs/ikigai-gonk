@@ -471,22 +471,14 @@ pub struct BrowseShell {
     pub web: Arc<Web>,
 }
 
-/// Percent-encode everything outside the unreserved set, so a command carrying an IRI and
-/// spaces travels as ONE query value.
-fn urlencode(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
-}
-
 /// The URL an affordance's command is fetched at — the query form this door speaks.
+///
+/// The whole command is ONE query value, so it goes through
+/// [`ikigai_fn::html::url_segment`]: a command carrying an IRI and spaces travels as one
+/// value, and nothing in it can add a parameter. (A `/k/` command LINE in a page is not a
+/// URL; `web/gonk.js` folds it into this same `?c=` form with `encodeURIComponent`.)
 pub fn k_url(command: &str) -> String {
-    format!("/k?{COMMAND}={}", urlencode(command))
+    format!("/k?{COMMAND}={}", ikigai_fn::html::url_segment(command))
 }
 
 /// Whether this capability satisfies the floor every browse row declares.

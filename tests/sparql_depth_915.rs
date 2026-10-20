@@ -22,6 +22,7 @@ use std::time::Duration;
 mod scratch_gonk;
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
+use ikigai_fn::html::url_segment as encoded;
 use ikigai_resolve::Resolver;
 use scratch_gonk::Gonk;
 
@@ -174,17 +175,6 @@ impl Gonk {
             .unwrap_or_else(|e| panic!("QUIC connect: {e}"));
         client.issue(request).map(|(repr, _)| repr)
     }
-}
-
-fn encoded(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }
 
 fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {

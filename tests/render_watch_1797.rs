@@ -38,6 +38,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
+use ikigai_fn::html::url_segment as encoded;
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::render;
@@ -115,17 +116,6 @@ impl Server {
             .unwrap_or_else(|| panic!("no status line for GET {path}: {response:?}"));
         (status, body.to_string())
     }
-}
-
-fn encoded(text: &str) -> String {
-    text.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }
 
 /// The route the planted watch asks for: a derivation, which ledger #880 refuses to another

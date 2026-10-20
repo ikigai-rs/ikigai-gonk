@@ -635,22 +635,10 @@ pub(crate) fn path_of(ledger: &Ledger, action: &str) -> String {
 pub(crate) fn encode(args: &[(&str, String)]) -> String {
     let query = args
         .iter()
-        .map(|(name, value)| format!("{name}={}", url_encode(value)))
+        .map(|(name, value)| format!("{name}={}", ikigai_fn::html::url_segment(value)))
         .collect::<Vec<_>>()
         .join("&");
     format!("?{query}")
-}
-
-pub(crate) fn url_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 /// gonk's HTTP door, as `--gonk` names it.
