@@ -193,6 +193,14 @@ good until it expires.
   resource, then `door`, `outcome`, `principal` (the passkey IRI, `-` for a refused sign-in),
   `credential`, `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`,
   `unenrolled`, `expired`, `idle`). A session token is never written.
+- **A ledger page your grant does not reach is a `403`, in one of two sentences** (ledger
+  #2021). Signed out: *Sign in to read the ledger "ventures".*, followed by where the sign-in is
+  (the header of every gonk page). Signed in: *Your passkey's grant doesn't include the ledger
+  "ventures".*, and no word about signing in, which would cure nothing. Either way the grant it
+  needs comes last, on its own line, for the operator. The door decides which from the request's
+  principal, which it carries on reads as well as writes. ⚠ The refusal is the HTTP library's
+  plain error page, not a gonk page: `ikigai-web` 0.1.66 gives a door no way to render its own
+  body for a refusal, so the sign-in button cannot be on it yet.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
   grant plus its own, and `passkey invite` refuses a grant that adds nothing. The anonymous
   grant includes running and reading PUBLIC scripts; publishing one takes
@@ -588,6 +596,9 @@ new build copied over the old one is served at once, with no restart.
 - the toolbox's own Content-Security-Policy (`ikigai_toolbox::TOOLBOX_CSP`) on the `/toolbox`
   rows and no others: it adds `'wasm-unsafe-eval'`, which lets the page's worker compile the
   engine. Every other page keeps the door's default policy.
+- a **Toolbox** entry in every page's header, after SPARQL (ledger #2021): an ordinary link to
+  `/toolbox`. With no `gonk.toolbox.dist` line there is no entry, so no page offers a door that
+  answers `404`.
 
 ⚠ A link to `/toolbox` from another site arrives as a foreign navigation, which keeps only the
 READ half of a caller's authority, and the `fs` read is not in that half

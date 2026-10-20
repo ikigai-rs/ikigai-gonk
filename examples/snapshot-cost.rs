@@ -123,6 +123,7 @@ fn main() {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
         epochs: None,
+        toolbox: false,
     });
     let door = doors::http_kernel(Arc::clone(&hub), web::space(face));
 

@@ -79,6 +79,7 @@
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
+              <xsl:apply-templates select="view:toolbox-link"/>
               <div id="auth" class="auth">
                 <xsl:apply-templates select="view:withheld"/>
                 <span id="auth-who" class="who" hidden="hidden"></span>
@@ -396,6 +397,13 @@
     <xsl:if test="@count-url">
       <span id="layers-badge-live" class="sr-only" role="status" aria-live="polite"></span>
     </xsl:if>
+  </xsl:template>
+
+  <!-- The RDF Toolbox (ledger #2021), present only when this server serves one: a
+       gonk.toolbox.dist line (src/web.rs::nav_with, Web::toolbox). The toolbox is its own page
+       with its own script and CSP, so this is an ordinary link: a full navigation, never a swap. -->
+  <xsl:template match="view:toolbox-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Toolbox</a>
   </xsl:template>
 
   <xsl:template name="layers-count">

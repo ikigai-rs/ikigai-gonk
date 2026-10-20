@@ -135,6 +135,7 @@ impl Server {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            toolbox: false,
         });
         let http = Arc::new(doors::http_kernel_with(
             Arc::clone(&hub),

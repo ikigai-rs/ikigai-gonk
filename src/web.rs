@@ -131,6 +131,12 @@ pub struct Web {
     /// re-reads every root's findings on every poll, as it did before — which is the only
     /// honest thing to do when nothing would say a count had changed.
     pub epochs: Option<Arc<crate::watch::Epochs>>,
+    /// Whether this server serves the RDF Toolbox at [`crate::toolbox::PATH`] (a
+    /// `gonk.toolbox.dist` line, ledger [#1933](http://localhost:1062/l/default/item/1933)), so
+    /// the header offers it (ledger [#2021](http://localhost:1062/l/default/item/2021)). No key,
+    /// no entry: a header link to a `/toolbox` that answers `404` is a door nobody should be
+    /// shown, the rule ledger #442 set for Browse.
+    pub toolbox: bool,
 }
 
 /// Bind the face.
@@ -338,8 +344,12 @@ fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
         ikigai_store::cap_read_graph(&ledger.graph()),
     ] {
         if !inv.capability.allows(&scope) {
+            // Signed in is the request's principal: the door mints it into the capability on
+            // reads as well as writes (`doors::http_cap`), so a refusal can say which of the
+            // two it is (ledger #2021).
+            let signed_in = inv.capability.principal().is_some();
             return Err(Error::Denied(
-                Lacking::ledger(ledger.name(), &scope).plain(),
+                Lacking::ledger(ledger.name(), &scope).plain(signed_in),
             ));
         }
     }
@@ -489,6 +499,18 @@ fn nav_with(
                 ("count-url", &count_url),
                 ("every", crate::queue::BADGE_EVERY),
             ],
+            "",
+        ));
+    }
+    // ★ The RDF Toolbox (ledger [#2021](http://localhost:1062/l/default/item/2021)), when this
+    // server serves one. No grant gates it: the door adds the toolbox's file reads to the
+    // anonymous grant whenever the build is configured (`main`, `Toolbox::grants`), and a
+    // signed-in caller holds the anonymous grant plus its own, so every caller of a server that
+    // has it may open it.
+    if web.toolbox {
+        out.push_str(&element(
+            "toolbox-link",
+            &[("href", crate::toolbox::PATH)],
             "",
         ));
     }
@@ -751,8 +773,10 @@ impl Endpoint for LedgersIndex {
 /// anyway, so the signed-out sentence is the right one to fall back to.
 ///
 /// A typed refusal ([`Error::Denied`], written by `ikigai-web` as plain text with no page
-/// around it) cannot carry a script or a control, so [`Lacking::plain`] is the same words for
-/// a reader whose state is unknown.
+/// around it) cannot carry a script or a control, so [`Lacking::plain`] says it in words. It
+/// does know which of the two it is, though: the capability carries the request's principal
+/// on reads too (`doors::http_cap`), so the refusal says ONE of the two sentences, never both
+/// (ledger [#2021](http://localhost:1062/l/default/item/2021)).
 pub(crate) struct Lacking {
     /// What a signed-out visitor reads, beside the sign-in button.
     pub signed_out: String,
@@ -845,22 +869,41 @@ impl Lacking {
         )
     }
 
-    /// The same words as plain text, for a refusal that has no page to stand in — neither
-    /// sentence presumes whether the reader is signed in, and the grant comes second.
-    pub(crate) fn plain(&self) -> String {
+    /// The same words as plain text, for a refusal that has no page to stand in: the one
+    /// sentence that fits the caller, then the grant on a line of its own, LAST, for the
+    /// operator and for an agent reading the refusal (UI conventions D14).
+    ///
+    /// Signed out, it says where the sign-in is, because the refusal itself cannot carry the
+    /// button. Signed in, it says only what the grant lacks: signing in again cures nothing.
+    /// (Brian, 2026-10-20, on the single sentence that covered both: *"it's not an acceptable
+    /// UX"*, ledger [#2021](http://localhost:1062/l/default/item/2021).)
+    ///
+    /// ```text
+    /// Sign in to read the ledger "ventures". Sign in with passkey is in the header of every gonk page (the front page is /); then come back to this address.
+    /// The grant it needs: urn:cap:ledger:read:ventures (to read the ledger "ventures")
+    ///
+    /// Your passkey's grant doesn't include the ledger "ventures".
+    /// The grant it needs: urn:cap:ledger:read:ventures (to read the ledger "ventures")
+    /// ```
+    pub(crate) fn plain(&self, signed_in: bool) -> String {
         let needs: Vec<String> = self
             .needs
             .iter()
             .map(|(iri, what)| format!("{iri} ({what})"))
             .collect();
-        format!(
-            "{}\nSigned in already? {}\nThe grant it needs: {}",
-            self.signed_out,
-            self.signed_in,
-            needs.join("; ")
-        )
+        let sentence = if signed_in {
+            self.signed_in.clone()
+        } else {
+            format!("{} {SIGN_IN_WHERE}", self.signed_out)
+        };
+        format!("{sentence}\nThe grant it needs: {}", needs.join("; "))
     }
 }
+
+/// Where a signed-out reader of a typed refusal finds the sign-in: the refusal is plain text
+/// and cannot carry the button itself (`Lacking::plain`).
+pub const SIGN_IN_WHERE: &str = "Sign in with passkey is in the header of every gonk page \
+                                 (the front page is /); then come back to this address.";
 
 /// The two ways a grant reaches a repository, in `ikigai-browse`'s own spelling.
 fn repository_grants() -> Vec<(String, String)> {

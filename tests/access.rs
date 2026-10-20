@@ -45,6 +45,7 @@ fn web_face(hub: &Arc<Kernel>, config: &tempfile::TempDir, port: u16) -> Arc<web
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
+        toolbox: false,
     })
 }
 

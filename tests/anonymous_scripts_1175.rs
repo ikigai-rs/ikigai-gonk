@@ -249,6 +249,7 @@ fn over_http_an_anonymous_run_is_refused_at_the_door_budget() {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
+        toolbox: false,
     });
     let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
     let door = doors::HttpDoor {

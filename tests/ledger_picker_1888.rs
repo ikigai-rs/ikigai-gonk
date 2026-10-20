@@ -54,6 +54,7 @@ impl Server {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            toolbox: false,
         });
         let anonymous = grants_for_all(
             &readable.iter().map(|s| s.to_string()).collect::<Vec<_>>(),

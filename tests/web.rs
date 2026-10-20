@@ -91,6 +91,7 @@ impl Server {
             rules: rules.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            toolbox: false,
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
@@ -829,7 +830,7 @@ fn a_cross_site_write_and_a_rebound_host_get_nothing() {
 /// notice is `web::Lacking`'s, signed-out sentence visible and free of capability IRIs, the
 /// signed-in sentence and its exact grant hidden for the script to show. And a ledger page
 /// refused outright — a typed 403 in plain text, with no page to carry a button — says the
-/// same thing in the same order: the words, then the grant.
+/// sentence that fits the caller, signed out or signed in, then the grant (ledger #2021).
 #[test]
 fn a_caller_short_of_a_ledger_grant_reads_a_sentence_before_a_grant() {
     // An anonymous caller holding no ledger grant, so the front page has no ledger to show.
@@ -883,18 +884,49 @@ fn a_caller_short_of_a_ledger_grant_reads_a_sentence_before_a_grant() {
         paragraph.starts_with(&escaped("denied: Sign in to read the ledger \"acme\".")),
         "{refused:?}"
     );
+    // ★ Signed out, it says where the sign-in is, and nothing about being signed in (ledger
+    // #2021: one sentence covering both was "not an acceptable UX").
     assert!(
-        paragraph.contains(&escaped(
-            "Signed in already? Your passkey's grant doesn't include the ledger \"acme\"."
-        )),
+        paragraph.contains(&escaped(web::SIGN_IN_WHERE)),
         "{refused:?}"
     );
+    assert!(!paragraph.contains("Signed in already"), "{refused:?}");
+    assert!(!paragraph.contains("grant doesn't include"), "{refused:?}");
     assert!(
         paragraph
             .lines()
             .last()
             .is_some_and(|l| l.contains("urn:cap:ledger:read:acme")),
         "the grant comes LAST: {refused:?}"
+    );
+
+    // ★ Signed in, under a grant that does not reach the ledger: the other sentence, alone.
+    // Signing in again cures nothing, so nothing offers it (ledger #2021).
+    let (token, _) = sign_in(
+        &server,
+        "reader",
+        &grants_for("default", Authority::Delete).unwrap(),
+    );
+    let lacking = server.page("/l/acme", Some(&token));
+    assert_eq!(lacking.status, 403, "the status is unchanged: {lacking:?}");
+    let (_, paragraph) = lacking
+        .body
+        .split_once("<p>")
+        .expect("the sentence is the page's one paragraph");
+    let paragraph = paragraph.split("</p>").next().expect("a closed paragraph");
+    assert!(
+        paragraph.starts_with(&escaped(
+            "denied: Your passkey's grant doesn't include the ledger \"acme\"."
+        )),
+        "{lacking:?}"
+    );
+    assert!(!paragraph.contains("Sign in"), "{lacking:?}");
+    assert!(
+        paragraph
+            .lines()
+            .last()
+            .is_some_and(|l| l.contains("urn:cap:ledger:read:acme")),
+        "the grant comes LAST: {lacking:?}"
     );
 
     // No root configured is the operator's sentence, unchanged, on both pages that say it —

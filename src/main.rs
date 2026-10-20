@@ -669,6 +669,9 @@ fn serve(flags: &config::Flags) -> ! {
             rules: Arc::clone(&render_rules),
             queue: settings.queue.clone(),
             epochs: Some(Arc::clone(&epochs)),
+            // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
+            // (ledger #2021).
+            toolbox: settings.toolbox.is_some(),
         });
         let pages = ikigai_gonk::layers_view::bind(
             web::space(Arc::clone(&face)),
