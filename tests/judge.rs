@@ -128,6 +128,7 @@ fn door_with(
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
         epochs: None,
+        toolbox: false,
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),

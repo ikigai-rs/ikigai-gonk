@@ -72,6 +72,7 @@ impl Server {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            toolbox: with_toolbox,
         });
         let toolbox = with_toolbox.then(|| Toolbox::at(dist.path().to_path_buf()).unwrap());
         let mut anonymous = anonymous_http_grants(&["default".to_string()]).unwrap();
@@ -370,4 +371,28 @@ fn the_config_key_is_optional_and_checked() {
     let twice =
         settings("gonk.toolbox.dist = \"~/dist\"\ngonk.toolbox.dist = \"~/dist\"\n").unwrap_err();
     assert!(twice.contains("2 times"), "{twice}");
+}
+
+/// ★ **The header offers the toolbox exactly when there is one** (ledger
+/// [#2021](http://localhost:1062/l/default/item/2021)): through #1933 `/toolbox` worked and no
+/// page linked to it. A `gonk.toolbox.dist` line puts a "Toolbox" entry in every page's header,
+/// an ordinary link to `/toolbox`; no line, no entry, so nobody is offered a door that answers
+/// `404`.
+#[test]
+fn the_header_offers_the_toolbox_only_when_the_key_is_set() {
+    let entry = "<a class='navlink' href='/toolbox'>Toolbox</a>";
+    let with = Server::start(true);
+    let home = with.open("/");
+    assert_eq!(home.status, 200, "{home:?}");
+    let page = home.text();
+    let header = &page[..page.find("</header>").expect("a header")];
+    assert!(header.contains(entry), "{header}");
+    // And it leads somewhere: the toolbox page itself.
+    assert_eq!(with.open("/toolbox").status, 200);
+
+    let without = Server::start(false);
+    let home = without.open("/");
+    assert_eq!(home.status, 200, "{home:?}");
+    assert!(!home.text().contains("Toolbox"), "{home:?}");
+    assert!(!home.text().contains("href='/toolbox'"), "{home:?}");
 }

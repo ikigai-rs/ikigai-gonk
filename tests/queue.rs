@@ -143,6 +143,7 @@ fn door_and_hub(
         // gate every test here sees is the one the shipped binary applies.
         queue: QueuePolicy::default(),
         epochs: None,
+        toolbox: false,
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),
@@ -2145,6 +2146,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
         epochs: Some(watch.epochs()),
+        toolbox: false,
     });
     Counting {
         door: doors::http_kernel(Arc::clone(&hub), web::space(face)),

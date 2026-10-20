@@ -3212,6 +3212,7 @@ impl HttpDoorHarness {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            toolbox: false,
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         // ★ The anonymous grant this server ships: the configured ledgers, read and write.

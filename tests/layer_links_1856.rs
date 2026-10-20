@@ -236,6 +236,7 @@ impl Gonk {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            toolbox: false,
         });
         let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, Some(view));
         let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, None));
