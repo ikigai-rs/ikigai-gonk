@@ -117,7 +117,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 38] = [
+const KEYS: [&str; 39] = [
     "gonk.log.access",
     "gonk.layer",
     "gonk.layer.deny",
@@ -156,6 +156,7 @@ const KEYS: [&str; 38] = [
     "gonk.review.arm",
     "gonk.review.judge",
     "gonk.review.judge_max_tokens",
+    crate::toolbox::KEY,
 ];
 
 /// How to invoke the binary.
@@ -655,6 +656,9 @@ pub struct Settings {
     /// (`gonk.mount.calls_per_hour`, default [`crate::budget::DEFAULT_MODEL_CALLS_PER_HOUR`];
     /// `0` for none) — see [`crate::budget::model_calls`].
     pub model_calls_per_hour: u32,
+    /// The RDF Toolbox's build directory (`gonk.toolbox.dist`, [`crate::toolbox`]), or `None`:
+    /// no `/toolbox`, and nothing else changes.
+    pub toolbox: Option<crate::toolbox::Toolbox>,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -1687,7 +1691,24 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         model_calls_per_hour: crate::budget::model_calls_per_hour(
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),
         )?,
+        toolbox: toolbox(text, homes)?,
     })
+}
+
+/// `gonk.toolbox.dist`: the RDF Toolbox's build directory, `~/`-expanded and checked
+/// ([`crate::toolbox::Toolbox::at`]). No line is `None`, and a line naming something that is
+/// not a directory is a refusal at start: a toolbox that silently 404s would look exactly like
+/// one that was never configured.
+fn toolbox(text: &str, homes: &Homes) -> Result<Option<crate::toolbox::Toolbox>, String> {
+    match values_for(text, crate::toolbox::KEY).as_slice() {
+        [] => Ok(None),
+        [line] => crate::toolbox::Toolbox::at(expand_home(line, &homes.home)).map(Some),
+        lines => Err(format!(
+            "{} is given {} times: the toolbox is one build directory",
+            crate::toolbox::KEY,
+            lines.len()
+        )),
+    }
 }
 
 /// `gonk.http.session_idle_minutes`, checked and in seconds: a whole number of minutes from 1

@@ -1463,6 +1463,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikigai-fs"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b039bdc6764deeacf94c909b5c936caa63853e4df3e0b868af801f9b65eacc9f"
+dependencies = [
+ "async-trait",
+ "ikigai-core",
+ "rustix",
+ "web-sys",
+]
+
+[[package]]
 name = "ikigai-gonk"
 version = "0.1.0"
 dependencies = [
@@ -1479,6 +1491,7 @@ dependencies = [
  "ikigai-core",
  "ikigai-engine",
  "ikigai-fn",
+ "ikigai-fs",
  "ikigai-intray",
  "ikigai-ipc",
  "ikigai-jsonld",
@@ -1494,6 +1507,7 @@ dependencies = [
  "ikigai-store",
  "ikigai-throttle",
  "ikigai-time",
+ "ikigai-toolbox",
  "ikigai-vocab",
  "ikigai-web",
  "ikigai-xslt",
@@ -1735,6 +1749,16 @@ checksum = "c507ce980d94dd7fdbfbe1b303ddfb4173de7ea48c869c5cae8410d4e8526a42"
 dependencies = [
  "ikigai-core",
  "ikigai-resolve",
+]
+
+[[package]]
+name = "ikigai-toolbox"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62403f917a2cb4e4ad0073866303eb5e8c4ea0bbf4889d28b0d5ea0031eee406"
+dependencies = [
+ "ikigai-core",
+ "ikigai-fn",
 ]
 
 [[package]]
@@ -4096,6 +4120,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web-sys"
+version = "0.3.105"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fbddc4a036f00ec4f18c83445bd3115cb306a91da554919a099d9222fe4a7f8"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

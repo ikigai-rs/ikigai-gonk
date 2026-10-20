@@ -67,6 +67,7 @@ pub mod script;
 pub mod sparql;
 pub mod stack;
 pub mod taker;
+pub mod toolbox;
 pub mod trigger;
 pub mod verdict;
 pub mod walk;

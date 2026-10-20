@@ -708,6 +708,32 @@ pub fn anonymous_http_grants(ledgers: &[String]) -> Result<Vec<String>, String> 
     Ok(tokens)
 }
 
+/// The read the HTTP door's caller needs for the RDF Toolbox ([`crate::toolbox`], ledger
+/// [#1933](http://localhost:1062/l/default/item/1933)): `urn:cap:fs:read:<dist>/<name>` for each
+/// file in `ikigai_toolbox::FILES`, and nothing else.
+///
+/// The toolbox reads its build under its CALLER's capability, so the door's caller must hold a
+/// read on the build. Named file by file rather than as the directory: the family already reads
+/// only its allowlist, but the directory is also reachable by its own name
+/// (`urn:iki:toolbox:dist:{path}`), and a directory grant would serve anything else an operator
+/// left in it. No write or delete token: nothing here writes the build.
+///
+/// ```
+/// use std::path::Path;
+/// use ikigai_gonk::grants::toolbox_read_grants;
+/// let grants = toolbox_read_grants(Path::new("/srv/toolbox/dist"));
+/// assert_eq!(grants.len(), ikigai_toolbox::FILES.len());
+/// assert_eq!(grants[0], "urn:cap:fs:read:/srv/toolbox/dist/toolbox.html");
+/// assert!(grants.contains(&"urn:cap:fs:read:/srv/toolbox/dist/engine.wasm".to_string()));
+/// assert!(grants.iter().all(|g| g.starts_with("urn:cap:fs:read:/srv/toolbox/dist/")));
+/// ```
+pub fn toolbox_read_grants(dist: &std::path::Path) -> Vec<String> {
+    ikigai_toolbox::FILES
+        .iter()
+        .map(|(name, _)| format!("urn:cap:fs:read:{}", dist.join(name).to_string_lossy()))
+        .collect()
+}
+
 /// The union of [`grants_for`] over several ledgers at one authority, first-seen order.
 pub fn grants_for_all(ledgers: &[String], authority: Authority) -> Result<Vec<String>, String> {
     let mut union: Vec<String> = Vec::new();

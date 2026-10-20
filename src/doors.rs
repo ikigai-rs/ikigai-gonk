@@ -425,11 +425,28 @@ pub fn http_kernel_with(
     pages: EndpointSpace,
     access: Option<AccessLog>,
 ) -> Kernel {
-    let space = Fallback::new(vec![
-        Arc::new(pages) as Arc<dyn Space>,
-        Arc::new(HubSpace::new(hub)) as Arc<dyn Space>,
-    ])
-    .named(spaces::iri(spaces::HTTP_DOOR));
+    http_kernel_serving(hub, pages, Vec::new(), access)
+}
+
+/// [`http_kernel_with`], with `faces` bound between gonk's pages and the hub: the HTML faces
+/// this door serves and no other door does. Today that is the RDF Toolbox when
+/// `gonk.toolbox.dist` is set ([`crate::toolbox::Toolbox::spaces`], ledger
+/// [#1933](http://localhost:1062/l/default/item/1933)), and nothing otherwise, which is
+/// [`http_kernel_with`] exactly.
+///
+/// In front of the hub, so a name a face binds is never the hub's to answer; behind the pages,
+/// whose `urn:iki:gonk:` names no face claims. What a face reads through this kernel reaches the
+/// hub as every page read does, under the caller's capability.
+pub fn http_kernel_serving(
+    hub: Arc<Kernel>,
+    pages: EndpointSpace,
+    faces: Vec<Arc<dyn Space>>,
+    access: Option<AccessLog>,
+) -> Kernel {
+    let mut layers: Vec<Arc<dyn Space>> = vec![Arc::new(pages)];
+    layers.extend(faces);
+    layers.push(Arc::new(HubSpace::new(hub)));
+    let space = Fallback::new(layers).named(spaces::iri(spaces::HTTP_DOOR));
     over(
         Arc::new(space),
         Some(crate::access::Door::Http),
@@ -1166,7 +1183,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 15] = [
+pub const GONK_PATHS: [&str; 16] = [
     "/",
     "/l",
     "/act",
@@ -1178,6 +1195,8 @@ pub const GONK_PATHS: [&str; 15] = [
     "/queue",
     "/browse",
     "/layers",
+    // The RDF Toolbox's rows ([`crate::toolbox::routes`]), when `gonk.toolbox.dist` adds them.
+    crate::toolbox::PATH,
     "/iki/",
     "/script/",
     "/nl/",
