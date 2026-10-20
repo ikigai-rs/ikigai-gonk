@@ -606,8 +606,23 @@ ikigai-nl = "0.4.0"
 # own handle, which JOINS the store's writer rather than starting a second one (store 0.2.18's
 # rule), and a PR explanation cut at the output budget is refused, not archived (0.18.9). gonk's
 # wiring (`Mount::annotations_through(store.shared_writer())`) is unchanged; 0.18.6 is still the
-# API floor. `"0.18.9"` is `<0.19.0`.
-ikigai-browse = "0.18.9"
+# API floor.
+# ★★ 0.19.0 is the floor now, a BEHAVIOR one (ledger #1932, #1546, #1923; ikigai-rs/ikigai-browse
+# PR 118): the review pass and the judge loop stop at the first `Refused` or `RetryAfter`, as they
+# already stopped at a `Denied`, and return the error WITH ITS TYPE. Under ikigai-llm 0.16 a
+# backend's 401/403 arrives as `Refused` and its 429 as `RetryAfter` with the delay, and gonk's own
+# model-call window (`urn:iki:gonk:mount:calls`, ikigai-throttle 0.2.0 above) refuses with
+# `RetryAfter` too. Through 0.18.x each was collapsed region by region: a refusal or a rate limit
+# was asked again for every remaining region and the delay was lost (the window refusing mid-pass
+# answered `200`, an "incomplete" pass). Now one review click is ONE answer with its class: `429`
+# with `Retry-After` for a rate limit, `502` for a refused credential (ikigai-web 0.1.66's table),
+# `outcome=retry-after` / `outcome=refused` in the access log, and nothing archived, so the next
+# click re-derives. An `Endpoint` (a 500) stays the region's own and the pass goes on. 0.19.0 also
+# carries the never-published 0.18.11 (dev-dependencies only), and requires ikigai-a11y 0.3.0
+# beside the dev-dependency's 0.2.x below. `tests/review_typed_stop_1932.rs` is the FLOOR TEST: on
+# 0.18.9 a backend 429 or 401 was asked once per region (three there) and the window case answered
+# `200`. `"0.19.0"` is `<0.20.0`.
+ikigai-browse = "0.19.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
