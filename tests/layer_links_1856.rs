@@ -23,6 +23,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
+mod layers_key;
+
 use futures::executor::block_on;
 use ikigai_core::{
     ArgRef, Capability, Error, Fallback, Iri, Kernel, Representation, Request, Space, SystemClock,
@@ -135,7 +137,9 @@ impl Host {
             ),
         );
         let state = tempfile::tempdir().unwrap();
-        let layers = ikigai_layers::Host::open(config.path(), state.path()).expect("the host");
+        let key = layers_key::state_key(config.path());
+        let layers =
+            ikigai_layers::Host::open(config.path(), state.path(), &key).expect("the host");
         let spaces: Vec<Arc<dyn Space>> = vec![Arc::new(ikigai_layers::space(&layers))];
         let kernel = Arc::new(
             Kernel::with_meta_renderer(

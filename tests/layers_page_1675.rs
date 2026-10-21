@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod common;
+mod layers_key;
 
 use common::Authenticator;
 use futures::executor::block_on;
@@ -250,7 +251,8 @@ impl Host {
         }
         write("collabs/crew.toml", &crew);
         let state = tempfile::tempdir().unwrap();
-        let host = ikigai_layers::Host::open(config.path(), state.path()).expect("the host");
+        let key = layers_key::state_key(config.path());
+        let host = ikigai_layers::Host::open(config.path(), state.path(), &key).expect("the host");
         let layers = host;
         let kernel = Arc::new(Host::kernel_over(&layers));
         Host {

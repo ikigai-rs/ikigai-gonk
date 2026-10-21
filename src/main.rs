@@ -786,6 +786,9 @@ fn serve(flags: &config::Flags) -> ! {
             Some(_) => ikigai_gonk::toolbox::route(edge),
             None => edge,
         };
+        // A browser navigating to an error gets it in gonk's own page, with the passkey
+        // sign-in on it when signing in would cure it (ledger #2021).
+        let edge = ikigai_gonk::refusal::install(edge, door.clone(), Arc::clone(&face));
         let error = ikigai_web::serve_with_listener(
             http,
             doors::http_cap(door),

@@ -291,6 +291,7 @@
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
+      <xsl:when test="@view = 'refusal'"><xsl:apply-templates select="view:refusal"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
@@ -360,6 +361,45 @@
         </details>
       </div>
     </div>
+  </xsl:template>
+
+  <!--
+    The page a browser NAVIGATING to an error gets (ledger #2021, src/refusal.rs): the same
+    shell as every page, the status unchanged (the door keeps it; this is only the body). Three
+    kinds, decided in Rust from the request:
+    - signin: a refusal signing in may cure. The sentence, and the passkey sign-in button,
+      hidden until web/gonk.js knows a passkey can be used here (as the header's is). Signing
+      in reloads the page, so the browser lands on the address it asked for.
+    - grant: signed in, and the grant does not reach the page. The sentence, then the grant it
+      needs, last; nothing offers a sign-in, which would cure nothing.
+    - error: anything else. The status as the heading, and the message.
+    Focus (D13): the heading is focusable and autofocused, so a page with no script still puts
+    a screen reader on it; web/gonk.js moves focus to the sign-in button once it shows it. The
+    heading and the button are each described by the sentence, so whichever has focus, the
+    refusal is read with it.
+  -->
+  <xsl:template match="view:refusal">
+    <section class="panel refusal" data-refusal="true" aria-labelledby="refusal-title">
+      <xsl:attribute name="data-kind"><xsl:value-of select="@kind"/></xsl:attribute>
+      <h1 id="refusal-title" tabindex="-1" autofocus="autofocus">
+        <xsl:if test="@sentence"><xsl:attribute name="aria-describedby">refusal-sentence</xsl:attribute></xsl:if>
+        <xsl:value-of select="@heading"/>
+      </h1>
+      <xsl:if test="@sentence">
+        <p id="refusal-sentence"><xsl:value-of select="@sentence"/></p>
+      </xsl:if>
+      <xsl:if test="@kind = 'signin'">
+        <div class="signin-notice" data-signin-notice="true">
+          <p>
+            <button type="button" class="signin-here" hidden="hidden" aria-describedby="refusal-sentence">Sign in with passkey</button>
+          </p>
+          <p class="note">Signing in brings you back to this page.</p>
+        </div>
+      </xsl:if>
+      <xsl:if test="@grant">
+        <p class="grant-needed">The grant it needs: <code><xsl:value-of select="@grant"/></code></p>
+      </xsl:if>
+    </section>
   </xsl:template>
 
   <!-- ============================================================ layers -->

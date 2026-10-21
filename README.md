@@ -198,9 +198,17 @@ good until it expires.
   (the header of every gonk page). Signed in: *Your passkey's grant doesn't include the ledger
   "ventures".*, and no word about signing in, which would cure nothing. Either way the grant it
   needs comes last, on its own line, for the operator. The door decides which from the request's
-  principal, which it carries on reads as well as writes. ⚠ The refusal is the HTTP library's
-  plain error page, not a gonk page: `ikigai-web` 0.1.66 gives a door no way to render its own
-  body for a refusal, so the sign-in button cannot be on it yet.
+  principal, which it carries on reads as well as writes.
+- **A browser that navigates to an error gets it as a gonk page** (ledger #2021,
+  `src/refusal.rs`): the usual header, navigation and styles around it, and the status
+  unchanged. Signed out and refused something a sign-in could cure, the page says the signed-out
+  sentence and carries **Sign in with passkey**, which takes focus; signing in reloads the page,
+  so you land on the address you asked for. Signed in, it says what the grant lacks and the
+  grant it needs, with no sign-in. Anything else (a `404`, a `429`, a `5xx`, a cross-site
+  write) is the same page with the status as its heading and the message under it. curl, a
+  script's `fetch` and htmx get what they got before: the sentence as text, or `ikigai-web`'s
+  minimal page. ⚠ A browser sends the fetch metadata this keys on (`Sec-Fetch-Mode`) only to
+  `localhost` or HTTPS, so over plain `http://` on a LAN address the page is the minimal one.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
   grant plus its own, and `passkey invite` refuses a grant that adds nothing. The anonymous
   grant includes running and reading PUBLIC scripts; publishing one takes

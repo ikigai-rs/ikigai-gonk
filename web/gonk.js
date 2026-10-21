@@ -587,6 +587,21 @@
     });
   }
 
+  // ★ A REFUSAL PAGE PUTS FOCUS WHERE THE WAY ON IS (ledger #2021, D13). The page a browser gets
+  // for an error it navigated to (src/refusal.rs) marks its heading `autofocus` for a page with
+  // no script, but a browser may skip autofocus (Chromium did, on a navigation in a pane without
+  // focus), so the script focuses it as it starts. Once the sign-in button above is shown, it is
+  // the one thing to do, so focus moves to it. Heading and button are each described by the
+  // refusal's sentence, so a screen reader reads the sentence with whichever has focus.
+  function focusRefusal() {
+    const refusal = document.querySelector("[data-refusal]");
+    if (!refusal) return;
+    const button = refusal.querySelector(".signin-here");
+    const heading = refusal.querySelector("h1");
+    const target = button && !button.hidden ? button : heading;
+    if (target && document.activeElement !== target) target.focus();
+  }
+
   document.addEventListener("htmx:afterSettle", (e) => drawNotices(e.detail && e.detail.target));
   document.addEventListener("click", (e) => {
     if (canSignIn && e.target.closest && e.target.closest(".signin-here")) signIn();
@@ -864,6 +879,7 @@
     wireSamples();
     wireLedgerMenu();
     checkAllWords();
+    focusRefusal();
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page
     if (location.hostname !== "localhost") {
@@ -897,6 +913,7 @@
       login.hidden = false;
     }
     drawNotices(document);
+    focusRefusal();
 
     const m = location.hash.match(/^#invite=([A-Za-z0-9_-]+)$/);
     if (m) {
