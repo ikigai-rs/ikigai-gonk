@@ -53,6 +53,11 @@ impl Server {
     /// A gonk HTTP door whose anonymous caller reads the `default` ledger, with the toolbox
     /// over a scratch build when `with_toolbox`, wired the way `main` wires it.
     fn start(with_toolbox: bool) -> Server {
+        Server::start_reading(with_toolbox, &["default".to_string()])
+    }
+
+    /// The same door, whose anonymous caller reads exactly the ledgers `readable` names.
+    fn start_reading(with_toolbox: bool, readable: &[String]) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -75,7 +80,7 @@ impl Server {
             toolbox: with_toolbox,
         });
         let toolbox = with_toolbox.then(|| Toolbox::at(dist.path().to_path_buf()).unwrap());
-        let mut anonymous = anonymous_http_grants(&["default".to_string()]).unwrap();
+        let mut anonymous = anonymous_http_grants(readable).unwrap();
         if let Some(toolbox) = &toolbox {
             anonymous.extend(toolbox.grants());
         }
@@ -211,10 +216,6 @@ fn the_page_and_its_files_serve_with_their_types_and_the_toolbox_csp() {
         Some(ikigai_toolbox::TOOLBOX_CSP),
         "{page:?}"
     );
-    assert!(
-        page.text().contains(r#"about="urn:toolbox:page""#),
-        "{page:?}"
-    );
     assert!(page.text().contains(r#"data-theme="auto""#), "{page:?}");
 
     let js = gonk.get("/toolbox/app.js", "*/*");
@@ -282,6 +283,95 @@ fn a_check_page_names_its_input_and_the_input_is_the_resources_turtle() {
     assert!(
         input.text().contains("@prefix") || input.text().contains("<urn:"),
         "{input:?}"
+    );
+}
+
+/// ★ **`/toolbox` opens on OUR data** (ledger [#2033](http://localhost:1062/l/default/item/2033)):
+/// a caller who may read the default ledger gets the check page over its items, which names the
+/// items' Turtle face as its input, instead of the empty page and turtle-lsp's samples.
+#[test]
+fn the_toolbox_opens_on_the_default_ledgers_items() {
+    let gonk = Server::start(true);
+    gonk.file("An item the toolbox opens on");
+
+    let page = gonk.open("/toolbox");
+    assert_eq!(page.status, 200, "{page:?}");
+    assert_eq!(
+        page.header("content-security-policy").as_deref(),
+        Some(ikigai_toolbox::TOOLBOX_CSP),
+        "{page:?}"
+    );
+    assert!(
+        page.text().contains(r#"about="urn:iki:ledger:items""#),
+        "{page:?}"
+    );
+    assert!(
+        page.text()
+            .contains("/toolbox/input/urn%3Aiki%3Aledger%3Aitems"),
+        "{page:?}"
+    );
+
+    // And that input is the ledger's Turtle, readable by the same caller.
+    let input = gonk.get("/toolbox/input/urn%3Aiki%3Aledger%3Aitems", "*/*");
+    assert_eq!(input.status, 200, "{input:?}");
+    assert!(
+        input.text().contains("An item the toolbox opens on"),
+        "{input:?}"
+    );
+
+    // `theme=` passes through to the page it opens.
+    let dark = gonk.open("/toolbox?theme=dark");
+    assert_eq!(dark.status, 200, "{dark:?}");
+    assert!(dark.text().contains(r#"data-theme="dark""#), "{dark:?}");
+    assert!(
+        dark.text().contains(r#"about="urn:iki:ledger:items""#),
+        "{dark:?}"
+    );
+
+    // The empty toolbox, turtle-lsp's samples, is still one name away.
+    let empty = gonk.open("/toolbox/page");
+    assert_eq!(empty.status, 200, "{empty:?}");
+    assert_eq!(
+        empty.header("content-security-policy").as_deref(),
+        Some(ikigai_toolbox::TOOLBOX_CSP)
+    );
+    assert!(
+        empty.text().contains(r#"about="urn:toolbox:page""#),
+        "{empty:?}"
+    );
+    assert!(!empty.text().contains("/toolbox/input/"), "{empty:?}");
+}
+
+/// A caller who may NOT read the default ledger still gets a toolbox: the empty page, which
+/// loads the samples, never an error page and never a check page whose one input would fail.
+#[test]
+fn a_caller_without_the_ledger_read_gets_the_samples() {
+    let gonk = Server::start_reading(true, &[]);
+
+    let page = gonk.open("/toolbox");
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(media(&page).starts_with("text/html"), "{page:?}");
+    assert_eq!(
+        page.header("content-security-policy").as_deref(),
+        Some(ikigai_toolbox::TOOLBOX_CSP),
+        "{page:?}"
+    );
+    assert!(
+        page.text().contains(r#"about="urn:toolbox:page""#),
+        "{page:?}"
+    );
+    assert!(!page.text().contains("/toolbox/input/"), "{page:?}");
+
+    // The read it lacks, for the record: the input it would have named is refused.
+    let input = gonk.get("/toolbox/input/urn%3Aiki%3Aledger%3Aitems", "*/*");
+    assert_eq!(input.status, 403, "{input:?}");
+
+    // A check page by hand is unchanged: it composes, and its input is what is refused.
+    let check = gonk.open("/toolbox/check/urn%3Aiki%3Aledger%3Aitems");
+    assert_eq!(check.status, 200, "{check:?}");
+    assert!(
+        check.text().contains(r#"about="urn:iki:ledger:items""#),
+        "{check:?}"
     );
 }
 

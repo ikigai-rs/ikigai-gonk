@@ -338,7 +338,7 @@ pub(crate) fn render_err(e: String) -> Error {
 
 /// The exact read grants for one ledger, checked up front so a page refuses with a typed
 /// `Denied` naming the token rather than rendering an empty ledger.
-fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
+pub(crate) fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
     for scope in [
         ledger.cap_read(),
         ikigai_store::cap_read_graph(&ledger.graph()),
