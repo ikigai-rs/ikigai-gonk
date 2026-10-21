@@ -113,8 +113,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, Error, Invocation, Iri, Representation,
-    Request, Result, Verb,
+    ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, Error, Invocation, Iri,
+    Representation, Request, Result, Verb,
 };
 
 use crate::render::{self, element, envelope};
@@ -508,7 +508,7 @@ fn can_annotate(inv: &Invocation<'_>) -> bool {
 ///
 /// ★ This is `ikigai-browse`'s OWN enforcement read back through its public constants.
 /// `granted()` passes a root when the capability holds `urn:cap:browse:read:{root}` or the
-/// literal all-roots wildcard — both EXACT scopes — so two [`ikigai_core::Capability::allows`]
+/// literal all-roots wildcard — both EXACT scopes — so two [`Capability::allows`]
 /// calls are the whole test and **no prefix rule is reimplemented here**.
 ///
 /// ⚠ That distinction is the line ledger #439 draws, and it is worth stating because the
@@ -519,20 +519,19 @@ fn can_annotate(inv: &Invocation<'_>) -> bool {
 /// not need that rule and must not borrow its approximation: a caller holding exactly
 /// `urn:cap:browse:read:ikigai-core` may read that one root, and an offer computed from the
 /// prefix would list all seven and mean six refusals.
-pub(crate) fn readable_roots(web: &Web, inv: &Invocation<'_>) -> Vec<String> {
+pub(crate) fn readable_roots(web: &Web, capability: &Capability) -> Vec<String> {
     web.browse_roots
         .iter()
-        .filter(|root| reads_root(inv, root))
+        .filter(|root| reads_root(capability, root))
         .cloned()
         .collect()
 }
 
 /// Whether this caller may read `root` — `ikigai-browse`'s own two exact tests, as
 /// [`readable_roots`] states them.
-fn reads_root(inv: &Invocation<'_>, root: &str) -> bool {
-    inv.capability
-        .allows(&format!("{BROWSE_READ_PREFIX}{root}"))
-        || inv.capability.allows(ikigai_browse::CAP_WILDCARD)
+fn reads_root(capability: &Capability, root: &str) -> bool {
+    capability.allows(&format!("{BROWSE_READ_PREFIX}{root}"))
+        || capability.allows(ikigai_browse::CAP_WILDCARD)
 }
 
 /// The CONFIGURED root a browse start names, when it names one: `urn:repo:{root}:…`.
@@ -574,8 +573,13 @@ impl Endpoint for BrowseRoots {
             ));
         }
         web::html_only(inv)?;
-        let roots = readable_roots(&self.web, inv);
-        let mut children = web::nav(&self.web, inv, &web::readable_ledgers(&self.web, inv), None);
+        let roots = readable_roots(&self.web, inv.capability);
+        let mut children = web::nav(
+            &self.web,
+            inv.capability,
+            &web::readable_ledgers(&self.web, inv.capability),
+            None,
+        );
         // ★ Three cases, and only the operator's is a sentence of this page's own: a caller
         // short of a grant reads `web::Lacking`'s two sentences, which every page that can say
         // so shares (ledger #739).
@@ -651,7 +655,7 @@ impl Endpoint for BrowseShell {
                  (for example /browse/urn:repo:ikigai-core:tree)."
             )));
         }
-        let ledgers = web::readable_ledgers(&self.web, inv);
+        let ledgers = web::readable_ledgers(&self.web, inv.capability);
         let mut attributes = vec![
             ("view", "browse".to_string()),
             ("full", "true".to_string()),
@@ -664,7 +668,7 @@ impl Endpoint for BrowseShell {
         // judged on THAT root (ledger #739): a grant naming another one reaches the floor and
         // not this page.
         let lacking = match configured_root(&self.web, &start) {
-            Some(root) if !reads_root(inv, root) => Some(web::Lacking::repository(root)),
+            Some(root) if !reads_root(inv.capability, root) => Some(web::Lacking::repository(root)),
             Some(_) => None,
             None if !can_browse(inv) => Some(web::Lacking::repositories()),
             None => None,
@@ -716,7 +720,7 @@ impl Endpoint for BrowseShell {
             &attributes,
             &format!(
                 "{}{}{}{github}",
-                web::nav(&self.web, inv, &ledgers, None),
+                web::nav(&self.web, inv.capability, &ledgers, None),
                 element("flash", &[], ""),
                 // The reason the region is empty, in `web::Lacking`'s words (ledger #739).
                 lacking

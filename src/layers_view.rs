@@ -1613,7 +1613,7 @@ impl<'a> Rows<'a> {
         }
         Rows {
             me,
-            held: web::readable_ledgers(web, inv)
+            held: web::readable_ledgers(web, inv.capability)
                 .iter()
                 .map(|l| l.name().to_string())
                 .collect(),
@@ -2036,9 +2036,9 @@ impl Endpoint for Overview {
             ));
         }
         web::html_only(inv)?;
-        let ledgers = web::readable_ledgers(&self.web, inv);
+        let ledgers = web::readable_ledgers(&self.web, inv.capability);
         // The overview announces what is new itself, so the header's count stays quiet here.
-        let mut children = web::nav_on_layers(&self.web, inv, &ledgers, "quiet=1");
+        let mut children = web::nav_on_layers(&self.web, inv.capability, &ledgers, "quiet=1");
         let mut attributes = vec![
             ("view", "layers".to_string()),
             ("full", "true".to_string()),
@@ -2115,9 +2115,14 @@ impl Endpoint for LayerPage {
         }
         web::html_only(inv)?;
         let layer = layer_binding(inv)?;
-        let ledgers = web::readable_ledgers(&self.web, inv);
+        let ledgers = web::readable_ledgers(&self.web, inv.capability);
         // The open layer reads its entries as they arrive: the header counts the others.
-        let mut children = web::nav_on_layers(&self.web, inv, &ledgers, &format!("open={layer}"));
+        let mut children = web::nav_on_layers(
+            &self.web,
+            inv.capability,
+            &ledgers,
+            &format!("open={layer}"),
+        );
         let mut attributes = vec![
             ("view", "layer".to_string()),
             ("full", "true".to_string()),
@@ -2342,7 +2347,7 @@ async fn item_links(web: &Web, inv: &Invocation<'_>, layer: &str) -> ItemLinks {
         key = v::COMMENT_KEY,
         number = v::NUMBER,
     );
-    for ledger in web::readable_ledgers(web, inv) {
+    for ledger in web::readable_ledgers(web, inv.capability) {
         let graph = ledger.graph();
         if !inv.capability.allows(&ikigai_store::cap_read_graph(&graph)) {
             continue;

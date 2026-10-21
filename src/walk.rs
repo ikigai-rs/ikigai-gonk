@@ -181,7 +181,7 @@ pub(crate) async fn section(
     frame: Frame<'_>,
 ) -> Result<Representation> {
     let web = &page.web;
-    let decide = can_decide(inv);
+    let decide = can_decide(inv.capability);
     let Frame {
         kinds,
         states,
@@ -267,7 +267,12 @@ pub(crate) async fn section(
     };
 
     // ---- the header: the same navs as the rows view, with the walk current
-    let mut children = web::nav(web, inv, &web::readable_ledgers(web, inv), None);
+    let mut children = web::nav(
+        web,
+        inv.capability,
+        &web::readable_ledgers(web, inv.capability),
+        None,
+    );
     if let Some((kind, text)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], text));
     }
