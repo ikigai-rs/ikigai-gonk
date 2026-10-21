@@ -1209,7 +1209,8 @@ ikigai-a11y = "0.2.1"
 # ★ 0.3.0 (ledger #2021): the published head, moved with the cli 0.1.67 crates. It seals a host's
 # state at rest, so `Host::open` takes a `StateKey`: each test mints an age identity (`age` below)
 # and loads it, as the layers crate's own tests do. `"0.3.0"` is `<0.4.0`.
-ikigai-layers = "0.3.0"
+# 0.3.1 (ledger #2042): bounds Turtle nesting at 64 levels before participant-side parsing.
+ikigai-layers = "0.3.1"
 # An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
 # own `age` floor).
 age = "0.11.1"
