@@ -156,7 +156,7 @@ pub struct Opening;
 impl Opening {
     /// The view to answer under `inv`'s capability.
     fn target(inv: &Invocation<'_>) -> String {
-        if crate::web::require_read(inv, &Ledger::default()).is_ok() {
+        if crate::web::require_read(inv.capability, &Ledger::default()).is_ok() {
             format!("urn:toolbox:check:{OPENING_INPUT}")
         } else {
             PAGE_IRI.to_string()

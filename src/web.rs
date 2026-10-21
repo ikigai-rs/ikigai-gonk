@@ -53,8 +53,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, InputSource,
-    Invocation, Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate, Verb,
+    ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace, Error, Exact,
+    InputSource, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate,
+    Verb,
 };
 use ikigai_ledger::Ledger;
 use oxigraph::model::NamedOrBlankNode;
@@ -338,16 +339,16 @@ pub(crate) fn render_err(e: String) -> Error {
 
 /// The exact read grants for one ledger, checked up front so a page refuses with a typed
 /// `Denied` naming the token rather than rendering an empty ledger.
-pub(crate) fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
+pub(crate) fn require_read(capability: &Capability, ledger: &Ledger) -> Result<()> {
     for scope in [
         ledger.cap_read(),
         ikigai_store::cap_read_graph(&ledger.graph()),
     ] {
-        if !inv.capability.allows(&scope) {
+        if !capability.allows(&scope) {
             // Signed in is the request's principal: the door mints it into the capability on
             // reads as well as writes (`doors::http_cap`), so a refusal can say which of the
             // two it is (ledger #2021).
-            let signed_in = inv.capability.principal().is_some();
+            let signed_in = capability.principal().is_some();
             return Err(Error::Denied(
                 Lacking::ledger(ledger.name(), &scope).plain(signed_in),
             ));
@@ -358,9 +359,9 @@ pub(crate) fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> 
 
 /// The ledgers to list: the configured ones, then any the caller's grant names, keeping
 /// only those with both read grants required by [`require_read`].
-pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
+pub(crate) fn readable_ledgers(web: &Web, capability: &Capability) -> Vec<Ledger> {
     let mut names: Vec<String> = web.ledgers.clone();
-    if let Some(scopes) = inv.capability.scopes() {
+    if let Some(scopes) = capability.scopes() {
         for scope in scopes {
             if let Some(name) = scope.strip_prefix("urn:cap:ledger:read:") {
                 if !names.iter().any(|n| n == name) {
@@ -372,7 +373,7 @@ pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
     names
         .iter()
         .filter_map(|n| Ledger::parse(n).ok())
-        .filter(|l| require_read(inv, l).is_ok())
+        .filter(|l| require_read(capability, l).is_ok())
         .collect()
 }
 
@@ -385,22 +386,22 @@ pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
 /// typing an IRI, and a door nobody can find is most of the way to not having one.
 pub(crate) fn nav(
     web: &Web,
-    inv: &Invocation<'_>,
+    capability: &Capability,
     ledgers: &[Ledger],
     current: Option<&str>,
 ) -> String {
-    nav_with(web, inv, ledgers, Here::from(current), None)
+    nav_with(web, capability, ledgers, Here::from(current), None)
 }
 
 /// [`nav`] on a Layers page, whose header count polls with `count_query` (`quiet=1` on the
 /// overview, `open={layer}` on a layer's page: see `crate::layers_view::Count`).
 pub(crate) fn nav_on_layers(
     web: &Web,
-    inv: &Invocation<'_>,
+    capability: &Capability,
     ledgers: &[Ledger],
     count_query: &str,
 ) -> String {
-    nav_with(web, inv, ledgers, Here::Elsewhere, Some(count_query))
+    nav_with(web, capability, ledgers, Here::Elsewhere, Some(count_query))
 }
 
 /// Where in the ledgers a page is, for the header's menu: one ledger's page (its link carries
@@ -420,7 +421,7 @@ impl<'a> From<Option<&'a str>> for Here<'a> {
 
 fn nav_with(
     web: &Web,
-    inv: &Invocation<'_>,
+    capability: &Capability,
     ledgers: &[Ledger],
     here: Here<'_>,
     count_query: Option<&str>,
@@ -454,7 +455,7 @@ fn nav_with(
             )
         })
         .collect::<String>();
-    let reads_a_root = !crate::k::readable_roots(web, inv).is_empty();
+    let reads_a_root = !crate::k::readable_roots(web, capability).is_empty();
     if reads_a_root {
         out.push_str(&element("browse", &[("href", crate::k::ROOTS_PATH)], ""));
     }
@@ -469,7 +470,7 @@ fn nav_with(
     // ([#466](http://localhost:1060/l/default/item/466)). The badge is on the nav rather
     // than the Queue page because the page is where you go once you already suspect
     // something.
-    let offers_queue = crate::queue::offers_queue(web, inv);
+    let offers_queue = crate::queue::offers_queue(web, capability);
     if offers_queue {
         out.push_str(&element(
             "queue",
@@ -487,7 +488,7 @@ fn nav_with(
     // per page whatever the number of layers; each answer carries the next. `every` re-asks the
     // first one too, so a first poll that fails (gonk restarting) is not the badge's last
     // (ledger #1705).
-    if inv.capability.allows(crate::layers_view::CAP_READ) {
+    if capability.allows(crate::layers_view::CAP_READ) {
         let count_url = match count_query {
             Some(query) => format!("{}?{query}", crate::layers_view::COUNT_PATH),
             None => crate::layers_view::COUNT_PATH.to_string(),
@@ -514,7 +515,7 @@ fn nav_with(
             "",
         ));
     }
-    if withholds(web, inv, reads_a_root, offers_queue) {
+    if withholds(web, capability, reads_a_root, offers_queue) {
         out.push_str(&element(
             "withheld",
             &[
@@ -531,26 +532,11 @@ fn nav_with(
 /// an error a browser navigated to (`crate::refusal`, ledger
 /// [#2021](http://localhost:1062/l/default/item/2021)), with the request's own capability.
 ///
-/// ★ The header is a function of the caller's CAPABILITY alone: [`readable_ledgers`],
-/// `k::readable_roots`, `queue::offers_queue` and [`withholds`] read `inv.capability` and
-/// nothing else, and nothing in [`nav_with`] issues a request (it is not `async`). So a
-/// detached invocation over that capability draws exactly the header the refused page would
-/// have had, the same function deciding it. A header piece that ever needs the kernel has to
-/// come through a real invocation, and the detached one would refuse it rather than guess.
-pub(crate) fn nav_for(web: &Web, capability: &ikigai_core::Capability) -> String {
-    let request = Request::new(
-        Verb::Source,
-        Iri::parse(REFUSAL_PAGE).expect("a constant IRI"),
-    );
-    let bindings = ikigai_core::Bindings::new();
-    let inv = Invocation::detached(&request, &bindings, capability);
-    let ledgers = readable_ledgers(web, &inv);
-    nav_with(web, &inv, &ledgers, Here::Elsewhere, None)
+/// The header depends only on the caller's capability; no kernel invocation is needed.
+pub(crate) fn nav_for(web: &Web, capability: &Capability) -> String {
+    let ledgers = readable_ledgers(web, capability);
+    nav_with(web, capability, &ledgers, Here::Elsewhere, None)
 }
-
-/// The name [`nav_for`]'s detached invocation carries: the refusal page has no resource of its
-/// own, and nothing resolves this.
-const REFUSAL_PAGE: &str = "urn:iki:gonk:page:refusal";
 
 /// What the header says when `nav` has left out a section this server has (ledger
 /// [#446](http://localhost:1062/l/default/item/446)) — signed out, and signed in under a grant
@@ -574,10 +560,11 @@ pub const WITHHELD_SIGNED_IN: &str = "Some sections are hidden: your grant does 
 /// configured ledger it may not read, Browse when roots are configured and it reads none, or
 /// the Queue when roots are configured and it is not offered one. A server with no roots has
 /// no Browse or Queue to withhold, so their absence there says nothing.
-fn withholds(web: &Web, inv: &Invocation<'_>, reads_a_root: bool, offers_queue: bool) -> bool {
-    let unread_ledger = web.ledgers.iter().any(|name| {
-        Ledger::parse(name).is_ok_and(|ledger| !inv.capability.allows(&ledger.cap_read()))
-    });
+fn withholds(web: &Web, capability: &Capability, reads_a_root: bool, offers_queue: bool) -> bool {
+    let unread_ledger = web
+        .ledgers
+        .iter()
+        .any(|name| Ledger::parse(name).is_ok_and(|ledger| !capability.allows(&ledger.cap_read())));
     let has_roots = !web.browse_roots.is_empty();
     unread_ledger || (has_roots && (!reads_a_root || !offers_queue))
 }
@@ -702,8 +689,8 @@ struct LedgersIndex {
 impl Endpoint for LedgersIndex {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
-        let ledgers = readable_ledgers(&self.web, inv);
-        let mut children = nav_with(&self.web, inv, &ledgers, Here::Index, None);
+        let ledgers = readable_ledgers(&self.web, inv.capability);
+        let mut children = nav_with(&self.web, inv.capability, &ledgers, Here::Index, None);
         if ledgers.is_empty() {
             children.push_str(&Lacking::ledgers().element());
             let doc = envelope(
@@ -1275,7 +1262,7 @@ async fn ledger_listing(
         limit,
         offset,
     } = *listing;
-    require_read(inv, ledger)?;
+    require_read(inv.capability, ledger)?;
     if !matches!(status, "open" | "closed" | "all") {
         return Err(Error::InvalidArgument {
             name: "status".to_string(),
@@ -1331,8 +1318,8 @@ async fn ledger_listing(
     };
     enrich_items(&mut graph, ledger, inv, status);
     enrich_authors(&mut graph, &web.passkeys);
-    let ledgers = readable_ledgers(web, inv);
-    let mut children = nav(web, inv, &ledgers, Some(ledger.name()));
+    let ledgers = readable_ledgers(web, inv.capability);
+    let mut children = nav(web, inv.capability, &ledgers, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
@@ -1550,7 +1537,10 @@ impl Endpoint for LedgerView {
         let limit = optional(inv, "limit");
         let offset = optional(inv, "offset");
         let ledger = match self.shape {
-            Shape::Home => match readable_ledgers(&self.web, inv).into_iter().next() {
+            Shape::Home => match readable_ledgers(&self.web, inv.capability)
+                .into_iter()
+                .next()
+            {
                 Some(ledger) => ledger,
                 None => {
                     // ⚠ The nav still renders: a grant may carry browse roots and no
@@ -1565,7 +1555,7 @@ impl Endpoint for LedgerView {
                         ],
                         &format!(
                             "{}{}",
-                            nav(&self.web, inv, &[], None),
+                            nav(&self.web, inv.capability, &[], None),
                             Lacking::ledgers().element()
                         ),
                     );
@@ -1677,7 +1667,7 @@ impl Endpoint for DoctorView {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
         let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
-        require_read(inv, &ledger)?;
+        require_read(inv.capability, &ledger)?;
         let read = with(
             request(Verb::Source, &format!("{}doctor", ledger.prefix()))?,
             "as",
@@ -1691,8 +1681,8 @@ impl Endpoint for DoctorView {
             })?;
         let mut children = nav(
             &self.web,
-            inv,
-            &readable_ledgers(&self.web, inv),
+            inv.capability,
+            &readable_ledgers(&self.web, inv.capability),
             Some(ledger.name()),
         );
         let mut problems = String::new();
@@ -1796,7 +1786,7 @@ async fn item_card(
     full: bool,
     flash: Option<(&str, &str)>,
 ) -> Result<Representation> {
-    require_read(inv, ledger)?;
+    require_read(inv.capability, ledger)?;
     let read = with(
         request(Verb::Source, &ledger.item(id))?,
         "as",
@@ -1816,7 +1806,12 @@ async fn item_card(
         .first()
         .and_then(|item| graph.value(item, &format!("{DCTERMS}title")))
         .unwrap_or_else(|| id.to_string());
-    let mut children = nav(web, inv, &readable_ledgers(web, inv), Some(ledger.name()));
+    let mut children = nav(
+        web,
+        inv.capability,
+        &readable_ledgers(web, inv.capability),
+        Some(ledger.name()),
+    );
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
@@ -2076,7 +2071,7 @@ impl Endpoint for Act {
                 item_card(&self.web, inv, &ledger, &id, false, flash).await
             }
             "gone" => {
-                let ledgers = readable_ledgers(&self.web, inv);
+                let ledgers = readable_ledgers(&self.web, inv.capability);
                 let doc = envelope(
                     "page",
                     &[
@@ -2087,7 +2082,7 @@ impl Endpoint for Act {
                     ],
                     &format!(
                         "{}{}",
-                        nav(&self.web, inv, &ledgers, Some(ledger.name())),
+                        nav(&self.web, inv.capability, &ledgers, Some(ledger.name())),
                         element("flash", &[("kind", "ok")], &said)
                     ),
                 );
@@ -2911,7 +2906,7 @@ impl Endpoint for Sparql {
                     .to_string(),
             });
         }
-        let ledgers = readable_ledgers(&self.web, inv);
+        let ledgers = readable_ledgers(&self.web, inv.capability);
         let ledger = match &asked.ledger {
             Some(name) => Ledger::parse(name)?,
             None => ledgers.first().cloned().unwrap_or_else(Ledger::default),
@@ -2932,7 +2927,7 @@ impl Endpoint for Sparql {
         };
         let children = format!(
             "{}{}{}{}{}",
-            nav(&self.web, inv, &ledgers, Some(ledger.name())),
+            nav(&self.web, inv.capability, &ledgers, Some(ledger.name())),
             samples(),
             cross_graph(),
             element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),
@@ -3324,6 +3319,47 @@ impl Endpoint for Asset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header can be drawn before any kernel invocation exists (ledger #2032).
+    #[test]
+    fn the_header_needs_only_the_callers_capability() {
+        let config = tempfile::tempdir().unwrap();
+        let web = Web {
+            hub: Arc::new(crate::compose(
+                ikigai_store::DurableStore::in_memory().unwrap(),
+            )),
+            ledgers: vec!["default".to_string()],
+            browse_roots: vec!["repo".to_string()],
+            passkeys: Arc::new(Passkeys::new(
+                crate::quic::Layout::in_config_home(config.path()),
+                1062,
+            )),
+            rules: crate::rules::DEFAULT_RULES.into(),
+            queue: crate::config::QueuePolicy::default(),
+            epochs: None,
+            toolbox: false,
+        };
+        let root = Capability::root();
+        let ledgers = readable_ledgers(&web, &root);
+        assert_eq!(ledgers.len(), 1);
+        let header = nav(&web, &root, &ledgers, None);
+        for section in ["ledger-menu", "browse", "queue", "layers-link"] {
+            assert!(header.contains(&format!("<view:{section}")), "{header}");
+        }
+        assert!(!header.contains("<view:withheld"));
+        assert_eq!(header, nav_for(&web, &root));
+
+        // A ledger token alone lacks the graph read: it must not offer that ledger.
+        let partial = Capability::scoped(["urn:cap:ledger:read:default"]);
+        let ledgers = readable_ledgers(&web, &partial);
+        assert!(ledgers.is_empty());
+        let header = nav(&web, &partial, &ledgers, None);
+        for section in ["ledger-menu", "browse", "queue", "layers-link"] {
+            assert!(!header.contains(&format!("<view:{section}")), "{header}");
+        }
+        assert!(header.contains("<view:withheld"));
+        assert_eq!(header, nav_for(&web, &partial));
+    }
 
     /// ★ Ledger #480: a page the CAP stopped says so, beside what it drew and out of what; a
     /// page the reader's own smaller `limit` stopped needs no such clause, and the "show more"

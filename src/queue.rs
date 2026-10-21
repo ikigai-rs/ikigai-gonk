@@ -105,8 +105,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Description, Endpoint, Error, InputSource, Invocation, Iri,
-    Kernel, Representation, Request, Result, Verb,
+    ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, Error, InputSource, Invocation,
+    Iri, Kernel, Representation, Request, Result, Verb,
 };
 use serde_json::Value;
 
@@ -505,8 +505,8 @@ pub(crate) fn finding_iri(id: &str) -> String {
 /// only a read grant gets a queue of findings, no buttons, and nothing on the page saying
 /// why; the layers that actually enforce this refuse at submit time, which is too late to
 /// be an explanation.
-pub(crate) fn can_decide(inv: &Invocation<'_>) -> bool {
-    inv.capability.allows(ikigai_browse::CAP_ANNOTATE)
+pub(crate) fn can_decide(capability: &Capability) -> bool {
+    capability.allows(ikigai_browse::CAP_ANNOTATE)
 }
 
 /// Whether the header should carry a Queue link for this caller.
@@ -515,8 +515,8 @@ pub(crate) fn can_decide(inv: &Invocation<'_>) -> bool {
 /// (ledger #444 settled that — "a link to a page of things you cannot decide is worse than no
 /// link") **and** there must be a repository it may read, or the page behind the link is a
 /// refusal with a nav entry pointing at it.
-pub(crate) fn offers_queue(web: &Web, inv: &Invocation<'_>) -> bool {
-    can_decide(inv) && !crate::k::readable_roots(web, inv).is_empty()
+pub(crate) fn offers_queue(web: &Web, capability: &Capability) -> bool {
+    can_decide(capability) && !crate::k::readable_roots(web, capability).is_empty()
 }
 
 // ---------------------------------------------------------------------- the page
@@ -853,7 +853,7 @@ async fn read_rows(
 /// refusal is a fact about the caller, and it is cheap.
 async fn read_through(
     hub: Arc<Kernel>,
-    capability: ikigai_core::Capability,
+    capability: Capability,
     epochs: Option<Arc<crate::watch::Epochs>>,
     slot: Slot,
     request: std::result::Result<Request, String>,
@@ -972,7 +972,7 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>) -> Counts {
         verdicts: 0,
         refused: 0,
     };
-    let roots = crate::k::readable_roots(web, inv);
+    let roots = crate::k::readable_roots(web, inv.capability);
     for (_, answer) in read_answers(web, inv, &roots, ("state", "pending")).await {
         let Some(rows) = answer.as_deref().ok().and_then(Value::as_array) else {
             counts.refused += 1;
@@ -1019,7 +1019,7 @@ impl QueuePage {
         flash: Option<(&str, &str)>,
         echo: Echo<'_>,
     ) -> Result<Representation> {
-        let roots = crate::k::readable_roots(&self.web, inv);
+        let roots = crate::k::readable_roots(&self.web, inv.capability);
         let wanted = crate::rows::rows_wanted(params.limit.as_deref())?;
         let scope = scope_wanted(params.scope.as_deref())?;
         // ★ Whether the undecided rows the judge refuted are listed (ledger #704): hidden by
@@ -1196,8 +1196,13 @@ impl QueuePage {
             .filter(|(_, r)| matches!(r, Rows::Failed(_)))
             .collect();
 
-        let decide = can_decide(inv);
-        let mut children = web::nav(&self.web, inv, &web::readable_ledgers(&self.web, inv), None);
+        let decide = can_decide(inv.capability);
+        let mut children = web::nav(
+            &self.web,
+            inv.capability,
+            &web::readable_ledgers(&self.web, inv.capability),
+            None,
+        );
         if let Some((kind, text)) = flash {
             children.push_str(&element("flash", &[("kind", kind)], text));
         }

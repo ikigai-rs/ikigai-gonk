@@ -427,7 +427,7 @@ pub(crate) async fn section(
 ) -> Result<Representation> {
     let web = &page.web;
     let policy = &web.queue;
-    let decide = can_decide(inv);
+    let decide = can_decide(inv.capability);
     let Frame {
         kind,
         kinds,
@@ -542,7 +542,12 @@ pub(crate) async fn section(
     );
 
     // ---- the header: the same navs as the rows view, with this kind current
-    let mut children = web::nav(web, inv, &web::readable_ledgers(web, inv), None);
+    let mut children = web::nav(
+        web,
+        inv.capability,
+        &web::readable_ledgers(web, inv.capability),
+        None,
+    );
     if let Some((flash_kind, text)) = flash {
         children.push_str(&element("flash", &[("kind", flash_kind)], text));
     }
