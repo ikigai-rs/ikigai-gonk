@@ -37,6 +37,15 @@ impl Server {
     /// A server configured with `configured` ledgers whose anonymous loopback caller reads
     /// `readable` (its grant's names are listed too, as `web::readable_ledgers` does).
     fn start(configured: &[&str], readable: &[&str]) -> Server {
+        let anonymous = grants_for_all(
+            &readable.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            Authority::Read,
+        )
+        .unwrap();
+        Self::with_grants(configured, anonymous)
+    }
+
+    fn with_grants(configured: &[&str], anonymous: Vec<String>) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -56,11 +65,6 @@ impl Server {
             epochs: None,
             toolbox: false,
         });
-        let anonymous = grants_for_all(
-            &readable.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            Authority::Read,
-        )
-        .unwrap();
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous,
@@ -446,4 +450,35 @@ fn no_readable_ledger_draws_no_menu_and_the_index_says_how_to_get_one() {
     assert_eq!(status, 200, "{page}");
     assert!(header_nav(&page).is_none(), "{page}");
     assert!(page.contains("Sign in to read the ledgers."), "{page}");
+}
+
+/// A link is offered only when both the ledger and its graph can be read (#1892).
+#[test]
+fn partial_read_grants_never_offer_a_refused_ledger_link() {
+    let complete = Ledger::parse("complete").unwrap();
+    let ledger_only = Ledger::parse("ledger-only").unwrap();
+    let graph_only = Ledger::parse("graph-only").unwrap();
+    let server = Server::with_grants(
+        &["complete", "ledger-only", "graph-only"],
+        vec![
+            complete.cap_read(),
+            ikigai_store::cap_read_graph(&complete.graph()),
+            ledger_only.cap_read(),
+            ikigai_store::cap_read_graph(&graph_only.graph()),
+        ],
+    );
+
+    assert_eq!(server.page("/l/ledger-only").0, 403);
+    assert_eq!(server.page("/l/graph-only").0, 403);
+    let page = server.ok("/l/complete");
+    let nav = header_nav(&page).expect("the readable ledger's link");
+    link(nav, "/l/complete");
+    assert!(!nav.contains("href=\"/l/ledger-only\""), "{nav}");
+    assert!(!nav.contains("href=\"/l/graph-only\""), "{nav}");
+
+    let index = server.ok("/l");
+    assert_eq!(
+        index_rows(&index),
+        [("complete".into(), "0".into(), "0".into())]
+    );
 }
