@@ -519,7 +519,7 @@ there.
 | `/layers/~/wait` | `urn:iki:gonk:fragment:layers-wait` | what an open Layers page asks every 3 s, answered at once from gonk's copy |
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
 | `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
-| `/toolbox` · `/toolbox/{…}` | `urn:toolbox:page` · `urn:toolbox:{…}` | the RDF Toolbox, only when `gonk.toolbox.dist` is set (see "The RDF Toolbox") |
+| `/toolbox` · `/toolbox/{…}` | `urn:iki:gonk:page:toolbox` · `urn:toolbox:{…}` | the RDF Toolbox, only when `gonk.toolbox.dist` is set (see "The RDF Toolbox") |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
@@ -558,16 +558,25 @@ SHACL and SPARQL page, by Abhishek Kundu (MIT), running in the browser tab. gonk
 `/toolbox`, and nothing else changes.
 
 ```text
-/toolbox                 urn:toolbox:page            the empty toolbox
+/toolbox                 urn:iki:gonk:page:toolbox   the toolbox on the default ledger's items, or empty
+/toolbox/page            urn:toolbox:page            the empty toolbox (turtle-lsp's samples)
 /toolbox/{name}          urn:toolbox:{name}          a built file (toolbox.html, app.js, engine.wasm, …)
 /toolbox/check/{iri}     urn:toolbox:check:{iri}     the toolbox checking one resource (shapes=, theme=)
 /toolbox/input/{iri}     urn:toolbox:input:{iri}     a resource's Turtle face, for the page to read
 ```
 
-`/toolbox/check/urn%3Aiki%3Aledger%3Adefault%3Aitems` opens the toolbox on the default ledger's
-Turtle, read under YOUR capability: the toolbox shows a viewer only what that viewer could read
-anyway, and a resource you cannot read is a `403`. Nothing is uploaded; the checking runs in the
-page.
+**`/toolbox` opens on our data** (ledger #2033): when you may read the default ledger, it is the
+check page over `urn:iki:ledger:items`, the default ledger's items, so the page's input is
+`/toolbox/input/urn%3Aiki%3Aledger%3Aitems` and the ledger's Turtle is in the editor when the page
+loads. When you may not (a host whose anonymous caller reads no ledger, say), it is the empty
+toolbox with turtle-lsp's samples, never an error page. The decision is your capability's, made on
+the server: the same read gate as the ledger's own pages. `theme=` passes through. The samples are
+always at `/toolbox/page`.
+
+Any other resource opens the same way by name: `/toolbox/check/urn%3Aiki%3Agonk%3Arender-rules`
+opens the toolbox on the render rules' Turtle, read under YOUR capability. The toolbox shows a viewer
+only what that viewer could read anyway, and a resource you cannot read is a `403`. Nothing is
+uploaded; the checking runs in the page.
 
 **Installing the build.** The build is not in the crate (the engine is 8 MB of WebAssembly). Build
 it from [ikigai-toolbox](https://github.com/ikigai-rs/ikigai-toolbox) (it needs rustup, git and
@@ -593,7 +602,8 @@ new build copied over the old one is served at once, with no restart.
 **What it adds to the HTTP door, and only there:**
 
 - the `urn:toolbox:*` family and the build directory, bound with ikigai-fs at
-  `urn:iki:toolbox:dist:{path}` (a jail at the directory). The socket and QUIC doors serve exactly
+  `urn:iki:toolbox:dist:{path}` (a jail at the directory), and `urn:iki:gonk:page:toolbox`, what
+  `/toolbox` answers (`toolbox::Opening`). The socket and QUIC doors serve exactly
   what they served before.
 - a read on exactly the toolbox's files for the anonymous loopback caller, one
   `urn:cap:fs:read:<dist>/<name>` for each name in `ikigai_toolbox::FILES`
