@@ -357,7 +357,7 @@ pub(crate) fn require_read(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> 
 }
 
 /// The ledgers to list: the configured ones, then any the caller's grant names, keeping
-/// only those it may read.
+/// only those with both read grants required by [`require_read`].
 pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
     let mut names: Vec<String> = web.ledgers.clone();
     if let Some(scopes) = inv.capability.scopes() {
@@ -372,7 +372,7 @@ pub(crate) fn readable_ledgers(web: &Web, inv: &Invocation<'_>) -> Vec<Ledger> {
     names
         .iter()
         .filter_map(|n| Ledger::parse(n).ok())
-        .filter(|l| inv.capability.allows(&l.cap_read()))
+        .filter(|l| require_read(inv, l).is_ok())
         .collect()
 }
 
