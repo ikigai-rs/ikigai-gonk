@@ -169,7 +169,15 @@ impl Space for HubSpace {
             // `canonical`, 0.1.78 adds `answered_by`), and a literal is E0063 at each one.
             // Nothing is rewritten here — no `.with_canonical` — because the hub
             // canonicalizes, caches and cuts under its own names.
-            Some(description) => {
+            Some(mut description) => {
+                if !self.wire
+                    && request
+                        .target
+                        .as_str()
+                        .starts_with(crate::views::VIEW_PREFIX)
+                {
+                    crate::views::describe_faces(&self.hub, &request.target, &mut description);
+                }
                 let resolved = Resolved::new(
                     Arc::new(Forward {
                         hub: Arc::clone(&self.hub),

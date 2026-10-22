@@ -353,3 +353,169 @@ fn the_readmes_declaration_binds_and_its_views_forward_the_callers_arguments() {
         );
     }
 }
+
+// HTTP negotiation must use the target's faces, rather than the view forwarder's.
+#[test]
+fn a_browser_negotiates_the_targets_faces_through_a_view() {
+    use ikigai_gonk::doors;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let views = Views::new();
+    let hub = hub(&views);
+    // Start with the driver's first read complete, so install counts cannot race
+    // an initial read of the declaration written below.
+    wait_for(&views, |status| status.refusal.is_some());
+    declare_and_wait(&views, &hub, &readme_declaration(), 1);
+    let filed = Request::new(Verb::Sink, iri("urn:iki:ledger:append"))
+        .with_arg("content", ArgRef::Inline(b"Readable view item".to_vec()));
+    block_on(hub.issue(filed, &Capability::root())).unwrap();
+    let http = Arc::new(doors::http_kernel(
+        Arc::clone(&hub),
+        ikigai_core::EndpointSpace::new(),
+    ));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let door = doors::HttpDoor {
+        anonymous: grants_for("default", Authority::Read).unwrap(),
+        bind: addr,
+        passkeys: None,
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+    };
+    let server = runtime.spawn(ikigai_web::serve_with_listener(
+        http,
+        doors::http_cap(door.clone()),
+        listener,
+        doors::edge_config(door),
+    ));
+    let get = |path: &str, accept: &str| {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nAccept: {accept}\r\nConnection: close\r\n\r\n", addr.port()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let browser = "text/html,application/xhtml+xml,*/*;q=0.8";
+    let response = get("/view/open", browser);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("Readable view item"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("content-type: text/plain"),
+        "{response}"
+    );
+    let explicit = get("/view/open?as=application/json", "image/png");
+    assert!(explicit.starts_with("HTTP/1.1 200"), "{explicit}");
+    assert!(
+        explicit
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{explicit}"
+    );
+    let refused = get("/view/open", "image/png");
+    assert!(refused.starts_with("HTTP/1.1 406"), "{refused}");
+    for (accept, content_type) in [
+        (
+            "application/json;q=0.9,text/plain;q=0.2",
+            "application/json",
+        ),
+        ("text/plain;q=0,*/*;q=0.8", "text/turtle"),
+        ("*/*", "text/plain"),
+    ] {
+        let response = get("/view/open", accept);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains(&format!("content-type: {content_type}")),
+            "{response}"
+        );
+        assert!(response.contains("Readable view item"), "{response}");
+    }
+    let explicit = get("/view/open?as=text/plain", browser);
+    assert!(explicit.starts_with("HTTP/1.1 200"), "{explicit}");
+    for (path, accept) in [
+        ("/view/open", "*/*;q=0"),
+        ("/view/open?as=image/png", browser),
+    ] {
+        let response = get(path, accept);
+        assert!(response.starts_with("HTTP/1.1 406"), "{response}");
+    }
+    // Prefixes and chains still use core's rule precedence, and the view grants
+    // no access to a ledger the anonymous caller cannot read.
+    declare_and_wait(
+        &views,
+        &hub,
+        &declaration(&[
+            (
+                "exact",
+                "urn:iki:gonk:view:open",
+                "urn:iki:gonk:view:staged",
+            ),
+            (
+                "exact",
+                "urn:iki:gonk:view:staged",
+                "urn:iki:ledger:default:items",
+            ),
+            (
+                "prefix",
+                "urn:iki:gonk:view:list-",
+                "urn:iki:ledger:default:",
+            ),
+            (
+                "exact",
+                "urn:iki:gonk:view:private",
+                "urn:iki:ledger:private:items",
+            ),
+        ]),
+        2,
+    );
+    for path in ["/view/open", "/view/list-items"] {
+        let response = get(path, browser);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("Readable view item"), "{response}");
+    }
+    let denied = get("/view/private", browser);
+    assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+
+    // A child rewrite before a root-resolving alias must describe the alias that
+    // actually answered, rather than whichever table happens to match first.
+    let nested = r#"
+        @prefix ik: <https://ikigai-rs.dev/ns#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+        @prefix v: <urn:iki:gonk:view:> .
+        v:outer a ik:Alias ; ik:maxHops 8 ; ik:rewrites v:outer:rule:1 ; ik:space v:inner .
+        v:outer:rule:1 a ik:RewriteRule ; ik:ruleKind "exact" ;
+            ik:logical "urn:iki:gonk:view:open" ; ik:canonical "urn:iki:gonk:view:inside" .
+        v:inner a ik:Alias ; ik:maxHops 8 ; ik:rewrites v:inner:rule:1 ; ik:space v:empty .
+        v:inner:rule:1 a ik:RewriteRule ; ik:ruleKind "exact" ;
+            ik:logical "urn:iki:gonk:view:inside" ; ik:canonical "urn:iki:ledger:default:items" ;
+            ik:resolveAt "root" .
+        v:empty a ik:EndpointSpace ; ik:doors rdf:nil .
+    "#;
+    declare_and_wait(&views, &hub, nested, 3);
+    let response = get("/view/open", browser);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("Readable view item"), "{response}");
+
+    // A changed declaration must change the negotiated contract immediately.
+    declare_and_wait(
+        &views,
+        &hub,
+        &declaration(&[("exact", "urn:iki:gonk:view:open", CHECK)]),
+        4,
+    );
+    let changed = get("/view/open", "application/json");
+    assert!(changed.starts_with("HTTP/1.1 406"), "{changed}");
+    declare_and_wait(&views, &hub, &declaration(&[]), 5);
+    let removed = get("/view/open", browser);
+    assert!(removed.starts_with("HTTP/1.1 404"), "{removed}");
+    server.abort();
+}

@@ -2920,7 +2920,10 @@ ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'source urn:gk:iki:gonk:view
 To remove one view, leave its rule out; to remove them all, declare the alias with no
 `ik:rewrites`. `source urn:gk:iki:gonk:views:declaration` reads back what is declared (as
 N-Triples). Over HTTP a view is `/view/{name}` (`/view/open?state=open`): the arguments are
-the caller's, forwarded unchanged, so a view names a TARGET, not a query.
+the caller's, forwarded unchanged, so a view names a TARGET, not a query. HTTP negotiates
+`Accept` against that target's faces, including quality values; an explicit `?as=` wins.
+A browser visiting a ledger listing view gets readable plain text, as with other non-HTML
+resources. If none of the target's faces is acceptable, the response is `406 Not Acceptable`.
 
 What holds, and what each costs:
 
