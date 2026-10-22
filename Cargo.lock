@@ -1950,6 +1950,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikigai-rdf"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d18935c4593bdbab12b74dde0986c3d08f2df28730137c6f96459b38f8df39e1"
+dependencies = [
+ "async-trait",
+ "getrandom 0.3.4",
+ "ikigai-core",
+ "oxrdf",
+ "oxrdfio",
+ "quick-xml 0.37.5",
+]
+
+[[package]]
 name = "ikigai-repo"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2008,12 +2022,13 @@ dependencies = [
 
 [[package]]
 name = "ikigai-store"
-version = "0.2.23"
+version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "233cba0b9cc9902bef8da3864e77d3a438e4748149c1b5bda0703bb1d2c3e6db"
+checksum = "b5df31215466a216f9b2ca49706d5e6679cf703bd86dd3dbac2b41de3f0da442"
 dependencies = [
  "async-trait",
  "ikigai-core",
+ "ikigai-rdf",
  "oxigraph",
  "oxiri",
  "serde",

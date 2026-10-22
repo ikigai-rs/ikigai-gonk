@@ -41,7 +41,9 @@ use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::{compose, doors};
 use ikigai_store::DurableStore;
 
-const STORE_IDS: [&str; 13] = [
+// ikigai-store 0.2.24 adds `store-graph-info` (needs the graph's read token) and `store-dump`
+// (needs the broad `urn:cap:store:read`, which gonk grants no client: only the owner holds it).
+const STORE_IDS: [&str; 15] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -50,8 +52,10 @@ const STORE_IDS: [&str; 13] = [
     "store-graph-ask",
     "store-graph-construct",
     "store-graph-describe",
+    "store-graph-info",
     "store-info",
     "store-graphs",
+    "store-dump",
     "store-update",
     "store-graph-update",
     "store-load",
