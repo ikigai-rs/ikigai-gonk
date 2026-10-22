@@ -219,7 +219,7 @@ fn an_export_becomes_items_comments_closes_and_links_once() {
     assert!(one.contains("Seen twice this week."), "{one}");
     assert!(
         one.contains(
-            "(kata comment 01K6Z0000000000000000000C2, 2026-09-03T10:00:00.000Z, for agent-7)"
+            "(kata comment 01K6Z0000000000000000000C2, 2026-09-03T10:00:00.000Z by chris, for agent-7)"
         ),
         "{one}"
     );
