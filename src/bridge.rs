@@ -9,7 +9,7 @@
 //! - **QUIC, as an enrolled client** (`--quic HOST:PORT --cert-dir DIR`): the certificate
 //!   directory `ikigai-gonk client add <name> --ledger <ledger>=write` writes (`client.crt`,
 //!   `client.key`, the `server.crt` to pin), dialed by the same code a mount dials with
-//!   ([`crate::mount::connect_quic`]). The grant is narrow (one ledger, write), revocable, and
+//!   (`crate::mount::connect_quic`). The grant is narrow (one ledger, write), revocable, and
 //!   works from any user, sandbox or machine. Every write is authored by the CLIENT: the
 //!   bridge names no `author`, and the door fills the client's own name
 //!   (`urn:iki:host:gonk:client:<fingerprint>`); who wrote the finding or the kata issue stays
