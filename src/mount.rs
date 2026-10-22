@@ -862,30 +862,38 @@ fn dial(target: &Target, describe: Duration, call: Duration) -> Result<Arc<Peer>
                 ))
             })
             .map_err(|e| format!("{}: {e}", path.display())),
-        Target::Quic { authority, certs } => {
-            let identity = ikigai_quic::Identity {
-                cert_pem: read(&certs.join("client.crt"))?,
-                key_pem: read(&certs.join("client.key"))?,
-            };
-            let server = read(&certs.join("server.crt"))?;
-            // Resolved per dial, never at startup: a peer named rather than numbered may
-            // only become resolvable once the network is up.
-            let addr = authority
-                .to_socket_addrs()
-                .map_err(|e| format!("quic://{authority}: {e}"))?
-                .next()
-                .ok_or_else(|| format!("quic://{authority}: resolved to no address"))?;
-            ikigai_quic::connect(addr, &identity, &server)
-                .map(|resolver| {
-                    Arc::new(Peer::Quic(
-                        resolver
-                            .with_describe_timeout(Some(describe))
-                            .with_call_timeout(Some(call)),
-                    ))
-                })
-                .map_err(|e| format!("quic://{authority} ({addr}): {e}"))
-        }
+        Target::Quic { authority, certs } => connect_quic(authority, certs).map(|resolver| {
+            Arc::new(Peer::Quic(
+                resolver
+                    .with_describe_timeout(Some(describe))
+                    .with_call_timeout(Some(call)),
+            ))
+        }),
     }
+}
+
+/// Dial the QUIC door at `authority` (`host:port`) as the client whose certificate directory is
+/// `certs`: its `client.crt` and `client.key` presented, its `server.crt` pinned — the layout
+/// `ikigai-gonk client add` writes and `ikigai --cert-dir` reads. A mount dials through this,
+/// and so do the bridges (`crate::bridge`, ledger #2075).
+pub(crate) fn connect_quic(
+    authority: &str,
+    certs: &Path,
+) -> Result<ikigai_quic::QuicResolver, String> {
+    let identity = ikigai_quic::Identity {
+        cert_pem: read(&certs.join("client.crt"))?,
+        key_pem: read(&certs.join("client.key"))?,
+    };
+    let server = read(&certs.join("server.crt"))?;
+    // Resolved per dial, never at startup: a peer named rather than numbered may
+    // only become resolvable once the network is up.
+    let addr = authority
+        .to_socket_addrs()
+        .map_err(|e| format!("quic://{authority}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("quic://{authority}: resolved to no address"))?;
+    ikigai_quic::connect(addr, &identity, &server)
+        .map_err(|e| format!("quic://{authority} ({addr}): {e}"))
 }
 
 fn read(path: &Path) -> Result<String, String> {
