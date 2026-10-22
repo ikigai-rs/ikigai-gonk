@@ -43,6 +43,9 @@ fn hub(views: &Views) -> Arc<Kernel> {
     views
         .start(&hub, Capability::root())
         .expect("the rebuild starts");
+    // Finish the initial empty read before writing: otherwise the driver may
+    // install the first declaration both at startup and for its queued cut.
+    wait_for(views, |status| status.refusal.is_some());
     hub
 }
 
@@ -363,9 +366,6 @@ fn a_browser_negotiates_the_targets_faces_through_a_view() {
 
     let views = Views::new();
     let hub = hub(&views);
-    // Start with the driver's first read complete, so install counts cannot race
-    // an initial read of the declaration written below.
-    wait_for(&views, |status| status.refusal.is_some());
     declare_and_wait(&views, &hub, &readme_declaration(), 1);
     let filed = Request::new(Verb::Sink, iri("urn:iki:ledger:append"))
         .with_arg("content", ArgRef::Inline(b"Readable view item".to_vec()));
