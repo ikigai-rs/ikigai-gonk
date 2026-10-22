@@ -721,7 +721,13 @@ file. On a file view a selected line (`#L42`, a typed `#L10-L20`, or the line an
 `#annotation-{id}` names) carries onto the link. It opens like every other link on these pages, in
 the same tab, and it follows the region: when a click moves the region to another directory or
 file, `web/gonk.js` asks for that view's link and swaps it in, and a view that is neither (an
-explanation, the pull requests) shows none.
+explanation, the pull-request listing) shows none.
+
+A pull request's page (`urn:repo:{root}:pr:{n}`, its explanation and its review) carries the same
+link, to the pull request on GitHub: `pull/{n}` in the root's repository (ledger #2117). It names
+no ref, so it has no note. The number is the one browse shows, which `gh` resolved; a clone whose
+`gh` base repository is not its origin (a fork with an `upstream` remote) names the base with a
+`gonk.browse.github` line.
 
 **The ref.** The HEAD commit, when a `refs/remotes/origin/…` ref contains it: a permalink, so
 GitHub shows exactly what the checkout holds. Otherwise the local tree is ahead, and the link
@@ -748,6 +754,7 @@ The same facts are resources, under the root's browse grant like every browse ro
 |---|---|
 | `urn:iki:gonk:github:{root}` | the repository, the ref, whether it is a permalink, and the root's place in its repository, one `key value` per line (or `none {reason}`); read after `urn:repo:{root}:state`, so it is cached until the root's HEAD, refs or config change |
 | `urn:iki:gonk:github:{root}:tree[:{path}]`, `…:file:{path}` | one view's page on GitHub (`href`, `ref`, `permalink`, `kind`, `note`), the path in browse's own spelling; `as=text/html` is the link the page shows |
+| `urn:iki:gonk:github:{root}:pull:{n}`, `…:pull:{n}:file:{path}` | a pull request on GitHub (`pull/{n}`), or one file in its Files tab (`pull/{n}/files#diff-{sha256 of the path}`, the anchor GitHub gives each file there); `href`, `kind`, `number`; `as=text/html` is the link |
 
 ```sh
 # a mount prefix is replaced by `urn:`, so an alias carries the whole name across

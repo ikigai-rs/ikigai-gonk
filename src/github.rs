@@ -1,10 +1,13 @@
 //! "On GitHub": a browse root's repository on GitHub, and the page there for one directory or
-//! file (ledger [#1907](http://localhost:1062/l/default/item/1907)).
+//! file (ledger [#1907](http://localhost:1062/l/default/item/1907)) or one pull request (ledger
+//! [#2117](http://localhost:1062/l/default/item/2117)).
 //!
 //! ```text
-//! urn:iki:gonk:github:{root}                 Source  the root's GitHub repository and the ref a link names
-//! urn:iki:gonk:github:{root}:tree[:{path}]   Source  a directory's page on GitHub (`tree/{ref}/{path}`)
-//! urn:iki:gonk:github:{root}:file:{path}     Source  a file's page on GitHub (`blob/{ref}/{path}`)
+//! urn:iki:gonk:github:{root}                     Source  the root's GitHub repository and the ref a link names
+//! urn:iki:gonk:github:{root}:tree[:{path}]       Source  a directory's page on GitHub (`tree/{ref}/{path}`)
+//! urn:iki:gonk:github:{root}:file:{path}         Source  a file's page on GitHub (`blob/{ref}/{path}`)
+//! urn:iki:gonk:github:{root}:pull:{n}            Source  a pull request's page on GitHub (`pull/{n}`)
+//! urn:iki:gonk:github:{root}:pull:{n}:file:{path} Source  one file in its Files tab (`pull/{n}/files#diff-{sha256(path)}`)
 //! ```
 //!
 //! # The resource map
@@ -14,6 +17,7 @@
 //! | a root's HEAD | `urn:repo:{root}:state` | composed, not built | browse's own probe, cached by gonk under the root's wide thread ([`crate::browse::cached_reads`]) |
 //! | a root's repository and ref | `urn:iki:gonk:github:{root}` | **the one computation** | the HEAD from `state`, then four local `git` reads: `remote.origin.url`, `--show-prefix`, whether a `refs/remotes/origin/*` ref contains the HEAD, and `origin/HEAD`; or the operator's `gonk.browse.github` override for the repository |
 //! | one view's page on GitHub | `urn:iki:gonk:github:{root}:{tree,file}…` | composition | the root's answer above, the path decoded from browse's own spelling, each segment through [`ikigai_fn::html::url_segment`], the whole through [`safe_href`] |
+//! | one pull request's page on GitHub | `urn:iki:gonk:github:{root}:pull:{n}[:file:{path}]` | composition | the root's repository from its answer above, the number and (for a file) the anchor through [`ikigai_fn::html::url_segment`], the whole through [`safe_href`] |
 //!
 //! **No atom of gonk's own.** The state is the repository's: `.git/config` holds the origin and
 //! `.git/refs` the commits origin is known to have, and `git` writes both, never the kernel. The
@@ -32,6 +36,16 @@
 //! because the page there may differ from the one here. ⚠ "Origin has it" is as of the last
 //! fetch or push: this server runs no network `git`, so a commit pushed from another clone is
 //! not known until this one fetches.
+//!
+//! # A pull request
+//!
+//! Browse's pull-request pages (`urn:repo:{root}:pr:{n}`, and its `:explain` and `:review`)
+//! link to `{repository}/pull/{n}`; no ref is named, so there is no permalink and no note. A
+//! file within a pull request links to its place in the Files tab, `pull/{n}/files#diff-{h}`,
+//! where `{h}` is the lowercase hex SHA-256 of the file's repository-relative path: the anchor
+//! GitHub gives each file there, which depends on the path alone. ⚠ The number is the one
+//! browse showed, which `gh` resolved; for a clone whose `gh` base repository is not its
+//! origin (a fork with an `upstream` remote), name the base with a `gonk.browse.github` line.
 //!
 //! # Where the repository comes from
 //!
@@ -75,14 +89,31 @@ pub fn root_iri(root: &str) -> String {
     format!("{PREFIX}{root}")
 }
 
-/// The GitHub name for a browse view, when the view is a root's tree, a directory or a file:
-/// `urn:repo:{root}:tree[:{path}]` and `urn:repo:{root}:file:{path}` map to the same suffix
-/// under [`PREFIX`], so the path keeps browse's own spelling. `None` for any other name.
+/// The GitHub name for a browse view, when the view is a root's tree, a directory, a file or
+/// a pull request: `urn:repo:{root}:tree[:{path}]` and `urn:repo:{root}:file:{path}` map to
+/// the same suffix under [`PREFIX`], so the path keeps browse's own spelling, and
+/// `urn:repo:{root}:pr:{n}` (with its `:explain` and `:review`) to `…:{root}:pull:{n}`. `None`
+/// for any other name. `web/gonk.js` holds the same map, for the views the region moves to.
 pub fn link_iri(view: &str) -> Option<String> {
     let rest = view.strip_prefix("urn:repo:")?;
     let (root, kind) = rest.split_once(':')?;
-    let viewed = kind == "tree" || kind.starts_with("tree:") || kind.starts_with("file:");
-    (viewed && !root.is_empty()).then(|| format!("{PREFIX}{rest}"))
+    if root.is_empty() {
+        return None;
+    }
+    if kind == "tree" || kind.starts_with("tree:") || kind.starts_with("file:") {
+        return Some(format!("{PREFIX}{rest}"));
+    }
+    let pr = kind.strip_prefix("pr:")?;
+    let n = pr
+        .strip_suffix(":explain")
+        .or_else(|| pr.strip_suffix(":review"))
+        .unwrap_or(pr);
+    is_number(n).then(|| format!("{PREFIX}{root}:pull:{n}"))
+}
+
+/// A pull request's number as browse and GitHub spell it: ASCII digits, no leading zero.
+fn is_number(n: &str) -> bool {
+    !n.is_empty() && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit())
 }
 
 // ---------------------------------------------------------------- the repository's name
@@ -232,6 +263,17 @@ pub fn space(roots: &[(String, PathBuf)], overrides: &[(String, String)]) -> End
                     root: root.clone(),
                     kind: Kind::File,
                 },
+            )
+            // ★ The file row FIRST: a trailing `{var}` captures to the end of the name and
+            // the first row that matches wins, so `pull:{n}` would swallow `pull:{n}:file:…`.
+            // `Pull` answers `none` for an `{n}` that is not a number, `pull:7:other` among them.
+            .bind(
+                template(&format!("{PREFIX}{root}:pull:{{n}}:file:{{path}}")),
+                Pull { root: root.clone() },
+            )
+            .bind(
+                template(&format!("{PREFIX}{root}:pull:{{n}}")),
+                Pull { root: root.clone() },
             );
     }
     space.named(crate::spaces::iri(crate::spaces::GITHUB))
@@ -609,14 +651,12 @@ pub fn view(text: &str) -> String {
         return String::new();
     };
     let get = |key: &str| read.get(key).map(String::as_str).unwrap_or_default();
-    let mut attributes = vec![
-        ("href", href.as_str()),
-        ("ref", get("ref")),
-        ("permalink", get("permalink")),
-        ("kind", get("kind")),
-    ];
-    if let Some(note) = read.get("note") {
-        attributes.push(("note", note.as_str()));
+    let mut attributes = vec![("href", href.as_str()), ("kind", get("kind"))];
+    // A pull request's link names no ref, so it has none of these.
+    for key in ["ref", "permalink", "note"] {
+        if let Some(value) = read.get(key) {
+            attributes.push((key, value.as_str()));
+        }
     }
     element("github", &attributes, "")
 }
@@ -672,6 +712,147 @@ impl Endpoint for Link {
     }
 }
 
+// ---------------------------------------------------------------- one pull request's page
+
+/// `urn:iki:gonk:github:{root}:pull:{n}` and `…:pull:{n}:file:{path}`.
+struct Pull {
+    root: String,
+}
+
+impl Pull {
+    /// The text face: `href`, `kind` (`pull` or `pull-file`) and `number`; or `none {reason}`.
+    async fn text(&self, inv: &Invocation<'_>) -> Result<String> {
+        let n = inv.bindings.get("n").unwrap_or_default();
+        if !is_number(n) {
+            return Ok("none the pull request is not a number\n".to_string());
+        }
+        let rel = match inv.bindings.get("path") {
+            None => None,
+            Some(encoded) => match crate::browse::decode_rel(encoded) {
+                Some(rel) => Some(
+                    rel.components()
+                        .filter_map(|c| c.as_os_str().to_str().map(str::to_string))
+                        .collect::<Vec<_>>(),
+                ),
+                None => return Ok("none the path is not a plain relative path\n".to_string()),
+            },
+        };
+        if rel.as_ref().is_some_and(Vec::is_empty) {
+            return Ok("none the path is not a plain relative path\n".to_string());
+        }
+        let root = inv.source(&iri(&root_iri(&self.root))?).await?;
+        let root = String::from_utf8_lossy(&root.bytes).into_owned();
+        let Some(facts) = fields(&root) else {
+            return Ok(root);
+        };
+        let Some(repository) = facts.get("repository") else {
+            return Err(Error::Endpoint(format!(
+                "github: `{}` answered without a repository",
+                root_iri(&self.root)
+            )));
+        };
+        let mut href = format!("{repository}/pull/{}", url_segment(n));
+        let kind = match &rel {
+            None => "pull",
+            Some(rel) => {
+                // The Files tab's anchor for one file: the SHA-256 of its path from the top of
+                // the repository, so the root's own place in it comes first.
+                let prefix = facts.get("prefix").map(String::as_str).unwrap_or_default();
+                let path = prefix
+                    .split('/')
+                    .chain(rel.iter().map(String::as_str))
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                href.push_str(&format!("/{}#{}", url_segment("files"), diff_anchor(&path)));
+                "pull-file"
+            }
+        };
+        let Some(href) = safe_href(&href) else {
+            return Ok("none the link is not an http(s) URL\n".to_string());
+        };
+        Ok(format!("href {href}\nkind {kind}\nnumber {n}\n"))
+    }
+}
+
+/// The anchor GitHub's Files tab gives one file: `diff-` and the lowercase hex SHA-256 of its
+/// repository-relative path.
+///
+/// ```
+/// use ikigai_gonk::github::diff_anchor;
+/// assert_eq!(
+///     diff_anchor("README.md"),
+///     "diff-b335630551682c19a781afebcf4d07bf978fb1f8ac04c6bf87428ed5106870f5"
+/// );
+/// ```
+pub fn diff_anchor(path: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(path.as_bytes());
+    let mut anchor = String::with_capacity(5 + 64);
+    anchor.push_str("diff-");
+    for byte in digest {
+        anchor.push_str(&format!("{byte:02x}"));
+    }
+    anchor
+}
+
+#[async_trait]
+impl Endpoint for Pull {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        granted(inv, &self.root)?;
+        let asked = face(inv)?;
+        let text = self.text(inv).await?;
+        if asked == TEXT {
+            return Ok(plain(text));
+        }
+        // The same fragment [`Link`] answers, for the same swap (`web/gonk.js`).
+        let doc = envelope(
+            "page",
+            &[("view", "github"), ("full", "false")],
+            &view(&text),
+        );
+        let html = render::render(&doc, false).map_err(crate::web::render_err)?;
+        Ok(crate::web::html(html).cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "gonk-github-pull"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-github-pull")
+            .title("A browse pull request's page on GitHub")
+            .summary(
+                "urn:iki:gonk:github:{root}:pull:{n} and …:pull:{n}:file:{path}, the path in \
+                 browse's own spelling. The pull request on GitHub, in the repository \
+                 urn:iki:gonk:github:{root} names: `pull/{n}`, or for a file its place in the \
+                 Files tab, `pull/{n}/files#diff-{sha256 of the path}`. Plain text, one `key \
+                 value` per line (href, kind, number), or `none {reason}`; text/html is the \
+                 link the browse page shows.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_browse::CAP_WILDCARD)
+            .input(as_spec())
+            .output(TEXT)
+            .output(HTML)
+            .input(
+                ArgSpec::new("n")
+                    .summary("the pull request's number")
+                    .class(XSD_STRING)
+                    .binding(),
+            )
+            // Only the file row binds a path.
+            .input(
+                ArgSpec::new("path")
+                    .summary("the root-relative path, in browse's spelling")
+                    .class(XSD_STRING)
+                    .binding()
+                    .optional(),
+            )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,9 +867,27 @@ mod tests {
             link_iri("urn:repo:core:file:src/a%20b.rs").as_deref(),
             Some("urn:iki:gonk:github:core:file:src/a%20b.rs")
         );
+        for (view, want) in [
+            ("urn:repo:core:pr:12", "urn:iki:gonk:github:core:pull:12"),
+            (
+                "urn:repo:core:pr:12:explain",
+                "urn:iki:gonk:github:core:pull:12",
+            ),
+            (
+                "urn:repo:core:pr:12:review",
+                "urn:iki:gonk:github:core:pull:12",
+            ),
+        ] {
+            assert_eq!(link_iri(view).as_deref(), Some(want), "{view}");
+        }
         for other in [
             "urn:repo:core:explain:src/lib.rs",
             "urn:repo:core:prs",
+            "urn:repo:core:prs:src",
+            "urn:repo:core:pr:",
+            "urn:repo:core:pr:012",
+            "urn:repo:core:pr:12:diff",
+            "urn:repo:core:pr:x",
             "urn:repo:core:treehouse",
             "urn:iki:finding:x",
         ] {

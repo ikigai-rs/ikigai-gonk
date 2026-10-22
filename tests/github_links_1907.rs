@@ -496,7 +496,7 @@ fn a_selected_line_carries_onto_a_file_link_and_nothing_else_does() {
         "+ lineFragment()",
         "a.browse-annotation-line",
         "window.addEventListener(\"hashchange\", carryLines)",
-        "\"urn:iki:gonk:github:\" + view.slice(\"urn:repo:\".length)",
+        "\"urn:iki:gonk:github:\" + m[1] + \":\" + (m[3] ? \"pull:\" + m[3] : m[2])",
         "target: \"#github\"",
     ] {
         assert!(wiring.contains(needle), "the link wiring lost `{needle}`");
