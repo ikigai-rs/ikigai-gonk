@@ -136,8 +136,8 @@ fn main() {
             &flags,
         ),
         Command::RoborevFile(args) => {
-            let socket = read_settings(&args.flags).socket;
-            ikigai_gonk::roborev::run(&args, &socket, &mut std::io::stdout())
+            let door = bridge_door(args.quic.clone(), &args.flags);
+            ikigai_gonk::roborev::run(&args, &door, &mut std::io::stdout())
                 .unwrap_or_else(|e| fail(&e));
         }
         Command::Checkout(args) => {
@@ -155,14 +155,23 @@ fn main() {
             }
         }
         Command::KataImport(args) => {
-            let socket = read_settings(&args.flags).socket;
-            ikigai_gonk::kata::run(&args, &socket, &mut std::io::stdout())
+            let door = bridge_door(args.quic.clone(), &args.flags);
+            ikigai_gonk::kata::run(&args, &door, &mut std::io::stdout())
                 .unwrap_or_else(|e| fail(&e));
         }
         Command::BackfillKeys(args) => backfill_keys(&args),
         Command::FindingsFile(args) => findings_file(&args),
         Command::Serve(flags) => serve(&flags),
     }
+}
+
+/// The door a bridge files through: `--quic` when given, else the socket the config names
+/// (ledger #2075: `--quic` wins when both are configured).
+fn bridge_door(
+    quic: Option<ikigai_gonk::bridge::Door>,
+    flags: &config::Flags,
+) -> ikigai_gonk::bridge::Door {
+    quic.unwrap_or_else(|| ikigai_gonk::bridge::Door::Socket(read_settings(flags).socket))
 }
 
 fn serve(flags: &config::Flags) -> ! {

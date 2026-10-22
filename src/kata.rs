@@ -2,11 +2,13 @@
 //!
 //! [kata](https://github.com/kenn-io/kata) keeps issues in its own database and writes it out
 //! with `kata export` as JSONL. This command reads that file and files each issue as a ledger
-//! item over the running gonk's owner-only socket — the same door and the same identity as
-//! `roborev file` ([`crate::bridge`], ledger #2075) — then its comments, its close, and finally
-//! the links between issues, once every issue has an item to point at. Through ledger #1687 it
-//! filed over the HTTP door as an anonymous loopback caller; that caller only reads now, so
-//! `--gonk` is refused, naming `--socket`.
+//! item in a running gonk, through the same doors as `roborev file` ([`crate::bridge`], ledger
+//! #2075): at the QUIC door as an enrolled client (`--quic HOST:PORT --cert-dir DIR`, which
+//! wins when both are configured), every write then authored by that client, or over the
+//! owner-only socket, with kata's authors as the ledger's. Then its comments, its close, and
+//! finally the links between issues, once every issue has an item to point at. Through ledger
+//! #1687 it filed over the HTTP door as an anonymous loopback caller; that caller only reads
+//! now, so `--gonk` is refused, naming `--quic` and `--socket`.
 //!
 //! # What `kata export` writes (read from its source, `kenn-io/kata` 2026-10-06)
 //!
@@ -37,7 +39,8 @@
 //! ⚠ **It is lossy, and every item says so.** The ledger stamps its own filed time and mints
 //! its own number, so kata's `created_at` and `short_id` survive only as text: each item's
 //! body ends with a provenance line (`Imported from kata <project>#<short_id> (<uid>), filed
-//! <created_at> by <author>.`), each comment ends with its own, and a close carries kata's
+//! <created_at> by <author>.`), each comment ends with its own (`(kata comment <uid>,
+//! <created_at> by <author>)`), and a close carries kata's
 //! close time as its note. A faithful import, which would keep them as data, is ledger #774.
 //!
 //! # Idempotence, and why it is race-free
@@ -73,14 +76,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::path::Path;
 
 use ikigai_ledger::Ledger;
 use serde_json::Value;
 
 use ikigai_ledger::json::{Answer, Item, ItemDocument};
 
-use crate::bridge::{no_http_door, Socket};
+use crate::bridge::{no_http_door, quic_door, Door, Gonk};
 use crate::config::Flags;
 
 /// The idempotence key's prefix: `urn:kata:issue:<uid>`.
@@ -92,8 +94,12 @@ pub struct ImportArgs {
     /// The export file.
     pub file: String,
     /// `--socket`, `--config`, `--config-home`, `--data-home`: where the running gonk's
-    /// owner-only socket is, and which `config.toml` says so.
+    /// owner-only socket is, and which `config.toml` says so. Not read when [`Self::quic`]
+    /// is set.
     pub flags: Flags,
+    /// `--quic HOST:PORT --cert-dir DIR`: file at gonk's QUIC door as the enrolled client in
+    /// `DIR`. Wins over the socket when both are configured ([`crate::bridge`]).
+    pub quic: Option<Door>,
     /// `--ledger`: the ledger to file into. Default `default`.
     pub ledger: String,
     /// `--project`: only this kata project's issues.
@@ -112,11 +118,13 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
     let mut out = ImportArgs {
         file: String::new(),
         flags: Flags::default(),
+        quic: None,
         ledger: "default".to_string(),
         project: None,
         dry_run: false,
     };
     let mut file = None;
+    let (mut quic, mut cert_dir) = (None, None);
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
             args.next()
@@ -124,6 +132,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
         };
         match arg.as_str() {
             "--gonk" => return Err(no_http_door("kata import")),
+            "--quic" => quic = Some(value("--quic")?),
+            "--cert-dir" => cert_dir = Some(value("--cert-dir")?.into()),
             "--socket" => out.flags.socket = Some(value("--socket")?),
             "--config" => out.flags.config = Some(value("--config")?.into()),
             "--config-home" => out.flags.config_home = Some(value("--config-home")?.into()),
@@ -138,6 +148,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
             extra => return Err(format!("kata import: unexpected argument `{extra}`")),
         }
     }
+    out.quic = quic_door("kata import", quic, cert_dir)?;
     out.file = file.ok_or("kata import: expected <export.jsonl> (`kata export` writes one)")?;
     Ledger::parse(&out.ledger).map_err(|e| format!("kata import: --ledger: {e}"))?;
     Ok(out)
@@ -457,11 +468,13 @@ pub fn append_for(issue: &Issue) -> (String, Vec<(&'static str, String)>) {
 
 /// One comment's text, with its marker.
 fn comment_text(comment: &Comment) -> String {
+    // kata's author is in the text too: over QUIC the ledger's author is the importing client.
     let mut text = format!(
-        "{}\n\n({}, {}",
+        "{}\n\n({}, {} by {}",
         comment.body.trim(),
         comment_marker(&comment.uid),
-        comment.created_at
+        comment.created_at,
+        comment.author
     );
     if let Some(teammate) = &comment.teammate {
         text.push_str(&format!(", for {teammate}"));
@@ -521,17 +534,17 @@ enum Standing {
     WouldFile,
 }
 
-/// Run `kata import` over the socket at `socket`. Prints one line per thing done to `out` and
-/// answers the tally. A refusal or an unreachable socket stops it with an error; what was
+/// Run `kata import` through `door`. Prints one line per thing done to `out` and answers the
+/// tally. A refusal or an unreachable door stops it with an error; what was
 /// filed before that stays filed, and running it again carries on from there.
 ///
 /// Under `--dry-run` every read is made and every write is only reported (`would …`), so the
 /// tally is what a real run would do now.
-pub fn run(args: &ImportArgs, socket: &Path, out: &mut impl Write) -> Result<Summary, String> {
+pub fn run(args: &ImportArgs, door: &Door, out: &mut impl Write) -> Result<Summary, String> {
     let text =
         std::fs::read_to_string(&args.file).map_err(|e| format!("reading {}: {e}", args.file))?;
     let export = parse(&text)?;
-    let gonk = Socket::connect(socket)?;
+    let gonk = Gonk::connect(door)?;
     let ledger = Ledger::parse(&args.ledger).map_err(|e| e.to_string())?;
     let dry = args.dry_run;
     let would = if dry { "would " } else { "" };
@@ -913,5 +926,32 @@ mod tests {
         )
         .unwrap_err()
         .contains("--socket"));
+        let quic = parse_args(
+            [
+                "import",
+                "x",
+                "--quic",
+                "127.0.0.1:1062",
+                "--cert-dir",
+                "/c",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(
+            quic.quic,
+            Some(Door::Quic {
+                authority: "127.0.0.1:1062".to_string(),
+                certs: "/c".into()
+            })
+        );
+        assert!(parse_args(
+            ["import", "x", "--quic", "127.0.0.1:1062"]
+                .into_iter()
+                .map(String::from)
+        )
+        .unwrap_err()
+        .contains("--cert-dir"));
     }
 }

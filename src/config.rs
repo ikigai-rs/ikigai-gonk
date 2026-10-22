@@ -276,10 +276,15 @@ usage:
   ikigai-gonk roborev file --ledger <ledger> --root <browse root>
                      --findings <markdown|-> [--job N] [--sha SHA] [--agent NAME]
                      [--repo-path PATH] [--min-severity critical|high|medium|low] [--dry-run]
-                     [--socket PATH] [--config PATH]
-                                   file each finding of ONE roborev review as a ledger item over
-                                   a RUNNING gonk's owner-only socket — what a roborev `[[hooks]]` entry on
+                     [--quic HOST:PORT --cert-dir DIR | --socket PATH | --config PATH]
+                                   file each finding of ONE roborev review as a ledger item in a
+                                   RUNNING gonk — what a roborev `[[hooks]]` entry on
                                    `review.completed` runs (README, \"Filing roborev findings\").
+                                   --quic files at the QUIC door as the client whose
+                                   certificate directory is --cert-dir (`client add <name>
+                                   --ledger <ledger>=write` wrote it), authored by that client;
+                                   without it, over the owner-only socket. --quic wins when both
+                                   are configured.
                                    Each finding is ONE keyed append, so a finding already filed
                                    (or filed by a concurrent hook) is not filed again; low ones
                                    are skipped unless --min-severity low
@@ -299,9 +304,12 @@ usage:
                                    and which roots there have no checkout. Clones nothing,
                                    writes no config: the command a timer runs
   ikigai-gonk kata import <export.jsonl> [--ledger default] [--project NAME] [--dry-run]
-                     [--socket PATH] [--config PATH]
-                                   file a `kata export` file's issues as ledger items over a
-                                   RUNNING gonk's owner-only socket: labels, priority, comments, closes, then links.
+                     [--quic HOST:PORT --cert-dir DIR | --socket PATH | --config PATH]
+                                   file a `kata export` file's issues as ledger items in a
+                                   RUNNING gonk: labels, priority, comments, closes, then links.
+                                   --quic files at the QUIC door as the enrolled client in
+                                   --cert-dir, authored by that client; without it, over the
+                                   owner-only socket. --quic wins when both are configured.
                                    Lossy (kata's ids and times survive as text) and idempotent:
                                    each item is filed `key=urn:kata:issue:<uid>` (one atomic
                                    append), and a re-run adds only what is missing. --dry-run

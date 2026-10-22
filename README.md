@@ -1189,16 +1189,27 @@ ledger's resources and hand-writes none of its own over them, so it does not pap
 ## Filing roborev findings
 
 [roborev](https://github.com/kenn-io/roborev) reviews each commit with a coding agent. Keep
-running it, and add one `[[hooks]]` entry to its config (`~/.roborev/config.toml`, or a
-repository's `.roborev.toml`): every finding of every completed review becomes a ledger item
-here, which can be triaged, labeled, linked, claimed and closed like any other, and which
-shows up on browse's page for the file it is about.
+running it, give it a client certificate that may write one ledger, and add one `[[hooks]]`
+entry to its config (`~/.roborev/config.toml`, or a repository's `.roborev.toml`): every
+finding of every completed review becomes a ledger item here, which can be triaged, labeled,
+linked, claimed and closed like any other, and which shows up on browse's page for the file it
+is about.
+
+```sh
+ikigai-gonk client add roborev --ledger default=write    # then restart gonk
+```
 
 ```toml
 [[hooks]]
 event = "review.completed"
-command = "ikigai-gonk roborev file --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
+command = "ikigai-gonk roborev file --quic 127.0.0.1:1062 --cert-dir ~/.config/ikigai/gonk/quic/clients/roborev --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
 ```
+
+`client add` writes the certificate directory (`client.crt`, `client.key`, and the
+`server.crt` to pin) under `gonk/quic/clients/roborev/`; when roborev runs as another user, in
+a sandbox or on another machine, move that directory to where it can read it, and point
+`--cert-dir` and `--quic HOST:PORT` (gonk's QUIC door; it follows the HTTP port, 1062 by
+default) there.
 
 roborev replaces each `{…}` with a single-quoted value before `sh -c` runs the line, so
 nothing in a finding can escape into the shell. `--root` is the **browse root name** gonk
@@ -1206,14 +1217,22 @@ serves the repository under (`gonk.browse.root = "<name>=<path>"`); `{repo_name}
 when the two match, and otherwise write the name in. `--dry-run` prints what would be filed
 (each append's arguments, the key among them) and touches nothing.
 
-**The door, and whose identity files.** The command files over the running gonk's owner-only
-socket (`gonk.socket`, default `~/.ikigai/gonk.sock`; `--socket PATH` or `--config PATH` names
-another), whose caller is the user who runs gonk: a roborev hook runs as that user, on that
-machine, so there is nothing to enroll or sign in, and every item is filed `author roborev`.
-Any ledger this server holds can be filed into. ⚠ Through ledger #1687 it filed over the HTTP
-door as an anonymous loopback caller; that caller only READS now, which is right, so the
-command answered `403` and filed nothing (ledger #2075). `--gonk` is now refused with exit 1,
-naming `--socket`: drop it from a hook line written before. `--dry-run` touches no gonk at all.
+**The door, and whose identity files.** With `--quic HOST:PORT --cert-dir DIR` the command
+files at gonk's QUIC door as the client whose certificate is in `DIR`: mutual TLS, then the
+grant `client add` enrolled it under. That grant is narrow (`--ledger default=write` writes one
+ledger, and a write to any other is `Denied`), revocable (`ikigai-gonk client remove roborev`),
+and the client's own: **every item is authored by the client**
+(`urn:iki:host:gonk:client:<fingerprint>`, shown as `roborev`), not by gonk's owner. A
+certificate gonk does not trust, or one enrolled under no grant, is refused at the door, and the
+command says so. Without `--quic`, the command files over the running gonk's owner-only socket
+(`gonk.socket`, default `~/.ikigai/gonk.sock`; `--socket PATH` or `--config PATH` names
+another), whose caller is the user who runs gonk, `author roborev`: a convenience for a hook
+running as that user, on that machine, outside any sandbox, which carries the owner's whole
+authority over every ledger. **When both are configured, `--quic` wins** and the socket is not
+dialed. ⚠ Through ledger #1687 the command filed over the HTTP door as an anonymous loopback
+caller; that caller only READS now, which is right, so the command answered `403` and filed
+nothing (ledger #2075). `--gonk` is now refused with exit 1, naming `--quic` and `--socket`:
+drop it from a hook line written before. `--dry-run` touches no gonk at all.
 A gonk that is not running, or a refusal, stops the command with exit 1 and says which; roborev
 logs a hook's failure and output in its daemon log, and never retries.
 
@@ -1228,7 +1247,7 @@ logs a hook's failure and output in its daemon log, and never retries.
 | the commit | `revision`, and `commit:` in the body |
 | the job | `roborev job: N (roborev show N)` in the body |
 | a panel's reviewers | `reported by:` in the body |
-| — | `key urn:roborev:finding:{hash}`, the idempotence key — also filed as an `about`, so items from before keys existed join the same way — and `author roborev` |
+| — | `key urn:roborev:finding:{hash}`, the idempotence key — also filed as an `about`, so items from before keys existed join the same way — and the author: the enrolled client over `--quic`, `roborev` over the socket |
 
 **Low findings are skipped by default** (`--min-severity medium`): roborev renders them on a
 passing review too, and one ledger item per nit buries the findings worth a person's time.
@@ -1329,12 +1348,14 @@ the key makes the second one free to repeat.
 ## Importing from kata
 
 [kata](https://github.com/kenn-io/kata) keeps issues in its own database. `kata export` writes
-it out as JSONL, and `ikigai-gonk kata import` files that file's issues into a ledger here,
-over the running gonk's owner-only socket:
+it out as JSONL, and `ikigai-gonk kata import` files that file's issues into a ledger here, as
+a client enrolled to write that ledger:
 
 ```sh
+ikigai-gonk client add kata --ledger default=write       # once; then restart gonk
 kata export --output kata.jsonl          # with kata's daemon stopped, or --allow-running-daemon
-ikigai-gonk kata import kata.jsonl --ledger default
+ikigai-gonk kata import kata.jsonl --ledger default \
+    --quic 127.0.0.1:1062 --cert-dir ~/.config/ikigai/gonk/quic/clients/kata
 ```
 
 ```text
@@ -1349,8 +1370,9 @@ linked    #3 parent #1
 3 filed, 0 already there; 2 comment(s), 1 close(s), 3 link(s) added; 1 deleted issue(s) and 1 link(s) skipped; not read: event 1, sqlite_sequence 1
 ```
 
-`--ledger` defaults to `default`; `--project NAME` imports one kata project's issues; `--socket
-PATH` (or `--config PATH`) names the socket when it is not `gonk.socket` of this user's config.
+`--ledger` defaults to `default`; `--project NAME` imports one kata project's issues. Without
+`--quic`, the import runs over the owner-only socket instead; `--socket PATH` (or `--config
+PATH`) names it when it is not `gonk.socket` of this user's config.
 
 **`--dry-run` reads for real and writes nothing.** It asks the ledger for each issue's key, as
 the real run does, so it says `already` for an issue that is there, reports exactly the
@@ -1359,11 +1381,15 @@ linked`, and a tally that says `would be`). ⚠ The one thing a read cannot tell
 answers like one never filed, so the dry run says `would file` where the real run leaves it
 alone.
 
-**The door** is `roborev file`'s: the owner-only socket, as the user who runs gonk, which reads
-and writes every ledger this server holds (an import needs both: write to file, read to converge
-on what is already there). ⚠ Through ledger #1687 it imported over the HTTP door as an anonymous
-loopback caller, which only reads now, so an import answered `403` (ledger #2075); `--gonk` is
-now refused with exit 1, naming `--socket`.
+**The door** is `roborev file`'s. With `--quic HOST:PORT --cert-dir DIR`, the QUIC door as the
+enrolled client in `DIR`, whose grant must write the ledger (an import also reads it, to
+converge on what is already there; `write` includes read). Every item, comment, close and link
+is then authored by that client, and kata's own author stays in the text (the provenance
+line, and each comment's ending). Without `--quic`, the owner-only socket, as the user who runs
+gonk, with kata's authors as the ledger's `author`. **When both are configured, `--quic` wins.**
+⚠ Through ledger #1687 it imported over the HTTP door as an anonymous loopback caller, which
+only reads now, so an import answered `403` (ledger #2075); `--gonk` is now refused with exit
+1, naming `--quic` and `--socket`.
 
 **The mapping.** `ikigai-ledger` took its model from kata, so most of this is one to one:
 
@@ -1371,10 +1397,10 @@ now refused with exit 1, naming `--socket`.
 | --- | --- |
 | `title` | the title (whitespace collapsed to one line) |
 | `body` | the body, followed by a provenance line: `Imported from kata <project>#<short_id> (<uid>), filed <created_at> by <author>; owner <owner>.` |
-| `author` | `author` |
+| `author` | `author` over the socket (over `--quic`, the client is the author, and kata's author is in the provenance line) |
 | `priority` 0–4 (absent = unset) | `priority` 0–4, the same scale (absent = unset) |
 | labels | `labels` |
-| comments | `comment`, with the comment's author, ending `(kata comment <uid>, <created_at>, for <teammate>)` |
+| comments | `comment`, with the comment's author over the socket, ending `(kata comment <uid>, <created_at> by <author>, for <teammate>)` |
 | `status` closed, `closed_reason` | `close` with the same reason (`done`, `wontfix`, `duplicate`, `superseded`, `audit-no-change`), and `Closed in kata at <closed_at>.` as its note |
 | links `parent`, `blocks`, `related` | `link` with the same type, same direction (`parent` from the child, `blocks` from the prerequisite), made after every issue has an item |
 | `uid` | `key urn:kata:issue:<uid>`, the idempotence key, and the same IRI as an `about` |

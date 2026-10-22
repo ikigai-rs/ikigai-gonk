@@ -3,8 +3,9 @@
 //! [roborev](https://github.com/kenn-io/roborev) reviews each commit with a coding agent and
 //! fires `[[hooks]]` on its events. This is the command such a hook runs: it reads the
 //! review roborev hands it, and files **one ledger item per finding** into a named ledger on
-//! a running gonk, over its owner-only socket ([`crate::bridge`]), so every finding can be triaged, labeled, linked,
-//! claimed and closed here, and shows up on browse's page for the file it is about.
+//! a running gonk, with an identity ([`crate::bridge`]), so every finding can be triaged,
+//! labeled, linked, claimed and closed here, and shows up on browse's page for the file it is
+//! about.
 //!
 //! # What roborev hands a hook (read from its source, `kenn-io/roborev` 2026-10-05)
 //!
@@ -53,20 +54,22 @@
 //!
 //! # Authority
 //!
-//! The filing runs over the running gonk's owner-only socket, whose capability is the owner's
-//! ([`crate::bridge`], ledger #2075): a roborev hook runs as the user who runs gonk, on its
-//! machine. Through ledger #1687 it filed over the HTTP door as an anonymous loopback caller;
-//! that caller only reads now, so `--gonk` is refused, naming `--socket`. Every item is filed
-//! `author=roborev`. A `--dry-run` touches no gonk at all.
+//! The filing runs with an identity ([`crate::bridge`], ledger #2075). With `--quic HOST:PORT
+//! --cert-dir DIR` it runs at the QUIC door as the client enrolled with `ikigai-gonk client add
+//! roborev --ledger <ledger>=write`, from any user, sandbox or machine, and every item is
+//! authored by that client. Without it, over the owner-only socket, as the user who runs gonk,
+//! and every item is filed `author=roborev`. `--quic` wins when both are configured. Through
+//! ledger #1687 it filed over the HTTP door as an anonymous loopback caller; that caller only
+//! reads now, so `--gonk` is refused, naming `--quic` and `--socket`. A `--dry-run` touches no
+//! gonk at all.
 
 use std::io::{Read, Write};
-use std::path::Path;
 
 use ikigai_ledger::json::Answer;
 use ikigai_ledger::Ledger;
 use sha2::{Digest, Sha256};
 
-use crate::bridge::{no_http_door, Socket};
+use crate::bridge::{no_http_door, quic_door, Door, Gonk};
 use crate::config::Flags;
 
 /// The severities roborev's schema allows, most severe first.
@@ -371,8 +374,12 @@ pub fn title(problem: &str) -> String {
 #[derive(Debug)]
 pub struct FileArgs {
     /// `--socket`, `--config`, `--config-home`, `--data-home`: where the running gonk's
-    /// owner-only socket is, and which `config.toml` says so.
+    /// owner-only socket is, and which `config.toml` says so. Not read when [`Self::quic`]
+    /// is set.
     pub flags: Flags,
+    /// `--quic HOST:PORT --cert-dir DIR`: file at gonk's QUIC door as the enrolled client in
+    /// `DIR`. Wins over the socket when both are configured ([`crate::bridge`]).
+    pub quic: Option<Door>,
     /// `--ledger`: the ledger to file into.
     pub ledger: String,
     /// `--root`: the browse root name the file IRIs are under (roborev's `{repo_name}`
@@ -402,8 +409,10 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
         None => return Err("roborev: expected `file`".to_string()),
     }
     let (mut ledger, mut root, mut findings) = (None, None, None);
+    let (mut quic, mut cert_dir) = (None, None);
     let mut out = FileArgs {
         flags: Flags::default(),
+        quic: None,
         ledger: String::new(),
         root: String::new(),
         findings: String::new(),
@@ -421,6 +430,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
         };
         match flag.as_str() {
             "--gonk" => return Err(no_http_door("roborev file")),
+            "--quic" => quic = Some(value()?),
+            "--cert-dir" => cert_dir = Some(value()?.into()),
             "--socket" => out.flags.socket = Some(value()?),
             "--config" => out.flags.config = Some(value()?.into()),
             "--config-home" => out.flags.config_home = Some(value()?.into()),
@@ -445,6 +456,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
     let required = |value: Option<String>, flag: &str| {
         value.ok_or_else(|| format!("roborev file: {flag} is required"))
     };
+    out.quic = quic_door("roborev file", quic, cert_dir)?;
     out.ledger = required(ledger, "--ledger")?;
     out.root = required(root, "--root")?;
     out.findings = required(findings, "--findings")?;
@@ -539,11 +551,11 @@ pub enum Outcome {
     BelowThreshold(Severity),
 }
 
-/// Run `roborev file`: parse, plan, then file each finding in turn over the socket at
-/// `socket`, which is dialed only when there is something to file. Prints one line per
-/// finding to `out`. A refusal or an unreachable socket stops it with an error; the findings
-/// filed before that stay filed, and running it again skips them.
-pub fn run(args: &FileArgs, socket: &Path, out: &mut impl Write) -> Result<Vec<Outcome>, String> {
+/// Run `roborev file`: parse, plan, then file each finding in turn through `door`, which is
+/// dialed only when there is something to file. Prints one line per finding to `out`. A
+/// refusal or an unreachable door stops it with an error; the findings filed before that stay
+/// filed, and running it again skips them.
+pub fn run(args: &FileArgs, door: &Door, out: &mut impl Write) -> Result<Vec<Outcome>, String> {
     let markdown = if args.findings == "-" {
         let mut text = String::new();
         std::io::stdin()
@@ -593,7 +605,7 @@ pub fn run(args: &FileArgs, socket: &Path, out: &mut impl Write) -> Result<Vec<O
         // hooks racing on this finding cannot both file it.
         let gonk = match &mut gonk {
             Some(gonk) => gonk,
-            None => gonk.insert(Socket::connect(socket)?),
+            None => gonk.insert(Gonk::connect(door)?),
         };
         let answer: Answer =
             gonk.sink_json(&ledger.resource("append"), &planned.args, &planned.content)?;
@@ -880,5 +892,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(http.contains("--socket"), "{http}");
+        assert!(http.contains("--quic"), "{http}");
+        // `--quic` and `--cert-dir` come together.
+        let with = |extra: &[&str]| {
+            let mut words = vec!["file", "--ledger", "x", "--root", "r", "--findings", "-"];
+            words.extend_from_slice(extra);
+            parse_args(words.into_iter().map(String::from))
+        };
+        assert_eq!(
+            with(&["--quic", "gonk:1062", "--cert-dir", "/c"])
+                .unwrap()
+                .quic,
+            Some(Door::Quic {
+                authority: "gonk:1062".to_string(),
+                certs: "/c".into()
+            })
+        );
+        assert_eq!(with(&[]).unwrap().quic, None);
+        assert!(with(&["--quic", "gonk:1062"])
+            .unwrap_err()
+            .contains("--cert-dir"));
+        assert!(with(&["--cert-dir", "/c"]).unwrap_err().contains("--quic"));
+        assert!(with(&["--quic", "quic://gonk:1062", "--cert-dir", "/c"])
+            .unwrap_err()
+            .contains("HOST:PORT"));
     }
 }
