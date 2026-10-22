@@ -273,11 +273,12 @@ usage:
                                    network — so a git hook can call it per changed file and a
                                    commit never waits. Identical requests collapse to one
                                    tuple (the drop is content-addressed)
-  ikigai-gonk roborev file --gonk http://127.0.0.1:1062 --ledger <ledger> --root <browse root>
+  ikigai-gonk roborev file --ledger <ledger> --root <browse root>
                      --findings <markdown|-> [--job N] [--sha SHA] [--agent NAME]
                      [--repo-path PATH] [--min-severity critical|high|medium|low] [--dry-run]
+                     [--socket PATH] [--config PATH]
                                    file each finding of ONE roborev review as a ledger item over
-                                   the HTTP door — what a roborev `[[hooks]]` entry on
+                                   a RUNNING gonk's owner-only socket — what a roborev `[[hooks]]` entry on
                                    `review.completed` runs (README, \"Filing roborev findings\").
                                    Each finding is ONE keyed append, so a finding already filed
                                    (or filed by a concurrent hook) is not filed again; low ones
@@ -297,10 +298,10 @@ usage:
                                    refusals; then say which checkouts no gonk.browse.root uses
                                    and which roots there have no checkout. Clones nothing,
                                    writes no config: the command a timer runs
-  ikigai-gonk kata import <export.jsonl> [--gonk http://127.0.0.1:1062] [--ledger default]
-                     [--project NAME] [--dry-run]
-                                   file a `kata export` file's issues as ledger items over the
-                                   HTTP door: labels, priority, comments, closes, then links.
+  ikigai-gonk kata import <export.jsonl> [--ledger default] [--project NAME] [--dry-run]
+                     [--socket PATH] [--config PATH]
+                                   file a `kata export` file's issues as ledger items over a
+                                   RUNNING gonk's owner-only socket: labels, priority, comments, closes, then links.
                                    Lossy (kata's ids and times survive as text) and idempotent:
                                    each item is filed `key=urn:kata:issue:<uid>` (one atomic
                                    append), and a re-run adds only what is missing. --dry-run
@@ -513,11 +514,11 @@ pub enum Command {
         /// `--config`: where this server's roots and mount are read from.
         flags: Flags,
     },
-    /// File one roborev review's findings into a ledger over the HTTP door.
+    /// File one roborev review's findings into a ledger over the owner-only socket.
     RoborevFile(crate::roborev::FileArgs),
     /// Clone or fast-forward the repositories gonk browses, and print their root lines.
     Checkout(crate::checkout::Args),
-    /// Import a `kata export` file into a ledger over the HTTP door.
+    /// Import a `kata export` file into a ledger over the owner-only socket.
     KataImport(crate::kata::ImportArgs),
     /// Give the items the bridges filed before keys existed their key, over the socket.
     BackfillKeys(crate::keys::BackfillArgs),

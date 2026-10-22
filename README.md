@@ -1197,7 +1197,7 @@ shows up on browse's page for the file it is about.
 ```toml
 [[hooks]]
 event = "review.completed"
-command = "ikigai-gonk roborev file --gonk http://127.0.0.1:1062 --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
+command = "ikigai-gonk roborev file --ledger default --root {repo_name} --repo-path {repo} --job {job_id} --sha {sha} --agent {agent} --findings {findings}"
 ```
 
 roborev replaces each `{…}` with a single-quoted value before `sh -c` runs the line, so
@@ -1206,21 +1206,16 @@ serves the repository under (`gonk.browse.root = "<name>=<path>"`); `{repo_name}
 when the two match, and otherwise write the name in. `--dry-run` prints what would be filed
 (each append's arguments, the key among them) and touches nothing.
 
-**The grant.** The command speaks to the HTTP door, whose anonymous loopback caller holds the
-READ tokens of the ledgers in `gonk.http.ledger` (default: `default`) and nothing else. ⚠ Since
-ledger #1687 that caller writes nothing, so against a gonk from that release on `--dry-run`
-works and filing answers `403`: filing again needs a signed-in or socket path this command does
-not have yet. To have it read (and, once it can file, file into) a ledger of its own, list it:
-
-```toml
-gonk.http.ledger = "default"
-gonk.http.ledger = "reviews"
-```
-
-`ikigai-gonk grants reviews write` prints what that grants (`urn:cap:ledger:write:reviews`,
-`urn:cap:ledger:read:reviews` and the two store tokens for its graph). A ledger the door does
-not grant answers `403`, and the command stops with exit 1, says so, and names the setting.
-roborev logs a hook's failure and output in its daemon log; it never retries.
+**The door, and whose identity files.** The command files over the running gonk's owner-only
+socket (`gonk.socket`, default `~/.ikigai/gonk.sock`; `--socket PATH` or `--config PATH` names
+another), whose caller is the user who runs gonk: a roborev hook runs as that user, on that
+machine, so there is nothing to enroll or sign in, and every item is filed `author roborev`.
+Any ledger this server holds can be filed into. ⚠ Through ledger #1687 it filed over the HTTP
+door as an anonymous loopback caller; that caller only READS now, which is right, so the
+command answered `403` and filed nothing (ledger #2075). `--gonk` is now refused with exit 1,
+naming `--socket`: drop it from a hook line written before. `--dry-run` touches no gonk at all.
+A gonk that is not running, or a refusal, stops the command with exit 1 and says which; roborev
+logs a hook's failure and output in its daemon log, and never retries.
 
 **What a finding becomes.**
 
@@ -1335,7 +1330,7 @@ the key makes the second one free to repeat.
 
 [kata](https://github.com/kenn-io/kata) keeps issues in its own database. `kata export` writes
 it out as JSONL, and `ikigai-gonk kata import` files that file's issues into a ledger here,
-over the HTTP door:
+over the running gonk's owner-only socket:
 
 ```sh
 kata export --output kata.jsonl          # with kata's daemon stopped, or --allow-running-daemon
@@ -1354,23 +1349,21 @@ linked    #3 parent #1
 3 filed, 0 already there; 2 comment(s), 1 close(s), 3 link(s) added; 1 deleted issue(s) and 1 link(s) skipped; not read: event 1, sqlite_sequence 1
 ```
 
-`--gonk` defaults to `http://127.0.0.1:1062` and `--ledger` to `default`; `--project NAME`
-imports one kata project's issues.
+`--ledger` defaults to `default`; `--project NAME` imports one kata project's issues; `--socket
+PATH` (or `--config PATH`) names the socket when it is not `gonk.socket` of this user's config.
 
 **`--dry-run` reads for real and writes nothing.** It asks the ledger for each issue's key, as
 the real run does, so it says `already` for an issue that is there, reports exactly the
 comments, closes and links a real run would add (`would commented`, `would closed`, `would
-linked`, and a tally that says `would be`), and is refused on a ledger the door does not grant,
-exit 1, like the real run. ⚠ The one thing a read cannot tell: an issue whose item was DELETED
+linked`, and a tally that says `would be`). ⚠ The one thing a read cannot tell: an issue whose item was DELETED
 answers like one never filed, so the dry run says `would file` where the real run leaves it
 alone.
 
-**The grant** is `roborev file`'s: the door's anonymous loopback caller holds the READ tokens
-of the ledgers in `gonk.http.ledger`, and an import needs read and write (write to file, read to
-converge on what is already there). ⚠ Since ledger #1687 that caller writes nothing, so a dry run
-works and an import answers `403` until this command gains a signed-in or socket path. To import into a ledger of its own, list it there
-(`gonk.http.ledger = "kata"`) and restart. A ledger the door does not grant answers `403`, and
-the import (or the dry run) stops with exit 1 and names the setting.
+**The door** is `roborev file`'s: the owner-only socket, as the user who runs gonk, which reads
+and writes every ledger this server holds (an import needs both: write to file, read to converge
+on what is already there). ⚠ Through ledger #1687 it imported over the HTTP door as an anonymous
+loopback caller, which only reads now, so an import answered `403` (ledger #2075); `--gonk` is
+now refused with exit 1, naming `--socket`.
 
 **The mapping.** `ikigai-ledger` took its model from kata, so most of this is one to one:
 
@@ -4031,8 +4024,8 @@ door's port unless a QUIC bind is named); `--quic-bind` moves QUIC alone.
 **Until 2026-10-12 the default was 1060.** What the move changes for a server already running:
 
 - **Clients name the new port.** A browser opens `http://localhost:1062/`; a QUIC client
-  connects to `quic://<host>:1062` and a `mount` line names it; `roborev file --gonk` and
-  `kata import --gonk` default to `http://127.0.0.1:1062`. Passkeys are registered to the
+  connects to `quic://<host>:1062` and a `mount` line names it; `roborev file` and
+  `kata import` file over the socket and name no port. Passkeys are registered to the
   relying party `localhost`, which carries no port, and the origin a sign-in is checked against
   follows the port the server is serving on.
 - **A server that must stay on 1060** says so: `gonk.port = 1060` (or `--port 1060`).

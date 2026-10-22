@@ -1,80 +1,95 @@
 //! `ikigai-gonk kata import`, end to end: the real binary, a `kata export` file written by
-//! hand from kata's export types (`tests/fixtures/kata-export.jsonl`), and gonk's HTTP door
-//! served in-process over a scratch in-memory store — the harness `tests/roborev.rs` uses.
+//! hand from kata's export types (`tests/fixtures/kata-export.jsonl`), and gonk's owner-only
+//! socket served in-process over a scratch in-memory store (ledger #2075) — the harness
+//! `tests/roborev.rs` uses.
 //!
 //! - [`an_export_becomes_items_comments_closes_and_links_once`] — the mapping, and a re-run
 //!   that changes nothing at all (every item's `updated` stamp is compared).
 //! - [`a_later_export_adds_what_is_new_to_items_already_filed`] — the run converges: comments
 //!   and links that arrive in a later export land on the items filed the first time.
-//! - [`a_ledger_the_door_does_not_grant_is_refused_plainly`] — the refusal names the grant.
+//!
+//! The real binary's own doors — a bridge filing over its socket, and its HTTP door still
+//! refusing the anonymous write — are `tests/bridge_identity_2075.rs`.
 
-use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 
+mod ready;
+
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
-use ikigai_gonk::grants::{grants_for, Authority};
-use ikigai_gonk::{compose, doors, quic};
+use ikigai_gonk::{compose, doors};
 use ikigai_store::DurableStore;
 
 const FIXTURE: &str = "tests/fixtures/kata-export.jsonl";
 
-/// The HTTP door as `main` builds it, but granting `ledger` read AND write to an anonymous
-/// loopback caller, which `main` no longer does (ledger #1687: anonymous is read-only), so the
-/// command's own filing logic stays tested. Returns the hub (to read back through) and the
-/// address.
-fn serve(ledger: &str) -> (Arc<Kernel>, SocketAddr, tempfile::TempDir) {
-    let grants = grants_for(ledger, Authority::Write).unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let listener = runtime
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let config = tempfile::tempdir().unwrap();
+/// The socket door as `main` builds it (`doors::door_kernel`, the owner's), served in-process
+/// over a scratch in-memory store: the door both bridges file through since ledger #2075.
+/// Returns the hub (to read back through) and where the command finds it.
+fn serve(_ledger: &str) -> (Arc<Kernel>, Served) {
     let hub = Arc::new(compose(
         DurableStore::in_memory().expect("an in-memory store"),
     ));
-    let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
-        quic::Layout::in_config_home(config.path()),
-        addr.port(),
-    ));
-    let face = Arc::new(ikigai_gonk::web::Web {
-        hub: Arc::clone(&hub),
-        ledgers: vec![ledger.to_string()],
-        browse_roots: Vec::new(),
-        passkeys: Arc::clone(&passkeys),
-        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
-        queue: ikigai_gonk::config::QueuePolicy::default(),
-        epochs: None,
-        toolbox: false,
-    });
-    let kernel = Arc::new(doors::http_kernel(
-        Arc::clone(&hub),
-        ikigai_gonk::web::space(face),
-    ));
-    let door = doors::HttpDoor {
-        anonymous: grants,
-        bind: addr,
-        passkeys: Some(passkeys),
-        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
-    };
-    let cap = doors::http_cap(door.clone());
-    let edge = doors::edge_config(door);
-    std::thread::spawn(move || {
-        runtime.block_on(ikigai_web::serve_with_listener(kernel, cap, listener, edge))
-    });
-    (hub, addr, config)
+    // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir may not.
+    let short = tempfile::Builder::new()
+        .prefix("gk")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = short.path().join("s");
+    let door = doors::door_kernel(Arc::clone(&hub));
+    let path = socket.clone();
+    std::thread::spawn(move || ikigai_ipc::serve(door, &path));
+    ready::socket(&socket);
+    let homes = tempfile::tempdir().unwrap();
+    std::fs::write(homes.path().join("config.toml"), "").unwrap();
+    (
+        hub,
+        Served {
+            socket,
+            homes,
+            _short: short,
+        },
+    )
 }
 
-/// `ikigai-gonk kata import <file> --gonk … --ledger …`.
-fn import(addr: SocketAddr, ledger: &str, file: &Path) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+/// Where a served socket is, and scratch homes, so nothing of this machine's gonk is read.
+struct Served {
+    socket: PathBuf,
+    homes: tempfile::TempDir,
+    _short: tempfile::TempDir,
+}
+
+impl Served {
+    /// The binary, told this socket and these homes.
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+        command.env("HOME", self.homes.path());
+        command
+    }
+
+    /// The arguments naming this socket and these homes.
+    fn flags(&self) -> Vec<std::ffi::OsString> {
+        let homes = self.homes.path();
+        vec![
+            "--socket".into(),
+            self.socket.clone().into(),
+            "--config".into(),
+            homes.join("config.toml").into(),
+            "--config-home".into(),
+            homes.into(),
+            "--data-home".into(),
+            homes.into(),
+        ]
+    }
+}
+
+/// `ikigai-gonk kata import <file> --socket … --ledger …`.
+fn import(gonk: &Served, ledger: &str, file: &Path) -> Output {
+    gonk.command()
         .args(["kata", "import"])
         .arg(file)
-        .arg("--gonk")
-        .arg(format!("http://127.0.0.1:{}", addr.port()))
+        .args(gonk.flags())
         .args(["--ledger", ledger])
         .output()
         .expect("run ikigai-gonk")
@@ -147,8 +162,8 @@ const ISSUE_3: &str = "01K6Z000000000000000000003";
 
 #[test]
 fn an_export_becomes_items_comments_closes_and_links_once() {
-    let (hub, addr, _config) = serve("kata");
-    let first = stdout(&import(addr, "kata", Path::new(FIXTURE)));
+    let (hub, gonk) = serve("kata");
+    let first = stdout(&import(&gonk, "kata", Path::new(FIXTURE)));
     assert!(first.contains("3 filed, 0 already there"), "{first}");
     assert!(
         first.contains("2 comment(s), 1 close(s), 3 link(s) added"),
@@ -239,7 +254,7 @@ fn an_export_becomes_items_comments_closes_and_links_once() {
 
     // ★ A re-run changes NOTHING: not one item's `updated` stamp, comment or link.
     let before = every_item(&hub, "kata");
-    let again = stdout(&import(addr, "kata", Path::new(FIXTURE)));
+    let again = stdout(&import(&gonk, "kata", Path::new(FIXTURE)));
     assert!(again.contains("0 filed, 3 already there"), "{again}");
     assert!(
         again.contains("0 comment(s), 0 close(s), 0 link(s) added"),
@@ -250,7 +265,7 @@ fn an_export_becomes_items_comments_closes_and_links_once() {
 
 #[test]
 fn a_later_export_adds_what_is_new_to_items_already_filed() {
-    let (hub, addr, _config) = serve("kata");
+    let (hub, gonk) = serve("kata");
     let full = std::fs::read_to_string(FIXTURE).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     // The earlier export: no comments and no links yet, and issue 0002 still open.
@@ -272,7 +287,7 @@ fn a_later_export_adds_what_is_new_to_items_already_filed() {
         .collect();
     let earlier_path = scratch.path().join("earlier.jsonl");
     std::fs::write(&earlier_path, earlier).unwrap();
-    let first = stdout(&import(addr, "kata", &earlier_path));
+    let first = stdout(&import(&gonk, "kata", &earlier_path));
     assert!(first.contains("3 filed"), "{first}");
     assert!(item_about(&hub, "kata", ISSUE_2)
         .lines()
@@ -280,7 +295,7 @@ fn a_later_export_adds_what_is_new_to_items_already_filed() {
         .unwrap()
         .contains("open"));
 
-    let later = stdout(&import(addr, "kata", Path::new(FIXTURE)));
+    let later = stdout(&import(&gonk, "kata", Path::new(FIXTURE)));
     assert!(later.contains("0 filed, 3 already there"), "{later}");
     assert!(
         later.contains("2 comment(s), 1 close(s), 3 link(s) added"),
@@ -292,28 +307,26 @@ fn a_later_export_adds_what_is_new_to_items_already_filed() {
 }
 
 /// `kata import --dry-run`, run once more with the flag.
-fn dry_run(addr: SocketAddr, ledger: &str, file: &Path) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+fn dry_run(gonk: &Served, ledger: &str, file: &Path) -> Output {
+    gonk.command()
         .args(["kata", "import"])
         .arg(file)
-        .arg("--gonk")
-        .arg(format!("http://127.0.0.1:{}", addr.port()))
+        .args(gonk.flags())
         .args(["--ledger", ledger, "--dry-run"])
         .output()
         .expect("run ikigai-gonk")
 }
 
 /// ★ Ledger #812: `--dry-run` does the READ half for real. Before, it never asked the ledger,
-/// so after a real import it still said `would file` for every issue, and it passed (exit 0) on
-/// a ledger the door does not grant. Now it reads each issue's key: it says `already`, reports
-/// exactly what a real run would add, writes nothing, and is refused where the real run is.
+/// so after a real import it still said `would file` for every issue. Now it reads each issue's
+/// key: it says `already`, reports exactly what a real run would add, and writes nothing.
 #[test]
 fn a_dry_run_reads_the_ledger_and_writes_nothing() {
-    let (hub, addr, _config) = serve("kata");
+    let (hub, gonk) = serve("kata");
     let scratch = tempfile::tempdir().unwrap();
 
     // An empty ledger: everything would be filed, and nothing is.
-    let fresh = stdout(&dry_run(addr, "kata", Path::new(FIXTURE)));
+    let fresh = stdout(&dry_run(&gonk, "kata", Path::new(FIXTURE)));
     assert!(
         fresh.contains("dry run, nothing written: 3 would be filed, 0 already there"),
         "{fresh}"
@@ -345,12 +358,12 @@ fn a_dry_run_reads_the_ledger_and_writes_nothing() {
         .collect();
     let earlier_path = scratch.path().join("earlier.jsonl");
     std::fs::write(&earlier_path, earlier).unwrap();
-    stdout(&import(addr, "kata", &earlier_path));
+    stdout(&import(&gonk, "kata", &earlier_path));
     let before = every_item(&hub, "kata");
 
     // The later export, dry: every issue is ALREADY there, and the convergence a real run
     // would do is reported exactly — and not done.
-    let later = stdout(&dry_run(addr, "kata", Path::new(FIXTURE)));
+    let later = stdout(&dry_run(&gonk, "kata", Path::new(FIXTURE)));
     assert!(
         later.contains("0 would be filed, 3 already there"),
         "{later}"
@@ -364,19 +377,12 @@ fn a_dry_run_reads_the_ledger_and_writes_nothing() {
     assert_eq!(every_item(&hub, "kata"), before, "a dry run wrote");
 
     // After the real run, the dry run has nothing left to do.
-    stdout(&import(addr, "kata", Path::new(FIXTURE)));
-    let done = stdout(&dry_run(addr, "kata", Path::new(FIXTURE)));
+    stdout(&import(&gonk, "kata", Path::new(FIXTURE)));
+    let done = stdout(&dry_run(&gonk, "kata", Path::new(FIXTURE)));
     assert!(
         done.contains("0 would be filed, 3 already there; 0 comment(s), 0 close(s), 0 link(s)"),
         "{done}"
     );
-
-    // And a ledger the door does not grant refuses the dry run as it refuses the real one.
-    let refused = dry_run(addr, "elsewhere", Path::new(FIXTURE));
-    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("403"), "{stderr}");
-    assert!(stderr.contains("gonk.http.ledger"), "{stderr}");
 }
 
 /// ★ The race the keyed append exists for (ledger #779, #810), with the importer's own code:
@@ -392,7 +398,7 @@ fn a_dry_run_reads_the_ledger_and_writes_nothing() {
 fn concurrent_imports_of_one_issue_file_it_once() {
     const IMPORTS: usize = 8;
     const ROUNDS: usize = 5;
-    let (hub, addr, _config) = serve("kata");
+    let (hub, gonk) = serve("kata");
     let scratch = tempfile::tempdir().unwrap();
     let meta = r#"{"kind":"meta","data":{"key":"export_version","value":"27"}}"#;
     for round in 0..ROUNDS {
@@ -405,10 +411,16 @@ fn concurrent_imports_of_one_issue_file_it_once() {
         let barrier = Arc::new(std::sync::Barrier::new(IMPORTS));
         let imports: Vec<_> = (0..IMPORTS)
             .map(|_| {
-                let (barrier, path) = (Arc::clone(&barrier), path.clone());
+                let barrier = Arc::clone(&barrier);
+                let mut command = gonk.command();
+                command
+                    .args(["kata", "import"])
+                    .arg(&path)
+                    .args(gonk.flags())
+                    .args(["--ledger", "kata"]);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    import(addr, "kata", &path)
+                    command.output().expect("run ikigai-gonk")
                 })
             })
             .collect();
@@ -443,42 +455,20 @@ fn concurrent_imports_of_one_issue_file_it_once() {
     }
 }
 
-#[test]
-fn a_ledger_the_door_does_not_grant_is_refused_plainly() {
-    let (hub, addr, _config) = serve("kata");
-    let refused = import(addr, "elsewhere", Path::new(FIXTURE));
-    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("403"), "{stderr}");
-    assert!(
-        stderr.contains("ledger #1687"),
-        "says anonymous is read-only: {stderr}"
-    );
-    assert!(
-        stderr.contains("gonk.http.ledger"),
-        "names the setting: {stderr}"
-    );
-    let all = source(&hub, "urn:iki:ledger:kata:items", &[("status", "all")]);
-    assert!(
-        !all.contains("Stop the loop"),
-        "nothing filed anywhere: {all}"
-    );
-}
-
 /// The DEFAULT ledger's names have no ledger segment (`urn:iki:ledger:item:key:…`), so the key
-/// lookup through the door is a different path there: the import, the re-run and the dry run
+/// lookup is a different name there: the import, the re-run and the dry run
 /// must work on it exactly as on a named ledger.
 #[test]
 fn the_default_ledger_is_keyed_the_same_way() {
-    let (_hub, addr, _config) = serve("default");
-    let first = stdout(&import(addr, "default", Path::new(FIXTURE)));
+    let (_hub, gonk) = serve("default");
+    let first = stdout(&import(&gonk, "default", Path::new(FIXTURE)));
     assert!(first.contains("3 filed, 0 already there"), "{first}");
-    let again = stdout(&import(addr, "default", Path::new(FIXTURE)));
+    let again = stdout(&import(&gonk, "default", Path::new(FIXTURE)));
     assert!(again.contains("0 filed, 3 already there"), "{again}");
     assert!(
         again.contains("0 comment(s), 0 close(s), 0 link(s) added"),
         "{again}"
     );
-    let dry = stdout(&dry_run(addr, "default", Path::new(FIXTURE)));
+    let dry = stdout(&dry_run(&gonk, "default", Path::new(FIXTURE)));
     assert!(dry.contains("0 would be filed, 3 already there"), "{dry}");
 }

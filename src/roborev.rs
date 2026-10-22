@@ -3,7 +3,7 @@
 //! [roborev](https://github.com/kenn-io/roborev) reviews each commit with a coding agent and
 //! fires `[[hooks]]` on its events. This is the command such a hook runs: it reads the
 //! review roborev hands it, and files **one ledger item per finding** into a named ledger on
-//! a running gonk, over the HTTP door, so every finding can be triaged, labeled, linked,
+//! a running gonk, over its owner-only socket ([`crate::bridge`]), so every finding can be triaged, labeled, linked,
 //! claimed and closed here, and shows up on browse's page for the file it is about.
 //!
 //! # What roborev hands a hook (read from its source, `kenn-io/roborev` 2026-10-05)
@@ -53,21 +53,21 @@
 //!
 //! # Authority
 //!
-//! The HTTP door grants an anonymous loopback caller the READ tokens of the ledgers listed in
-//! `gonk.http.ledger`, and nothing else (`crate::doors`). ⚠ Since ledger #1687 that caller
-//! writes nothing, and this command files through that door alone, so against a gonk from that
-//! release on a dry run works and filing answers 403; filing again needs a signed-in or socket
-//! path this command does not have yet. `ikigai-gonk grants <ledger> write` prints them (`urn:cap:ledger:write:<ledger>` and its siblings). A ledger the door does not
-//! grant answers 403, and this command says so and exits 1.
+//! The filing runs over the running gonk's owner-only socket, whose capability is the owner's
+//! ([`crate::bridge`], ledger #2075): a roborev hook runs as the user who runs gonk, on its
+//! machine. Through ledger #1687 it filed over the HTTP door as an anonymous loopback caller;
+//! that caller only reads now, so `--gonk` is refused, naming `--socket`. Every item is filed
+//! `author=roborev`. A `--dry-run` touches no gonk at all.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::path::Path;
 
-use ikigai_ledger::json::{Answer, MEDIA_TYPE as JSON, SCHEMA};
+use ikigai_ledger::json::Answer;
 use ikigai_ledger::Ledger;
-use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
+
+use crate::bridge::{no_http_door, Socket};
+use crate::config::Flags;
 
 /// The severities roborev's schema allows, most severe first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -368,10 +368,11 @@ pub fn title(problem: &str) -> String {
 }
 
 /// Everything `ikigai-gonk roborev file` was told.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct FileArgs {
-    /// `--gonk`: the HTTP door, `http://<loopback host>:<port>`.
-    pub gonk: String,
+    /// `--socket`, `--config`, `--config-home`, `--data-home`: where the running gonk's
+    /// owner-only socket is, and which `config.toml` says so.
+    pub flags: Flags,
     /// `--ledger`: the ledger to file into.
     pub ledger: String,
     /// `--root`: the browse root name the file IRIs are under (roborev's `{repo_name}`
@@ -400,9 +401,9 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
         Some(other) => return Err(format!("roborev: `{other}` is not a subcommand (file)")),
         None => return Err("roborev: expected `file`".to_string()),
     }
-    let (mut gonk, mut ledger, mut root, mut findings) = (None, None, None, None);
+    let (mut ledger, mut root, mut findings) = (None, None, None);
     let mut out = FileArgs {
-        gonk: String::new(),
+        flags: Flags::default(),
         ledger: String::new(),
         root: String::new(),
         findings: String::new(),
@@ -419,7 +420,11 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
                 .ok_or_else(|| format!("roborev file: {flag} needs a value"))
         };
         match flag.as_str() {
-            "--gonk" => gonk = Some(value()?),
+            "--gonk" => return Err(no_http_door("roborev file")),
+            "--socket" => out.flags.socket = Some(value()?),
+            "--config" => out.flags.config = Some(value()?.into()),
+            "--config-home" => out.flags.config_home = Some(value()?.into()),
+            "--data-home" => out.flags.data_home = Some(value()?.into()),
             "--ledger" => ledger = Some(value()?),
             "--root" => root = Some(value()?),
             "--findings" => findings = Some(value()?),
@@ -440,7 +445,6 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
     let required = |value: Option<String>, flag: &str| {
         value.ok_or_else(|| format!("roborev file: {flag} is required"))
     };
-    out.gonk = required(gonk, "--gonk")?;
     out.ledger = required(ledger, "--ledger")?;
     out.root = required(root, "--root")?;
     out.findings = required(findings, "--findings")?;
@@ -451,7 +455,6 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<FileArgs, St
             out.root
         ));
     }
-    Door::parse(&out.gonk)?;
     Ok(out)
 }
 
@@ -536,10 +539,11 @@ pub enum Outcome {
     BelowThreshold(Severity),
 }
 
-/// Run `roborev file`: parse, plan, then check and file each finding in turn. Prints one
-/// line per finding to `out`. A refusal or an unreachable door stops it with an error; the
-/// findings filed before that stay filed, and running it again skips them.
-pub fn run(args: &FileArgs, out: &mut impl Write) -> Result<Vec<Outcome>, String> {
+/// Run `roborev file`: parse, plan, then file each finding in turn over the socket at
+/// `socket`, which is dialed only when there is something to file. Prints one line per
+/// finding to `out`. A refusal or an unreachable socket stops it with an error; the findings
+/// filed before that stay filed, and running it again skips them.
+pub fn run(args: &FileArgs, socket: &Path, out: &mut impl Write) -> Result<Vec<Outcome>, String> {
     let markdown = if args.findings == "-" {
         let mut text = String::new();
         std::io::stdin()
@@ -559,8 +563,8 @@ pub fn run(args: &FileArgs, out: &mut impl Write) -> Result<Vec<Outcome>, String
         }
         Review::Findings(findings) => findings,
     };
-    let door = Door::parse(&args.gonk)?;
     let ledger = Ledger::parse(&args.ledger).map_err(|e| e.to_string())?;
+    let mut gonk = None;
     let mut outcomes = Vec::new();
     for skipped in findings.iter().filter(|f| f.severity < args.min_severity) {
         let _ = writeln!(
@@ -587,12 +591,12 @@ pub fn run(args: &FileArgs, out: &mut impl Write) -> Result<Vec<Outcome>, String
         }
         // ONE request: the ledger checks the key and files in the same store update, so two
         // hooks racing on this finding cannot both file it.
-        let answer: Answer = door.json(
-            "POST",
-            &path_of(&ledger, "append"),
-            &planned.args,
-            &planned.content,
-        )?;
+        let gonk = match &mut gonk {
+            Some(gonk) => gonk,
+            None => gonk.insert(Socket::connect(socket)?),
+        };
+        let answer: Answer =
+            gonk.sink_json(&ledger.resource("append"), &planned.args, &planned.content)?;
         let item = answer
             .item
             .display
@@ -624,207 +628,6 @@ pub fn run(args: &FileArgs, out: &mut impl Write) -> Result<Vec<Outcome>, String
     Ok(outcomes)
 }
 
-/// The door's URL path for one of a ledger's resources: the IRI with `urn:` dropped and
-/// every `:` a `/`, which is the mapping `ikigai-web` reverses.
-pub(crate) fn path_of(ledger: &Ledger, action: &str) -> String {
-    let iri = ledger.resource(action);
-    format!("/{}", iri.trim_start_matches("urn:").replace(':', "/"))
-}
-
-/// `?name=value&…`, every value percent-encoded.
-pub(crate) fn encode(args: &[(&str, String)]) -> String {
-    let query = args
-        .iter()
-        .map(|(name, value)| format!("{name}={}", ikigai_fn::html::url_segment(value)))
-        .collect::<Vec<_>>()
-        .join("&");
-    format!("?{query}")
-}
-
-/// gonk's HTTP door, as `--gonk` names it.
-///
-/// Loopback names only, because the door grants nothing to any other `Host` (DNS
-/// rebinding, `crate::doors`): an address this command could reach and gonk would refuse
-/// is a misconfiguration to name now, not a 403 to explain later. Plain HTTP only, which
-/// is all the door speaks. `kata import` ([`crate::kata`]) speaks through it too.
-#[derive(Debug)]
-pub(crate) struct Door {
-    host: String,
-    port: u16,
-}
-
-impl Door {
-    pub(crate) fn parse(url: &str) -> Result<Door, String> {
-        let bad = |why: &str| {
-            format!(
-                "--gonk `{url}`: {why} (expected http://127.0.0.1:{})",
-                crate::config::DEFAULT_PORT
-            )
-        };
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| bad("only http:// — the door is plain HTTP on loopback"))?;
-        let rest = rest.trim_end_matches('/');
-        let (host, port) = rest.rsplit_once(':').ok_or_else(|| bad("no port"))?;
-        let port: u16 = port.parse().map_err(|_| bad("the port is not a number"))?;
-        if !["localhost", "127.0.0.1", "[::1]"].contains(&host) {
-            return Err(bad(
-                "gonk's HTTP door grants nothing to a non-loopback Host, so only localhost, \
-                 127.0.0.1 or [::1]",
-            ));
-        }
-        Ok(Door {
-            host: host.to_string(),
-            port,
-        })
-    }
-
-    /// One request in the plain face; the body of a 2xx, or an error naming the refusal.
-    pub(crate) fn call(
-        &self,
-        method: &str,
-        path: &str,
-        query: &str,
-        body: &str,
-    ) -> Result<String, String> {
-        let (status, text) = self.send(method, path, query, body, "text/plain")?;
-        refused(method, path, status, &text)?;
-        Ok(text)
-    }
-
-    /// One request in the ledger's JSON face (`as=application/json`, schema 1), read into
-    /// its type: the machine contract, where the plain face is for people.
-    pub(crate) fn json<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        path: &str,
-        args: &[(&str, String)],
-        body: &str,
-    ) -> Result<T, String> {
-        self.lookup(method, path, args, body)?.ok_or_else(|| {
-            format!("gonk answered {method} {path} with 404: there is nothing at that name")
-        })
-    }
-
-    /// [`Door::json`], with a 404 answered as `None`: how a read asks "is there one?".
-    pub(crate) fn lookup<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        path: &str,
-        args: &[(&str, String)],
-        body: &str,
-    ) -> Result<Option<T>, String> {
-        let mut args = args.to_vec();
-        args.push(("as", JSON.to_string()));
-        let (status, text) = self.send(method, path, &encode(&args), body, JSON)?;
-        if status == 404 {
-            return Ok(None);
-        }
-        refused(method, path, status, &text)?;
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-            format!("gonk answered {method} {path} with something that is not JSON ({e}): {text}")
-        })?;
-        let schema = value.get("schema").and_then(serde_json::Value::as_u64);
-        if schema != Some(u64::from(SCHEMA)) {
-            return Err(format!(
-                "gonk answered {method} {path} in the ledger's JSON face schema {}, and this \
-                 build reads schema {SCHEMA}: rebuild ikigai-gonk against the ledger that \
-                 server runs",
-                schema.map_or_else(|| "(none)".to_string(), |s| s.to_string())
-            ));
-        }
-        serde_json::from_value(value)
-            .map(Some)
-            .map_err(|e| format!("gonk's answer to {method} {path} is not the shape schema {SCHEMA} promises ({e}): {text}"))
-    }
-
-    /// One request, `Connection: close`: the status and the body.
-    fn send(
-        &self,
-        method: &str,
-        path: &str,
-        query: &str,
-        body: &str,
-        accept: &str,
-    ) -> Result<(u16, String), String> {
-        let target = format!(
-            "{}:{}",
-            self.host.trim_matches(|c| c == '[' || c == ']'),
-            self.port
-        );
-        let unreachable = |e: std::io::Error| {
-            format!(
-                "cannot reach gonk at http://{}:{}: {e}",
-                self.host, self.port
-            )
-        };
-        let addrs = target.to_socket_addrs().map_err(unreachable)?;
-        let mut last = None;
-        let mut stream = None;
-        for addr in addrs {
-            match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(e) => last = Some(e),
-            }
-        }
-        let mut stream = stream.ok_or_else(|| {
-            unreachable(last.unwrap_or_else(|| std::io::Error::other("no address")))
-        })?;
-        let timeout = Some(Duration::from_secs(30));
-        stream.set_read_timeout(timeout).map_err(unreachable)?;
-        stream.set_write_timeout(timeout).map_err(unreachable)?;
-        let request = format!(
-            "{method} {path}{query} HTTP/1.1\r\nHost: {}:{}\r\nAccept: {accept}\r\n\
-             Content-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\
-             Connection: close\r\n\r\n{body}",
-            self.host,
-            self.port,
-            body.len()
-        );
-        stream.write_all(request.as_bytes()).map_err(unreachable)?;
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).map_err(unreachable)?;
-        let raw = String::from_utf8_lossy(&raw);
-        let (head, mut text) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
-        let status: u16 = head
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .ok_or_else(|| format!("gonk answered {method} {path} with no status line"))?;
-        let length = head.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        });
-        if let Some(length) = length.filter(|&l| l <= text.len()) {
-            text = &text[..length];
-        }
-        Ok((status, text.to_string()))
-    }
-}
-
-/// `Ok` for a 2xx; otherwise the error, and for a 403 the grant that would have allowed it.
-fn refused(method: &str, path: &str, status: u16, text: &str) -> Result<(), String> {
-    match status {
-        200..=299 => Ok(()),
-        403 => Err(format!(
-            "gonk refused {method} {path} (403): {}. The HTTP door grants an anonymous \
-             loopback caller the READ tokens of the ledgers in `gonk.http.ledger` and nothing \
-             else; since ledger #1687 it writes nothing, and this command files through that \
-             door alone, so it can read (a dry run) but not file into a gonk from that release \
-             on",
-            text.trim()
-        )),
-        _ => Err(format!(
-            "gonk answered {method} {path} with {status}: {}",
-            text.trim()
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,8 +646,8 @@ mod tests {
         parse_args(
             [
                 "file",
-                "--gonk",
-                "http://127.0.0.1:1060",
+                "--socket",
+                "/tmp/g.sock",
                 "--ledger",
                 "reviews",
                 "--root",
@@ -1005,45 +808,14 @@ mod tests {
     }
 
     #[test]
-    fn paths_and_queries() {
-        assert_eq!(
-            encode(&[
-                ("key", "urn:kata:issue:01J".into()),
-                ("about", "a b".into())
-            ]),
-            "?key=urn%3Akata%3Aissue%3A01J&about=a%20b"
-        );
-        assert_eq!(
-            path_of(&Ledger::parse("default").unwrap(), "items"),
-            "/iki/ledger/items"
-        );
-        assert_eq!(
-            path_of(&Ledger::parse("acme").unwrap(), "append"),
-            "/iki/ledger/acme/append"
-        );
-    }
-
-    #[test]
-    fn the_door_is_loopback_http() {
-        assert!(Door::parse("http://127.0.0.1:1060").is_ok());
-        assert!(Door::parse("http://localhost:1060/").is_ok());
-        assert!(Door::parse("http://[::1]:1060").is_ok());
-        assert!(Door::parse("https://127.0.0.1:1060").is_err());
-        assert!(Door::parse("http://gonk.example:1060")
-            .unwrap_err()
-            .contains("non-loopback"));
-        assert!(Door::parse("http://127.0.0.1").is_err());
-    }
-
-    #[test]
     fn the_arguments() {
         let parsed = args();
         assert_eq!(parsed.min_severity, Severity::Medium);
         assert_eq!(parsed.sha.as_deref(), Some("abc123"));
         let base = [
             "file",
-            "--gonk",
-            "http://127.0.0.1:1",
+            "--socket",
+            "/tmp/g.sock",
             "--ledger",
             "x",
             "--root",
@@ -1054,8 +826,8 @@ mod tests {
         let bad_root = parse_args(
             [
                 "file",
-                "--gonk",
-                "http://127.0.0.1:1",
+                "--socket",
+                "/tmp/g.sock",
                 "--ledger",
                 "x",
                 "--root",
@@ -1072,8 +844,8 @@ mod tests {
         let empty = parse_args(
             [
                 "file",
-                "--gonk",
-                "http://127.0.0.1:1",
+                "--socket",
+                "/tmp/g.sock",
                 "--ledger",
                 "x",
                 "--root",
@@ -1088,5 +860,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.sha, None);
+        assert_eq!(empty.flags.socket.as_deref(), Some("/tmp/g.sock"));
+        // `--gonk` named the HTTP door, which files nothing since ledger #1687: refused, and
+        // the refusal says what to pass instead.
+        let http = parse_args(
+            [
+                "file",
+                "--gonk",
+                "http://127.0.0.1:1062",
+                "--ledger",
+                "x",
+                "--root",
+                "r",
+                "--findings",
+                "-",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err();
+        assert!(http.contains("--socket"), "{http}");
     }
 }

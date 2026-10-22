@@ -136,7 +136,9 @@ fn main() {
             &flags,
         ),
         Command::RoborevFile(args) => {
-            ikigai_gonk::roborev::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
+            let socket = read_settings(&args.flags).socket;
+            ikigai_gonk::roborev::run(&args, &socket, &mut std::io::stdout())
+                .unwrap_or_else(|e| fail(&e));
         }
         Command::Checkout(args) => {
             // The same two homes `serve` takes (ledger #918), resolved by the same function.
@@ -153,7 +155,9 @@ fn main() {
             }
         }
         Command::KataImport(args) => {
-            ikigai_gonk::kata::run(&args, &mut std::io::stdout()).unwrap_or_else(|e| fail(&e));
+            let socket = read_settings(&args.flags).socket;
+            ikigai_gonk::kata::run(&args, &socket, &mut std::io::stdout())
+                .unwrap_or_else(|e| fail(&e));
         }
         Command::BackfillKeys(args) => backfill_keys(&args),
         Command::FindingsFile(args) => findings_file(&args),
