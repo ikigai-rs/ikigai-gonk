@@ -78,6 +78,7 @@
               <xsl:apply-templates select="view:browse"/>
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
+              <xsl:apply-templates select="view:views-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <xsl:apply-templates select="view:toolbox-link"/>
               <div id="auth" class="auth">
@@ -305,6 +306,7 @@
       <xsl:when test="@view = 'layers-wait'"><xsl:call-template name="layers-wait"/></xsl:when>
       <xsl:when test="@view = 'layers-count'"><xsl:call-template name="layers-count"/></xsl:when>
       <xsl:when test="@view = 'layers-say'"><xsl:call-template name="layers-say"/></xsl:when>
+      <xsl:when test="@view = 'views'"><xsl:call-template name="views"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
            only its own element, which is what makes a chunk's rows render as the page's. -->
@@ -444,6 +446,12 @@
        with its own script and CSP, so this is an ordinary link: a full navigation, never a swap. -->
   <xsl:template match="view:toolbox-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Toolbox</a>
+  </xsl:template>
+
+  <!-- The Views page (ledger #2099, src/views_page.rs), offered only to a caller whose grant
+       reads the views declaration (src/web.rs::nav_with). An ordinary link, beside Layers. -->
+  <xsl:template match="view:views-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Views</a>
   </xsl:template>
 
   <xsl:template name="layers-count">
@@ -694,6 +702,125 @@
     <xsl:if test="@rows">
       <ul id="layers-list" class="layer-list" hx-swap-oob="true"><xsl:apply-templates select="view:layer-row"/></ul>
     </xsl:if>
+  </xsl:template>
+
+  <!-- ============================================================ views -->
+
+  <!-- /views (ledger #2099, src/views_page.rs): the named views IN FORCE, the views space's
+       status, and for a caller holding the declaration's write token one form per view and
+       one to add a view. Every form is a plain POST to /views/save answered with this page and
+       the verdict at its top, so it works the same without a script. A caller without the
+       token gets no forms at all, not disabled ones. -->
+  <xsl:template name="views">
+    <section class="panel views" aria-labelledby="views-title">
+      <h1 id="views-title"><xsl:value-of select="@title"/></h1>
+      <xsl:apply-templates select="view:flash" mode="announce"/>
+      <p class="note"><xsl:value-of select="@intro"/></p>
+      <xsl:apply-templates select="view:views-status"/>
+      <xsl:apply-templates select="view:notice"/>
+      <h2 id="views-list-title">Views in force</h2>
+      <xsl:if test="@empty"><p class="empty"><xsl:value-of select="@empty"/></p></xsl:if>
+      <xsl:if test="@listed = 'true'">
+        <div class="table-wrap">
+          <table aria-labelledby="views-list-title">
+            <thead>
+              <tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Target</th><th scope="col">Resolves at</th></tr>
+            </thead>
+            <tbody>
+              <xsl:apply-templates select="view:view-rule"/>
+            </tbody>
+          </table>
+        </div>
+      </xsl:if>
+      <xsl:if test="@editable = 'true'">
+        <xsl:if test="@listed = 'true'">
+          <h2 id="views-edit-title">Change or remove a view</h2>
+          <xsl:apply-templates select="view:view-rule" mode="edit"/>
+        </xsl:if>
+        <xsl:apply-templates select="view:views-add"/>
+      </xsl:if>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:views-status">
+    <h2 id="views-status-title">Status</h2>
+    <dl class="meta" aria-labelledby="views-status-title">
+      <dt>In force</dt>
+      <dd><xsl:value-of select="@in-force"/><xsl:if test="@when"><xsl:text>, bound </xsl:text><xsl:value-of select="@when"/></xsl:if></dd>
+      <dt>Last refusal</dt>
+      <dd><xsl:value-of select="@refusal"/><xsl:if test="@refused-at"><xsl:text> (at </xsl:text><code class="iri"><xsl:value-of select="@refused-at"/></code>)</xsl:if></dd>
+      <dt>Stored</dt>
+      <dd><xsl:value-of select="@stored"/></dd>
+    </dl>
+  </xsl:template>
+
+  <xsl:template match="view:view-rule">
+    <tr>
+      <th scope="row" class="iri">
+        <xsl:choose>
+          <xsl:when test="@href"><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a></xsl:when>
+          <xsl:otherwise><xsl:value-of select="@name"/></xsl:otherwise>
+        </xsl:choose>
+      </th>
+      <td><xsl:value-of select="@kind"/></td>
+      <td class="iri"><xsl:value-of select="@target"/></td>
+      <td><xsl:value-of select="@at"/></td>
+    </tr>
+  </xsl:template>
+
+  <!-- One view's form. Its legend names the view, and both buttons are described by it
+       (aria-describedby), so a list of buttons read alone still says which view each is for.
+       Enter in a field presses the first button, Save. -->
+  <xsl:template match="view:view-rule" mode="edit">
+    <form class="panel view-form" method="post">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <fieldset>
+        <legend><xsl:attribute name="id">view-<xsl:value-of select="@index"/></xsl:attribute><xsl:value-of select="@name"/></legend>
+        <input type="hidden" name="base"><xsl:attribute name="value"><xsl:value-of select="@base"/></xsl:attribute></input>
+        <input type="hidden" name="was"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
+        <input type="hidden" name="was-kind"><xsl:attribute name="value"><xsl:value-of select="@kind"/></xsl:attribute></input>
+        <div class="grid">
+          <label>Name, after urn:iki:gonk:view:
+            <input type="text" name="name" required="required" autocomplete="off" spellcheck="false"><xsl:attribute name="value"><xsl:value-of select="@local"/></xsl:attribute></input>
+          </label>
+          <label>Target
+            <input type="text" name="target" required="required" autocomplete="off" spellcheck="false"><xsl:attribute name="value"><xsl:value-of select="@target"/></xsl:attribute></input>
+          </label>
+        </div>
+        <fieldset class="row kind">
+          <legend>Kind</legend>
+          <label><input type="radio" name="kind" value="exact"><xsl:if test="@kind = 'exact'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if></input> Exact: this one name</label>
+          <label><input type="radio" name="kind" value="prefix"><xsl:if test="@kind = 'prefix'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if></input> Prefix: every name that starts with it</label>
+        </fieldset>
+        <p class="row">
+          <button type="submit" name="op" value="change"><xsl:attribute name="aria-describedby">view-<xsl:value-of select="@index"/></xsl:attribute>Save</button>
+          <button type="submit" name="op" value="remove" class="quiet"><xsl:attribute name="aria-describedby">view-<xsl:value-of select="@index"/></xsl:attribute>Remove</button>
+        </p>
+      </fieldset>
+    </form>
+  </xsl:template>
+
+  <xsl:template match="view:views-add">
+    <form class="panel view-form" method="post" aria-labelledby="views-add-title">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <h2 id="views-add-title">Add a view</h2>
+      <input type="hidden" name="op" value="add"/>
+      <input type="hidden" name="base"><xsl:attribute name="value"><xsl:value-of select="@base"/></xsl:attribute></input>
+      <div class="grid">
+        <label>Name, after <xsl:value-of select="@prefix"/>
+          <input type="text" name="name" required="required" autocomplete="off" spellcheck="false"/>
+        </label>
+        <label>Target
+          <input type="text" name="target" required="required" autocomplete="off" spellcheck="false"/>
+        </label>
+      </div>
+      <fieldset class="row kind">
+        <legend>Kind</legend>
+        <label><input type="radio" name="kind" value="exact" checked="checked"/> Exact: this one name</label>
+        <label><input type="radio" name="kind" value="prefix"/> Prefix: every name that starts with it</label>
+      </fieldset>
+      <p class="row"><button type="submit">Add view</button></p>
+    </form>
   </xsl:template>
 
   <!-- ======================================================== browse shell -->

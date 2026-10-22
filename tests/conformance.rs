@@ -305,7 +305,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 21] = [
+const WEB_IDS: [&str; 23] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -327,6 +327,9 @@ const WEB_IDS: [&str; 21] = [
     "gonk-passkey",
     "gonk-asset",
     "gonk-render-rules",
+    // The Views page and its form adapter (ledger #2099).
+    "gonk-page-views",
+    "gonk-views-save",
 ];
 
 fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {

@@ -73,6 +73,7 @@ pub mod toolbox;
 pub mod trigger;
 pub mod verdict;
 pub mod views;
+pub mod views_page;
 pub mod walk;
 pub mod watch;
 pub mod web;

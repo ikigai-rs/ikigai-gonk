@@ -508,6 +508,7 @@ there.
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
 | `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
 | `/view/{name}` | `urn:iki:gonk:view:{name}` | a named view: whatever its target answers, under your own grant (see "Named views") |
+| `/views` · `POST /views/save` | `urn:iki:gonk:page:views` · `urn:iki:gonk:views:save` | the Views page: the named views in force and the views space's status, and with the declaration's write token a form to add, change or remove each (see "The Views page") |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
@@ -2981,6 +2982,37 @@ What holds, and what each costs:
   not list view names, and a view's `Meta` describes core's forwarder.
 - The rebuild runs under the host's root capability (ledger #2048: a narrowed listener does
   not hear a declaration it could not cache). `tests/views_2006.rs` holds all of it.
+
+### The Views page (ledger #2099)
+
+The header's **Views**, beside Layers, is `/views`: every view IN FORCE (its name, exact or
+prefix, its target and where it resolves), each exact name a link to `/view/{name}`, and the
+status door's state: the declaration in force, when it bound, the last refusal and why, and
+whether the declaration in the store is the one in force. The header offers it to a caller whose
+grant reads the declaration (`urn:cap:store:read:graph:urn:iki:gonk:views:declaration`); anyone
+else is not shown the link, and `/views` answers them a `403` naming that token.
+
+With the write token as well (`urn:cap:store:write:graph:urn:iki:gonk:views:declaration`) the
+page has a form per view (its name after `urn:iki:gonk:view:`, its target, exact or prefix; Save
+and Remove) and one to add a view. Without it the page has no forms at all, and a post made
+anyway is refused by the declaration's own contract and the store beneath it. Neither token is
+in any grant the commands write: add them to a passkey's grant in `gonk/grants.json` by hand.
+
+- **A save rewrites the WHOLE declaration**, built by core (`Topology::to_turtle`) from the
+  views in force with one added, changed or removed, and writes it through the declaration's own
+  Sink under your capability. Then it waits (up to five seconds) for the views space to report
+  that declaration as in force or refused, and the page it answers with says which and why.
+- **A refused declaration changes nothing.** The page lists what is in force, so after a refusal
+  it still lists the old views and says the stored declaration was refused, and why; the next
+  save starts from the views in force and replaces the refused text.
+- **A form carries the digest of the declaration it was drawn from.** If the declaration has
+  changed since (another tab, another person, the socket), nothing is written and the page says
+  so.
+- **The page never edits what it cannot show.** An arrangement other than one alias over an empty
+  endpoint space (written over the socket) is listed, and the page says to change it there.
+- Through the page every name is under `urn:iki:gonk:view:`, so gonk's check cannot refuse a
+  save; a refusal the page reports comes from core (a declaration it cannot build).
+  `tests/views_page_2099.rs` holds all of it.
 
 ## The three doors
 
