@@ -1173,6 +1173,8 @@ fn routes() -> Vec<Route> {
             crate::layers_view::COUNT_IRI,
         ),
         route(crate::layers_view::PAGE_PATH, crate::layers_view::PAGE_IRI),
+        // Onboarding (ledger #2009): read-only; approval is the owner's socket alone.
+        route(crate::onboard::PAGE_PATH, crate::onboard::PAGE_IRI),
         route("/layers/{layer}", crate::layers_view::LAYER_PAGE_TEMPLATE),
         route("/layers/{layer}/say", crate::layers_view::SAY_TEMPLATE),
         // ★ A layer file is someone else's bytes: served as `application/octet-stream`, and
@@ -1198,7 +1200,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 18] = [
+pub const GONK_PATHS: [&str; 19] = [
     "/",
     "/l",
     "/act",
@@ -1212,6 +1214,7 @@ pub const GONK_PATHS: [&str; 18] = [
     "/queue",
     "/browse",
     "/layers",
+    crate::onboard::PAGE_PATH,
     // The RDF Toolbox's rows ([`crate::toolbox::routes`]), when `gonk.toolbox.dist` adds them.
     crate::toolbox::PATH,
     "/iki/",

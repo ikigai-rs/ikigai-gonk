@@ -58,6 +58,7 @@ pub mod layers_view;
 pub mod mirror;
 pub mod mount;
 pub mod nl;
+pub mod onboard;
 pub mod queue;
 pub mod quic;
 pub mod refusal;
@@ -136,6 +137,10 @@ pub mod spaces {
     /// ledger [#2006](http://localhost:1062/l/default/item/2006)). Not the views themselves:
     /// those are core's dynamic space, `urn:iki:space:dynamic:views`, last in the hub.
     pub const VIEWS: &str = "urn:iki:gonk:space:views";
+    /// The onboarding controller's resources ([`onboard::Onboard::space`](crate::onboard::Onboard::space),
+    /// ledger [#2009](http://localhost:1062/l/default/item/2009)), bound only when a
+    /// `gonk.onboard` line configures it.
+    pub const ONBOARD: &str = "urn:iki:gonk:space:onboard";
 
     /// One of the constants above as an [`Iri`].
     pub fn iri(name: &str) -> Iri {

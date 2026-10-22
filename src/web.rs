@@ -534,6 +534,15 @@ fn nav_with(
         }
         out.push_str(&element("views-link", &attributes, ""));
     }
+    // ★ Onboarding (ledger [#2009](http://localhost:1062/l/default/item/2009)), when this server
+    // onboards nodes and the caller's grant reads the page (`urn:cap:gonk:onboard:read`).
+    if crate::onboard::offers_page(web, capability) {
+        out.push_str(&element(
+            "onboard-link",
+            &[("href", crate::onboard::PAGE_PATH)],
+            "",
+        ));
+    }
     // ★ The RDF Toolbox (ledger [#2021](http://localhost:1062/l/default/item/2021)), when this
     // server serves one. No grant gates it: the door adds the toolbox's file reads to the
     // anonymous grant whenever the build is configured (`main`, `Toolbox::grants`), and a

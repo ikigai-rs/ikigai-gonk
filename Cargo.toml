@@ -1176,6 +1176,28 @@ ikigai-toolbox = "0.1.0"
 # mounts the same version. Its `ikigai-core` floor (0.1.89) is below this manifest's.
 # `"0.1.9"` is `<0.2.0`.
 ikigai-fs = "0.1.9"
+# ★ Onboarding a node by itself (ledger #2009, `crate::onboard`): the controller's tools beside
+# the controller key, and gonk's own half of applying a signed entitlement.
+# - `ikigai-layers` as a PARTICIPANT (`default-features = false`, no layer host, so no second
+#   store or RocksDB in this graph): `onboard::signing_bytes_of`, the one definition of the bytes an
+#   entitlement's signature covers, which the layer host verifies with. Hand-copying it here would
+#   be a second implementation of a byte-exact rule. 0.4.0 is where `onboard` arrives, so it is the
+#   true floor; `"0.4.0"` is `<0.5.0`. The tests below take the host (the dev-dependency).
+ikigai-layers = { version = "0.4.0", default-features = false }
+# `urn:sign:sign` and `urn:sign:verify`: the controller signs an entitlement and gonk verifies one
+# with them, in a kernel of their own that no door binds (`onboard::Signer`). 0.3.2 is the release
+# ikigai-layers 0.4.0 verifies with, so both sides share one signature-graph format.
+# `"0.3.2"` is `<0.4.0`.
+ikigai-sign = "0.3.2"
+# The controller key's keystore (the Keychain on a Mac) and `urn:secret:generate`, which mints it
+# (`ikigai-gonk onboard init`). The server reads the key through the `Backend` trait for the one
+# signing call and never serves `urn:secret:*` at any door. 0.2.0 is the published head and the
+# `generate` the init calls; `"0.2.0"` is `<0.3.0`.
+ikigai-secret = "0.2.0"
+# The pairing code's proof: HMAC-SHA256 (RFC 2104) over the fingerprint, checked in constant time
+# (`Mac::verify_slice`), over the `sha2` above. Already in this graph (through the QUIC stack), so
+# this adds an edge, not a package. `"0.12.1"` is `<0.13.0`.
+hmac = "0.12.1"
 
 [dev-dependencies]
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
@@ -1216,7 +1238,10 @@ ikigai-a11y = "0.2.1"
 # state at rest, so `Host::open` takes a `StateKey`: each test mints an age identity (`age` below)
 # and loads it, as the layers crate's own tests do. `"0.3.0"` is `<0.4.0`.
 # 0.3.1 (ledger #2042): bounds Turtle nesting at 64 levels before participant-side parsing.
-ikigai-layers = "0.3.1"
+# ★ 0.4.0 (ledger #2009): the onboarding lobby and the grants layer, which
+# `tests/onboard_2009.rs` drives end to end. The same version as the normal dependency above (a
+# participant there; the host here, so a test build unifies to the host). `"0.4.0"` is `<0.5.0`.
+ikigai-layers = "0.4.0"
 # An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
 # own `age` floor).
 age = "0.11.1"

@@ -79,6 +79,7 @@
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
               <xsl:apply-templates select="view:views-link"/>
+              <xsl:apply-templates select="view:onboard-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <xsl:apply-templates select="view:toolbox-link"/>
               <div id="auth" class="auth">
@@ -302,6 +303,7 @@
       <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
       <xsl:when test="@view = 'layers'"><xsl:call-template name="layers"/></xsl:when>
+      <xsl:when test="@view = 'onboard'"><xsl:call-template name="onboard"/></xsl:when>
       <xsl:when test="@view = 'layer'"><xsl:call-template name="layer"/></xsl:when>
       <xsl:when test="@view = 'layers-wait'"><xsl:call-template name="layers-wait"/></xsl:when>
       <xsl:when test="@view = 'layers-count'"><xsl:call-template name="layers-count"/></xsl:when>
@@ -482,6 +484,73 @@
       <xsl:attribute name="hx-get"><xsl:value-of select="@url"/></xsl:attribute>
       <xsl:attribute name="hx-trigger"><xsl:value-of select="@trigger"/></xsl:attribute>
     </div>
+  </xsl:template>
+
+  <!-- Onboarding (ledger #2009, src/onboard.rs): offered only when this server onboards nodes
+       and the caller's grant reads the page (src/onboard.rs::offers_page). -->
+  <xsl:template match="view:onboard-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Onboard</a>
+  </xsl:template>
+
+  <!-- The Onboard page: read-only. An approval is a command on the owner's socket, never a
+       button here (Brian, 2026-10-22: the controller key is used on plasma only), so a pending
+       request shows the command to copy. -->
+  <xsl:template name="onboard">
+    <section class="panel onboard" aria-labelledby="onboard-title">
+      <h1 id="onboard-title"><xsl:value-of select="@title"/></h1>
+      <xsl:if test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
+      <xsl:if test="@error"><p class="note" role="alert"><xsl:value-of select="@error"/></p></xsl:if>
+      <xsl:if test="@restart"><p class="note" role="status"><xsl:value-of select="@restart"/></p></xsl:if>
+      <xsl:if test="not(@note)">
+        <h2 id="onboard-pending-title">Waiting for approval</h2>
+        <p class="note">Approve on this machine, from a terminal: the command is beside each request.</p>
+        <xsl:choose>
+          <xsl:when test="view:onboard-request">
+            <ul class="onboard-list" aria-labelledby="onboard-pending-title">
+              <xsl:apply-templates select="view:onboard-request"/>
+            </ul>
+          </xsl:when>
+          <xsl:otherwise><p class="empty">No enrollment requests are waiting.</p></xsl:otherwise>
+        </xsl:choose>
+        <h2 id="onboard-entitlements-title">Entitlements</h2>
+        <xsl:choose>
+          <xsl:when test="view:onboard-entitlement">
+            <ul class="onboard-list" aria-labelledby="onboard-entitlements-title">
+              <xsl:apply-templates select="view:onboard-entitlement"/>
+            </ul>
+          </xsl:when>
+          <xsl:otherwise><p class="empty">No entitlements have been said.</p></xsl:otherwise>
+        </xsl:choose>
+      </xsl:if>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:onboard-request">
+    <li class="onboard-row">
+      <p>
+        <strong><xsl:value-of select="@name"/></strong>
+        <xsl:if test="@kinds != ''"><xsl:text> (</xsl:text><xsl:value-of select="@kinds"/><xsl:text>)</xsl:text></xsl:if>
+        <xsl:text>: </xsl:text>
+        <xsl:value-of select="@verdict"/>
+        <xsl:if test="@reason != ''"><xsl:text>, </xsl:text><xsl:value-of select="@reason"/></xsl:if>
+      </p>
+      <p class="note">Request <code class="iri"><xsl:value-of select="@id"/></code>, certificate <code class="iri"><xsl:value-of select="@fingerprint"/></code></p>
+      <xsl:if test="@verdict = 'pending'">
+        <p>Approve with <code><xsl:value-of select="@approve"/></code></p>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:onboard-entitlement">
+    <li class="onboard-row">
+      <p>
+        <strong><xsl:value-of select="@principal"/></strong>
+        <xsl:text>: </xsl:text>
+        <xsl:value-of select="@verdict"/>
+        <xsl:if test="@reason != ''"><xsl:text>, </xsl:text><xsl:value-of select="@reason"/></xsl:if>
+      </p>
+      <p class="note">Entry <code class="iri"><xsl:value-of select="@entry"/></code></p>
+    </li>
   </xsl:template>
 
   <xsl:template name="layers">

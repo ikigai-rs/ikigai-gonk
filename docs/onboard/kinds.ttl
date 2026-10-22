@@ -1,0 +1,25 @@
+# The node kinds an onboarding invite may name (ledger #2009), for <config home>/gonk/onboard/kinds.ttl.
+# A kind is configuration: a new kind is an edit here, never code. The canonical copy is the
+# hub's (ikigai-devtools services/onboard/kinds.ttl); this is gonk's example of the shape (docs/onboard/kinds.ttl).
+#
+# Every term is read by `ikigai-gonk onboard approve`, which unions the kinds an invite names into
+# ONE entitlement (the grants layer keeps one per certificate) and always adds `read` on the grants
+# layer, so a node reads its own entitlement there:
+#   onb:layerGrant    urn:cap:layer:{read|feed|say|out|take}:{layer}, the layer host's half
+#   onb:gonkGrant     "{ledger}={read|audit|worker|write}", gonk's half (applied as bundle onb-{name})
+#   onb:router        a worker's router label, for the node's worker configuration
+#   onb:gonkDoor      gonk's QUIC door, HOST:PORT, for the node to reach
+#   onb:gonkServerCert  gonk's server certificate, PEM; when absent, approve sends gonk's own
+@prefix onb: <https://ikigai-rs.dev/ns/onboard#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<urn:iki:onboard:kind:worker>
+    rdfs:label "A gonk worker: claims and comments on the default ledger" ;
+    onb:gonkGrant "default=worker" ;
+    onb:router "edge" ;
+    onb:gonkDoor "plasma.local:1062" .
+
+<urn:iki:onboard:kind:task-member>
+    rdfs:label "A member of the edge task channel" ;
+    onb:layerGrant <urn:cap:layer:read:tasks> , <urn:cap:layer:feed:tasks> ,
+        <urn:cap:layer:out:tasks> , <urn:cap:layer:take:tasks> .

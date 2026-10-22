@@ -117,8 +117,9 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 39] = [
+const KEYS: [&str; 40] = [
     "gonk.log.access",
+    "gonk.onboard",
     "gonk.layer",
     "gonk.layer.deny",
     "gonk.layers.view",
@@ -273,6 +274,11 @@ usage:
                                    network — so a git hook can call it per changed file and a
                                    commit never waits. Identical requests collapse to one
                                    tuple (the drop is content-addressed)
+  ikigai-gonk onboard init | invite <name> --kind <k[,k]> [--out DIR] | pending | check <entry>
+                    | approve <entry> | revoke <fingerprint|name> | apply | status
+                                   the onboarding controller (`gonk.onboard`, ledger #2009):
+                                   every subcommand but init talks to the RUNNING gonk over its
+                                   owner-only socket; approve signs under the controller key
   ikigai-gonk roborev file --ledger <ledger> --root <browse root>
                      --findings <markdown|-> [--job N] [--sha SHA] [--agent NAME]
                      [--repo-path PATH] [--min-severity critical|high|medium|low] [--dry-run]
@@ -524,6 +530,8 @@ pub enum Command {
     },
     /// File one roborev review's findings into a ledger over the owner-only socket.
     RoborevFile(crate::roborev::FileArgs),
+    /// The onboarding controller's commands (ledger #2009, [`crate::onboard`]).
+    Onboard(crate::onboard::Args),
     /// Clone or fast-forward the repositories gonk browses, and print their root lines.
     Checkout(crate::checkout::Args),
     /// Import a `kata export` file into a ledger over the owner-only socket.
@@ -668,6 +676,9 @@ pub struct Settings {
     /// The RDF Toolbox's build directory (`gonk.toolbox.dist`, [`crate::toolbox`]), or `None`:
     /// no `/toolbox`, and nothing else changes.
     pub toolbox: Option<crate::toolbox::Toolbox>,
+    /// The onboarding controller's door and files (`gonk.onboard`, [`crate::onboard`]), or
+    /// `None`: no `urn:iki:onboard:*`, and nothing else changes.
+    pub onboard: Option<crate::onboard::Config>,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -1022,6 +1033,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         Some("layer") => {
             args.next();
             return parse_layer(args);
+        }
+        Some("onboard") => {
+            args.next();
+            return crate::onboard::parse_args(args).map(Command::Onboard);
         }
         Some("roborev") => {
             args.next();
@@ -1665,6 +1680,21 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             Some(view)
         }
     };
+    let onboard = match values_for(text, crate::onboard::KEY).as_slice() {
+        [] => None,
+        [line] => Some(crate::onboard::parse(
+            line,
+            &homes.home,
+            &homes.config.join("gonk"),
+        )?),
+        lines => {
+            return Err(format!(
+                "{} is given {} times: one controller per gonk",
+                crate::onboard::KEY,
+                lines.len()
+            ))
+        }
+    };
     let explain = explain_tiers(text)?;
     let backup = backup_policy(flags, text, homes)?;
     let review = review_trigger(text, homes)?;
@@ -1701,6 +1731,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),
         )?,
         toolbox: toolbox(text, homes)?,
+        onboard,
     })
 }
 

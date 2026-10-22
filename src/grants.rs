@@ -788,9 +788,18 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
 /// behind the owner-only socket, whose caller can read the dataset's files anyway. That is
 /// the contact-intake airlock's shape — its own door, not a flag on the public one.
 ///
+/// ★ And the onboarding controller's writes (ledger #2009, [`crate::onboard::CAP_ADMIN`]):
+/// minting an invite, approving one (a signature under the controller key), revoking, applying.
+/// Brian, 2026-10-22: the controller key lives on plasma only, so an approval never comes from
+/// the passkey door or a QUIC client — the same airlock.
+///
 /// ⚠ Refused as a GRANT, not as a requirement. The endpoints declare them and the root
 /// capability on the socket satisfies them, exactly as it satisfies everything else.
-pub const CAP_GONK_ADMIN: [&str; 2] = [crate::backup::CAP_BACKUP, crate::backup::CAP_RESTORE];
+pub const CAP_GONK_ADMIN: [&str; 3] = [
+    crate::backup::CAP_BACKUP,
+    crate::backup::CAP_RESTORE,
+    crate::onboard::CAP_ADMIN,
+];
 
 /// The scopes in `scopes` that are one of the backup family's tokens — asked by
 /// `quic::grant_refusal`, and through it by every path that turns a grant into scopes.
