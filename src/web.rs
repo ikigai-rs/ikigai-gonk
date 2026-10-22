@@ -280,6 +280,20 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             Exact::new(crate::queue::BADGE_IRI),
             crate::queue::Badge::new(Arc::clone(&web)),
         )
+        // The Views page (ledger #2099) — see [`crate::views_page`]. It reads the views'
+        // status and declaration and writes the declaration under the CALLER's capability.
+        .bind(
+            Exact::new(crate::views_page::PAGE_IRI),
+            crate::views_page::ViewsPage {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            Exact::new(crate::views_page::SAVE_IRI),
+            crate::views_page::SaveView {
+                web: Arc::clone(&web),
+            },
+        )
         .named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
@@ -404,12 +418,19 @@ pub(crate) fn nav_on_layers(
     nav_with(web, capability, ledgers, Here::Elsewhere, Some(count_query))
 }
 
+/// [`nav`] on the Views page, whose header link carries `aria-current`.
+pub(crate) fn nav_on_views(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
+    nav_with(web, capability, ledgers, Here::Views, None)
+}
+
 /// Where in the ledgers a page is, for the header's menu: one ledger's page (its link carries
 /// `aria-current`), the `/l` index (its "All ledgers" link does), or anywhere else.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Here<'a> {
     Ledger(&'a str),
     Index,
+    /// The Views page: not in the ledgers, but its header link is the current page's.
+    Views,
     Elsewhere,
 }
 
@@ -502,6 +523,16 @@ fn nav_with(
             ],
             "",
         ));
+    }
+    // ★ The Views page (ledger [#2099](http://localhost:1062/l/default/item/2099)), beside
+    // Layers, on the browse rule: offered only to a caller whose grant reads the views
+    // declaration, so nobody is shown a door that answers a 403.
+    if capability.allows(&crate::views::read_grant()) {
+        let mut attributes = vec![("href", crate::views_page::PAGE_PATH)];
+        if here == Here::Views {
+            attributes.push(("current", "true"));
+        }
+        out.push_str(&element("views-link", &attributes, ""));
     }
     // ★ The RDF Toolbox (ledger [#2021](http://localhost:1062/l/default/item/2021)), when this
     // server serves one. No grant gates it: the door adds the toolbox's file reads to the

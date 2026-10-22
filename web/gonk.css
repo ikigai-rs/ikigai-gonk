@@ -461,3 +461,10 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
   .ledgers, .ledger-menu { position: static; }
   .ledger-panel { left: 1rem; right: 1rem; top: calc(100% + 0.25rem); min-width: 0; max-width: none; }
 }
+
+/* The Views page (ledger #2099). */
+.view-form fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.view-form legend { font-weight: 600; padding: 0; margin: 0 0 0.5rem; overflow-wrap: anywhere; }
+.view-form .kind legend { font-weight: 400; font-size: 0.9rem; color: var(--muted); margin: 0 0.5rem 0 0; float: left; }
+.view-form .grid input { width: 100%; }
+.views .meta dd { overflow-wrap: anywhere; }

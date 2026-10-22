@@ -198,6 +198,20 @@ impl Views {
     }
 }
 
+/// The arrangement the views space has in force: the one child of [`SPACE`] in the hub's
+/// topology, or `None` when the hub holds no views space. Before anything binds it is
+/// whatever core holds for an empty space; [`STATUS`] says whether anything has.
+pub fn in_force(hub: &Kernel) -> Option<Topology> {
+    let mut pending = vec![hub.topology()];
+    while let Some(node) = pending.pop() {
+        if node.id.as_ref().is_some_and(|id| id.as_str() == SPACE) {
+            return node.children.into_iter().next();
+        }
+        pending.extend(node.children);
+    }
+    None
+}
+
 /// Give the HTTP adapter the faces behind a root-resolving view. Core 0.1.110's
 /// forwarder deliberately describes itself, so without this projection ikigai-web
 /// cannot negotiate against the target. Invocation still goes through the view:
@@ -206,16 +220,7 @@ pub(crate) fn describe_faces(hub: &Kernel, name: &Iri, description: &mut Descrip
     if description.id != "alias-view" {
         return;
     }
-    let mut pending = vec![hub.topology()];
-    let mut declaration = None;
-    while let Some(node) = pending.pop() {
-        if node.id.as_ref().is_some_and(|id| id.as_str() == SPACE) {
-            declaration = node.children.into_iter().next();
-            break;
-        }
-        pending.extend(node.children);
-    }
-    let Some(mut declaration) = declaration else {
+    let Some(mut declaration) = in_force(hub) else {
         return;
     };
     let mut tables = std::collections::HashMap::new();
