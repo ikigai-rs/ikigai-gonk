@@ -2924,6 +2924,12 @@ the caller's, forwarded unchanged, so a view names a TARGET, not a query. HTTP n
 `Accept` against that target's faces, including quality values; an explicit `?as=` wins.
 A browser visiting a ledger listing view gets readable plain text, as with other non-HTML
 resources. If none of the target's faces is acceptable, the response is `406 Not Acceptable`.
+A view onto a saved script (`urn:script:{name}:result`) is runnable anonymously only if the
+script is published `public=true`: a view grants nothing, so an anonymous `/view/{name}` onto
+a named script is refused with `urn:cap:script:run:{name}`, as running the script directly
+would be. Republish with `sink urn:gk:script:{name} language=… public=true` and the script's
+source piped in. A view cannot target an HTML page such as `/l/{ledger}`: those pages live in
+the HTTP door's own kernel, and a view resolves from the hub's root.
 
 What holds, and what each costs:
 
