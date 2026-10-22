@@ -2,9 +2,11 @@
 //!
 //! [kata](https://github.com/kenn-io/kata) keeps issues in its own database and writes it out
 //! with `kata export` as JSONL. This command reads that file and files each issue as a ledger
-//! item over gonk's HTTP door — the same loopback client and the same grant as
-//! `roborev file` ([`crate::roborev`]) — then its comments, its close, and finally the links
-//! between issues, once every issue has an item to point at.
+//! item over the running gonk's owner-only socket — the same door and the same identity as
+//! `roborev file` ([`crate::bridge`], ledger #2075) — then its comments, its close, and finally
+//! the links between issues, once every issue has an item to point at. Through ledger #1687 it
+//! filed over the HTTP door as an anonymous loopback caller; that caller only reads now, so
+//! `--gonk` is refused, naming `--socket`.
 //!
 //! # What `kata export` writes (read from its source, `kenn-io/kata` 2026-10-06)
 //!
@@ -65,31 +67,33 @@
 //!
 //! A dry run does the READ half for real and skips only the writes: it asks the ledger for
 //! each issue's key, so it says `already` for an issue that is there and reports exactly the
-//! comments, closes and links a real run would add; and a ledger the door does not grant
-//! refuses it (403, exit 1) as it refuses the real run. ⚠ One thing a read cannot tell: an
-//! issue whose item was deleted answers 404 like one never filed, so the dry run says
+//! comments, closes and links a real run would add. ⚠ One thing a read cannot tell: an
+//! issue whose item was deleted answers "not found" like one never filed, so the dry run says
 //! `would file` where the real run would leave it alone.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
+use std::path::Path;
 
 use ikigai_ledger::Ledger;
 use serde_json::Value;
 
 use ikigai_ledger::json::{Answer, Item, ItemDocument};
 
-use crate::roborev::{encode, path_of, Door};
+use crate::bridge::{no_http_door, Socket};
+use crate::config::Flags;
 
 /// The idempotence key's prefix: `urn:kata:issue:<uid>`.
 pub const KEY_PREFIX: &str = "urn:kata:issue:";
 
 /// Everything `ikigai-gonk kata import` was told.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ImportArgs {
     /// The export file.
     pub file: String,
-    /// `--gonk`: the HTTP door. Default `http://127.0.0.1:1062` ([`crate::config::DEFAULT_PORT`]).
-    pub gonk: String,
+    /// `--socket`, `--config`, `--config-home`, `--data-home`: where the running gonk's
+    /// owner-only socket is, and which `config.toml` says so.
+    pub flags: Flags,
     /// `--ledger`: the ledger to file into. Default `default`.
     pub ledger: String,
     /// `--project`: only this kata project's issues.
@@ -107,7 +111,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
     }
     let mut out = ImportArgs {
         file: String::new(),
-        gonk: format!("http://127.0.0.1:{}", crate::config::DEFAULT_PORT),
+        flags: Flags::default(),
         ledger: "default".to_string(),
         project: None,
         dry_run: false,
@@ -119,7 +123,11 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
                 .ok_or_else(|| format!("kata import: {flag} needs a value"))
         };
         match arg.as_str() {
-            "--gonk" => out.gonk = value("--gonk")?,
+            "--gonk" => return Err(no_http_door("kata import")),
+            "--socket" => out.flags.socket = Some(value("--socket")?),
+            "--config" => out.flags.config = Some(value("--config")?.into()),
+            "--config-home" => out.flags.config_home = Some(value("--config-home")?.into()),
+            "--data-home" => out.flags.data_home = Some(value("--data-home")?.into()),
             "--ledger" => out.ledger = value("--ledger")?,
             "--project" => out.project = Some(value("--project")?),
             "--dry-run" => out.dry_run = true,
@@ -132,7 +140,6 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ImportArgs, 
     }
     out.file = file.ok_or("kata import: expected <export.jsonl> (`kata export` writes one)")?;
     Ledger::parse(&out.ledger).map_err(|e| format!("kata import: --ledger: {e}"))?;
-    Door::parse(&out.gonk)?;
     Ok(out)
 }
 
@@ -514,17 +521,17 @@ enum Standing {
     WouldFile,
 }
 
-/// Run `kata import`. Prints one line per thing done to `out` and answers the tally. A
-/// refusal or an unreachable door stops it with an error; what was filed before that stays
-/// filed, and running it again carries on from there.
+/// Run `kata import` over the socket at `socket`. Prints one line per thing done to `out` and
+/// answers the tally. A refusal or an unreachable socket stops it with an error; what was
+/// filed before that stays filed, and running it again carries on from there.
 ///
 /// Under `--dry-run` every read is made and every write is only reported (`would …`), so the
 /// tally is what a real run would do now.
-pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
+pub fn run(args: &ImportArgs, socket: &Path, out: &mut impl Write) -> Result<Summary, String> {
     let text =
         std::fs::read_to_string(&args.file).map_err(|e| format!("reading {}: {e}", args.file))?;
     let export = parse(&text)?;
-    let door = Door::parse(&args.gonk)?;
+    let gonk = Socket::connect(socket)?;
     let ledger = Ledger::parse(&args.ledger).map_err(|e| e.to_string())?;
     let dry = args.dry_run;
     let would = if dry { "would " } else { "" };
@@ -550,10 +557,10 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
             continue;
         }
         let (content, append) = append_for(issue);
-        let item_path = path_of(&ledger, &format!("item:key:{}", key(&issue.uid)));
+        let item_iri = ledger.resource(&format!("item:key:{}", key(&issue.uid)));
         let item = if dry {
             // The read half of the append: is the key taken?
-            match door.lookup::<ItemDocument>("GET", &item_path, &[], "")? {
+            match gonk.lookup::<ItemDocument>(&item_iri)? {
                 Some(doc) => {
                     summary.already += 1;
                     let _ = writeln!(
@@ -592,8 +599,7 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
             }
         } else {
             // ONE request: the key is checked and the item filed in the same store update.
-            let answer: Answer =
-                door.json("POST", &path_of(&ledger, "append"), &append, &content)?;
+            let answer: Answer = gonk.sink_json(&ledger.resource("append"), &append, &content)?;
             let shown = answer
                 .item
                 .display
@@ -630,18 +636,16 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
                     ))
                 }
             }
-            door.json::<ItemDocument>("GET", &item_path, &[], "")?.item
+            gonk.source_json::<ItemDocument>(&item_iri)?.item
         };
         for comment in &issue.comments {
             if has_comment(&item, &comment_marker(&comment.uid)) {
                 continue;
             }
             if !dry {
-                let query = encode(&[by_key(&issue.uid), ("author", comment.author.clone())]);
-                door.call(
-                    "POST",
-                    &path_of(&ledger, "comment"),
-                    &query,
+                gonk.sink(
+                    &ledger.resource("comment"),
+                    &[by_key(&issue.uid), ("author", comment.author.clone())],
                     &comment_text(comment),
                 )?;
             }
@@ -680,7 +684,7 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
                     .unwrap_or_default()
             );
             if !dry {
-                door.call("POST", &path_of(&ledger, "close"), &encode(&close), &note)?;
+                gonk.sink(&ledger.resource("close"), &close, &note)?;
             }
             summary.closed += 1;
             let _ = writeln!(
@@ -713,8 +717,11 @@ pub fn run(args: &ImportArgs, out: &mut impl Write) -> Result<Summary, String> {
                     continue;
                 }
                 if !dry {
-                    let query = encode(&[by_key(&link.from), ("type", kind.to_string())]);
-                    door.call("POST", &path_of(&ledger, "link"), &query, &to.iri)?;
+                    gonk.sink(
+                        &ledger.resource("link"),
+                        &[by_key(&link.from), ("type", kind.to_string())],
+                        &to.iri,
+                    )?;
                 }
                 (from.display.clone(), to.display.clone())
             }
@@ -893,16 +900,18 @@ mod tests {
     fn the_arguments() {
         let parsed = parse_args(["import", "x.jsonl"].into_iter().map(String::from)).unwrap();
         assert_eq!(parsed.ledger, "default");
-        assert_eq!(parsed.gonk, "http://127.0.0.1:1062");
+        assert_eq!(parsed.flags.socket, None);
         assert!(parse_args(["import"].into_iter().map(String::from))
             .unwrap_err()
             .contains("expected <export.jsonl>"));
         assert!(parse_args(["export"].into_iter().map(String::from)).is_err());
+        // `--gonk` named the HTTP door, which files nothing since ledger #1687.
         assert!(parse_args(
-            ["import", "x", "--gonk", "http://gonk.example:1060"]
+            ["import", "x", "--gonk", "http://127.0.0.1:1062"]
                 .into_iter()
                 .map(String::from)
         )
-        .is_err());
+        .unwrap_err()
+        .contains("--socket"));
     }
 }

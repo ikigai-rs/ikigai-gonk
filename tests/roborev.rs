@@ -1,75 +1,92 @@
 //! `ikigai-gonk roborev file`, end to end: the real binary, a roborev review rendered the
 //! way roborev's `Document.Markdown` renders it (`tests/fixtures/roborev-review-completed.md`),
-//! and gonk's HTTP door served in-process over a scratch in-memory store.
+//! and gonk's owner-only socket served in-process over a scratch in-memory store (ledger #2075).
 //!
 //! - [`a_review_files_one_item_per_finding_once`] — the mapping (about, labels, priority,
 //!   revision), and the same payload filed twice yields each item once.
-//! - [`a_ledger_the_door_does_not_grant_is_refused_plainly`] — the refusal names the grant.
+//! - [`a_gonk_that_is_not_running_is_said_plainly`] — the error names the socket.
+//!
+//! The real binary's own doors — a bridge filing over its socket, and its HTTP door still
+//! refusing the anonymous write — are `tests/bridge_identity_2075.rs`.
 
-use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::Output;
 use std::sync::Arc;
 
+mod ready;
+
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
-use ikigai_gonk::grants::{grants_for, Authority};
-use ikigai_gonk::{compose, doors, quic};
+use ikigai_gonk::{compose, doors};
 use ikigai_store::DurableStore;
 
 const FIXTURE: &str = include_str!("fixtures/roborev-review-completed.md");
 
-/// The HTTP door as `main` builds it, but granting `ledger` read AND write to an anonymous
-/// loopback caller, which `main` no longer does (ledger #1687: anonymous is read-only), so the
-/// command's own filing logic stays tested. Returns the hub (to read back through) and the
-/// address.
-fn serve(ledger: &str) -> (Arc<Kernel>, SocketAddr, tempfile::TempDir) {
-    let grants = grants_for(ledger, Authority::Write).unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let listener = runtime
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let config = tempfile::tempdir().unwrap();
+/// The socket door as `main` builds it (`doors::door_kernel`, the owner's), served in-process
+/// over a scratch in-memory store: the door both bridges file through since ledger #2075.
+/// Returns the hub (to read back through) and where the command finds it.
+fn serve(_ledger: &str) -> (Arc<Kernel>, Served) {
     let hub = Arc::new(compose(
         DurableStore::in_memory().expect("an in-memory store"),
     ));
-    let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
-        quic::Layout::in_config_home(config.path()),
-        addr.port(),
-    ));
-    let face = Arc::new(ikigai_gonk::web::Web {
-        hub: Arc::clone(&hub),
-        ledgers: vec![ledger.to_string()],
-        browse_roots: Vec::new(),
-        passkeys: Arc::clone(&passkeys),
-        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
-        queue: ikigai_gonk::config::QueuePolicy::default(),
-        epochs: None,
-        toolbox: false,
-    });
-    let kernel = Arc::new(doors::http_kernel(
-        Arc::clone(&hub),
-        ikigai_gonk::web::space(face),
-    ));
-    let door = doors::HttpDoor {
-        anonymous: grants,
-        bind: addr,
-        passkeys: Some(passkeys),
-        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
-    };
-    let cap = doors::http_cap(door.clone());
-    let edge = doors::edge_config(door);
-    std::thread::spawn(move || {
-        runtime.block_on(ikigai_web::serve_with_listener(kernel, cap, listener, edge))
-    });
-    (hub, addr, config)
+    // A Unix socket path must fit `sun_path` (104 bytes on macOS); a scratch dir may not.
+    let short = tempfile::Builder::new()
+        .prefix("gk")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = short.path().join("s");
+    let door = doors::door_kernel(Arc::clone(&hub));
+    let path = socket.clone();
+    std::thread::spawn(move || ikigai_ipc::serve(door, &path));
+    ready::socket(&socket);
+    let homes = tempfile::tempdir().unwrap();
+    std::fs::write(homes.path().join("config.toml"), "").unwrap();
+    (
+        hub,
+        Served {
+            socket,
+            homes,
+            _short: short,
+        },
+    )
+}
+
+/// Where a served socket is, and scratch homes, so nothing of this machine's gonk is read.
+struct Served {
+    socket: PathBuf,
+    homes: tempfile::TempDir,
+    _short: tempfile::TempDir,
+}
+
+impl Served {
+    /// The binary, told this socket and these homes.
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+        command.env("HOME", self.homes.path());
+        command
+    }
+
+    /// The arguments naming this socket and these homes.
+    fn flags(&self) -> Vec<std::ffi::OsString> {
+        let homes = self.homes.path();
+        vec![
+            "--socket".into(),
+            self.socket.clone().into(),
+            "--config".into(),
+            homes.join("config.toml").into(),
+            "--config-home".into(),
+            homes.into(),
+            "--data-home".into(),
+            homes.into(),
+        ]
+    }
 }
 
 /// The command a roborev hook line runs, with roborev's values filled in.
-fn file(addr: SocketAddr, ledger: &str, extra: &[&str]) -> Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
-        .args(["roborev", "file", "--gonk"])
-        .arg(format!("http://127.0.0.1:{}", addr.port()))
+fn file(gonk: &Served, ledger: &str, extra: &[&str]) -> Output {
+    gonk.command()
+        .args(["roborev", "file"])
+        .args(gonk.flags())
         .args(["--ledger", ledger, "--root", "demo", "--job", "42"])
         .args(["--sha", "0123456789abcdef0123456789abcdef01234567"])
         .args(["--agent", "codex", "--repo-path", "/work/demo"])
@@ -113,9 +130,9 @@ fn item_lines(listing: &str) -> Vec<&str> {
 
 #[test]
 fn a_review_files_one_item_per_finding_once() {
-    let (hub, addr, _config) = serve("reviews");
+    let (hub, gonk) = serve("reviews");
 
-    let first = stdout(&file(addr, "reviews", &[]));
+    let first = stdout(&file(&gonk, "reviews", &[]));
     assert_eq!(first.matches("filed ").count(), 3, "{first}");
     assert_eq!(
         first.matches("skipped ").count(),
@@ -173,13 +190,13 @@ fn a_review_files_one_item_per_finding_once() {
     }
 
     // The same payload again: nothing new.
-    let again = stdout(&file(addr, "reviews", &[]));
+    let again = stdout(&file(&gonk, "reviews", &[]));
     assert_eq!(again.matches("already ").count(), 3, "{again}");
     assert_eq!(again.matches("filed ").count(), 0, "{again}");
     assert_eq!(item_lines(&items(&hub, "reviews", &[])).len(), 3);
 
     // Asking for the low ones files exactly the one that was skipped.
-    let low = stdout(&file(addr, "reviews", &["--min-severity", "low"]));
+    let low = stdout(&file(&gonk, "reviews", &["--min-severity", "low"]));
     assert_eq!(low.matches("filed ").count(), 1, "{low}");
     assert_eq!(low.matches("already ").count(), 3, "{low}");
     let all = items(&hub, "reviews", &[]);
@@ -199,7 +216,7 @@ fn a_review_files_one_item_per_finding_once() {
 fn concurrent_hooks_filing_one_finding_file_it_once() {
     const HOOKS: usize = 8;
     const ROUNDS: usize = 5;
-    let (hub, addr, _config) = serve("reviews");
+    let (hub, gonk) = serve("reviews");
     for round in 0..ROUNDS {
         let markdown = format!(
             "## Summary\n\nOne.\n\n## Findings\n\n### 1. High\n\n**Location:** src/race.rs:{round}\
@@ -208,14 +225,14 @@ fn concurrent_hooks_filing_one_finding_file_it_once() {
         let barrier = Arc::new(std::sync::Barrier::new(HOOKS));
         let hooks: Vec<_> = (0..HOOKS)
             .map(|_| {
-                let (barrier, markdown) = (Arc::clone(&barrier), markdown.clone());
+                let barrier = Arc::clone(&barrier);
+                let mut command = gonk.command();
+                command
+                    .args(["roborev", "file"])
+                    .args(gonk.flags())
+                    .args(["--ledger", "reviews", "--root", "demo"])
+                    .args(["--findings", &markdown]);
                 std::thread::spawn(move || {
-                    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
-                    command
-                        .args(["roborev", "file", "--gonk"])
-                        .arg(format!("http://127.0.0.1:{}", addr.port()))
-                        .args(["--ledger", "reviews", "--root", "demo"])
-                        .args(["--findings", &markdown]);
                     barrier.wait();
                     command.output().expect("run ikigai-gonk")
                 })
@@ -250,22 +267,30 @@ fn concurrent_hooks_filing_one_finding_file_it_once() {
 }
 
 #[test]
-fn a_ledger_the_door_does_not_grant_is_refused_plainly() {
-    let (hub, addr, _config) = serve("reviews");
-    let refused = file(addr, "elsewhere", &[]);
-    assert_eq!(refused.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("refused"), "{stderr}");
-    assert!(stderr.contains("gonk.http.ledger"), "{stderr}");
+fn a_gonk_that_is_not_running_is_said_plainly() {
+    let (hub, gonk) = serve("reviews");
+    let output = gonk
+        .command()
+        .args(["roborev", "file", "--socket"])
+        .arg(gonk.homes.path().join("nobody.sock"))
+        .args(["--ledger", "reviews", "--root", "demo"])
+        .args(["--findings", FIXTURE])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot reach gonk's socket"), "{stderr}");
+    assert!(stderr.contains("nobody.sock"), "{stderr}");
     assert!(item_lines(&items(&hub, "reviews", &[])).is_empty());
 }
 
 #[test]
 fn prose_from_a_fix_job_files_nothing_and_succeeds() {
-    let (hub, addr, _config) = serve("reviews");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
-        .args(["roborev", "file", "--gonk"])
-        .arg(format!("http://127.0.0.1:{}", addr.port()))
+    let (hub, gonk) = serve("reviews");
+    let output = gonk
+        .command()
+        .args(["roborev", "file"])
+        .args(gonk.flags())
         .args(["--ledger", "reviews", "--root", "demo"])
         .args([
             "--findings",

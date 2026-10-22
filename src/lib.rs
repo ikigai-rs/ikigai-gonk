@@ -38,6 +38,7 @@ pub mod admit;
 pub mod backfill;
 pub mod backup;
 pub mod batch;
+pub mod bridge;
 pub mod browse;
 pub mod budget;
 pub mod checkout;

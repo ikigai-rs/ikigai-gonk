@@ -53,9 +53,9 @@
 //!
 //! Reading findings needs `urn:cap:browse:read:*`, and an anonymous loopback caller of the HTTP
 //! door holds only the ledgers' tokens (`tests/queue.rs::an_anonymous_loopback_caller_can_neither
-//! _read_nor_decide_a_finding`). So unlike `roborev file`, which only writes, this command speaks
-//! to a RUNNING gonk over its socket, whose capability is root — the door `ledger backfill-keys`
-//! and `layer take` use.
+//! _read_nor_decide_a_finding`). So this command speaks to a RUNNING gonk over its socket, whose
+//! capability is root — the door `ledger backfill-keys`, `layer take`, and since ledger #2075
+//! `roborev file` and `kata import` use ([`crate::bridge`]).
 //!
 //! # Why a command and not a step inside the Queue's publish
 //!
