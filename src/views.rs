@@ -49,9 +49,10 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Capability, Description, DynamicSpace, Endpoint, EndpointSpace,
-    Error, Exact, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, SpaceCheck,
-    SystemClock, Topology, Verb,
+    ActionSpec, AliasTable, ArgRef, ArgSpec, Canonical, Capability, Description, DynamicSpace,
+    Endpoint, EndpointSpace, Error, Exact, Invocation, Iri, Kernel, ReprType, Representation,
+    Request, Resolution, ResolveAt, Result, Scope, Space, SpaceCheck, SpaceKind, SystemClock,
+    Topology, Verb,
 };
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
@@ -194,6 +195,102 @@ impl Views {
             })
             .map(|_| ())
             .map_err(|e| format!("the views will not rebuild (no thread: {e})"))
+    }
+}
+
+/// Give the HTTP adapter the faces behind a root-resolving view. Core 0.1.110's
+/// forwarder deliberately describes itself, so without this projection ikigai-web
+/// cannot negotiate against the target. Invocation still goes through the view:
+/// capability checks, dependency tracking and cache invalidation stay in the hub.
+pub(crate) fn describe_faces(hub: &Kernel, name: &Iri, description: &mut Description) {
+    if description.id != "alias-view" {
+        return;
+    }
+    let mut pending = vec![hub.topology()];
+    let mut declaration = None;
+    while let Some(node) = pending.pop() {
+        if node.id.as_ref().is_some_and(|id| id.as_str() == SPACE) {
+            declaration = node.children.into_iter().next();
+            break;
+        }
+        pending.extend(node.children);
+    }
+    let Some(mut declaration) = declaration else {
+        return;
+    };
+    let mut tables = std::collections::HashMap::new();
+    let mut pending = vec![&mut declaration];
+    while let Some(node) = pending.pop() {
+        if let SpaceKind::Alias { rules, max_hops } = &node.kind {
+            // Name anonymous aliases in this private snapshot so core's resolution
+            // tells us WHICH table answered, even inside fallbacks or child aliases.
+            let id = node.id.get_or_insert_with(|| {
+                Iri::parse(format!("urn:iki:gonk:http:view-probe:{}", tables.len())).unwrap()
+            });
+            let table = rules
+                .iter()
+                .fold(AliasTable::new().with_max_hops(*max_hops), |table, rule| {
+                    table.rule_at(rule.kind, &rule.from, &rule.to, rule.at)
+                });
+            tables.insert(id.clone(), table);
+        }
+        pending.extend(node.children.iter_mut());
+    }
+    // The views' registry is empty. Rebuild only a routing observer from the live
+    // snapshot, using core's builder and resolver rather than interpreting overlays.
+    // The observer invokes no endpoint and changes only its own routing counters.
+    let Ok(probe) = ikigai_core::build(&declaration, &ikigai_core::Registry::new()) else {
+        return;
+    };
+    let mut target = name.clone();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..ikigai_core::DEFAULT_MAX_DEPTH {
+        if !seen.insert(target.clone()) {
+            return;
+        }
+        let Resolution::Hit(hit) =
+            probe.resolve(&Request::new(Verb::Source, target.clone()), &Scope::empty())
+        else {
+            return;
+        };
+        let Some(table) = hit.answered_by.as_ref().and_then(|id| tables.get(id)) else {
+            return;
+        };
+        let Canonical::Aliased(hop) = table.canonicalize(hit.canonical.as_ref().unwrap_or(&target))
+        else {
+            return;
+        };
+        if !hop
+            .rules()
+            .iter()
+            .any(|&i| table.rules()[i].resolve_at() == ResolveAt::Root)
+        {
+            return;
+        }
+        target = hop.canonical().clone();
+        let Some(served) = hub.describe(&target) else {
+            return;
+        };
+        if served.id == "alias-view" {
+            continue;
+        }
+        // Only project representation choices. The target's required capabilities
+        // and bindings are evaluated when the view forwards, not at this boundary.
+        description.actions = served
+            .action_specs()
+            .into_iter()
+            .map(|action| {
+                let mut faces = ActionSpec::new(action.verb);
+                faces.outputs = action.outputs;
+                faces.inputs = action
+                    .inputs
+                    .into_iter()
+                    .filter(|input| input.name == "as")
+                    .collect();
+                faces
+            })
+            .collect();
+        return;
     }
 }
 
