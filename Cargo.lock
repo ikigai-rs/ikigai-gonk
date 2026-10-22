@@ -1708,15 +1708,18 @@ dependencies = [
 
 [[package]]
 name = "ikigai-core"
-version = "0.1.108"
+version = "0.1.110"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "feb9dfe90bbfdb92756418daa0db3b930dc39bd59095c9f6580d38c3d62596b5"
+checksum = "d77b03ae83cdeead339628ba54f5b9c09f88be94a4f55c98a30cac39483a9650"
 dependencies = [
  "async-trait",
  "blake3",
  "futures-channel",
  "futures-util",
+ "getrandom 0.3.4",
  "oxiri",
+ "oxrdf",
+ "oxttl",
  "serde",
 ]
 
@@ -4271,7 +4274,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

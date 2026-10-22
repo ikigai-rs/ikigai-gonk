@@ -13,7 +13,7 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{
-    access, browse, compose_with, doors, layer, mount, queue, quic, trigger, verdict, watch, web,
+    access, browse, compose_serving, doors, layer, mount, queue, quic, trigger, verdict, watch, web,
 };
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
@@ -423,7 +423,10 @@ fn serve(flags: &config::Flags) -> ! {
         settings.mount_host().as_deref(),
         anonymous_runs,
     );
-    let hub = Arc::new(compose_with(
+    // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
+    // from the declaration graph whenever its own Sink writes it.
+    let views = ikigai_gonk::views::Views::new();
+    let hub = Arc::new(compose_serving(
         store,
         browse_space,
         mounted,
@@ -436,8 +439,22 @@ fn serve(flags: &config::Flags) -> ! {
         }),
         Some(&scripts),
         Some(&nl),
+        Some(&views),
     ));
     scripts.attach(&hub);
+    // Under ROOT, for the reason on `Views::start` (ledger #2048): a narrowed listener does not
+    // hear a declaration it could not cache. The views' own reads stay the caller's.
+    let views_line = match views.start(&hub, ikigai_core::Capability::root()) {
+        Ok(()) => format!(
+            "{} under {}, rebuilt from {} (a Sink needs {}); status at {}",
+            ikigai_gonk::views::SPACE,
+            ikigai_gonk::views::VIEW_PREFIX,
+            ikigai_gonk::views::DECLARATION,
+            ikigai_gonk::views::write_grant(),
+            ikigai_gonk::views::STATUS
+        ),
+        Err(e) => e,
+    };
     let layer_line =
         layer::start(&settings.layers, &layer_mounts, &hub).unwrap_or_else(|e| fail(&e));
     // ★ The Layers page (ledger #1675): its own door under its own identity, mounted into
@@ -747,6 +764,7 @@ fn serve(flags: &config::Flags) -> ! {
             }
         );
         eprintln!("  backup  {backup_line}");
+        eprintln!("  views   {views_line}");
         eprintln!("  llm     {mount_line}");
         eprintln!("  layer   {layer_line}");
         eprintln!("  layers  {layers_line}");

@@ -1125,6 +1125,9 @@ fn routes() -> Vec<Route> {
         route("/sparql", "urn:iki:gonk:sparql"),
         route("/sparql/results", "urn:iki:gonk:fragment:sparql"),
         route("/render-rules", "urn:iki:gonk:render-rules"),
+        // Ledger #2006: a named view, answered by the hub's views space under the caller's
+        // capability (`crate::views`). It answers what its target answers, page or not.
+        route("/view/{name}", "urn:iki:gonk:view:{name}"),
         route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
         route("/static/{name}", "urn:iki:gonk:asset:{name}"),
         route("/k", crate::k::K_IRI),
@@ -1183,12 +1186,13 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 16] = [
+pub const GONK_PATHS: [&str; 17] = [
     "/",
     "/l",
     "/act",
     "/sparql",
     "/render-rules",
+    "/view/",
     "/auth/",
     "/static/",
     "/k",

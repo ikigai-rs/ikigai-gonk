@@ -507,6 +507,7 @@ there.
 | `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | the editor page and its results; with a results `Accept`, the SPARQL 1.1 Protocol (GET, and POST as a read) over `urn:sparql:*` |
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
 | `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
+| `/view/{name}` | `urn:iki:gonk:view:{name}` | a named view: whatever its target answers, under your own grant (see "Named views") |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
@@ -2864,6 +2865,94 @@ draft carries where it came from into the version a person publishes.
   ledger #308) with every other call that reaches the model.
 - **Not built:** `urn:nl:script` (a plan, then Lisp; ledger #959) and a page for drafting (it
   is the mechanical route today).
+
+## Named views (ledger #2006)
+
+A **view** is a name under `urn:iki:gonk:view:` that forwards to a name gonk already serves: a
+ledger listing, a saved script's `urn:script:{name}:result`, a SPARQL view. Views are DATA: an
+operator declares, changes and removes them while gonk runs, and nothing restarts.
+
+| resource | verbs | |
+| --- | --- | --- |
+| `urn:iki:gonk:views:declaration` | Source · Sink | the declaration, a graph in the store of the same name: Turtle in the `ik:` arrangement vocabulary |
+| `urn:iki:gonk:views:check` | Source | the rule a declaration must pass (a SPARQL ASK; true refuses it) |
+| `urn:iki:space:dynamic:views:status` | Source | which declaration is in force, how many have bound, and the last refusal and why |
+| `urn:iki:gonk:view:{name}` | any | a view: answers what its target answers |
+
+A declaration is one `ik:Alias` over an empty `ik:EndpointSpace`, one `ik:RewriteRule` per view,
+each marked `ik:resolveAt "root"` (core 0.1.110): the target is resolved from the hub's root
+under the CALLER's capability. A `"prefix"` rule maps a whole namespace of views at once.
+
+```turtle
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+<urn:ikigai:space:_:1> a ik:Alias ;
+    ik:maxHops 8 ;
+    ik:rewrites <urn:ikigai:space:_:1:rule:1>, <urn:ikigai:space:_:1:rule:2> ;
+    ik:space <urn:ikigai:space:_:2> .
+
+<urn:ikigai:space:_:1:rule:1> a ik:RewriteRule ;
+    ik:ruleKind "exact" ;
+    ik:logical "urn:iki:gonk:view:next" ;
+    ik:canonical "urn:iki:ledger:default:next" ;
+    ik:resolveAt "root" .
+
+<urn:ikigai:space:_:1:rule:2> a ik:RewriteRule ;
+    ik:ruleKind "exact" ;
+    ik:logical "urn:iki:gonk:view:open" ;
+    ik:canonical "urn:iki:ledger:default:items" ;
+    ik:resolveAt "root" .
+
+<urn:ikigai:space:_:2> a ik:EndpointSpace ;
+    ik:doors rdf:nil .
+```
+
+**Add, change or remove a view** by writing the WHOLE declaration again, through its own Sink
+(over the owner's socket, or as a QUIC client holding the write token):
+
+```sh
+cat views.ttl | ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'sink urn:gk:iki:gonk:views:declaration'
+ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'source urn:gk:iki:space:dynamic:views:status'
+ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'source urn:gk:iki:gonk:view:open state=open'
+```
+
+To remove one view, leave its rule out; to remove them all, declare the alias with no
+`ik:rewrites`. `source urn:gk:iki:gonk:views:declaration` reads back what is declared (as
+N-Triples). Over HTTP a view is `/view/{name}` (`/view/open?state=open`): the arguments are
+the caller's, forwarded unchanged, so a view names a TARGET, not a query.
+
+What holds, and what each costs:
+
+- **The authority to change the views is the write token for their graph**,
+  `urn:cap:store:write:graph:urn:iki:gonk:views:declaration`, and nothing else: no new
+  capability. A ledger writer is refused, by the declaration's own contract and by the store's
+  `urn:iki:store:graph-update` beneath it. Grant that token to a QUIC client and it may change
+  the views; reading the declaration takes `urn:cap:store:read:graph:urn:iki:gonk:views:declaration`.
+- **A view grants nothing.** Its target is read under the caller's own capability, so a
+  caller who may not read the target is refused exactly as if it had asked for the target.
+- **A view never shadows a name gonk serves.** The views space is the LAST member of the hub,
+  so a name anything else answers never reaches it; and the check refuses a declaration that
+  names anything outside `urn:iki:gonk:view:` at all.
+- **A refused declaration changes nothing**: the views in force keep answering, and the
+  status names the reason (the check, a malformed declaration, an unknown endpoint).
+- **Validate before bind, fail closed.** gonk starts with an empty views space; with no
+  declaration the status says so ("no views are declared"), and gonk serves everything else
+  as before.
+- **Every change cuts every cached view** (version one's coarse cut, core ledger #2034), and a
+  write to a view's target invalidates that view.
+- ⚠ **Write through `urn:iki:gonk:views:declaration`, never `urn:iki:store:graph-update`
+  directly.** Both reach the same graph under the same token, but only the declaration's own
+  Sink cuts the thread the rebuild listens on: a raw graph write is heard at the next
+  declaration write or the next start.
+- ⚠ **No composed views yet.** A door in a declaration names an endpoint and a pattern and
+  cannot fix an argument, so nothing gonk links composes anything an alias does not; the
+  views' endpoint registry is empty. A composition with fixed arguments is a saved script, and
+  a view onto its `urn:script:{name}:result` is the composed view.
+- ⚠ **A view is invisible to discovery** (ledger #2065): `urn:kernel:catalog` and `/act` do
+  not list view names, and a view's `Meta` describes core's forwarder.
+- The rebuild runs under the host's root capability (ledger #2048: a narrowed listener does
+  not hear a declaration it could not cache). `tests/views_2006.rs` holds all of it.
 
 ## The three doors
 
