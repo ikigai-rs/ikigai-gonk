@@ -89,7 +89,13 @@ path = "src/main.rs"
 # unchanged: a `RetryAfter` is NOT transient. Not taken here: `Kernel::with_retry_budget` and
 # `issue_with_context` (a retry budget and a run deadline minted at the doors; the hand-back of
 # ledger #1923 says what that takes). `"0.1.108"` is `<0.2.0`.
-ikigai-core = "0.1.108"
+# ★ 0.1.110 is the floor now (ledger #2006 arc 2, #2061), and an API one: named views. A
+# `DynamicSpace` (0.1.109) placed last in the hub, rebuilt from a declaration in the store, whose
+# `ik:Alias` rules are marked `ik:resolveAt "root"` (0.1.110) so a view forwards to a name the hub
+# serves elsewhere (`crate::views`). The `declare` feature brings the Turtle reader the
+# declaration is parsed with (`Topology::from_turtle`, `DynamicSpace::install`/`refresh`/`drive`).
+# `"0.1.110"` is `<0.2.0`.
+ikigai-core = { version = "0.1.110", features = ["declare"] }
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because

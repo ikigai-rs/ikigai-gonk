@@ -1,0 +1,17 @@
+# urn:iki:gonk:views:check — the rule a candidate views declaration must pass before it binds
+# (ledger #2006). Asked of the candidate arrangement's Turtle (`Topology::to_turtle`), never of
+# the store. TRUE means the candidate is REFUSED: it binds, rewrites, mounts or limits a name
+# outside `urn:iki:gonk:view:`, so it would claim a name that is not a view's.
+#
+# The views space is last in the hub, so by placement a view can never shadow a name gonk
+# already serves; this rule is the second fence, and the one that keeps the views namespace
+# what its name says. Only a view's TARGET (`ik:canonical`) may be anything: that is the
+# name a view forwards to, under the caller's own capability.
+PREFIX ik: <https://ikigai-rs.dev/ns#>
+ASK {
+  { ?node ik:pattern ?name }
+  UNION { ?node ik:logical ?name }
+  UNION { ?node ik:prefix ?name }
+  UNION { ?node ik:family ?name }
+  FILTER (!STRSTARTS(STR(?name), "urn:iki:gonk:view:"))
+}

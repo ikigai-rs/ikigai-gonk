@@ -71,6 +71,7 @@ pub mod taker;
 pub mod toolbox;
 pub mod trigger;
 pub mod verdict;
+pub mod views;
 pub mod walk;
 pub mod watch;
 pub mod web;
@@ -129,6 +130,10 @@ pub mod spaces {
     /// [#1907](http://localhost:1062/l/default/item/1907)) — bound beside the browse family,
     /// over the same roots.
     pub const GITHUB: &str = "urn:iki:gonk:space:github";
+    /// The views' declaration and check resources ([`views::Views::space`](crate::views::Views::space),
+    /// ledger [#2006](http://localhost:1062/l/default/item/2006)). Not the views themselves:
+    /// those are core's dynamic space, `urn:iki:space:dynamic:views`, last in the hub.
+    pub const VIEWS: &str = "urn:iki:gonk:space:views";
 
     /// One of the constants above as an [`Iri`].
     pub fn iri(name: &str) -> Iri {
@@ -235,6 +240,29 @@ pub fn compose_with(
     scripts: Option<&crate::script::Scripts>,
     nl: Option<&crate::nl::Nl>,
 ) -> Kernel {
+    compose_serving(store, browse, mounted, trigger, backups, scripts, nl, None)
+}
+
+/// [`compose_with`], plus the named views ([`crate::views`], ledger
+/// [#2006](http://localhost:1062/l/default/item/2006)) when `views` is given — what `main`
+/// builds. `None` is [`compose_with`] exactly.
+///
+/// ★ **The views space is the LAST member of the hub**, after every space this function binds,
+/// so by precedence a view can never shadow a name gonk already serves: a name an earlier
+/// member answers never reaches it. Its declaration and check resources sit beside the
+/// scripts, where their `urn:iki:gonk:views:` names overlap nothing. The caller starts the
+/// rebuild afterwards ([`crate::views::Views::start`]), as it attaches the scripts.
+#[allow(clippy::too_many_arguments)] // One per optional family, as `compose_with`'s seven are.
+pub fn compose_serving(
+    store: DurableStore,
+    browse: Option<Arc<crate::browse::CachedReads>>,
+    mounted: Vec<Arc<dyn Space>>,
+    trigger: Vec<Arc<dyn Space>>,
+    backups: Option<crate::backup::Backups>,
+    scripts: Option<&crate::script::Scripts>,
+    nl: Option<&crate::nl::Nl>,
+    views: Option<&crate::views::Views>,
+) -> Kernel {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
     // process. In the hub, so it holds for every door: nesting at every depth, length for a
@@ -287,6 +315,9 @@ pub fn compose_with(
     if let Some(nl) = nl {
         spaces.extend(nl.spaces());
     }
+    if let Some(views) = views {
+        spaces.push(Arc::new(views.space()));
+    }
     // The root to read the verdict set through, kept before the family is moved in.
     let verdict_root = browse
         .as_ref()
@@ -309,6 +340,10 @@ pub fn compose_with(
     if let Some(backups) = backups {
         spaces.push(Arc::new(backup::space(backups)));
         spaces.push(Arc::new(ikigai_compress::space()));
+    }
+    // ★ LAST, always (ledger #2006): the views can only answer what nothing above answers.
+    if let Some(views) = views {
+        spaces.push(views.dynamic());
     }
     // Named, so `urn:kernel:topology` renders the hub as `urn:iki:gonk:space:hub` from every
     // door (the door kernels forward this name) and a hit reports it as `answered_by` when
