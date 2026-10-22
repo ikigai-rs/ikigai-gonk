@@ -41,7 +41,7 @@ is fixed.
   reopen, claim, defer, label, link, delete, purge), the doctor, the SPARQL editor and its
   result tables, the browse landing page, the "On GitHub" link and its note above a browse page's region, the review Queue (scopes, batch and walk views), the
   Layers page (the overview, a channel with its post form, a task layer, the live updates, the
-  "Reconnecting" status and the unreachable-door banner), the unread count on the header's Layers link, the Views page (its table of views, its status, and the add, change and remove forms), the passkey sign-in and enrollment controls, and the empty and
+  "Reconnecting" status and the unreachable-door banner), the unread count on the header's Layers link, the Views page (its table of views, its status, and the add, change and remove forms), the Onboard page (its pending requests, their approve commands and the entitlements' verdicts), the passkey sign-in and enrollment controls, and the empty and
   refusal states each one can show.
   All of it is rendered by `web/gonk.xsl` and styled by `web/gonk.css`.
 - **The page scripts**: `web/gonk.js` (the header's ledger menu and its filter, status and refusal messages, sample-query toggles, the

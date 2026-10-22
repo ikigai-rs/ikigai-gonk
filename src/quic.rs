@@ -947,10 +947,11 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
     let admin = crate::grants::gonk_admin_scopes(scopes);
     if !admin.is_empty() {
         return Some(format!(
-            "grant `{name}` names {} — the backup family's tokens. A backup is every graph in \
-             the dataset in one file and a restore builds a store from bytes the caller \
-             supplies; neither belongs on a certificate or a passkey. They are reachable from \
-             the owner-only socket, whose caller can read the dataset's files anyway",
+            "grant `{name}` names {} — the owner's tokens. A backup is every graph in the \
+             dataset in one file, a restore builds a store from bytes the caller supplies, and \
+             onboarding signs entitlements under the controller key; none belongs on a \
+             certificate or a passkey. They are reachable from the owner-only socket, whose \
+             caller can read the dataset's files anyway",
             admin.join(" and ")
         ));
     }

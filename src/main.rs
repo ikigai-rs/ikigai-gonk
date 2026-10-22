@@ -135,6 +135,7 @@ fn main() {
             minutes,
             &flags,
         ),
+        Command::Onboard(args) => onboard_command(&args),
         Command::RoborevFile(args) => {
             let door = bridge_door(args.quic.clone(), &args.flags);
             ikigai_gonk::roborev::run(&args, &door, &mut std::io::stdout())
@@ -436,6 +437,15 @@ fn serve(flags: &config::Flags) -> ! {
         settings.mount_host().as_deref(),
         anonymous_runs,
     );
+    // ★ The onboarding controller (ledger #2009, `onboard`), only with a `gonk.onboard` line:
+    // its resources beside the review family's, its key in the keystore, its door its own.
+    let onboard = settings.onboard.as_ref().map(|config| {
+        ikigai_gonk::onboard::Onboard::from_config(config, layout.clone())
+            .unwrap_or_else(|e| fail(&e))
+    });
+    if let Some(onboard) = &onboard {
+        trigger_spaces.push(Arc::new(onboard.space()));
+    }
     // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();
@@ -455,6 +465,23 @@ fn serve(flags: &config::Flags) -> ! {
         Some(&views),
     ));
     scripts.attach(&hub);
+    let onboard_line = match (&onboard, &settings.onboard) {
+        (Some(onboard), Some(config)) => {
+            onboard.attach(&hub);
+            onboard.start();
+            format!(
+                "controller at {} (lobby `{}`, grants `{}`), key `{}` in the keystore; applies \
+                 the grants layer every {} s; writes need the owner's socket, the page {}",
+                config.target,
+                onboard.lobby(),
+                onboard.grants(),
+                config.key,
+                ikigai_gonk::onboard::APPLY_EVERY.as_secs(),
+                ikigai_gonk::onboard::CAP_READ
+            )
+        }
+        _ => format!("off (no {} line)", ikigai_gonk::onboard::KEY),
+    };
     // Under ROOT, for the reason on `Views::start` (ledger #2048): a narrowed listener does not
     // hear a declaration it could not cache. The views' own reads stay the caller's.
     let views_line = match views.start(&hub, ikigai_core::Capability::root()) {
@@ -708,6 +735,7 @@ fn serve(flags: &config::Flags) -> ! {
             &face,
             layers_view,
         );
+        let pages = ikigai_gonk::onboard::bind_page(pages, &face);
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
         let faces = settings
             .toolbox
@@ -781,6 +809,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  llm     {mount_line}");
         eprintln!("  layer   {layer_line}");
         eprintln!("  layers  {layers_line}");
+        eprintln!("  onboard {onboard_line}");
         eprintln!("  review  {review_line}");
         eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");
@@ -1265,6 +1294,70 @@ fn layer_take(offer: &str, flags: &config::Flags) {
             )
         }
         Err(e) => fail(&e),
+    }
+}
+
+/// `ikigai-gonk onboard …` (ledger #2009): `init` here, everything else over the socket.
+fn onboard_command(args: &ikigai_gonk::onboard::Args) {
+    use ikigai_gonk::onboard::{self as onb, CliOp};
+    let settings = read_settings(&args.flags);
+    let homes = Homes::resolve(&args.flags).unwrap_or_else(|e| fail(&e));
+    if args.op == CliOp::Init {
+        let (key, path) = match &settings.onboard {
+            Some(config) => (config.key.clone(), config.controller_key.clone()),
+            None => (
+                onb::DEFAULT_KEY.to_string(),
+                homes
+                    .config
+                    .join("gonk")
+                    .join("onboard")
+                    .join("controller.pub.pem"),
+            ),
+        };
+        if path.exists() {
+            fail(&format!(
+                "{} exists: the controller key is minted once (remove it and the keystore's `{key}` \
+                 and `{key}.pub` to start again)",
+                path.display()
+            ));
+        }
+        let public = onb::generate_key(ikigai_secret::default_backend(), None, &key)
+            .unwrap_or_else(|e| fail(&e));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| fail(&format!("{}: {e}", parent.display())));
+        }
+        std::fs::write(&path, &public)
+            .unwrap_or_else(|e| fail(&format!("{}: {e}", path.display())));
+        println!(
+            "controller key `{key}` minted into the keystore; its public half is {}",
+            path.display()
+        );
+        println!("  give the layer host the same file as `onboard.controller_key` (layers.toml):");
+        print!("{public}");
+        return;
+    }
+    let request = onb::cli_request(&args.op)
+        .unwrap_or_else(|| fail("onboard: that entry id is not one an IRI can carry"));
+    let client = ikigai_ipc::connect(&settings.socket).unwrap_or_else(|e| {
+        fail(&format!(
+            "cannot reach gonk's socket at {}: {e} (is gonk running with a {} line?)",
+            settings.socket.display(),
+            onb::KEY
+        ))
+    });
+    let (answer, _) =
+        ikigai_resolve::Resolver::issue(&client, request).unwrap_or_else(|e| fail(&e.to_string()));
+    match &args.op {
+        CliOp::Invite { name, out, .. } => {
+            let minted: serde_json::Value = serde_json::from_slice(&answer.bytes)
+                .unwrap_or_else(|e| fail(&format!("the invite's answer is not JSON: {e}")));
+            let cert = out.join(format!("{name}-door.crt"));
+            std::fs::write(&cert, minted["server_cert"].as_str().unwrap_or_default())
+                .unwrap_or_else(|e| fail(&format!("{}: {e}", cert.display())));
+            print!("{}", onb::invite_lines(&minted, &cert));
+        }
+        _ => print!("{}", String::from_utf8_lossy(&answer.bytes)),
     }
 }
 

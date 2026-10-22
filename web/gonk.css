@@ -391,6 +391,12 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 /* The refusal page (ledger #2021): its grant line can be one long IRI. */
 .refusal .grant-needed code { overflow-wrap: anywhere; }
 
+/* The Onboard page (ledger #2009): fingerprints and commands are long, so they wrap anywhere.
+ * Palette tokens only. */
+.onboard-list { list-style: none; margin: 0 0 var(--gap); padding: 0; }
+.onboard-row { padding: 0.6rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.onboard-row p { margin: 0 0 0.25rem; }
+
 /* The Layers page (ledger #1675). Every state is a WORD first ("New", "3 new"); the weight and
  * the accent only repeat it. No color here that is not a palette token. */
 .layer-list, .entries { list-style: none; margin: 0 0 var(--gap); padding: 0; }

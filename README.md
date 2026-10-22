@@ -2326,6 +2326,70 @@ this line.
   the page over a scratch layer host in process (its anonymous caller is handed the two tokens,
   which the real server never does) and prints the URL; `bobby` posts every 30 seconds.
 
+## Onboarding a node (ledger #2009)
+
+A node enrolls itself: it makes its own certificate, posts one request on the layer host's
+lobby with a pairing code's proof, and waits. gonk on plasma is the CONTROLLER: it mints the
+invite, checks each request, signs the entitlement under the controller key (in the Keychain,
+never anywhere else) and applies gonk's own half of it. The layer host applies its half.
+
+```toml
+gonk.onboard = "quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/onboard-door"
+```
+
+The certificate directory is the identity this gonk presents at the layer door, and it must be
+the layer host's `onboard.controller`. Optional words: `lobby=` (default `enroll`), `grants=`
+(default `grants`), `key=` (the keystore name, default `ikigai-gonk.onboard.controller`),
+`controller-key=` (default `<config home>/gonk/onboard/controller.pub.pem`) and `kinds=`
+(default `<config home>/gonk/onboard/kinds.ttl`; the shape is `docs/onboard/kinds.ttl`).
+
+```text
+urn:iki:onboard:kind:{kind}    Source  one kind, from the kinds file
+urn:iki:onboard:invite         Sink    mint an invite: name=, kind=k[,k]; the code is answered ONCE
+urn:iki:onboard:invite:{id}    Source  an invite as the store holds it (never its code)
+urn:iki:onboard:check:{entry}  Source  one lobby request, checked
+urn:iki:onboard:pending        Source  the requests no entitlement names yet, each checked
+urn:iki:onboard:approve        Sink    entry=: sign, say, spend the invite, apply
+urn:iki:onboard:revoke         Sink    who= (a fingerprint or a name): a signed revocation
+urn:iki:onboard:apply          Sink    apply the grants layer to gonk's enrollment now
+urn:iki:onboard:status         Source  every entitlement and its verdict; restart pending
+```
+
+**Who may do what.** Every write needs `urn:cap:gonk:onboard:admin`, which no grant may hold, so
+only the owner's socket approves: never the passkey door, never a QUIC client. The reads need
+`urn:cap:gonk:onboard:read`, which a passkey's grant may carry for the `/onboard` page. That page
+shows what is pending, with the command that approves each, and every entitlement's verdict; it
+has no Approve button, on purpose.
+
+**What a check refuses**, each named in `pending`: an invite never minted here, used, or past its
+24 hours; a proof that is not HMAC-SHA256 of the fingerprint under the invite's code; a
+certificate that does not hash to its fingerprint. The code is kept in the keystore beside the
+controller key until its invite is used (the proof is keyed by the code itself, so a hash of it
+could not check one); the store holds only its SHA-256.
+
+**Several kinds, one entitlement.** An invite for `worker,task-member` becomes ONE entitlement with
+the union of the kinds' grants (the grants layer keeps one per certificate). Every entitlement
+also grants `read` on the grants layer, so the node reads its own there.
+
+**gonk's half** is `client add onb-{name} --cert <the node's certificate> --ledger …` for each
+`onb:gonkGrant`, done by `apply` (every 60 seconds, and after each approve and revoke),
+idempotent by fingerprint, verified against the controller's public key first. ⚠ gonk reads its
+TRUSTED certificates at start, so a newly enrolled node needs `ikigai-gonk` restarted;
+`status` says so. A revocation takes effect at the node's next call without one.
+
+### The operator's commands, for the Mac Mini
+
+```sh
+ikigai-gonk onboard init                                  # once: mint the key (Touch ID), write controller.pub.pem
+# give the layer host the same controller.pub.pem as `onboard.controller_key`
+ikigai-gonk onboard invite mini --kind worker,task-member # prints the code ONCE and the node's command;
+                                                          # writes mini-door.crt (the door's server.crt)
+ikigai-gonk onboard pending                               # after the Mini posts: checked, with the approve command
+ikigai-gonk onboard approve <entry>                       # sign, say, apply gonk's half
+ikigai-gonk onboard status                                # restart ikigai-gonk when it says so
+ikigai-gonk onboard revoke mini                           # later, if ever
+```
+
 ## Reviewing on a git event
 
 A commit can put its changed files in front of the review pass. **The queue is the bound**:
