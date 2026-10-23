@@ -23,7 +23,8 @@
 // <details> without this file, becomes a disclosure button that Escape and a click outside
 // close, with a filter that narrows its links past eight ledgers (ledger #1888). (11) a browse
 // page's "On GitHub" link follows the region to the view it now shows, which htmx swaps in
-// without changing the page's URL, and carries a selected line onto it (ledger #1907).
+// without changing the page's URL, and carries a selected line onto it (ledger #1907, and a
+// pull request's page, #2117).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -494,14 +495,23 @@
   //
   // The browse shell draws the link for the view it opens on (src/k.rs), and the region's own
   // affordances then move it to other views by htmx, which never changes this page's URL. So
-  // when a swap into #browse came from `/k?c=source urn:repo:{root}:tree…` or `…:file:…`, this
-  // asks the server for the same view's link (`urn:iki:gonk:github:…`, src/github.rs) and
-  // swaps it in; a swap to any other view hides it. ⚠ The server builds and encodes every URL:
-  // this relays which view is showing, and appends a file view's selected line (`#L10`,
-  // `#L10-L20`, or the line an `#annotation-{id}` card names) to the server's own `data-base`,
-  // after checking it is exactly that shape.
+  // when a swap into #browse came from `/k?c=source urn:repo:{root}:tree…`, `…:file:…` or a
+  // pull request's `…:pr:{n}[:explain|:review]` (ledger #2117), this asks the server for the
+  // same view's link (`urn:iki:gonk:github:…`, src/github.rs `link_iri`, which this map
+  // mirrors) and swaps it in; a swap to any other view hides it. ⚠ The server builds and
+  // encodes every URL: this relays which view is showing, and appends a file view's selected
+  // line (`#L10`, `#L10-L20`, or the line an `#annotation-{id}` card names) to the server's
+  // own `data-base`, after checking it is exactly that shape.
   const LINES_HASH = /^#L\d+(?:-L\d+)?$/;
-  const GITHUB_VIEW = /^urn:repo:[^:]+:(?:tree|tree:.+|file:.+)$/;
+  const GITHUB_VIEW = /^urn:repo:([^:]+):(?:(tree|tree:.+|file:.+)|pr:([1-9]\d*)(?::explain|:review)?)$/;
+
+  // The GitHub name for a view: the same suffix for a tree or a file, `pull:{n}` for any of a
+  // pull request's pages. Null for any other view.
+  function githubOf(view) {
+    const m = view.match(GITHUB_VIEW);
+    if (!m) return null;
+    return "urn:iki:gonk:github:" + m[1] + ":" + (m[3] ? "pull:" + m[3] : m[2]);
+  }
 
   // The view a `/k?c=source {iri} …` read named, or null for anything else.
   function viewOf(path) {
@@ -539,11 +549,11 @@
     const config = e.detail.requestConfig;
     const view = viewOf(config && config.path);
     if (!view) return;
-    if (!GITHUB_VIEW.test(view)) {
+    const link = githubOf(view);
+    if (!link) {
       hideGithub();
       return;
     }
-    const link = "urn:iki:gonk:github:" + view.slice("urn:repo:".length);
     htmx.ajax("GET", "/k?c=" + encodeURIComponent("source " + link + " as=text/html"), {
       target: "#github",
       swap: "outerHTML",
