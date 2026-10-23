@@ -3275,6 +3275,32 @@ mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
+    /// Ledger #2129: a trailing comment is not part of the value. TOML's rule: a `#` outside a
+    /// quoted string starts a comment, and one inside a string is the string's.
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_value() {
+        for (line, value) in [
+            ("key = \"v\"   # note", "v"),
+            ("key = 'v' # note", "v"),
+            ("key = \"a # b\"  # note", "a # b"),
+            ("key = \"a # b\"", "a # b"),
+            ("key = 1070 # the port", "1070"),
+            ("key = true# armed", "true"),
+            ("key = v # a bare token", "v"),
+            ("key = \"v\"", "v"),
+        ] {
+            assert_eq!(
+                lines(line).next(),
+                Some(("key", value.to_string())),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            value_for("# gonk.port = 1\ngonk.port = 1070   # mine\n", "gonk.port"),
+            Some("1070".to_string())
+        );
+    }
+
     /// Ledger #1745: `gonk.layer.deny` names the operator's deny file, which reaches every OFFER
     /// binding (never a take binding), and a deny file that is named and missing stops the
     /// server rather than denying nothing.
