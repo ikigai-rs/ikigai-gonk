@@ -2346,17 +2346,35 @@ pub(crate) fn values_for(text: &str, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every `key = value` line, in file order, the value read by TOML's own rules (ledger #2129):
+/// a quoted string is the string, so a `#` after it starts a comment and one inside it is
+/// text; an integer or a boolean is its spelling. A value TOML refuses (a bare token such as
+/// `core=~/x`) keeps what it always had: the text up to a `#`, quotes trimmed.
 fn lines(text: &str) -> impl Iterator<Item = (&str, String)> + '_ {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once('='))
-        .map(|(name, value)| {
-            (
-                name.trim(),
-                value.trim().trim_matches(['"', '\'']).trim().to_string(),
-            )
-        })
+        .map(|(name, value)| (name.trim(), toml_value(value)))
+}
+
+/// One line's value, parsed as the value of a one-key TOML document.
+fn toml_value(value: &str) -> String {
+    match format!("v = {value}").parse::<toml::Table>() {
+        Ok(mut table) => match table.remove("v") {
+            Some(toml::Value::String(text)) => text,
+            Some(other) => other.to_string(),
+            None => String::new(),
+        },
+        Err(_) => value
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['"', '\''])
+            .trim()
+            .to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -3218,11 +3236,9 @@ mod tests {
 
     /// ★ **Every config line this server's documentation shows reads back as it means.**
     ///
-    /// The line grammar every ikigai process reads (`key = "value"`, a `#` line a comment) has
-    /// no trailing comment: the reader keeps everything after `=`, so a documented
-    /// `gonk.bind = "127.0.0.1:1060"   # …` became a value with the comment in it and stopped
-    /// the server (ledger #737, from ledger #723). The docs are what changed, not the reader,
-    /// because the grammar is shared. This reads every uncommented line in the README's
+    /// A documented `gonk.bind = "127.0.0.1:1060"   # …` once became a value with the comment
+    /// in it and stopped the server (ledger #737, from ledger #723); the reader now follows
+    /// TOML's comment rule (ledger #2129), and this still reads every uncommented line in the README's
     /// fenced config blocks and in this module's own doc, and requires the value the reader
     /// takes to be exactly the quoted value (or the bare token) the line shows.
     #[test]

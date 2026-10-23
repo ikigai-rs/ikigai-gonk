@@ -1058,6 +1058,11 @@ serde_json = "1"
 # `DeserializeOwned`, the bound on the bridges' one generic JSON read (`roborev::Door::json`),
 # which reads `ikigai_ledger::json`'s types. Already in the graph through serde_json.
 serde = "1"
+# A `config.toml` line's VALUE, read by TOML's own rules (`config::lines`, ledger #2129): a `#`
+# outside a quoted string starts a comment, so `key = "v"   # note` is `v`. Per line, not per
+# file: the shared file repeats keys (`gonk.browse.root`), which a whole-document parse refuses.
+# Already in the graph through ikigai-store, at this version.
+toml = "0.8"
 # The HTML face's renderer: `transform_xml`, xrust's XSLT called as a library function.
 # ⚠ The CRATE, not its endpoint — `urn:xslt:transform` is never bound here, so the served
 # catalog does not widen and its `http(s)://` fetch path (through `urn:httpGet`) does not

@@ -2016,6 +2016,7 @@ dependencies = [
  "spargebra",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
