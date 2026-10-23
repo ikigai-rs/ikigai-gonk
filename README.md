@@ -235,7 +235,17 @@ good until it expires.
   from a resource representation and cannot add `Set-Cookie`; the seam that can
   (`ikigai_web::with_headers`) is not in a published ikigai-web yet.
   What remains is `SameSite=Strict`, a same-origin Content-Security-Policy with no inline
-  script, and a session table that lives in memory.
+  script or style, and a session table that lives in memory.
+
+### The headers every page carries
+
+The HTTP door sends `ikigai-web`'s page preset, `SecurityHeaders::html_door` (ledger #2137):
+`Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; object-src
+'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`, `X-Content-Type-Options:
+nosniff`, `Referrer-Policy: no-referrer`, and `Cross-Origin-Opener-Policy: same-origin`. No page
+uses inline script or style, and htmx's injected indicator `<style>` is turned off. Two kinds of
+row replace the CSP with their own, on that row alone: a layer file (a sandbox) and the toolbox
+(below). `tests/html_door_2137.rs` pins all three.
 
 ### What the HTTP door refuses a browser
 
@@ -615,7 +625,7 @@ new build copied over the old one is served at once, with no restart.
   by `/toolbox/…` and by the directory's own name (`/iki/toolbox/dist/…`) alike.
 - the toolbox's own Content-Security-Policy (`ikigai_toolbox::TOOLBOX_CSP`) on the `/toolbox`
   rows and no others: it adds `'wasm-unsafe-eval'`, which lets the page's worker compile the
-  engine. Every other page keeps the door's default policy.
+  engine. Every other page keeps the door's page preset.
 - a **Toolbox** entry in every page's header, after SPARQL (ledger #2021): an ordinary link to
   `/toolbox`. With no `gonk.toolbox.dist` line there is no entry, so no page offers a door that
   answers `404`.

@@ -241,7 +241,8 @@ fn the_page_and_its_files_serve_with_their_types_and_the_toolbox_csp() {
         Some(ikigai_toolbox::TOOLBOX_CSP)
     );
 
-    // gonk's own pages keep the door's default policy: the toolbox's is on its routes only.
+    // gonk's own pages keep the door's policy (the page preset, ledger #2137): the toolbox's
+    // is on its routes only.
     let home = gonk.open("/");
     assert_eq!(home.status, 200, "{home:?}");
     let policy = home.header("content-security-policy").expect("a CSP");

@@ -43,6 +43,7 @@ use ikigai_core::{
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{
     AdmitFn, CapFn, EdgeConfig, HttpRequest, PrincipalFn, Refusal, Route, RouteTable,
+    SecurityHeaders,
 };
 
 use crate::access::AccessLog;
@@ -1073,11 +1074,19 @@ fn session_token(request: &HttpRequest) -> Option<String> {
 ///
 /// The page routes are rows here, each onto one of gonk's own resources ([`crate::web`]);
 /// every other path takes the mechanical mapping (`POST /iki/ledger/append` → `Sink
-/// urn:iki:ledger:append`), exactly as before. The default CSP — `default-src 'self'`, no
-/// framing, forms to self — needs no loosening: there is no inline script or style anywhere
-/// in the face, and htmx is served from this origin. That holds for the browse family's
-/// faces too: `ikigai-browse` asserts in its own tests that it emits no `style=` attribute,
-/// and its affordances are htmx attributes rather than script.
+/// urn:iki:ledger:append`), exactly as before.
+///
+/// ★ **The headers are `ikigai-web`'s page preset, [`SecurityHeaders::html_door`]** (ledger
+/// [#2137](http://localhost:1062/l/default/item/2137), #1958 point 3): `script-src 'self'` and
+/// `style-src 'self'` with no `'unsafe-inline'`, `object-src 'none'`, no `<base>`, no framing,
+/// forms to self, and `Cross-Origin-Opener-Policy: same-origin`. It needs no loosening: there
+/// is no inline script or style anywhere in the face, and htmx is served from this origin with
+/// its injected indicator `<style>` turned off (`tests/htmx_config_1958.rs`). That holds for
+/// the browse family's faces too: `ikigai-browse` asserts in its own tests that it emits no
+/// `style=` attribute, and its affordances are htmx attributes rather than script. A browser
+/// pass over every page and the passkey ceremonies found no CSP violation under it. A row with
+/// its own [`Route::csp`] (the layers file sandbox, the toolbox) replaces the preset's CSP on
+/// that row alone; `tests/html_door_2137.rs` pins both.
 ///
 /// The last two rows are the browse door ([`crate::k`]): `/k` for the adapter every browse
 /// affordance targets, and `/browse/…` for the page they render inside. Neither takes a
@@ -1100,6 +1109,7 @@ pub fn edge_config_with(door: HttpDoor, access: Option<AccessLog>) -> EdgeConfig
         // dispatch. Over the same `door` as the two seams below, so the three agree.
         admit_fn: Some(http_admit_with(door.clone(), access)),
         principal_fn: Some(http_principal(door)),
+        security: Some(SecurityHeaders::html_door()),
         ..EdgeConfig::default()
     }
 }
