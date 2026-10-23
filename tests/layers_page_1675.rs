@@ -864,9 +864,10 @@ fn a_file_downloads_only_when_its_digest_matches() {
         Some("application/octet-stream"),
         "never the stated media type: {got:?}"
     );
-    assert!(
-        got.header("content-security-policy")
-            .is_some_and(|csp| csp.contains("sandbox")),
+    // The row's own sandbox, REPLACING the door's page preset (ledger #2137), not beside it.
+    assert_eq!(
+        got.header("content-security-policy").as_deref(),
+        Some(ikigai_gonk::layers_view::FILE_CSP),
         "{got:?}"
     );
     let refused = gonk.page(&format!("/layers/talk/file/{}", id(&bad)));
