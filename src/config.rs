@@ -33,6 +33,10 @@
 //! # who else writes on this host's side, so a bare `ledger #N` they write links to `default`
 //! # (default: only the page's own identity; anyone else's bare reference is their own ledger)
 //! # gonk.layers.local = "hub, plasma-gonk"
+//! # the onboarding controller (`ikigai-gonk onboard init` writes both lines)
+//! # gonk.onboard = "quic://ikigai-rs.dev:4434 ~/.ikigai/layers-client/brian"
+//! # gonk.onboard.door = "plasma.local:1062"   # where an entitlement says gonk is; or "socket"
+//!                                       # (default: <short host name>.local:<QUIC port>)
 //! # gonk.explain.file.max_tokens = 400   # the per-call spend ceilings, per grain
 //! # bind the git-event review QUEUE (urn:space:reviews)
 //! gonk.review.space = "reviews"
@@ -117,9 +121,10 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 40] = [
+const KEYS: [&str; 41] = [
     "gonk.log.access",
     "gonk.onboard",
+    "gonk.onboard.door",
     "gonk.layer",
     "gonk.layer.deny",
     "gonk.layers.view",
@@ -278,7 +283,10 @@ usage:
                     | approve <entry> | revoke <fingerprint|name> | apply | status
                                    the onboarding controller (`gonk.onboard`, ledger #2009):
                                    every subcommand but init talks to the RUNNING gonk over its
-                                   owner-only socket; approve signs under the controller key
+                                   owner-only socket; approve signs under the controller key.
+                                   init (once, and safe to rerun) mints the key, writes the
+                                   kinds file and the missing gonk.onboard lines, and prints
+                                   the layer host's [onboard] table (`onboard` for its flags)
   ikigai-gonk roborev file --ledger <ledger> --root <browse root>
                      --findings <markdown|-> [--job N] [--sha SHA] [--agent NAME]
                      [--repo-path PATH] [--min-severity critical|high|medium|low] [--dry-run]
@@ -1691,6 +1699,37 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             return Err(format!(
                 "{} is given {} times: one controller per gonk",
                 crate::onboard::KEY,
+                lines.len()
+            ))
+        }
+    };
+    let onboard = match (
+        onboard,
+        values_for(text, crate::onboard::DOOR_KEY).as_slice(),
+    ) {
+        (None, []) => None,
+        (None, [_, ..]) => {
+            return Err(format!(
+                "{} is set and no {} line is: it is the door an onboarding entitlement \
+                 advertises, and there is no onboarding controller",
+                crate::onboard::DOOR_KEY,
+                crate::onboard::KEY
+            ))
+        }
+        (Some(mut config), []) => {
+            config.door = crate::onboard::GonkDoor::Default {
+                port: quic.addr().map(|a| a.port()),
+            };
+            Some(config)
+        }
+        (Some(mut config), [line]) => {
+            config.door = crate::onboard::parse_door(line)?;
+            Some(config)
+        }
+        (Some(_), lines) => {
+            return Err(format!(
+                "{} is given {} times: gonk is reachable at one door",
+                crate::onboard::DOOR_KEY,
                 lines.len()
             ))
         }

@@ -1,4 +1,5 @@
 # The node kinds an onboarding invite may name (ledger #2009), for <config home>/gonk/onboard/kinds.ttl.
+# `ikigai-gonk onboard init` writes this file there when there is none (it is compiled in).
 # A kind is configuration: a new kind is an edit here, never code. The canonical copy is the
 # hub's (ikigai-devtools services/onboard/kinds.ttl); this is gonk's example of the shape (docs/onboard/kinds.ttl).
 #
@@ -8,7 +9,9 @@
 #   onb:layerGrant    urn:cap:layer:{read|feed|say|out|take}:{layer}, the layer host's half
 #   onb:gonkGrant     "{ledger}={read|audit|worker|write}", gonk's half (applied as bundle onb-{name})
 #   onb:router        a worker's router label, for the node's worker configuration
-#   onb:gonkDoor      gonk's QUIC door, HOST:PORT, for the node to reach
+#   onb:gonkDoor      gonk's QUIC door, HOST:PORT. OPTIONAL and kept for older files: the door is
+#                     the gonk setting `gonk.onboard.door` (ledger #2123), which wins when both are
+#                     present; a kind's door counts only where no such line is written
 #   onb:gonkServerCert  gonk's server certificate, PEM; when absent, approve sends gonk's own
 @prefix onb: <https://ikigai-rs.dev/ns/onboard#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -16,8 +19,7 @@
 <urn:iki:onboard:kind:worker>
     rdfs:label "A gonk worker: claims and comments on the default ledger" ;
     onb:gonkGrant "default=worker" ;
-    onb:router "edge" ;
-    onb:gonkDoor "plasma.local:1062" .
+    onb:router "edge" .
 
 <urn:iki:onboard:kind:task-member>
     rdfs:label "A member of the edge task channel" ;

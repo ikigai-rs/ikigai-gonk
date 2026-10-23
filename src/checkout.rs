@@ -739,11 +739,29 @@ pub fn append_roots(
     if lines.is_empty() {
         return Ok((results, None));
     }
-    let mut new = text.clone().unwrap_or_default();
+    let backup = append_lines(config, text.as_deref(), &lines)?;
+    Ok((results, backup))
+}
+
+/// Append `lines` to the config file whose current text is `text` (`None`: there is no file
+/// yet), leaving a `<file>.<seconds>.bak` copy of the old one beside it, and answer that
+/// backup's path. The new file is written beside the old and renamed over it, keeping its
+/// permissions, so a failed write leaves the old file whole. Nothing already in the file is
+/// rewritten: what to add is the caller's question (`checkout --write-config`, `onboard init`).
+///
+/// # Errors
+///
+/// A directory, backup or file that cannot be written.
+pub fn append_lines(
+    config: &Path,
+    text: Option<&str>,
+    lines: &[String],
+) -> Result<Option<PathBuf>, String> {
+    let mut new = text.unwrap_or_default().to_string();
     if !new.is_empty() && !new.ends_with('\n') {
         new.push('\n');
     }
-    for line in &lines {
+    for line in lines {
         new.push_str(line);
         new.push('\n');
     }
@@ -751,7 +769,7 @@ pub fn append_roots(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
-    let backup = match &text {
+    let backup = match text {
         Some(_) => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -773,7 +791,7 @@ pub fn append_roots(
         let _ = std::fs::remove_file(&staging);
         format!("replacing {}: {e}", config.display())
     })?;
-    Ok((results, backup))
+    Ok(backup)
 }
 
 /// `<file>.<suffix>`, beside `<file>`.

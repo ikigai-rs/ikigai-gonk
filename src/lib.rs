@@ -59,6 +59,7 @@ pub mod mirror;
 pub mod mount;
 pub mod nl;
 pub mod onboard;
+pub mod onboard_init;
 pub mod queue;
 pub mod quic;
 pub mod refusal;

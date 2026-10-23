@@ -2333,9 +2333,46 @@ lobby with a pairing code's proof, and waits. gonk on plasma is the CONTROLLER: 
 invite, checks each request, signs the entitlement under the controller key (in the Keychain,
 never anywhere else) and applies gonk's own half of it. The layer host applies its half.
 
+**`ikigai-gonk onboard init` sets all of it up** (ledger #2123): run it once, answer its
+questions (each has a default), and nothing is copied or edited by hand. It
+
+1. mints the controller key into the keystore (Touch ID) and writes its public half,
+   `<config home>/gonk/onboard/controller.pub.pem`, unless that file is there already;
+2. writes the default kinds file, `<config home>/gonk/onboard/kinds.ttl` (a copy of
+   `docs/onboard/kinds.ttl` compiled into the binary), only when there is none;
+3. appends the two settings below to `config.toml` when they are missing, with a backup beside it,
+   the way `checkout --write-config` does, and never rewrites a line that is there;
+4. prints the layer host's `[onboard]` table for its `layers.toml`, with the PEM to put beside it.
+   What gonk cannot know is printed commented out and marked `SET THIS`: `trust_dir` always (it
+   must be the door's OWN client directory), and `controller` unless the certificate set is a
+   layers client's `…/layers-client/<participant>`.
+
+It asks how nodes reach this gonk, as a menu: **1, locally** (nodes on this machine use gonk's
+owner-only socket, so no door is advertised; on the node, `python3 tools/gonk.py init --socket
+<gonk.sock>`. ⚠ That socket carries the owner's authority, so a gonk grant does not bound such a
+node), or **2, from elsewhere** (over QUIC, at an address that defaults to `<short host
+name>.local:<the QUIC door's port>`; init then says whether that door will actually open: a
+loopback `gonk.quic.bind` is warned about, and with no `gonk.quic.bind` the door opens once a
+client certificate is enrolled, which the first approval does). Then the layer host's door
+(default: the one in `gonk.layers.view`, else `ikigai-rs.dev:4434`) and the controller's
+certificate set there (default: the one in `gonk.layers.view`). Flags answer every question:
+`--door HOST:PORT|socket`, `--layer-door HOST:PORT`, `--cert-dir DIR`, and `--yes` takes the
+defaults. With no terminal on stdin it asks nothing. A rerun mints nothing, fills in only what is
+missing, says what it kept, and prints the table again. It exits 1 when a line could not be
+written (no certificate set, say), naming it.
+
 ```toml
-gonk.onboard = "quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/onboard-door"
+gonk.onboard = "quic://ikigai-rs.dev:4434 ~/.ikigai/layers-client/brian"
+# where nodes reach this gonk, or "socket" for nodes on this machine
+gonk.onboard.door = "plasma.local:1062"
 ```
+
+**`gonk.onboard.door`** is where an entitlement tells a node this gonk is (`onb:gonkDoor`), a fact
+about this gonk rather than a kind, so no kind repeats it. With no line it defaults to `<short host
+name>.local:<the QUIC door's port>`. A kind's `onb:gonkDoor` is still read, for kinds files written
+before the setting existed, but **the setting wins when both are present**; a kind's door counts
+only where no line is written. A door is advertised only to an entitlement that carries a gonk
+grant (or whose kind names one). The line without a `gonk.onboard` line is refused at start.
 
 The certificate directory is the identity this gonk presents at the layer door, and it must be
 the layer host's `onboard.controller`. Optional words: `lobby=` (default `enroll`), `grants=`
@@ -2380,8 +2417,9 @@ TRUSTED certificates at start, so a newly enrolled node needs `ikigai-gonk` rest
 ### The operator's commands, for the Mac Mini
 
 ```sh
-ikigai-gonk onboard init                                  # once: mint the key (Touch ID), write controller.pub.pem
-# give the layer host the same controller.pub.pem as `onboard.controller_key`
+ikigai-gonk onboard init                                  # the key (Touch ID, once), the kinds file, the two
+                                                          # config lines; prints the edge's [onboard] table
+# paste that table into the layer host's layers.toml, with controller.pub.pem beside it; restart gonk
 ikigai-gonk onboard invite mini --kind worker,task-member # prints the code ONCE and the node's command;
                                                           # writes mini-door.crt (the door's server.crt)
 ikigai-gonk onboard pending                               # after the Mini posts: checked, with the approve command
