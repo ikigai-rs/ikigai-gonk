@@ -470,12 +470,14 @@ fn serve(flags: &config::Flags) -> ! {
             onboard.attach(&hub);
             onboard.start();
             format!(
-                "controller at {} (lobby `{}`, grants `{}`), key `{}` in the keystore; applies \
-                 the grants layer every {} s; writes need the owner's socket, the page {}",
+                "controller at {} (lobby `{}`, grants `{}`), key `{}` in the keystore; nodes \
+                 are told gonk is at {}; applies the grants layer every {} s; writes need the \
+                 owner's socket, the page {}",
                 config.target,
                 onboard.lobby(),
                 onboard.grants(),
                 config.key,
+                onboard.gonk_door().describe(),
                 ikigai_gonk::onboard::APPLY_EVERY.as_secs(),
                 ikigai_gonk::onboard::CAP_READ
             )
@@ -1302,39 +1304,39 @@ fn onboard_command(args: &ikigai_gonk::onboard::Args) {
     use ikigai_gonk::onboard::{self as onb, CliOp};
     let settings = read_settings(&args.flags);
     let homes = Homes::resolve(&args.flags).unwrap_or_else(|e| fail(&e));
-    if args.op == CliOp::Init {
-        let (key, path) = match &settings.onboard {
-            Some(config) => (config.key.clone(), config.controller_key.clone()),
-            None => (
-                onb::DEFAULT_KEY.to_string(),
-                homes
-                    .config
-                    .join("gonk")
-                    .join("onboard")
-                    .join("controller.pub.pem"),
-            ),
+    if let CliOp::Init(flags) = &args.op {
+        // ★ Everything `init` does is in `onboard_init`, driven by a test with no terminal;
+        // here only the Keychain mint and the terminal are chosen (ledger #2123).
+        use std::io::IsTerminal;
+        let (config, text) = config::read_config(&args.flags, &homes).unwrap_or_else(|e| fail(&e));
+        let env = ikigai_gonk::onboard_init::Env {
+            homes: homes.clone(),
+            config,
+            text,
+            onboard: settings.onboard.clone(),
+            quic: settings.quic,
+            socket: settings.socket.clone(),
+            host: onb::short_host_name(),
         };
-        if path.exists() {
-            fail(&format!(
-                "{} exists: the controller key is minted once (remove it and the keystore's `{key}` \
-                 and `{key}.pub` to start again)",
-                path.display()
-            ));
+        let stdin = std::io::stdin();
+        let mut prompt;
+        let mut defaults = ikigai_gonk::onboard_init::Defaults;
+        let ask: &mut dyn ikigai_gonk::onboard_init::Ask = if stdin.is_terminal() && !flags.yes {
+            prompt = ikigai_gonk::onboard_init::Prompt {
+                input: stdin.lock(),
+                out: std::io::stdout(),
+            };
+            &mut prompt
+        } else {
+            &mut defaults
+        };
+        let mut mint = |key: &str| onb::generate_key(ikigai_secret::default_backend(), None, key);
+        let complete =
+            ikigai_gonk::onboard_init::run(flags, &env, ask, &mut mint, &mut std::io::stdout())
+                .unwrap_or_else(|e| fail(&e));
+        if !complete {
+            std::process::exit(1);
         }
-        let public = onb::generate_key(ikigai_secret::default_backend(), None, &key)
-            .unwrap_or_else(|e| fail(&e));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .unwrap_or_else(|e| fail(&format!("{}: {e}", parent.display())));
-        }
-        std::fs::write(&path, &public)
-            .unwrap_or_else(|e| fail(&format!("{}: {e}", path.display())));
-        println!(
-            "controller key `{key}` minted into the keystore; its public half is {}",
-            path.display()
-        );
-        println!("  give the layer host the same file as `onboard.controller_key` (layers.toml):");
-        print!("{public}");
         return;
     }
     let request = onb::cli_request(&args.op)

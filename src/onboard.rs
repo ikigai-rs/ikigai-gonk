@@ -86,6 +86,16 @@ use crate::mount::{LazyMount, Target};
 
 /// The config key: one line, or none (no onboarding here).
 pub const KEY: &str = "gonk.onboard";
+/// Where THIS gonk is reachable, as an entitlement advertises it to a node (ledger
+/// [#2123](http://localhost:1062/l/default/item/2123)): `HOST:PORT`, or [`SOCKET_DOOR`]. A fact
+/// about this gonk, not about a kind, so every kind no longer repeats it ([`GonkDoor`]).
+pub const DOOR_KEY: &str = "gonk.onboard.door";
+/// [`DOOR_KEY`]'s word for "nodes on this machine reach gonk over its owner-only socket": no
+/// door is advertised.
+pub const SOCKET_DOOR: &str = "socket";
+/// The kinds file `onboard init` writes when there is none: `docs/onboard/kinds.ttl`, which
+/// carries no `onb:gonkDoor` (the door is [`DOOR_KEY`]).
+pub const DEFAULT_KINDS: &str = include_str!("../docs/onboard/kinds.ttl");
 /// What every onboarding WRITE requires: invite, approve, revoke, apply. Refused as a grant
 /// ([`crate::grants::CAP_GONK_ADMIN`]), so only the owner's socket holds it.
 pub const CAP_ADMIN: &str = "urn:cap:gonk:onboard:admin";
@@ -189,6 +199,136 @@ pub struct Config {
     pub controller_key: PathBuf,
     /// The kinds file.
     pub kinds: PathBuf,
+    /// The door an entitlement advertises for gonk ([`DOOR_KEY`]); [`parse`] leaves it
+    /// `GonkDoor::Default { port: None }`, and the settings fill it in.
+    pub door: GonkDoor,
+}
+
+/// Where an entitlement says this gonk is reachable (`onb:gonkDoor`), from [`DOOR_KEY`].
+///
+/// ★ **The setting wins over a kind's `onb:gonkDoor`**, which is still read for the kinds files
+/// written before the setting existed; with no setting, a kind's door is used, and failing that
+/// the default. A door is advertised only to an entitlement that carries a gonk grant (or whose
+/// kind names a door), since nothing else would dial it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GonkDoor {
+    /// `gonk.onboard.door = "socket"`: nodes run on this machine and reach gonk over its
+    /// owner-only socket, so no door (and no server certificate) is advertised.
+    Socket,
+    /// `gonk.onboard.door = "HOST:PORT"`.
+    Set(String),
+    /// No line: a kind's door, else `<short host name>.local:<port>`, where `port` is the
+    /// QUIC door's (`None` when gonk serves no QUIC door, and then nothing is advertised).
+    Default {
+        /// The QUIC door's port.
+        port: Option<u16>,
+    },
+}
+
+impl GonkDoor {
+    /// The door this setting advertises when no kind names one, if any.
+    pub fn fallback(&self) -> Option<String> {
+        match self {
+            GonkDoor::Socket => None,
+            GonkDoor::Set(door) => Some(door.clone()),
+            GonkDoor::Default { port } => port.map(default_door),
+        }
+    }
+
+    /// The door an entitlement carries: `kind` is the first door its kinds name, and
+    /// `gonk_grant` whether it carries a gonk grant.
+    pub fn advertised(&self, kind: Option<String>, gonk_grant: bool) -> Option<String> {
+        match self {
+            GonkDoor::Socket => None,
+            GonkDoor::Set(door) => (kind.is_some() || gonk_grant).then(|| door.clone()),
+            GonkDoor::Default { .. } => kind.or_else(|| self.fallback().filter(|_| gonk_grant)),
+        }
+    }
+
+    /// How the banner and `init` say it.
+    pub fn describe(&self) -> String {
+        match self {
+            GonkDoor::Socket => {
+                format!("{SOCKET_DOOR} (nodes on this machine; no door advertised)")
+            }
+            GonkDoor::Set(door) => door.clone(),
+            GonkDoor::Default { port: Some(port) } => {
+                format!(
+                    "{} (default; a kind's onb:gonkDoor wins over it)",
+                    default_door(*port)
+                )
+            }
+            GonkDoor::Default { port: None } => "none (no QUIC door)".to_string(),
+        }
+    }
+}
+
+/// Parse a [`DOOR_KEY`] value: [`SOCKET_DOOR`], or `HOST:PORT`.
+///
+/// ```
+/// use ikigai_gonk::onboard::{parse_door, GonkDoor};
+/// assert_eq!(parse_door("socket"), Ok(GonkDoor::Socket));
+/// assert_eq!(parse_door("mini.local:1062"), Ok(GonkDoor::Set("mini.local:1062".into())));
+/// assert!(parse_door("quic://mini.local:1062").is_err());
+/// assert!(parse_door("mini.local").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Anything else, named.
+pub fn parse_door(value: &str) -> std::result::Result<GonkDoor, String> {
+    if value == SOCKET_DOOR {
+        return Ok(GonkDoor::Socket);
+    }
+    host_port(value)
+        .map(GonkDoor::Set)
+        .map_err(|why| format!("{DOOR_KEY} `{value}`: {why}; or `{SOCKET_DOOR}`"))
+}
+
+/// `HOST:PORT`, checked: a host with no scheme, no space and no quote, and a port.
+///
+/// # Errors
+///
+/// Anything else, named.
+pub fn host_port(value: &str) -> std::result::Result<String, String> {
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return Err("expected HOST:PORT".to_string());
+    };
+    if host.is_empty()
+        || host.contains("//")
+        || host
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
+        return Err(format!(
+            "`{host}` is not a host (expected HOST:PORT, no scheme)"
+        ));
+    }
+    port.parse::<u16>()
+        .ok()
+        .filter(|p| *p != 0)
+        .ok_or_else(|| format!("`{port}` is not a port"))?;
+    Ok(value.to_string())
+}
+
+/// `<short host name>.local:<port>`: this machine as the LAN names it.
+pub fn default_door(port: u16) -> String {
+    format!("{}.local:{port}", short_host_name())
+}
+
+/// This machine's short host name (`hostname -s`), lowercased; `localhost` when it cannot be
+/// read. std has no host-name call, and gonk links no crate that does, so it asks the one
+/// command both macOS and Linux have.
+pub fn short_host_name() -> String {
+    std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 /// Parse a `gonk.onboard` line. `home` expands `~/`; `gonk_dir` is `<config home>/gonk`, where
@@ -246,6 +386,7 @@ pub fn parse(line: &str, home: &Path, gonk_dir: &Path) -> std::result::Result<Co
         key: DEFAULT_KEY.to_string(),
         controller_key: gonk_dir.join("onboard").join("controller.pub.pem"),
         kinds: gonk_dir.join("onboard").join("kinds.ttl"),
+        door: GonkDoor::Default { port: None },
     };
     for word in words {
         match word.split_once('=') {
@@ -288,6 +429,8 @@ pub struct Parts {
     pub controller_key: String,
     /// The kinds file, read at every use.
     pub kinds: PathBuf,
+    /// The door an entitlement advertises for gonk ([`DOOR_KEY`]).
+    pub gonk_door: GonkDoor,
     /// gonk's own QUIC enrollment, which apply writes.
     pub layout: crate::quic::Layout,
     /// The wall clock.
@@ -864,6 +1007,7 @@ impl Onboard {
             key: config.key.clone(),
             controller_key,
             kinds: config.kinds.clone(),
+            gonk_door: config.door.clone(),
             layout,
             clock: system_clock(),
         }))
@@ -886,6 +1030,11 @@ impl Onboard {
                 }
                 std::thread::sleep(APPLY_EVERY);
             });
+    }
+
+    /// The door an entitlement advertises for this gonk.
+    pub fn gonk_door(&self) -> &GonkDoor {
+        &self.parts.gonk_door
     }
 
     /// The lobby layer.
@@ -1534,7 +1683,15 @@ impl Onboard {
             gonk_scopes(grant)
                 .map_err(|e| conflict(format!("kind's onb:gonkGrant `{grant}`: {e}")))?;
         }
-        if !gonk_grants.is_empty() && gonk_cert.is_none() {
+        // The door is this gonk's setting; a kind's `onb:gonkDoor` only where no line is
+        // written ([`GonkDoor::advertised`]). Over the socket there is no door to pin.
+        let gonk_door = self
+            .parts
+            .gonk_door
+            .advertised(gonk_door, !gonk_grants.is_empty());
+        if self.parts.gonk_door == GonkDoor::Socket {
+            gonk_cert = None;
+        } else if !gonk_grants.is_empty() && gonk_cert.is_none() {
             gonk_cert = std::fs::read_to_string(self.parts.layout.server_cert()).ok();
         }
         let fold = self.fold().map_err(Error::Endpoint)?;
@@ -2291,8 +2448,9 @@ impl Endpoint for Resource {
 /// `ikigai-gonk onboard …`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliOp {
-    /// Mint the controller key into the keystore and write its public half.
-    Init,
+    /// Set up the controller: the key, the kinds file, the config lines, the edge's table
+    /// ([`crate::onboard_init`]).
+    Init(crate::onboard_init::InitFlags),
     /// `invite <name> --kind <k,k>`.
     Invite {
         /// The node's name.
@@ -2326,7 +2484,10 @@ pub struct Args {
 }
 
 /// The `onboard` usage.
-pub const USAGE: &str = "ikigai-gonk onboard init                         mint the controller key (Keychain) and write its public half
+pub const USAGE: &str = "ikigai-gonk onboard init [--door HOST:PORT|socket] [--layer-door HOST:PORT] [--cert-dir DIR] [--yes]
+                                                 set up the controller: mint its key (Keychain) once, write the
+                                                 kinds file and the gonk.onboard lines that are missing, print
+                                                 the layer host's [onboard] table; asks, with defaults, on a terminal
 ikigai-gonk onboard invite <name> --kind <k[,k]> [--out DIR]
                                                  a one-use, 24 h invite: the code once, the door's server.crt into DIR
 ikigai-gonk onboard pending                      lobby requests waiting, each checked
@@ -2356,6 +2517,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> std::result::Result
         .ok_or_else(|| format!("onboard: expected a subcommand\n\n{USAGE}"))?;
     let mut flags = crate::config::Flags::default();
     let (mut operand, mut kinds, mut out) = (None, None, None);
+    let mut init = crate::onboard_init::InitFlags::default();
     while let Some(word) = args.next() {
         let mut value = || {
             args.next()
@@ -2368,6 +2530,10 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> std::result::Result
             "--data-home" => flags.data_home = Some(value()?.into()),
             "--kind" if sub == "invite" => kinds = Some(value()?),
             "--out" if sub == "invite" => out = Some(PathBuf::from(value()?)),
+            "--door" if sub == "init" => init.door = Some(value()?),
+            "--layer-door" if sub == "init" => init.layer_door = Some(value()?),
+            "--cert-dir" if sub == "init" => init.cert_dir = Some(value()?),
+            "--yes" if sub == "init" => init.yes = true,
             w if !w.starts_with('-') && operand.is_none() => operand = Some(w.to_string()),
             other => return Err(format!("onboard {sub}: unexpected `{other}`\n\n{USAGE}")),
         }
@@ -2382,7 +2548,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> std::result::Result
         None => Ok(op),
     };
     let op = match sub.as_str() {
-        "init" => none(CliOp::Init)?,
+        "init" => none(CliOp::Init(init.clone()))?,
         "invite" => CliOp::Invite {
             name: need("<name>")?,
             kinds: kinds.ok_or("onboard invite: expected --kind <kind[,kind]>")?,
@@ -2404,7 +2570,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> std::result::Result
 pub fn cli_request(op: &CliOp) -> Option<Request> {
     let with = |r: Request, k: &str, v: &str| r.with_arg(k, ArgRef::Inline(v.as_bytes().to_vec()));
     Some(match op {
-        CliOp::Init => return None,
+        CliOp::Init(_) => return None,
         CliOp::Invite { name, kinds, .. } => with(
             with(
                 with(Request::new(Verb::Sink, iri(INVITE)), "name", name),

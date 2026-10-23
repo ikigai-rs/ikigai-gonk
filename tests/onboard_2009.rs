@@ -331,10 +331,27 @@ const NOW: u64 = 1_800_000_000_000;
 
 impl Gonk {
     fn new(edge: &Edge, keys: Arc<Memory>, public: &str) -> Gonk {
+        Gonk::with(
+            edge,
+            keys,
+            public,
+            onboard::GonkDoor::Default { port: None },
+            KINDS,
+        )
+    }
+
+    /// A gonk whose `gonk.onboard.door` is `door`, over the kinds file `kinds_ttl`.
+    fn with(
+        edge: &Edge,
+        keys: Arc<Memory>,
+        public: &str,
+        door: onboard::GonkDoor,
+        kinds_ttl: &str,
+    ) -> Gonk {
         let home = tempfile::tempdir().unwrap();
         let layout = Layout::in_config_home(home.path());
         let kinds = home.path().join("kinds.ttl");
-        std::fs::write(&kinds, KINDS).unwrap();
+        std::fs::write(&kinds, kinds_ttl).unwrap();
         let clock = Arc::new(AtomicU64::new(NOW));
         let ticks = Arc::clone(&clock);
         let onboard = Onboard::new(Parts {
@@ -347,6 +364,7 @@ impl Gonk {
             key: onboard::DEFAULT_KEY.to_string(),
             controller_key: public.to_string(),
             kinds,
+            gonk_door: door,
             layout: layout.clone(),
             clock: Arc::new(move || ticks.load(Ordering::SeqCst)),
         });
@@ -994,4 +1012,66 @@ fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
     assert!(!stranger.contains(&id));
     assert!(stranger.contains(onboard::CAP_READ), "{stranger}");
     assert!(!stranger.contains("href='/onboard'"));
+}
+
+/// The door an approved worker's entitlement advertises, as the grants layer holds it, under
+/// `door` and the kinds `kinds_ttl` (ledger #2123): `None` when it carries none.
+fn advertised(door: onboard::GonkDoor, kinds_ttl: &str) -> Option<String> {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::with(&edge, keys, &public, door, kinds_ttl);
+    let minted = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let mini = node();
+    let id = mini.request(&edge, &minted.invite.id, &minted.code);
+    let (said, _) = a.onboard.approve(&id).unwrap();
+    let turtle = edge
+        .controller_door()
+        .call(
+            Request::new(Verb::Source, Iri::parse(&said).unwrap())
+                .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec())),
+        )
+        .expect("the controller reads the entitlement");
+    let turtle = String::from_utf8(turtle.bytes).unwrap();
+    let store = oxigraph::store::Store::new().unwrap();
+    store
+        .load_from_reader(oxigraph::io::RdfFormat::Turtle, turtle.as_bytes())
+        .unwrap();
+    let door = oxigraph::model::NamedNode::new(format!("{ONB}gonkDoor")).unwrap();
+    let found: Vec<String> = store
+        .quads_for_pattern(None, Some(door.as_ref()), None, None)
+        .map(|q| match q.unwrap().object {
+            oxigraph::model::Term::Literal(l) => l.value().to_string(),
+            other => panic!("{other}"),
+        })
+        .collect();
+    assert!(found.len() <= 1, "{found:?}");
+    found.into_iter().next()
+}
+
+#[test]
+fn the_door_is_the_gonk_setting_and_wins_over_a_kinds_door() {
+    let with_door = KINDS.replace(
+        "onb:router \"edge\" .",
+        "onb:router \"edge\" ;\n    onb:gonkDoor \"kind.example:1062\" .",
+    );
+    assert_ne!(with_door, KINDS, "the fixture gained a kind door");
+    let set = || onboard::GonkDoor::Set("gonk.example:1062".to_string());
+    // The setting, with no kind door and with one: the setting.
+    assert_eq!(
+        advertised(set(), KINDS).as_deref(),
+        Some("gonk.example:1062")
+    );
+    assert_eq!(
+        advertised(set(), &with_door).as_deref(),
+        Some("gonk.example:1062")
+    );
+    // No setting: a kind's door still counts (older kinds files), else none here (no QUIC port).
+    let none = || onboard::GonkDoor::Default { port: None };
+    assert_eq!(
+        advertised(none(), &with_door).as_deref(),
+        Some("kind.example:1062")
+    );
+    assert_eq!(advertised(none(), KINDS), None);
+    // Locally: no door at all, whatever the kind says.
+    assert_eq!(advertised(onboard::GonkDoor::Socket, &with_door), None);
 }
