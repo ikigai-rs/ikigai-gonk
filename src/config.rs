@@ -273,6 +273,13 @@ usage:
                                    take ONE offer from a task layer this server binds in the
                                    take role (`gonk.layer`), through the running gonk, and file
                                    it into that binding's ledger, keyed: run twice, files once
+  ikigai-gonk browse add <name>=<path> | remove <name> | list [--socket PATH] [--config PATH]
+                                   mount or unmount a browse root on the RUNNING gonk, with no
+                                   restart: add writes its gonk.browse.root line to config.toml
+                                   (a backup beside it), remove comments its lines out; both are
+                                   idempotent. Over the owner-only socket; with no gonk running,
+                                   add and remove only write the file. list prints the roots in
+                                   force and each refused line with its reason
   ikigai-gonk review request <repo> <path> [--config PATH]
                                    drop ONE review request into the queue `gonk.review.space`
                                    names. Writes one file and exits: no store, no door, no
@@ -310,7 +317,7 @@ usage:
                                    diverged is refused and left alone. Prints each
                                    `gonk.browse.root` line; --write-config appends the missing
                                    ones to config.toml (a backup beside it). No store, no door.
-                                   gonk reads its roots at startup: restart it after adding one
+                                   A running gonk mounts a written root with no restart
   ikigai-gonk checkout --all [--dir DIR] [--config PATH] [--config-home DIR] [--data-home DIR]
                                    fetch and fast-forward EVERY checkout already under the
                                    managed directory, each from its own `origin`, with the same
@@ -452,6 +459,13 @@ pub enum Command {
         /// Whether `key` is a bundle name (`true`) or a fingerprint.
         by_name: bool,
         /// `--config`.
+        flags: Flags,
+    },
+    /// Add, remove or list browse roots on a RUNNING gonk, with no restart (ledger #2154).
+    Browse {
+        /// What to do.
+        op: BrowseOp,
+        /// Where to read the config from, and `--socket`.
         flags: Flags,
     },
     /// Take one offer from a bound task layer into its ledger (ledger #1190).
@@ -1042,6 +1056,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return parse_layer(args);
         }
+        Some("browse") => {
+            args.next();
+            return parse_browse(args);
+        }
         Some("onboard") => {
             args.next();
             return crate::onboard::parse_args(args).map(Command::Onboard);
@@ -1217,6 +1235,78 @@ fn parse_layer(mut args: impl Iterator<Item = String>) -> Result<Command, String
         }
     }
     Ok(Command::LayerTake { offer, flags })
+}
+
+/// What `ikigai-gonk browse` does (ledger #2154).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowseOp {
+    /// `add <name>=<path>`.
+    Add {
+        /// The root's name.
+        name: String,
+        /// Its directory, as typed (`~/` allowed).
+        path: String,
+    },
+    /// `remove <name>`.
+    Remove {
+        /// The root's name.
+        name: String,
+    },
+    /// `list`.
+    List,
+}
+
+/// `browse add <name>=<path> | remove <name> | list [--socket <path>]
+/// [--config|--config-home|--data-home <path>]`.
+///
+/// ```
+/// use ikigai_gonk::config::{parse_args, BrowseOp, Command};
+/// let args = ["browse", "add", "ui=~/git-personal/ikigai-ui", "--socket", "/tmp/g.sock"];
+/// match parse_args(args.iter().map(|s| s.to_string())).unwrap() {
+///     Command::Browse { op, flags } => {
+///         assert_eq!(op, BrowseOp::Add { name: "ui".into(), path: "~/git-personal/ikigai-ui".into() });
+///         assert_eq!(flags.socket.as_deref(), Some("/tmp/g.sock"));
+///     }
+///     _ => unreachable!(),
+/// }
+/// assert!(parse_args(["browse", "add", "ui"].iter().map(|s| s.to_string())).is_err());
+/// assert!(parse_args(["browse", "move", "x"].iter().map(|s| s.to_string())).is_err());
+/// ```
+fn parse_browse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let op = match args.next().as_deref() {
+        Some("add") => {
+            let spec = args.next().ok_or("browse add: expected <name>=<path>")?;
+            let (name, path) = spec
+                .split_once('=')
+                .filter(|(n, p)| !n.trim().is_empty() && !p.trim().is_empty())
+                .ok_or("browse add: expected <name>=<path>, e.g. ui=~/git-personal/ikigai-ui")?;
+            BrowseOp::Add {
+                name: name.trim().to_string(),
+                path: path.trim().to_string(),
+            }
+        }
+        Some("remove") => BrowseOp::Remove {
+            name: args.next().ok_or("browse remove: expected <name>")?,
+        },
+        Some("list") => BrowseOp::List,
+        Some(other) => {
+            return Err(format!(
+                "browse: `{other}` is not a subcommand (add <name>=<path> | remove <name> | list)"
+            ))
+        }
+        None => return Err("browse: expected add <name>=<path> | remove <name> | list".to_string()),
+    };
+    let mut flags = Flags::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            "--socket" => flags.socket = Some(value(&mut args, "--socket")?),
+            other => return Err(format!("browse: unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::Browse { op, flags })
 }
 
 fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
@@ -1614,17 +1704,24 @@ pub fn check_socket_path(socket: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The owner-only socket: `--socket`, else `gonk.socket`, else the data home's. Read alone by
+/// a command that must work while some OTHER setting is refused (`browse remove` of a root
+/// whose directory is gone would otherwise be stopped by that very root).
+pub fn socket_for(flags: &Flags, text: &str, homes: &Homes) -> PathBuf {
+    flags
+        .socket
+        .clone()
+        .or_else(|| value_for(text, "gonk.socket"))
+        .map(|spelled| expand_home(&spelled, &homes.home))
+        .unwrap_or_else(|| homes.data.join(SOCKET_NAME))
+}
+
 /// Merge flags over the config text into validated [`Settings`].
 pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, String> {
     check_keys(text)?;
     let http = resolve_bind(flags.bind.as_deref(), flags.port, text)?;
     refuse_non_loopback(http)?;
-    let socket = flags
-        .socket
-        .clone()
-        .or_else(|| value_for(text, "gonk.socket"))
-        .map(|spelled| expand_home(&spelled, &homes.home))
-        .unwrap_or_else(|| homes.data.join(SOCKET_NAME));
+    let socket = socket_for(flags, text, homes);
     let quic = quic_bind(flags, text, http)?;
     // ⚠ The socket's LENGTH is not checked here (ledger #1093): every subcommand reads these
     // settings, and one that never opens the socket (`passkey invite`, which has no --socket

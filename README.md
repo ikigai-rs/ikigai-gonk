@@ -3666,7 +3666,7 @@ browse roots:
   added      gonk.browse.root = "kata=~/.ikigai/checkouts/kata"
   backup     /Users/you/.config/ikigai/config.toml.1791302400.bak
 
-gonk reads gonk.browse.root at startup only: restart gonk to serve the new root(s).
+a running gonk mounts the new root(s) with no restart (it watches config.toml; `ikigai-gonk browse list` says what is in force).
 ```
 
 - **Where.** Each URL is cloned into `~/.ikigai/checkouts/<name>` (`--dir` for another
@@ -3692,12 +3692,67 @@ gonk reads gonk.browse.root at startup only: restart gonk to serve the new root(
 It is a command, like `review request`: it opens no store and binds no door, and the server
 itself has no code that fetches anything.
 
-**Restarting is the whole fix, and how is yours.** Adding a root changes only `config.toml`,
-which gonk reads when it starts, so a restart of the process is all it takes. The command does
-not print a supervisor's command: a launchd label (or a systemd unit, or a terminal) is the
-operator's own choice, and one machine's restart line is the wrong one on the next. Under
-launchd a config-only change needs only the process restarted; a REPLACED binary or plist is
-what needs a re-registration (`bootout`, then `bootstrap`).
+**No restart.** A running gonk watches `config.toml` and mounts a root whose line appears
+there, so `--write-config` is all it takes (ledger
+[#2154](http://localhost:1062/l/default/item/2154); see "Adding and removing a root while gonk
+runs", below). The one exception is a gonk that started with NO root: it composed no browse
+family, and its first root takes one restart.
+
+### Adding and removing a root while gonk runs
+
+```sh
+ikigai-gonk browse add ui=~/git-personal/ikigai-ui    # writes the line, mounts it
+ikigai-gonk browse remove ui                          # comments the line out, unmounts it
+ikigai-gonk browse list                               # what is in force, and what was refused
+```
+
+```text
+browse roots from /Users/you/.config/ikigai/config.toml (live: an edit mounts or unmounts with no restart)
+  ikigai-core	/Users/you/git-personal/ikigai-core	watched
+  ui	/Users/you/git-personal/ikigai-ui	watched
+  refused	json=~/git-personal/ikigai-jsno	/Users/you/git-personal/ikigai-jsno is not a directory
+1 re-arrangement(s) since start
+```
+
+The set of roots is DATA: `config.toml`'s `gonk.browse.root` lines are the one place it is
+held, and everything the browse family serves is rebuilt from them. A change mounts or
+unmounts with **no restart**, so no worker's connection, no passkey session and no review in
+flight is dropped for it. Either way of changing the file works:
+
+- **The command**, over the owner-only socket: `add` writes the line through the same
+  append-only writer `checkout --write-config` uses (the old file copied beside it first; the
+  same name at the same directory writes nothing; the name at a DIFFERENT directory is refused),
+  `remove` comments the root's lines out (its `gonk.browse.root`, and any `gonk.browse.github`
+  naming it, which the next start would otherwise refuse), and each answers the new status.
+  With no gonk answering on the socket, `add` and `remove` write the file and say that nothing
+  was mounted.
+- **An edit by hand.** gonk watches the file's directory and re-reads it a moment after it
+  changes.
+
+The resources behind it, all owner-only (`urn:cap:gonk:browse:roots`, which gonk mints for
+nobody, so the socket door's root reaches them and no other door does):
+
+```text
+urn:iki:gonk:browse:roots          Source  the roots in force, each refused line and why, the source
+urn:iki:gonk:browse:root:{name}    Source  one root's status
+                                   Sink    add it: content = its directory (~/ allowed)
+                                   Delete  remove it
+```
+
+- **A line that does not mount is refused, and the rest keep serving.** A directory that is not
+  there, a name used twice, a name a root cannot have: each is a `refused` line in the status
+  with its reason, and the roots in force are untouched. (At START the same line still stops
+  gonk, as before: a typo should not come up half-configured. So fix or remove it before the
+  next restart.)
+- **What a change cuts.** Every answer the browse family served hangs from one thread,
+  `urn:iki:gonk:browse:roots`, and a change cuts it: the coarse cut, the one core's dynamic
+  spaces make. Nothing cached under the old roots survives, including a read of a root that was
+  removed and added back at another directory. A file that cannot be read keeps the roots in
+  force.
+- **When it is not live.** Roots given as `--browse-root` flags override the file for the whole
+  run, so the status says they are fixed and every write is refused. A gonk started with no root
+  composes no browse family; the status says its first root takes a restart, and `add` still
+  writes the line for it.
 
 ### Keeping them current
 

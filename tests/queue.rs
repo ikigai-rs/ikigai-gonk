@@ -133,7 +133,7 @@ fn door_and_hub(
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: vec![ROOT.to_string()],
+        browse_roots: vec![ROOT.to_string()].into(),
         passkeys: Arc::new(Passkeys::new(
             quic::Layout::in_config_home(config.path()),
             1060,
@@ -2138,7 +2138,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: vec![ROOT.to_string()],
+        browse_roots: vec![ROOT.to_string()].into(),
         passkeys: Arc::new(Passkeys::new(
             quic::Layout::in_config_home(config.path()),
             1060,

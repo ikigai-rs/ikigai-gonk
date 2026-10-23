@@ -340,7 +340,7 @@ fn over_http_an_anonymous_plan_and_check_stop_at_the_door_budget() {
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: Vec::new(),
+        browse_roots: Vec::new().into(),
         passkeys: Arc::clone(&passkeys),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),

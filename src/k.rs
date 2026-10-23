@@ -521,9 +521,9 @@ fn can_annotate(inv: &Invocation<'_>) -> bool {
 /// prefix would list all seven and mean six refusals.
 pub(crate) fn readable_roots(web: &Web, capability: &Capability) -> Vec<String> {
     web.browse_roots
-        .iter()
+        .names()
+        .into_iter()
         .filter(|root| reads_root(capability, root))
-        .cloned()
         .collect()
 }
 
@@ -543,7 +543,7 @@ fn reads_root(capability: &Capability, root: &str) -> bool {
 /// boundary either way.
 fn configured_root<'a>(web: &Web, start: &'a str) -> Option<&'a str> {
     let root = start.strip_prefix("urn:repo:")?.split(':').next()?;
-    web.browse_roots.iter().any(|r| r == root).then_some(root)
+    web.browse_roots.contains(root).then_some(root)
 }
 
 /// The tree IRI a root's link opens on — the browse family's own entry face.

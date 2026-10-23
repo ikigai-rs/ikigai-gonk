@@ -312,13 +312,12 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
         let _ = writeln!(out, "  backup     {}", display(&backup, &homes.home));
     }
     if added {
-        // ⚠ No supervisor command (ledger #1093): it used to print a `launchctl kickstart` of
-        // a launchd label that is one operator's private choice, on a machine where gonk may
-        // run under something else entirely or in a terminal. How to restart is theirs.
+        // ⚠ No supervisor command (ledger #1093): how a gonk is run is the operator's. And
+        // since ledger #2154 none is needed: a running gonk hears the file change.
         let _ = writeln!(
             out,
-            "\ngonk reads gonk.browse.root at startup only: restart gonk to serve the new \
-             root(s)."
+            "\na running gonk mounts the new root(s) with no restart (it watches config.toml; \
+             `ikigai-gonk browse list` says what is in force)."
         );
     }
     Ok(all_ok)
@@ -765,6 +764,13 @@ pub fn append_lines(
         new.push_str(line);
         new.push('\n');
     }
+    replace_file(config, text, &new)
+}
+
+/// Replace `config` (whose current text is `text`, `None`: no file yet) with `new`: the old
+/// file copied to `<file>.<seconds>.bak` first, the new one written beside it and renamed
+/// over it with its permissions, so a failed write leaves the old file whole.
+fn replace_file(config: &Path, text: Option<&str>, new: &str) -> Result<Option<PathBuf>, String> {
     if let Some(parent) = config.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("creating {}: {e}", parent.display()))?;
@@ -783,7 +789,7 @@ pub fn append_lines(
         None => None,
     };
     let staging = sibling(config, "checkout-tmp");
-    std::fs::write(&staging, &new).map_err(|e| format!("writing {}: {e}", staging.display()))?;
+    std::fs::write(&staging, new).map_err(|e| format!("writing {}: {e}", staging.display()))?;
     if let Ok(meta) = std::fs::metadata(config) {
         let _ = std::fs::set_permissions(&staging, meta.permissions());
     }
@@ -792,6 +798,47 @@ pub fn append_lines(
         format!("replacing {}: {e}", config.display())
     })?;
     Ok(backup)
+}
+
+/// Comment out every line of `config` that configures the browse root `name`: its
+/// `gonk.browse.root` line and any `gonk.browse.github` line naming it (which the next start
+/// would refuse once the root is gone). Each becomes `# <line>  (removed: …)`, so the file
+/// keeps what it said; the old file is copied beside it first, as [`append_lines`] does.
+/// Answers how many lines were commented out, and the backup's path when there were any.
+/// Idempotent: a name no line configures writes nothing.
+///
+/// # Errors
+///
+/// A file that cannot be read, backed up or written.
+pub fn comment_out_root(config: &Path, name: &str) -> Result<(usize, Option<PathBuf>), String> {
+    let text = match std::fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, None)),
+        Err(e) => return Err(format!("reading {}: {e}", config.display())),
+    };
+    let names = |key: &str, line: &str| {
+        crate::config::values_for(line, key)
+            .into_iter()
+            .any(|value| value.split_once('=').map(|(n, _)| n.trim()) == Some(name))
+    };
+    let mut count = 0;
+    let mut new = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if names("gonk.browse.root", body) || names(crate::github::OVERRIDE_KEY, body) {
+            new.push_str(&format!(
+                "# {body}  (removed: ikigai-gonk browse remove {name})\n"
+            ));
+            count += 1;
+        } else {
+            new.push_str(line);
+        }
+    }
+    if count == 0 {
+        return Ok((0, None));
+    }
+    let backup = replace_file(config, Some(&text), &new)?;
+    Ok((count, backup))
 }
 
 /// `<file>.<suffix>`, beside `<file>`.

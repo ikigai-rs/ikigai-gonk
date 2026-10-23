@@ -52,7 +52,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
     let face = Arc::new(ikigai_gonk::web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: Vec::new(),
+        browse_roots: Vec::new().into(),
         passkeys,
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),

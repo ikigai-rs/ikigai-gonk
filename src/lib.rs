@@ -65,6 +65,7 @@ pub mod quic;
 pub mod refusal;
 pub mod render;
 pub mod roborev;
+pub mod roots;
 pub mod rows;
 pub mod rules;
 pub mod script;
@@ -142,6 +143,10 @@ pub mod spaces {
     /// ledger [#2009](http://localhost:1062/l/default/item/2009)), bound only when a
     /// `gonk.onboard` line configures it.
     pub const ONBOARD: &str = "urn:iki:gonk:space:onboard";
+    /// The live browse roots ([`roots::LiveRoots::space`](crate::roots::LiveRoots::space),
+    /// ledger [#2154](http://localhost:1062/l/default/item/2154)): the set in force and the
+    /// owner's door onto `config.toml`'s lines.
+    pub const ROOTS: &str = "urn:iki:gonk:space:roots";
 
     /// One of the constants above as an [`Iri`].
     pub fn iri(name: &str) -> Iri {
@@ -327,9 +332,7 @@ pub fn compose_serving(
         spaces.push(Arc::new(views.space()));
     }
     // The root to read the verdict set through, kept before the family is moved in.
-    let verdict_root = browse
-        .as_ref()
-        .and_then(|b| b.first_root().map(str::to_string));
+    let verdict_root = browse.as_ref().and_then(|b| b.first_root());
     if let Some(browse) = browse {
         // ★ The git-history series (ledger #1631, [`crate::history`]) ride with the family
         // whose roots, authority and `state` probe they compose over.
