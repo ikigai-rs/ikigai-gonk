@@ -86,7 +86,7 @@ impl Server {
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
-            browse_roots,
+            browse_roots: browse_roots.into(),
             passkeys: Arc::clone(&passkeys),
             rules: rules.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),

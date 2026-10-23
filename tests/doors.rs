@@ -307,7 +307,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
     let face = Arc::new(ikigai_gonk::web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: Vec::new(),
+        browse_roots: Vec::new().into(),
         passkeys: Arc::clone(&passkeys),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
@@ -462,7 +462,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
     let face = Arc::new(ikigai_gonk::web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: Vec::new(),
+        browse_roots: Vec::new().into(),
         passkeys: Arc::clone(&passkeys),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),

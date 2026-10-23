@@ -88,13 +88,13 @@
 //! either that an operator can write down.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use ikigai_browse::{ExplainConfig, Mount, StyleWatch};
 use ikigai_core::{
-    ArgRef, Description, Endpoint, EndpointSpace, Invocation, Iri, Representation, Request,
-    Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Description, Endpoint, EndpointSpace, Invocation, Iri, Kernel, Representation, Request,
+    Resolution, Result, Scope, Space, SpaceEntry, Threaded, Topology, Verb,
 };
 use ikigai_store::{SharedWriter, SharerWrites, Store};
 use oxigraph::model::{GraphName, NamedNode};
@@ -540,23 +540,58 @@ pub fn cached_reads(
     watched: &[Watched],
     epochs: Option<Arc<Epochs>>,
 ) -> CachedReads {
+    // ★ The NAME goes on browse's own space, not on this overlay — see the type's doc.
+    // `ikigai-browse` (0.13.0) claims none for it; if a later release does, this line
+    // would overwrite it, and the right move then is to stop naming here and forward
+    // whatever it claims.
+    let inner = inner.named(crate::spaces::iri(crate::spaces::BROWSE));
+    let id = inner.id();
     CachedReads {
-        // ★ The NAME goes on browse's own space, not on this overlay — see the type's doc.
-        // `ikigai-browse` (0.13.0) claims none for it; if a later release does, this line
-        // would overwrite it, and the right move then is to stop naming here and forward
-        // whatever it claims.
-        inner: inner.named(crate::spaces::iri(crate::spaces::BROWSE)),
-        roots: watched
-            .iter()
-            .map(|root| (root.name.clone(), Arc::clone(&root.ignore)))
-            .collect(),
+        arrangement: Arc::new(RwLock::new(Arrangement {
+            inner: threaded(Arc::new(inner)),
+            id,
+            roots: watched
+                .iter()
+                .map(|root| (root.name.clone(), Arc::clone(&root.ignore)))
+                .collect(),
+            contract_root: None,
+            history: None,
+            github: None,
+        })),
         epochs,
         graph: None,
         reviews: None,
-        contract_root: None,
-        history: None,
-        github: None,
     }
+}
+
+/// ★ **The thread every answer of the browse family hangs from, besides its own** (ledger
+/// [#2154](http://localhost:1062/l/default/item/2154)): the set of roots. A re-arrangement
+/// ([`CachedReads::replace`]) cuts it, so no answer computed under the old roots survives
+/// the change: core's COARSE cut, the one `DynamicSpace` makes (ledger #2006), taken with
+/// core's own combinator ([`Threaded`]). Named for the resource that reports the set,
+/// [`crate::roots::ROOTS_IRI`].
+pub const ROOTS_THREAD: &str = "urn:iki:gonk:browse:roots";
+
+/// `space`, every answer of it hung from [`ROOTS_THREAD`].
+fn threaded(space: Arc<dyn Space>) -> Arc<dyn Space> {
+    Arc::new(Threaded::new(space, ROOTS_THREAD))
+}
+
+/// What a re-arrangement of the roots replaces: everything [`wire`] built FROM the roots.
+/// What it keeps ([`CachedReads`]' other fields) is what was built from the process.
+#[derive(Clone)]
+struct Arrangement {
+    /// browse's own space, threaded.
+    inner: Arc<dyn Space>,
+    /// Its name, read before it was threaded ([`Threaded`] claims none of its own).
+    id: Option<Iri>,
+    roots: std::collections::BTreeMap<String, Arc<RootIgnore>>,
+    /// A configured root to read the family's contracts through ([`CachedReads::first_root`]).
+    contract_root: Option<String>,
+    /// The git-history series over the same roots ([`CachedReads::with_history`]), threaded.
+    history: Option<Arc<dyn Space>>,
+    /// "On GitHub" over the same roots ([`CachedReads::with_github`]), threaded.
+    github: Option<Arc<dyn Space>>,
 }
 
 /// The space [`cached_reads`] builds.
@@ -575,8 +610,9 @@ pub fn cached_reads(
 ///
 /// Should core grow a kind for an interception overlay, this is the one place to report it.
 pub struct CachedReads {
-    inner: EndpointSpace,
-    roots: std::collections::BTreeMap<String, Arc<RootIgnore>>,
+    /// Behind a lock since ledger [#2154](http://localhost:1062/l/default/item/2154), so the
+    /// roots can change while the server runs ([`Self::replace`]).
+    arrangement: Arc<RwLock<Arrangement>>,
     epochs: Option<Arc<Epochs>>,
     /// The graph browse writes (`None`: the default graph) — what a store-door write must
     /// name to move a pending count ([`Self::observe_store_writes`]).
@@ -584,15 +620,47 @@ pub struct CachedReads {
     /// Where every review Source through the family is counted while it runs
     /// ([`Self::observing_reviews`]).
     reviews: Option<Arc<crate::trigger::Activity>>,
-    /// A configured root to read the family's contracts through ([`Self::first_root`]).
-    contract_root: Option<String>,
-    /// The git-history series over the same roots ([`Self::with_history`]).
-    history: Option<Arc<dyn Space>>,
-    /// "On GitHub" over the same roots ([`Self::with_github`]).
-    github: Option<Arc<dyn Space>>,
 }
 
 impl CachedReads {
+    /// The arrangement in force, read. A poisoned lock still holds a whole arrangement (it is
+    /// replaced as one value), so it is read through.
+    fn current(&self) -> std::sync::RwLockReadGuard<'_, Arrangement> {
+        self.arrangement.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn current_mut(&mut self) -> &mut Arrangement {
+        Arc::get_mut(&mut self.arrangement)
+            .expect("a builder runs before the overlay is shared")
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// ★ **Replace everything this overlay serves with `next`'s arrangement, and cut what the
+    /// old one served** (ledger [#2154](http://localhost:1062/l/default/item/2154)): a root
+    /// mounted or unmounted while the server runs, with no restart and no door dropped.
+    ///
+    /// `next` is a fresh [`wire`] over the new roots; only what it built FROM the roots is
+    /// taken (browse's space, the watched set, the contract root, the history and GitHub
+    /// series). What this overlay was built with from the PROCESS stays: the badge's epochs
+    /// (the table the Queue was handed), the graph, the review counter.
+    ///
+    /// Then [`ROOTS_THREAD`] is cut, so every answer served under the old arrangement is gone
+    /// from the cache, and each `removed` root's own threads too, which hang nothing new but
+    /// say plainly that the root has left. A swap is two `Arc`s under a write lock: a request
+    /// in flight finishes on the doors it resolved.
+    pub fn replace(&self, kernel: &Kernel, next: &CachedReads, removed: &[String]) {
+        let next = next.current().clone();
+        {
+            let mut current = self.arrangement.write().unwrap_or_else(|p| p.into_inner());
+            *current = next;
+        }
+        kernel.cut(ROOTS_THREAD);
+        for root in removed {
+            kernel.cut(root_thread(root));
+            kernel.cut(wide_thread(root));
+        }
+    }
     /// Say which graph browse writes, for [`Self::observe_store_writes`].
     #[must_use]
     pub fn writing_to(mut self, graph: &Graph) -> Self {
@@ -629,13 +697,18 @@ impl CachedReads {
     /// is a root for both or for neither.
     #[must_use]
     pub fn with_history(mut self, history: Arc<dyn Space>) -> Self {
-        self.history = Some(history);
+        self.current_mut().history = Some(threaded(history));
         self
     }
 
-    /// The git-history series to bind beside this family, when [`wire`] built one.
+    /// The git-history series to bind beside this family, when [`wire`] built one: a view of
+    /// the arrangement IN FORCE, so a re-arrangement reaches it too.
     pub fn history(&self) -> Option<Arc<dyn Space>> {
-        self.history.clone()
+        self.current().history.as_ref()?;
+        Some(Arc::new(Part {
+            arrangement: Arc::clone(&self.arrangement),
+            which: Which::History,
+        }))
     }
 
     /// Carry "On GitHub" over the same roots ([`crate::github`], ledger
@@ -645,19 +718,24 @@ impl CachedReads {
     /// when a `gonk.browse.github` line names a root's repository.
     #[must_use]
     pub fn with_github(mut self, github: Arc<dyn Space>) -> Self {
-        self.github = Some(github);
+        self.current_mut().github = Some(threaded(github));
         self
     }
 
-    /// "On GitHub" to bind beside this family, when [`wire`] built it.
+    /// "On GitHub" to bind beside this family, when [`wire`] built it — a view of the
+    /// arrangement in force, as [`Self::history`] is.
     pub fn github(&self) -> Option<Arc<dyn Space>> {
-        self.github.clone()
+        self.current().github.as_ref()?;
+        Some(Arc::new(Part {
+            arrangement: Arc::clone(&self.arrangement),
+            which: Which::Github,
+        }))
     }
 
     /// Name the configured root the family's contracts are read through — [`wire`]'s first.
     #[must_use]
     pub fn reading_contracts_through(mut self, root: Option<String>) -> Self {
-        self.contract_root = root;
+        self.current_mut().contract_root = root;
         self
     }
 
@@ -665,10 +743,12 @@ impl CachedReads {
     /// ([`crate::verdict::adopt`]): every root's contract is the same template's, but browse
     /// resolves `urn:repo:{root}:…` only for a configured root, so a made-up name describes
     /// nothing. The one [`wire`] was given first, else the first watched one.
-    pub fn first_root(&self) -> Option<&str> {
-        self.contract_root
-            .as_deref()
-            .or_else(|| self.roots.keys().next().map(String::as_str))
+    pub fn first_root(&self) -> Option<String> {
+        let current = self.current();
+        current
+            .contract_root
+            .clone()
+            .or_else(|| current.roots.keys().next().cloned())
     }
 
     /// The badge's epochs, when the roots are watched.
@@ -772,15 +852,64 @@ impl Space for CachedReads {
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         // The catalog is browse's, unchanged.
-        self.inner.entries()
+        self.current().inner.entries()
     }
 
     fn id(&self) -> Option<Iri> {
-        self.inner.id()
+        self.current().id.clone()
     }
 
     fn topology(&self) -> Topology {
-        self.inner.topology()
+        self.current().inner.topology()
+    }
+}
+
+/// Which series beside the family a [`Part`] answers.
+#[derive(Clone, Copy)]
+enum Which {
+    History,
+    Github,
+}
+
+/// One of the series bound BESIDE the family ([`CachedReads::history`],
+/// [`CachedReads::github`]), read from the arrangement in force on every resolution, so a
+/// re-arrangement of the roots reaches it with no rebinding. Transparent, as the overlay is.
+struct Part {
+    arrangement: Arc<RwLock<Arrangement>>,
+    which: Which,
+}
+
+impl Part {
+    fn space(&self) -> Option<Arc<dyn Space>> {
+        let current = self.arrangement.read().unwrap_or_else(|p| p.into_inner());
+        match self.which {
+            Which::History => current.history.clone(),
+            Which::Github => current.github.clone(),
+        }
+    }
+}
+
+impl Space for Part {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        match self.space() {
+            Some(space) => space.resolve(request, scope),
+            None => Resolution::Miss,
+        }
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.space().and_then(|space| space.entries())
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.space().and_then(|space| space.id())
+    }
+
+    fn topology(&self) -> Topology {
+        match self.space() {
+            Some(space) => space.topology(),
+            None => EndpointSpace::new().topology(),
+        }
     }
 }
 
@@ -822,7 +951,7 @@ impl CachedReads {
     /// The family's own resolution, with the badge's epochs touched by a write and a cached
     /// read hung on its thread — everything [`cached_reads`] describes.
     fn resolve_touching(&self, request: &Request, scope: &Scope) -> Resolution {
-        let resolution = self.inner.resolve(request, scope);
+        let resolution = self.current().inner.resolve(request, scope);
         if let (Some(epochs), Some(touch)) = (&self.epochs, touch_for(request)) {
             let epochs = Arc::clone(epochs);
             return resolution.map_endpoint(move |endpoint| {
@@ -856,7 +985,7 @@ impl CachedReads {
             return None;
         }
         let (root, rest) = split_repo_iri(request.target.as_str())?;
-        let ignore = self.roots.get(root)?;
+        let ignore = Arc::clone(self.current().roots.get(root)?);
         match rest {
             "tree" => return Some(root_thread(root)),
             "hash" | "state" => return Some(wide_thread(root)),

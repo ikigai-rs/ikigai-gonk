@@ -170,7 +170,7 @@ fn shell(hub: &Arc<Kernel>, start: &str, cap: &Capability) -> String {
     let face = Arc::new(web::Web {
         hub: Arc::clone(hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: vec!["demo".to_string()],
+        browse_roots: vec!["demo".to_string()].into(),
         passkeys: Arc::new(Passkeys::new(layout, 1062)),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),

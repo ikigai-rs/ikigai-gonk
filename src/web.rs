@@ -107,7 +107,11 @@ pub struct Web {
     /// ⚠ The names only. The paths are the mount's business ([`crate::browse::wire`]);
     /// a page never needs one, and holding one here would put a filesystem path one
     /// rendering mistake away from a caller who may not read the root it belongs to.
-    pub browse_roots: Vec<String>,
+    ///
+    /// ★ LIVE since ledger [#2154](http://localhost:1062/l/default/item/2154): the set a root
+    /// added or removed while gonk runs replaces ([`crate::roots::RootNames`]). A test hands
+    /// a fixed one with `vec![…].into()`.
+    pub browse_roots: crate::roots::RootNames,
     // ★ **No `review` field, and its absence is the shape of ledger
     // [#466](http://localhost:1060/l/default/item/466)'s fix.** This face used to hold the
     // trigger so the Queue page could count its inbox directly — the only way to reach a
@@ -3369,7 +3373,7 @@ mod tests {
                 ikigai_store::DurableStore::in_memory().unwrap(),
             )),
             ledgers: vec!["default".to_string()],
-            browse_roots: vec!["repo".to_string()],
+            browse_roots: vec!["repo".to_string()].into(),
             passkeys: Arc::new(Passkeys::new(
                 crate::quic::Layout::in_config_home(config.path()),
                 1062,

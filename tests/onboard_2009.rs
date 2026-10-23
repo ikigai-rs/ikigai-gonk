@@ -976,7 +976,7 @@ fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
     let face = Arc::new(ikigai_gonk::web::Web {
         hub: Arc::clone(&a.hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: Vec::new(),
+        browse_roots: Vec::new().into(),
         passkeys,
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),

@@ -13,7 +13,8 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{
-    access, browse, compose_serving, doors, layer, mount, queue, quic, trigger, verdict, watch, web,
+    access, browse, compose_serving, doors, layer, mount, queue, quic, roots, trigger, verdict,
+    watch, web,
 };
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
@@ -56,6 +57,7 @@ fn main() {
         }
         Command::ReviewRequest { repo, path, flags } => review_request(&repo, &path, &flags),
         Command::LayerTake { offer, flags } => layer_take(&offer, &flags),
+        Command::Browse { op, flags } => browse_command(&op, &flags),
         Command::ClientAdd {
             name,
             cert,
@@ -290,14 +292,16 @@ fn serve(flags: &config::Flags) -> ! {
     }
     // What the backup reads, and under which of the store's bounds (ledger #1699).
     let dataset = backup::Dataset::new(&store, Arc::clone(&handle));
+    // ★ The store's OWN writer (ledger #1252): browse's writes commit on the thread and
+    // under the lock every store door uses, and carry the declaration made above. Kept, so a
+    // re-arrangement of the roots (ledger #2154) builds over the same one.
+    let writer = store
+        .shared_writer()
+        .expect("a store opened shared hands out its writer");
     let browse = browses.then(|| {
         browse::wire(
             settings.browse_roots.clone(),
-            // ★ The store's OWN writer (ledger #1252): browse's writes commit on the thread and
-            // under the lock every store door uses, and carry the declaration made above.
-            store
-                .shared_writer()
-                .expect("a store opened shared hands out its writer"),
+            writer.clone(),
             Some(&root_watch),
             explains.then_some(&settings.explain),
             // The SAME value the declaration above was derived from — not a second
@@ -327,6 +331,52 @@ fn serve(flags: &config::Flags) -> ! {
         ),
         None => (None, None),
     };
+    // ★ The roots as live data (ledger #2154, `roots`): a root added to or removed from
+    // config.toml mounts or unmounts with no restart. Live only when the roots came from the
+    // file and the family is composed; otherwise the status says why not.
+    let roots_source = if !flags.browse_roots.is_empty() {
+        roots::Source::Flags
+    } else {
+        match &browse_space {
+            Some(browse) => {
+                let explain = explains.then(|| settings.explain.clone());
+                let (graph, config_home, writer) =
+                    (browse_graph.clone(), homes.config.clone(), writer.clone());
+                let build: roots::Build = Box::new(move |roots, watch, github| {
+                    browse::wire(
+                        roots.to_vec(),
+                        writer.clone(),
+                        Some(watch),
+                        explain.as_ref(),
+                        &graph,
+                        Some(config_home.clone()),
+                    )
+                    .space
+                    .with_github(Arc::new(ikigai_gonk::github::space(roots, github)))
+                });
+                roots::Source::Config {
+                    path: config_path.clone(),
+                    home: homes.home.clone(),
+                    live: Box::new(roots::Live {
+                        browse: Arc::clone(browse),
+                        epochs: root_watch.epochs(),
+                        build,
+                    }),
+                }
+            }
+            None => roots::Source::NotComposed {
+                path: config_path.clone(),
+                home: homes.home.clone(),
+            },
+        }
+    };
+    let live_roots = roots::LiveRoots::new(
+        roots_source,
+        settings.browse_roots.clone(),
+        settings.browse_github.clone(),
+        unwatched.clone(),
+        None,
+    );
     // The mounts are built before the kernel and dialled by neither: `crate::mount` dials on
     // first use, so a peer that is down costs this server nothing at startup and the ledger
     // is served whether or not a model can be reached.
@@ -407,11 +457,7 @@ fn serve(flags: &config::Flags) -> ! {
     // #1598), a priority rather than an authority; see `backfill::scopes`.
     let backfill = explains.then(|| {
         Arc::new(backfill::Backfill::new(
-            settings
-                .browse_roots
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
+            live_roots.names(),
             settings.queue.clone(),
             settings.explain.judge.clone(),
             backfill::scopes(&mount_host(&settings)),
@@ -446,6 +492,7 @@ fn serve(flags: &config::Flags) -> ! {
     if let Some(onboard) = &onboard {
         trigger_spaces.push(Arc::new(onboard.space()));
     }
+    trigger_spaces.push(Arc::new(live_roots.space()));
     // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();
@@ -606,7 +653,19 @@ fn serve(flags: &config::Flags) -> ! {
     // The badge's epochs, taken before the watch moves onto its thread: the watch bumps a
     // root's when it cuts it, the browse overlay when a write names it (ledger #667).
     let epochs = root_watch.epochs();
-    root_watch.spawn(Arc::clone(&hub));
+    live_roots.attach(&hub);
+    if live_roots.is_live() {
+        // Held by the live set, which retires it when a re-arrangement replaces it.
+        live_roots.hold(root_watch.spawn_held(Arc::clone(&hub)));
+        if let Err(e) = live_roots.watch_config() {
+            eprintln!(
+                "ikigai-gonk: config.toml will not be watched ({e}); `ikigai-gonk browse \
+                 add|remove` still mounts and unmounts live"
+            );
+        }
+    } else {
+        root_watch.spawn(Arc::clone(&hub));
+    }
 
     // The socket door. Bound only after the store is held, so it can never replace the
     // socket of a gonk that is still running.
@@ -719,11 +778,7 @@ fn serve(flags: &config::Flags) -> ! {
             ledgers: settings.http_ledgers.clone(),
             // The NAMES of the configured roots, for the header's entry point and the page
             // behind it. The paths went to the mount above; a page never needs one.
-            browse_roots: settings
-                .browse_roots
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
+            browse_roots: live_roots.names(),
             passkeys: Arc::clone(&passkeys),
             rules: Arc::clone(&render_rules),
             queue: settings.queue.clone(),
@@ -1296,6 +1351,69 @@ fn layer_take(offer: &str, flags: &config::Flags) {
             )
         }
         Err(e) => fail(&e),
+    }
+}
+
+/// `ikigai-gonk browse add|remove|list` (ledger #2154): over the running gonk's socket, which
+/// writes its OWN config file and mounts or unmounts with no restart. With no gonk to reach,
+/// `add` and `remove` write the file here, for the next start.
+fn browse_command(op: &config::BrowseOp, flags: &config::Flags) {
+    use config::BrowseOp;
+    use ikigai_core::{ArgRef, Iri, Request, Verb};
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let (config_path, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
+    // The socket alone, not the whole settings: a root whose directory is gone stops
+    // `settings`, and removing that root is exactly what this command is for.
+    let socket = config::socket_for(flags, &text, &homes);
+    let iri = |name: &str| {
+        Iri::parse(format!("{}{name}", roots::ROOT_PREFIX))
+            .unwrap_or_else(|_| fail(&format!("browse: `{name}` cannot be a root name")))
+    };
+    let request = match op {
+        BrowseOp::Add { name, path } => Request::new(Verb::Sink, iri(name))
+            .with_arg("content", ArgRef::Inline(path.as_bytes().to_vec())),
+        BrowseOp::Remove { name } => Request::new(Verb::Delete, iri(name)),
+        BrowseOp::List => Request::new(
+            Verb::Source,
+            Iri::parse(roots::ROOTS_IRI).expect("a constant IRI"),
+        ),
+    };
+    match ikigai_ipc::connect(&socket) {
+        Ok(client) => {
+            let (answer, _) = ikigai_resolve::Resolver::issue(&client, request)
+                .unwrap_or_else(|e| fail(&e.to_string()));
+            print!("{}", String::from_utf8_lossy(&answer.bytes));
+        }
+        Err(e) => {
+            let offline = format!(
+                "no gonk answers at {} ({e}), so nothing was mounted",
+                socket.display()
+            );
+            match op {
+                BrowseOp::Add { name, path } => {
+                    let line = roots::write_root(&config_path, &homes.home, name, path)
+                        .unwrap_or_else(|e| fail(&e));
+                    let done = match line {
+                        ikigai_gonk::checkout::ConfigLine::Added => "wrote",
+                        _ => "already had",
+                    };
+                    println!(
+                        "{done} `{}` in {}; {offline}. gonk mounts it at its next start.",
+                        ikigai_gonk::checkout::root_line(name, path),
+                        config_path.display()
+                    );
+                }
+                BrowseOp::Remove { name } => {
+                    let (count, _) = ikigai_gonk::checkout::comment_out_root(&config_path, name)
+                        .unwrap_or_else(|e| fail(&e));
+                    println!(
+                        "commented out {count} line(s) for `{name}` in {}; {offline}.",
+                        config_path.display()
+                    );
+                }
+                BrowseOp::List => fail(&offline),
+            }
+        }
     }
 }
 

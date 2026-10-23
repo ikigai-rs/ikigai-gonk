@@ -310,7 +310,10 @@ pub struct Unwatched {
 /// recounts.
 #[derive(Debug, Default)]
 pub struct Epochs {
-    roots: BTreeMap<String, AtomicU64>,
+    /// Behind a lock since ledger [#2154](http://localhost:1062/l/default/item/2154): a root
+    /// mounted while the server runs gains a counter ([`Epochs::track`]). Never shrunk — see
+    /// there.
+    roots: RwLock<BTreeMap<String, AtomicU64>>,
     /// Finding id → root, learned from the rows the badge counted: a decision posts
     /// `urn:iki:finding:{id}`, which does not say which repository it belongs to.
     owners: Mutex<HashMap<String, String>>,
@@ -323,28 +326,54 @@ impl Epochs {
     /// Counters for these roots, all at zero.
     pub fn new<I: IntoIterator<Item = String>>(roots: I) -> Epochs {
         Epochs {
-            roots: roots.into_iter().map(|r| (r, AtomicU64::new(0))).collect(),
+            roots: RwLock::new(roots.into_iter().map(|r| (r, AtomicU64::new(0))).collect()),
             owners: Mutex::default(),
             reads: crate::queue::Reads::default(),
         }
     }
 
+    /// The counters, read. A poisoned lock still holds whole counters (an insert is the only
+    /// write), so it is read through rather than propagated.
+    fn counters(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, AtomicU64>> {
+        self.roots.read().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// The root's epoch now, or `None` for a root this table does not hold (never memoized).
     pub fn stamp(&self, root: &str) -> Option<u64> {
-        self.roots.get(root).map(|e| e.load(Ordering::SeqCst))
+        self.counters().get(root).map(|e| e.load(Ordering::SeqCst))
     }
 
     /// Something under `root` changed.
     pub fn touch(&self, root: &str) {
-        if let Some(epoch) = self.roots.get(root) {
+        if let Some(epoch) = self.counters().get(root) {
             epoch.fetch_add(1, Ordering::SeqCst);
         }
     }
 
     /// Something changed and it is not known where.
     pub fn touch_all(&self) {
-        for epoch in self.roots.values() {
+        for epoch in self.counters().values() {
             epoch.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The set of roots changed while the server runs (ledger
+    /// [#2154](http://localhost:1062/l/default/item/2154)): give each root in `roots` a counter
+    /// when it has none, and TOUCH every one it already has.
+    ///
+    /// ⚠ A counter is never removed, and a re-added root's is never reset. The Queue's memo
+    /// keeps rows stamped with an epoch; a root removed and mounted again at a fresh `0` could
+    /// match rows stamped `0` before it left, and serve them. Touching instead moves every
+    /// stamp past whatever was memoized, and a removed root's counter costs one integer.
+    pub fn track(&self, roots: &[String]) {
+        let mut counters = self.roots.write().unwrap_or_else(|p| p.into_inner());
+        for epoch in counters.values() {
+            epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        for root in roots {
+            counters
+                .entry(root.clone())
+                .or_insert_with(|| AtomicU64::new(0));
         }
     }
 
@@ -387,6 +416,17 @@ impl RootWatch {
     /// Start watching `roots`, recursively. Returns the watch and the roots it did NOT get;
     /// [`Self::watched`] is the set whose reads may be cached.
     pub fn start(roots: &[(String, PathBuf)]) -> (RootWatch, Vec<Unwatched>) {
+        Self::start_counting(roots, None)
+    }
+
+    /// [`Self::start`], bumping `epochs` instead of a table of its own — what a re-arrangement
+    /// of the roots while the server runs uses (ledger
+    /// [#2154](http://localhost:1062/l/default/item/2154)), so the badge and the Queue keep
+    /// the one table they were handed at start. `None` is [`Self::start`].
+    pub fn start_counting(
+        roots: &[(String, PathBuf)],
+        epochs: Option<Arc<Epochs>>,
+    ) -> (RootWatch, Vec<Unwatched>) {
         let (tx, events) = std::sync::mpsc::channel();
         let (mut watched, mut refused, mut watchers) = (Vec::new(), Vec::new(), Vec::new());
         for (name, dir) in roots {
@@ -414,7 +454,14 @@ impl RootWatch {
                 }),
             }
         }
-        let epochs = Arc::new(Epochs::new(watched.iter().map(|w| w.name.clone())));
+        let names: Vec<String> = watched.iter().map(|w| w.name.clone()).collect();
+        let epochs = match epochs {
+            Some(epochs) => {
+                epochs.track(&names);
+                epochs
+            }
+            None => Arc::new(Epochs::new(names)),
+        };
         (
             RootWatch {
                 watched,
@@ -508,6 +555,39 @@ impl RootWatch {
     /// [`Self::run`] on its own thread.
     pub fn spawn(self, kernel: Arc<Kernel>) {
         std::thread::spawn(move || self.run(kernel));
+    }
+
+    /// [`Self::spawn`], with the platform watches handed back instead of moved onto the
+    /// thread: dropping the [`Held`] ends them, which closes the channel, which ends the
+    /// thread. What a re-arrangement of the roots uses to retire the watch it replaced
+    /// (ledger [#2154](http://localhost:1062/l/default/item/2154)).
+    pub fn spawn_held(self, kernel: Arc<Kernel>) -> Held {
+        let RootWatch {
+            watched,
+            epochs,
+            events,
+            _watchers,
+        } = self;
+        let driver = RootWatch {
+            watched,
+            epochs,
+            events,
+            _watchers: Vec::new(),
+        };
+        std::thread::spawn(move || driver.run(kernel));
+        Held { _watchers }
+    }
+}
+
+/// The platform watches of a [`RootWatch`] driven by [`RootWatch::spawn_held`]. Dropping it
+/// stops that watch.
+pub struct Held {
+    _watchers: Vec<RecommendedWatcher>,
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Held({} watch(es))", self._watchers.len())
     }
 }
 

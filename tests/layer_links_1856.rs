@@ -235,7 +235,7 @@ impl Gonk {
             ledgers: ["default", "crew", "bobby", "secret"]
                 .map(str::to_string)
                 .to_vec(),
-            browse_roots: Vec::new(),
+            browse_roots: Vec::new().into(),
             passkeys: Arc::clone(&passkeys),
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),

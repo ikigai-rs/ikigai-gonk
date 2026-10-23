@@ -93,7 +93,7 @@ const YIELD_EVERY: Duration = Duration::from_secs(2);
 
 /// The backfill: what it may walk, under what, and where the run stands.
 pub struct Backfill {
-    roots: Vec<String>,
+    roots: crate::roots::RootNames,
     policy: QueuePolicy,
     judge: Option<String>,
     scopes: Vec<String>,
@@ -171,7 +171,7 @@ impl Backfill {
     /// configured `gonk.review.judge`, `None` when off), under exactly `scopes`.
     #[must_use]
     pub fn new(
-        roots: Vec<String>,
+        roots: impl Into<crate::roots::RootNames>,
         policy: QueuePolicy,
         judge: Option<String>,
         scopes: Vec<String>,
@@ -179,7 +179,7 @@ impl Backfill {
         review: Option<Trigger>,
     ) -> Backfill {
         Backfill {
-            roots,
+            roots: roots.into(),
             policy,
             judge,
             scopes,
@@ -314,7 +314,7 @@ impl Backfill {
         let cap = Capability::scoped(self.scopes.clone());
         // The work: every serious pending finding, per root, as it stands now.
         let mut work: Vec<(String, String)> = Vec::new();
-        for root in &self.roots {
+        for root in &self.roots.names() {
             match pending_serious(&hub, &cap, root, &self.policy).await {
                 Ok(ids) => work.extend(ids.into_iter().map(|id| (root.clone(), id))),
                 Err(why) => self.with_run(|run| run.unreadable.push((root.clone(), why))),

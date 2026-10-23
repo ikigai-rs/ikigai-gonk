@@ -72,7 +72,7 @@ fn served(
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string()],
-        browse_roots: Vec::new(),
+        browse_roots: Vec::new().into(),
         passkeys: Arc::new(Passkeys::new(
             quic::Layout::in_config_home(config.path()),
             1,
