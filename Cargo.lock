@@ -2020,13 +2020,14 @@ dependencies = [
 
 [[package]]
 name = "ikigai-intray"
-version = "0.1.67"
+version = "0.1.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b9e5014283698aced629573a0e6a3f4ce605d5192f451980b5862f2f34484e"
+checksum = "0f5c411fe9574c53adba1be81dcc5de942bac342b693a341c72acb63f4db88be"
 dependencies = [
  "async-trait",
  "blake3",
  "ikigai-core",
+ "ikigai-rdf",
  "ikigai-resolve",
  "ikigai-store",
  "notify",
@@ -2061,9 +2062,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-layers"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb9d0d0937daec9bd580549b4fc37b22da9ede75c89d73e80c727e96f77e6bd8"
+checksum = "f2053fa360f335536a3115b29e2c9750259ba0106d553383b26e032a81ca0d16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2078,7 +2079,6 @@ dependencies = [
  "ikigai-shacl",
  "ikigai-sign",
  "ikigai-store",
- "oxigraph",
  "oxrdf",
  "oxrdfio",
  "oxsdatatypes",
@@ -2087,7 +2087,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "spargebra",
  "toml 0.8.23",
 ]
 
@@ -2184,9 +2183,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-resolve"
-version = "0.1.67"
+version = "0.1.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eeb53b184c3ec4abe6e0cfef539dcbcd27dcd884bfaec04daa9e0df7f573d48a"
+checksum = "2c5334558cd3a9789dde20ad0c1e89cf505041ff06880bfec43e3731ddccdefd"
 dependencies = [
  "async-trait",
  "futures",
