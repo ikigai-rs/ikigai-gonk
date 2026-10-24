@@ -74,6 +74,15 @@ impl Server {
     /// [`Server::start_configured`] with browse ROOT NAMES configured: the header's entry
     /// points are computed from them. No browse family is mounted behind them.
     fn start_with_roots(rules: &str, anonymous: Vec<String>, browse_roots: Vec<String>) -> Server {
+        Self::start_with_ledgers(rules, anonymous, browse_roots, &["default"])
+    }
+
+    fn start_with_ledgers(
+        rules: &str,
+        anonymous: Vec<String>,
+        browse_roots: Vec<String>,
+        ledgers: &[&str],
+    ) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -85,7 +94,7 @@ impl Server {
         let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
-            ledgers: vec!["default".to_string()],
+            ledgers: ledgers.iter().map(|name| name.to_string()).collect(),
             browse_roots: browse_roots.into(),
             passkeys: Arc::clone(&passkeys),
             rules: rules.into(),
@@ -2853,5 +2862,61 @@ fn the_doctor_says_what_it_judged_against_on_one_line() {
         "shipping",
     ] {
         assert!(states.body.contains(state), "{state}: {states:?}");
+    }
+}
+
+/// A signed-in caller's editor and header must agree on the ledger in force,
+/// regardless of configuration order or whether default is readable.
+#[test]
+fn a_multi_ledger_passkey_defaults_to_default_in_both_pickers() {
+    for (readable, expected_default) in [
+        (vec!["alpha", "default", "zeta"], "default"),
+        (vec!["alpha", "zeta"], "zeta"),
+    ] {
+        let server = Server::start_with_ledgers(
+            ikigai_gonk::rules::DEFAULT_RULES,
+            Vec::new(),
+            Vec::new(),
+            &["zeta", "alpha", "default"],
+        );
+        let scopes = readable
+            .into_iter()
+            .flat_map(|name| grants_for(name, Authority::Read).unwrap())
+            .collect::<Vec<_>>();
+        let (token, _) = sign_in(&server, "multi-ledger", &scopes);
+        for (path, expected) in [
+            ("/sparql", expected_default),
+            ("/sparql?ledger=alpha", "alpha"),
+        ] {
+            let page = server.page(path, Some(&token));
+            assert_eq!(page.status, 200, "{page:?}");
+            let body = page.body.replace('\'', "\"");
+            let select = body
+                .split("<select id=\"q-ledger\" name=\"ledger\">")
+                .nth(1)
+                .unwrap()
+                .split("</select>")
+                .next()
+                .unwrap();
+            assert!(
+                select.contains(&format!("selected=\"selected\" value=\"{expected}\"")),
+                "{path}: {select}"
+            );
+            assert_eq!(select.matches("selected=").count(), 1, "{select}");
+            assert!(
+                body.contains(&format!("Ledger: {expected}")),
+                "{path}: header ledger"
+            );
+            let header = body.split("</header>").next().unwrap();
+            assert!(
+                header.contains(&format!(
+                    "aria-current=\"page\" class=\"ledger-link\" href=\"/l/{expected}\""
+                )),
+                "{path}: {header}"
+            );
+            if expected_default != "default" {
+                assert!(!select.contains("value=\"default\""), "{select}");
+            }
+        }
     }
 }
