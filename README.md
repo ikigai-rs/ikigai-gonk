@@ -1300,6 +1300,38 @@ once more with the findings merged and reworded. A hook cannot tell a member fro
 synthesis's, deduplicated only where the words match. Point this hook at single-agent reviews
 if one item per defect matters more than seeing every reviewer's wording.
 
+## Pending findings summaries
+
+For a "Findings on touched files" check, gonk counts the pending findings by severity:
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock --plain \
+  -c 'source urn:repo:ikigai-gonk:findings-summary:src/lib.rs'
+# Omit the path to summarize every file with pending findings in this root:
+ikigai --connect ~/.ikigai/gonk.sock --plain \
+  -c 'source urn:repo:ikigai-gonk:findings-summary'
+```
+
+With the socket mounted at `urn:gk:`, use
+`urn:gk:repo:ikigai-gonk:findings-summary:src/lib.rs`. Paths use browse's percent encoding
+(for example, `src/a%20b.rs`). The JSON face (`application/json`, the default) answers:
+
+```json
+{"repo":"ikigai-gonk","state":"pending","total":3,"files":[{"path":"src/lib.rs","total":3,"severities":{"major":2},"unrated":1}]}
+```
+
+Files and severity words are sorted; only observed severity words appear. A named file with
+no pending findings returns one file with `total: 0`, empty `severities` and `unrated: 0`.
+A root with none returns `files: []`. Pull-request findings address a diff and are excluded.
+
+The summary requires the root's browse read grant, just like the findings listing, and needs
+no mounted model. It composes the listing's pending read, so it agrees with computed
+supersession and current decisions, including retractions. This is not a separate RDF state
+filter: browse may read file contents and run its drift pass. It reduces the response callers
+must read and count; it does not bypass the listing's work or its unpaged response-size bound.
+An oversized listing refuses the summary too; narrow it to a file rather than accepting a
+partial count.
+
 ## Filing gonk's own findings
 
 gonk's review pass mints **pending findings**, and a person publishes or declines each one at
