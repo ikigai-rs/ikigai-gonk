@@ -2953,7 +2953,14 @@ impl Endpoint for Sparql {
         let ledgers = readable_ledgers(&self.web, inv.capability);
         let ledger = match &asked.ledger {
             Some(name) => Ledger::parse(name)?,
-            None => ledgers.first().cloned().unwrap_or_else(Ledger::default),
+            // Prefer the conventional ledger independently of configuration/grant order.
+            // Only fall back to the first readable ledger when default is unavailable.
+            None => ledgers
+                .iter()
+                .find(|ledger| ledger.is_default())
+                .or_else(|| ledgers.first())
+                .cloned()
+                .unwrap_or_else(Ledger::default),
         };
         require_graph(inv, &ledger)?;
         let query = asked.query;
