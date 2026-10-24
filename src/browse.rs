@@ -396,6 +396,10 @@ pub fn wire(
     config_home: Option<PathBuf>,
 ) -> Wired {
     let first = roots.first().map(|(name, _)| name.clone());
+    let root_names = roots
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     // The git-history series (ledger #1631) over the same roots, before the mount takes them.
     let history = crate::history::space(&roots);
     // "On GitHub" over the same roots (ledger #1907), with no override: `main` replaces it
@@ -416,6 +420,7 @@ pub fn wire(
         None => mount,
     };
     let (space, style) = mount.space_watched();
+    let space = crate::findings_summary::bind(space, &root_names);
     Wired {
         space: match watch {
             Some(watch) => cached_reads(space, watch.watched(), Some(watch.epochs())),

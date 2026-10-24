@@ -272,7 +272,7 @@ fn annotate(kernel: &Kernel, id: &str, target: &str, quote: &str, note: &str) {
 /// `review` and the PR-derived layers are deliberately absent: they derive through
 /// `urn:llm:*`, which nothing binds until a `gonk.mount` line names the peer that serves it,
 /// and an action the kernel can never satisfy is an over-offer.
-const BROWSE_IDS: [&str; 10] = [
+const BROWSE_IDS: [&str; 11] = [
     "annotation",
     "browse-annotations",
     "browse-file",
@@ -283,6 +283,7 @@ const BROWSE_IDS: [&str; 10] = [
     "browse-state",
     "browse-style",
     "browse-tree",
+    "gonk-findings-summary",
 ];
 
 /// The five the mount adds, over seven patterns per root (`explain`, `explain:{path}`,

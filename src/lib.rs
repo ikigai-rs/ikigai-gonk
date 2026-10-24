@@ -46,6 +46,7 @@ pub mod config;
 pub mod doors;
 pub mod egress;
 pub mod findings;
+pub mod findings_summary;
 pub mod github;
 pub mod grants;
 pub mod history;
