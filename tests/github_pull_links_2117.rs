@@ -192,7 +192,10 @@ fn a_pull_request_links_to_its_page_in_the_roots_repository() {
         &[("as", "text/html")],
     );
     assert!(html.contains(&format!("href='{REPO}/pull/7'")), "{html}");
-    assert!(html.contains(">On GitHub</a>"), "{html}");
+    assert!(
+        html.contains(">On GitHub<span class='sr-only'> (opens in a new tab)</span></a>"),
+        "{html}"
+    );
     assert!(
         !html.contains("data-lines"),
         "a selected line is a file view's, not a pull request's: {html}"
@@ -274,7 +277,10 @@ fn the_browse_page_draws_the_link_for_a_pull_request() {
             page.contains(&format!("href='{REPO}/pull/7'")),
             "{start}: {page}"
         );
-        assert!(page.contains(">On GitHub</a>"), "{start}: {page}");
+        assert!(
+            page.contains(">On GitHub<span class='sr-only'> (opens in a new tab)</span></a>"),
+            "{start}: {page}"
+        );
     }
 
     // The listing is many pull requests, not one.

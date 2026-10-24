@@ -728,8 +728,10 @@ exactly what its grant names, and browsing needs a role beyond a ledger's grant.
 A browse page that shows a root, a directory or a file carries an **On GitHub** link above the
 region, to the same path on GitHub: `tree/{ref}/{path}` for a directory, `blob/{ref}/{path}` for a
 file. On a file view a selected line (`#L42`, a typed `#L10-L20`, or the line an annotation card's
-`#annotation-{id}` names) carries onto the link. It opens like every other link on these pages, in
-the same tab, and it follows the region: when a click moves the region to another directory or
+`#annotation-{id}` names) carries onto the link. Like every link to GitHub on these pages (a
+`owner/repo PR N` or `owner/repo#N` reference, a GitHub URL in a body, a layer entry's repository),
+it opens in a new tab, with "opens in a new tab" in its name for a screen reader and an arrow after
+its text, and it follows the region: when a click moves the region to another directory or
 file, `web/gonk.js` asks for that view's link and swaps it in, and a view that is neither (an
 explanation, the pull-request listing) shows none.
 
