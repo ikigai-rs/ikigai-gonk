@@ -281,11 +281,15 @@ fn a_directory_and_a_file_link_to_the_same_path_at_the_head_commit() {
     assert!(file.contains(&format!("href='{want}'")), "{file}");
     assert!(file.contains(&format!("data-base='{want}'")), "{file}");
     assert!(file.contains("data-lines='true'"), "{file}");
-    assert!(file.contains(">On GitHub</a>"), "{file}");
+    assert!(
+        file.contains(">On GitHub<span class='sr-only'> (opens in a new tab)</span></a>"),
+        "{file}"
+    );
     assert!(!file.contains("github-note"), "{file}");
     assert!(
-        !file.contains("target="),
-        "it opens like every other link here, in the same tab: {file}"
+        // Each on its own: the page's serializer sorts attributes, so their order is not ours.
+        file.contains(" target='_blank'") && file.contains(" rel='noopener noreferrer'"),
+        "a link to GitHub opens in a new tab: {file}"
     );
     let dir = text(
         &hub,
@@ -456,7 +460,10 @@ fn the_browse_page_draws_the_link_for_its_view() {
         page.contains(&format!("href='{REPO}/tree/{head}/src'")),
         "{page}"
     );
-    assert!(page.contains(">On GitHub</a>"), "{page}");
+    assert!(
+        page.contains(">On GitHub<span class='sr-only'> (opens in a new tab)</span></a>"),
+        "{page}"
+    );
 
     let page = shell(&hub, "urn:repo:demo:file:src/lib.rs", &reader);
     assert!(

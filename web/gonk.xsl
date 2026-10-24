@@ -668,7 +668,7 @@
             <xsl:if test="@repository">
               <xsl:text>Repository: </xsl:text>
               <xsl:choose>
-                <xsl:when test="@repository-href"><a><xsl:attribute name="href"><xsl:value-of select="@repository-href"/></xsl:attribute><xsl:value-of select="@repository"/></a></xsl:when>
+                <xsl:when test="@repository-href"><a><xsl:attribute name="href"><xsl:value-of select="@repository-href"/></xsl:attribute><xsl:if test="starts-with(@repository-href, 'https://github.com/')"><xsl:attribute name="target">_blank</xsl:attribute><xsl:attribute name="rel">noopener noreferrer</xsl:attribute></xsl:if><xsl:value-of select="@repository"/><xsl:if test="starts-with(@repository-href, 'https://github.com/')"><span class="sr-only"> (opens in a new tab)</span></xsl:if></a></xsl:when>
                 <xsl:otherwise><code><xsl:value-of select="@repository"/></code></xsl:otherwise>
               </xsl:choose>
             </xsl:if>
@@ -1001,7 +1001,7 @@
     the region. The shell draws it for the view it opens on; web/gonk.js swaps in this same
     template's fragment (urn:iki:gonk:github:…, as=text/html) whenever the region moves to
     another view, and carries a file view's #L10 or #L10-L20 onto the link from data-base.
-    It opens like every other link here, in the same tab. With no link the paragraph is
+    Like every link to GitHub here, it opens in a new tab and says so. With no link the paragraph is
     still drawn, hidden, so the script has one place to swap into.
   -->
   <xsl:template name="github">
@@ -1019,7 +1019,11 @@
         <xsl:if test="@kind = 'file'">
           <xsl:attribute name="data-lines">true</xsl:attribute>
         </xsl:if>
+        <!-- A new tab, said aloud, for the reasons render::NEW_TAB_ATTRS and NEW_TAB_NOTE give. -->
+        <xsl:attribute name="target">_blank</xsl:attribute>
+        <xsl:attribute name="rel">noopener noreferrer</xsl:attribute>
         <xsl:text>On GitHub</xsl:text>
+        <span class="sr-only"> (opens in a new tab)</span>
       </a>
       <xsl:if test="@note">
         <span class="note github-note"><xsl:value-of select="@note"/></span>

@@ -679,8 +679,19 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 /// let prs = "<p data-linkify='default'>Fixed in ikigai-rs/ikigai-lisp PR 28 and o/r#7.</p>";
 /// assert_eq!(
 ///     linkify(prs),
-///     "<p data-linkify='default'>Fixed in <a href='https://github.com/ikigai-rs/ikigai-lisp/pull/28'>\
-///      ikigai-rs/ikigai-lisp PR 28</a> and <a href='https://github.com/o/r/issues/7'>o/r#7</a>.</p>"
+///     "<p data-linkify='default'>Fixed in <a href='https://github.com/ikigai-rs/ikigai-lisp/pull/28' \
+///      target='_blank' rel='noopener noreferrer'>ikigai-rs/ikigai-lisp PR 28<span class='sr-only'> \
+///      (opens in a new tab)</span></a> and <a href='https://github.com/o/r/issues/7' \
+///      target='_blank' rel='noopener noreferrer'>o/r#7<span class='sr-only'> (opens in a new \
+///      tab)</span></a>.</p>"
+/// );
+/// // A GitHub URL written out opens in a new tab too; any other URL opens in place.
+/// let urls = "<p data-linkify='default'>https://github.com/o/r/pull/7 https://a.example</p>";
+/// assert_eq!(
+///     linkify(urls),
+///     "<p data-linkify='default'><a href='https://github.com/o/r/pull/7' target='_blank' \
+///      rel='noopener noreferrer'>https://github.com/o/r/pull/7<span class='sr-only'> (opens in \
+///      a new tab)</span></a> <a href='https://a.example'>https://a.example</a></p>"
 /// );
 /// // Text outside a marked element is never touched.
 /// assert_eq!(linkify("<p>https://a.example</p>"), "<p>https://a.example</p>");
@@ -744,7 +755,12 @@ fn linkify_text(text: &str, value: &str) -> String {
             if let Some(len) = url_at(here) {
                 let url = &here[..len];
                 let href = rehome(url).unwrap_or_else(|| url.to_string());
-                out.push_str(&format!("<a href='{href}'>{url}</a>"));
+                let (attrs, note) = if on_github(&href) {
+                    (NEW_TAB_ATTRS, NEW_TAB_NOTE)
+                } else {
+                    ("", "")
+                };
+                out.push_str(&format!("<a href='{href}'{attrs}>{url}{note}</a>"));
                 i += len;
                 continue;
             }
@@ -755,7 +771,10 @@ fn linkify_text(text: &str, value: &str) -> String {
                 .is_some_and(|c| matches!(c, '/' | '.' | '-' | '_' | ':' | '@' | '#'));
             if !joined {
                 if let Some((len, href)) = github_ref_at(here) {
-                    out.push_str(&format!("<a href='{href}'>{}</a>", &here[..len]));
+                    out.push_str(&format!(
+                        "<a href='{href}'{NEW_TAB_ATTRS}>{}{NEW_TAB_NOTE}</a>",
+                        &here[..len]
+                    ));
                     i += len;
                     continue;
                 }
@@ -992,6 +1011,25 @@ const LAYER_CONTEXT: &str = "layer:";
 /// [#1856](http://localhost:1062/l/default/item/1856)). Escaped for a single-quoted attribute.
 pub const FOREIGN_REF_TITLE: &str =
     "A reference to an item in the author&apos;s own ledger, which this gonk does not hold";
+
+/// The attributes a link to GitHub carries: it opens in a new tab, so the reader keeps their
+/// place in gonk. `noopener` keeps the GitHub page from reaching this one through
+/// `window.opener`, and `noreferrer` keeps gonk's URL out of GitHub's logs. `web/gonk.xsl` writes
+/// the same pair on the "On GitHub" link and a layer entry's repository.
+pub const NEW_TAB_ATTRS: &str = " target='_blank' rel='noopener noreferrer'";
+
+/// What a new-tab link says to a screen reader, inside the link so it is part of the link's
+/// name: a new tab is a change of context that a sighted reader sees and a listener does not
+/// (WCAG technique G201). The visible arrow is `web/gonk.css`'s, with empty alternative text.
+pub const NEW_TAB_NOTE: &str = "<span class='sr-only'> (opens in a new tab)</span>";
+
+/// Whether `href` is a page on GitHub, and so opens in a new tab ([`NEW_TAB_ATTRS`]).
+fn on_github(href: &str) -> bool {
+    const ORIGIN: &str = "https://github.com/";
+    // `get`, not slicing, for the reason [`url_at`] gives.
+    href.get(..ORIGIN.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(ORIGIN))
+}
 
 /// The [`LINKIFY_ATTR`] value for one layer entry's text (ledger
 /// [#1856](http://localhost:1062/l/default/item/1856)): a layer entry is someone's prose, and a

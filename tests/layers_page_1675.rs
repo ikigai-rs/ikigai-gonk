@@ -674,6 +674,15 @@ fn entries_render_newest_first_with_their_kinds() {
             .contains("href='https://github.com/ikigai-rs/ikigai-gonk'"),
         "a brief's repository, as a link"
     );
+    // Each on its own: the page's serializer sorts attributes, so their order is not ours.
+    assert!(
+        page.body.contains(" target='_blank'")
+            && page.body.contains(" rel='noopener noreferrer'")
+            && page
+                .body
+                .contains("<span class='sr-only'> (opens in a new tab)</span>"),
+        "a brief's repository on GitHub opens a new tab and says so"
+    );
     assert!(
         !page.body.contains("<b>this</b>"),
         "a body is text, never markup"
