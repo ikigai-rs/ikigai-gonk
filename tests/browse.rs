@@ -3794,3 +3794,61 @@ fn a_mount_refuses_a_writer_that_does_not_declare_its_graph() {
         None,
     );
 }
+
+/// ★ A browse page's query arguments open its view with them (Brian, 2026-10-24): the page's
+/// history pushes `/browse/{iri}?k=v` for a view read with arguments, so a Back, a reload or a
+/// shared link must reopen THAT view, not its bare default. `/browse/urn:repo:demo:prs?state=all`
+/// is the pull requests listing with every state, which the bare IRI (open only) is not.
+///
+/// The value lands in a command line, so one that could start another word or stage (a space,
+/// a `|`) is refused, never quietly dropped.
+#[test]
+fn a_browse_pages_query_arguments_open_its_view_with_them() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let token = door.enrol_and_sign_in_with(browsing_scopes());
+
+    let (status, page) = door.get_html("/browse/urn:repo:demo:prs?state=all", Some(&token));
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(&urlencode(
+            "source urn:repo:demo:prs state=all as=text/html"
+        )),
+        "the region loads the listing with every state: {page}"
+    );
+
+    // No arguments: the region loads the view exactly as before.
+    let (_, bare) = door.get_html("/browse/urn:repo:demo:tree", Some(&token));
+    assert!(
+        bare.contains(&urlencode("source urn:repo:demo:tree as=text/html")),
+        "{bare}"
+    );
+
+    for bad in [
+        "/browse/urn:repo:demo:prs?state=all%7Csink",
+        "/browse/urn:repo:demo:prs?state=a%20b",
+    ] {
+        let (status, refused) = door.get_html(bad, Some(&token));
+        assert_eq!(status, 400, "{bad}: {refused}");
+    }
+}
+
+/// The page's half of that, pinned as WIRING: `web/gonk.js` pushes each view's page URL into
+/// history and loads it back on popstate, so Back returns to the view the reader came from.
+#[test]
+fn the_browse_region_keeps_a_history() {
+    let js = include_str!("../web/gonk.js");
+    assert!(
+        js.contains("history.pushState({ browse: url }, \"\", url)"),
+        "push"
+    );
+    assert!(
+        js.contains("window.addEventListener(\"popstate\""),
+        "restore"
+    );
+    assert!(
+        js.contains("return \"/browse/\" + encodeURI(words[1])"),
+        "the page URL"
+    );
+}

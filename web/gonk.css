@@ -165,10 +165,12 @@ summary { cursor: pointer; color: var(--accent); }
 .github-link { font-weight: 600; }
 .github-note { flex: 1 1 16rem; overflow-wrap: anywhere; }
 
-/* A link that opens a new tab (GitHub's) shows an arrow after its text. The arrow's alternative
- * text is empty because the link already says "opens in a new tab" in `sr-only` text; a browser
- * without the alternative-text syntax drops the rule and shows no arrow. */
-a[target="_blank"]::after { content: "\2197" / ""; margin-left: 0.15em; }
+/* A link that opens a new tab (GitHub's) shows an arrow after its text, not underlined: the arrow
+ * is the sign that the link goes elsewhere, and an underline broken by its margin read as two
+ * links (Brian, 2026-10-24). `inline-block` is what stops the link's underline reaching it. Its
+ * alternative text is empty because the link already says "opens in a new tab" in `sr-only`
+ * text; a browser without the alternative-text syntax drops the rule and shows no arrow. */
+a[target="_blank"]::after { content: "\2197" / ""; margin-left: 0.15em; display: inline-block; text-decoration: none; }
 
 /* The sample-query buttons. `quiet small` reuses the palette the contrast test already
  * holds to the floor; the focus ring is the global :focus-visible outline, so they are
