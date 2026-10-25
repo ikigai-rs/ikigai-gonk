@@ -481,6 +481,53 @@ pub fn k_url(command: &str) -> String {
     format!("/k?{COMMAND}={}", ikigai_fn::html::url_segment(command))
 }
 
+/// A browse page's query arguments, forwarded to the view it opens: ` k=v` for each, in
+/// order, so `/browse/urn:repo:x:prs?state=all` opens the listing with every state.
+///
+/// It is what lets the page's history work (`web/gonk.js` pushes each view's page URL, its
+/// arguments as the query): a Back, a reload or a shared link reopens the view the reader
+/// saw, not its bare default. `as` is the page's own face and is not forwarded.
+///
+/// ★ The value lands in a COMMAND LINE, so it is held to a narrow alphabet before it does:
+/// no space and no `|` (either would start another word or another stage of the line), and a
+/// name is a plain argument name. Anything else is refused, never quietly dropped, so a URL
+/// that cannot be honored says so instead of opening something else.
+fn view_args(inv: &Invocation<'_>) -> Result<String> {
+    let name_ok = |n: &str| {
+        let mut chars = n.chars();
+        chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && n.len() <= 32
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    let value_ok = |v: &str| {
+        !v.is_empty()
+            && v.len() <= 200
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._:@/+-=,".contains(c))
+    };
+    let mut out = String::new();
+    for name in inv.request.args.keys() {
+        if name == "as" {
+            continue;
+        }
+        let value = inv.inline_str(name).map_err(|_| Error::InvalidArgument {
+            name: name.clone(),
+            detail: "a browse page's arguments are text".to_string(),
+        })?;
+        if !name_ok(name) || !value_ok(value) {
+            return Err(Error::InvalidArgument {
+                name: name.clone(),
+                detail: format!(
+                    "`{name}={value}` cannot be forwarded to the view: a name is lowercase \
+                     letters, digits and `-`, and a value has no spaces or `|`"
+                ),
+            });
+        }
+        out.push_str(&format!(" {name}={value}"));
+    }
+    Ok(out)
+}
+
 /// Whether this capability satisfies the floor every browse row declares.
 ///
 /// ⚠ `urn:cap:browse:read:*` is a WILDCARD requirement, which the kernel reads as "holds
@@ -674,7 +721,11 @@ impl Endpoint for BrowseShell {
             None => None,
         };
         if lacking.is_none() {
-            attributes.push(("start-url", k_url(&format!("source {start} as=text/html"))));
+            let args = view_args(inv)?;
+            attributes.push((
+                "start-url",
+                k_url(&format!("source {start}{args} as=text/html")),
+            ));
             attributes.push(("stylesheet", k_url("source urn:repo:style")));
             // ★ The SECOND sheet, and the one that makes the faces legible: `urn:repo:style`
             // is the syntax theme for the `hl-` classes inside a file view, and

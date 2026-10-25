@@ -570,6 +570,74 @@
   window.addEventListener("hashchange", carryLines);
   carryLines();
 
+  // ------------------------------------------------------- the browse region's history
+  //
+  // ★ BACK RETURNS TO THE VIEW YOU CAME FROM (Brian, 2026-10-24). Browse swaps every view into
+  // #browse in place, so with nothing here the page's URL never moved and Back left browse
+  // altogether. Each view the region shows now pushes its own page URL, `/browse/{iri}` with the
+  // view's arguments as the query (the shell forwards them: `view_args` in src/k.rs), and Back or
+  // Forward loads that view back into the region. So a PR opened from a tree's recent list goes
+  // Back to the tree, the same place the repository crumb goes, and a reload or a shared URL
+  // opens the same view, arguments and all.
+  //
+  // A restored view's URL already IS the location, so its swap pushes nothing; a fragment-only
+  // move (`#L42`) fires popstate too, and is left to the line handling above.
+
+  // The page URL for a `/k?c=source {iri} [k=v …]` read, or null for anything else (a Sink, a
+  // positional value). `as` and `chrome` are the face, not the view, and are not carried.
+  function pageUrlOf(path) {
+    if (typeof path !== "string" || path.slice(0, 3) !== "/k?") return null;
+    const command = new URLSearchParams(path.slice(3)).get("c") || "";
+    const words = command.trim().split(/\s+/);
+    if (words[0] !== "source" || !words[1]) return null;
+    const query = new URLSearchParams();
+    for (const word of words.slice(2)) {
+      const at = word.indexOf("=");
+      if (at < 1) return null;
+      const name = word.slice(0, at);
+      if (name === "as" || name === "chrome") continue;
+      query.append(name, word.slice(at + 1));
+    }
+    const q = query.toString();
+    return "/browse/" + encodeURI(words[1]) + (q ? "?" + q : "");
+  }
+
+  function here() {
+    return location.pathname + location.search;
+  }
+
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target || target.id !== "browse") return;
+    const config = e.detail.requestConfig;
+    const url = pageUrlOf(config && config.path);
+    if (!url || url === here()) return;
+    history.pushState({ browse: url }, "", url);
+  });
+
+  window.addEventListener("popstate", () => {
+    if (!$("browse") || location.pathname.slice(0, 8) !== "/browse/") return;
+    const shown = $("browse").getAttribute("data-view-url");
+    if (shown === here()) return;
+    const iri = decodeURI(location.pathname.slice(8));
+    let args = "";
+    new URLSearchParams(location.search).forEach((value, name) => {
+      args += " " + name + "=" + value;
+    });
+    htmx.ajax("GET", "/k?c=" + encodeURIComponent("source " + iri + args + " as=text/html"), {
+      target: "#browse",
+      swap: "innerHTML",
+    });
+  });
+
+  // Which page URL the region is showing, so a fragment-only Back reloads nothing.
+  document.addEventListener("htmx:afterSettle", (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target || target.id !== "browse") return;
+    const url = pageUrlOf(e.detail.requestConfig && e.detail.requestConfig.path);
+    if (url) target.setAttribute("data-view-url", url);
+  });
+
   // ------------------------------------------------------------------ sign-in notices
 
   // ★ A PAGE THE GRANT DOES NOT REACH SAYS SO IN WORDS (ledger #739). The server renders both
