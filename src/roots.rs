@@ -87,6 +87,14 @@ const KEY: &str = "gonk.browse.root";
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
+/// One ordering for root listings: Unicode lowercase, then exact spelling so names that
+/// differ only in case have a deterministic order independent of configuration order.
+pub(crate) fn name_order(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
+}
+
 /// The NAMES of the roots in force, shared by every page that offers a root (the header, the
 /// Browse and Queue pages, the judge backfill) and replaced by a re-arrangement.
 ///
@@ -95,7 +103,8 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 pub struct RootNames(Arc<RwLock<Vec<String>>>);
 
 impl From<Vec<String>> for RootNames {
-    fn from(names: Vec<String>) -> Self {
+    fn from(mut names: Vec<String>) -> Self {
+        names.sort_by(|a, b| name_order(a, b));
         RootNames(Arc::new(RwLock::new(names)))
     }
 }
@@ -107,7 +116,7 @@ impl FromIterator<String> for RootNames {
 }
 
 impl RootNames {
-    /// The names now, in configured order.
+    /// The names now, sorted case-insensitively, with exact spelling breaking ties.
     pub fn names(&self) -> Vec<String> {
         self.0.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
@@ -126,7 +135,8 @@ impl RootNames {
             .any(|r| r == root)
     }
 
-    fn set(&self, names: Vec<String>) {
+    fn set(&self, mut names: Vec<String>) {
+        names.sort_by(|a, b| name_order(a, b));
         *self.0.write().unwrap_or_else(|p| p.into_inner()) = names;
     }
 }
@@ -450,7 +460,9 @@ impl LiveRoots {
                 path.display()
             ),
         };
-        for (name, dir) in &state.in_force {
+        let mut roots: Vec<_> = state.in_force.iter().collect();
+        roots.sort_by(|a, b| name_order(&a.0, &b.0));
+        for (name, dir) in roots {
             let watch = match state.unwatched.iter().find(|u| &u.name == name) {
                 Some(u) => format!("served live, not watched ({})", u.reason),
                 None => "watched".to_string(),

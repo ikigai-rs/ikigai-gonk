@@ -1089,9 +1089,11 @@ fn browse_line(
                 not bound"
             .to_string();
     }
-    let names: Vec<String> = roots
+    let names: roots::RootNames = roots.iter().map(|(name, _)| name.clone()).collect();
+    let names: Vec<String> = names
+        .names()
         .iter()
-        .map(|(name, _)| {
+        .map(|name| {
             if watched.iter().any(|root| &root.name == name) {
                 format!("{name} (watched)")
             } else {

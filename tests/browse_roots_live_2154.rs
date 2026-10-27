@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod common;
 mod scratch_gonk;
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
@@ -362,4 +363,169 @@ fn a_re_arrangement_cuts_every_answer_the_old_one_served() {
     let answer = futures::executor::block_on(hub.issue(read(), &root)).expect("read");
     assert_eq!(answer.bytes, b"a, elsewhere");
     drop((watch, next_watch));
+}
+
+/// #2392: configuration order and an appended live root must not dictate listing order.
+#[test]
+fn root_listings_sort_by_name_before_and_after_a_live_addition() {
+    let repos = tempfile::tempdir().unwrap();
+    let dir = repo(repos.path(), "files");
+    let gonk = Gonk::start(&format!(
+        "gonk.browse.root = \"zulu={}\"\ngonk.browse.root = \"alpha={}\"\ngonk.browse.root = \"ALPHA={}\"\n",
+        dir.display(), dir.display(), dir.display()
+    ));
+    let log = gonk.log();
+    let banner = log
+        .lines()
+        .find(|line| line.starts_with("  browse "))
+        .unwrap();
+    let positions: Vec<_> = ["ALPHA", "alpha", "zulu"]
+        .iter()
+        .map(|name| banner.find(&format!("{name} (watched)")).unwrap())
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{banner}"
+    );
+    let owner = ikigai_ipc::connect(&gonk.socket).expect("socket");
+    let status = text(
+        owner
+            .issue(request(Verb::Source, "urn:iki:gonk:browse:roots", None))
+            .map(|(r, _)| r),
+    );
+    let config = config_path(&status);
+    let cli = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+            .args(args)
+            .arg("--socket")
+            .arg(&gonk.socket)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let token = sign_in_to_browse(&gonk);
+    let mut failures = Vec::new();
+    for (stage, expected) in [
+        ("configured", vec!["ALPHA", "alpha", "zulu"]),
+        ("live-added", vec!["ALPHA", "alpha", "Beta", "zulu"]),
+    ] {
+        if stage == "live-added" {
+            cli(&["browse", "add", &format!("Beta={}", dir.display())]);
+        }
+        let listed = cli(&["browse", "list"]);
+        let actual: Vec<_> = listed
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("  ")
+                    .and_then(|line| line.split_once('\t'))
+                    .map(|(name, _)| name)
+            })
+            .filter(|name| *name != "refused")
+            .collect();
+        if actual != expected {
+            failures.push(format!(
+                "{stage} browse list: {actual:?}, expected {expected:?}"
+            ));
+        }
+        let page = http(&gonk, "GET", "/browse", "", Some(&token)).replace('\'', "\"");
+        let positions: Vec<_> = expected
+            .iter()
+            .map(|name| {
+                page.find(&format!("href=\"/browse/urn:repo:{name}:tree\""))
+                    .unwrap_or_else(|| panic!("missing {name}: {page}"))
+            })
+            .collect();
+        if !positions.windows(2).all(|pair| pair[0] < pair[1]) {
+            failures.push(format!(
+                "{stage} browse index: positions {positions:?}, expected {expected:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn root_names_have_the_same_order_regardless_of_input_order() {
+    use ikigai_gonk::roots::RootNames;
+
+    let expected = ["ALPHA", "alpha", "Beta", "zulu", "Äther", "äther"];
+    for input in [
+        vec!["zulu", "alpha", "äther", "ALPHA", "Äther", "Beta"],
+        vec!["Beta", "Äther", "ALPHA", "äther", "alpha", "zulu"],
+    ] {
+        let names: RootNames = input.into_iter().map(str::to_string).collect();
+        assert_eq!(names.names(), expected);
+    }
+}
+
+/// Drive the real binary's HTTP door, including its passkey ceremony.
+fn http(gonk: &Gonk, method: &str, path: &str, body: &str, token: Option<&str>) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let mut stream = TcpStream::connect(gonk.http).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let cookie = token
+        .map(|token| {
+            format!(
+                "Cookie: {}={token}\r\n",
+                ikigai_gonk::identity::SESSION_COOKIE
+            )
+        })
+        .unwrap_or_default();
+    write!(stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\nSec-Fetch-Site: same-origin\r\nAccept: {accept}\r\nContent-Type: application/json\r\n{cookie}Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        port = gonk.http.port(), len = body.len(),
+        accept = if method == "GET" { "text/html" } else { "application/json" },
+    ).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    response.split_once("\r\n\r\n").unwrap().1.to_string()
+}
+
+fn sign_in_to_browse(gonk: &Gonk) -> String {
+    use ikigai_gonk::identity;
+
+    let auth = common::Authenticator::new();
+    let invite = identity::invite(
+        &gonk.layout,
+        "browser",
+        &[ikigai_browse::CAP_WILDCARD.to_string()],
+        false,
+        30,
+        identity::now_seconds(),
+    )
+    .unwrap();
+    let origin = format!("http://localhost:{}", gonk.http.port());
+    let challenge = |path| {
+        let options: serde_json::Value =
+            serde_json::from_str(&http(gonk, "POST", path, "{}", None)).unwrap();
+        options["challenge"].as_str().unwrap().to_string()
+    };
+    http(
+        gonk,
+        "POST",
+        "/auth/register",
+        &auth.register_body(&challenge("/auth/register-options"), &invite, &origin),
+        None,
+    );
+    let session: serde_json::Value = serde_json::from_str(&http(
+        gonk,
+        "POST",
+        "/auth/login",
+        &auth.login_body(&challenge("/auth/login-options"), &origin, 1),
+        None,
+    ))
+    .unwrap();
+    session["session"].as_str().unwrap().to_string()
 }

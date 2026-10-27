@@ -479,11 +479,12 @@ pub fn browse_role_for(
     role: BrowseRole,
     roots: &[String],
 ) -> Result<Vec<String>, String> {
-    let configured: Vec<&str> = settings
+    let mut configured: Vec<&str> = settings
         .browse_roots
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
+    configured.sort_by(|a, b| crate::roots::name_order(a, b));
     for root in roots {
         if !configured.contains(&root.as_str()) {
             return Err(format!(

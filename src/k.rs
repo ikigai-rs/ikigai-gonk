@@ -551,7 +551,7 @@ fn can_annotate(inv: &Invocation<'_>) -> bool {
     inv.capability.allows(ikigai_browse::CAP_ANNOTATE)
 }
 
-/// The configured browse roots this caller may READ, in configured order.
+/// The configured browse roots this caller may READ, in case-insensitive name order.
 ///
 /// ★ This is `ikigai-browse`'s OWN enforcement read back through its public constants.
 /// `granted()` passes a root when the capability holds `urn:cap:browse:read:{root}` or the
