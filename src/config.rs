@@ -396,8 +396,9 @@ serve flags (each overrides its config key wholesale):
                         this server is the only thing that can export the dataset
   --config PATH         read this file instead of <config home>/config.toml
   --config-home DIR     the config home (config.toml, store.toml, gonk/) instead of
-                        $XDG_CONFIG_HOME/ikigai or ~/.config/ikigai. Also taken by `client`,
-                        `passkey invite`, `review request` and `grants --browse`
+                        $XDG_CONFIG_HOME/ikigai or ~/.config/ikigai. Also taken by
+                        all commands that read server configuration; `grants` accepts them too
+                        (ledger and graph tokens are independent of the homes)
   --data-home DIR       the data home (the socket, the store, backups, the review queue)
                         instead of ~/.ikigai; same commands
   --store DIR           the dataset's directory, outright (default: store.toml's, else
@@ -1098,8 +1099,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
                     .next()
                     .filter(|ledger| !ledger.starts_with('-'))
                     .ok_or("grants --ledger-graph: expected <ledger>")?;
-                if let Some(extra) = args.next() {
-                    return Err(format!("grants: unexpected argument `{extra}`"));
+                let mut flags = Flags::default();
+                while let Some(arg) = args.next() {
+                    match arg.as_str() {
+                        flag @ ("--config" | "--config-home" | "--data-home") => {
+                            home_flag(flag, &mut args, &mut flags)?;
+                        }
+                        other => return Err(format!("grants: unexpected argument `{other}`")),
+                    }
                 }
                 return Ok(Command::GrantsLedgerGraph { ledger });
             }
@@ -1113,14 +1120,25 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
                 }
                 other => Some(other.to_string()),
             };
-            let authority = match (args.next(), &ledger) {
-                (Some(value), None) => browse_graph_authority(&value)?,
-                (Some(value), Some(_)) => value.parse()?,
-                (None, _) => Authority::Write,
-            };
-            if let Some(extra) = args.next() {
-                return Err(format!("grants: unexpected argument `{extra}`"));
+            // These grants depend only on the subject and authority. Accept the same
+            // home overrides as provisioning commands without opening any config files.
+            let mut flags = Flags::default();
+            let mut authority = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?;
+                    }
+                    other if authority.is_none() && !other.starts_with('-') => {
+                        authority = Some(match &ledger {
+                            None => browse_graph_authority(other)?,
+                            Some(_) => other.parse()?,
+                        });
+                    }
+                    other => return Err(format!("grants: unexpected argument `{other}`")),
+                }
             }
+            let authority = authority.unwrap_or(Authority::Write);
             return Ok(Command::Grants { ledger, authority });
         }
         Some("serve") => {
