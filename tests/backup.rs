@@ -1510,3 +1510,25 @@ fn a_backup_past_the_stores_default_load_cap_restores() {
     assert!(answer.contains("(gzip,"), "{answer}");
     assert_eq!(counts_on_disk(&restored), past_the_load_cap_counts());
 }
+
+/// A sparse file exercises the production bound without allocating a 2 GiB buffer.
+#[test]
+fn archive_source_refuses_one_byte_over_its_stated_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "gonk-store-2026-10-25T000000Z.nq.gz";
+    std::fs::File::create(dir.path().join(name))
+        .unwrap()
+        .set_len(backup::ARCHIVE_MAX_BYTES + 1)
+        .unwrap();
+    let hub = hub(dir.path(), 5);
+    let result = try_issue(
+        &hub,
+        Verb::Source,
+        &format!("urn:iki:gonk:backup:archive:{name}"),
+        &[],
+    );
+    assert!(
+        matches!(result, Err(Error::OverBudget { .. })),
+        "{result:?}"
+    );
+}

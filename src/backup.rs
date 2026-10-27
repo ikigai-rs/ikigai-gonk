@@ -292,6 +292,12 @@ pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 /// would be the only thing that noticed.
 const RESTORE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Maximum encoded archive size read or copied: **2 GiB**. This leaves room for gzip
+/// framing and incompressible data from a backup of at most 1 GiB of N-Quads.
+/// Expanded restore data still has the separate 1 GiB `RESTORE_MAX_BYTES` bound.
+/// Oversized input is refused with `OverBudget`, never returned as a truncated document.
+pub const ARCHIVE_MAX_BYTES: u64 = 2 * RESTORE_MAX_BYTES;
+
 // Every archive a backup can write is one a restore takes (ledger #1664).
 const _: () = assert!(RESTORE_MAX_BYTES >= JOB_ANSWER_BYTES_MAX);
 // The decompressor refuses a `max-bytes` over its ceiling, so this cannot be larger, and a
@@ -1532,6 +1538,50 @@ impl Status {
 
 // ---------------------------------------------------------------- reading one back
 
+fn check_bytes(bytes: u64, max: u64) -> Result<()> {
+    if bytes > max {
+        return Err(Error::OverBudget {
+            detail: format!("backup archive exceeds the {max}-byte limit"),
+        });
+    }
+    Ok(())
+}
+
+fn read_archive_bytes(path: &Path, max: u64) -> Result<Vec<u8>> {
+    let read_error = |e| Error::NotFound(format!("reading archive {}: {e}", path.display()));
+    let file = std::fs::File::open(path).map_err(read_error)?;
+    // Reject large files before allocating. Also bound the read itself: the file may
+    // grow after metadata was read, or report a length smaller than its contents.
+    check_bytes(file.metadata().map_err(read_error)?.len(), max)?;
+    read_archive_input(file, max).map_err(|e| match e {
+        Error::OverBudget { .. } => e,
+        other => Error::Endpoint(format!("reading archive {}: {other}", path.display())),
+    })
+}
+
+fn read_archive_input(reader: impl std::io::Read, max: u64) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    reader
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::Endpoint(format!("reading archive: {e}")))?;
+    check_bytes(bytes.len() as u64, max)?;
+    Ok(bytes)
+}
+
+fn check_restore_input(content: &[u8]) -> Result<()> {
+    check_restore_size(content.len() as u64, content.starts_with(&[0x1f, 0x8b]))
+}
+
+fn check_restore_size(bytes: u64, gzip: bool) -> Result<()> {
+    check_bytes(bytes, ARCHIVE_MAX_BYTES)?;
+    if !gzip {
+        check_bytes(bytes, RESTORE_MAX_BYTES)?;
+    }
+    Ok(())
+}
+
 struct ReadArchive {
     backups: Backups,
 }
@@ -1552,12 +1602,7 @@ impl Endpoint for ReadArchive {
             }
             Verb::Source => {
                 let path = archive_path(&self.backups.settings.dir, name)?;
-                let bytes = std::fs::read(&path).map_err(|e| {
-                    Error::NotFound(format!(
-                        "no archive `{name}` in {}: {e}",
-                        self.backups.settings.dir.display()
-                    ))
-                })?;
+                let bytes = read_archive_bytes(&path, ARCHIVE_MAX_BYTES)?;
                 Ok(Representation::new(ReprType::new(GZIP), bytes))
             }
             other => Err(unsupported("gonk-backup-archive", other)),
@@ -1577,7 +1622,8 @@ impl Endpoint for ReadArchive {
                  linking a filesystem family into a server that holds the dataset: pipe it \
                  into `urn:iki:gonk:restore` to verify it, or off the machine to have a \
                  copy somewhere the disk holding the data is not. `{name}` is a bare file \
-                 name in that directory — `urn:iki:gonk:backup:status` lists them.",
+                 name in that directory — `urn:iki:gonk:backup:status` lists them. \
+                 Archives over 2 GiB are refused with OverBudget, never truncated.",
             )
             .verb(Verb::Source)
             .verb(Verb::Exists)
@@ -1637,7 +1683,10 @@ impl Endpoint for Restore {
             .requires(CAP_RESTORE)
             .input(
                 ArgSpec::new("content")
-                    .summary("the archive: a gzip stream or plain N-Quads; filled from the pipe")
+                    .summary(
+                        "the archive: gzip (at most 2 GiB, expanding to at most 1 GiB) or \
+                         plain N-Quads (at most 1 GiB); filled from the pipe",
+                    )
                     .class(XSD_STRING),
             )
             .input(
@@ -1667,6 +1716,7 @@ impl Restore {
         let into = PathBuf::from(inv.inline_str("into")?);
         self.check_target(&into)?;
         let content = inv.inline_arg("content")?;
+        check_restore_input(content)?;
         let (nquads, how) = if content.starts_with(&[0x1f, 0x8b]) {
             let expanded = inv
                 .issue(
@@ -2248,7 +2298,10 @@ impl Endpoint for RestoreScripts {
             .requires(CAP_RESTORE)
             .input(
                 ArgSpec::new("content")
-                    .summary("the scripts archive: gzip or plain JSON; filled from the pipe")
+                    .summary(
+                        "the scripts archive: gzip (at most 2 GiB, expanding to at most 1 GiB) \
+                         or plain JSON (at most 1 GiB); filled from the pipe",
+                    )
                     .class(XSD_STRING),
             )
             .input(
@@ -2268,6 +2321,7 @@ impl RestoreScripts {
         let into = PathBuf::from(inv.inline_str("into")?);
         self.check_target(&into)?;
         let content = inv.inline_arg("content")?;
+        check_restore_input(content)?;
         let json = if content.starts_with(&[0x1f, 0x8b]) {
             inv.issue(
                 Request::new(Verb::Source, iri("urn:decompress:gzip")?)
@@ -2651,6 +2705,40 @@ fn civil(millis: u64) -> (i64, u32, u32, u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_one_byte_over_the_bound_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        std::fs::write(&path, [0_u8; 33]).unwrap();
+        assert!(matches!(
+            read_archive_bytes(&path, 32),
+            Err(Error::OverBudget { .. })
+        ));
+        let mut growing = std::io::Cursor::new([0_u8; 64]);
+        assert!(matches!(
+            read_archive_input(&mut growing, 32),
+            Err(Error::OverBudget { .. })
+        ));
+        assert_eq!(growing.position(), 33, "read only one byte past the limit");
+        std::fs::write(&path, [7_u8; 32]).unwrap();
+        assert_eq!(read_archive_bytes(&path, 32).unwrap(), [7_u8; 32]);
+        assert_eq!(read_archive_input(&[7_u8; 32][..], 32).unwrap(), [7_u8; 32]);
+    }
+
+    #[test]
+    fn restore_refuses_one_byte_over_each_bound_before_copying() {
+        assert!(check_restore_size(ARCHIVE_MAX_BYTES, true).is_ok());
+        assert!(matches!(
+            check_restore_size(ARCHIVE_MAX_BYTES + 1, true),
+            Err(Error::OverBudget { .. })
+        ));
+        assert!(check_restore_size(RESTORE_MAX_BYTES, false).is_ok());
+        assert!(matches!(
+            check_restore_size(RESTORE_MAX_BYTES + 1, false),
+            Err(Error::OverBudget { .. })
+        ));
+    }
 
     /// A dataset over an empty in-memory store, for a test that never takes a backup.
     fn scratch_dataset() -> Dataset {
