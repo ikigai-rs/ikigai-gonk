@@ -1280,6 +1280,8 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
         None => {
             let flags = config::Flags {
                 config: args.config.clone(),
+                config_home: args.config_home.clone(),
+                data_home: args.data_home.clone(),
                 ..config::Flags::default()
             };
             read_settings(&flags).socket

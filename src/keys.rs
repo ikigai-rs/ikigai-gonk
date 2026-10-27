@@ -76,6 +76,10 @@ pub struct BackfillArgs {
     pub socket: Option<PathBuf>,
     /// `--config`: read this file instead of `<config home>/config.toml`, for the socket.
     pub config: Option<PathBuf>,
+    /// `--config-home`: the config home whose config.toml supplies the socket.
+    pub config_home: Option<PathBuf>,
+    /// `--data-home`: the data home containing the default socket.
+    pub data_home: Option<PathBuf>,
     /// `--dry-run`: read and plan, write nothing.
     pub dry_run: bool,
 }
@@ -95,6 +99,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<BackfillArgs
         ledger: "default".to_string(),
         socket: None,
         config: None,
+        config_home: None,
+        data_home: None,
         dry_run: false,
     };
     while let Some(flag) = args.next() {
@@ -106,6 +112,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<BackfillArgs
             "--ledger" => out.ledger = value()?,
             "--socket" => out.socket = Some(PathBuf::from(value()?)),
             "--config" => out.config = Some(PathBuf::from(value()?)),
+            "--config-home" => out.config_home = Some(PathBuf::from(value()?)),
+            "--data-home" => out.data_home = Some(PathBuf::from(value()?)),
             "--dry-run" => out.dry_run = true,
             other => return Err(format!("ledger backfill-keys: unknown argument `{other}`")),
         }
