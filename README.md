@@ -3748,6 +3748,9 @@ browse roots from /Users/you/.config/ikigai/config.toml (live: an edit mounts or
 1 re-arrangement(s) since start
 ```
 
+Root listings sort by name without regard to case, including roots added live. Names that
+differ only in case sort by their exact spelling to keep the order deterministic.
+
 The set of roots is DATA: `config.toml`'s `gonk.browse.root` lines are the one place it is
 held, and everything the browse family serves is rebuilt from them. A change mounts or
 unmounts with **no restart**, so no worker's connection, no passkey session and no review in

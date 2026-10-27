@@ -271,6 +271,7 @@ pub fn run(args: &Args, homes: &Homes, out: &mut impl Write) -> Result<bool, Str
     if roots.is_empty() {
         return Ok(all_ok);
     }
+    roots.sort_by(|a, b| crate::roots::name_order(&a.0, &b.0));
     let _ = writeln!(out, "\nbrowse roots:");
     for (name, path) in &roots {
         let _ = writeln!(out, "  {}", root_line(name, path));
@@ -380,7 +381,7 @@ fn run_all(
             names.push(name);
         }
     }
-    names.sort();
+    names.sort_by(|a, b| crate::roots::name_order(a, b));
     let git = Git::new();
     let mut all_ok = true;
     let mut checkouts = Vec::new();
@@ -453,7 +454,7 @@ fn run_all(
 /// parse are skipped: the coverage report is information, and gonk's own startup names a
 /// bad line.
 fn configured_roots(text: &str, home: &Path) -> Vec<(String, PathBuf)> {
-    crate::config::values_for(text, "gonk.browse.root")
+    let mut roots: Vec<_> = crate::config::values_for(text, "gonk.browse.root")
         .into_iter()
         .filter_map(|line| {
             let (name, path) = line.split_once('=')?;
@@ -462,7 +463,9 @@ fn configured_roots(text: &str, home: &Path) -> Vec<(String, PathBuf)> {
                 crate::config::expand_home(path.trim(), home),
             ))
         })
-        .collect()
+        .collect();
+    roots.sort_by(|a, b| crate::roots::name_order(&a.0, &b.0));
+    roots
 }
 
 /// One way the checkouts under the managed directory and the configured roots fail to cover
