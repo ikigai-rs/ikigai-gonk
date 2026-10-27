@@ -1205,6 +1205,8 @@ ikigai-secret = "0.2.0"
 hmac = "0.12.1"
 
 [dev-dependencies]
+# The authz benchmark reads the Linux thread CPU clock outside latency samples.
+libc = "0.2"
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
 # PRODUCTION floor too: see the vocab note above. 0.8.0: REQUIRED (a required input dropped
 # must be refused, typed), VALIDATE, and `Suite::own`, which scopes every walk here to gonk's
@@ -1250,3 +1252,7 @@ ikigai-layers = "0.5.0"
 # An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
 # own `age` floor).
 age = "0.11.1"
+
+[[bench]]
+name = "authz"
+harness = false
