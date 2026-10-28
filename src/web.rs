@@ -1697,7 +1697,8 @@ impl Endpoint for LedgerView {
 // ------------------------------------------------------------------------ the doctor
 
 /// `/l/{ledger}/doctor`: the ledger's doctor (ikigai-ledger 0.5.0, ledger #775) as a page —
-/// its five stored checks (orphaned, abandoned, lease-expired, unknown-state, two-states), every
+/// the checks it ran, listed as its document names them (orphaned, abandoned, lease-expired,
+/// unknown-state, two-states, awaiting-closed, and awaiting-stale since ikigai-ledger 0.13.1), every
 /// problem with the remedy the ledger names, and nothing repaired. It is a READ of
 /// `urn:iki:ledger:{ledger}:doctor` under the caller's own capability, rendered from its JSON
 /// face (`ikigai_ledger::json::DoctorDocument`); the page offers no action, because the doctor

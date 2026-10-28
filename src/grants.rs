@@ -757,15 +757,16 @@ pub fn broad_store_scopes(scopes: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// `urn:cap:exec:*` — the OFFERING wildcard `ikigai-repo` declares on `urn:system:exec`,
-/// which as a GRANT means "run any program".
+/// `urn:cap:exec:*` — the OFFERING wildcard over `ikigai-repo`'s per-tool exec scopes, which
+/// as a GRANT means "run any program".
 pub const CAP_EXEC_ANY: &str = "urn:cap:exec:*";
 
 /// The scopes in `scopes` that grant unbounded process execution.
 ///
 /// ★ **A wildcard is an offering form, not a grant form, and the two look identical in a
-/// JSON file.** `ikigai-repo` declares `urn:cap:exec:*` on `urn:system:exec` to say "holds
-/// some grant under this prefix"; the same string written into `grants.json` says "may run
+/// JSON file.** `ikigai-repo` declared `urn:cap:exec:*` on `urn:system:exec` (served through
+/// 0.2.x, gone since 0.3.0, ledger #1706) to say "holds some grant under this prefix"; the
+/// same string written into `grants.json` says "may run
 /// anything on this machine", over a network door. The per-tool spelling
 /// (`urn:cap:exec:git`) is what that crate enforces at dispatch and what an operator means,
 /// so the wildcard is refused the way the broad store tokens are — a grant a reader could

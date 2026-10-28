@@ -226,6 +226,7 @@ pub fn routes() -> Vec<Route> {
     let route = |pattern: String, iri_template: &str| Route {
         pattern,
         iri_template: iri_template.to_string(),
+        redirect: None,
         cap: None,
         cors: None,
         csp: Some(ikigai_toolbox::TOOLBOX_CSP.to_string()),

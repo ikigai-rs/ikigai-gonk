@@ -1557,7 +1557,7 @@ mod tests {
         assert!(check_grants(&grants()).is_err());
     }
 
-    /// ★ New with the browse family: `urn:system:exec` is compiled in, so a grants file can
+    /// ★ New with the browse family: `ikigai-repo` is compiled in, so a grants file can
     /// now name the exec wildcard — and a wildcard written as a grant is the opposite of what
     /// it looks like. The per-tool spelling is accepted, because that is what `ikigai-repo`
     /// enforces at dispatch.
