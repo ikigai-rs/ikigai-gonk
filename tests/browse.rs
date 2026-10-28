@@ -3862,3 +3862,36 @@ fn the_browse_region_keeps_a_history() {
         "the page URL"
     );
 }
+
+/// Since ikigai-repo 0.3 a repo space built with no roots refuses every `dir=`, and gonk built
+/// it with `ikigai_repo::space()`, so every repository view browse composes over
+/// `urn:repo:*` answered "this space has no repository roots configured". The facades are now
+/// confined to the browse roots: a configured root is served, a directory outside every root
+/// is refused, and neither says there are no roots.
+#[test]
+fn the_repo_facades_run_in_a_browse_root_and_nowhere_else() {
+    let dir = scratch_root();
+    let outside = tempfile::tempdir().expect("a second temp dir");
+    let (kernel, _watch) = served(&dir);
+    let status = |at: &std::path::Path| {
+        let request = Request::new(Verb::Source, Iri::parse("urn:repo:status").unwrap())
+            .with_arg("dir", ArgRef::Inline(at.display().to_string().into_bytes()));
+        block_on(kernel.issue(request, &Capability::root()))
+    };
+    let inside = status(dir.path());
+    if let Err(error) = &inside {
+        let shown = error.to_string();
+        assert!(!shown.contains("no repository roots"), "{shown}");
+        assert!(
+            !shown.contains("not a directory under a configured"),
+            "{shown}"
+        );
+    }
+    let shown = status(outside.path())
+        .expect_err("outside every root")
+        .to_string();
+    assert!(
+        shown.contains("is not a directory under a configured repository root"),
+        "{shown}"
+    );
+}
