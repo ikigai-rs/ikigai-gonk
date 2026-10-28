@@ -153,6 +153,12 @@ pub struct Enrolled {
 /// Every enrolled passkey, by credential id. Absent file or key: none.
 pub fn read_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, String> {
     let doc = quic::read_object(&layout.clients_json())?;
+    parse_passkeys(&doc)
+}
+
+pub(crate) fn parse_passkeys(
+    doc: &Map<String, Value>,
+) -> Result<BTreeMap<String, Enrolled>, String> {
     let mut out = BTreeMap::new();
     let Some(map) = doc.get("passkeys") else {
         return Ok(out);
@@ -444,7 +450,7 @@ fn redeem(layout: &Layout, code: &str, now: u64) -> Result<String, String> {
 /// The scopes a grant name holds, fail-closed: unknown, empty, or naming any token
 /// [`quic::grant_refusal`] refuses is an error. The same rule the QUIC door applies.
 pub fn scopes_of(layout: &Layout, grant: &str) -> Result<Vec<String>, String> {
-    let grants = quic::read_grants(&layout.grants_json())?;
+    let grants = layout.current_grants()?;
     quic::scopes_for_grant(&grants, grant)
 }
 
@@ -968,7 +974,13 @@ impl Passkeys {
             }
             (session.credential_id.clone(), session.expires)
         };
-        let Some(enrolled) = read_passkeys(&self.layout).ok()?.remove(&credential_id) else {
+        let Some(enrolled) = self
+            .layout
+            .current_passkeys()
+            .ok()?
+            .get(&credential_id)
+            .cloned()
+        else {
             let ended = self.state.lock().ok()?.end_sessions(&credential_id);
             self.audit(
                 "gonk:Logout",

@@ -33,6 +33,8 @@
 
 #![forbid(unsafe_code)]
 
+mod file_cache;
+
 pub mod access;
 pub mod admit;
 pub mod backfill;

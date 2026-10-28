@@ -56,6 +56,9 @@ use crate::grants::broad_store_scopes;
 #[derive(Debug, Clone)]
 pub struct Layout {
     dir: PathBuf,
+    enrolment_cache: Arc<crate::file_cache::FileCache<Enrolment>>,
+    passkeys_cache: Arc<crate::file_cache::FileCache<BTreeMap<String, crate::identity::Enrolled>>>,
+    grants_cache: Arc<crate::file_cache::FileCache<BTreeMap<String, Vec<String>>>>,
 }
 
 impl Layout {
@@ -63,7 +66,29 @@ impl Layout {
     pub fn in_config_home(config_home: &Path) -> Layout {
         Layout {
             dir: config_home.join("gonk"),
+            enrolment_cache: Arc::default(),
+            passkeys_cache: Arc::default(),
+            grants_cache: Arc::default(),
         }
+    }
+
+    pub(crate) fn current_passkeys(
+        &self,
+    ) -> Result<Arc<BTreeMap<String, crate::identity::Enrolled>>, String> {
+        // An absent clients file is an empty enrollment, so identity ends its sessions.
+        // It never reuses a cached enrollment when the file cannot be opened.
+        Ok(self
+            .passkeys_cache
+            .get_optional(&self.clients_json(), |text| {
+                let doc =
+                    serde_json::from_str(text).map_err(|e| format!("not a JSON object: {e}"))?;
+                crate::identity::parse_passkeys(&doc)
+            })?
+            .unwrap_or_default())
+    }
+
+    pub(crate) fn current_grants(&self) -> Result<Arc<BTreeMap<String, Vec<String>>>, String> {
+        self.grants_cache.get(&self.grants_json(), parse_grants)
     }
 
     /// `gonk/quic`.
@@ -1248,9 +1273,10 @@ pub fn current_authority(
     layout: &Layout,
     fingerprint: &str,
 ) -> Result<(String, Capability), String> {
-    let enrolment = read_enrolment(&layout.clients_json())?
-        .ok_or_else(|| format!("no enrollment file at {}", layout.clients_json().display()))?;
-    let grants = read_grants(&layout.grants_json())?;
+    let enrolment = layout
+        .enrolment_cache
+        .get(&layout.clients_json(), parse_enrolment)?;
+    let grants = layout.current_grants()?;
     authority(&enrolment, &grants, fingerprint)
 }
 
