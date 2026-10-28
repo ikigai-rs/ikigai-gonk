@@ -405,6 +405,11 @@ pub fn wire(
     // "On GitHub" over the same roots (ledger #1907), with no override: `main` replaces it
     // with [`CachedReads::with_github`] when a `gonk.browse.github` line names one.
     let github = crate::github::space(&roots, &[]);
+    // The dev-tooling facades (`urn:repo:git:*`, `gh:*`, `cargo:*`) confined to the same roots
+    // (ledger #1712): since ikigai-repo 0.3 a space built with no roots refuses every `dir=`,
+    // so browse's repository views were refused until the roots came here too.
+    let repo = ikigai_repo::space_with_roots(roots.iter().map(|(_, path)| path.clone()))
+        .named(ikigai_core::space_iri("repo"));
     // The explain archive is built on the WRITER'S handle: browse refuses at mount time an
     // `ExplainConfig` on any other `Arc<Store>`, even one over the same dataset.
     let store = Arc::clone(writer.store());
@@ -429,7 +434,8 @@ pub fn wire(
         .writing_to(graph)
         .reading_contracts_through(first)
         .with_history(Arc::new(history))
-        .with_github(Arc::new(github)),
+        .with_github(Arc::new(github))
+        .with_repo(Arc::new(repo)),
         style,
     }
 }
@@ -562,6 +568,7 @@ pub fn cached_reads(
             contract_root: None,
             history: None,
             github: None,
+            repo: None,
         })),
         epochs,
         graph: None,
@@ -597,6 +604,8 @@ struct Arrangement {
     history: Option<Arc<dyn Space>>,
     /// "On GitHub" over the same roots ([`CachedReads::with_github`]), threaded.
     github: Option<Arc<dyn Space>>,
+    /// The dev-tooling facades confined to the same roots ([`CachedReads::with_repo`]), threaded.
+    repo: Option<Arc<dyn Space>>,
 }
 
 /// The space [`cached_reads`] builds.
@@ -737,6 +746,26 @@ impl CachedReads {
         }))
     }
 
+    /// Carry the dev-tooling space confined to the same roots (`ikigai_repo::space_with_roots`,
+    /// ledger [#1712](http://localhost:1062/l/default/item/1712)), for [`crate::compose_with`] to
+    /// bind beside this family. In the arrangement, like [`Self::with_history`], so a root added
+    /// or removed while the server runs ([`Self::replace`]) moves what `dir=` may name with it.
+    #[must_use]
+    pub fn with_repo(mut self, repo: Arc<dyn Space>) -> Self {
+        self.current_mut().repo = Some(threaded(repo));
+        self
+    }
+
+    /// The dev-tooling space to bind beside this family, when [`wire`] built one: a view of
+    /// the arrangement in force, as [`Self::history`] is.
+    pub fn repo(&self) -> Option<Arc<dyn Space>> {
+        self.current().repo.as_ref()?;
+        Some(Arc::new(Part {
+            arrangement: Arc::clone(&self.arrangement),
+            which: Which::Repo,
+        }))
+    }
+
     /// Name the configured root the family's contracts are read through — [`wire`]'s first.
     #[must_use]
     pub fn reading_contracts_through(mut self, root: Option<String>) -> Self {
@@ -874,6 +903,7 @@ impl Space for CachedReads {
 enum Which {
     History,
     Github,
+    Repo,
 }
 
 /// One of the series bound BESIDE the family ([`CachedReads::history`],
@@ -890,6 +920,7 @@ impl Part {
         match self.which {
             Which::History => current.history.clone(),
             Which::Github => current.github.clone(),
+            Which::Repo => current.repo.clone(),
         }
     }
 }

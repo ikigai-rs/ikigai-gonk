@@ -347,8 +347,11 @@ pub fn compose_serving(
         if let Some(github) = browse.github() {
             spaces.push(github);
         }
+        // The dev-tooling facades, confined to the browse roots (ledger #1712). Read before the
+        // family is moved in.
+        let repo = browse.repo();
         spaces.push(browse as Arc<dyn Space>);
-        spaces.push(Arc::new(ikigai_repo::space()));
+        spaces.extend(repo);
     }
     spaces.extend(trigger);
     if let Some(backups) = backups {
