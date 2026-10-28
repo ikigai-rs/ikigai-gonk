@@ -238,7 +238,7 @@ fn unreadable_file_never_uses_stale_authority() {
             f.layout.grants_json()
         };
         let permissions = std::fs::metadata(&path).unwrap().permissions();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         // Root can read mode-000 files; assert refusal when the OS enforces it.
         if std::fs::File::open(&path).is_err() {
             f.refused();
