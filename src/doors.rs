@@ -536,8 +536,9 @@ pub struct HttpDoor {
 pub fn http_cap(door: HttpDoor) -> CapFn {
     Arc::new(move |request: &HttpRequest| {
         let now = identity::now_seconds();
-        let capability = Capability::scoped(http_scopes(&door, request, now));
-        match http_principal_of(&door, request, now) {
+        let identity = http_identity(&door, request, now);
+        let capability = Capability::scoped(http_scopes_for(&door, request, identity.as_ref()));
+        match identity.map(|who| identity::passkey_iri(&who.enrolled.credential_id)) {
             // A passkey IRI is always an absolute IRI with no `*`, so this cannot fail; if it
             // ever did, the request keeps its authority and names nobody, which is the
             // anonymous reading, never a wider one.
@@ -571,10 +572,14 @@ pub fn http_principal(door: HttpDoor) -> PrincipalFn {
 
 /// [`http_principal`], with the clock as an argument.
 pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<String> {
+    let identity = http_identity(door, request, now)?;
+    Some(identity::passkey_iri(&identity.enrolled.credential_id))
+}
+
+fn http_identity(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<identity::Identity> {
     let passkeys = door.passkeys.as_ref()?;
     let token = session_token(request)?;
-    let identity = passkeys.identity(&token, now)?;
-    Some(identity::passkey_iri(&identity.enrolled.credential_id))
+    passkeys.identity(&token, now)
 }
 
 /// The refusal marker for a request this door does not answer at all, or `None` — THE one
@@ -867,20 +872,34 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
     if let Some(marker) = http_refusal(door, request) {
         return vec![marker.to_string()];
     }
+    let identity = http_identity(door, request, now);
+    http_scopes_for(door, request, identity.as_ref())
+}
+
+fn http_scopes_for(
+    door: &HttpDoor,
+    request: &HttpRequest,
+    identity: Option<&identity::Identity>,
+) -> Vec<String> {
+    if let Some(marker) = http_refusal(door, request) {
+        return vec![marker.to_string()];
+    }
     let mut scopes: Vec<String> = match request.peer {
         Some(peer) if is_loopback(peer) => door.anonymous.clone(),
         _ => Vec::new(),
     };
-    let mut signed_in = false;
-    if let (Some(passkeys), Some(token)) = (&door.passkeys, session_token(request)) {
-        if let Some(identity) = passkeys.identity(&token, now) {
-            signed_in = true;
-            for scope in identity.scopes {
-                if !scopes.contains(&scope) {
-                    scopes.push(scope);
-                }
-            }
-        }
+    let signed_in = identity.is_some();
+    if let Some(identity) = identity {
+        // Preserve anonymous order (including duplicates), then first occurrence order
+        // from the grant, while membership checks are expected constant time.
+        let mut seen: std::collections::HashSet<&str> = scopes.iter().map(String::as_str).collect();
+        let granted: Vec<String> = identity
+            .scopes
+            .iter()
+            .filter(|scope| seen.insert(scope.as_str()))
+            .cloned()
+            .collect();
+        scopes.extend(granted);
     }
     // ★ Ledger #880: another page's navigation carries the READ half, whatever it names — so
     // `<a href="/k?c=source urn:repo:R:explain:P">` on a page at another localhost port, which
