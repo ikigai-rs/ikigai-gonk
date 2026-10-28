@@ -301,8 +301,9 @@ const EXPLAIN_IDS: [&str; 5] = [
 ];
 
 /// `ikigai-repo`'s facades — bound only alongside a browse face, because that is what needs
-/// them (browse's PR rows resolve `urn:repo:pr:*` through the kernel).
-const REPO_IDS: [&str; 10] = [
+/// them (browse's PR rows resolve `urn:repo:pr:*` through the kernel). No `system-exec`: since
+/// ikigai-repo 0.3.0 (ledger #1706) the space serves no caller-built argv, only these typed facades.
+const REPO_IDS: [&str; 9] = [
     "repo-branch",
     "repo-list",
     "repo-log",
@@ -312,7 +313,6 @@ const REPO_IDS: [&str; 10] = [
     "repo-pr-list",
     "repo-pr-view",
     "repo-status",
-    "system-exec",
 ];
 
 /// gonk's own git-history series over the same roots (ledger #1631, `crate::history`) —
@@ -1905,7 +1905,6 @@ fn the_anonymous_http_caller_is_offered_and_allowed_nothing_from_the_new_familie
         "urn:repo:demo:tree",
         "urn:repo:demo:file:src/lib.rs",
         "urn:repo:status",
-        "urn:system:exec",
     ] {
         let answer = block_on(Kernel::issue(
             &hub,
@@ -1917,6 +1916,17 @@ fn the_anonymous_http_caller_is_offered_and_allowed_nothing_from_the_new_familie
             "`{denied}` must be a typed Denied for an anonymous caller, got {answer:?}"
         );
     }
+    // Since ikigai-repo 0.3.0 (ledger #1706) `urn:system:exec` is not compiled in at all, so no
+    // capability reaches it: the hub answers it `Unresolved`, to this caller as to any.
+    let answer = block_on(Kernel::issue(
+        &hub,
+        request(Verb::Source, "urn:system:exec", &[]),
+        &anonymous,
+    ));
+    assert!(
+        matches!(answer, Err(ikigai_core::Error::Unresolved(_))),
+        "`urn:system:exec` is no longer served, got {answer:?}"
+    );
 }
 
 // ----------------------------------------------------------- what it watches

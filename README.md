@@ -306,8 +306,7 @@ on 2026-10-09 needs a dropped token: `urn:repo:{root}:explain[:{path}]`, `:revie
 `:judge:{path}`, `:judge-finding:{id}` (Source and Exists), `:pr:{n}:explain`, `:pr:{n}:review`,
 `urn:iki:gonk:review:pass` and the `urn:llm:` mount itself (net: inference, and the archive and
 findings writes that ride on it); `urn:repo:{status,log,branch}`, `urn:repo:pr:*` (and browse's
-PR rows, which resolve them) and `urn:system:exec` (exec: programs, and `gh`'s calls to
-GitHub). One write is left to a navigation on purpose: a browse READ re-anchors annotations
+PR rows, which resolve them) (exec: programs, and `gh`'s calls to GitHub). One write is left to a navigation on purpose: a browse READ re-anchors annotations
 whose file drifted, a deterministic repair any reader triggers. `urn:iki:gonk:render` needs no
 token at all, and is bounded on its own (see the hub resources below).
 
@@ -1571,8 +1570,7 @@ and `urn:iki:annotation` covers both `urn:iki:annotation:{id}` and the bare
 (browse) *and* `urn:repo:status`, `urn:repo:log`, `urn:repo:pr:list` (the facades) to gonk,
 where they run in gonk's process, under gonk's working directory, with whatever capability the
 caller carried across. A host that wants the facades local and only the roots remote cannot
-say so with a prefix mount. (`urn:system:exec` is outside that prefix and stays wherever the
-calling host binds it, unless mounted by name.)
+say so with a prefix mount.
 
 ★ **A mounting client caches nothing it gets from here, and that is deliberate.** Golden
 threads are kernel-local and do not cross a wire (ledger
@@ -3183,15 +3181,15 @@ and cannot touch the store's whole-dataset doors (`urn:iki:store:select`,
 its grant and nothing else.
 
 **And with browse roots configured, that argument has to be re-made, because more is now
-compiled in.** `urn:repo:*` reads files off the disk and runs `git`; `urn:system:exec` runs a
-named tool; `urn:iki:annotation` writes to the dataset. What each door reaches:
+compiled in.** `urn:repo:*` reads files off the disk and runs `git` and `gh`;
+`urn:iki:annotation` writes to the dataset. What each door reaches:
 
 | family | anonymous HTTP | signed-in HTTP | socket | QUIC |
 | --- | --- | --- | --- | --- |
 | the configured ledgers | read + write | + the passkey's grant | all | per grant |
 | `urn:repo:{root}:*` (`urn:cap:browse:read:{root}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:annotation` (`urn:cap:annotate`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
-| `urn:repo:{status,log,…}`, `urn:system:exec` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:repo:{status,log,…}` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `--browse read`, or `--browse-graph read` alone | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
 | RAW writes to a LEDGER graph — `urn:iki:store:graph-update` naming `urn:iki:ledger:graph:*` (`urn:cap:gonk:raw-write:graph:<graph>`, ledger #878) | **no** — `403`, though its ledgers' own writes work | only if the grant names it — `--ledger-graph <ledger>` | yes (root) | only if the grant names it — `--ledger-graph <ledger>` |
@@ -3908,7 +3906,8 @@ grounding states.
 "no filesystem module, no process execution and no outbound network client is compiled in, so
 none is reachable whatever a grant says". The browse family made two of those three false:
 `urn:repo:{root}:file` and `:tree` read the filesystem under a configured root, and
-`urn:repo:{status,log,branch}`, `urn:repo:pr:*` and `urn:system:exec` spawn `git` and `gh`.
+`urn:repo:{status,log,branch}` and `urn:repo:pr:*` spawn `git` and `gh`. (`urn:system:exec`, which
+ran a named tool, is no longer compiled in: ikigai-repo 0.3.0 dropped it, ledger #1706.)
 
 **The third has now changed too, and it is worth stating exactly rather than dropping.** With
 a `gonk.mount` line, gonk opens an outbound connection — QUIC, or a Unix socket — **to one

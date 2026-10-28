@@ -1119,6 +1119,7 @@ fn routes() -> Vec<Route> {
     let route = |pattern: &str, iri_template: &str| Route {
         pattern: pattern.to_string(),
         iri_template: iri_template.to_string(),
+        redirect: None,
         cap: None,
         cors: None,
         csp: None,
@@ -1299,6 +1300,7 @@ fn browse_routes() -> Vec<Route> {
             Route {
                 pattern: format!("/browse/{captures}"),
                 iri_template: crate::k::BROWSE_PAGE_TEMPLATE.replace("{start}", &captures),
+                redirect: None,
                 cap: None,
                 cors: None,
                 csp: None,

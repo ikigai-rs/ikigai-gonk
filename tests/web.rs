@@ -2809,7 +2809,7 @@ fn the_doctor_says_what_it_judged_against_on_one_line() {
         format!(
             "Judged against the kata-flight lifecycle · checked {checked} (when this cached \
              check last ran) · checks: orphaned, abandoned, lease-expired, unknown-state, \
-             two-states, awaiting-closed"
+             two-states, awaiting-closed, awaiting-stale"
         ),
         "{line}"
     );

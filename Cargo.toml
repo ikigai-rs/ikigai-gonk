@@ -95,7 +95,13 @@ path = "src/main.rs"
 # serves elsewhere (`crate::views`). The `declare` feature brings the Turtle reader the
 # declaration is parsed with (`Topology::from_turtle`, `DynamicSpace::install`/`refresh`/`drive`).
 # `"0.1.110"` is `<0.2.0`.
-ikigai-core = { version = "0.1.110", features = ["declare"] }
+# ★ 0.2.0 is the pin now (ledger #2364, the core 0.2.0 sweep): 0.2.0 is the streams release (ledger
+# #2261), and the old 0.1 pin meant `<0.2.0` under 0.x rules, so it could never reach it. `"0.2.0"`
+# is a caret floor admitting every 0.2.x; ikigai-store 0.3.1, ikigai-repo 0.3.1, ikigai-fs 0.2.2 and
+# ikigai-sign 0.4.1 below require `^0.2.1`, so the lock carries a newer patch, and the one-core
+# check (`cargo tree -i ikigai-core`) shows ONE 0.2.x. Nothing in gonk needed a change for core 0.2
+# itself. `"0.2.0"` is `<0.3.0`.
+ikigai-core = { version = "0.2.0", features = ["declare"] }
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because
@@ -108,7 +114,9 @@ ikigai-core = { version = "0.1.110", features = ["declare"] }
 # 0.1.102: core's lockstep release.
 # 0.1.108: core's lockstep release (`ik:mayFail`, `ik:FailureClass` and its seven individuals,
 # which gonk's own descriptions do not yet use). `"0.1.108"` is `<0.2.0`.
-ikigai-vocab = "0.1.108"
+# ★ 0.2.0 (ledger #2364): core's lockstep release, the streams release (ledger #2261); the old 0.1
+# pin meant `<0.2.0` under 0.x rules. `"0.2.0"` is `<0.3.0`.
+ikigai-vocab = "0.2.0"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
 # 0.2.4 is where the freshness half of this pin comes from, and it is the whole of what
@@ -196,7 +204,9 @@ ikigai-vocab = "0.1.108"
 # its cross-graph note say so (`crate::web`), and the browse join test pins the refusal
 # (`tests/browse.rs`). `GRAPH ?g` is unchanged. Also in 0.2.22: a `SharedWriter` join names what it
 # narrowed away, and the widest-join count is public. `"0.2.22"` is `<0.3.0`.
-ikigai-store = { version = "0.2.22", features = ["persistent"] }
+# ★ 0.3.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.3.1"` is `<0.4.0`.
+ikigai-store = { version = "0.3.1", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -251,7 +261,12 @@ ikigai-store = { version = "0.2.22", features = ["persistent"] }
 # `crate::mirror`, `crate::kata`) deserialize `ikigai_ledger::json`, so the new field arrives
 # typed and a fixture built without it still parses. `"0.11.1"` was `<0.12.0`: a ceiling, so
 # this had to move. 0.11.0 is still the API floor. `"0.12.0"` is `<0.13.0`.
-ikigai-ledger = "0.12.0"
+# ★ 0.13.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. 0.13.1's doctor runs a seventh check, `awaiting-stale` (an open
+# hand-back older than `awaiting-age`, 24h by default); the doctor page lists the checks as the
+# document names them, so it shows the new one with no code change, and `tests/web.rs` pins it.
+# `"0.13.1"` is `<0.14.0`.
+ikigai-ledger = "0.13.1"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
@@ -273,7 +288,9 @@ ikigai-ledger = "0.12.0"
 # rest of its authority (0.3.4), and the ledger 0.11.1 / store 0.2.21 security floor (0.3.5).
 # gonk calls neither by name; this is the published head taken as a stated floor, what was
 # built and tested. 0.3.0 is still the API floor. `"0.3.5"` is `<0.4.0`.
-ikigai-script = "0.3.5"
+# ★ 0.4.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.4.0"` is `<0.5.0`.
+ikigai-script = "0.4.0"
 # ★ The rate on ANONYMOUS script runs (ledger #1175, `crate::script::ANONYMOUS_RUNS`): one
 # `RateLimit` overlay over the script family, consulted only for a run whose capability carries
 # the anonymous door's marker, which is the advice `ikigai-script`'s README gives a host that
@@ -293,7 +310,9 @@ ikigai-script = "0.3.5"
 # variant, then throttle's detail). `tests/anonymous_runs_1210.rs` pins the new text. Its
 # `Retry`, `Failover` and `CircuitBreaker` overlays now decide from `Error::class()` and a run's
 # shared retry pool; gonk composes none of them. `"0.2.0"` is `<0.3.0`.
-ikigai-throttle = "0.2.0"
+# ★ 0.3.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.3.0"` is `<0.4.0`.
+ikigai-throttle = "0.3.0"
 # The plan doors a `language=plan` script reaches — `urn:plan:eval`, `urn:plan:validate`,
 # `urn:plan:requires` (`plan_space::space`, behind the `plan-reader` feature). 0.1.44 is where
 # they are published, so it is the true floor. ⚠ A fresh resolve takes 0.1.46, which needs
@@ -320,7 +339,9 @@ ikigai-throttle = "0.2.0"
 # changes (wire v9's `IssueWith` on the transports, the edge statuses) are not in the plan
 # runner this binary links.
 # 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
-ikigai-engine = { version = "0.1.67", features = ["plan-reader"] }
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
+ikigai-engine = { version = "0.2.1", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). It is linked for the plan
 # doors ALONE, and gonk never serves it to a caller: every door refuses `urn:shacl:*` as it
@@ -357,7 +378,14 @@ ikigai-engine = { version = "0.1.67", features = ["plan-reader"] }
 # The subset also implements `sh:closed` and `sh:ignoredProperties`; no shape in
 # `ikigai_vocab::SHAPES` uses them today, so a plan validates exactly as on 0.3.5, and a
 # vocabulary release that closes a shape is validated rather than refused. `"0.3.6"` is `<0.4.0`.
-ikigai-shacl = { version = "0.3.6", default-features = false }
+# ★ 0.5.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. SHACL-SPARQL moved behind ikigai-shacl's own `sparql` feature
+# (optional since 0.4.0, ledger #2107): without it the subset REFUSES a shapes graph using
+# `sh:sparql`/`sh:select`, which `ikigai_vocab::SHAPES` does, so every plan failed validation
+# (`tests/anonymous_runs_1210.rs` went red). `sparql` brings back exactly that half (ikigai-store,
+# spargebra, oxigraph, all already in this graph) and NOT rudof: `cargo tree -i rudof_rdf` still
+# finds nothing. `"0.5.0"` is `<0.6.0`.
+ikigai-shacl = { version = "0.5.0", default-features = false, features = ["sparql"] }
 # ★ Natural language to a DRAFT query (ledger #1138, `crate::nl`): `urn:nl:grounding` (what a
 # drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
 # templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
@@ -383,7 +411,9 @@ ikigai-shacl = { version = "0.3.6", default-features = false }
 # model repeated attempt N" instead of claiming the bound was reached. gonk constructs no
 # `Attempt` and matches no wording, so it needed no code change. `"0.3.0"` was `<0.4.0`, a
 # ceiling; `"0.4.0"` is `<0.5.0`.
-ikigai-nl = "0.4.0"
+# ★ 0.5.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.5.0"` is `<0.6.0`.
+ikigai-nl = "0.5.0"
 # The repository browse family — `urn:repo:{root}:{tree,file,state,hash}`, `urn:repo:style`,
 # the PR pages and the W3C annotation family. 0.4.0 is the floor, and it is load-bearing
 # three times over. 0.3.0 is where the annotation family took its `urn:iki:annotation:` name,
@@ -629,16 +659,23 @@ ikigai-nl = "0.4.0"
 # beside the dev-dependency's 0.2.x below. `tests/review_typed_stop_1932.rs` is the FLOOR TEST: on
 # 0.18.9 a backend 429 or 401 was asked once per region (three there) and the window case answered
 # `200`. `"0.19.0"` is `<0.20.0`.
-ikigai-browse = "0.19.0"
+# ★ 0.20.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.20.0"` is `<0.21.0`.
+ikigai-browse = "0.20.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
-# `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}` and `urn:system:exec`. browse
+# `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
-# it is what makes those rows work. Every resource here enforces `urn:cap:exec:{tool}` —
-# `urn:system:exec` included, per tool, not under the offering wildcard — so a grant naming
+# it is what makes those rows work. Every resource here enforces `urn:cap:exec:{tool}`, per
+# tool, not under the offering wildcard — so a grant naming
 # `urn:cap:exec:git` cannot run `gh`, and `grants.rs` refuses the wildcard as a GRANT.
 # 0.2.0 (ledger #987): the space names itself `urn:iki:space:repo`; nothing else changed, and
 # `^0.1.6` was `<0.2.0`, a ceiling.
-ikigai-repo = "0.2.0"
+# ★ 0.3.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. ⚠ It NARROWS what this manifest compiles in: since 0.3.0
+# (ledger #1706) the space no longer serves `urn:system:exec` (a caller-built argv was a grant to
+# run anything), and the hub answers that name `Unresolved`. The catalog pins in
+# `tests/browse.rs` drop `system-exec` accordingly. `"0.3.1"` is `<0.4.0`.
+ikigai-repo = "0.3.1"
 # The tuplespace behind the git-event review trigger (`crate::trigger`, ledger #261):
 # `urn:space:{name}` — `out` drops a tuple, `rd` reads without consuming, `take` claims one
 # with an atomic rename compare-and-swap. Linked for ONE property that is not a
@@ -713,7 +750,9 @@ ikigai-repo = "0.2.0"
 # 0.1.62 (ledger #1489): the one-release reason; the intray did not change.
 # 0.1.66 (ledger #1923): the one-release reason (see `ikigai-web` below); the intray did not change.
 # 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below); the intray did not change.
-ikigai-intray = "0.1.67"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
+ikigai-intray = "0.2.1"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -745,7 +784,9 @@ ikigai-intray = "0.1.67"
 # mount still calls `issue_as`, so nothing here mints or forwards a retry budget yet.
 # 0.1.66 -> 0.1.67 (ledger #2021): engine, intray, quic and ipc at 0.1.67 require
 # `ikigai-resolve ^0.1.67`.
-ikigai-resolve = "0.1.67"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
+ikigai-resolve = "0.2.1"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -796,7 +837,10 @@ ikigai-resolve = "0.1.67"
 # speaks wire v9 (tags 9-13 for the four new error variants, `Call::IssueWith`), and still
 # serves a v7/v8 client, which receives each new variant downgraded to `Endpoint(display)`.
 # 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
-ikigai-ipc = "0.1.67"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. Moves with `ikigai-quic`, `ikigai-web` and the lock's
+# `ikigai-wire` at 0.2.1 (wire v10). `"0.2.1"` is `<0.3.0`.
+ikigai-ipc = "0.2.1"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -888,7 +932,10 @@ ikigai-ipc = "0.1.67"
 # the mounts speak wire v9, as `ikigai-ipc` above: a `RetryAfter` from a mounted model crosses to a
 # v9 peer typed, and to a v7/v8 peer as `Endpoint(display)`. 0.1.56 is still the behavior floor.
 # 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
-ikigai-quic = "0.1.67"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. Moves with `ikigai-ipc`, `ikigai-web` and the lock's
+# `ikigai-wire` at 0.2.1 (wire v10). `"0.2.1"` is `<0.3.0`.
+ikigai-quic = "0.2.1"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -997,7 +1044,15 @@ ikigai-quic = "0.1.67"
 # signing in would cure it; the status and the error headers are the library's. Through 0.1.66
 # every text error became the library's fixed, unstyled page. 0.1.66's error table above still
 # holds. `"0.1.67"` is `<0.2.0`.
-ikigai-web = "0.1.67"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. 0.2.0 added `Route::redirect` (a page to redirect to after a
+# non-htmx POST); every route gonk builds sets it `None`, keeping the endpoint's answer as before.
+# Moved with `ikigai-ipc`, `ikigai-quic` and the lock's `ikigai-wire`, all 0.2.1: the cli set moves
+# together (wire v10). The door now serves through `hyper` (features `server` and `http1` only,
+# with `hyper-util`'s tokio glue): new packages in the lock, and SERVER code only, so the
+# outbound surface argued above is unchanged (`cargo tree -e features -i hyper`). `"0.2.1"` is
+# `<0.3.0`.
+ikigai-web = "0.2.1"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -1012,7 +1067,9 @@ ikigai-web = "0.1.67"
 # route no page can reach; `tests/conformance.rs` pins the four ids so a version that
 # binds more is a red test.
 # 0.2.0 (ledger #987): the space names itself `urn:iki:space:compress`; `^0.1.0` was `<0.2.0`.
-ikigai-compress = "0.2.0"
+# ★ 0.3.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.3.0"` is `<0.4.0`.
+ikigai-compress = "0.3.0"
 # ★ The backup's archive is STREAMED into a gzip encoder (ledger #1699) instead of handed whole to
 # `urn:compress:gzip`: the dump held the dataset several times over (the SPARQL JSON answer, the
 # N-Quads, a copy of them for the call), so it now writes each quad into this encoder as it reads
@@ -1045,7 +1102,9 @@ flate2 = "1.1.10"
 # holds that workspace's current release. A tick now keeps the principal that scheduled it after
 # the ceiling's clamp (ledger #1077). The backup job names no principal (`backup::JOB_SCOPES`
 # alone), so it fires exactly as it did on 0.4.1.
-ikigai-time = "0.4.2"
+# ★ 0.5.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.5.0"` is `<0.6.0`.
+ikigai-time = "0.5.0"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
 # The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic). `sync` is the
@@ -1089,13 +1148,17 @@ toml = "0.8"
 # and EVERY transform is answered within a time budget — 5 s unless the host names its own.
 # gonk names its own (`render::RENDER_BUDGET`, 60 s in release, 10 min in debug): the 5 s
 # default refused ordinary pages in a debug build on a loaded machine. `^0.1.3` was `<0.2.0`.
-ikigai-xslt = "0.2.1"
+# ★ 0.4.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.4.0"` is `<0.5.0`.
+ikigai-xslt = "0.4.0"
 # The ecosystem's one HTML helper (`ikigai_fn::html`): the header's ledger menu and the `/l`
 # index build their links with `url_segment` (ledger #1888) rather than a private encoder, the
 # field guide's "do not reimplement" rule. 0.5.0 is the floor: the release that added the
 # `html` module (ledger #1813). Light: its only runtime dependencies are ikigai-core (already
 # here), async-trait and futures-util. `"0.5.0"` is `<0.6.0`.
-ikigai-fn = "0.5.0"
+# ★ 0.7.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.7.0"` is `<0.8.0`.
+ikigai-fn = "0.7.0"
 # The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
 # only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so
 # nothing here needs a CBOR decoder. Present from 0.1.14; the verifier has not changed since
@@ -1113,7 +1176,9 @@ ikigai-fn = "0.5.0"
 # 0.1.62: the one-release reason; the verifier is unchanged.
 # 0.1.66 (ledger #1923): the one-release reason; the verifier is unchanged.
 # 0.1.67 (ledger #2021): the one-release reason; the verifier is unchanged.
-ikigai-passkey = "0.1.67"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head. It links no ikigai crate at all
+# (p256, serde_json, sha2), so it cannot bring a second core. `"0.2.1"` is `<0.3.0`.
+ikigai-passkey = "0.2.1"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
@@ -1167,20 +1232,26 @@ ignore = "0.4.33"
 # prune dropped anything. ⚠ Linked for the mirror ALONE and bound in a private kernel only it
 # issues to: no door serves `urn:jsonld:*`. 0.2.2 is the release that has prune (ledger #1180).
 # `"0.2.2"` is `<0.3.0`.
-ikigai-jsonld = "0.2.2"
+# ★ 0.3.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.3.0"` is `<0.4.0`.
+ikigai-jsonld = "0.3.0"
 # The RDF Toolbox at `/toolbox` (ledger #1933, `crate::toolbox`): turtle-lsp's in-browser
 # Validate, Format, SHACL and SPARQL page as `urn:toolbox:*`, over a build directory the operator
 # installs and names with `gonk.toolbox.dist`. Bound in the HTTP door ONLY, and only when that key
 # is set: no other door serves it, and with no key nothing is bound or routed. 0.1.0 is the first
 # release and what is built and tested; `"0.1.0"` is `<0.2.0`.
-ikigai-toolbox = "0.1.0"
+# ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
+ikigai-toolbox = "0.2.1"
 # The toolbox's build directory, bound at `ikigai_toolbox::DIST` with ikigai-fs's `FileEndpoint`:
 # a jail at the configured directory, read under the caller's capability, which the HTTP door's
 # anonymous caller holds for exactly the toolbox's files (`crate::grants::toolbox_read_grants`).
 # 0.1.9 is the current release and what is built and tested; ikigai-toolbox's own host test
 # mounts the same version. Its `ikigai-core` floor (0.1.89) is below this manifest's.
 # `"0.1.9"` is `<0.2.0`.
-ikigai-fs = "0.1.9"
+# ★ 0.2.2 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.2.2"` is `<0.3.0`.
+ikigai-fs = "0.2.2"
 # ★ Onboarding a node by itself (ledger #2009, `crate::onboard`): the controller's tools beside
 # the controller key, and gonk's own half of applying a signed entitlement.
 # - `ikigai-layers` as a PARTICIPANT (`default-features = false`, no layer host, so no second
@@ -1188,17 +1259,23 @@ ikigai-fs = "0.1.9"
 #   entitlement's signature covers, which the layer host verifies with. Hand-copying it here would
 #   be a second implementation of a byte-exact rule. 0.4.0 is where `onboard` arrives, so it is the
 #   true floor; `"0.4.0"` is `<0.5.0`. The tests below take the host (the dev-dependency).
-ikigai-layers = { version = "0.5.0", default-features = false }
+# ★ 0.6.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
+ikigai-layers = { version = "0.6.0", default-features = false }
 # `urn:sign:sign` and `urn:sign:verify`: the controller signs an entitlement and gonk verifies one
 # with them, in a kernel of their own that no door binds (`onboard::Signer`). 0.3.2 is the release
 # ikigai-layers 0.4.0 verifies with, so both sides share one signature-graph format.
 # `"0.3.2"` is `<0.4.0`.
-ikigai-sign = "0.3.2"
+# ★ 0.4.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.4.1"` is `<0.5.0`.
+ikigai-sign = "0.4.1"
 # The controller key's keystore (the Keychain on a Mac) and `urn:secret:generate`, which mints it
 # (`ikigai-gonk onboard init`). The server reads the key through the `Backend` trait for the one
 # signing call and never serves `urn:secret:*` at any door. 0.2.0 is the published head and the
 # `generate` the init calls; `"0.2.0"` is `<0.3.0`.
-ikigai-secret = "0.2.0"
+# ★ 0.3.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.3.0"` is `<0.4.0`.
+ikigai-secret = "0.3.0"
 # The pairing code's proof: HMAC-SHA256 (RFC 2104) over the fingerprint, checked in constant time
 # (`Mac::verify_slice`), over the `sha2` above. Already in this graph (through the QUIC stack), so
 # this adds an edge, not a package. `"0.12.1"` is `<0.13.0`.
@@ -1216,14 +1293,19 @@ libc = "0.2"
 # them) and `Suite::fails_under`, OPT-IN through `Suite::check_failures()` for this one minor and
 # the default from 0.11.0. `tests/conformance.rs` and `tests/backup.rs` opt in now, so the flip
 # changes nothing here; gonk's own actions declare no `fails` yet. `"0.10.0"` is `<0.11.0`.
-ikigai-conformance = "0.10.0"
+# ★ 0.11.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. 0.11.0 turns on the DATATYPES and FAILURES checks by default.
+# `"0.11.0"` is `<0.12.0`.
+ikigai-conformance = "0.11.0"
 futures = "0.3"
 tempfile = "3"
 # A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path
 # is exercised end to end over HTTP — the same key type `ikigai-passkey` verifies.
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # The WCAG contrast floor the page's palette is held to, in both color schemes.
-ikigai-a11y = "0.2.1"
+# ★ 0.4.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.4.0"` is `<0.5.0`.
+ikigai-a11y = "0.4.0"
 # The scripted layer host the mirror's tests run against (ledger #1190): the published layer
 # host, in process, behind a door that mints each participant's principal. ★ 0.2.2 is the
 # floor (ledger #1316): it serves `urn:layers:me`, which the mirror and the taker read for
@@ -1248,7 +1330,9 @@ ikigai-a11y = "0.2.1"
 # ★ 0.4.0 (ledger #2009): the onboarding lobby and the grants layer, which
 # `tests/onboard_2009.rs` drives end to end. The same version as the normal dependency above (a
 # participant there; the host here, so a test build unifies to the host). `"0.4.0"` is `<0.5.0`.
-ikigai-layers = "0.5.0"
+# ★ 0.6.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
+# ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
+ikigai-layers = "0.6.0"
 # An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
 # own `age` floor).
 age = "0.11.1"
