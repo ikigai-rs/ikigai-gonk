@@ -2101,6 +2101,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikigai-http"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a560d538d26d30f6fe897ece9dba3b3962024f3acc2ec6c340d92a87b9d83a9e"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures-io",
+ "futures-util",
+ "httpdate",
+ "ikigai-core",
+ "url",
+]
+
+[[package]]
 name = "ikigai-intray"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2119,9 +2134,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-ipc"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521cab9861d90eafa1b0d1218371b9bcaea6e5d90e4b1ae701ab1408876a8e96"
+checksum = "37d8b71ced5e7144ad3a890db6562e715741183846a2177d4aacf04628f83150"
 dependencies = [
  "futures",
  "ikigai-core",
@@ -2212,9 +2227,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-passkey"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23dbe606f17def976c75b79d2721d3e51443307f53da337117f6a5ec28a6f383"
+checksum = "648c96e1f3127022aeb4eddf11c475113357cd576010d759ac209058d041e943"
 dependencies = [
  "p256",
  "serde_json",
@@ -2223,9 +2238,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-quic"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48b920257c1d4954ae14edcb3b00615d3dbdfb43b77d916aac3d9c0c46d99083"
+checksum = "d52b90a23b260086ded5d5c9149a0b1f4addce7fb8ccd05dde0fd2a8be14d0a3"
 dependencies = [
  "futures",
  "ikigai-core",
@@ -2420,13 +2435,14 @@ dependencies = [
 
 [[package]]
 name = "ikigai-web"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c035dfd4d4cd5a34e76e90ff7d40cc7acfc2b9fef105f91304a8f0151e77e80"
+checksum = "665636d8a37e78dea9251749786ec26b7791eb0e45c51d515da8c842cad6d0cf"
 dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "futures-core",
  "http",
  "http-body",
  "http-body-util",
@@ -2434,6 +2450,7 @@ dependencies = [
  "hyper-util",
  "ikigai-core",
  "ikigai-fn",
+ "ikigai-http",
  "libc",
  "serde_json",
  "tokio",
@@ -2441,9 +2458,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-wire"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83d17ac183b51e6f490113ce86d200d0771a9dbc26008ef1152bd5b9f7fb0b5e"
+checksum = "e8ff10ab6a9deba8019ef6a131a40699908263b4dfce0099975934b4fdca7a3f"
 dependencies = [
  "ikigai-core",
  "ikigai-resolve",
