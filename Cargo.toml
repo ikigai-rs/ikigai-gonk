@@ -101,7 +101,9 @@ path = "src/main.rs"
 # ikigai-sign 0.4.1 below require `^0.2.1`, so the lock carries a newer patch, and the one-core
 # check (`cargo tree -i ikigai-core`) shows ONE 0.2.x. Nothing in gonk needed a change for core 0.2
 # itself. `"0.2.0"` is `<0.3.0`.
-ikigai-core = { version = "0.2.0", features = ["declare"] }
+# Core 0.2.5 projects root-resolving views onto their target contracts (ledger #2518),
+# including named requests with fixed arguments.
+ikigai-core = { version = "0.2.5", features = ["declare"] }
 # The Meta renderer, and in a server that is not a formatting choice: a mounting client
 # reads every contract through the JSON Meta face (0.1.47+), and without it named
 # arguments are silently dropped across the mount. 0.1.69 rather than 0.1.47 because

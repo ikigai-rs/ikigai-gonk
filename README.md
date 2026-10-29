@@ -3060,7 +3060,8 @@ under the CALLER's capability. A `"prefix"` rule maps a whole namespace of views
 
 <urn:ikigai:space:_:1> a ik:Alias ;
     ik:maxHops 8 ;
-    ik:rewrites <urn:ikigai:space:_:1:rule:1>, <urn:ikigai:space:_:1:rule:2> ;
+    ik:rewrites <urn:ikigai:space:_:1:rule:1>, <urn:ikigai:space:_:1:rule:2>,
+        <urn:ikigai:space:_:1:rule:3> ;
     ik:space <urn:ikigai:space:_:2> .
 
 <urn:ikigai:space:_:1:rule:1> a ik:RewriteRule ;
@@ -3075,6 +3076,16 @@ under the CALLER's capability. A `"prefix"` rule maps a whole namespace of views
     ik:canonical "urn:iki:ledger:default:items" ;
     ik:resolveAt "root" .
 
+<urn:ikigai:space:_:1:rule:3> a ik:RewriteRule ;
+    ik:ruleKind "exact" ;
+    ik:logical "urn:iki:gonk:view:closed-items" ;
+    ik:canonical "urn:iki:ledger:default:items" ;
+    ik:resolveAt "root" ;
+    ik:fixes <urn:ikigai:space:_:1:rule:3:status> .
+
+<urn:ikigai:space:_:1:rule:3:status> a ik:Argument ;
+    ik:inputName "status" ; ik:value "closed" .
+
 <urn:ikigai:space:_:2> a ik:EndpointSpace ;
     ik:doors rdf:nil .
 ```
@@ -3085,14 +3096,17 @@ under the CALLER's capability. A `"prefix"` rule maps a whole namespace of views
 ```sh
 cat views.ttl | ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'sink urn:gk:iki:gonk:views:declaration'
 ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'source urn:gk:iki:space:dynamic:views:status'
-ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'source urn:gk:iki:gonk:view:open state=open'
+ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" -c 'source urn:gk:iki:gonk:view:open status=open'
 ```
 
 To remove one view, leave its rule out; to remove them all, declare the alias with no
 `ik:rewrites`. `source urn:gk:iki:gonk:views:declaration` reads back what is declared (as
-N-Triples). Over HTTP a view is `/view/{name}` (`/view/open?state=open`): the arguments are
-the caller's, forwarded unchanged, so a view names a TARGET, not a query. HTTP negotiates
-`Accept` against that target's faces, including quality values; an explicit `?as=` wins.
+N-Triples). Over HTTP a view is `/view/{name}` (`/view/open?status=open`): the arguments are
+the caller's, forwarded unchanged unless the binding fixes them. The `closed-items` view above
+fixes `status=closed`: ask `/view/closed-items` without `status`. Giving a fixed input, even with
+the same value, is refused with a message naming the binding. Unfixed inputs pass through;
+`as` is never fixed. A view's contract is its target's, with fixed inputs listed as fixed.
+HTTP negotiates `Accept` against that target's faces, including quality values; an explicit `?as=` wins.
 A browser visiting a ledger listing view gets readable plain text, as with other non-HTML
 resources. If none of the target's faces is acceptable, the response is `406 Not Acceptable`.
 A view onto a saved script (`urn:script:{name}:result`) is runnable anonymously only if the
@@ -3125,19 +3139,17 @@ What holds, and what each costs:
   directly.** Both reach the same graph under the same token, but only the declaration's own
   Sink cuts the thread the rebuild listens on: a raw graph write is heard at the next
   declaration write or the next start.
-- ⚠ **No composed views yet.** A door in a declaration names an endpoint and a pattern and
-  cannot fix an argument, so nothing gonk links composes anything an alias does not; the
-  views' endpoint registry is empty. A composition with fixed arguments is a saved script, and
-  a view onto its `urn:script:{name}:result` is the composed view.
-- ⚠ **A view is invisible to discovery** (ledger #2065): `urn:kernel:catalog` and `/act` do
-  not list view names, and a view's `Meta` describes core's forwarder.
+- **Composed views fix arguments on existing targets** with `ik:fixes` (core 0.2.5); the
+  views' endpoint registry stays empty. Fixed values may be inline (`ik:value`) or resource
+  references (`ik:ref`), read under the caller's capability.
+- View names are not listed by `urn:kernel:catalog` or `/act` (ledger #2065).
 - The rebuild runs under the host's root capability (ledger #2048: a narrowed listener does
   not hear a declaration it could not cache). `tests/views_2006.rs` holds all of it.
 
 ### The Views page (ledger #2099)
 
-The header's **Views**, beside Layers, is `/views`: every view IN FORCE (its name, exact or
-prefix, its target and where it resolves), each exact name a link to `/view/{name}`, and the
+The header's **Views**, beside Layers, is `/views`: every view IN FORCE (its name, exact, prefix or
+template, its target and where it resolves), each exact name a link to `/view/{name}`, and the
 status door's state: the declaration in force, when it bound, the last refusal and why, and
 whether the declaration in the store is the one in force. The header offers it to a caller whose
 grant reads the declaration (`urn:cap:store:read:graph:urn:iki:gonk:views:declaration`); anyone
@@ -3160,7 +3172,8 @@ in any grant the commands write: add them to a passkey's grant in `gonk/grants.j
   changed since (another tab, another person, the socket), nothing is written and the page says
   so.
 - **The page never edits what it cannot show.** An arrangement other than one alias over an empty
-  endpoint space (written over the socket) is listed, and the page says to change it there.
+  endpoint space, or one containing named requests with templates, fixed arguments, bound verbs
+  or declared inputs, is listed without forms. The page says to change it over the socket.
 - Through the page every name is under `urn:iki:gonk:view:`, so gonk's check cannot refuse a
   save; a refusal the page reports comes from core (a declaration it cannot build).
   `tests/views_page_2099.rs` holds all of it.
