@@ -355,7 +355,15 @@ pub fn door_kernel(hub: Arc<Kernel>) -> Kernel {
 /// (ledger [#899](http://localhost:1060/l/default/item/899)). Nothing else is refused here:
 /// no refusal markers and no author rules, because the socket names no principal.
 pub fn door_kernel_with(hub: Arc<Kernel>, access: Option<AccessLog>) -> Kernel {
-    over(
+    door_kernel_with_space(hub, access).0
+}
+
+/// [`door_kernel_with`], retaining the exact shared root for direct body conformance probes.
+pub fn door_kernel_with_space(
+    hub: Arc<Kernel>,
+    access: Option<AccessLog>,
+) -> (Kernel, Arc<dyn Space>) {
+    over_with_space(
         Arc::new(HubSpace::over_wire(hub).naming_nobody()),
         Some(crate::access::Door::Socket),
         None,
@@ -392,6 +400,15 @@ fn over(
     grants: Option<crate::quic::Layout>,
     access: Option<AccessLog>,
 ) -> Kernel {
+    over_with_space(space, door, grants, access).0
+}
+
+fn over_with_space(
+    space: Arc<dyn Space>,
+    door: Option<crate::access::Door>,
+    grants: Option<crate::quic::Layout>,
+    access: Option<AccessLog>,
+) -> (Kernel, Arc<dyn Space>) {
     let space = match door {
         Some(door) => {
             Arc::new(crate::admit::Admitting::new(space, door).rechecking(grants)) as Arc<dyn Space>
@@ -402,9 +419,10 @@ fn over(
         Some(log) => Arc::new(log.over(space)) as Arc<dyn Space>,
         None => space,
     };
-    Kernel::with_meta_renderer(space, Arc::new(TurtleRenderer))
+    let kernel = Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock))
-        .with_cache_policy(Arc::new(NoCache))
+        .with_cache_policy(Arc::new(NoCache));
+    (kernel, space)
 }
 
 /// The HTTP door's kernel: gonk's pages ([`crate::web::space`]) in front of the hub — still
@@ -456,11 +474,21 @@ pub fn http_kernel_serving(
     faces: Vec<Arc<dyn Space>>,
     access: Option<AccessLog>,
 ) -> Kernel {
+    http_kernel_serving_with_space(hub, pages, faces, access).0
+}
+
+/// [`http_kernel_serving`], retaining the exact shared root for direct body conformance probes.
+pub fn http_kernel_serving_with_space(
+    hub: Arc<Kernel>,
+    pages: EndpointSpace,
+    faces: Vec<Arc<dyn Space>>,
+    access: Option<AccessLog>,
+) -> (Kernel, Arc<dyn Space>) {
     let mut layers: Vec<Arc<dyn Space>> = vec![Arc::new(pages)];
     layers.extend(faces);
     layers.push(Arc::new(HubSpace::new(hub)));
     let space = Fallback::new(layers).named(spaces::iri(spaces::HTTP_DOOR));
-    over(
+    over_with_space(
         Arc::new(space),
         Some(crate::access::Door::Http),
         None,

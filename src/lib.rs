@@ -279,6 +279,22 @@ pub fn compose_serving(
     nl: Option<&crate::nl::Nl>,
     views: Option<&crate::views::Views>,
 ) -> Kernel {
+    compose_serving_with_space(store, browse, mounted, trigger, backups, scripts, nl, views).0
+}
+
+/// [`compose_serving`], retaining the exact shared root used by the kernel.
+/// This lets conformance compare endpoint body methods without a forwarding kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_serving_with_space(
+    store: DurableStore,
+    browse: Option<Arc<crate::browse::CachedReads>>,
+    mounted: Vec<Arc<dyn Space>>,
+    trigger: Vec<Arc<dyn Space>>,
+    backups: Option<crate::backup::Backups>,
+    scripts: Option<&crate::script::Scripts>,
+    nl: Option<&crate::nl::Nl>,
+    views: Option<&crate::views::Views>,
+) -> (Kernel, Arc<dyn Space>) {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
     // process. In the hub, so it holds for every door: nesting at every depth, length for a
@@ -366,7 +382,8 @@ pub fn compose_serving(
     // door (the door kernels forward this name) and a hit reports it as `answered_by` when
     // no space inside claims one — today none of the linked crates' spaces do.
     let hub = Fallback::new(spaces).named(self::spaces::iri(self::spaces::HUB));
-    let kernel = Kernel::with_meta_renderer(Arc::new(hub), Arc::new(TurtleRenderer))
+    let space: Arc<dyn Space> = Arc::new(hub);
+    let kernel = Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(TurtleRenderer))
         .with_clock(Arc::new(SystemClock));
     // ★ The judge's verdict words, adopted from the browse family this hub composes (ledger
     // #702 item 1): the Queue orders, folds and hides by them, and spells none of them. An
@@ -375,5 +392,5 @@ pub fn compose_serving(
     if let Some(root) = verdict_root {
         let _ = crate::verdict::adopt(&kernel, &root);
     }
-    kernel
+    (kernel, space)
 }

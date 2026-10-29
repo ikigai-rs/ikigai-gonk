@@ -1298,7 +1298,9 @@ libc = "0.2"
 # ★ 0.11.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. 0.11.0 turns on the DATATYPES and FAILURES checks by default.
 # `"0.11.0"` is `<0.12.0`.
-ikigai-conformance = "0.11.0"
+# 0.12.0 (ledger #2604): BODIES and BODY-INPUTS run by default.
+# This admits 0.12.1, which preserves the baseline caller on the bounded BODIES call.
+ikigai-conformance = "0.12.0"
 futures = "0.3"
 tempfile = "3"
 # A software authenticator: `tests/web.rs` signs real ES256 assertions, so the passkey path

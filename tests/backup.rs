@@ -10,15 +10,18 @@
 //! the number a Turtle dump preserves while destroying the graph partition. Everything
 //! compared here is compared PER GRAPH.
 
+#[path = "support/body_conformance.rs"]
+mod body_conformance;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_conformance::{Fixture, Suite};
-use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
+use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Space, Verb};
 use ikigai_gonk::backup::{self, Backups};
-use ikigai_gonk::{compose_with, doors};
+use ikigai_gonk::{compose_serving_with_space, compose_with, doors};
 use ikigai_store::{DurableStore, SharerWrites, Store};
 
 /// The stopgap the hub took on 2026-09-16, through `urn:iki:store:select` with no downtime,
@@ -118,8 +121,12 @@ fn shared_dataset() -> (DurableStore, backup::Dataset) {
 
 /// A hub with the backup family bound over an in-memory store, rotating into `dir`.
 fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
+    Arc::new(hub_with_space(dir, keep).0)
+}
+
+fn hub_with_space(dir: &Path, keep: usize) -> (Kernel, Arc<dyn Space>) {
     let (store, dataset) = shared_dataset();
-    Arc::new(compose_with(
+    compose_serving_with_space(
         store,
         None,
         Vec::new(),
@@ -139,7 +146,8 @@ fn hub(dir: &Path, keep: usize) -> Arc<Kernel> {
         }),
         None,
         None,
-    ))
+        None,
+    )
 }
 
 fn issue(kernel: &Kernel, verb: Verb, iri: &str, args: &[(&str, &[u8])]) -> String {
@@ -329,7 +337,7 @@ fn the_backup_composition_conforms() {
     // valid gzip stream and does not need to be: the endpoint's job is to hand back bytes.
     let planted = format!("gonk-store-2000-01-01T000000Z{}", backup::ARCHIVE_SUFFIX);
     std::fs::write(dir.path().join(&planted), b"planted").expect("plant an archive");
-    let hub = hub(dir.path(), 5);
+    let (hub, space) = hub_with_space(dir.path(), 5);
     seed(&hub);
     // Scoped to the backup family (conformance 0.8's `Suite::own`): everything else in this
     // composition is inherited, not walked, and pinned exactly below. The store, the ledger
@@ -359,9 +367,11 @@ fn the_backup_composition_conforms() {
         .fixture(Fixture::new("gonk-backup-archive", Verb::Exists).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-status", Verb::Source))
         .fixture(Fixture::new("gonk-backup", Verb::Source));
+    let (hub, suite) = body_conformance::wire(hub, space, suite);
     let report = suite.run_blocking(&hub);
     println!("--- backup composition ---\n{report}");
     assert!(report.is_clean(), "{report}");
+    body_conformance::assert_probed(&report);
     let mut walked: Vec<&str> = report.walked.iter().map(String::as_str).collect();
     walked.sort_unstable();
     walked.dedup();
