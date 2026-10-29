@@ -32,13 +32,16 @@
 //! fixtures. Before conformance 0.8 this file opted the store out by hand and walked the
 //! ledger with a copy of the ledger's fixtures.
 
+#[path = "support/body_conformance.rs"]
+mod body_conformance;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::executor::block_on;
 use ikigai_conformance::{Check, Fixture, Report, Suite};
-use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
-use ikigai_gonk::{compose, doors};
+use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Space, Verb};
+use ikigai_gonk::{compose_serving_with_space, doors};
 use ikigai_store::DurableStore;
 
 // ikigai-store 0.2.24 adds `store-graph-info` (needs the graph's read token) and `store-dump`
@@ -100,8 +103,10 @@ const HUB_IDS: [&str; 5] = [
 ];
 
 /// A real query per `urn:sparql:*` form — the synthesized `"x"` the walk would otherwise
-/// send is not SPARQL. Each reads the union default (the walk runs under root, so every named
-/// graph), which the seeded ledger items make non-empty.
+/// send is not SPARQL. Each reads the seeded ledger graph through an explicit read grant.
+/// Conformance 0.12.0 loses root authority on the bounded BODIES call (ledger #2599);
+/// a scoped fixture preserves the same authority across every call, including that probe.
+/// ENFORCED and AUTHORITY still use an empty capability, independently of the fixture.
 const SPARQL_FIXTURES: [(&str, &str); 4] = [
     ("sparql-select", "SELECT * WHERE { ?s ?p ?o } LIMIT 1"),
     ("sparql-ask", "ASK { ?s ?p ?o }"),
@@ -113,9 +118,20 @@ const SPARQL_FIXTURES: [(&str, &str); 4] = [
 ];
 
 fn hub() -> Arc<Kernel> {
-    Arc::new(compose(
+    Arc::new(hub_with_space().0)
+}
+
+fn hub_with_space() -> (Kernel, Arc<dyn Space>) {
+    compose_serving_with_space(
         DurableStore::in_memory().expect("an in-memory store"),
-    ))
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 fn issue(kernel: &Kernel, verb: Verb, iri: &str, args: &[(&str, &str)]) -> String {
@@ -156,7 +172,13 @@ fn fixtures() -> Suite {
     SPARQL_FIXTURES
         .iter()
         .fold(suite, |suite, (id, query)| {
-            suite.fixture(Fixture::new(*id, Verb::Source).arg("query", *query))
+            suite.fixture(
+                Fixture::new(*id, Verb::Source)
+                    .arg("query", *query)
+                    .capability(Capability::scoped([ikigai_store::cap_read_graph(
+                        "urn:iki:ledger:graph:default",
+                    )])),
+            )
         })
         // ★ The `urn:sparql:*` faces echo the DATA, which is the ledger's, and its terms are
         // under the ledger namespace. ⚠ Not `sign#` any more: the ledger stamps
@@ -267,11 +289,13 @@ fn the_served_catalog_is_exactly_the_store_and_the_ledger() {
 
 #[test]
 fn the_hub_conforms() {
-    let hub = hub();
+    let (hub, space) = hub_with_space();
+    let (hub, suite) = body_conformance::wire(hub, space, suite());
     seed(&hub);
-    let report = suite().run_blocking(&hub);
+    let report = suite.run_blocking(&hub);
     println!("--- hub ---\n{report}");
     assert!(report.is_clean(), "{report}");
+    body_conformance::assert_probed(&report);
     assert_eq!(walked(&report), sorted(HUB_IDS), "{report}");
     assert_eq!(inherited(&report), store_and_ledger(), "{report}");
 }
@@ -285,11 +309,12 @@ fn the_hub_conforms() {
 /// by a write through a door.
 #[test]
 fn a_door_kernel_conforms_like_the_hub() {
-    let door = doors::door_kernel(hub());
+    let (door, space) = doors::door_kernel_with_space(hub(), None);
+    let (door, suite) = body_conformance::wire(door, space, fixtures());
     seed(&door);
     let report = HUB_IDS
         .iter()
-        .fold(fixtures(), |suite, id| {
+        .fold(suite, |suite, id| {
             suite.opt_out_check(
                 *id,
                 Check::Cacheable,
@@ -300,6 +325,7 @@ fn a_door_kernel_conforms_like_the_hub() {
         .run_blocking(&door);
     println!("--- door ---\n{report}");
     assert!(report.is_clean(), "{report}");
+    body_conformance::assert_probed(&report);
     assert_eq!(walked(&report), sorted(HUB_IDS), "{report}");
     assert_eq!(inherited(&report), store_and_ledger(), "{report}");
 }
@@ -333,6 +359,10 @@ const WEB_IDS: [&str; 23] = [
 ];
 
 fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
+    http_door_with_space(hub, config).0
+}
+
+fn http_door_with_space(hub: Arc<Kernel>, config: &std::path::Path) -> (Kernel, Arc<dyn Space>) {
     let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
         ikigai_gonk::quic::Layout::in_config_home(config),
         1060,
@@ -347,7 +377,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         epochs: None,
         toolbox: false,
     });
-    doors::http_kernel(hub, ikigai_gonk::web::space(face))
+    doors::http_kernel_serving_with_space(hub, ikigai_gonk::web::space(face), Vec::new(), None)
 }
 
 /// ★ The HTTP door serves the hub's catalog PLUS its pages, and nothing else — and the
@@ -379,9 +409,10 @@ fn the_http_door_adds_exactly_its_pages() {
 #[test]
 fn the_http_door_conforms() {
     let config = tempfile::tempdir().unwrap();
-    let door = http_door(hub(), config.path());
+    let (door, space) = http_door_with_space(hub(), config.path());
+    let (door, suite) = body_conformance::wire(door, space, fixtures());
     let a = seed(&door);
-    let suite = WEB_IDS.iter().fold(fixtures(), |suite, id| suite.own(*id));
+    let suite = WEB_IDS.iter().fold(suite, |suite, id| suite.own(*id));
     let report = HUB_IDS
         .iter()
         .fold(suite, |suite, id| {
@@ -409,7 +440,15 @@ fn the_http_door_conforms() {
         // `tests/browse.rs::a_cross_site_post_cannot_annotate_through_the_adapter` (an empty
         // capability writes nothing) and `…::the_adapter_sinks_the_annotation_family_and_
         // nothing_else` (the surface it can reach at all).
-        .fixture(Fixture::new("gonk-k", Verb::Source).arg("c", "source urn:iki:ledger:items"))
+        .fixture(
+            Fixture::new("gonk-k", Verb::Source)
+                .arg("c", "source urn:iki:ledger:items")
+                // As above, keep the target's actual grant on 0.12.0's bounded call.
+                .capability(Capability::scoped([
+                    "urn:cap:ledger:read:default".to_string(),
+                    ikigai_store::cap_read_graph("urn:iki:ledger:graph:default"),
+                ])),
+        )
         // ★ Three waivers, and they are ONE fact about pass-through adapters rather than
         // three excuses: this resource's capability floor, its faces and its cache validity
         // all belong to whatever the command names, which is not known until the command is
@@ -521,6 +560,7 @@ fn the_http_door_conforms() {
         .run_blocking(&door);
     println!("--- http door ---\n{report}");
     assert!(report.is_clean(), "{report}");
+    body_conformance::assert_probed(&report);
     // The pages, and the hub's own resources behind them: the chunk renderer and the query
     // face. Nothing else is gonk's, and the rest is pinned exactly.
     assert_eq!(

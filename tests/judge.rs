@@ -26,6 +26,9 @@
 //! graph's own write token — a judge needs a model, and what is tested is gonk's routing on
 //! the shape browse documents, not the model.
 
+#[path = "support/body_conformance.rs"]
+mod body_conformance;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -1429,9 +1432,11 @@ fn the_backfill_conforms() {
         Arc::new(Activity::default()),
         None,
     ));
+    let space = backfill.space();
     let kernel =
-        Kernel::with_meta_renderer(backfill.space(), Arc::new(ikigai_vocab::TurtleRenderer));
-    let report = ikigai_conformance::Suite::new()
+        Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(ikigai_vocab::TurtleRenderer));
+    let (kernel, suite) = body_conformance::wire(kernel, space, ikigai_conformance::Suite::new());
+    let report = suite
         .fixture(
             ikigai_conformance::Fixture::new("gonk-judge-backfill", Verb::Sink)
                 .arg("content", backfill::STOP),
@@ -1440,6 +1445,7 @@ fn the_backfill_conforms() {
         .run_blocking(&kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    body_conformance::assert_probed(&report);
 }
 
 // ------------------------------------------------------- the reproduced mark (PR C)
