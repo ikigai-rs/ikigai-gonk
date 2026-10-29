@@ -43,8 +43,9 @@
 //! is replaced by the door's. ★ The last is the one that matters: `ikigai-sparql` reads a
 //! by-reference `budget=` as no budget at all and falls to its ceiling, so an add-if-missing
 //! stamp there is bypassed by sending one (ikigai-cms-web PR 98). `ikigai-store` 0.2.8 instead
-//! REFUSES a by-reference `budget=` (`InvalidArgument`, "read by value only"), which is the
-//! safer answer, but the stamp does not rely on it.
+//! refused a by-reference `budget=` (`InvalidArgument`, "read by value only"). Core 0.2.5
+//! now resolves numeric argument references before the store runs. The door marks its adapter
+//! as a forwarder so the stamp still runs before any budget reference is read.
 //!
 //! # The answer's SIZE is the store's base, and nothing is stamped for it
 //!

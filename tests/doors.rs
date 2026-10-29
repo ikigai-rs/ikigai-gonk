@@ -64,6 +64,20 @@ fn root_issue(kernel: &Kernel, request: Request) -> String {
 }
 
 #[test]
+fn the_door_preserves_the_hubs_projected_meta_contract() {
+    let hub = hub();
+    let door = doors::door_kernel(Arc::clone(&hub));
+    let meta = || {
+        request(
+            Verb::Meta,
+            "urn:iki:ledger:items",
+            &[("as", "application/json")],
+        )
+    };
+    assert_eq!(root_issue(&door, meta()), root_issue(&hub, meta()));
+}
+
+#[test]
 fn a_write_through_a_door_cuts_the_hubs_cache() {
     let hub = hub();
     let door = doors::door_kernel(Arc::clone(&hub));

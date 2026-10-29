@@ -345,7 +345,7 @@ fn an_anonymous_caller_may_lower_the_door_budget_and_never_raise_it() {
 /// later REFUSE a by-reference `budget=` (it is read by value only) — it does not read it as
 /// absent and fall to its ceiling the way `ikigai-sparql` does.
 #[test]
-fn a_by_reference_budget_cannot_bypass_the_door_and_the_store_refuses_one() {
+fn a_by_reference_budget_cannot_bypass_the_door_and_missing_references_are_refused() {
     let server = Server::start(300);
     let anonymous = Capability::scoped(
         grants_for("default", Authority::Write)
@@ -376,13 +376,11 @@ fn a_by_reference_budget_cannot_bypass_the_door_and_the_store_refuses_one() {
             .hub
             .issue(select("urn:iki:store:graph-select"), &Capability::root()),
     ) {
-        Err(Error::InvalidArgument { name, detail }) => {
-            assert_eq!(name, "budget");
-            // 0.2.8 said "not an inline value"; 0.2.9 reads every bound through
-            // `inline_bound`, which names how it was given.
-            assert!(detail.contains("by reference"), "{detail}");
-        }
-        other => panic!("the store refuses a by-reference budget, got {other:?}"),
+        // Core 0.2.5 settles a numeric input's reference before invoking the store.
+        // The door stamps its anonymous callers first; a direct root read still has to
+        // resolve the caller's reference under that caller's capability.
+        Err(Error::Unresolved(name)) => assert_eq!(name.as_str(), "urn:example:an-hour"),
+        other => panic!("a missing budget reference is refused, got {other:?}"),
     }
 }
 
