@@ -284,6 +284,12 @@ fn the_page_lists_the_readmes_declaration_with_links_and_the_status() {
         "{body}"
     );
     assert!(body.contains("none since the last bind"), "{body}");
+    assert_eq!(
+        forms(body),
+        0,
+        "fixed bindings cannot be edited by this form"
+    );
+    assert!(body.contains("fields this page does not show"), "{body}");
     // The header's Views link marks this page as the current one.
     assert!(
         body.contains("<a aria-current='page' class='navlink' href='/views'>Views</a>"),
@@ -555,7 +561,13 @@ fn a_refused_declaration_leaves_the_old_views_and_the_page_says_why() {
 fn a_form_drawn_before_the_declaration_changed_writes_nothing() {
     let gonk = gonk(operator());
     let stale = gonk.base();
-    gonk.declare_as_root(&readme_declaration());
+    // This test needs editable aliases; the README also contains a fixed binding.
+    let mut editable = ikigai_core::Topology::from_turtle(&readme_declaration()).unwrap();
+    let ikigai_core::SpaceKind::Alias { rules, .. } = &mut editable.kind else {
+        panic!("the README declares an alias")
+    };
+    rules.retain(|rule| !rule.is_named_request());
+    gonk.declare_as_root(&editable.to_turtle());
     wait_for(&gonk.views, |s| s.installs == 1);
     let before = gonk.stored();
     let answer = gonk.save(&[

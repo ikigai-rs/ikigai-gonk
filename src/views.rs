@@ -35,24 +35,20 @@
 //! [`DECLARATION`] cuts the thread the rebuild listens on; a raw graph write is heard at the
 //! next declaration write or the next start.
 //!
-//! ⚠ **The `Registry` is empty, deliberately.** A composed view (an arrangement of registered
-//! endpoints) would need a door to supply fixed ARGUMENTS to the endpoint it binds, and the
-//! `ik:` arrangement vocabulary has no way to say that: a door names an endpoint and a pattern,
-//! and every argument comes from the caller. So nothing gonk links would compose anything a
-//! plain alias does not. A composition with fixed arguments is a saved script, and a view onto
-//! its `urn:script:{name}:result` is the composed view.
+//! The endpoint registry stays empty: composed views use root-resolving named requests with
+//! `ik:fixes` arguments, so they bind existing hub targets without registering endpoints.
+//! Core projects the target's contract, with fixed inputs listed as fixed; a caller cannot
+//! supply them. Unfixed inputs and face negotiation (`as`) remain the caller's.
 //!
-//! ⚠ A view is invisible to discovery (ledger [#2065](http://localhost:1062/l/default/item/2065)):
-//! its `Meta` describes core's forwarder, and `urn:kernel:catalog` does not list view names.
+//! View names are not listed by `urn:kernel:catalog` (ledger #2065).
 
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, AliasTable, ArgRef, ArgSpec, Canonical, Capability, Description, DynamicSpace,
-    Endpoint, EndpointSpace, Error, Exact, Invocation, Iri, Kernel, ReprType, Representation,
-    Request, Resolution, ResolveAt, Result, Scope, Space, SpaceCheck, SpaceKind, SystemClock,
-    Topology, Verb,
+    ActionSpec, ArgRef, ArgSpec, Capability, Description, DynamicSpace, Endpoint, EndpointSpace,
+    Error, Exact, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, SpaceCheck,
+    SystemClock, Topology, Verb,
 };
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
@@ -210,93 +206,6 @@ pub fn in_force(hub: &Kernel) -> Option<Topology> {
         pending.extend(node.children);
     }
     None
-}
-
-/// Give the HTTP adapter the faces behind a root-resolving view. Core 0.1.110's
-/// forwarder deliberately describes itself, so without this projection ikigai-web
-/// cannot negotiate against the target. Invocation still goes through the view:
-/// capability checks, dependency tracking and cache invalidation stay in the hub.
-pub(crate) fn describe_faces(hub: &Kernel, name: &Iri, description: &mut Description) {
-    if description.id != "alias-view" {
-        return;
-    }
-    let Some(mut declaration) = in_force(hub) else {
-        return;
-    };
-    let mut tables = std::collections::HashMap::new();
-    let mut pending = vec![&mut declaration];
-    while let Some(node) = pending.pop() {
-        if let SpaceKind::Alias { rules, max_hops } = &node.kind {
-            // Name anonymous aliases in this private snapshot so core's resolution
-            // tells us WHICH table answered, even inside fallbacks or child aliases.
-            let id = node.id.get_or_insert_with(|| {
-                Iri::parse(format!("urn:iki:gonk:http:view-probe:{}", tables.len())).unwrap()
-            });
-            let table = rules
-                .iter()
-                .fold(AliasTable::new().with_max_hops(*max_hops), |table, rule| {
-                    table.rule_at(rule.kind, &rule.from, &rule.to, rule.at)
-                });
-            tables.insert(id.clone(), table);
-        }
-        pending.extend(node.children.iter_mut());
-    }
-    // The views' registry is empty. Rebuild only a routing observer from the live
-    // snapshot, using core's builder and resolver rather than interpreting overlays.
-    // The observer invokes no endpoint and changes only its own routing counters.
-    let Ok(probe) = ikigai_core::build(&declaration, &ikigai_core::Registry::new()) else {
-        return;
-    };
-    let mut target = name.clone();
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..ikigai_core::DEFAULT_MAX_DEPTH {
-        if !seen.insert(target.clone()) {
-            return;
-        }
-        let Resolution::Hit(hit) =
-            probe.resolve(&Request::new(Verb::Source, target.clone()), &Scope::empty())
-        else {
-            return;
-        };
-        let Some(table) = hit.answered_by.as_ref().and_then(|id| tables.get(id)) else {
-            return;
-        };
-        let Canonical::Aliased(hop) = table.canonicalize(hit.canonical.as_ref().unwrap_or(&target))
-        else {
-            return;
-        };
-        if !hop
-            .rules()
-            .iter()
-            .any(|&i| table.rules()[i].resolve_at() == ResolveAt::Root)
-        {
-            return;
-        }
-        target = hop.canonical().clone();
-        let Some(served) = hub.describe(&target) else {
-            return;
-        };
-        if served.id == "alias-view" {
-            continue;
-        }
-        // Only project representation choices. The target's required capabilities
-        // and bindings are evaluated when the view forwards, not at this boundary.
-        description.actions = served
-            .action_specs()
-            .into_iter()
-            .map(|action| {
-                let mut faces = ActionSpec::new(action.verb);
-                faces.outputs = action.outputs;
-                faces.inputs = action
-                    .inputs
-                    .into_iter()
-                    .filter(|input| input.name == "as")
-                    .collect();
-                faces
-            })
-            .collect();
-        return;
-    }
 }
 
 fn iri(name: &str) -> Iri {

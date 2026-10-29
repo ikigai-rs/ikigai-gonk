@@ -105,13 +105,6 @@ pub struct InForce {
     pub rewritable: bool,
 }
 
-fn kind_word(kind: RuleKind) -> &'static str {
-    match kind {
-        RuleKind::Exact => "exact",
-        _ => "prefix",
-    }
-}
-
 fn at_word(at: ResolveAt) -> &'static str {
     match at {
         ResolveAt::Root => "root",
@@ -124,16 +117,17 @@ pub fn rules_of(topology: &Topology) -> InForce {
     let SpaceKind::Alias { rules, max_hops } = &topology.kind else {
         return InForce::default();
     };
-    let rewritable = matches!(
-        topology.children.as_slice(),
-        [child] if child.children.is_empty()
-            && matches!(&child.kind, SpaceKind::EndpointSpace { doors } if doors.is_empty())
-    );
+    let rewritable = rules.iter().all(|rule| !rule.is_named_request())
+        && matches!(
+            topology.children.as_slice(),
+            [child] if child.children.is_empty()
+                && matches!(&child.kind, SpaceKind::EndpointSpace { doors } if doors.is_empty())
+        );
     InForce {
         rules: rules
             .iter()
             .map(|rule| Rule {
-                kind: kind_word(rule.kind),
+                kind: rule.match_kind().keyword(),
                 name: rule.from.clone(),
                 target: rule.to.clone(),
                 at: at_word(rule.at),
@@ -372,8 +366,8 @@ impl ViewsPage {
             children.push_str(&element(
                 "notice",
                 &[("kind", "error")],
-                "The arrangement in force is not one alias over an empty endpoint space, so \
-                 this page cannot rewrite it without losing what it does not show. Change it \
+                "The arrangement in force has fields this page does not show, so \
+                 this page cannot rewrite it without losing them. Change it \
                  over the socket (see the README's \"Named views\").",
             ));
         }
@@ -805,6 +799,32 @@ mod tests {
         let mut got = read.rules;
         got.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn named_requests_are_labeled_and_cannot_lose_their_arguments_in_a_page_edit() {
+        let mut topology = Topology::from_turtle(&declaration(
+            &[rule("exact", "open", "urn:iki:ledger:default:items")],
+            8,
+        ))
+        .unwrap();
+        let SpaceKind::Alias { rules, .. } = &mut topology.kind else {
+            panic!("an alias")
+        };
+        rules[0]
+            .fixes
+            .push(ikigai_core::FixedArgument::value("status", "open"));
+        assert!(!rules_of(&topology).rewritable);
+        let SpaceKind::Alias { rules, .. } = &mut topology.kind else {
+            panic!("an alias")
+        };
+        rules[0] = TopologyRule::named_template(
+            "urn:iki:gonk:view:item:{id}",
+            "urn:iki:ledger:default:item:{id}",
+        );
+        let read = rules_of(&topology);
+        assert_eq!(read.rules[0].kind, "template");
+        assert!(!read.rewritable);
     }
 
     #[test]

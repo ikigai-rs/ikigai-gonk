@@ -912,6 +912,10 @@ impl Endpoint for Admitted {
         self.inner.describe()
     }
 
+    fn forwards(&self) -> Option<ikigai_core::Forward> {
+        self.inner.forwards()
+    }
+
     fn confinement(&self) -> Option<Topology> {
         self.inner.confinement()
     }

@@ -170,19 +170,12 @@ impl Space for HubSpace {
             // `canonical`, 0.1.78 adds `answered_by`), and a literal is E0063 at each one.
             // Nothing is rewritten here — no `.with_canonical` — because the hub
             // canonicalizes, caches and cuts under its own names.
-            Some(mut description) => {
-                if !self.wire
-                    && request
-                        .target
-                        .as_str()
-                        .starts_with(crate::views::VIEW_PREFIX)
-                {
-                    crate::views::describe_faces(&self.hub, &request.target, &mut description);
-                }
+            Some(description) => {
                 let resolved = Resolved::new(
                     Arc::new(Forward {
                         hub: Arc::clone(&self.hub),
                         description,
+                        target: (request.verb != Verb::Meta).then(|| request.target.clone()),
                         wire: self.wire,
                         nobody: self.nobody,
                     }),
@@ -227,6 +220,7 @@ impl Space for HubSpace {
 /// The endpoint a [`HubSpace`] resolves to.
 struct Forward {
     hub: Arc<Kernel>,
+    target: Option<Iri>,
     description: Description,
     /// [`HubSpace::over_wire`]'s flag, carried to the one place an answer passes.
     wire: bool,
@@ -261,6 +255,16 @@ impl Endpoint for Forward {
         } else {
             answer
         })
+    }
+
+    fn forwards(&self) -> Option<ikigai_core::Forward> {
+        // Leave references and attached bodies to the hub's target contract. In particular,
+        // the anonymous budget stamp must run before a caller's budget reference is read.
+        // Meta already holds the hub's projected description. Do not project it again
+        // through this door's own root, where the same target is this adapter again.
+        self.target
+            .as_ref()
+            .map(|target| ikigai_core::Forward::new(self.description.id.clone(), target.clone()))
     }
 
     fn name(&self) -> &str {

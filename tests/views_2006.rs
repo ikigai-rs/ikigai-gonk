@@ -342,12 +342,12 @@ fn the_readmes_declaration_binds_and_its_views_forward_the_callers_arguments() {
         ("urn:iki:gonk:view:next", "urn:iki:ledger:default:next"),
         ("urn:iki:gonk:view:open", "urn:iki:ledger:default:items"),
     ] {
-        let with_state = |name: &str| {
+        let with_status = |name: &str| {
             Request::new(Verb::Source, iri(name))
-                .with_arg("state", ArgRef::Inline(b"open".to_vec()))
+                .with_arg("status", ArgRef::Inline(b"open".to_vec()))
         };
-        let direct = block_on(hub.issue(with_state(target), &root)).map(|r| r.bytes);
-        let through = block_on(hub.issue(with_state(view), &root)).map(|r| r.bytes);
+        let direct = block_on(hub.issue(with_status(target), &root)).map(|r| r.bytes);
+        let through = block_on(hub.issue(with_status(view), &root)).map(|r| r.bytes);
         assert!(direct.is_ok(), "{target}: {direct:?}");
         assert_eq!(
             through.map_err(|e| e.to_string()),
@@ -448,6 +448,21 @@ fn a_browser_negotiates_the_targets_faces_through_a_view() {
         let response = get(path, accept);
         assert!(response.starts_with("HTTP/1.1 406"), "{response}");
     }
+    let composed = get("/view/closed-items?as=application/json", "image/png");
+    assert!(composed.starts_with("HTTP/1.1 200"), "{composed}");
+    assert!(
+        composed
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{composed}"
+    );
+    assert!(!composed.contains("Readable view item"), "{composed}");
+    let conflict = get("/view/closed-items?status=open", browser);
+    assert!(conflict.starts_with("HTTP/1.1 400"), "{conflict}");
+    assert!(
+        conflict.contains("urn:iki:gonk:view:closed-items"),
+        "{conflict}"
+    );
     // Prefixes and chains still use core's rule precedence, and the view grants
     // no access to a ledger the anonymous caller cannot read.
     declare_and_wait(
@@ -518,4 +533,91 @@ fn a_browser_negotiates_the_targets_faces_through_a_view() {
     let removed = get("/view/open", browser);
     assert!(removed.starts_with("HTTP/1.1 404"), "{removed}");
     server.abort();
+}
+
+#[test]
+fn a_views_contract_exposes_the_targets_inputs() {
+    let views = Views::new();
+    let hub = hub(&views);
+    declare_and_wait(
+        &views,
+        &hub,
+        &declaration(&[(
+            "exact",
+            "urn:iki:gonk:view:open",
+            "urn:iki:ledger:default:items",
+        )]),
+        1,
+    );
+    let description = hub.describe(&iri("urn:iki:gonk:view:open")).unwrap();
+    assert!(
+        description.action_specs().iter().any(|action| {
+            action.verb == Verb::Source && action.inputs.iter().any(|input| input.name == "status")
+        }),
+        "a view must project the target's status input: {description:?}"
+    );
+}
+
+#[test]
+fn a_composed_view_fixes_status_and_keeps_the_callers_authority_and_face() {
+    let views = Views::new();
+    let hub = hub(&views);
+    declare_and_wait(&views, &hub, &readme_declaration(), 1);
+    let view = "urn:iki:gonk:view:closed-items";
+    let description = hub.describe(&iri(view)).unwrap();
+    let source = description
+        .action_specs()
+        .into_iter()
+        .find(|action| action.verb == Verb::Source)
+        .unwrap();
+    let status = source
+        .inputs
+        .iter()
+        .find(|input| input.name == "status")
+        .unwrap();
+    assert_eq!(status.fixed.as_deref(), Some("closed"));
+    assert!(source
+        .inputs
+        .iter()
+        .any(|input| input.name == "as" && input.fixed.is_none()));
+    let reader = Capability::root().attenuate(grants_for("default", Authority::Read).unwrap());
+    for title in ["Still open", "Already closed"] {
+        let append = Request::new(Verb::Sink, iri("urn:iki:ledger:default:append"))
+            .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec()));
+        block_on(hub.issue(append, &Capability::root())).unwrap();
+    }
+    let close = Request::new(Verb::Sink, iri("urn:iki:ledger:default:close"))
+        .with_arg("item", ArgRef::Inline(b"2".to_vec()));
+    block_on(hub.issue(close, &Capability::root())).unwrap();
+    let direct = Request::new(Verb::Source, iri("urn:iki:ledger:default:items"))
+        .with_arg("status", ArgRef::Inline(b"closed".to_vec()))
+        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    let bound = Request::new(Verb::Source, iri(view))
+        .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    let answer = block_on(hub.issue(bound.clone(), &reader)).unwrap().bytes;
+    assert_eq!(answer, block_on(hub.issue(direct, &reader)).unwrap().bytes);
+    let text = String::from_utf8(answer).unwrap();
+    assert!(!text.contains("Still open"), "{text}");
+    assert!(text.contains("Already closed"), "{text}");
+    for status in ["open", "closed"] {
+        let refused = block_on(
+            hub.issue(
+                bound
+                    .clone()
+                    .with_arg("status", ArgRef::Inline(status.as_bytes().to_vec())),
+                &reader,
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(refused, Error::InvalidArgument { .. }),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains(view), "{refused}");
+    }
+    let stranger = Capability::root().attenuate(["urn:cap:example:other"]);
+    assert!(matches!(
+        block_on(hub.issue(bound, &stranger)),
+        Err(Error::Denied(_))
+    ));
 }
