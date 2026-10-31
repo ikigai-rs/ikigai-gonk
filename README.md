@@ -3518,6 +3518,16 @@ names it, `urn:iki:gonk:backup:archive:{name}` reads either archive out, and the
 them together. A directory that cannot be read fails the backup before anything is written. A
 backup taken before this holds the dataset alone, and the status says so.
 
+**A download is read from the file, not held whole** (ledger #2730). `urn:iki:gonk:backup:archive:{name}`
+answers a body over the archive file, read 64 KiB at a time, so a download's memory does not
+grow with the archive. The body is seekable, and its strong validator is the archive's content id
+(`b3:…`, core's identity rule), which the sidecar records beside the SHA-256 (`archive_content_id`,
+`scripts_archive_content_id`). An archive taken before that is hashed from the file the first time
+it is asked for. A door that serves byte ranges, such as ikigai-web's, can therefore resume an
+interrupted download with `Range` and `If-Range`. Who may download is unchanged: the endpoint still
+requires `urn:cap:gonk:backup`, and gonk's HTTP door grants it to no one. An archive changed or
+removed while it is being read ends the read with `Conflict`, never with a short or mixed body.
+
 ### The format is N-Quads, and the easy mistake is Turtle
 
 **CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named

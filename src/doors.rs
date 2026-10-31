@@ -36,9 +36,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    Bindings, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts, Expiry,
-    Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved, Result,
-    Scope, Space, SpaceEntry, SystemClock, Topology, Verb,
+    Bindings, Body, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts,
+    Expiry, Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved,
+    Result, Scope, Space, SpaceEntry, SystemClock, Topology, Verb,
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{
@@ -228,17 +228,16 @@ struct Forward {
     nobody: bool,
 }
 
-#[async_trait]
-impl Endpoint for Forward {
-    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        // The CALLER's capability, unchanged: the door kernel has already checked the
-        // declared floor against the same description, and the hub checks it again along
-        // with everything the endpoint enforces inside.
-        //
-        // ★ The one rewrite: an ANONYMOUS HTTP caller's SPARQL is stamped with the door's time
-        // budget (ledger #964/#979, [`crate::budget`]). Here because every request any door
-        // sends the hub passes through this line, and only those: the hub's own sub-requests
-        // (the ledger's queries) never do, so they are never stamped.
+impl Forward {
+    /// The request the hub is issued: the door's, with the CALLER's capability unchanged (the
+    /// door kernel has already checked the declared floor against the same description, and
+    /// the hub checks it again along with everything the endpoint enforces inside).
+    ///
+    /// ★ The one rewrite: an ANONYMOUS HTTP caller's SPARQL is stamped with the door's time
+    /// budget (ledger #964/#979, [`crate::budget`]). Here because every request any door
+    /// sends the hub passes through this line, and only those: the hub's own sub-requests
+    /// (the ledger's queries) never do, so they are never stamped.
+    fn request(&self, inv: &Invocation<'_>) -> Request {
         let mut request =
             crate::budget::stamp(inv.request.clone(), &self.description.id, inv.capability);
         if self.nobody {
@@ -249,7 +248,29 @@ impl Endpoint for Forward {
         // (`ikigai_script::TRANSPORT_ARGUMENTS`, ledger #1173) and refuses a parameter declared
         // by one of their names, so nothing here strips them (ledger #1196). Who a run is for
         // is the CAPABILITY's principal, which the door minted.
-        let answer = self.hub.issue(request, inv.capability).await?;
+        request
+    }
+}
+
+#[async_trait]
+impl Endpoint for Forward {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let answer = self.hub.issue(self.request(inv), inv.capability).await?;
+        Ok(if self.wire {
+            for_the_wire(answer)
+        } else {
+            answer
+        })
+    }
+
+    /// The hub's answer as its endpoint produced it (ledger #2730): a body the door can
+    /// stream (the backup archive's download, a file) reaches the door as that body, rather
+    /// than being collected by the hub under its default stream budget first.
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        let answer = self
+            .hub
+            .issue_body(self.request(inv), inv.capability)
+            .await?;
         Ok(if self.wire {
             for_the_wire(answer)
         } else {
@@ -314,7 +335,7 @@ impl Endpoint for Forward {
 /// let pure = Representation::new(ReprType::new("text/plain"), "42").cacheable();
 /// assert_eq!(for_the_wire(pure).expiry, Expiry::Never);
 /// ```
-pub fn for_the_wire(answer: Representation) -> Representation {
+pub fn for_the_wire<B>(answer: Representation<B>) -> Representation<B> {
     if answer.threads().is_empty() {
         answer
     } else {
