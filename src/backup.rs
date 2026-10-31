@@ -118,8 +118,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
-    Iri, Kernel, ReprType, Representation, Request, Result, UriTemplate, Verb,
+    ArgRef, ArgSpec, Body, ByteStream, Bytes, Capability, ContentHasher, ContentId, Description,
+    Endpoint, EndpointSpace, Error, Exact, Invocation, Iri, Kernel, Replay, ReprType,
+    Representation, Request, Result, UriTemplate, Verb,
 };
 use ikigai_time::JobRegistry;
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
@@ -1055,6 +1056,7 @@ impl TakeBackup {
         let nquads_bytes = usize::try_from(dump.nquads_bytes).unwrap_or(usize::MAX);
         let archive = &dump.archive;
         let archive_digest = digest(archive);
+        let archive_id = ContentId::of(archive).to_string();
         let scripts_archive = match &scripts {
             Some(snapshot) => Some(
                 inv.issue(
@@ -1093,6 +1095,7 @@ impl TakeBackup {
             nquads_sha256: &nquads_digest,
             archive_bytes: archive.len(),
             archive_sha256: &archive_digest,
+            archive_content_id: &archive_id,
             store_quads_after_dump: after,
             scripts: match (&scripts, &scripts_archive) {
                 (Some(snapshot), Some(archive)) => Some(ScriptsMeta {
@@ -1103,6 +1106,7 @@ impl TakeBackup {
                     json_sha256: digest(&snapshot.json),
                     archive_bytes: archive.len(),
                     archive_sha256: digest(archive),
+                    archive_content_id: ContentId::of(archive).to_string(),
                 }),
                 _ => None,
             },
@@ -1609,6 +1613,26 @@ impl Endpoint for ReadArchive {
         }
     }
 
+    /// A `Source` as a body over the file (ledger #2730): an [`ArchiveFile`], so a download
+    /// holds a chunk at a time rather than the archive, and a door that serves ranges can
+    /// resume one. The same refusals as [`invoke`](Self::invoke): a name outside the rotation
+    /// directory, a missing file, and an archive over [`ARCHIVE_MAX_BYTES`].
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        if inv.request.verb != Verb::Source {
+            return self.invoke(inv).await.map(Representation::into_body);
+        }
+        let name = inv
+            .bindings
+            .get("name")
+            .ok_or_else(|| Error::MissingArgument("name".to_string()))?;
+        let path = archive_path(&self.backups.settings.dir, name)?;
+        let file = ArchiveFile::open(&self.backups.settings.dir, name, path)?;
+        Ok(Representation::from_body(
+            ReprType::new(GZIP),
+            Body::replay(file),
+        ))
+    }
+
     fn name(&self) -> &str {
         "gonk-backup-archive"
     }
@@ -1623,7 +1647,10 @@ impl Endpoint for ReadArchive {
                  into `urn:iki:gonk:restore` to verify it, or off the machine to have a \
                  copy somewhere the disk holding the data is not. `{name}` is a bare file \
                  name in that directory — `urn:iki:gonk:backup:status` lists them. \
-                 Archives over 2 GiB are refused with OverBudget, never truncated.",
+                 Archives over 2 GiB are refused with OverBudget, never truncated. The \
+                 answer is a body over the file, read a chunk at a time: seekable, with the \
+                 archive's content id (which the sidecar records) as its strong validator, \
+                 so a door that serves byte ranges can resume an interrupted download.",
             )
             .verb(Verb::Source)
             .verb(Verb::Exists)
@@ -1641,6 +1668,242 @@ impl Endpoint for ReadArchive {
             // can plan for.
             .output("text/plain")
     }
+}
+
+/// The largest chunk an [`ArchiveFile`] reader yields.
+const ARCHIVE_CHUNK: u64 = 64 * 1024;
+
+/// One archive on disk as a body that can be read again (ledger #2730): what [`ARCHIVE`]'s
+/// `Source` answers, in place of the whole file read into memory first.
+///
+/// - **Seekable, with its length**: every reader is a fresh handle on the path, from byte 0
+///   or any offset, reading chunks of at most [`ARCHIVE_CHUNK`]. Memory stays one chunk
+///   whatever the archive's size.
+/// - **A strong validator**: the archive's content id. The backup records it in the sidecar
+///   when it writes the archive (`archive_content_id`, `scripts_archive_content_id`), from the
+///   bytes it holds then, as it records the SHA-256; an archive whose sidecar does not (one
+///   taken before #2730, or no sidecar) is hashed by one reader the first time it is asked
+///   for. A seekable body with a length and a strong validator is what an HTTP door answers
+///   `206` over, so an interrupted download resumes with `Range` / `If-Range`.
+/// - **Never torn**: the file's version (length, mtime, inode) is taken at open and checked
+///   when each reader opens and when it ends. An archive replaced or written in place since
+///   ends the reader with [`Error::Conflict`], never a short or spliced body. The rotation
+///   writes an archive once, through a temporary name, so the only change it makes is a prune.
+struct ArchiveFile {
+    path: PathBuf,
+    version: FileVersion,
+    /// The content id the sidecar recorded for exactly this length, if it did.
+    recorded: Option<ContentId>,
+    hashed: std::sync::OnceLock<Option<ContentId>>,
+}
+
+/// What [`ArchiveFile`] compares to tell an archive has changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileVersion {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    inode: u64,
+}
+
+impl FileVersion {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        FileVersion {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            inode,
+        }
+    }
+}
+
+impl ArchiveFile {
+    /// The archive at `path` (named `name` in `dir`), refused as [`read_archive_bytes`]
+    /// refuses it: missing is `NotFound`, past [`ARCHIVE_MAX_BYTES`] is `OverBudget`.
+    fn open(dir: &Path, name: &str, path: PathBuf) -> Result<Self> {
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| Error::NotFound(format!("reading archive {}: {e}", path.display())))?;
+        if !meta.is_file() {
+            return Err(Error::NotFound(format!(
+                "reading archive {}: not a file",
+                path.display()
+            )));
+        }
+        check_bytes(meta.len(), ARCHIVE_MAX_BYTES)?;
+        let version = FileVersion::of(&meta);
+        Ok(ArchiveFile {
+            recorded: recorded_content_id(dir, name, version.len),
+            path,
+            version,
+            hashed: std::sync::OnceLock::new(),
+        })
+    }
+
+    fn reader(&self, offset: u64) -> ArchiveReader {
+        use std::io::{Seek, SeekFrom};
+        let opened = std::fs::File::open(&self.path)
+            .map_err(|_| self.changed())
+            .and_then(|mut file| {
+                let now = file.metadata().map_err(|_| self.changed())?;
+                if FileVersion::of(&now) != self.version {
+                    return Err(self.changed());
+                }
+                file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                    Error::Endpoint(format!("reading archive {}: {e}", self.path.display()))
+                })?;
+                Ok(file)
+            });
+        match opened {
+            Ok(file) => ArchiveReader {
+                file: Some(file),
+                remaining: self.version.len.saturating_sub(offset),
+                path: self.path.clone(),
+                version: self.version,
+                failed: None,
+            },
+            Err(e) => ArchiveReader {
+                file: None,
+                remaining: 0,
+                path: self.path.clone(),
+                version: self.version,
+                failed: Some(e),
+            },
+        }
+    }
+
+    fn changed(&self) -> Error {
+        changed_while_read(&self.path)
+    }
+}
+
+impl Replay for ArchiveFile {
+    fn open(&self) -> ByteStream {
+        Box::pin(self.reader(0))
+    }
+
+    fn open_at(&self, offset: u64) -> Option<ByteStream> {
+        Some(Box::pin(self.reader(offset)))
+    }
+
+    fn len_hint(&self) -> Option<u64> {
+        Some(self.version.len)
+    }
+
+    fn validator(&self) -> Option<ContentId> {
+        if self.recorded.is_some() {
+            return self.recorded;
+        }
+        *self.hashed.get_or_init(|| {
+            let mut hasher = ContentHasher::new();
+            let mut reader = self.reader(0);
+            while let Some(chunk) = reader.next_chunk() {
+                hasher.update(&chunk.ok()?);
+            }
+            Some(hasher.finish())
+        })
+    }
+}
+
+/// The content id the backup recorded for archive `name` of `len` bytes, from the sidecar it
+/// wrote with it: a store archive's own, or the store sidecar of the same stamp for a scripts
+/// archive. `None` when there is none, or it names another file or another length.
+fn recorded_content_id(dir: &Path, name: &str, len: u64) -> Option<ContentId> {
+    let (sidecar, prefix) = match name.strip_prefix(SCRIPTS_PREFIX) {
+        Some(rest) => {
+            let stamp = rest.strip_suffix(SCRIPTS_SUFFIX)?;
+            (format!("gonk-store-{stamp}{ARCHIVE_SUFFIX}"), "scripts_")
+        }
+        None => (name.to_string(), ""),
+    };
+    let meta = std::fs::read_to_string(dir.join(format!("{sidecar}{META_SUFFIX}"))).ok()?;
+    let says = |key: &str| field(&meta, &format!("{prefix}{key}"));
+    if says("archive")? != name || says("archive_bytes")? != len.to_string() {
+        return None;
+    }
+    ContentId::parse(&says("archive_content_id")?).ok()
+}
+
+/// One reader of an [`ArchiveFile`]: its own handle, the bytes the version at open leaves to
+/// read, and the version to check again at the end.
+struct ArchiveReader {
+    /// The handle; `None` once the stream ended.
+    file: Option<std::fs::File>,
+    remaining: u64,
+    path: PathBuf,
+    version: FileVersion,
+    failed: Option<Error>,
+}
+
+impl ArchiveReader {
+    /// The next chunk, the error that ends the stream, or `None` at a clean end. One bounded
+    /// blocking read on the polling thread, as a file body is read in ikigai-fs.
+    fn next_chunk(&mut self) -> Option<Result<Bytes>> {
+        use std::io::Read as _;
+        if let Some(error) = self.failed.take() {
+            self.file = None;
+            return Some(Err(error));
+        }
+        let file = self.file.as_mut()?;
+        if self.remaining == 0 {
+            // The end: still the version this body opened, or the bytes read were torn.
+            let now = file.metadata().map(|meta| FileVersion::of(&meta));
+            self.file = None;
+            return match now {
+                Ok(now) if now == self.version => None,
+                _ => Some(Err(self.changed())),
+            };
+        }
+        let mut buf = vec![0u8; self.remaining.min(ARCHIVE_CHUNK) as usize];
+        let read = loop {
+            match file.read(&mut buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        };
+        match read {
+            // Shorter than the version at open: it shrank under the reader.
+            Ok(0) => {
+                self.file = None;
+                Some(Err(self.changed()))
+            }
+            Ok(n) => {
+                self.remaining -= n as u64;
+                buf.truncate(n);
+                Some(Ok(Bytes::from(buf)))
+            }
+            Err(e) => {
+                self.file = None;
+                Some(Err(Error::Endpoint(format!(
+                    "reading archive {}: {e}",
+                    self.path.display()
+                ))))
+            }
+        }
+    }
+
+    fn changed(&self) -> Error {
+        changed_while_read(&self.path)
+    }
+}
+
+impl futures_core::Stream for ArchiveReader {
+    type Item = Result<Bytes>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.get_mut().next_chunk())
+    }
+}
+
+fn changed_while_read(path: &Path) -> Error {
+    Error::Conflict(format!(
+        "archive {} changed while it was read",
+        path.display()
+    ))
 }
 
 // ---------------------------------------------------------------- restoring
@@ -2535,6 +2798,9 @@ struct MetaFields<'a> {
     nquads_sha256: &'a str,
     archive_bytes: usize,
     archive_sha256: &'a str,
+    /// The archive's content id (`b3:…`, core's identity rule): the strong validator its
+    /// download states ([`ArchiveFile`], ledger #2730).
+    archive_content_id: &'a str,
     store_quads_after_dump: u64,
     scripts: Option<ScriptsMeta<'a>>,
 }
@@ -2548,6 +2814,7 @@ struct ScriptsMeta<'a> {
     json_sha256: String,
     archive_bytes: usize,
     archive_sha256: String,
+    archive_content_id: String,
 }
 
 fn meta_json(fields: &MetaFields<'_>) -> String {
@@ -2561,7 +2828,8 @@ fn meta_json(fields: &MetaFields<'_>) -> String {
         Some(scripts) => format!(
             ",\"scripts_archive\":{},\"scripts_names\":{},\"scripts_files\":{},\
              \"scripts_json_bytes\":{},\"scripts_json_sha256\":{},\
-             \"scripts_archive_bytes\":{},\"scripts_archive_sha256\":{}",
+             \"scripts_archive_bytes\":{},\"scripts_archive_sha256\":{},\
+             \"scripts_archive_content_id\":{}",
             quote(scripts.archive),
             scripts.names,
             scripts.files,
@@ -2569,13 +2837,15 @@ fn meta_json(fields: &MetaFields<'_>) -> String {
             quote(&scripts.json_sha256),
             scripts.archive_bytes,
             quote(&scripts.archive_sha256),
+            quote(&scripts.archive_content_id),
         ),
         None => String::new(),
     };
     format!(
         "{{\"archive\":{},\"taken_at\":{},\"taken_at_ms\":{},\"quads\":{},\
          \"graphs\":{{{}}},\"nquads_bytes\":{},\"nquads_sha256\":{},\
-         \"archive_bytes\":{},\"archive_sha256\":{},\"store_quads_after_dump\":{}{}}}\n",
+         \"archive_bytes\":{},\"archive_sha256\":{},\"archive_content_id\":{},\
+         \"store_quads_after_dump\":{}{}}}\n",
         quote(fields.archive),
         quote(fields.taken_at),
         fields.taken_at_ms,
@@ -2585,6 +2855,7 @@ fn meta_json(fields: &MetaFields<'_>) -> String {
         quote(fields.nquads_sha256),
         fields.archive_bytes,
         quote(fields.archive_sha256),
+        quote(fields.archive_content_id),
         fields.store_quads_after_dump,
         scripts,
     )
@@ -3120,6 +3391,7 @@ mod tests {
             nquads_sha256: "abc",
             archive_bytes: 91_234,
             archive_sha256: "def",
+            archive_content_id: "b3:00",
             store_quads_after_dump: 2850,
             scripts: Some(ScriptsMeta {
                 archive: "gonk-scripts-2026-09-16T172813Z.json.gz",
@@ -3129,6 +3401,7 @@ mod tests {
                 json_sha256: "fed".to_string(),
                 archive_bytes: 1_024,
                 archive_sha256: "cba".to_string(),
+                archive_content_id: "b3:11".to_string(),
             }),
         });
         assert_eq!(field(&json, "quads").as_deref(), Some("2850"));
@@ -3152,6 +3425,11 @@ mod tests {
         assert_eq!(
             field(&json, "scripts_archive_bytes").as_deref(),
             Some("1024")
+        );
+        assert_eq!(field(&json, "archive_content_id").as_deref(), Some("b3:00"));
+        assert_eq!(
+            field(&json, "scripts_archive_content_id").as_deref(),
+            Some("b3:11")
         );
         serde_json::from_str::<serde_json::Value>(&json).expect("a sidecar is JSON");
     }

@@ -100,8 +100,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, Capability, Description, Endpoint, Error, InputSource, Invocation, Iri, Representation,
-    Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Body, Capability, Description, Endpoint, Error, InputSource, Invocation, Iri,
+    Representation, Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 use crate::access::Door;
@@ -857,21 +857,7 @@ impl Endpoint for Admitted {
         };
         if !inv.request.verb.is_mutating() {
             let answer = self.answer(inv, None, narrowed).await;
-            // A derivation refused because the request came from another page reads, from
-            // the kernel, as "does not grant `urn:cap:net:*`" — to a person whose grant does.
-            // Say which half of the authority went missing, and why.
-            return match answer {
-                Err(Error::Denied(why))
-                    if arrived
-                        && inv
-                            .capability
-                            .scopes()
-                            .is_some_and(|held| held.contains(FOREIGN_PAGE)) =>
-                {
-                    Err(Error::Denied(format!("{why}. {FOREIGN_PAGE_SENTENCE}")))
-                }
-                other => other,
-            };
+            return foreign_page_explained(answer, arrived, inv.capability);
         }
         // ★ At EVERY depth, unlike the checks around it (ledger #878). Nothing inside a door
         // kernel has a reason to write the store raw — the ledger's own `graph-update`s run
@@ -904,6 +890,20 @@ impl Endpoint for Admitted {
         self.answer(inv, None, narrowed).await
     }
 
+    /// A READ at the socket as the endpoint produced its body (ledger #2730), so the backup
+    /// archive's download reaches the door as a body over the file rather than being collected
+    /// here. That is exactly the case [`invoke`](Self::invoke) answers by calling the endpoint
+    /// unchanged: the socket refuses no read and narrows nothing (rules 1 and 5 are the
+    /// network doors'). Every other request is answered by `invoke`, with all its checks, and
+    /// its buffer handed on as a body.
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        if self.door == Door::Socket && !inv.request.verb.is_mutating() {
+            let answer = self.inner.invoke_body(inv).await;
+            return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
+        }
+        self.invoke(inv).await.map(Representation::into_body)
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -918,5 +918,26 @@ impl Endpoint for Admitted {
 
     fn confinement(&self) -> Option<Topology> {
         self.inner.confinement()
+    }
+}
+
+/// A derivation refused because the request came from another page reads, from the kernel, as
+/// "does not grant `urn:cap:net:*`" — to a person whose grant does. Say which half of the
+/// authority went missing, and why.
+fn foreign_page_explained<T>(
+    answer: Result<T>,
+    arrived: bool,
+    capability: &Capability,
+) -> Result<T> {
+    match answer {
+        Err(Error::Denied(why))
+            if arrived
+                && capability
+                    .scopes()
+                    .is_some_and(|held| held.contains(FOREIGN_PAGE)) =>
+        {
+            Err(Error::Denied(format!("{why}. {FOREIGN_PAGE_SENTENCE}")))
+        }
+        other => other,
     }
 }

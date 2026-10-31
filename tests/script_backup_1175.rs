@@ -184,6 +184,22 @@ fn a_backup_holds_the_scripts_and_their_restore_verifies() {
         &format!("urn:iki:gonk:backup:archive:{scripts_archive}"),
         &[],
     );
+    // Ledger #2730: its download is a body over the file whose content id the store sidecar
+    // of the same stamp recorded (`scripts_archive_content_id`).
+    let id = ikigai_core::ContentId::of(&archive).to_string();
+    assert_eq!(meta["scripts_archive_content_id"], id.as_str(), "{meta:#}");
+    let body = block_on(hub.issue_body(
+        Request::new(
+            Verb::Source,
+            Iri::parse(format!("urn:iki:gonk:backup:archive:{scripts_archive}")).unwrap(),
+        ),
+        &root,
+    ))
+    .unwrap();
+    let ikigai_core::Body::Replay(replay) = &body.bytes else {
+        panic!("the scripts archive was buffered whole");
+    };
+    assert_eq!(replay.validator().map(|v| v.to_string()), Some(id));
     let restored = work.path().join("restored-scripts");
     let into = restored.to_string_lossy().into_owned();
     let report = String::from_utf8(issue(

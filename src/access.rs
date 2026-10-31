@@ -111,8 +111,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, Capability, Description, Endpoint, Error, Invocation, Iri, Representation, Request,
-    Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Body, Capability, Description, Endpoint, Error, Invocation, Iri, Representation,
+    Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 /// The line's class, in `ikigai-log`'s CURIE column.
@@ -396,16 +396,15 @@ struct Timed {
     log: AccessLog,
 }
 
-#[async_trait]
-impl Endpoint for Timed {
-    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        // A sub-request a page issues is part of the request that page answers, not a line.
-        if inv.depth() > 0 {
-            return self.inner.invoke(inv).await;
-        }
-        let started = SystemTime::now();
-        let clock = Instant::now();
-        let answer = self.inner.invoke(inv).await;
+impl Timed {
+    /// Write the line for one request that arrived at the door, when the log takes it.
+    fn record(
+        &self,
+        inv: &Invocation<'_>,
+        started: SystemTime,
+        clock: Instant,
+        answer: std::result::Result<usize, &Error>,
+    ) {
         let dur_ms = clock.elapsed().as_millis();
         if self
             .log
@@ -416,11 +415,43 @@ impl Endpoint for Timed {
                 self.log.door,
                 inv.request,
                 inv.capability,
-                answer.as_ref().map(|r| r.bytes.len()),
+                answer,
                 dur_ms,
             );
             (self.log.sink)(&line);
         }
+    }
+}
+
+#[async_trait]
+impl Endpoint for Timed {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // A sub-request a page issues is part of the request that page answers, not a line.
+        if inv.depth() > 0 {
+            return self.inner.invoke(inv).await;
+        }
+        let started = SystemTime::now();
+        let clock = Instant::now();
+        let answer = self.inner.invoke(inv).await;
+        self.record(inv, started, clock, answer.as_ref().map(|r| r.bytes.len()));
+        answer
+    }
+
+    /// The body as the endpoint produced it, timed the same way (ledger #2730): a body the
+    /// door streams (the backup archive's download) is not collected here. Its line records
+    /// the body's length when it is known before reading, and `0` for a one-shot stream; the
+    /// duration is the time to the answer, not to its last byte.
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        if inv.depth() > 0 {
+            return self.inner.invoke_body(inv).await;
+        }
+        let started = SystemTime::now();
+        let clock = Instant::now();
+        let answer = self.inner.invoke_body(inv).await;
+        let bytes = answer
+            .as_ref()
+            .map(|r| r.bytes.len_hint().map_or(0, |n| n as usize));
+        self.record(inv, started, clock, bytes);
         answer
     }
 

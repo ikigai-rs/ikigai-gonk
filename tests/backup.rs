@@ -1542,3 +1542,249 @@ fn archive_source_refuses_one_byte_over_its_stated_bound() {
         "{result:?}"
     );
 }
+
+// ------------------------------------------------------------------ the download as a body
+
+/// The archive's whole body, read through `urn:iki:gonk:backup:archive:{name}` as the kernel
+/// hands it to a door ([`Kernel::issue_body`]), not collected by the test.
+fn archive_body(kernel: &Kernel, name: &str) -> ikigai_core::Representation<ikigai_core::Body> {
+    block_on(kernel.issue_body(
+        Request::new(
+            Verb::Source,
+            Iri::parse(format!("urn:iki:gonk:backup:archive:{name}")).expect("an archive IRI"),
+        ),
+        &Capability::root(),
+    ))
+    .expect("the archive reads as a body")
+}
+
+/// Everything `stream` yields, in order; its error if it fails.
+fn drain(stream: ikigai_core::ByteStream) -> Result<Vec<u8>, Error> {
+    use futures::StreamExt as _;
+    block_on(stream.fold(Ok(Vec::new()), |held, chunk| async move {
+        let mut held = held?;
+        held.extend_from_slice(&chunk?);
+        Ok(held)
+    }))
+}
+
+/// ★ Ledger [#2730](http://localhost:1062/l/default/item/2730): the download is answered over
+/// the FILE, not read whole first. A sparse archive larger than the kernel's default stream
+/// budget is answered at once, as a seekable body whose length is the file's, and a reader
+/// opened near its end reads only what lies past the offset. Before #2730 the endpoint read
+/// the whole file into one buffer before it answered (`Body::Bytes`), so the memory a download
+/// held was the archive's size.
+#[test]
+fn the_archive_download_is_a_seekable_body_over_the_file_not_a_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "gonk-store-2026-10-30T000000Z.nq.gz";
+    let size = ikigai_core::DEFAULT_STREAM_MEMORY + 1;
+    let file = std::fs::File::create(dir.path().join(name)).unwrap();
+    file.set_len(size).unwrap();
+    {
+        use std::os::unix::fs::FileExt as _;
+        file.write_at(b"tail", size - 4).unwrap();
+    }
+    let hub = hub(dir.path(), 5);
+    let answer = archive_body(&hub, name);
+    assert_eq!(answer.repr_type.media_type, "application/gzip");
+    let ikigai_core::Body::Replay(replay) = &answer.bytes else {
+        panic!(
+            "the archive was buffered whole: {:?}",
+            answer.bytes.len_hint()
+        );
+    };
+    assert_eq!(replay.len_hint(), Some(size));
+    let tail = replay
+        .open_at(size - 6)
+        .expect("the archive body is seekable");
+    assert_eq!(drain(tail).unwrap(), b"\0\0tail");
+}
+
+/// ★ Ledger #2730: a byte range of the download is the same slice of the archive file, every
+/// reader reads the same bytes, and the body's content id (its strong validator, what a door
+/// answers `ETag` and `If-Range` with) is the archive's digest, the one the backup recorded
+/// in its sidecar when it wrote the archive.
+#[test]
+fn a_byte_range_of_the_download_is_that_slice_of_the_archive_and_its_content_id_is_recorded() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    seed(&hub);
+    issue(&hub, Verb::Source, backup::BACKUP, &[]);
+    let newest = backup::archives(backups.path()).pop().expect("an archive");
+    let on_disk = std::fs::read(backups.path().join(&newest.name)).unwrap();
+    let id = ikigai_core::ContentId::of(&on_disk);
+    let meta = newest.meta.expect("a sidecar");
+    assert!(
+        meta.contains(&format!("\"archive_content_id\":\"{id}\"")),
+        "the sidecar records the archive's content id: {meta}"
+    );
+
+    let answer = archive_body(&hub, &newest.name);
+    let ikigai_core::Body::Replay(replay) = &answer.bytes else {
+        panic!("the archive was buffered whole");
+    };
+    assert_eq!(replay.len_hint(), Some(on_disk.len() as u64));
+    assert_eq!(replay.validator(), Some(id));
+    assert_eq!(drain(replay.open()).unwrap(), on_disk);
+    assert_eq!(drain(replay.open()).unwrap(), on_disk, "read again");
+    for offset in [0, 1, on_disk.len() / 2, on_disk.len() - 1, on_disk.len()] {
+        let part = replay.open_at(offset as u64).expect("seekable");
+        assert_eq!(
+            drain(part).unwrap(),
+            &on_disk[offset..],
+            "from byte {offset}"
+        );
+    }
+    // The buffered face reads the same bytes.
+    assert_eq!(newest_archive(&hub, backups.path()), on_disk);
+}
+
+/// ★ Ledger #2730: an archive with no sidecar entry for its content id (one taken before
+/// #2730, or a scripts archive) still states one: the digest of the file's own bytes.
+#[test]
+fn an_archive_without_a_recorded_content_id_states_the_digest_of_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "gonk-store-2026-10-29T000000Z.nq.gz";
+    let bytes: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
+    std::fs::write(dir.path().join(name), &bytes).unwrap();
+    std::fs::write(
+        dir.path().join(format!("{name}{}", backup::META_SUFFIX)),
+        b"{\"archive\":\"x\",\"archive_bytes\":200000}",
+    )
+    .unwrap();
+    let hub = hub(dir.path(), 5);
+    let answer = archive_body(&hub, name);
+    let ikigai_core::Body::Replay(replay) = &answer.bytes else {
+        panic!("the archive was buffered whole");
+    };
+    assert_eq!(replay.validator(), Some(ikigai_core::ContentId::of(&bytes)));
+}
+
+/// ★ Ledger #2730: a file changed under an open body ends its reader with `Conflict`, never a
+/// short or mixed body: a resumed download must not splice two versions together.
+#[test]
+fn an_archive_changed_under_its_body_is_refused_not_spliced() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "gonk-store-2026-10-28T000000Z.nq.gz";
+    std::fs::write(dir.path().join(name), vec![1u8; 100_000]).unwrap();
+    let hub = hub(dir.path(), 5);
+    let answer = archive_body(&hub, name);
+    let ikigai_core::Body::Replay(replay) = &answer.bytes else {
+        panic!("the archive was buffered whole");
+    };
+    std::fs::write(dir.path().join(name), vec![2u8; 100_001]).unwrap();
+    let read = drain(replay.open_at(10).expect("seekable"));
+    assert!(matches!(read, Err(Error::Conflict(_))), "{read:?}");
+}
+
+/// One HTTP/1.1 `GET` of `path` with `headers`: the status line and headers (lowercased),
+/// and the body's bytes.
+fn http_get(addr: std::net::SocketAddr, path: &str, headers: &str) -> (String, Vec<u8>) {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("a header block");
+    let head = String::from_utf8_lossy(&response[..split]).to_ascii_lowercase();
+    (head, response[split + 4..].to_vec())
+}
+
+/// ★ Ledger #2730, end to end: over ikigai-web's HTTP door, a caller that holds the backup
+/// capability (the test hands the root capability to every request; gonk's own HTTP door
+/// grants no backup token, and that does not change) can resume an interrupted download. The
+/// whole download says `Accept-Ranges: bytes` and carries a strong `ETag` (the door's, from
+/// the archive's content id); a `Range` with that `If-Range` is answered `206` with exactly
+/// that slice of the archive file; an `If-Range` naming another version gets the whole
+/// archive again, never a slice of a different file.
+#[test]
+fn an_http_range_of_the_download_is_answered_206_with_that_slice() {
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    seed(&hub);
+    issue(&hub, Verb::Source, backup::BACKUP, &[]);
+    let name = backup::archives(backups.path()).pop().unwrap().name;
+    let on_disk = std::fs::read(backups.path().join(&name)).unwrap();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cap: ikigai_web::CapFn = Arc::new(|_| Capability::root());
+    std::thread::spawn(move || {
+        runtime.block_on(ikigai_web::serve_with_listener(
+            hub,
+            cap,
+            listener,
+            ikigai_web::EdgeConfig::default(),
+        ))
+    });
+    let path = format!("/iki/gonk/backup/archive/{name}");
+
+    let (head, body) = http_get(addr, &path, "");
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("accept-ranges: bytes"), "{head}");
+    assert_eq!(body, on_disk);
+    let etag = head
+        .lines()
+        .find_map(|line| line.strip_prefix("etag: "))
+        .expect("a strong ETag")
+        .to_string();
+    assert!(!etag.starts_with("w/"), "{etag}");
+
+    let (first, last) = (on_disk.len() / 3, on_disk.len() - 2);
+    let (head, body) = http_get(
+        addr,
+        &path,
+        &format!("Range: bytes={first}-{last}\r\nIf-Range: {etag}\r\n"),
+    );
+    assert!(head.starts_with("http/1.1 206"), "{head}");
+    assert!(
+        head.contains(&format!(
+            "content-range: bytes {first}-{last}/{}",
+            on_disk.len()
+        )),
+        "{head}"
+    );
+    assert_eq!(body, &on_disk[first..=last]);
+
+    let (head, body) = http_get(
+        addr,
+        &path,
+        &format!("Range: bytes={first}-\r\nIf-Range: \"another-version\"\r\n"),
+    );
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert_eq!(body, on_disk);
+}
+
+/// ★ Ledger #2730: through the socket door (where the owner, who holds the backup capability,
+/// downloads an archive) the body reaches the door as the hub's endpoint produced it: the
+/// same seekable body over the file, not one the hub collected under its default stream
+/// budget first. The sparse archive here is past that budget, so a collect would refuse it.
+#[test]
+fn the_socket_door_hands_the_archive_on_as_the_same_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "gonk-store-2026-10-27T000000Z.nq.gz";
+    let size = ikigai_core::DEFAULT_STREAM_MEMORY + 1;
+    std::fs::File::create(dir.path().join(name))
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    let door = doors::door_kernel(hub(dir.path(), 5));
+    let answer = archive_body(&door, name);
+    let ikigai_core::Body::Replay(replay) = &answer.bytes else {
+        panic!("the door was handed a buffer");
+    };
+    assert_eq!(replay.len_hint(), Some(size));
+    let tail = replay.open_at(size - 3).expect("seekable");
+    assert_eq!(drain(tail).unwrap(), b"\0\0\0");
+}
