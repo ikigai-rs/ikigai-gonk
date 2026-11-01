@@ -20,7 +20,7 @@
 //!
 //! | kind | fields read | |
 //! | --- | --- | --- |
-//! | `issue` | `id`, `uid` (a 26-character ULID), `project_id`, `short_id`, `title`, `body`, `status` (`open`/`closed`), `closed_reason`, `owner`, `priority` (0 highest … 4 lowest; absent = unset), `author`, `created_at`, `closed_at`, `deleted_at` | ignored: `updated_at`, `metadata`, `revision`, `assignment_expires_on`, recurrence fields |
+//! | `issue` | `id`, `uid` (a 26-character ULID), `project_id`, `short_id`, `title`, `body`, `status` (`open`/`closed`), `closed_reason`, `owner`, `priority` (0 highest … 4 lowest; absent = unset), `author`, `created_at`, `closed_at`, `deleted_at`, `metadata` (`work.*`) | ignored: `updated_at`, non-work `metadata`, `revision`, `assignment_expires_on`, recurrence fields |
 //! | `comment` | `uid`, `issue_id`, `author`, `teammate`, `body`, `created_at` | |
 //! | `issue_label` | `issue_id`, `label` | ignored: who added it, and when |
 //! | `link` | `from_issue_uid`, `to_issue_uid`, `type` (`parent`, `blocks`, `related`) | ignored: `author`, `created_at` |
@@ -55,16 +55,23 @@
 //!
 //! An issue already there is not filed again, and the run CONVERGES rather than skipping it:
 //! it reads the item by its key (`item:key:<key>`, in the ledger's JSON face), and a comment
-//! whose marker (`kata comment <uid>`) is in none of the item's comments is added, an issue
-//! closed in kata whose item is still open is closed, and a link the item does not carry yet
+//! whose marker (`kata comment <uid>`) is in none of the item's comments is added with
+//! `key=urn:kata:comment:<uid>`. The ledger checks that key and writes in one update, so
+//! concurrent imports add each comment once too. Legacy unkeyed comments keep their markers.
+//! An issue closed in kata whose item is still open is closed, and a link it does not carry yet
 //! is made — each addressed `item=key:<key>`. So a re-run of the same export changes nothing,
 //! and a later export adds what is new. An issue whose item was DELETED in the ledger is left
 //! alone: its tombstone keeps the key, and a deletion is a decision an import does not undo.
 //!
 //! ⚠ Not converged: an item's title, body, labels and priority are written once, when it is
-//! filed; a later edit in kata does not reach it. And the convergence itself (read the item,
-//! then comment, close or link) is still check-then-act — the ledger has no keyed comment — so
-//! two imports racing on the SAME new comment can both add it. Only the filing is atomic.
+//! filed; a later edit in kata does not reach it. Work metadata is retained as JSON in the
+//! body, without guessing ledger fields for kata's keys. Lifecycle labels become states;
+//! unknown or conflicting states refuse the export before any write. Existing states that
+//! have advanced locally are left alone. The socket preserves free-text owners as claims;
+//! QUIC can claim only for its own certificate principal. Other owners get a percent-encoded
+//! `kata:owner:<owner>` label and the item is deferred for an operator to reconcile. Claims
+//! have no lease: the import cannot renew the source worker's assignment. Close and link
+//! convergence still reads then writes; it is not a transaction with filing or comments.
 //!
 //! # `--dry-run`
 //!
@@ -77,7 +84,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
-use ikigai_ledger::Ledger;
+use ikigai_ledger::{Ledger, Lifecycle};
 use serde_json::Value;
 
 use ikigai_ledger::json::{Answer, Item, ItemDocument};
@@ -183,6 +190,10 @@ pub struct Issue {
     pub deleted: bool,
     /// Its labels, in export order.
     pub labels: Vec<String>,
+    /// The lifecycle label, mapped to a ledger state.
+    pub state: Option<String>,
+    /// Work metadata retained as JSON in the imported body.
+    pub work: BTreeMap<String, Value>,
     /// Its comments, in export order.
     pub comments: Vec<Comment>,
 }
@@ -334,6 +345,15 @@ pub fn parse(text: &str) -> Result<Export, String> {
                     created_at: string("created_at")?,
                     deleted: optional("deleted_at").is_some(),
                     labels: Vec::new(),
+                    state: None,
+                    work: data
+                        .get("metadata")
+                        .and_then(Value::as_object)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(name, _)| name.starts_with("work.") || *name == "work")
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect(),
                     comments: Vec::new(),
                 };
                 by_id.insert(id, export.issues.len());
@@ -379,6 +399,33 @@ pub fn parse(text: &str) -> Result<Export, String> {
              which always opens with one; nothing was imported"
                 .to_string(),
         );
+    }
+    let lifecycle = Lifecycle::kata_flight();
+    for issue in &mut export.issues {
+        for label in &issue.labels {
+            if let Some(state) = label.strip_prefix("lifecycle:") {
+                if lifecycle.state(state).is_none() {
+                    return Err(format!(
+                        "kata {}: unknown lifecycle state `{state}`; nothing was imported",
+                        issue.short_id
+                    ));
+                }
+                if issue
+                    .state
+                    .as_deref()
+                    .is_some_and(|previous| previous != state)
+                {
+                    return Err(format!(
+                        "kata {}: conflicting lifecycle labels; nothing was imported",
+                        issue.short_id
+                    ));
+                }
+                issue.state = Some(state.to_string());
+            }
+        }
+        issue
+            .labels
+            .retain(|label| !label.starts_with("lifecycle:"));
     }
     Ok(export)
 }
@@ -452,6 +499,12 @@ pub fn append_for(issue: &Issue) -> (String, Vec<(&'static str, String)>) {
         content.push_str(&format!("; owner {owner}"));
     }
     content.push_str(".\n");
+    if !issue.work.is_empty() {
+        content.push_str("\nKata work metadata:\n```json\n");
+        content
+            .push_str(&serde_json::to_string_pretty(&issue.work).expect("JSON values serialize"));
+        content.push_str("\n```\n");
+    }
     let mut args = vec![
         ("key", key(&issue.uid)),
         ("about", key(&issue.uid)),
@@ -511,7 +564,9 @@ fn is_open(item: &Item) -> bool {
 
 /// Whether one of its comments carries `marker`.
 fn has_comment(item: &Item, marker: &str) -> bool {
-    item.comments.iter().any(|c| c.text.contains(marker))
+    item.comments
+        .iter()
+        .any(|c| c.text.contains(&format!("({marker},")))
 }
 
 /// Whether it carries a `kind` link to `to`.
@@ -534,6 +589,101 @@ enum Standing {
     WouldFile,
 }
 
+/// Preserve source ownership without claiming as an unrelated importing principal.
+fn owner_matches(door: &Door, principal: Option<&str>, owner: &str) -> bool {
+    let owner = owner.trim();
+    !matches!(owner, "none" | "any")
+        && !owner.trim().is_empty()
+        && match door {
+            Door::Socket(_) => !crate::admit::is_principal_iri(owner),
+            Door::Quic { .. } => principal.is_some_and(|own| crate::quic::same_client(own, owner)),
+        }
+}
+
+/// A label-safe, reversible owner marker; a comma or newline cannot become another label.
+fn owner_marker(owner: &str) -> String {
+    let mut marker = String::from("kata:owner:");
+    for byte in owner.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~:".contains(&byte) {
+            marker.push(char::from(byte));
+        } else {
+            marker.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    marker
+}
+
+/// Complete an interrupted import too. Never overwrite another holder or a state that has
+/// advanced locally. A racing transition is successful only if it reached the same state.
+#[allow(clippy::too_many_arguments)]
+fn restore_work(
+    gonk: &Gonk,
+    ledger: &Ledger,
+    door: &Door,
+    principal: Option<&str>,
+    issue: &Issue,
+    item: Option<&Item>,
+    dry: bool,
+    out: &mut impl Write,
+) -> Result<(), String> {
+    let would = if dry { "would " } else { "" };
+    if issue.closed.is_none() && item.is_none_or(is_open) {
+        if let Some(owner) = &issue.owner {
+            if owner_matches(door, principal, owner) {
+                if item.is_none_or(|i| i.claim.is_none()) {
+                    if !dry {
+                        gonk.sink(&ledger.resource("claim"), &[by_key(&issue.uid)], owner)?;
+                    }
+                    let _ = writeln!(out, "{would}claimed   kata {} by {owner}", issue.short_id);
+                }
+            } else {
+                let marker = owner_marker(owner);
+                if item.is_none_or(|i| !i.labels.contains(&marker)) {
+                    if !dry {
+                        gonk.sink(&ledger.resource("label"), &[by_key(&issue.uid)], &marker)?;
+                    }
+                    let _ = writeln!(out, "{would}marked    kata {} {marker}", issue.short_id);
+                }
+                // A marker alone does not exclude work from next. Keep unmatched ownership
+                // held for an operator to reconcile rather than offering duplicate work.
+                if item.is_none_or(|i| !i.deferred) {
+                    if !dry {
+                        gonk.sink(&ledger.resource("defer"), &[by_key(&issue.uid)], "")?;
+                    }
+                    let _ = writeln!(
+                        out,
+                        "{would}deferred  kata {}: unmatched owner",
+                        issue.short_id
+                    );
+                }
+            }
+        }
+    }
+    if let Some(state) = issue.state.as_deref().filter(|s| *s != "filed") {
+        if item.is_none_or(|i| is_open(i) && i.state.as_deref() == Some("filed")) {
+            if !dry {
+                // A keyed item consumes the whole suffix, including `:state`; use the
+                // resolved immutable number for an item's state endpoint.
+                let number = item.ok_or("a real import must resolve its item")?.number;
+                let target = ledger.resource(&format!("item:{number}:state"));
+                if let Err(error) = gonk.sink(
+                    &target,
+                    &[("from", "filed".into()), ("to", state.into())],
+                    "",
+                ) {
+                    let current: ItemDocument = gonk
+                        .source_json(&ledger.resource(&format!("item:key:{}", key(&issue.uid))))?;
+                    if current.item.state.as_deref() != Some(state) {
+                        return Err(error);
+                    }
+                }
+            }
+            let _ = writeln!(out, "{would}state     kata {} {state}", issue.short_id);
+        }
+    }
+    Ok(())
+}
+
 /// Run `kata import` through `door`. Prints one line per thing done to `out` and answers the
 /// tally. A refusal or an unreachable door stops it with an error; what was
 /// filed before that stays filed, and running it again carries on from there.
@@ -545,6 +695,17 @@ pub fn run(args: &ImportArgs, door: &Door, out: &mut impl Write) -> Result<Summa
         std::fs::read_to_string(&args.file).map_err(|e| format!("reading {}: {e}", args.file))?;
     let export = parse(&text)?;
     let gonk = Gonk::connect(door)?;
+    let principal = match door {
+        Door::Socket(_) => None,
+        Door::Quic { certs, .. } => {
+            let path = certs.join("client.crt");
+            let pem = std::fs::read_to_string(&path)
+                .map_err(|e| format!("reading {}: {e}", path.display()))?;
+            Some(crate::quic::client_iri(
+                &ikigai_quic::fingerprint_of_pem(&pem).map_err(|e| e.to_string())?,
+            ))
+        }
+    };
     let ledger = Ledger::parse(&args.ledger).map_err(|e| e.to_string())?;
     let dry = args.dry_run;
     let would = if dry { "would " } else { "" };
@@ -604,6 +765,16 @@ pub fn run(args: &ImportArgs, door: &Door, out: &mut impl Write) -> Result<Summa
                             ""
                         }
                     );
+                    restore_work(
+                        &gonk,
+                        &ledger,
+                        door,
+                        principal.as_deref(),
+                        issue,
+                        None,
+                        true,
+                        out,
+                    )?;
                     summary.comments += issue.comments.len();
                     summary.closed += usize::from(issue.closed.is_some());
                     items.insert(issue.uid.clone(), Standing::WouldFile);
@@ -651,16 +822,39 @@ pub fn run(args: &ImportArgs, door: &Door, out: &mut impl Write) -> Result<Summa
             }
             gonk.source_json::<ItemDocument>(&item_iri)?.item
         };
+        restore_work(
+            &gonk,
+            &ledger,
+            door,
+            principal.as_deref(),
+            issue,
+            Some(&item),
+            dry,
+            out,
+        )?;
         for comment in &issue.comments {
             if has_comment(&item, &comment_marker(&comment.uid)) {
                 continue;
             }
             if !dry {
-                gonk.sink(
+                let answer: Answer = gonk.sink_json(
                     &ledger.resource("comment"),
-                    &[by_key(&issue.uid), ("author", comment.author.clone())],
+                    &[
+                        by_key(&issue.uid),
+                        ("author", comment.author.clone()),
+                        ("key", format!("urn:kata:comment:{}", comment.uid)),
+                    ],
                     &comment_text(comment),
                 )?;
+                if answer.outcome == "existing" {
+                    continue;
+                }
+                if answer.outcome != "commented" {
+                    return Err(format!(
+                        "unexpected kata comment outcome `{}`",
+                        answer.outcome
+                    ));
+                }
             }
             summary.comments += 1;
             let _ = writeln!(
@@ -835,6 +1029,73 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_labels_are_states_and_work_metadata_keeps_its_types() {
+        let line = issue_line(
+            r#","metadata":{"work.branch":"ship/1","work.pr":42,"work":{"check":true},"other":"ignored"}"#,
+        );
+        for state in [
+            "filed",
+            "queued",
+            "reviewed",
+            "resolving",
+            "refining",
+            "shipping",
+        ] {
+            let label = format!(
+                r#"{{"kind":"issue_label","data":{{"issue_id":1,"label":"lifecycle:{state}"}}}}"#
+            );
+            let parsed = export(&[
+                &line,
+                &label,
+                r#"{"kind":"issue_label","data":{"issue_id":1,"label":"bug"}}"#,
+            ])
+            .unwrap();
+            let issue = &parsed.issues[0];
+            assert_eq!(issue.state.as_deref(), Some(state));
+            assert_eq!(issue.labels, ["bug"]);
+            assert_eq!(issue.work["work.pr"], 42);
+            assert_eq!(issue.work["work"]["check"], true);
+            assert!(!issue.work.contains_key("other"));
+            let (content, args) = append_for(issue);
+            assert!(content.contains("\"work.pr\": 42"));
+            assert!(args.contains(&("labels", "bug".into())));
+        }
+        let resolving =
+            r#"{"kind":"issue_label","data":{"issue_id":1,"label":"lifecycle:resolving"}}"#;
+        let shipping =
+            r#"{"kind":"issue_label","data":{"issue_id":1,"label":"lifecycle:shipping"}}"#;
+        assert!(export(&[&line, resolving, shipping])
+            .unwrap_err()
+            .contains("conflicting lifecycle"));
+        let unknown = r#"{"kind":"issue_label","data":{"issue_id":1,"label":"lifecycle:typo"}}"#;
+        assert!(export(&[&line, unknown])
+            .unwrap_err()
+            .contains("unknown lifecycle"));
+    }
+
+    #[test]
+    fn ownership_does_not_impersonate_an_unmatched_principal() {
+        let socket = Door::Socket("unused".into());
+        let quic = Door::Quic {
+            authority: "unused:1062".into(),
+            certs: "unused".into(),
+        };
+        let own = "urn:iki:host:gonk:client:ab12";
+        assert!(owner_matches(&socket, None, "agent-7"));
+        assert!(!owner_matches(&socket, None, own));
+        assert!(!owner_matches(&socket, None, "none"));
+        assert!(!owner_matches(&quic, Some(own), "agent-7"));
+        assert!(!owner_matches(
+            &quic,
+            Some(own),
+            "urn:iki:host:gonk:client:cd34"
+        ));
+        assert!(owner_matches(&quic, Some(own), own));
+        assert!(owner_matches(&quic, Some(own), "urn:iki:gonk:client:ab12"));
+        assert_eq!(owner_marker("agent,one\n%"), "kata:owner:agent%2Cone%0A%25");
+    }
+
+    #[test]
     fn priorities_outside_the_shared_scale_are_refused() {
         assert_eq!(
             export(&[&issue_line(r#","priority":4"#)]).unwrap().issues[0].priority,
@@ -903,6 +1164,10 @@ mod tests {
         assert!(!has_link(&item, "blocks", "urn:iki:ledger:kata:item:c"));
         assert!(has_comment(&item, &comment_marker("01C")));
         assert!(!has_comment(&item, &comment_marker("01D")));
+        assert!(
+            !has_comment(&item, &comment_marker("01")),
+            "a UID prefix is a different comment"
+        );
         assert_eq!(
             by_key("01J"),
             ("item", "key:urn:kata:issue:01J".to_string())

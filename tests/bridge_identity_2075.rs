@@ -167,6 +167,58 @@ fn both_bridges_file_as_an_enrolled_quic_client() {
     assert_eq!(items(&gonk).len(), 6);
 }
 
+/// Kata owners are source data, never authority to act as another enrolled principal.
+#[test]
+fn kata_quic_claims_only_for_a_matching_owner() {
+    let gonk = with_clients();
+    let home = tempfile::tempdir().unwrap();
+    let own = principal_of(&gonk, "roborev");
+    let path = home.path().join("flight.jsonl");
+    let mut export = String::from(
+        "{\"kind\":\"meta\",\"data\":{\"key\":\"export_version\",\"value\":\"27\"}}\n",
+    );
+    for (id, owner) in [(1, own.as_str()), (2, "some-other-worker")] {
+        export.push_str(
+            &serde_json::json!({"kind":"issue", "data": {
+                "id":id, "uid":format!("quic-flight-{id}"), "short_id":id.to_string(),
+                "title":format!("Flight {id}"), "status":"open", "owner":owner,
+                "author":"chris", "created_at":"2026-10-01T00:00:00Z"
+            }})
+            .to_string(),
+        );
+        export.push('\n');
+        export.push_str(
+            &serde_json::json!({"kind":"issue_label", "data": {
+                "issue_id":id, "label":"lifecycle:resolving"
+            }})
+            .to_string(),
+        );
+        export.push('\n');
+    }
+    std::fs::write(&path, export).unwrap();
+    for _ in 0..2 {
+        let mut command = bridge(home.path());
+        command.args(["kata", "import"]).arg(&path);
+        as_client(&mut command, &gonk, "roborev");
+        stdout(&command.output().unwrap());
+    }
+    let all = items(&gonk);
+    assert_eq!(all.len(), 2);
+    let matched = all.iter().find(|i| i["title"] == "Flight 1").unwrap();
+    assert_eq!(matched["state"], "resolving");
+    assert_eq!(matched["claim"]["holder"], own);
+    assert_eq!(matched["claim"]["principal"], own);
+    let unmatched = all.iter().find(|i| i["title"] == "Flight 2").unwrap();
+    assert_eq!(unmatched["state"], "resolving");
+    assert!(unmatched["claim"].is_null());
+    assert_eq!(unmatched["deferred"], true);
+    assert!(unmatched["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l == "kata:owner:some-other-worker"));
+}
+
 /// The one rule when both doors are configured: `--quic` wins, and the socket is not dialed.
 #[test]
 fn quic_wins_over_the_socket() {
