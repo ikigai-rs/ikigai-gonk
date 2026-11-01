@@ -2417,3 +2417,52 @@ impl Door for Counting {
         self.inner.call(request)
     }
 }
+
+/// Ledger #2800: a former taker may still report on an offer they released.
+#[test]
+fn a_hand_back_on_a_superseded_offer_is_only_a_comment() {
+    for take_new_offer in [true, false] {
+        let w = World::new();
+        let mirror = w.mirror();
+        let n = w.file("Measure the cache\n\nBefore and after.", &[]);
+        let first = offered(&pass(&mirror));
+        w.take(&them(), &first).unwrap();
+        pass(&mirror);
+        w.report(&them(), "Release", &first, "");
+        let second = offered(&pass(&mirror));
+        assert_ne!(first, second);
+        let next_taker = participant("bobby-claude");
+        if take_new_offer {
+            w.take(&next_taker, &second).unwrap();
+            pass(&mirror);
+        }
+        for _ in 0..mirror::MAX_HANDBACKS {
+            let report = w.report(
+                &them(),
+                "Handback",
+                &first,
+                "; ik:evidence <https://github.com/ikigai-rs/ikigai-core/pull/41>",
+            );
+            pass(&mirror);
+            assert!(
+                w.item(n)["awaiting"].is_null(),
+                "a former taker set awaiting"
+            );
+            assert!(w.comments(n).iter().any(|c| c.contains(&report)
+                && c.contains("https://github.com/ikigai-rs/ikigai-core/pull/41")));
+            if take_new_offer {
+                assert_eq!(w.item(n)["claim"]["holder"], next_taker);
+            } else {
+                assert_eq!(w.pending(), [second.clone()]);
+                assert!(w.item(n)["claim"].is_null());
+            }
+        }
+        settled(&mirror);
+        settled(&mirror);
+        assert_eq!(
+            comments_starting(&w, n, "Handed back").len(),
+            mirror::MAX_HANDBACKS
+        );
+        assert!(w.item(n)["awaiting"].is_null());
+    }
+}
