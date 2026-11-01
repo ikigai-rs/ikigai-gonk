@@ -2308,3 +2308,112 @@ fn a_hand_back_replayed_after_its_item_closed_is_not_a_failure() {
     settled(&mirror);
     assert_eq!(comments_starting(&w, n, "Handed back").len(), 1);
 }
+
+/// The threads cut under our ledger's names since `listener` was last drained.
+fn cuts(listener: &ikigai_core::CutListener) -> Vec<String> {
+    listener
+        .drain()
+        .events
+        .iter()
+        .map(|e| e.thread.to_string())
+        .collect()
+}
+
+/// ★ Ledger #2799: every pass re-applied every report it held as a keyed comment, and the
+/// kernel cuts the comment thread after any mutating request, unchanged ones included. The
+/// mirror's own cut listener heard that cut and ran the next pass: an idle binding spun. A pass
+/// with nothing new now writes nothing, so it cuts nothing.
+#[test]
+fn a_pass_with_nothing_new_cuts_nothing() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("Fix the parser\n\nIt drops the last line.", &[]);
+    // Withheld: its keyed "Not offered" comment is said once.
+    w.file(
+        "Rotate the key\n\nghp_0123456789abcdefghijABCDEFGHIJ012345 leaked.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    w.report(&them(), "Progress", &offer, "; ik:note \"halfway\"");
+    w.report(
+        &them(),
+        "Handback",
+        &offer,
+        "; ik:evidence <https://github.com/ikigai-rs/ikigai-core/pull/41>",
+    );
+    pass(&mirror);
+    assert_eq!(w.item(n)["awaiting"], "dispatcher");
+    let listener = w
+        .hub
+        .listen(
+            ikigai_core::ListenSpec::new().prefix(format!("urn:iki:ledger:{LEDGER}:")),
+            &Capability::root(),
+        )
+        .unwrap();
+    settled(&mirror);
+    assert_eq!(
+        cuts(&listener),
+        Vec::<String>::new(),
+        "a settled pass wrote"
+    );
+    settled(&mirror);
+    assert_eq!(
+        cuts(&listener),
+        Vec::<String>::new(),
+        "a settled pass wrote"
+    );
+}
+
+/// ★ Ledger #2799, as it ran: with `mirror::start` running and nothing to do, its own cuts must
+/// not kick it. Before the fix this ran thousands of passes a second.
+#[test]
+fn an_idle_binding_does_not_kick_itself() {
+    let w = World::new();
+    let mirror = w.mirror();
+    w.file("Fix the parser\n\nIt drops the last line.", &[]);
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    w.report(&them(), "Release", &offer, "; ik:note \"not mine\"");
+    pass(&mirror);
+    settled(&mirror);
+    let listener = w
+        .hub
+        .listen(
+            ikigai_core::ListenSpec::new().prefix(format!("urn:iki:ledger:{LEDGER}:")),
+            &Capability::root(),
+        )
+        .unwrap();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    mirror::start(
+        w.mirror_through(Arc::new(Counting {
+            inner: w.door(&us()),
+            reads: Arc::clone(&reads),
+        })),
+        Arc::new(NoFeed(w.door(&us()))),
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    let passes = reads.load(Ordering::SeqCst);
+    assert!(
+        passes <= 2,
+        "{passes} passes in 3 s with nothing to do, {} cuts under the ledger's names",
+        cuts(&listener).len()
+    );
+}
+
+/// A door that counts the `urn:layers:me` reads through it: one per pass.
+struct Counting {
+    inner: AsParticipant,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Door for Counting {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        if request.target.as_str() == "urn:layers:me" {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.call(request)
+    }
+}
