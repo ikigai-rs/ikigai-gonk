@@ -62,6 +62,9 @@ pub const SAVE_IRI: &str = "urn:iki:gonk:views:save";
 pub const VERDICT_WAIT: Duration = Duration::from_secs(5);
 /// The `base` a form carries when no declaration is stored.
 const NO_DECLARATION: &str = "none";
+const STALE_DECLARATION: &str =
+    "Nothing was saved: the declaration changed after this page was drawn. The page \
+     below shows it as it is now; make the change again.";
 /// What a declaration the page writes uses for `ik:maxHops` when nothing is in force.
 const MAX_HOPS: usize = 8;
 
@@ -649,12 +652,7 @@ impl SaveView {
         // declaration is refused here, before anything is written.
         let current = stored(inv).await?;
         if base.trim() != current.as_deref().unwrap_or(NO_DECLARATION) {
-            return Ok((
-                "error",
-                "Nothing was saved: the declaration changed after this page was drawn. The page \
-                 below shows it as it is now; make the change again."
-                    .to_string(),
-            ));
+            return Ok(("error", STALE_DECLARATION.to_string()));
         }
         let in_force = status(inv)
             .await
@@ -680,8 +678,15 @@ impl SaveView {
         // The declaration's own Sink, so the rebuild hears it, under the caller's capability:
         // the declaration's contract and the store's graph write decide.
         let write = Request::new(Verb::Sink, iri(DECLARATION))
-            .with_arg("content", ArgRef::Inline(turtle.into_bytes()));
-        inv.issue(write).await?;
+            .with_arg("content", ArgRef::Inline(turtle.into_bytes()))
+            .with_arg("base", ArgRef::Inline(base.into_bytes()));
+        match inv.issue(write).await {
+            Ok(_) => {}
+            Err(Error::Conflict(_)) => {
+                return Ok(("error", STALE_DECLARATION.to_string()));
+            }
+            Err(error) => return Err(error),
+        }
         let Some(digest) = stored(inv).await? else {
             return Ok((
                 "error",

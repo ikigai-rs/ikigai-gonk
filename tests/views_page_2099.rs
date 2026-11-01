@@ -618,3 +618,85 @@ fn the_header_offers_views_exactly_to_a_caller_who_reads_them() {
     assert_eq!(page.status, 403, "{}", page.body);
     assert!(page.body.contains(&views::read_grant()), "{}", page.body);
 }
+
+/// Ledger #2784: two forms from one page must never silently replace each other.
+#[test]
+fn two_saves_from_one_page_lose_neither_view() {
+    let gonk = gonk(operator());
+    for round in 0..10 {
+        let base = gonk.base();
+        let names = [format!("race-{round}-a"), format!("race-{round}-b")];
+        let barrier = std::sync::Barrier::new(2);
+        let answers = std::thread::scope(|scope| {
+            let handles: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    let (gonk, base, barrier) = (&gonk, &base, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        gonk.save(&[
+                            ("op", "add"),
+                            ("base", base),
+                            ("name", name),
+                            ("target", CHECK),
+                            ("kind", "exact"),
+                        ])
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let stored = gonk.stored();
+        for (name, answer) in names.iter().zip(&answers) {
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert!(
+                answer.body.contains("Nothing was saved")
+                    || stored.contains(&format!("urn:iki:gonk:view:{name}")),
+                "round {round}: save of {name} was lost without a refusal: {}\nstored: {stored}",
+                answer.body
+            );
+        }
+        assert!(answers.iter().any(|a| a.body.contains("it is in force")));
+    }
+}
+
+/// The write itself must reject a stale digest, even without the form's early check.
+#[test]
+fn the_declaration_sink_compares_the_base_before_replacing() {
+    let gonk = gonk(operator());
+    let conditional = |base: &str, turtle: &str| {
+        block_on(
+            gonk.hub.issue(
+                Request::new(Verb::Sink, iri(DECLARATION))
+                    .with_arg("base", ArgRef::Inline(base.as_bytes().to_vec()))
+                    .with_arg("content", ArgRef::Inline(turtle.as_bytes().to_vec())),
+                &Capability::root(),
+            ),
+        )
+    };
+    let empty = ikigai_gonk::views_page::declaration(&[], 8);
+    conditional("none", &empty).unwrap();
+    let before = gonk.stored();
+    let base = ikigai_core::ContentId::of(before.as_bytes()).to_string();
+    assert!(matches!(
+        conditional("none", &readme_declaration()),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(gonk.stored(), before);
+
+    // An unconditional declaration write (for example, from the socket) participates too.
+    gonk.declare_as_root(&readme_declaration());
+    let changed = gonk.stored();
+    assert_ne!(changed, before);
+    assert!(matches!(
+        conditional(&base, &empty),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(gonk.stored(), changed);
+    let current = ikigai_core::ContentId::of(changed.as_bytes()).to_string();
+    conditional(&current, &empty).unwrap();
+    assert_eq!(gonk.stored(), before);
+}

@@ -17,7 +17,10 @@
 //!   `urn:iki:store:graph-construct` under the CALLER's capability; its `Sink` replaces them
 //!   through `urn:iki:store:graph-update`, also under the caller's capability, so the store's
 //!   per-graph write token ([`write_grant`]) IS the authority to change the views. No new
-//!   capability exists for it.
+//!   capability exists for it. An optional `base` digest makes the replacement conditional:
+//!   all declaration Sinks share a lock across the digest check and write. `none` means no
+//!   declaration; a mismatch returns `Error::Conflict` without writing. Checking a base also
+//!   requires the caller's read grant.
 //! - **A view is a rule, not code**: an `ik:Alias` exact or prefix rule marked
 //!   `ik:resolveAt "root"` (core 0.1.110), which forwards the rewritten name from the hub's
 //!   root under the caller's own capability. So a view grants nothing its reader could not
@@ -46,9 +49,9 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Capability, Description, DynamicSpace, Endpoint, EndpointSpace,
-    Error, Exact, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, SpaceCheck,
-    SystemClock, Topology, Verb,
+    ActionSpec, ArgRef, ArgSpec, Capability, ContentId, Description, DynamicSpace, Endpoint,
+    EndpointSpace, Error, Exact, Invocation, Iri, Kernel, ReprType, Representation, Request,
+    Result, SpaceCheck, SystemClock, Topology, Verb,
 };
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
@@ -108,6 +111,7 @@ pub fn write_grant() -> String {
 /// ([`Views::start`]), as the script family is attached after.
 pub struct Views {
     dynamic: Arc<DynamicSpace>,
+    declaration_write: Arc<tokio::sync::Mutex<()>>,
     /// The hub, set by [`start`](Self::start): what the check reads [`CHECK`] through. Weak,
     /// because the hub holds this space and the space holds the check.
     hub: Arc<OnceLock<Weak<Kernel>>>,
@@ -128,6 +132,7 @@ impl Views {
             .with_clock(Arc::new(SystemClock));
         Views {
             dynamic: Arc::new(dynamic),
+            declaration_write: Arc::default(),
             hub,
         }
     }
@@ -140,6 +145,7 @@ impl Views {
             .with_clock(Arc::new(SystemClock));
         Views {
             dynamic: Arc::new(dynamic),
+            declaration_write: Arc::default(),
             hub: Arc::new(OnceLock::new()),
         }
     }
@@ -153,7 +159,12 @@ impl Views {
     /// hub: their names are gonk's own and no other space claims them.
     pub fn space(&self) -> EndpointSpace {
         EndpointSpace::new()
-            .bind(Exact::new(DECLARATION), DeclarationEndpoint)
+            .bind(
+                Exact::new(DECLARATION),
+                DeclarationEndpoint {
+                    write: Arc::clone(&self.declaration_write),
+                },
+            )
             .bind(Exact::new(CHECK), CheckEndpoint)
             .named(crate::spaces::iri(crate::spaces::VIEWS))
     }
@@ -258,7 +269,10 @@ fn refuses(rule: &str, turtle: &str) -> std::result::Result<bool, String> {
 }
 
 /// [`DECLARATION`]: the graph's triples (`Source`), or a new set of them (`Sink`).
-struct DeclarationEndpoint;
+struct DeclarationEndpoint {
+    // Shared by every binding made by Views::space, including writes from other doors.
+    write: Arc<tokio::sync::Mutex<()>>,
+}
 
 impl DeclarationEndpoint {
     async fn read(&self, inv: &Invocation<'_>) -> Result<Representation> {
@@ -299,6 +313,23 @@ impl DeclarationEndpoint {
             });
         }
         let triples = n_triples(content)?;
+        // Compare while holding the same lock as every declaration Sink's replacement.
+        // A page's earlier read is only an early refusal, never permission to overwrite.
+        // Raw graph-update writes bypass this endpoint (and its rebuild notification).
+        let _write = self.write.lock().await;
+        if inv.request.args.contains_key("base") {
+            let base = inv.inline_str("base")?;
+            let current = match self.read(inv).await {
+                Ok(answer) => ContentId::of(&answer.bytes).to_string(),
+                Err(Error::NotFound(_)) => "none".to_string(),
+                Err(error) => return Err(error),
+            };
+            if base.trim() != current {
+                return Err(Error::Conflict(
+                    "the declaration changed after this page was drawn".to_string(),
+                ));
+            }
+        }
         let update = if triples.trim().is_empty() {
             format!("CLEAR SILENT GRAPH <{DECLARATION}>")
         } else {
@@ -378,6 +409,15 @@ impl Endpoint for DeclarationEndpoint {
                         ArgSpec::new("content")
                             .class(XSD_STRING)
                             .summary("the whole declaration, as Turtle"),
+                    )
+                    .input(
+                        ArgSpec::new("base")
+                            .class(XSD_STRING)
+                            .summary(
+                                "replace only if the declaration still has this content digest \
+                                 (none for no declaration); requires read access",
+                            )
+                            .optional(),
                     )
                     .output("text/plain;charset=utf-8"),
             )
