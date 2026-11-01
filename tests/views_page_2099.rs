@@ -662,3 +662,41 @@ fn two_saves_from_one_page_lose_neither_view() {
         assert!(answers.iter().any(|a| a.body.contains("it is in force")));
     }
 }
+
+/// The write itself must reject a stale digest, even without the form's early check.
+#[test]
+fn the_declaration_sink_compares_the_base_before_replacing() {
+    let gonk = gonk(operator());
+    let conditional = |base: &str, turtle: &str| {
+        block_on(
+            gonk.hub.issue(
+                Request::new(Verb::Sink, iri(DECLARATION))
+                    .with_arg("base", ArgRef::Inline(base.as_bytes().to_vec()))
+                    .with_arg("content", ArgRef::Inline(turtle.as_bytes().to_vec())),
+                &Capability::root(),
+            ),
+        )
+    };
+    let empty = ikigai_gonk::views_page::declaration(&[], 8);
+    conditional("none", &empty).unwrap();
+    let before = gonk.stored();
+    let base = ikigai_core::ContentId::of(before.as_bytes()).to_string();
+    assert!(matches!(
+        conditional("none", &readme_declaration()),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(gonk.stored(), before);
+
+    // An unconditional declaration write (for example, from the socket) participates too.
+    gonk.declare_as_root(&readme_declaration());
+    let changed = gonk.stored();
+    assert_ne!(changed, before);
+    assert!(matches!(
+        conditional(&base, &empty),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(gonk.stored(), changed);
+    let current = ikigai_core::ContentId::of(changed.as_bytes()).to_string();
+    conditional(&current, &empty).unwrap();
+    assert_eq!(gonk.stored(), before);
+}
