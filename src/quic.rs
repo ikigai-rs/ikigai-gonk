@@ -116,6 +116,21 @@ impl Layout {
         self.dir.join("clients.json")
     }
 
+    /// Hold [`ClientsLock`] for one read-modify-write of [`clients_json`](Self::clients_json),
+    /// blocking until no other writer, in this process or another, holds it. With no
+    /// directory there is no file to write, and nothing to hold: the write itself will fail.
+    pub(crate) fn lock_clients(&self) -> Result<ClientsLock, String> {
+        let path = self.dir.join(".clients.json.lock");
+        let file = match open_private(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ClientsLock(None)),
+            Err(e) => return Err(format!("opening {}: {e}", path.display())),
+        };
+        file.lock()
+            .map_err(|e| format!("locking {}: {e}", path.display()))?;
+        Ok(ClientsLock(Some(file)))
+    }
+
     /// Grant name → scopes.
     pub fn grants_json(&self) -> PathBuf {
         self.dir.join("grants.json")
@@ -329,6 +344,7 @@ pub fn planned_fingerprint(
 /// startup, so a removed bundle is still accepted by the TLS handshake until a restart — and
 /// then refused for want of a grant.
 pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
+    let _lock = layout.lock_clients()?;
     let mut doc = read_object(&layout.clients_json())?;
     let Some(Value::Object(mut clients)) = doc.remove("clients") else {
         return Ok(false);
@@ -356,6 +372,7 @@ pub fn unenrol(layout: &Layout, fingerprint: &str) -> Result<bool, String> {
 /// while `grants.json` still held its grant — and the printed fix named a fixed
 /// `--ledger default=write`, which against a broader grant is a NARROWING.
 pub fn rotate_enrolment(layout: &Layout, old: &str, new: &str) -> Result<Option<String>, String> {
+    let _lock = layout.lock_clients()?;
     let mut doc = read_object(&layout.clients_json())?;
     let mut clients = match doc.remove("clients") {
         None => return Ok(None),
@@ -1380,6 +1397,7 @@ pub fn enrol(
     scopes: &[String],
     force: bool,
 ) -> Result<(), String> {
+    let _lock = layout.lock_clients()?;
     enrol_refusal(layout, grant, Some(fingerprint), scopes, force)?;
     let mut grants = read_object(&layout.grants_json())?;
     let mut clients_doc = read_object(&layout.clients_json())?;
@@ -1467,6 +1485,36 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<(), String> {
     let temp = path.with_file_name(format!(".{name}.tmp"));
     create_private(&temp, contents).map_err(|e| format!("writing {}: {e}", temp.display()))?;
     std::fs::rename(&temp, path).map_err(|e| format!("replacing {}: {e}", path.display()))
+}
+
+/// Every change to `clients.json` reads the file, decides, and writes the whole file back; two
+/// at once would each write what they read, and the later rename would silently undo the
+/// earlier change (ledger [#2776](http://localhost:1062/l/default/item/2776): a sign-in writing
+/// its counter back re-enrolled a passkey `passkey revoke` had just removed). They also share
+/// one temporary name in [`write_private`]. So each holds this, an exclusive `flock` on a lock
+/// file beside `clients.json`, from its read to its rename. It is a SEPARATE file because the
+/// rename replaces `clients.json`'s inode, and a lock on the old one would exclude nobody.
+/// Released when dropped.
+pub(crate) struct ClientsLock(#[allow(dead_code)] Option<std::fs::File>);
+
+#[cfg(unix)]
+fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
 }
 
 #[cfg(unix)]

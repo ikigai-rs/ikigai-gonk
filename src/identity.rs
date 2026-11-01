@@ -193,8 +193,13 @@ pub(crate) fn parse_passkeys(
 }
 
 /// Write one passkey entry into `clients.json`, keeping every other key (the QUIC clients,
-/// the default) exactly as it was.
-fn write_passkey(layout: &Layout, entry: &Enrolled) -> Result<(), String> {
+/// the default) exactly as it was. The caller holds `_lock` from the read it decided on to
+/// here, so no other change to the file lands in between and is undone (ledger #2776).
+fn write_passkey(
+    layout: &Layout,
+    _lock: &quic::ClientsLock,
+    entry: &Enrolled,
+) -> Result<(), String> {
     let mut doc = quic::read_object(&layout.clients_json())?;
     let mut passkeys = match doc.remove("passkeys") {
         None => Map::new(),
@@ -266,6 +271,7 @@ pub fn checked_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, S
 /// The audit line is written AFTER the change, so it never claims a revocation that did not
 /// happen; if it cannot be written the change stands and the error says so.
 pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
+    let lock = layout.lock_clients()?;
     let target = pick(layout, which)?;
     let mut doc = quic::read_object(&layout.clients_json())?;
     let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
@@ -276,6 +282,7 @@ pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled
     let text = quic::pretty(&Value::Object(doc))?;
     quic::parse_enrolment(&text)?;
     quic::write_private(&layout.clients_json(), &text)?;
+    drop(lock);
     record(layout, REVOKED, &target, now_ms).map_err(|e| {
         format!(
             "passkey `{}` WAS revoked, but its audit line could not be written to {}: {e}",
@@ -771,6 +778,7 @@ impl Passkeys {
         // Parsing is the check that this is an ES256 key this server can verify against.
         RegisteredCredential::from_spki_der(b64(&id, "id")?, &key, 0)
             .map_err(|e| format!("{e} — this server verifies ES256 (P-256) passkeys only"))?;
+        let lock = self.layout.lock_clients()?;
         if read_passkeys(&self.layout)?.contains_key(&id) {
             return Err("this credential is already enrolled".to_string());
         }
@@ -792,7 +800,7 @@ impl Passkeys {
             public_key: URL_SAFE_NO_PAD.encode(&key),
             sign_count: 0,
         };
-        write_passkey(&self.layout, &entry)?;
+        write_passkey(&self.layout, &lock, &entry)?;
         Ok(entry)
     }
 
@@ -863,10 +871,21 @@ impl Passkeys {
         )
         // One refusal on the wire; the precise reason is in the error the caller logs.
         .map_err(|e| format!("the passkey assertion was refused ({e})"))?;
+        // ★ Decided again under the lock, against the file as it is NOW: a `passkey revoke`
+        // (or a re-enrolment under another key) may have landed while this was verifying, and
+        // writing the entry read before it back would undo it (ledger #2776).
+        let lock = self.layout.lock_clients()?;
+        let unchanged = read_passkeys(&self.layout)?.remove(&id).is_some_and(|now| {
+            now.public_key == enrolled.public_key && now.grant == enrolled.grant
+        });
+        if !unchanged {
+            return Err("this passkey is not enrolled on this server".to_string());
+        }
         if count != enrolled.sign_count {
             enrolled.sign_count = count;
-            write_passkey(&self.layout, &enrolled)?;
+            write_passkey(&self.layout, &lock, &enrolled)?;
         }
+        drop(lock);
         let scopes = scopes_of(&self.layout, &enrolled.grant)?;
         let token = random_b64(32)?;
         let expires = now + SESSION_SECONDS;
@@ -1125,6 +1144,7 @@ mod tests {
         }
         write_passkey(
             &rp.layout,
+            &rp.layout.lock_clients().unwrap(),
             &Enrolled {
                 credential_id: id.to_string(),
                 grant: "brian".to_string(),
