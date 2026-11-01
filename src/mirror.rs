@@ -2302,7 +2302,7 @@ mod tests {
             ));
             let binding = layer::parse(
                 &format!(
-                    "tasks offer quic://127.0.0.1:1 {} ledger={ledger}",
+                    "tasks offer quic://127.0.0.1:1 {} ledger={ledger} confirm-ledger={ledger}",
                     certs.path().display()
                 ),
                 std::path::Path::new("/nowhere"),
