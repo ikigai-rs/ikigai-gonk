@@ -534,11 +534,12 @@ impl Taker {
             let mut announced = self.announced.lock().unwrap_or_else(|p| p.into_inner());
             for tuple in pending.values().filter(|t| t.is("Offer")) {
                 if announced.insert(tuple.subject.clone()) {
+                    // By IRI only: these lines go to stderr, the server's log, and an offer's
+                    // title and brief are a collaborator's text, never kept in the clear there
+                    // (ledger #2801). The layers page shows them to whoever may read the layer.
                     report.did(format!(
-                        "offer <{}> is open: {} (`ikigai-gonk layer take {}` takes it)",
-                        tuple.subject,
-                        tuple.title.as_deref().unwrap_or("(untitled)"),
-                        tuple.subject
+                        "offer <{}> is open (`ikigai-gonk layer take {}` takes it)",
+                        tuple.subject, tuple.subject
                     ));
                 }
             }
