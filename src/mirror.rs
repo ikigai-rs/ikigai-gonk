@@ -961,16 +961,44 @@ impl Mirror {
                 let count = handbacks_on.entry(offer.clone()).or_default();
                 *count += 1;
                 if *count <= MAX_HANDBACKS {
-                    self.comment(
-                        item,
-                        &report_key(&layer_name, subject),
-                        &format!(
-                            "Handed back in layer {layer_name} by <{taker}>.\n{}{note}",
-                            evidence_lines(&r.tuple.evidence)
-                        ),
-                        true,
-                        &mut report,
-                    )
+                    let key = report_key(&layer_name, subject);
+                    let evidence = evidence_lines(&r.tuple.evidence);
+                    // ★ Ledger #2797: closed work awaits nobody, so the ledger refuses
+                    // `handback=true` on it, even for a key already written. A hand-back on a
+                    // closed item (one that arrived late, or one replayed after the dispatcher
+                    // closed it) is an ordinary comment under the same key: written once,
+                    // nothing the next time, and never a refusal to retry every pass.
+                    let late = |report: &mut Report| {
+                        self.comment(
+                            item,
+                            &key,
+                            &format!(
+                                "Handed back in layer {layer_name} by <{taker}> in the report \
+                                 <{subject}>, after this item closed: recorded as a comment, \
+                                 not a hand-back, because closed work awaits nobody.\n\
+                                 {evidence}{note}"
+                            ),
+                            false,
+                            report,
+                        )
+                    };
+                    if item.status == "open" {
+                        match self.comment(
+                            item,
+                            &key,
+                            &format!(
+                                "Handed back in layer {layer_name} by <{taker}>.\n{evidence}{note}"
+                            ),
+                            true,
+                            &mut report,
+                        ) {
+                            // Closed between the listing and the write.
+                            Err(e) if refused_as_closed(&e) => late(&mut report),
+                            other => other,
+                        }
+                    } else {
+                        late(&mut report)
+                    }
                     .map(|_| ())
                 } else if *count == MAX_HANDBACKS + 1 {
                     self.comment(
@@ -1484,6 +1512,12 @@ pub fn evidence_lines(evidence: &[String]) -> String {
 /// ```
 pub fn defang(iri: &str) -> String {
     iri.replace("://", "[:]//").replace('#', "[#]")
+}
+
+/// Whether `error` is the ledger refusing a hand-back because its item is closed (ledger
+/// #1418's refusal, which says "closed work awaits nobody").
+fn refused_as_closed(error: &str) -> bool {
+    error.contains("closed work awaits nobody") || error.contains("Closed work awaits nobody")
 }
 
 /// The comment key a hand-back past [`MAX_HANDBACKS`] on `offer` is said under, once.
