@@ -1281,6 +1281,52 @@ fn a_host_without_urn_layers_me_is_refused_by_name() {
     );
 }
 
+/// Two independent ledgers can present the same layer certificate (ledger #2802).
+#[test]
+fn shared_identity_offerers_do_not_withdraw_each_others_offers() {
+    let first = World::new();
+    let second = World {
+        hub: Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap())),
+        layers: Arc::clone(&first.layers),
+        _config: tempfile::tempdir().unwrap(),
+        _state: tempfile::tempdir().unwrap(),
+    };
+    let binding = first.binding(LAYER);
+    let a = Mirror::new(
+        binding.clone(),
+        Arc::new(first.door(&us())),
+        Arc::clone(&first.hub),
+    )
+    .unwrap();
+    let b = Mirror::new(
+        binding,
+        Arc::new(second.door(&us())),
+        Arc::clone(&second.hub),
+    )
+    .unwrap();
+    let n = first.file("First host's work\n\nKeep this pending.", &[]);
+    let m = second.file("Second host's work\n\nKeep this pending too.", &[]);
+    let original = offered(&pass(&a));
+    let other = offered(&pass(&b));
+    for _ in 0..3 {
+        pass(&a);
+        pass(&b);
+    }
+    let pending = first.pending();
+    assert!(
+        pending.contains(&original),
+        "first offer replaced: {pending:?}; item: {}",
+        first.item(n)
+    );
+    assert!(
+        pending.contains(&other),
+        "second offer replaced: {pending:?}; item: {}",
+        second.item(m)
+    );
+    settled(&a);
+    settled(&b);
+}
+
 /// ★ An offer whose item is DELETED is withdrawn, even when it was this ledger's only offer
 /// (ledger #1316): the mirror knows itself from `urn:layers:me`. Inferred from the offers it had
 /// recorded, as through gonk 0.x, it knew nobody once the only item carrying a record was gone,
