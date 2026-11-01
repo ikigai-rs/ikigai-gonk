@@ -295,6 +295,32 @@ pub fn compose_serving_with_space(
     nl: Option<&crate::nl::Nl>,
     views: Option<&crate::views::Views>,
 ) -> (Kernel, Arc<dyn Space>) {
+    compose_serving_with_lifecycles(
+        store,
+        browse,
+        mounted,
+        trigger,
+        backups,
+        scripts,
+        nl,
+        views,
+        ikigai_ledger::lifecycle::Lifecycles::default(),
+    )
+}
+
+/// [`compose_serving_with_space`] with the host's validated per-ledger lifecycles.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_serving_with_lifecycles(
+    store: DurableStore,
+    browse: Option<Arc<crate::browse::CachedReads>>,
+    mounted: Vec<Arc<dyn Space>>,
+    trigger: Vec<Arc<dyn Space>>,
+    backups: Option<crate::backup::Backups>,
+    scripts: Option<&crate::script::Scripts>,
+    nl: Option<&crate::nl::Nl>,
+    views: Option<&crate::views::Views>,
+    lifecycles: ikigai_ledger::lifecycle::Lifecycles,
+) -> (Kernel, Arc<dyn Space>) {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
     // process. In the hub, so it holds for every door: nesting at every depth, length for a
@@ -320,7 +346,9 @@ pub fn compose_serving_with_space(
     // ([`crate::admit::claim_kind`]) — a passkey is a person, anything else a machine — never
     // from the caller. Sound because every door OVERWRITES `principal` before the hub sees it.
     spaces.push(Arc::new(ikigai_ledger::space_with(
-        ikigai_ledger::SpaceConfig::default().claim_kind(crate::admit::claim_kind()),
+        ikigai_ledger::SpaceConfig::default()
+            .claim_kind(crate::admit::claim_kind())
+            .lifecycles(lifecycles),
     )));
     // ★ The page renderer's chunk resource (`urn:iki:gonk:render`, ledger #519) lives HERE
     // and not in the HTTP door's page space, because the hub holds the one cache in the

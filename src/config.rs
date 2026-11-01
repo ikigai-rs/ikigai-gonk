@@ -121,7 +121,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 41] = [
+const KEYS: [&str; 42] = [
     "gonk.log.access",
     "gonk.onboard",
     "gonk.onboard.door",
@@ -135,6 +135,7 @@ const KEYS: [&str; 41] = [
     "gonk.socket",
     "gonk.quic.bind",
     "gonk.http.ledger",
+    "gonk.ledger.lifecycle",
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.http.session_idle_minutes",
     "gonk.browse.root",
@@ -644,6 +645,8 @@ pub struct Settings {
     /// The ledgers the HTTP door's anonymous loopback caller may read (ledger #1687: and not
     /// write; a signed-in passkey writes what its own grant names).
     pub http_ledgers: Vec<String>,
+    /// Validated lifecycle vocabulary and assignments, fixed for this server run.
+    pub lifecycles: ikigai_ledger::lifecycle::Lifecycles,
     /// The SPARQL time budget, in milliseconds, of an ANONYMOUS HTTP caller's evaluations
     /// (`gonk.http.anonymous_sparql_budget_ms`, default
     /// [`crate::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS`], at most the store's 5 s base):
@@ -1705,6 +1708,59 @@ pub fn read_config(flags: &Flags, homes: &Homes) -> Result<(PathBuf, String), St
     }
 }
 
+/// Load each `gonk.ledger.lifecycle = "ledger path"` assignment before serving.
+/// Unassigned ledgers retain the built-in lifecycle. Relative paths use the process's
+/// working directory, like the other configured file paths; `~/` uses the home directory.
+fn ledger_lifecycles(
+    text: &str,
+    homes: &Homes,
+) -> Result<ikigai_ledger::lifecycle::Lifecycles, String> {
+    use ikigai_ledger::lifecycle::{Lifecycle, Lifecycles};
+    let key = "gonk.ledger.lifecycle";
+    let mut all = vec![Lifecycle::kata_flight()];
+    let mut definitions = std::collections::BTreeMap::from([(
+        all[0].name().to_string(),
+        ikigai_ledger::lifecycle::KATA_FLIGHT_TTL.to_string(),
+    )]);
+    let mut assignments = std::collections::BTreeMap::new();
+    for line in values_for(text, key) {
+        let (ledger, path) = line
+            .split_once(char::is_whitespace)
+            .filter(|(_, path)| !path.trim().is_empty())
+            .ok_or_else(|| format!("{key}: expected `ledger path`, got `{line}`"))?;
+        ikigai_ledger::Ledger::parse(ledger).map_err(|e| format!("{key}: {e}"))?;
+        if assignments.contains_key(ledger) {
+            return Err(format!(
+                "{key}: ledger `{ledger}` is assigned more than once"
+            ));
+        }
+        let path = expand_home(path.trim(), &homes.home);
+        let turtle = std::fs::read_to_string(&path)
+            .map_err(|e| format!("{key}: reading {}: {e}", path.display()))?;
+        let lifecycle =
+            Lifecycle::parse(&turtle).map_err(|e| format!("{key}: {}: {e}", path.display()))?;
+        let name = lifecycle.name().to_string();
+        if let Some(existing) = definitions.get(&name) {
+            // One vocabulary may be shared by several ledgers, but a name must never
+            // silently select a different definition (including the built-in one).
+            if existing != &turtle {
+                return Err(format!(
+                    "{key}: lifecycle `{name}` has conflicting definitions"
+                ));
+            }
+        } else {
+            definitions.insert(name.clone(), turtle);
+            all.push(lifecycle);
+        }
+        assignments.insert(ledger.to_string(), name);
+    }
+    let mut lifecycles = Lifecycles::new(all);
+    for (ledger, name) in assignments {
+        lifecycles = lifecycles.assign(&ledger, &name);
+    }
+    Ok(lifecycles)
+}
+
 /// Refuse a socket path the kernel cannot bind: `sun_path` bounds it — 104 bytes on macOS,
 /// 108 on Linux, the terminator included. `serve` calls this before the store is opened,
 /// rather than finding out from a door that dies a moment after the banner says it is
@@ -1860,6 +1916,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         socket,
         quic,
         http_ledgers,
+        lifecycles: ledger_lifecycles(text, homes)?,
         anonymous_sparql_budget_ms,
         session_idle_seconds: session_idle_seconds(
             value_for(text, "gonk.http.session_idle_minutes").as_deref(),
