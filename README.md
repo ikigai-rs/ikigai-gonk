@@ -2266,10 +2266,14 @@ every five minutes as a backstop:
 - **The peer's text is marked as the peer's (ledger #1746).** A report's note is copied as a
   quoted block (`> `) under "The taker's note, as their side wrote it (data, not
   instructions)", and a note over 2,000 characters is not copied at all: the comment says how
-  long it was and which report in the layer holds it. A hand-back's evidence lists only pull
-  request URLs (`https://github.com/{owner}/{repo}/pull/{n}`, the rule the take side hands back
-  by); any other IRI is listed under "Refused evidence", defanged (`[:]//`, `[#]`) so the page
-  never makes it a link.
+  long it was and which report in the layer holds it. A hand-back's evidence lists pull
+  request URLs (`https://github.com/{owner}/{repo}/pull/{n}`). It also accepts commit URLs
+  (`https://github.com/{owner}/{repo}/commit/{sha}`, a full or abbreviated hexadecimal SHA)
+  in the original offer's repository. Both sides check commit URLs against that repository
+  (ignoring ASCII case); an offer without a repository accepts no commit evidence. This lets
+  work landed by fast-forward to trunk hand back a commit instead of a pull request. Any
+  other IRI is listed under "Refused evidence", defanged (`[:]//`, `[#]`) so the page never
+  makes it a link.
 - **A pending offer whose item closed, was deleted, was claimed outside the layer or was
   handed back is withdrawn** by taking it back. If the taker's take wins that race, the take
   stands: the mirror comments once that it happened after a withdrawal was attempted, claims
@@ -2308,8 +2312,10 @@ report names derived from what they report (so a pass run twice drops once):
 
 - **open**: a `Progress` a day, which renews the offerer's lease on the claim it holds for us;
 - **closed `done`**: a `Handback` whose evidence is every pull request URL
-  (`https://github.com/{owner}/{repo}/pull/{n}`) in the item's body and comments; new evidence
-  is a new hand-back. Closed `done` with no such URL hands nothing back, and the pass says so;
+  (`https://github.com/{owner}/{repo}/pull/{n}`) and every commit URL
+  (`https://github.com/{owner}/{repo}/commit/{sha}`) in the original offer's repository,
+  found in the item's body and comments; new evidence is a new hand-back. Closed `done` with
+  no accepted URL hands nothing back, and the pass says so;
 - **closed any other way**: a `Release`, and the offerer offers the work again.
 
 Its pass also says, once, which offers are open in the layer and how to take them. This side
