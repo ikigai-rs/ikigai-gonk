@@ -419,7 +419,7 @@ fn a_pruned_backup_takes_its_scripts_archive_with_it() {
     );
     assert_eq!(
         left.len(),
-        3,
-        "one store archive, its sidecar, its scripts: {left:?}"
+        4,
+        "one store archive, its sidecar, its scripts, and the rotation lock: {left:?}"
     );
 }

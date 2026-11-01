@@ -1112,6 +1112,13 @@ impl TakeBackup {
             },
         });
 
+        // Serialize publication AND the read/delete decision in prune. Otherwise two
+        // backups can each spare their own archive and delete the other's at keep = 1.
+        // The same lock protects the temporary names of same-second publications.
+        // Lock the directory on disk so separate bindings/processes share the boundary;
+        // snapshots and compression above remain concurrent, outside the lock.
+        let rotation = lock_rotation(&settings.dir)?;
+
         // Write the archive first and the sidecar second, each through a temporary name.
         // A crash between them leaves an archive without a sidecar, which `STATUS` reports
         // as exactly that; the reverse order would leave a sidecar describing a file that
@@ -1132,6 +1139,7 @@ impl TakeBackup {
             .filter(|a| a.name != name)
             .find_map(|a| a.meta.as_deref().and_then(|m| field(m, "nquads_sha256")));
         let unchanged = previous.as_deref() == Some(nquads_digest.as_str());
+        drop(rotation);
 
         let mut report = String::new();
         report.push_str(&format!("backup {name}\n"));
@@ -1213,6 +1221,28 @@ impl TakeBackup {
     }
 }
 
+/// Hold the rotation's publication/pruning lock until the returned file is dropped.
+///
+/// This file must stay in place: unlinking it would let a new caller lock a different
+/// inode while an existing caller still holds the old one. In particular, do not use
+/// `create_private`, which removes an existing temporary file before opening it.
+fn lock_rotation(dir: &Path) -> Result<std::fs::File> {
+    let path = dir.join(".rotation.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|e| Error::Endpoint(format!("opening {}: {e}", path.display())))?;
+    file.lock()
+        .map_err(|e| Error::Endpoint(format!("locking {}: {e}", path.display())))?;
+    Ok(file)
+}
+
 /// Keep the newest `keep` archives, deleting the rest with their sidecars. Returns what
 /// went.
 ///
@@ -1221,6 +1251,7 @@ impl TakeBackup {
 /// a machine whose clock ran ahead, or left by a clock stepped back) sort as the newest for
 /// ever, and every backup taken here is deleted the moment it is written while the report
 /// says "backup gonk-store-…". `keep` is at least 1 ([`crate::config`] refuses 0).
+// The caller must hold `lock_rotation` from before publication until pruning completes.
 fn prune(dir: &Path, keep: usize, taken: &str) -> Vec<String> {
     let others: Vec<Archive> = archives(dir)
         .into_iter()
