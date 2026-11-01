@@ -655,6 +655,39 @@ state and the claim: its holder, its kind, and its lease and expiry. The claim f
 optional lease. `/l/{ledger}/doctor` lists what the doctor found (orphaned, abandoned,
 lease-expired, unknown-state, two-states), with each remedy as text. It repairs nothing.
 
+Configure a lifecycle per named ledger with a repeatable config line:
+
+```toml
+gonk.ledger.lifecycle = "tasks ~/.config/ikigai/workflow.ttl"
+```
+
+For example, `workflow.ttl` can give `tasks` a `closed` state:
+
+```turtle
+@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<urn:iki:ledger:lifecycle:workflow> a ledger:Lifecycle ;
+    ledger:hasState <urn:iki:ledger:lifecycle:workflow:filed>,
+                    <urn:iki:ledger:lifecycle:workflow:closed> .
+<urn:iki:ledger:lifecycle:workflow:filed> rdfs:label "filed" ;
+    ledger:order 0 ; ledger:inFlight false ; ledger:drain "dispatcher" .
+<urn:iki:ledger:lifecycle:workflow:closed> rdfs:label "closed" ;
+    ledger:order 1 ; ledger:inFlight false ; ledger:drain "archive" .
+```
+
+`urn:iki:ledger:tasks:item:{id}:state` then accepts `from=filed to=closed` and refuses
+states outside this vocabulary. This lifecycle state is separate from closing an item with
+its `close` action. Every lifecycle must declare `filed` first, with order 0 and not in
+flight; each other state must either be in flight or name a drain responsible for it.
+Unassigned ledgers retain the built-in kata-flight lifecycle. Several ledgers may load the
+same file; different file contents declaring the same lifecycle name are refused, as are
+duplicate assignments, invalid ledger names, missing files and invalid lifecycle documents.
+All files are read and validated at startup, before the store or doors open. Restart to
+load changes. `~/` expands to the home directory; relative paths use the process's working
+directory. Changing a lifecycle does not migrate stored states: the doctor reports states
+outside the new vocabulary as `unknown-state`.
+
 **A claim's kind is this server's to stamp, never the caller's** (`admit::claim_kind`). A claim
 whose request carries a passkey principal is a `person`'s. A QUIC client's, an agent's, an
 anonymous caller's and the owner socket's are a `machine`'s (Brian, 2026-10-09). The ledger

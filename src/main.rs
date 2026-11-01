@@ -13,8 +13,8 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{
-    access, browse, compose_serving, doors, layer, mount, queue, quic, roots, trigger, verdict,
-    watch, web,
+    access, browse, compose_serving_with_lifecycles, doors, layer, mount, queue, quic, roots,
+    trigger, verdict, watch, web,
 };
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
 // promise is not a type this file names, it is `browse::Graph` read as a declaration.
@@ -496,21 +496,25 @@ fn serve(flags: &config::Flags) -> ! {
     // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();
-    let hub = Arc::new(compose_serving(
-        store,
-        browse_space,
-        mounted,
-        trigger_spaces,
-        Some(Backups {
-            settings: Arc::clone(&backup_settings),
-            jobs: jobs.clone(),
-            next: backup_next.clone(),
-            dataset,
-        }),
-        Some(&scripts),
-        Some(&nl),
-        Some(&views),
-    ));
+    let hub = Arc::new(
+        compose_serving_with_lifecycles(
+            store,
+            browse_space,
+            mounted,
+            trigger_spaces,
+            Some(Backups {
+                settings: Arc::clone(&backup_settings),
+                jobs: jobs.clone(),
+                next: backup_next.clone(),
+                dataset,
+            }),
+            Some(&scripts),
+            Some(&nl),
+            Some(&views),
+            settings.lifecycles.clone(),
+        )
+        .0,
+    );
     scripts.attach(&hub);
     let onboard_line = match (&onboard, &settings.onboard) {
         (Some(onboard), Some(config)) => {
