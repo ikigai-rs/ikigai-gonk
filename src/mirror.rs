@@ -116,6 +116,15 @@ pub const MAX_REFUSED_IRI: usize = 200;
 /// The backstop: a pass at least this often, whatever the feed and the ledger say.
 pub const SWEEP: Duration = Duration::from_secs(5 * 60);
 
+/// How long a ledger write that failed is held off before it is tried again, the first time;
+/// each further failure doubles it, up to [`SWEEP`]. An edit to the item tries it at once.
+///
+/// ★ Ledger [#2799](http://localhost:1062/l/default/item/2799): the kernel cuts the target's
+/// thread after every mutating request, a refused one included, and the mirror's own cut
+/// listener kicks a pass on that cut. A write that failed every pass ran the next pass at once,
+/// for ever.
+pub const WRITE_RETRY: Duration = Duration::from_secs(30);
+
 /// How long one feed read waits for an event (the layer host's bound is 60 s).
 pub const FEED_WAIT_SECS: u64 = 50;
 
@@ -260,6 +269,18 @@ pub struct Mirror {
     principal: String,
     /// `urn:jsonld:*`, in a kernel only this mirror issues to.
     prune: Kernel,
+    /// The comment keys under this layer's names already in the ledger, as the pass read them
+    /// (and as it wrote them since): a comment under one of them is not sent (ledger #2799).
+    keys: Mutex<BTreeSet<String>>,
+    /// The ledger writes that failed, held off ([`WRITE_RETRY`]).
+    failing: Mutex<BTreeMap<String, Failing>>,
+}
+
+/// A ledger write that failed: what it said, and when it is tried again.
+struct Failing {
+    error: String,
+    until: std::time::Instant,
+    wait: Duration,
 }
 
 /// A task layer, through a binding's door: its definition (checked once to be a tuplespace),
@@ -600,6 +621,8 @@ impl Mirror {
             hub,
             capability,
             prune: Kernel::new(Arc::new(ikigai_jsonld::space())),
+            keys: Mutex::default(),
+            failing: Mutex::default(),
         })
     }
 
@@ -726,6 +749,52 @@ impl Mirror {
             .map_err(|e| format!("{target}: {e}"))
     }
 
+    /// A write to the ledger about `item`, named `what`: one that failed is not sent again
+    /// until [`WRITE_RETRY`] (doubling, up to [`SWEEP`]) has passed or the item has changed,
+    /// and until then answers what it said the last time.
+    ///
+    /// ★ Ledger #2799: even a refused write cuts its thread, and that cut kicks the next pass.
+    fn ledger_write(
+        &self,
+        item: &Item,
+        what: &str,
+        request: ikigai_core::Request,
+    ) -> Result<Vec<u8>, String> {
+        let name = format!("{what} on {} at {}", item.iri, item.modified);
+        let now = std::time::Instant::now();
+        let failing = self.failing.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(f) = failing.get(&name) {
+            if now < f.until {
+                return Err(f.error.clone());
+            }
+        }
+        // Not held across the write: only the pass thread writes, and a write can be slow.
+        drop(failing);
+        let answer = self.ledger_issue(request);
+        let mut failing = self.failing.lock().unwrap_or_else(|p| p.into_inner());
+        match &answer {
+            Ok(_) => {
+                failing.remove(&name);
+            }
+            Err(error) => {
+                let wait = failing
+                    .get(&name)
+                    .map_or(WRITE_RETRY, |f| (f.wait * 2).min(SWEEP));
+                failing.insert(
+                    name,
+                    Failing {
+                        error: error.clone(),
+                        until: now + wait,
+                        wait,
+                    },
+                );
+            }
+        }
+        // Forget the writes no pass has tried for a while: their items changed or went.
+        failing.retain(|_, f| now < f.until + SWEEP);
+        answer
+    }
+
     fn ledger_request(&self, verb: Verb, resource: &str) -> ikigai_core::Request {
         layer::request(
             verb,
@@ -750,15 +819,20 @@ impl Mirror {
 
     /// The offers recorded on each item: `item IRI → offer IRIs`, from its `about` edges to
     /// this layer's offers, and from the comment keys an offer was recorded under before
-    /// ikigai-ledger 0.10 (see the module docs).
+    /// ikigai-ledger 0.10 (see the module docs). And, into [`Mirror::keys`], every comment key
+    /// under this layer's names (`layer:{layer}:…`, and a report's own IRI, `{layer IRI}:…`).
     fn recorded(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
         let ledger = Ledger::parse(&self.binding.ledger).map_err(|e| e.to_string())?;
         let prefix = offered_key(&self.binding.layer, "");
         let offers = format!("{}:offer:", self.binding.layer_iri());
+        let ours = format!("layer:{}:", self.binding.layer);
+        let reports = format!("{}:", self.binding.layer_iri());
         let query = format!(
-            "SELECT ?item ?key ?about WHERE {{ \
+            "SELECT ?item ?key ?about ?mine WHERE {{ \
              {{ ?c <{on}> ?item ; <{key}> ?key . FILTER(STRSTARTS(STR(?key), \"{prefix}\")) }} \
-             UNION {{ ?item <{about}> ?about . FILTER(STRSTARTS(STR(?about), \"{offers}\")) }} }}",
+             UNION {{ ?item <{about}> ?about . FILTER(STRSTARTS(STR(?about), \"{offers}\")) }} \
+             UNION {{ ?m <{on}> ?on ; <{key}> ?mine . FILTER(STRSTARTS(STR(?mine), \"{ours}\") \
+               || STRSTARTS(STR(?mine), \"{reports}\")) }} }}",
             on = v::ON_ITEM,
             key = v::COMMENT_KEY,
             about = v::ABOUT,
@@ -771,6 +845,7 @@ impl Mirror {
         let json: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| format!("the store's SELECT answer is not JSON: {e}"))?;
         let mut recorded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut keys = BTreeSet::new();
         for binding in json
             .pointer("/results/bindings")
             .and_then(serde_json::Value::as_array)
@@ -778,6 +853,10 @@ impl Mirror {
             .flatten()
         {
             let value = |name: &str| binding.pointer(&format!("/{name}/value"))?.as_str();
+            if let Some(key) = value("mine") {
+                keys.insert(key.to_string());
+                continue;
+            }
             let offer = value("about").or_else(|| value("key")?.strip_prefix(&prefix));
             if let (Some(item), Some(offer)) = (value("item"), offer) {
                 recorded
@@ -790,11 +869,17 @@ impl Mirror {
             offers.sort();
             offers.dedup();
         }
+        *self.keys.lock().unwrap_or_else(|p| p.into_inner()) = keys;
         Ok(recorded)
     }
 
     /// A comment on `item` under `key`; a key already used writes nothing. `Ok(true)` when this
     /// call wrote it.
+    ///
+    /// ★ Ledger #2799: a key this pass read (or wrote) is not sent at all. The ledger answers
+    /// `existing` and writes nothing, but the kernel still cuts the comment thread, and the
+    /// mirror's own listener ran the next pass on that cut: re-applying every report it held
+    /// made an idle binding pass thousands of times a second.
     fn comment(
         &self,
         item: &Item,
@@ -803,6 +888,14 @@ impl Mirror {
         handback: bool,
         report: &mut Report,
     ) -> Result<bool, String> {
+        if self
+            .keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(key)
+        {
+            return Ok(false);
+        }
         let mut request = self
             .ledger_request(Verb::Sink, "comment")
             .with_arg("item", inline(&item.number.to_string()))
@@ -813,7 +906,12 @@ impl Mirror {
         if handback {
             request = request.with_arg("handback", inline("true"));
         }
-        let answer = self.ledger_issue(request)?;
+        let what = format!("comment {key} handback={handback}");
+        let answer = self.ledger_write(item, &what, request)?;
+        self.keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key.to_string());
         let outcome = serde_json::from_slice::<serde_json::Value>(&answer)
             .ok()
             .and_then(|j| j.get("outcome")?.as_str().map(str::to_string));
@@ -837,11 +935,14 @@ impl Mirror {
         if renew {
             request = request.with_arg("renew", inline("true"));
         }
-        self.ledger_issue(request).map(|_| ())
+        self.ledger_write(item, &format!("claim for {taker} renew={renew}"), request)
+            .map(|_| ())
     }
 
     fn release(&self, item: &Item, taker: &str) -> Result<(), String> {
-        self.ledger_issue(
+        self.ledger_write(
+            item,
+            &format!("release from {taker}"),
             self.ledger_request(Verb::Delete, "claim")
                 .with_arg("item", inline(&item.number.to_string()))
                 .with_arg("from", inline(taker)),
@@ -1240,7 +1341,7 @@ impl Mirror {
             let record = self
                 .ledger_request(Verb::Sink, &format!("item:{}:about", item.number))
                 .with_arg("content", inline(&offer));
-            if let Err(e) = self.ledger_issue(record) {
+            if let Err(e) = self.ledger_write(item, "record an offer", record) {
                 report.failed(format!(
                     "recording the offer of {}: {e}",
                     layer::item_words(item)
@@ -2064,6 +2165,53 @@ fn ikigai_gonk_default_ledger() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger #2799: a ledger write that fails is held off, not sent again on the kick its
+    /// own refusal's cut gives the next pass; it answers what it said, and an edit to the item
+    /// tries it at once.
+    #[test]
+    fn a_failing_ledger_write_is_held_off_until_its_item_changes() {
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = Arc::clone(&sent);
+        let refuse = ikigai_core::FnEndpoint::new("refuse", move |_inv| {
+            counting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Error::Conflict("refused".to_string()))
+        })
+        .with_description(ikigai_core::Description::new("refuse").verb(Verb::Sink));
+        let space = ikigai_core::EndpointSpace::new().bind(
+            ikigai_core::Exact::new("urn:iki:ledger:crew:comment"),
+            refuse,
+        );
+        let hub = Arc::new(Kernel::new(Arc::new(space)));
+        let certs = tempfile::tempdir().unwrap();
+        let line = format!(
+            "tasks offer quic://127.0.0.1:1 {} ledger=crew collab=crew",
+            certs.path().display()
+        );
+        let binding = layer::parse(&line, std::path::Path::new("/nowhere")).unwrap();
+        struct Nowhere;
+        impl Door for Nowhere {
+            fn call(&self, _: ikigai_core::Request) -> Result<ikigai_core::Representation, Error> {
+                Err(Error::Unavailable("no layer in this test".to_string()))
+            }
+        }
+        let mirror = Mirror::new(binding, Arc::new(Nowhere), hub).unwrap();
+        let mut item = page(&[1], 1, 0).items.remove(0);
+        let mut report = Report::default();
+        let mut say = |item: &Item| {
+            mirror
+                .comment(item, "layer:tasks:k", "text", false, &mut report)
+                .unwrap_err()
+        };
+        let first = say(&item);
+        assert!(first.contains("refused"), "{first}");
+        assert_eq!(say(&item), first, "held off, it answers what it said");
+        assert_eq!(say(&item), first);
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+        item.modified = "2026-11-01T00:00:00Z".to_string();
+        say(&item);
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn minted_ids_sort_by_time_and_differ() {
