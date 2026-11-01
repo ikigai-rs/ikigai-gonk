@@ -310,12 +310,15 @@ PR rows, which resolve them) (exec: programs, and `gh`'s calls to GitHub). One w
 whose file drifted, a deterministic repair any reader triggers. `urn:iki:gonk:render` needs no
 token at all, and is bounded on its own (see the hub resources below).
 
-⚠ **The challenge table has no per-origin or per-IP bound, on purpose.** With cross-site posts
-refused, every caller that can still mint a challenge is on THIS machine and arrives from
-loopback, and the only origin a ceremony is accepted from is this server's own — so neither
-key separates an attacker from the person signing in. A local process can still fill the
-table (256 challenges, five minutes); a local process can also already write every ledger the
-anonymous grant names, so it is inside the boundary this door draws.
+★ **There is no challenge table to fill** (ledger #2804). With cross-site posts refused, every
+caller that can still mint a challenge is on THIS machine and arrives from loopback, and the
+only origin a ceremony is accepted from is this server's own — so neither a per-origin nor a
+per-IP bound separates an attacker from the person signing in. Through 44c1d03 the server held
+every challenge it issued and refused the 257th, so a local process could lock sign-in out for
+five minutes, renewably. A challenge is now SEALED instead: its purpose and expiry under an
+HMAC keyed by this server, held nowhere until it is answered. Only an answered challenge is
+remembered (until it expires, so it is single-use), and only a passkey's signature or a spent
+invite answers one, so minting any number of challenges costs no memory and refuses nobody.
 
 **And a write may not name someone else as its author** (ledger #864, R4). An `author` shaped
 like a principal this server names — `urn:iki:gonk:passkey:<id>`, which the item page renders
