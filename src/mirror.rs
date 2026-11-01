@@ -12,7 +12,8 @@
 //!    our offers is addressed to us; it is taken, by its subject, in `ik:seq` order (never
 //!    take-first, whose order is the intray's). Every report we have ever taken is then applied,
 //!    and applying one twice is a no-op: a `Handback` is a comment keyed by the report's IRI
-//!    with `handback=true` (so a replay comments nothing and cannot re-set a hand-back the
+//!    with `handback=true` only while its offer is the item's newest and the item is open
+//!    (so a replay comments nothing and cannot re-set a hand-back the
 //!    dispatcher has cleared), a `Release` is a keyed comment plus the release of the taker's
 //!    claim while that offer is still the item's newest, and a `Progress` renews the taker's
 //!    lease when it is taken (and comments, keyed, when it carries a note). What one taker can
@@ -1010,7 +1011,8 @@ impl Mirror {
         }
 
         // 2. Apply every report we hold, in feed order. Idempotent: keyed comments, and a
-        //    release only while the offer is its item's newest and the taker still holds it.
+        //    hand-back only while the offer is its item's newest, and a release only while
+        //    that is true and the taker still holds it.
         let newest: BTreeMap<String, String> = recorded
             .iter()
             .filter_map(|(item, offers)| Some((item.clone(), offers.last()?.clone())))
@@ -1083,7 +1085,22 @@ impl Mirror {
                             report,
                         )
                     };
-                    if item.status == "open" {
+                    if newest.get(&item.iri) != Some(&offer) {
+                        // Ledger #2800: a former taker can still report on an offer they
+                        // released. Preserve the evidence without interrupting its successor.
+                        self.comment(
+                            item,
+                            &key,
+                            &format!(
+                                "Handed back in layer {layer_name} by <{taker}> in the report \
+                                 <{subject}> on superseded offer <{offer}>: recorded as a \
+                                 comment because a newer offer owns the work.\n\
+                                 {evidence}{note}"
+                            ),
+                            false,
+                            &mut report,
+                        )
+                    } else if item.status == "open" {
                         match self.comment(
                             item,
                             &key,
