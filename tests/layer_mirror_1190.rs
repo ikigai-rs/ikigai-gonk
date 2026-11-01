@@ -1192,6 +1192,17 @@ fn an_offer_taken_by_hand_is_filed_once_and_claimed_on_our_side() {
         "their pass announces the open offer: {:?}",
         announced.actions
     );
+    // The announcement goes to stderr, which is the server's log: it names the offer by its
+    // IRI and carries none of the collaborator's text, title or brief (ledger #2801).
+    assert!(
+        announced
+            .actions
+            .iter()
+            .chain(&announced.problems)
+            .all(|a| !a.contains("Port the importer") && !a.contains("old format")),
+        "the log line carries no offer text: {:?}",
+        announced.actions
+    );
 
     let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
         panic!("not filed")

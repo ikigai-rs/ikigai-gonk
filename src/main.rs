@@ -269,6 +269,13 @@ fn serve(flags: &config::Flags) -> ! {
     // ledgers live in named graphs, so their scoped reads stay cached).
     let browse_graph = browse::Graph::chosen();
     let browses = !settings.browse_roots.is_empty();
+    // Owner-only before RocksDB writes a byte into it (ledger #2801).
+    ikigai_gonk::private_store_dir(&store_path).unwrap_or_else(|e| {
+        fail(&format!(
+            "cannot make the store directory {} owner-only: {e}",
+            store_path.display()
+        ))
+    });
     let opened = DurableStore::open_shared_declaring(&store_path, browse_graph.sharer_writes());
     let (store, handle) = opened.unwrap_or_else(|e| {
         fail(&format!(

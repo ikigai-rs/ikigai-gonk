@@ -90,6 +90,36 @@ use ikigai_core::{Fallback, Kernel, Space, SystemClock};
 use ikigai_store::DurableStore;
 use ikigai_vocab::TurtleRenderer;
 
+/// The store's directory, made owner-only (`0700`) before the store opens it (ledger
+/// [#2801](http://localhost:1062/l/default/item/2801)).
+///
+/// The dataset is every ledger and every collaborator's layer notes; RocksDB creates its
+/// directory and files under the process umask, which on most machines leaves them readable
+/// by every local account. The backup already writes its archives `0600` in a `0700`
+/// directory; the live dataset it copies is held to the same. Directories this creates are
+/// `0700` from the moment they exist, and the store's own directory is narrowed if it was
+/// there already: the files in it keep their modes, and no one else can reach them.
+///
+/// # Errors
+///
+/// When the directory cannot be created or its mode cannot be set.
+pub fn private_store_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// The identities gonk's own spaces claim — what `urn:kernel:topology` names their nodes by
 /// and what a hit through one reports as `Resolved::answered_by` (core 0.1.78, ledger
 /// [#546](http://localhost:1060/l/default/item/546)).
