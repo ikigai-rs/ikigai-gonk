@@ -2453,7 +2453,7 @@ fn a_hand_back_on_a_superseded_offer_is_only_a_comment() {
             if take_new_offer {
                 assert_eq!(w.item(n)["claim"]["holder"], next_taker);
             } else {
-                assert_eq!(w.pending(), [second.clone()]);
+                assert_eq!(w.pending(), std::slice::from_ref(&second));
                 assert!(w.item(n)["claim"].is_null());
             }
         }
