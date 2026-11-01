@@ -112,16 +112,22 @@ impl Door for ResolverDoor {
     }
 }
 
-/// What [`take`] did.
+/// What [`take`] did for this server. Neither variant grants the caller ownership:
+/// the caller must claim the filed item in the local ledger before working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Took {
     /// Taken now, and filed as this item number.
     Filed(i64),
     /// Taken earlier (by this server) and filed then, or now after a lost reply.
+    /// This is recovery information, not a fresh take or a claim for this caller.
+    /// The CLI reports it with a nonzero exit status so scripts can distinguish it.
     Already(i64),
 }
 
 /// Take `offer` from `binding`'s layer and file it into the bound ledger.
+///
+/// The layer's exclusivity is per server identity. Agents sharing this server must
+/// claim the local item separately: only the ledger claim grants exclusive work.
 ///
 /// # Errors
 ///

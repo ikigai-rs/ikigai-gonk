@@ -2293,7 +2293,15 @@ identity at the door), and files it into the bound ledger with `key=layer:{layer
 offer's local name>` and `about` the offer (and its repository): run twice, it files once. A
 take whose reply was lost is recovered from its receipt when the receipt names this server,
 as the layer door says who it is (`urn:layers:me`); a receipt naming anyone else is refused,
-naming the taker. Taking stays a person's decision; an auto-take policy is v2.
+naming the taker. A fresh take exits 0. An offer already taken by this server (including
+receipt recovery after a lost reply) exits 1, names the local item on stderr, and tells the
+caller to claim it.
+
+**The local ledger claim grants exclusive work.** A layer take is exclusive per server
+identity, so agents sharing a gonk must claim the filed item in the bound ledger before
+starting work, even after a fresh take. A successful take only means this server took and
+filed the offer; it does not claim the item for the caller. Taking stays a person's decision;
+an auto-take policy is v2.
 
 The running server then reports on each filed item, on the same triggers as the mirror, under
 report names derived from what they report (so a pass run twice drops once):

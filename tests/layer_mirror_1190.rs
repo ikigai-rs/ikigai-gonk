@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod layers_key;
+mod ready;
 
 use futures::executor::block_on;
 use ikigai_core::{
@@ -1049,6 +1050,130 @@ impl Theirs {
             .filter(|a| a.starts_with(&format!("reported {class}")))
             .count()
     }
+}
+
+/// The command reaches the layer as one server identity and a shared local ledger.
+struct TakeCommandDoor {
+    layer: AsParticipant,
+    ledger: Arc<Kernel>,
+    taking: std::sync::Barrier,
+}
+
+#[async_trait::async_trait]
+impl ikigai_core::Endpoint for TakeCommandDoor {
+    async fn invoke(&self, inv: &ikigai_core::Invocation<'_>) -> Result<Representation, Error> {
+        if inv.request.target.as_str().starts_with("urn:layer") {
+            if inv.request.verb == Verb::Delete {
+                self.taking.wait();
+            }
+            Kernel::issue(
+                &self.layer.kernel,
+                inv.request.clone(),
+                &self.layer.capability,
+            )
+            .await
+        } else {
+            Kernel::issue(&self.ledger, inv.request.clone(), inv.capability).await
+        }
+    }
+
+    fn name(&self) -> &str {
+        "take-command-door"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("take-command-door")
+            .verb(Verb::Source)
+            .verb(Verb::Sink)
+            .verb(Verb::Delete)
+    }
+}
+
+/// Two agents share the server identity, but must not both see a fresh take succeed.
+#[test]
+fn concurrent_takes_have_only_one_fresh_success() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let theirs = w.theirs();
+    w.file(
+        "One offer for two agents\n\nOnly one agent should start.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let homes = tempfile::tempdir().unwrap();
+    let socket = homes.path().join("s");
+    let config = homes.path().join("config");
+    std::fs::write(
+        &config,
+        format!(
+            "gonk.layer = \"tasks take quic://127.0.0.1:1 {} ledger=ikigai\"\n",
+            homes.path().display()
+        ),
+    )
+    .unwrap();
+    let space = EndpointSpace::new().bind(
+        ikigai_core::UriTemplate::parse("urn:{rest}").unwrap(),
+        TakeCommandDoor {
+            layer: w.door(&them()),
+            ledger: Arc::clone(&theirs.hub),
+            taking: std::sync::Barrier::new(2),
+        },
+    );
+    let kernel =
+        Kernel::with_meta_renderer(Arc::new(space), Arc::new(ikigai_vocab::TurtleRenderer));
+    let path = socket.clone();
+    std::thread::spawn(move || ikigai_ipc::serve(kernel, &path));
+    ready::socket(&socket);
+    let barrier = std::sync::Barrier::new(2);
+    let command = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+            .args(["layer", "take", &offer])
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--config")
+            .arg(&config)
+            .arg("--config-home")
+            .arg(homes.path())
+            .arg("--data-home")
+            .arg(homes.path())
+            .output()
+            .unwrap()
+    };
+    let run = || {
+        barrier.wait();
+        command()
+    };
+    let results = std::thread::scope(|scope| {
+        let first = scope.spawn(&run);
+        let second = scope.spawn(&run);
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status.success())
+            .count(),
+        1,
+        "only one caller may treat a take as fresh: {results:?}"
+    );
+    let repeated = results.iter().find(|r| !r.status.success()).unwrap();
+    let why = String::from_utf8_lossy(&repeated.stderr);
+    assert!(why.contains("already taken by this server"), "{why}");
+    assert!(why.contains("claim"), "{why}");
+    assert_eq!(repeated.status.code(), Some(1));
+    assert!(repeated.stdout.is_empty());
+    let fresh = results.iter().find(|r| r.status.success()).unwrap();
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("claim"));
+
+    // The keyed-item shortcut must give scripts the same refusal as receipt recovery.
+    let replay = command();
+    assert_eq!(replay.status.code(), Some(1), "{replay:?}");
+    assert!(replay.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&replay.stderr).contains("already taken by this server"));
+    assert!(
+        theirs.item(1)["claim"].is_null(),
+        "a take is not a local claim"
+    );
 }
 
 #[test]
