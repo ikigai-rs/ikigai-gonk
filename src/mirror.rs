@@ -47,6 +47,15 @@
 //! still carries only the comment, and [`Mirror::pass`] reads BOTH, so those offers are neither
 //! lost nor offered a second time; nothing is migrated.
 //!
+//! # Offer ownership
+//!
+//! New offers are named `{layer IRI}:offer:{instance}:{mint_id}`. The instance is a random
+//! identifier persisted in a private graph in this gonk's store, per ledger/layer binding.
+//! Sharing a layer certificate does not share this namespace: orphan cleanup withdraws only
+//! pending offers in this namespace AND attributed to our layer principal (ledger #2802).
+//! Recorded legacy offers still reconcile normally; an unrecorded legacy offer cannot safely
+//! be attributed to this gonk, so orphan cleanup leaves it pending for the operator to resolve.
+//!
 //! # What crosses
 //!
 //! An offer is a fixed CONSTRUCT over the ledger's graph that names only the item's title, its
@@ -68,7 +77,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ikigai_core::{ArgRef, Capability, Error, Kernel, ListenSpec, Verb};
@@ -268,6 +277,8 @@ pub struct Mirror {
     hub: Arc<Kernel>,
     capability: Capability,
     principal: String,
+    /// The persistent namespace of this ledger/layer binding, loaded on its first pass.
+    offer_prefix: OnceLock<String>,
     /// `urn:jsonld:*`, in a kernel only this mirror issues to.
     prune: Kernel,
     /// The comment keys under this layer's names already in the ledger, as the pass read them
@@ -577,6 +588,14 @@ impl LayerClient {
     }
 }
 
+/// Private, per-binding metadata, independent of the layer certificate directory.
+fn instance_graph(binding: &Binding) -> String {
+    format!(
+        "urn:iki:gonk:mirror:instance:{}:{}",
+        binding.ledger, binding.layer
+    )
+}
+
 /// The capability a mirror writes to its ledger under: the worker grant (read, claim, comment,
 /// and the ledger graph's store tokens) plus `urn:cap:ledger:about:{ledger}` (ikigai-ledger
 /// 0.10.0), which records an offer on its item, acting as the mirror's own principal. Never
@@ -586,6 +605,9 @@ impl LayerClient {
 /// [#1598](http://localhost:1062/l/default/item/1598)): the mirror is this server's own job, so
 /// its ledger reads use the slots the store keeps for the host rather than a caller's share.
 /// A priority, not an authority: it reaches no resource.
+///
+/// It can also read and write its private instance graph, holding only the persistent offer
+/// namespace for this ledger/layer binding. It cannot write the ledger graph directly.
 pub fn capability(binding: &Binding) -> Result<Capability, String> {
     let mut scopes = crate::grants::grants_for(&binding.ledger, crate::grants::Authority::Worker)?;
     scopes.push(
@@ -594,6 +616,9 @@ pub fn capability(binding: &Binding) -> Result<Capability, String> {
             .cap_about(),
     );
     scopes.push(crate::budget::STORE_RESERVE.to_string());
+    let graph = instance_graph(binding);
+    scopes.push(ikigai_store::cap_read_graph(&graph));
+    scopes.push(ikigai_store::cap_write_graph(&graph));
     Capability::scoped(scopes)
         .with_principal(&binding.principal())
         .map_err(|e| format!("the mirror's principal {}: {e:?}", binding.principal()))
@@ -617,6 +642,7 @@ impl Mirror {
         let capability = capability(&binding)?;
         Ok(Mirror {
             principal: binding.principal(),
+            offer_prefix: OnceLock::new(),
             layer: LayerClient::new(door, &binding.layer),
             binding,
             hub,
@@ -630,6 +656,65 @@ impl Mirror {
     /// The binding this mirror serves.
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+
+    /// Read or mint this binding's namespace in the LOCAL store, never in the copied layer
+    /// certificates. The conditional insert is atomic, so two mirrors on this store agree.
+    /// Keep it after a restart (and in backups), including when every item has been deleted.
+    fn offer_prefix(&self) -> Result<&str, String> {
+        if let Some(prefix) = self.offer_prefix.get() {
+            return Ok(prefix);
+        }
+        let graph = instance_graph(&self.binding);
+        let predicate = "urn:iki:gonk:mirror:instance";
+        let read = || -> Result<Vec<serde_json::Value>, String> {
+            let query = format!("SELECT ?instance WHERE {{ <{graph}> <{predicate}> ?instance }}");
+            let bytes = self.ledger_issue(
+                layer::request(Verb::Source, "urn:iki:store:graph-select")
+                    .with_arg("graph", inline(&graph))
+                    .with_arg("query", inline(&query)),
+            )?;
+            let json: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("reading the offer namespace: {e}"))?;
+            json.pointer("/results/bindings")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .ok_or_else(|| "the offer namespace query answered no bindings".to_string())
+        };
+        let mut rows = read()?;
+        if rows.is_empty() {
+            let id = mint_id();
+            let update = format!(
+                "INSERT {{ GRAPH <{graph}> {{ <{graph}> <{predicate}> \"{id}\" }} }} \
+                 WHERE {{ FILTER NOT EXISTS {{ GRAPH <{graph}> {{ <{graph}> <{predicate}> ?instance }} }} }}"
+            );
+            self.ledger_issue(
+                layer::request(Verb::Sink, "urn:iki:store:graph-update")
+                    .with_arg("graph", inline(&graph))
+                    .with_arg("content", inline(&update)),
+            )?;
+            rows = read()?;
+        }
+        let id = match rows.as_slice() {
+            [row] => row
+                .pointer("/instance/value")
+                .and_then(serde_json::Value::as_str),
+            _ => None,
+        }
+        .filter(|id| {
+            id.len() == 26
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+        .ok_or_else(|| format!("<{graph}> must hold exactly one valid offer namespace"))?;
+        let prefix = format!("{}:offer:{id}:", self.binding.layer_iri());
+        // Another pass may have initialized the same namespace while we read it.
+        let _ = self.offer_prefix.set(prefix);
+        Ok(self
+            .offer_prefix
+            .get()
+            .expect("the offer namespace was set"))
     }
 
     /// What the collaboration's participants graph says each taker is.
@@ -867,7 +952,14 @@ impl Mirror {
             }
         }
         for offers in recorded.values_mut() {
-            offers.sort();
+            // Both legacy names and names with an instance prefix end in the time-based
+            // mint_id. The instance's creation time must not choose an item's newest offer.
+            offers.sort_by(|a, b| {
+                a.rsplit(':')
+                    .next()
+                    .cmp(&b.rsplit(':').next())
+                    .then(a.cmp(b))
+            });
             offers.dedup();
         }
         *self.keys.lock().unwrap_or_else(|p| p.into_inner()) = keys;
@@ -962,6 +1054,7 @@ impl Mirror {
     /// the next pass tries again.
     pub fn pass(&self) -> Result<Report, String> {
         let context = self.layer.ready()?;
+        let offer_prefix = self.offer_prefix()?;
         let mut report = Report::default();
         self.refresh_kinds(&mut report);
         let mut pending = self.layer.pending()?;
@@ -1243,7 +1336,7 @@ impl Mirror {
             }
             let Some(newest) = offers.last() else {
                 if wants_offer {
-                    self.offer(item, None, &context, &mut report);
+                    self.offer(item, None, offer_prefix, &context, &mut report);
                 }
                 continue;
             };
@@ -1267,7 +1360,7 @@ impl Mirror {
                     // Recorded, never dropped (a crash between the two): drop it now, under
                     // the name the record already gives it.
                     if wants_offer {
-                        self.offer(item, Some(newest), &context, &mut report);
+                        self.offer(item, Some(newest), offer_prefix, &context, &mut report);
                     }
                 }
                 Some(t)
@@ -1278,7 +1371,7 @@ impl Mirror {
                     let spent = released.contains(newest)
                         && releases_of.get(&item.iri).copied().unwrap_or(0) >= MAX_RELEASES;
                     if wants_offer && (!spent || self.budget_answered(item, newest, &mut report)) {
-                        self.offer(item, None, &context, &mut report);
+                        self.offer(item, None, offer_prefix, &context, &mut report);
                     }
                 }
                 Some(t) => {
@@ -1307,12 +1400,15 @@ impl Mirror {
             }
         }
 
-        // 4. Our offers pending in the layer for an item that is no longer live (deleted).
+        // 4. Offers in this binding's namespace whose item is no longer live (deleted).
+        // A certificate identifies a participant, not a gonk: another ledger/server can use
+        // it too (#2802). Unknown legacy names have no instance attribution; leave them alone.
         if let (true, Some(us)) = (complete, known_offerer) {
             let live: BTreeSet<&str> = items.iter().map(|i| i.iri.as_str()).collect();
             let orphans: Vec<String> = pending
                 .values()
                 .filter(|t| t.is("Offer") && t.dropper.as_deref() == Some(us.as_str()))
+                .filter(|t| t.subject.starts_with(offer_prefix))
                 .filter(|t| {
                     ours.get(&t.subject)
                         .is_none_or(|i| !live.contains(i.as_str()))
@@ -1332,10 +1428,17 @@ impl Mirror {
 
     /// Offer `item`: under `existing` (a recorded offer the layer never got), else a new name,
     /// recorded on the item before it is dropped.
-    fn offer(&self, item: &Item, existing: Option<&String>, context: &str, report: &mut Report) {
+    fn offer(
+        &self,
+        item: &Item,
+        existing: Option<&String>,
+        prefix: &str,
+        context: &str,
+        report: &mut Report,
+    ) {
         let offer = existing
             .cloned()
-            .unwrap_or_else(|| format!("{}:offer:{}", self.binding.layer_iri(), mint_id()));
+            .unwrap_or_else(|| format!("{prefix}{}", mint_id()));
         // Built first: an item that cannot be offered records nothing.
         match self.built(item, &offer, context) {
             Ok(_) => {}
@@ -2188,6 +2291,44 @@ fn ikigai_gonk_default_ledger() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offer_namespaces_survive_store_reopen_and_distinguish_ledgers() {
+        struct NoLayer;
+        impl Door for NoLayer {
+            fn call(&self, _: ikigai_core::Request) -> Result<ikigai_core::Representation, Error> {
+                panic!("a namespace is local state, not a call to the layer")
+            }
+        }
+        let store = tempfile::tempdir().unwrap();
+        let certs = tempfile::tempdir().unwrap();
+        let load = |ledger| {
+            let hub = Arc::new(crate::compose(
+                ikigai_store::DurableStore::open(store.path()).unwrap(),
+            ));
+            let binding = layer::parse(
+                &format!(
+                    "tasks offer quic://127.0.0.1:1 {} ledger={ledger} confirm-ledger={ledger}",
+                    certs.path().display()
+                ),
+                std::path::Path::new("/nowhere"),
+            )
+            .unwrap();
+            let mirror = Mirror::new(binding, Arc::new(NoLayer), hub).unwrap();
+            mirror.offer_prefix().unwrap().to_string()
+        };
+        let crew = load("crew");
+        assert_eq!(
+            load("crew"),
+            crew,
+            "the namespace is durable without any items"
+        );
+        assert_ne!(
+            load("other"),
+            crew,
+            "ledgers on one host have distinct namespaces"
+        );
+    }
 
     /// ★ Ledger #2799: a ledger write that fails is held off, not sent again on the kick its
     /// own refusal's cut gives the next pass; it answers what it said, and an edit to the item

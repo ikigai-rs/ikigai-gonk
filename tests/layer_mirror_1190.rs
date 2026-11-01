@@ -525,6 +525,7 @@ fn an_offer_is_recorded_as_an_about_edge_not_a_comment() {
 fn an_offer_recorded_as_a_comment_is_still_read() {
     let w = World::new();
     let mirror = w.mirror();
+    settled(&mirror);
     let n = w.file("An older item\n\nOffered before the about grant.", &[]);
     let legacy = format!("urn:layer:{LAYER}:offer:{}", mirror::mint_id());
     w.gonk(
@@ -542,8 +543,13 @@ fn an_offer_recorded_as_a_comment_is_still_read() {
     .unwrap();
     let report = pass(&mirror);
     assert_eq!(offered(&report), legacy, "{:?}", report.actions);
-    assert_eq!(w.pending(), vec![legacy]);
+    assert_eq!(w.pending(), vec![legacy.clone()]);
     settled(&mirror);
+    w.take(&us(), &legacy).unwrap();
+    let replacement = offered(&pass(&mirror));
+    assert_ne!(replacement, legacy);
+    settled(&mirror);
+    assert_eq!(w.pending(), vec![replacement]);
 }
 
 /// The mirror's grant: the worker grant plus `about`, and still never close or write.
@@ -1516,6 +1522,106 @@ fn a_host_without_urn_layers_me_is_refused_by_name() {
     );
 }
 
+/// Two independent ledgers can present the same layer certificate (ledger #2802).
+#[test]
+fn shared_identity_offerers_do_not_withdraw_each_others_offers() {
+    let first = World::new();
+    let second = World {
+        hub: Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap())),
+        layers: Arc::clone(&first.layers),
+        _config: tempfile::tempdir().unwrap(),
+        _state: tempfile::tempdir().unwrap(),
+    };
+    let binding = first.binding(LAYER);
+    let a = Mirror::new(
+        binding.clone(),
+        Arc::new(first.door(&us())),
+        Arc::clone(&first.hub),
+    )
+    .unwrap();
+    let b = Mirror::new(
+        binding,
+        Arc::new(second.door(&us())),
+        Arc::clone(&second.hub),
+    )
+    .unwrap();
+    let n = first.file("First host's work\n\nKeep this pending.", &[]);
+    let m = second.file("Second host's work\n\nKeep this pending too.", &[]);
+    let original = offered(&pass(&a));
+    let other = offered(&pass(&b));
+    for _ in 0..3 {
+        pass(&a);
+        pass(&b);
+    }
+    let pending = first.pending();
+    assert!(
+        pending.contains(&original),
+        "first offer replaced: {pending:?}; item: {}",
+        first.item(n)
+    );
+    assert!(
+        pending.contains(&other),
+        "second offer replaced: {pending:?}; item: {}",
+        second.item(m)
+    );
+    settled(&a);
+    settled(&b);
+    assert_eq!(first.item(n)["about"].as_array().unwrap().len(), 1);
+    assert_eq!(second.item(m)["about"].as_array().unwrap().len(), 1);
+    let client = mirror::LayerClient::new(Arc::new(first.door(&us())), LAYER);
+    assert!(
+        client.receipts().unwrap().is_empty(),
+        "no withdrawal receipts"
+    );
+
+    // Reconstruct both workers over their original stores, then delete the only item in
+    // one ledger. Even with its about edge gone, that mirror recognizes only its own orphan.
+    let restarted_a = Mirror::new(
+        a.binding().clone(),
+        Arc::new(first.door(&us())),
+        Arc::clone(&first.hub),
+    )
+    .unwrap();
+    let restarted_b = Mirror::new(
+        b.binding().clone(),
+        Arc::new(second.door(&us())),
+        Arc::clone(&second.hub),
+    )
+    .unwrap();
+    first.gonk(Verb::Delete, &format!("item:{n}"), &[]).unwrap();
+    pass(&restarted_a);
+    settled(&restarted_a);
+    settled(&restarted_b);
+    assert_eq!(first.pending(), vec![other]);
+    let receipts = client.receipts().unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert!(receipts.contains_key(&original));
+}
+
+/// An unknown old-format offer has no instance namespace. The shared certificate alone
+/// cannot prove whose deleted item it belongs to; leave it pending rather than guessing.
+#[test]
+fn unrecorded_legacy_offers_are_not_withdrawn_by_shared_identity() {
+    let w = World::new();
+    let legacy = format!("urn:layer:{LAYER}:offer:{}", mirror::mint_id());
+    w.door(&us())
+        .call(
+            Request::new(Verb::Sink, Iri::parse(TUPLES).unwrap()).with_arg(
+                "content",
+                ArgRef::Inline(
+                    format!(
+                        "@prefix ik: <{IK}> . @prefix dcterms: <http://purl.org/dc/terms/> . \
+                 <{legacy}> a ik:Offer ; dcterms:title \"Legacy\" ; ik:brief \"Unknown origin\" ."
+                    )
+                    .into_bytes(),
+                ),
+            ),
+        )
+        .unwrap();
+    settled(&w.mirror());
+    assert_eq!(w.pending(), vec![legacy]);
+}
+
 /// ★ An offer whose item is DELETED is withdrawn, even when it was this ledger's only offer
 /// (ledger #1316): the mirror knows itself from `urn:layers:me`. Inferred from the offers it had
 /// recorded, as through gonk 0.x, it knew nobody once the only item carrying a record was gone,
@@ -1529,7 +1635,8 @@ fn the_only_offer_of_a_deleted_item_is_withdrawn() {
     assert!(w.pending().contains(&offer));
     w.gonk(Verb::Delete, &format!("item:{n}"), &[])
         .expect("the owner deletes the item");
-    let report = pass(&mirror);
+    let restarted = w.mirror();
+    let report = pass(&restarted);
     assert!(
         report
             .actions
