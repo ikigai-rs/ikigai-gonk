@@ -1144,8 +1144,8 @@ fn concurrent_takes_have_only_one_fresh_success() {
         command()
     };
     let results = std::thread::scope(|scope| {
-        let first = scope.spawn(&run);
-        let second = scope.spawn(&run);
+        let first = scope.spawn(run);
+        let second = scope.spawn(run);
         [first.join().unwrap(), second.join().unwrap()]
     });
     assert_eq!(
