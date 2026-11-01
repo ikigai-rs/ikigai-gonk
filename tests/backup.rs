@@ -1088,7 +1088,11 @@ fn the_rotation_directory_and_every_file_in_it_are_owner_only() {
         .expect("the rotation directory")
         .flatten()
         .collect();
-    assert_eq!(files.len(), 2, "an archive and its sidecar: {files:?}");
+    assert_eq!(
+        files.len(),
+        3,
+        "an archive, its sidecar, and the rotation lock: {files:?}"
+    );
     for file in files {
         let mode = file.metadata().expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{:?} is {mode:o}", file.file_name());
