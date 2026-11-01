@@ -1280,6 +1280,105 @@ fn their_close_hands_back_with_evidence_and_our_item_waits_for_its_dispatcher() 
     settled(&mirror);
 }
 
+// Ledger #2807: fast-forward workflows can hand back a commit in the offered repository.
+#[test]
+fn commit_evidence_hands_back_only_in_the_offered_repository() {
+    for repository in ["ikigai-core", "another-repo"] {
+        let w = World::new();
+        let mirror = w.mirror();
+        let theirs = w.theirs();
+        let n = w.file(
+            "Fix the parser\n\nIt drops the last line.",
+            &[("about", "https://github.com/ikigai-rs/ikigai-core")],
+        );
+        let offer = offered(&pass(&mirror));
+        let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
+            panic!("not filed")
+        };
+        pass(&mirror);
+        let url = format!("https://github.com/ikigai-rs/{repository}/commit/0123456789abcdef0123456789abcdef01234567");
+        theirs
+            .gonk(
+                Verb::Sink,
+                "comment",
+                &[
+                    ("item", &local.to_string()),
+                    ("content", &format!("Landed: {url}.")),
+                ],
+            )
+            .unwrap();
+        theirs
+            .gonk(
+                Verb::Sink,
+                "close",
+                &[("item", &local.to_string()), ("reason", "done")],
+            )
+            .unwrap();
+        let expected = usize::from(repository == "ikigai-core");
+        let report = theirs.taker.pass().unwrap();
+        assert_eq!(
+            report
+                .actions
+                .iter()
+                .filter(|a| a.starts_with("reported Handback"))
+                .count(),
+            expected,
+            "{url}: {report:?}"
+        );
+        let replay = theirs.taker.pass().unwrap();
+        assert!(
+            !replay
+                .actions
+                .iter()
+                .any(|a| a.starts_with("reported Handback")),
+            "{replay:?}"
+        );
+        pass(&mirror);
+        let handed = comments_starting(&w, n, "Handed back");
+        assert_eq!(handed.len(), expected);
+        if expected == 1 {
+            assert_eq!(w.item(n)["awaiting"], "dispatcher");
+            assert!(handed[0].contains(&format!("Evidence: {url}")));
+        } else {
+            assert!(w.item(n)["awaiting"].is_null());
+        }
+    }
+}
+
+#[test]
+fn mirror_refuses_commit_evidence_from_another_repository() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file(
+        "Fix the parser\n\nIt drops the last line.",
+        &[("about", "https://github.com/ikigai-rs/ikigai-core")],
+    );
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    w.report(
+        &them(),
+        "Handback",
+        &offer,
+        "; ik:evidence <https://github.com/ikigai-rs/ikigai-core/commit/0123456789abcdef0123456789abcdef01234567>, \
+         <https://github.com/ikigai-rs/another-repo/commit/0123456789abcdef0123456789abcdef01234567>",
+    );
+    pass(&mirror);
+    let handed = comments_starting(&w, n, "Handed back");
+    assert_eq!(handed.len(), 1);
+    assert!(
+        handed[0].contains("Evidence: https://github.com/ikigai-rs/ikigai-core/commit/"),
+        "{}",
+        handed[0]
+    );
+    assert!(
+        handed[0].contains("https[:]//github.com/ikigai-rs/another-repo/commit/"),
+        "{}",
+        handed[0]
+    );
+    assert_eq!(linked(&handed[0]).matches("href='").count(), 1);
+}
+
 #[test]
 fn their_close_without_done_releases_and_we_offer_again() {
     let w = World::new();

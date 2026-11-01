@@ -1065,7 +1065,10 @@ impl Mirror {
                 *count += 1;
                 if *count <= MAX_HANDBACKS {
                     let key = report_key(&layer_name, subject);
-                    let evidence = evidence_lines(&r.tuple.evidence);
+                    let repository = taken
+                        .get(&offer)
+                        .and_then(|receipt| receipt.tuple.repository.as_deref());
+                    let evidence = evidence_lines(&r.tuple.evidence, repository);
                     // ★ Ledger #2797: closed work awaits nobody, so the ledger refuses
                     // `handback=true` on it, even for a key already written. A hand-back on a
                     // closed item (one that arrived late, or one replayed after the dispatcher
@@ -1559,10 +1562,11 @@ pub fn quoted_note(note: Option<&str>, report: &str) -> String {
     )
 }
 
-/// A hand-back's evidence as its comment lists it (ledger #1746): the pull request URLs
-/// ([`crate::taker::is_pull_request`], the rule the taker's own side hands back by) as
-/// evidence, and anything else under "refused evidence", DEFANGED ([`defang`]) so the page
-/// never makes it a link. At most [`MAX_EVIDENCE`] of each are listed.
+/// A hand-back's evidence as its comment lists it (ledger #1746): pull request URLs and
+/// commit URLs in the original offer's `repository` as evidence (the shared rule is
+/// [`crate::taker::is_evidence_for_repository`]), and anything else under "refused evidence",
+/// DEFANGED ([`defang`]) so the page never makes it a link. At most [`MAX_EVIDENCE`] of each
+/// are listed.
 ///
 /// ```
 /// use ikigai_gonk::mirror::evidence_lines;
@@ -1570,19 +1574,20 @@ pub fn quoted_note(note: Option<&str>, report: &str) -> String {
 ///     "https://github.com/o/r/pull/7".to_string(),
 ///     "javascript:alert(1)".to_string(),
 ///     "https://evil.example/x#1".to_string(),
-/// ]);
+/// ], Some("https://github.com/o/r"));
 /// assert_eq!(
 ///     said,
 ///     "Evidence: https://github.com/o/r/pull/7\n\
-///      Refused evidence (not a pull request URL; shown defanged, never linked): \
+///      Refused evidence (not a pull request URL or a commit URL in the offered repository; \
+///      shown defanged, never linked): \
 ///      javascript:alert(1) https[:]//evil.example/x[#]1"
 /// );
-/// assert!(evidence_lines(&[]).starts_with("Evidence: none"));
+/// assert!(evidence_lines(&[], None).starts_with("Evidence: none"));
 /// ```
-pub fn evidence_lines(evidence: &[String]) -> String {
+pub fn evidence_lines(evidence: &[String], repository: Option<&str>) -> String {
     let (good, refused): (Vec<&String>, Vec<&String>) = evidence
         .iter()
-        .partition(|e| crate::taker::is_pull_request(e));
+        .partition(|e| crate::taker::is_evidence_for_repository(e, repository));
     let more = |n: usize| {
         if n > MAX_EVIDENCE {
             format!(" (and {} more, not listed)", n - MAX_EVIDENCE)
@@ -1591,7 +1596,7 @@ pub fn evidence_lines(evidence: &[String]) -> String {
         }
     };
     let mut out = if good.is_empty() {
-        "Evidence: none that is a pull request URL (https://github.com/{owner}/{repo}/pull/{n})"
+        "Evidence: none that is a pull request URL or a commit URL in the offered repository"
             .to_string()
     } else {
         let listed: Vec<&str> = good.iter().take(MAX_EVIDENCE).map(|e| e.as_str()).collect();
@@ -1611,7 +1616,8 @@ pub fn evidence_lines(evidence: &[String]) -> String {
             })
             .collect();
         out.push_str(&format!(
-            "\nRefused evidence (not a pull request URL; shown defanged, never linked): {}{}",
+            "\nRefused evidence (not a pull request URL or a commit URL in the offered repository; \
+             shown defanged, never linked): {}{}",
             listed.join(" "),
             more(refused.len())
         ));

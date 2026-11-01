@@ -13,8 +13,9 @@
 //!   offerer under a name derived from what it reports, so a pass run twice drops once (the
 //!   layer's replay rule, one subject one tuple): while the item is open, a `Progress` a day,
 //!   which renews the offerer's lease on the claim it holds for us; once it is closed `done`, a
-//!   `Handback` whose evidence is every pull request URL in its body and comments (new evidence
-//!   is a new hand-back); once it is closed any other way, a `Release`, one per close reason
+//!   `Handback` whose evidence is every pull request URL and offered-repository commit URL in
+//!   its body and comments (new evidence is a new hand-back); once it is closed any other way,
+//!   a `Release`, one per close reason
 //!   (a later comment on the closed item is not another release).
 //! - **This side never reads or writes the offerer's ledger.** It sees offers and nothing else.
 //!
@@ -335,7 +336,8 @@ fn offer_of(item: &Item, layer: &str) -> Option<String> {
     item.about.iter().find(|a| a.starts_with(&prefix)).cloned()
 }
 
-/// Every pull request URL in `item`'s body and comments, in order, once each.
+/// Every pull request or commit URL in `item`'s body and comments, in order, once each.
+/// Commit URLs must also pass [`is_evidence_for_repository`] before being handed back.
 ///
 /// ```
 /// # // The ledger's Item is non_exhaustive, so the doc builds one from its JSON face.
@@ -368,7 +370,7 @@ pub fn evidence(item: &Item) -> Vec<String> {
                     || c == '_')
             });
             let url = url.trim_end_matches('.');
-            if is_pull_request(url) && !found.iter().any(|f| f == url) {
+            if (is_pull_request(url) || is_commit(url)) && !found.iter().any(|f| f == url) {
                 found.push(url.to_string());
             }
         }
@@ -379,8 +381,8 @@ pub fn evidence(item: &Item) -> Vec<String> {
 /// Whether `url` is, whole, a pull request URL: `https://github.com/{owner}/{repo}/pull/{n}`,
 /// in GitHub's own name characters (the [`crate::mirror::REPOSITORY`] rule, so no `?`, `#`, `%`
 /// or `@` can ride inside an owner or a repository).
-/// What [`evidence`] finds, and the only evidence the offer side copies into its ledger as
-/// evidence ([`crate::mirror`], ledger [#1746](http://localhost:1062/l/default/item/1746)).
+/// Pull requests are accepted alongside repository-checked commits by
+/// [`is_evidence_for_repository`].
 ///
 /// ```
 /// use ikigai_gonk::taker::is_pull_request;
@@ -393,22 +395,76 @@ pub fn evidence(item: &Item) -> Vec<String> {
 /// assert!(!is_pull_request("javascript:alert(1)"));
 /// ```
 pub fn is_pull_request(url: &str) -> bool {
-    url.strip_prefix("https://github.com/")
-        .map(|rest| rest.split('/').collect::<Vec<_>>())
-        .is_some_and(|parts| {
-            parts.len() == 4
-                && parts[2] == "pull"
-                && !parts[0].is_empty()
-                && !parts[1].is_empty()
-                && parts[0]
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                && parts[1]
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
-                && parts[3].chars().all(|c| c.is_ascii_digit())
-                && !parts[3].is_empty()
-        })
+    github_reference(url).is_some_and(|parts| {
+        parts[2] == "pull" && !parts[3].is_empty() && parts[3].bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Whether `url` is a GitHub commit URL with a hexadecimal SHA (full or abbreviated).
+/// Queries, fragments, additional paths and non-GitHub hosts are refused.
+///
+/// ```
+/// use ikigai_gonk::taker::is_commit;
+/// assert!(is_commit("https://github.com/o/r/commit/0123456789abcdef0123456789abcdef01234567"));
+/// assert!(is_commit("https://github.com/o/r/commit/abcdef0"));
+/// for url in [
+///     "http://github.com/o/r/commit/abcdef0",
+///     "https://example.com/o/r/commit/abcdef0",
+///     "https://github.com/o/r/commit/",
+///     "https://github.com/o/r/commit/main",
+///     "https://github.com/o/r/commit/abcdef0/files",
+///     "https://github.com/o/r/commit/abcdef0?x=1",
+///     "https://github.com/o/r/commit/abcdef0#diff",
+///     "https://github.com/o/r?token=x/commit/abcdef0",
+/// ] {
+///     assert!(!is_commit(url), "{url}");
+/// }
+/// ```
+pub fn is_commit(url: &str) -> bool {
+    github_reference(url).is_some_and(|parts| {
+        parts[2] == "commit"
+            && !parts[3].is_empty()
+            && parts[3].len() <= 40
+            && parts[3].bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+fn github_reference(url: &str) -> Option<[&str; 4]> {
+    let parts: [&str; 4] = url
+        .strip_prefix("https://github.com/")?
+        .split('/')
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()?;
+    (!parts[0].is_empty()
+        && !parts[1].is_empty()
+        && parts[0]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && parts[1]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'))
+    .then_some(parts)
+}
+
+/// The evidence rule shared by both federation sides: pull request URLs, or commit URLs
+/// whose repository matches the original offer. An offer without a repository cannot
+/// authorize commit evidence. GitHub repository names are compared without ASCII case.
+///
+/// ```
+/// use ikigai_gonk::taker::is_evidence_for_repository;
+/// let url = "https://github.com/o/r/commit/abcdef0";
+/// assert!(is_evidence_for_repository(url, Some("https://github.com/O/R")));
+/// assert!(!is_evidence_for_repository(url, Some("https://github.com/o/other")));
+/// assert!(!is_evidence_for_repository(url, Some("https://github.com/o/r/")));
+/// assert!(!is_evidence_for_repository(url, None));
+/// ```
+pub fn is_evidence_for_repository(url: &str, repository: Option<&str>) -> bool {
+    is_pull_request(url)
+        || (is_commit(url)
+            && url.rsplit_once("/commit/").is_some_and(|(repo, _)| {
+                repository.is_some_and(|offered| repo.eq_ignore_ascii_case(offered))
+            }))
 }
 
 /// One binding's take side, run by the server.
@@ -520,11 +576,17 @@ impl Taker {
                     String::new(),
                 )
             } else if item.closed_reason.as_deref() == Some("done") {
-                let evidence = evidence(item);
+                let evidence: Vec<String> = evidence(item)
+                    .into_iter()
+                    .filter(|url| {
+                        is_evidence_for_repository(url, receipt.tuple.repository.as_deref())
+                    })
+                    .collect();
                 if evidence.is_empty() {
                     report.failed(format!(
-                        "{} is closed done with no pull request URL in its body or comments, so \
-                         there is nothing to hand back: comment one",
+                        "{} is closed done with no accepted evidence URL in its body or comments, so \
+                         there is nothing to hand back: comment a GitHub pull request URL or \
+                         a commit URL in the offered repository",
                         layer::item_words(item)
                     ));
                     continue;
