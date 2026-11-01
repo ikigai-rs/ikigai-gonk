@@ -116,19 +116,40 @@ impl Layout {
         self.dir.join("clients.json")
     }
 
-    /// Hold [`ClientsLock`] for one read-modify-write of [`clients_json`](Self::clients_json),
-    /// blocking until no other writer, in this process or another, holds it. With no
+    /// Hold [`FileLock`] for one read-modify-write of [`clients_json`](Self::clients_json),
+    /// blocking until no other writer, in this process or another, holds it.
+    pub(crate) fn lock_clients(&self) -> Result<FileLock, String> {
+        self.lock_beside("clients.json")
+    }
+
+    /// Hold [`FileLock`] for one read-modify-write of [`grants_json`](Self::grants_json)
+    /// (ledger [#2777](http://localhost:1062/l/default/item/2777)).
+    pub(crate) fn lock_grants(&self) -> Result<FileLock, String> {
+        self.lock_beside("grants.json")
+    }
+
+    /// Hold [`FileLock`] for one read-modify-write of [`invites_json`](Self::invites_json)
+    /// (ledger [#2777](http://localhost:1062/l/default/item/2777)).
+    pub(crate) fn lock_invites(&self) -> Result<FileLock, String> {
+        self.lock_beside("invites.json")
+    }
+
+    /// The exclusive lock on `.<name>.lock` beside the authority file `name`. With no
     /// directory there is no file to write, and nothing to hold: the write itself will fail.
-    pub(crate) fn lock_clients(&self) -> Result<ClientsLock, String> {
-        let path = self.dir.join(".clients.json.lock");
+    ///
+    /// ★ **Taken in one order: clients, then grants, then invites**, never the reverse, so two
+    /// writers that each need two of them cannot wait on each other. And never twice in one
+    /// thread: a second `flock` on a second descriptor of the same file waits on the first.
+    fn lock_beside(&self, name: &str) -> Result<FileLock, String> {
+        let path = self.dir.join(format!(".{name}.lock"));
         let file = match open_private(&path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ClientsLock(None)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FileLock(None)),
             Err(e) => return Err(format!("opening {}: {e}", path.display())),
         };
         file.lock()
             .map_err(|e| format!("locking {}: {e}", path.display()))?;
-        Ok(ClientsLock(Some(file)))
+        Ok(FileLock(Some(file)))
     }
 
     /// Grant name → scopes.
@@ -1251,6 +1272,7 @@ pub fn put_grant(
         return Err(refusal);
     }
     private_dir(&layout.dir)?;
+    let _lock = layout.lock_grants()?;
     let mut grants = read_object(&layout.grants_json())?;
     let change = GrantChange::against(grants.get(grant), scopes);
     if change.changes() && !force {
@@ -1398,6 +1420,7 @@ pub fn enrol(
     force: bool,
 ) -> Result<(), String> {
     let _lock = layout.lock_clients()?;
+    let _grants = layout.lock_grants()?;
     enrol_refusal(layout, grant, Some(fingerprint), scopes, force)?;
     let mut grants = read_object(&layout.grants_json())?;
     let mut clients_doc = read_object(&layout.clients_json())?;
@@ -1482,20 +1505,33 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<(), String> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let temp = path.with_file_name(format!(".{name}.tmp"));
-    create_private(&temp, contents).map_err(|e| format!("writing {}: {e}", temp.display()))?;
-    std::fs::rename(&temp, path).map_err(|e| format!("replacing {}: {e}", path.display()))
+    // A temporary of its own, so two writes of one file at once (whoever forgot its lock)
+    // never rename each other's bytes or find theirs already gone (ledger #2777).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
+    let written = create_private(&temp, contents)
+        .map_err(|e| format!("writing {}: {e}", temp.display()))
+        .and_then(|()| {
+            std::fs::rename(&temp, path).map_err(|e| format!("replacing {}: {e}", path.display()))
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
 }
 
-/// Every change to `clients.json` reads the file, decides, and writes the whole file back; two
-/// at once would each write what they read, and the later rename would silently undo the
-/// earlier change (ledger [#2776](http://localhost:1062/l/default/item/2776): a sign-in writing
-/// its counter back re-enrolled a passkey `passkey revoke` had just removed). They also share
-/// one temporary name in [`write_private`]. So each holds this, an exclusive `flock` on a lock
-/// file beside `clients.json`, from its read to its rename. It is a SEPARATE file because the
-/// rename replaces `clients.json`'s inode, and a lock on the old one would exclude nobody.
+/// Every change to `clients.json`, `grants.json` or `invites.json` reads the file, decides,
+/// and writes the whole file back; two at once would each write what they read, and the later
+/// rename would silently undo the earlier change (ledger
+/// [#2776](http://localhost:1062/l/default/item/2776): a sign-in writing its counter back
+/// re-enrolled a passkey `passkey revoke` had just removed; ledger
+/// [#2777](http://localhost:1062/l/default/item/2777): a `passkey invite` wrote back an invite
+/// a registration had just redeemed). So each holds this, an exclusive `flock` on a lock file
+/// beside the file it changes, from its read to its rename. It is a SEPARATE file because the
+/// rename replaces the target's inode, and a lock on the old one would exclude nobody.
 /// Released when dropped.
-pub(crate) struct ClientsLock(#[allow(dead_code)] Option<std::fs::File>);
+pub(crate) struct FileLock(#[allow(dead_code)] Option<std::fs::File>);
 
 #[cfg(unix)]
 fn open_private(path: &Path) -> std::io::Result<std::fs::File> {

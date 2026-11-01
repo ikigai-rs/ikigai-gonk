@@ -195,11 +195,7 @@ pub(crate) fn parse_passkeys(
 /// Write one passkey entry into `clients.json`, keeping every other key (the QUIC clients,
 /// the default) exactly as it was. The caller holds `_lock` from the read it decided on to
 /// here, so no other change to the file lands in between and is undone (ledger #2776).
-fn write_passkey(
-    layout: &Layout,
-    _lock: &quic::ClientsLock,
-    entry: &Enrolled,
-) -> Result<(), String> {
+fn write_passkey(layout: &Layout, _lock: &quic::FileLock, entry: &Enrolled) -> Result<(), String> {
     let mut doc = quic::read_object(&layout.clients_json())?;
     let mut passkeys = match doc.remove("passkeys") {
         None => Map::new(),
@@ -420,6 +416,8 @@ pub fn invite(
 ) -> Result<String, String> {
     quic::put_grant(layout, grant, scopes, force)?;
     let code = random_b64(24)?;
+    // Held from the read to the rename, so a redeem landing in between is not undone (#2777).
+    let _lock = layout.lock_invites()?;
     let mut doc = quic::read_object(&layout.invites_json())?;
     // Expired invites are dropped whenever the file is written, so it does not grow.
     doc.retain(|_, entry| entry.get("expires").and_then(Value::as_u64).unwrap_or(0) > now);
@@ -431,8 +429,12 @@ pub fn invite(
     Ok(code)
 }
 
-/// Consume an invite: its grant, if the code is live. Single use — removed on success.
+/// Consume an invite: its grant, if the code is live. Single use — removed on success, under
+/// the invites lock from the read to the rename, so no concurrent [`invite`] writes it back
+/// (ledger #2777). [`Passkeys::register`] calls this holding the clients lock, which is the
+/// order [`quic::Layout`] takes them in.
 fn redeem(layout: &Layout, code: &str, now: u64) -> Result<String, String> {
+    let _lock = layout.lock_invites()?;
     let mut doc = quic::read_object(&layout.invites_json())?;
     let key = sha256_hex(code.as_bytes());
     let entry = doc
