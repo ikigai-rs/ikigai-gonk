@@ -2205,6 +2205,13 @@ in the config must not offer the wrong ledger. At start, the server refuses:
   `… ledger=work collab=bobby confirm-ledger=work`. An offer line with no `collab=` needs it
   too. `confirm-ledger=` on a take line is refused.
 
+**Which ledger a take line must name (ledger #2796).** A take binding requires a dedicated
+ledger for work taken from that layer. Create it and name it in `ledger=`; do not bind the
+taker to `default` or a ledger containing unrelated local work. This is an operating
+requirement, not a startup validation. Each take looks up only its offer's key; each reporting
+pass selects the binding's `layer:{layer}:` item keys and reads only those items, including
+their comments for evidence (ledger #2806).
+
 When a binding starts, `serve` says how many open, unclaimed items it would offer, before its
 first pass offers any.
 
