@@ -170,6 +170,79 @@ fn try_issue(
     block_on(kernel.issue(request, &Capability::root())).map(|repr| repr.bytes)
 }
 
+/// Concurrent publications must leave a complete rotation set, even at keep = 1.
+/// Different fixed seconds exercise mutual pruning; the same second exercises the
+/// shared temporary names. Separate bindings also cover callers sharing a directory.
+#[test]
+fn two_backups_at_once_leave_an_archive() {
+    for same_second in [false, true] {
+        let backups = tempfile::tempdir().expect("tempdir");
+        let hubs: Vec<_> = (0..2)
+            .map(|i| {
+                hub_with_space(backups.path(), 1).0.with_clock(Arc::new(
+                    ikigai_core::FixedClock::at(
+                        1_789_579_693_000 + if same_second { 0 } else { i * 1000 },
+                    ),
+                ))
+            })
+            .collect();
+        seed(&hubs[0]);
+        for round in 0..30 {
+            let barrier = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = hubs
+                    .iter()
+                    .map(|hub| {
+                        let barrier = &barrier;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            try_issue(hub, Verb::Source, backup::BACKUP, &[])
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert!(
+                results.iter().all(Result::is_ok),
+                "same_second={same_second}, round={round}: {results:?}"
+            );
+            let archives = backup::archives(backups.path());
+            assert_eq!(
+                archives.len(),
+                1,
+                "same_second={same_second}, round={round}"
+            );
+            let meta: serde_json::Value = serde_json::from_str(
+                archives[0]
+                    .meta
+                    .as_deref()
+                    .expect("archive must have its sidecar"),
+            )
+            .unwrap();
+            let bytes = std::fs::read(backups.path().join(&archives[0].name)).unwrap();
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                meta["archive_sha256"],
+                format!("{:x}", Sha256::digest(&bytes))
+            );
+            let nquads = try_issue(
+                &hubs[0],
+                Verb::Source,
+                "urn:decompress:gzip",
+                &[("content", &bytes)],
+            )
+            .expect("archive must decompress");
+            assert_eq!(
+                meta["nquads_sha256"],
+                format!("{:x}", Sha256::digest(&nquads))
+            );
+        }
+    }
+}
+
 /// Three named graphs and the default graph, so every comparison below has a partition to
 /// lose. A single-graph dataset — which is what this store holds today — would pass a
 /// Turtle round trip by luck.
