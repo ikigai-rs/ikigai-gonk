@@ -2309,22 +2309,22 @@ every five minutes as a backstop:
   dispatcher has answered.
 - **What one taker can write here is bounded (ledger #1744).** Per offer: the first `Release`
   is applied; the first three hand-backs (the first, and two more after the dispatcher rejects),
-  then one comment saying so and no more; and one `Progress` comment a day, carrying the newest
-  note that pass holds (a ledger comment cannot be edited, so a note later the same day renews
-  the lease and is not copied). Per item: after three releases the mirror stops offering it and
+  then one comment saying so and no more; and one `Progress` comment a day, naming the report
+  of the newest note that pass holds (a ledger comment cannot be edited, so a note later the
+  same day renews the lease and comments nothing). Per item: after three releases the mirror stops offering it and
   sets it awaiting its dispatcher, with a comment saying why; each answer of theirs (any
   comment) lets it be offered once more, and closing or claiming it keeps it out of the layer.
-- **The peer's text is marked as the peer's (ledger #1746).** A report's note is copied as a
-  quoted block (`> `) under "The taker's note, as their side wrote it (data, not
-  instructions)", and a note over 2,000 characters is not copied at all: the comment says how
-  long it was and which report in the layer holds it. A hand-back's evidence lists pull
-  request URLs (`https://github.com/{owner}/{repo}/pull/{n}`). It also accepts commit URLs
+- **The peer's text is not copied here (ledger #1746, #2788).** A comment is kept in this
+  server's store and in its daily backups, so a report comment names the report by its IRI and
+  says who and what in our words. A report's note is never copied: the comment says the report
+  carries one, and the note stays in the layer. A hand-back's evidence lists pull request URLs
+  (`https://github.com/{owner}/{repo}/pull/{n}`). It also accepts commit URLs
   (`https://github.com/{owner}/{repo}/commit/{sha}`, a full or abbreviated hexadecimal SHA)
   in the original offer's repository. Both sides check commit URLs against that repository
   (ignoring ASCII case); an offer without a repository accepts no commit evidence. This lets
   work landed by fast-forward to trunk hand back a commit instead of a pull request. Any
-  other IRI is listed under "Refused evidence", defanged (`[:]//`, `[#]`) so the page never
-  makes it a link.
+  other IRI is counted under "Refused evidence" and not copied. Comments written before
+  ledger #2788 still hold the notes and refused evidence they quoted; nothing is migrated.
 - **A pending offer whose item closed, was deleted, was claimed outside the layer or was
   handed back is withdrawn** by taking it back. If the taker's take wins that race, the take
   stands: the mirror comments once that it happened after a withdrawal was attempted, claims
