@@ -2221,3 +2221,90 @@ fn a_take_on_a_torn_listing_takes_nothing() {
     tear.store(true, Ordering::SeqCst);
     assert_eq!(theirs.taker.take(&offer).unwrap(), Took::Already(local));
 }
+
+/// Ledger #2797: a hand-back that arrives after its item closed. The ledger refuses
+/// `handback=true` on closed work, so it is recorded as an ordinary comment naming the report
+/// and its evidence, once, and never retried; a report on another item in the same pass is
+/// applied beside it.
+#[test]
+fn a_hand_back_for_a_closed_item_is_a_comment_once_and_not_retried() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("Fix the parser\n\nIt drops the last line.", &[]);
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    let m = w.file("Fix the lexer\n\nIt drops the first line.", &[]);
+    let other = offered(&pass(&mirror));
+    w.take(&them(), &other).unwrap();
+    pass(&mirror);
+    w.gonk(
+        Verb::Sink,
+        "close",
+        &[("item", &n.to_string()), ("reason", "done")],
+    )
+    .unwrap();
+    let late = w.report(
+        &them(),
+        "Handback",
+        &offer,
+        "; ik:evidence <https://github.com/ikigai-rs/ikigai-core/pull/41> ; ik:note \"CI green\"",
+    );
+    w.report(
+        &them(),
+        "Handback",
+        &other,
+        "; ik:evidence <https://github.com/ikigai-rs/ikigai-core/pull/42>",
+    );
+    let report = pass(&mirror);
+    assert!(
+        report.actions.iter().any(|a| a.contains(&late)),
+        "{:?}",
+        report.actions
+    );
+    let handed = comments_starting(&w, n, "Handed back");
+    assert_eq!(handed.len(), 1, "{:?}", w.comments(n));
+    assert!(
+        handed[0].contains(&format!("in the report <{late}>, after this item closed")),
+        "names the report: {}",
+        handed[0]
+    );
+    assert!(handed[0].contains("https://github.com/ikigai-rs/ikigai-core/pull/41"));
+    assert!(w.item(n)["awaiting"].is_null());
+    assert_eq!(w.item(n)["status"], "closed");
+    // The report behind it, on another item, is not held back.
+    assert_eq!(comments_starting(&w, m, "Handed back").len(), 1);
+    assert_eq!(w.item(m)["awaiting"], "dispatcher");
+    settled(&mirror);
+    settled(&mirror);
+    assert_eq!(comments_starting(&w, n, "Handed back").len(), 1);
+}
+
+/// Ledger #2797: a hand-back applied while its item was open is replayed every pass; once the
+/// dispatcher closes the item, the replay must stay a no-op rather than a refusal.
+#[test]
+fn a_hand_back_replayed_after_its_item_closed_is_not_a_failure() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("Fix the parser\n\nIt drops the last line.", &[]);
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    w.report(
+        &them(),
+        "Handback",
+        &offer,
+        "; ik:evidence <https://github.com/ikigai-rs/ikigai-core/pull/41>",
+    );
+    pass(&mirror);
+    assert_eq!(w.item(n)["awaiting"], "dispatcher");
+    w.gonk(
+        Verb::Sink,
+        "close",
+        &[("item", &n.to_string()), ("reason", "done")],
+    )
+    .unwrap();
+    settled(&mirror);
+    settled(&mirror);
+    assert_eq!(comments_starting(&w, n, "Handed back").len(), 1);
+}
