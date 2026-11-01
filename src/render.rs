@@ -609,10 +609,36 @@ pub const RENDER_BUDGET: std::time::Duration = if cfg!(debug_assertions) {
     std::time::Duration::from_secs(60)
 };
 
+/// Held across every transform this process runs, so renders take turns.
+///
+/// # ★ Why one at a time (ledger #2815)
+///
+/// xrust 2.3 interns every name through `qualname` 0.0.2, whose interner is ONE process-wide
+/// `RwLock` taken for WRITING on every clone and drop of a name — and a transform clones its
+/// template trees, names and all, constantly. So concurrent transforms never ran in parallel:
+/// they queued on that lock, and lost to it besides. Captured with gdb on a 4-core runner
+/// under load (`tests/views_page_2099.rs`, four tests' first page at once): every
+/// `ikigai-xslt` thread inside xrust's `Transform` clone or drop, on or around the lock of
+/// `qualname::unique_string::UNIQUE_STRINGS`, and no page answered in 30 s. And each
+/// concurrent call took a FRESH pooled thread, whose per-thread memo compiles the stylesheet
+/// again (4 s in a debug build, under that same lock).
+///
+/// Taking turns here costs no parallelism (there was none), turns the convoy into a queue,
+/// and leaves the pool one call at a time — so its one warm thread, with the stylesheet
+/// compiled once, answers every render. A render past [`RENDER_BUDGET`] is answered and
+/// releases its turn; the transform it leaves running is the crate's to count.
+static TRANSFORM_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Transform an envelope through [`STYLESHEET`] and serialize the result as HTML. A full
 /// page gets its doctype here, because xrust does not write one.
 pub fn render(document: &str, full_page: bool) -> Result<String, String> {
-    let xml = ikigai_xslt::transform_xml_within(document, STYLESHEET, false, RENDER_BUDGET)?;
+    let xml = {
+        // Only the guard is shared, and a panic cannot leave `()` half-written.
+        let _turn = TRANSFORM_TURN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ikigai_xslt::transform_xml_within(document, STYLESHEET, false, RENDER_BUDGET)?
+    };
     let body = linkify(&html(&xml));
     Ok(if full_page {
         format!("<!DOCTYPE html>\n{body}")
