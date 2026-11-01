@@ -2274,6 +2274,16 @@ KIND of credential, or the deny file's line number, never the matched text), and
 an edit removes it. This guards against an accident on our side; it matches shapes, so the
 dispatcher still decides what a shared ledger holds.
 
+**Links to our own items do not cross (ledger #2810).** Every gonk binds `127.0.0.1:1062` by
+default, so `http://localhost:1062/l/default/item/403` in a brief would open the TAKER's item 403
+on the taker's machine. Before an offer is dropped, every link in its title and brief whose host
+is a loopback name (`localhost`, `127.*`, `[::1]`, `0.0.0.0`) and whose path is
+`/l/{ledger}/item/{n}` is rewritten as words, `the offerer's {ledger} ledger #{n}`; a Markdown
+link keeps its label beside them. A bare `#403` is left as it is, because it may be a pull
+request. So when writing an item that may be offered, name every item of ours by ledger and
+number ("ikigai ledger #403"), never by a bare number, and link nothing on this machine that the
+taker needs to read: put it in the brief.
+
 ### The offer role: the mirror
 
 A pass is level-triggered and idempotent (twice is once), and runs on every event in the
