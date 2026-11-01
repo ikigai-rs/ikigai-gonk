@@ -268,7 +268,12 @@ ikigai-store = { version = "0.3.1", features = ["persistent"] }
 # hand-back older than `awaiting-age`, 24h by default); the doctor page lists the checks as the
 # document names them, so it shows the new one with no code change, and `tests/web.rs` pins it.
 # `"0.13.1"` is `<0.14.0`.
-ikigai-ledger = "0.13.1"
+# ★ 0.14.1 (ledger #2794): one close per item, and a closed item cannot enter flight (ledger #2764,
+# #2765: two concurrent closes duplicated the release comment and status event, and a closed item
+# accepted a move into an in-flight state, both found by a collaborator's parallel spike). 0.14.0
+# added close timestamps, daily counts and an explicit backfill Sink, none called by name here.
+# A federated taker's gonk must carry this for the fixes to reach it. `"0.14.1"` is `<0.15.0`.
+ikigai-ledger = "0.14.1"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
