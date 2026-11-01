@@ -76,6 +76,7 @@ use std::sync::Mutex;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use ikigai_passkey::{Assertion, Policy, RegisteredCredential};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -107,9 +108,19 @@ pub const CHALLENGE_SECONDS: u64 = 5 * 60;
 /// How long an invite is valid by default.
 pub const INVITE_MINUTES: u64 = 30;
 
-/// The most challenges or sessions held at once. ★ A bound REFUSES past it rather than
-/// evicting: an evicted challenge would fail someone's login mid-ceremony with an error
-/// that names nothing, and anonymous callers can mint challenges.
+/// The most sessions held at once. ★ The bound REFUSES past it rather than evicting: an
+/// evicted session would sign someone out with an error that names nothing. Only a passkey
+/// can open a session, so no anonymous caller can fill it.
+///
+/// ★ Challenges are NOT bounded by it, because they are not held (ledger
+/// [#2804](http://localhost:1062/l/default/item/2804)). Any process on this machine may mint
+/// one, and through 44c1d03 each was kept until it expired and the 257th was refused: 256
+/// header-less posts locked sign-in out for five minutes, renewably. Evicting instead would
+/// only move the lockout (a flood evicts the real ceremony before the person touches the
+/// key). So a challenge is SEALED ([`Passkeys::challenge`]): what it is for and when it
+/// expires, under an HMAC keyed by this server. Only an ANSWERED challenge is remembered —
+/// after a passkey signed it or an invite enrolled it — so only what a credential holder does
+/// can grow memory.
 pub const MAX_PENDING: usize = 256;
 
 /// The IRI prefix a signed-in passkey is NAMED by when the door stamps a write — the
@@ -472,10 +483,20 @@ pub enum Purpose {
     Login,
 }
 
-struct Pending {
-    purpose: Purpose,
-    expires: u64,
+impl Purpose {
+    /// The byte a sealed challenge carries for it.
+    fn tag(self) -> u8 {
+        match self {
+            Purpose::Register => b'r',
+            Purpose::Login => b'l',
+        }
+    }
 }
+
+/// A sealed challenge's random part, in bytes.
+const NONCE_BYTES: usize = 16;
+/// A sealed challenge's bytes: nonce, purpose tag, expiry (big-endian seconds), HMAC-SHA256.
+const SEALED_BYTES: usize = NONCE_BYTES + 1 + 8 + 32;
 
 struct Session {
     credential_id: String,
@@ -500,7 +521,11 @@ impl Session {
 
 #[derive(Default)]
 struct State {
-    challenges: HashMap<String, Pending>,
+    /// The key challenges are sealed under: drawn on the first challenge, never written down,
+    /// so a restart voids every challenge outstanding (as the table it replaced did).
+    seal_key: Option<[u8; 32]>,
+    /// Every challenge already answered, until it expires: what makes one single-use.
+    answered: HashMap<String, u64>,
     /// Keyed by the SHA-256 of the token — the token itself is never held.
     sessions: HashMap<String, Session>,
     /// How many bytes of [`audit_log`] this server has read: the lines past it are news.
@@ -727,38 +752,79 @@ impl Passkeys {
             .unwrap_or_default()
     }
 
-    /// A fresh single-use challenge, base64url.
+    /// A fresh single-use challenge, base64url: a random nonce, `purpose` and the expiry,
+    /// sealed by this server ([`MAX_PENDING`] says why it is not held). Minting one costs no
+    /// memory, so however many are minted, the next is minted too.
     pub fn challenge(&self, purpose: Purpose, now: u64) -> Result<String, String> {
-        let challenge = random_b64(32)?;
-        let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
-        state.challenges.retain(|_, p| p.expires > now);
-        if state.challenges.len() >= MAX_PENDING {
-            return Err(format!(
-                "{MAX_PENDING} passkey ceremonies are already waiting for an answer; try again \
-                 in a few minutes"
-            ));
-        }
-        state.challenges.insert(
-            challenge.clone(),
-            Pending {
-                purpose,
-                expires: now + CHALLENGE_SECONDS,
-            },
-        );
-        Ok(challenge)
+        let key = {
+            let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+            match state.seal_key {
+                Some(key) => key,
+                None => {
+                    let mut key = [0u8; 32];
+                    getrandom::fill(&mut key)
+                        .map_err(|e| format!("the OS random source failed: {e}"))?;
+                    *state.seal_key.insert(key)
+                }
+            }
+        };
+        let mut sealed = vec![0u8; NONCE_BYTES];
+        getrandom::fill(&mut sealed).map_err(|e| format!("the OS random source failed: {e}"))?;
+        sealed.push(purpose.tag());
+        sealed.extend_from_slice(&(now + CHALLENGE_SECONDS).to_be_bytes());
+        let mac = seal(&key, &sealed).finalize().into_bytes();
+        sealed.extend_from_slice(&mac);
+        Ok(URL_SAFE_NO_PAD.encode(&sealed))
     }
 
-    fn take_challenge(&self, challenge: &str, purpose: Purpose, now: u64) -> Result<(), String> {
-        let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
-        match state.challenges.remove(challenge) {
-            Some(p) if p.purpose == purpose && p.expires > now => Ok(()),
-            Some(_) => {
-                Err("that challenge has expired or was issued for another ceremony".to_string())
-            }
-            None => {
-                Err("that challenge was not issued here, or has already been answered".to_string())
-            }
+    /// `challenge` was sealed here for `purpose` and is neither expired nor answered: when it
+    /// expires. Checked first, so a ceremony refuses a foreign challenge before any work;
+    /// [`Passkeys::answer_challenge`] decides again, atomically, once the ceremony succeeds.
+    fn check_challenge(&self, challenge: &str, purpose: Purpose, now: u64) -> Result<u64, String> {
+        let not_ours =
+            || "that challenge was not issued here, or has already been answered".to_string();
+        let sealed = URL_SAFE_NO_PAD.decode(challenge).map_err(|_| not_ours())?;
+        if sealed.len() != SEALED_BYTES {
+            return Err(not_ours());
         }
+        let (body, mac) = sealed.split_at(SEALED_BYTES - 32);
+        let state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+        let key = state.seal_key.ok_or_else(not_ours)?;
+        seal(&key, body).verify_slice(mac).map_err(|_| not_ours())?;
+        if state.answered.contains_key(challenge) {
+            return Err(not_ours());
+        }
+        let expires = u64::from_be_bytes(body[NONCE_BYTES + 1..].try_into().expect("8 bytes"));
+        if body[NONCE_BYTES] != purpose.tag() || expires <= now {
+            return Err(
+                "that challenge has expired or was issued for another ceremony".to_string(),
+            );
+        }
+        Ok(expires)
+    }
+
+    /// Mark `challenge` (checked, expiring at `expires`) answered, or refuse if it already
+    /// is. Called only once a ceremony has SUCCEEDED — a passkey signed it, or an invite
+    /// enrolled it — so a caller without either cannot grow [`State::answered`].
+    fn answer_challenge(&self, challenge: &str, expires: u64, now: u64) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+        state.answered.retain(|_, until| *until > now);
+        if state
+            .answered
+            .insert(challenge.to_string(), expires)
+            .is_some()
+        {
+            return Err(
+                "that challenge was not issued here, or has already been answered".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn take_challenge(&self, challenge: &str, purpose: Purpose, now: u64) -> Result<(), String> {
+        let expires = self.check_challenge(challenge, purpose, now)?;
+        self.answer_challenge(challenge, expires, now)
     }
 
     /// Finish a registration. The body is the page's JSON:
@@ -772,7 +838,7 @@ impl Passkeys {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         let challenge = text("challenge")?;
-        self.take_challenge(&challenge, Purpose::Register, now)?;
+        let expires = self.check_challenge(&challenge, Purpose::Register, now)?;
         let client_data = b64(&text("clientDataJSON")?, "clientDataJSON")?;
         self.check_client_data(&client_data, "webauthn.create", &challenge)?;
         let id = text("id")?;
@@ -788,6 +854,8 @@ impl Passkeys {
         // a malformed key must not burn a single-use code.
         let grant = redeem(&self.layout, &text("invite")?, now)?;
         scopes_of(&self.layout, &grant)?;
+        // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
+        self.answer_challenge(&challenge, expires, now)?;
         let label = v
             .get("label")
             .and_then(Value::as_str)
@@ -840,7 +908,7 @@ impl Passkeys {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         let challenge = text("challenge")?;
-        self.take_challenge(&challenge, Purpose::Login, now)?;
+        let expires = self.check_challenge(&challenge, Purpose::Login, now)?;
         let id = text("id")?;
         let mut enrolled = read_passkeys(&self.layout)?
             .remove(&id)
@@ -873,6 +941,8 @@ impl Passkeys {
         )
         // One refusal on the wire; the precise reason is in the error the caller logs.
         .map_err(|e| format!("the passkey assertion was refused ({e})"))?;
+        // Answered only now that a passkey signed it ([`MAX_PENDING`]).
+        self.answer_challenge(&challenge, expires, now)?;
         // ★ Decided again under the lock, against the file as it is NOW: a `passkey revoke`
         // (or a re-enrolment under another key) may have landed while this was verifying, and
         // writing the entry read before it back would undo it (ledger #2776).
@@ -1069,6 +1139,13 @@ fn b64(text: &str, field: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| format!("`{field}` is not base64url"))
 }
 
+/// The HMAC a challenge is sealed with, over `body`, keyed by this server's `key`.
+fn seal(key: &[u8; 32], body: &[u8]) -> Hmac<Sha256> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
+    mac.update(body);
+    mac
+}
+
 fn random_b64(bytes: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).map_err(|e| format!("the OS random source failed: {e}"))?;
@@ -1251,16 +1328,64 @@ mod tests {
         assert!(rp.identity(&again, 19).is_none());
     }
 
-    /// ★ A bound refuses; it never evicts someone's ceremony.
+    /// ★ Minting challenges holds nothing (ledger #2804): past [`MAX_PENDING`] a challenge
+    /// is still minted, and the FIRST one minted is still answerable — nothing is refused and
+    /// nothing is evicted.
     #[test]
-    fn past_the_bound_a_challenge_is_refused_not_evicted() {
+    fn past_any_bound_a_challenge_is_minted_and_none_is_evicted() {
         let dir = tempfile::tempdir().unwrap();
         let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
         let first = rp.challenge(Purpose::Login, 0).unwrap();
-        for _ in 1..MAX_PENDING {
+        for _ in 0..4 * MAX_PENDING {
             rp.challenge(Purpose::Login, 0).unwrap();
+            rp.challenge(Purpose::Register, 0).unwrap();
         }
-        assert!(rp.challenge(Purpose::Login, 0).is_err());
+        let last = rp.challenge(Purpose::Login, 0).unwrap();
+        assert!(rp.state.lock().unwrap().answered.is_empty());
         assert!(rp.take_challenge(&first, Purpose::Login, 1).is_ok());
+        assert!(rp.take_challenge(&last, Purpose::Login, 1).is_ok());
+    }
+
+    /// A challenge is believed only under THIS server's seal: another server's, one with a
+    /// byte changed, and one with its purpose or expiry rewritten are all refused.
+    #[test]
+    fn a_challenge_sealed_elsewhere_or_altered_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
+        let other = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
+        rp.challenge(Purpose::Login, 0).unwrap();
+        let foreign = other.challenge(Purpose::Login, 0).unwrap();
+        assert!(rp.take_challenge(&foreign, Purpose::Login, 1).is_err());
+        let ours = URL_SAFE_NO_PAD
+            .decode(rp.challenge(Purpose::Register, 0).unwrap())
+            .unwrap();
+        for at in [0, NONCE_BYTES, NONCE_BYTES + 1, SEALED_BYTES - 1] {
+            let mut altered = ours.clone();
+            altered[at] ^= if at == NONCE_BYTES { b'r' ^ b'l' } else { 1 };
+            let altered = URL_SAFE_NO_PAD.encode(&altered);
+            assert!(rp.take_challenge(&altered, Purpose::Login, 1).is_err());
+            assert!(rp.take_challenge(&altered, Purpose::Register, 1).is_err());
+        }
+        for junk in ["", "AAAA", "not base64!"] {
+            assert!(rp.take_challenge(junk, Purpose::Login, 1).is_err());
+        }
+        let ours = URL_SAFE_NO_PAD.encode(&ours);
+        assert!(rp.take_challenge(&ours, Purpose::Register, 1).is_ok());
+    }
+
+    /// The answered set forgets a challenge once it has expired: it grows only with
+    /// ceremonies answered inside one [`CHALLENGE_SECONDS`].
+    #[test]
+    fn an_answered_challenge_is_forgotten_once_it_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
+        let c = rp.challenge(Purpose::Login, 0).unwrap();
+        assert!(rp.take_challenge(&c, Purpose::Login, 1).is_ok());
+        assert_eq!(rp.state.lock().unwrap().answered.len(), 1);
+        let d = rp.challenge(Purpose::Login, CHALLENGE_SECONDS).unwrap();
+        assert!(rp
+            .take_challenge(&d, Purpose::Login, CHALLENGE_SECONDS + 1)
+            .is_ok());
+        assert_eq!(rp.state.lock().unwrap().answered.len(), 1);
     }
 }

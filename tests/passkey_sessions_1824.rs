@@ -9,6 +9,7 @@
 //! - [`the_operators_logout_all_reaches_the_running_server_through_the_log`]
 //! - [`sign_ins_and_sign_outs_are_logged_and_a_token_never_is`]
 //! - [`the_logout_command_needs_all_and_leaves_the_passkey_enrolled`]
+//! - [`a_local_process_minting_challenges_cannot_lock_out_sign_in`] (ledger #2804)
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -540,4 +541,27 @@ fn the_logout_command_needs_all_and_leaves_the_passkey_enrolled() {
         "{log}"
     );
     assert_eq!(std::fs::read_to_string(&clients).unwrap(), before);
+}
+
+/// ★ **Minting challenges cannot lock sign-in out** (ledger
+/// [#2804](http://localhost:1062/l/default/item/2804)). A caller with no `Origin` and no
+/// `Sec-Fetch-Site` — any process on this machine — may ask for a challenge (`same_origin`
+/// passes it, on purpose: the CLI and scripts are such callers). Through 44c1d03 the relying
+/// party held every challenge it issued and REFUSED past `identity::MAX_PENDING` (256), so
+/// 256 header-less posts answered the real page's sign-in 503 for five minutes, renewable.
+/// A challenge is now sealed by this server rather than held, so there is no table to fill.
+#[test]
+fn a_local_process_minting_challenges_cannot_lock_out_sign_in() {
+    let server = Server::start();
+    let scopes = grants_for("default", Authority::Write).unwrap();
+    let authenticator = Authenticator::new();
+    for op in ["register-options", "login-options"] {
+        for n in 0..=identity::MAX_PENDING {
+            let minted = server.raw("POST", &format!("/auth/{op}"), &[], "{}");
+            assert_eq!(minted.status, 200, "header-less {op} #{n}: {minted:?}");
+        }
+    }
+    server.enroll(&authenticator, "brian", &scopes);
+    let token = server.login(&authenticator, 1);
+    assert_eq!(server.session_status(&token), 200);
 }

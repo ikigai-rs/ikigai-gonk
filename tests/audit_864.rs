@@ -402,7 +402,8 @@ impl Server {
 // browser on this machine (a `<form method=post action=http://localhost:1060/auth/login-options>`
 // needs no preflight) mints a challenge. `identity::MAX_PENDING` (256) refuses past the bound
 // for CHALLENGE_SECONDS (5 min), so 256 such posts make the real page's own same-origin sign-in
-// fail, renewable every five minutes.
+// fail, renewable every five minutes. (Since ledger #2804 a challenge is sealed rather than held,
+// so no caller can fill a table; this test still pins that a cross-site post mints nothing.)
 // ------------------------------------------------------------------------------------------
 #[test]
 fn r2_a_cross_site_page_cannot_lock_out_passkey_sign_in() {
