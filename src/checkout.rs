@@ -708,6 +708,7 @@ pub fn append_roots(
     roots: &[(String, String)],
     home: &Path,
 ) -> Result<(Vec<ConfigLine>, Option<PathBuf>), String> {
+    let _lock = lock_config(config)?;
     let text = match std::fs::read_to_string(config) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -791,7 +792,17 @@ fn replace_file(config: &Path, text: Option<&str>, new: &str) -> Result<Option<P
         }
         None => None,
     };
-    let staging = sibling(config, "checkout-tmp");
+    // A staging name of its own: a writer that does not hold the lock (`onboard init`) must
+    // not rename another's half-written file, or have its own renamed away.
+    static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let staging = sibling(
+        config,
+        &format!(
+            "checkout-tmp.{}.{}",
+            std::process::id(),
+            STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+    );
     std::fs::write(&staging, new).map_err(|e| format!("writing {}: {e}", staging.display()))?;
     if let Ok(meta) = std::fs::metadata(config) {
         let _ = std::fs::set_permissions(&staging, meta.permissions());
@@ -801,6 +812,28 @@ fn replace_file(config: &Path, text: Option<&str>, new: &str) -> Result<Option<P
         format!("replacing {}: {e}", config.display())
     })?;
     Ok(backup)
+}
+
+/// Hold `config` for one read-decide-write: an exclusive advisory lock on `<file>.lock`
+/// beside it, released when the answer is dropped. A browse-root add and remove read the
+/// file, decide from what they read and rename a new file over it, so two at once (in one
+/// process or two) would each write from the text before the other's line (ledger #2783).
+/// The lock is on a file of its own because the config file itself is replaced by a rename.
+fn lock_config(config: &Path) -> Result<std::fs::File, String> {
+    if let Some(parent) = config.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    let path = sibling(config, "lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    file.lock()
+        .map_err(|e| format!("locking {}: {e}", path.display()))?;
+    Ok(file)
 }
 
 /// Comment out every line of `config` that configures the browse root `name`: its
@@ -814,6 +847,11 @@ fn replace_file(config: &Path, text: Option<&str>, new: &str) -> Result<Option<P
 ///
 /// A file that cannot be read, backed up or written.
 pub fn comment_out_root(config: &Path, name: &str) -> Result<(usize, Option<PathBuf>), String> {
+    // No file, no line to comment out, and nothing (not even a lock file) is created for it.
+    if !config.exists() {
+        return Ok((0, None));
+    }
+    let _lock = lock_config(config)?;
     let text = match std::fs::read_to_string(config) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, None)),
