@@ -779,8 +779,7 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The backup family's two tokens — the only authority in this server that is not scoped to
-/// a ledger, and the reason it is refused as a grant rather than merely never minted.
+/// The owner's administrative tokens, refused as grants rather than merely never minted.
 ///
 /// ★ **These are the airlock.** `urn:cap:gonk:backup` reads EVERY graph (a backup is the
 /// whole dataset in one file, which is precisely the authority the per-graph boundary exists
@@ -795,15 +794,19 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
 /// Brian, 2026-10-22: the controller key lives on plasma only, so an approval never comes from
 /// the passkey door or a QUIC client — the same airlock.
 ///
+/// Browse root administration ([`crate::roots::CAP_ROOTS`]) also belongs only to the owner:
+/// it can mount any existing directory for browsing, outside the roots an operator chose.
+///
 /// ⚠ Refused as a GRANT, not as a requirement. The endpoints declare them and the root
 /// capability on the socket satisfies them, exactly as it satisfies everything else.
-pub const CAP_GONK_ADMIN: [&str; 3] = [
+pub const CAP_GONK_ADMIN: [&str; 4] = [
     crate::backup::CAP_BACKUP,
     crate::backup::CAP_RESTORE,
     crate::onboard::CAP_ADMIN,
+    crate::roots::CAP_ROOTS,
 ];
 
-/// The scopes in `scopes` that are one of the backup family's tokens — asked by
+/// The scopes in `scopes` that are one of the owner's administrative tokens — asked by
 /// `quic::grant_refusal`, and through it by every path that turns a grant into scopes.
 pub fn gonk_admin_scopes(scopes: &[String]) -> Vec<String> {
     scopes

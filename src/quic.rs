@@ -956,8 +956,9 @@ pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String
 /// - the store's broad tokens ([`broad_store_scopes`]): every graph, or `DROP ALL`;
 /// - the offering wildcards (`wildcard_refusal`): every program, or every host;
 /// - a door's markers and an identity's name, which only a door computes;
-/// - the backup family ([`crate::grants::gonk_admin_scopes`]): every graph in one file, and a
-///   store built at a path the caller names. Reachable from the owner-only socket only;
+/// - the owner's administrative tokens ([`crate::grants::gonk_admin_scopes`]): backup,
+///   restore, onboarding, and browse root administration. Reachable from the owner-only
+///   socket only;
 /// - the store's host reserve ([`crate::budget::store_reserve_scopes`], ledger
 ///   [#1600](http://localhost:1062/l/default/item/1600)): the evaluation slots kept for gonk's
 ///   own jobs. A priority, not an authority, but one a caller must never hold.
@@ -1011,8 +1012,9 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
     if !admin.is_empty() {
         return Some(format!(
             "grant `{name}` names {} — the owner's tokens. A backup is every graph in the \
-             dataset in one file, a restore builds a store from bytes the caller supplies, and \
-             onboarding signs entitlements under the controller key; none belongs on a \
+             dataset in one file, a restore builds a store from bytes the caller supplies, \
+             onboarding signs entitlements under the controller key, and browse root \
+             administration can mount any existing directory; none belongs on a \
              certificate or a passkey. They are reachable from the owner-only socket, whose \
              caller can read the dataset's files anyway",
             admin.join(" and ")
