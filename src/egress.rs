@@ -247,3 +247,139 @@ pub fn withheld(title: &str, brief: &str, deny: Option<&DenyList>) -> Option<Wit
     }
     None
 }
+
+/// `text` with every link to an item of a ledger on THIS machine rewritten as words naming the
+/// ledger and number (ledger [#2810](http://localhost:1062/l/default/item/2810)).
+///
+/// Every gonk binds `127.0.0.1:1062` by default, so `http://localhost:1062/l/default/item/403`
+/// in a brief opens the TAKER's default ledger, item 403, on the taker's machine: the wrong item,
+/// looking authoritative. A link whose host is a loopback name (`localhost`, `127.*`, `[::1]`,
+/// `0.0.0.0`) and whose path is `/l/{ledger}/item/{n}` becomes `the offerer's {ledger} ledger
+/// #{n}`; a Markdown link `[label](…)` to one keeps its label, `label (the offerer's …)`, and a
+/// relative `[label](/l/{ledger}/item/{n})` is read the same way. An autolink's `<…>` goes with
+/// it. Every other link is left as it is.
+///
+/// ★ A bare `#403` is not touched: it is as likely a pull request as an item, and the brief
+/// writer's to spell out ("ikigai ledger #403").
+///
+/// ```
+/// use ikigai_gonk::egress::local_links;
+/// assert_eq!(
+///     local_links("See http://localhost:1062/l/default/item/403."),
+///     "See the offerer's default ledger #403."
+/// );
+/// assert_eq!(
+///     local_links("[#12](http://127.0.0.1:1062/l/crew/item/12) and <http://[::1]/l/crew/item/7>"),
+///     "#12 (the offerer's crew ledger #12) and the offerer's crew ledger #7"
+/// );
+/// assert_eq!(
+///     local_links("[the plan](/l/crew/item/9#c3)"),
+///     "the plan (the offerer's crew ledger #9)"
+/// );
+/// // Other hosts, other paths, and bare numbers pass.
+/// let kept = "https://github.com/o/r/pull/3, http://localhost:1062/l/crew, #403";
+/// assert_eq!(local_links(kept), kept);
+/// ```
+pub fn local_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &text[at..];
+        let markdown = out.ends_with("](");
+        let Some((len, words)) = local_link(rest, markdown) else {
+            let c = rest.chars().next().unwrap_or_default();
+            out.push(c);
+            at += c.len_utf8();
+            continue;
+        };
+        let after = &rest[len..];
+        if markdown && after.starts_with(')') {
+            // `[label](link)` → `label (words)`; the label is everything since its `[`.
+            out.truncate(out.len() - 2);
+            let open = out.rfind('[').unwrap_or(out.len());
+            let label = out[open..].trim_start_matches('[').to_string();
+            out.truncate(open);
+            out.push_str(&format!("{label} ({words})"));
+            at += len + 1;
+        } else if out.ends_with('<') && after.starts_with('>') {
+            out.pop();
+            out.push_str(&words);
+            at += len + 1;
+        } else {
+            out.push_str(&words);
+            at += len;
+        }
+    }
+    out
+}
+
+/// A local ledger link at the start of `text`: its length, and the words that replace it. A
+/// relative `/l/…` link counts only as a Markdown link's target (`relative`).
+fn local_link(text: &str, relative: bool) -> Option<(usize, String)> {
+    let path = if relative && text.starts_with("/l/") {
+        0
+    } else {
+        let after_scheme = text
+            .strip_prefix("http://")
+            .or_else(|| text.strip_prefix("https://"))?;
+        let scheme = text.len() - after_scheme.len();
+        let host_len = after_scheme
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(after_scheme.len());
+        if !loopback(&after_scheme[..host_len]) {
+            return None;
+        }
+        scheme + host_len
+    };
+    let tail = text[path..].strip_prefix("/l/")?;
+    let ledger_len = tail.find('/')?;
+    let ledger = &tail[..ledger_len];
+    if ledger.is_empty() || !ledger.bytes().all(ledger_byte) {
+        return None;
+    }
+    let number_part = tail[ledger_len..].strip_prefix("/item/")?;
+    let digits = number_part.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let number = &number_part[..digits];
+    // A fragment, query or trailing slash belongs to the link too.
+    let end = number_part[digits..]
+        .find(|c: char| c.is_whitespace() || "()<>[]\"'`".contains(c))
+        .unwrap_or(number_part.len() - digits);
+    let mut extra = &number_part[digits..digits + end];
+    // Sentence punctuation after the link is the sentence's.
+    while extra.ends_with(['.', ',', ';', ':', '!']) {
+        extra = &extra[..extra.len() - 1];
+    }
+    if !matches!(extra.chars().next(), None | Some('#' | '?' | '/')) {
+        return None;
+    }
+    let len = text.len() - number_part.len() + digits + extra.len();
+    Some((len, format!("the offerer's {ledger} ledger #{number}")))
+}
+
+/// A byte a ledger's path segment may hold (percent-encoded names included).
+fn ledger_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"-_.%~".contains(&b)
+}
+
+/// Whether `authority` (`host[:port]`) names this machine.
+fn loopback(authority: &str) -> bool {
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((host, port)) if port.is_empty() || port.starts_with(':') => host,
+            _ => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "::1"
+        || host == "0.0.0.0"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}

@@ -2857,3 +2857,37 @@ fn a_hand_back_on_a_superseded_offer_is_only_a_comment() {
         assert!(w.item(n)["awaiting"].is_null());
     }
 }
+
+/// Ledger #2810: every gonk binds `127.0.0.1:1062` by default, so a link to one of OUR items in
+/// a brief opens the TAKER's item of that number on their machine. No local ledger link crosses;
+/// each becomes words naming our ledger and number.
+#[test]
+fn a_local_ledger_link_in_a_brief_does_not_cross() {
+    let w = World::new();
+    let mirror = w.mirror();
+    w.file(
+        "Linked\n\nSee http://localhost:1062/l/default/item/403 and \
+         [#12](http://127.0.0.1:1062/l/crew/item/12), and the page \
+         <http://[::1]:1060/l/default/item/7>. Keep https://github.com/ikigai-rs/ikigai-gonk.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let tuple = w.tuple(&offer);
+    for leak in [
+        "localhost",
+        "127.0.0.1",
+        "[::1]",
+        "/l/default/item",
+        "/l/crew/item",
+    ] {
+        assert!(!tuple.contains(leak), "{leak} crossed:\n{tuple}");
+    }
+    for words in [
+        "the offerer's default ledger #403",
+        "#12 (the offerer's crew ledger #12)",
+        "the offerer's default ledger #7",
+        "https://github.com/ikigai-rs/ikigai-gonk",
+    ] {
+        assert!(tuple.contains(words), "no {words:?} in:\n{tuple}");
+    }
+}

@@ -676,7 +676,8 @@ impl Mirror {
     }
 
     /// The offer for `item`: the fixed CONSTRUCT, then the content gate ([`crate::egress`]) on
-    /// the title and brief it would publish, then `urn:jsonld:prune` against the layer's
+    /// the title and brief it would publish, then its local ledger links rewritten as words
+    /// ([`crate::egress::local_links`]), then `urn:jsonld:prune` against the layer's
     /// context, refused when prune dropped anything. Answers the JSON-LD the layer is sent.
     ///
     /// # Errors
@@ -722,6 +723,7 @@ impl Mirror {
         if let Some(w) = crate::egress::withheld(&title, &brief, self.binding.deny.as_deref()) {
             return Err(Refusal::Withheld(w));
         }
+        let triples = without_local_links(triples);
         let expanded = expanded_json_ld(&triples);
         Ok(prune_strict(&self.prune, &expanded, context)?)
     }
@@ -1854,6 +1856,33 @@ fn receipts(triples: &[(String, String, Term)]) -> BTreeMap<String, Taken> {
 }
 
 /// `triples` as an expanded JSON-LD document, one node object per subject.
+/// `triples` with every literal's local ledger links rewritten as words
+/// ([`crate::egress::local_links`], ledger #2810): a link to one of our items would open the
+/// taker's item of that number on the taker's machine.
+fn without_local_links(triples: Vec<(String, String, Term)>) -> Vec<(String, String, Term)> {
+    triples
+        .into_iter()
+        .map(|(s, p, o)| {
+            let o = match o {
+                Term::Literal(l) => {
+                    let value = crate::egress::local_links(l.value());
+                    let literal = match l.language() {
+                        Some(lang) => {
+                            oxigraph::model::Literal::new_language_tagged_literal_unchecked(
+                                value, lang,
+                            )
+                        }
+                        None => oxigraph::model::Literal::new_typed_literal(value, l.datatype()),
+                    };
+                    Term::Literal(literal)
+                }
+                other => other,
+            };
+            (s, p, o)
+        })
+        .collect()
+}
+
 fn expanded_json_ld(triples: &[(String, String, Term)]) -> Vec<u8> {
     let mut nodes: BTreeMap<&str, serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
     for (s, p, o) in triples {
