@@ -390,10 +390,8 @@ fn a_dry_run_reads_the_ledger_and_writes_nothing() {
 /// import whose `items?about=` check landed before the first append filed the issue again. The
 /// keyed append is one store update, so the issue is one item however many imports race.
 ///
-/// The export is issues only, open, with no comments or links: comments, closes and links are
-/// converged by reading the item and then writing, which is still check-then-act (the ledger
-/// has no keyed comment), so two imports racing on a NEW comment can both add it. The README
-/// says so.
+/// This export isolates issue filing. The in-flight regression below also races comments
+/// against both a newly filed item and an item imported earlier.
 #[test]
 fn concurrent_imports_of_one_issue_file_it_once() {
     const IMPORTS: usize = 8;
@@ -471,4 +469,122 @@ fn the_default_ledger_is_keyed_the_same_way() {
     );
     let dry = stdout(&dry_run(&gonk, "default", Path::new(FIXTURE)));
     assert!(dry.contains("0 would be filed, 3 already there"), "{dry}");
+}
+
+fn concurrent_import(gonk: &Served, path: &Path) -> Vec<String> {
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let imports: Vec<_> = (0..8)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let mut command = gonk.command();
+            command
+                .args(["kata", "import"])
+                .arg(path)
+                .args(gonk.flags())
+                .args(["--ledger", "kata"]);
+            std::thread::spawn(move || {
+                barrier.wait();
+                command.output().unwrap()
+            })
+        })
+        .collect();
+    imports
+        .into_iter()
+        .map(|import| stdout(&import.join().unwrap()))
+        .collect()
+}
+
+#[test]
+fn concurrent_imports_preserve_in_flight_work_and_comments() {
+    let (hub, gonk) = serve("kata");
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("flight.jsonl");
+    let export = r#"{"kind":"meta","data":{"key":"export_version","value":"27"}}
+{"kind":"issue","data":{"id":1,"uid":"flight","short_id":"1","title":"In flight","status":"open","owner":"agent-7","author":"chris","created_at":"2026-10-01T00:00:00Z","metadata":{"work.branch":"ship/1","work.pr":42}}}
+{"kind":"issue_label","data":{"issue_id":1,"label":"lifecycle:resolving"}}
+{"kind":"comment","data":{"uid":"flight-comment","issue_id":1,"author":"chris","body":"Working","created_at":"2026-10-01T00:00:00Z"}}
+"#;
+    std::fs::write(&path, export).unwrap();
+    let preview = stdout(&dry_run(&gonk, "kata", &path));
+    assert!(preview.contains("would claimed"), "{preview}");
+    assert!(preview.contains("would state"), "{preview}");
+    assert_eq!(every_item(&hub, "kata"), "");
+    let outputs = concurrent_import(&gonk, &path);
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|o| o.contains("1 comment(s)"))
+            .count(),
+        1
+    );
+    let item: serde_json::Value = serde_json::from_str(&source(
+        &hub,
+        "urn:iki:ledger:kata:item:key:urn:kata:issue:flight",
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    let item = &item["item"];
+    assert_eq!(item["state"], "resolving", "{item:#}");
+    assert_eq!(item["claim"]["holder"], "agent-7");
+    assert_eq!(item["comments"].as_array().unwrap().len(), 1);
+    assert!(item["body"].as_str().unwrap().contains("work.branch"));
+    assert!(item["body"].as_str().unwrap().contains("ship/1"));
+    assert!(!item["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l == "lifecycle:resolving"));
+    // A later export races on a NEW comment against an already initialized item too.
+    let later = format!(
+        "{export}{}\n",
+        r#"{"kind":"comment","data":{"uid":"later-comment","issue_id":1,"author":"chris","body":"Ready for review","created_at":"2026-10-02T00:00:00Z"}}"#
+    );
+    std::fs::write(&path, later).unwrap();
+    let outputs = concurrent_import(&gonk, &path);
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|o| o.contains("1 comment(s)"))
+            .count(),
+        1
+    );
+    let doc: serde_json::Value = serde_json::from_str(&source(
+        &hub,
+        "urn:iki:ledger:kata:item:key:urn:kata:issue:flight",
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    assert_eq!(doc["item"]["comments"].as_array().unwrap().len(), 2);
+    let before = every_item(&hub, "kata");
+    stdout(&import(&gonk, "kata", &path));
+    assert_eq!(every_item(&hub, "kata"), before);
+    let next = source(
+        &hub,
+        "urn:iki:ledger:kata:next",
+        &[("as", "application/json")],
+    );
+    let next: serde_json::Value = serde_json::from_str(&next).unwrap();
+    assert_eq!(next["ready"], 0, "{next:#}");
+
+    // A reimport must respect progress and a close made in this ledger.
+    let write = |target: &str, args: &[(&str, &str)]| {
+        let request = args.iter().fold(
+            Request::new(Verb::Sink, Iri::parse(target).unwrap()),
+            |request, (name, value)| {
+                request.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec()))
+            },
+        );
+        block_on(Kernel::issue(&hub, request, &Capability::root())).unwrap();
+    };
+    write(
+        "urn:iki:ledger:kata:item:1:state",
+        &[("from", "resolving"), ("to", "refining")],
+    );
+    let progressed = every_item(&hub, "kata");
+    stdout(&import(&gonk, "kata", &path));
+    assert_eq!(every_item(&hub, "kata"), progressed);
+    write("urn:iki:ledger:kata:close", &[("item", "1")]);
+    let closed = every_item(&hub, "kata");
+    stdout(&import(&gonk, "kata", &path));
+    assert_eq!(every_item(&hub, "kata"), closed);
 }

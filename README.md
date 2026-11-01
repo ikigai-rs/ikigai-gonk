@@ -1450,8 +1450,11 @@ only reads now, so an import answered `403` (ledger #2075); `--gonk` is now refu
 | `body` | the body, followed by a provenance line: `Imported from kata <project>#<short_id> (<uid>), filed <created_at> by <author>; owner <owner>.` |
 | `author` | `author` over the socket (over `--quic`, the client is the author, and kata's author is in the provenance line) |
 | `priority` 0–4 (absent = unset) | `priority` 0–4, the same scale (absent = unset) |
-| labels | `labels` |
-| comments | `comment`, with the comment's author over the socket, ending `(kata comment <uid>, <created_at> by <author>, for <teammate>)` |
+| `lifecycle:*` labels | the corresponding kata-flight state; unknown or conflicting states refuse the export before any write |
+| other labels | `labels` |
+| `owner` | a free-text claim over the owner-only socket; over QUIC, a claim only when the owner names the importing certificate principal; otherwise a `kata:owner:<owner>` marker label (percent-encoded) and deferred until reconciled |
+| `metadata` keys `work.*` (or the `work` object) | preserved as JSON in the imported body |
+| comments | `comment key=urn:kata:comment:<uid>`, with the comment's author over the socket, ending `(kata comment <uid>, <created_at> by <author>, for <teammate>)` |
 | `status` closed, `closed_reason` | `close` with the same reason (`done`, `wontfix`, `duplicate`, `superseded`, `audit-no-change`), and `Closed in kata at <closed_at>.` as its note |
 | links `parent`, `blocks`, `related` | `link` with the same type, same direction (`parent` from the child, `blocks` from the prerequisite), made after every issue has an item |
 | `uid` | `key urn:kata:issue:<uid>`, the idempotence key, and the same IRI as an `about` |
@@ -1462,9 +1465,8 @@ kata has no item kind, so none is filed.
 **What is lost.** The ledger stamps its own filed time and mints its own number, so kata's
 `created_at`, `short_id` and `uid` survive only as the text above; a faithful import that keeps
 them as data is ledger [#774](http://localhost:1060/l/default/item/774). Not carried at all:
-`owner` as a claim (it is in the provenance line), `updated_at`, `metadata`, assignment
-expiry, recurrences, who added a label or a link and when, kata's event history, and every
-other export kind (sync bindings, federation state, claims, purge logs), which are counted
+`updated_at`, non-work `metadata`, assignment expiry, recurrences, who added a label or a link
+and when, kata's event history, and every other export kind (sync bindings, federation state, claims, purge logs), which are counted
 on the last line instead.
 
 **Running it again, or twice at once.** Each issue is ONE keyed append: the ledger checks the
@@ -1472,14 +1474,20 @@ key and files in the same store update, so an issue already there is not filed a
 imports of one export at the same instant file each issue once (eight concurrent imports, one
 item: `tests/kata.rs`). The run then reads the item by its key (`item:key:urn:kata:issue:<uid>`,
 in the ledger's JSON face) and CONVERGES on it, addressing every write `item=key:…`: a comment
-whose `kata comment <uid>` marker is in none of its comments is added, an issue closed in kata
-whose item is open is closed, and a link the item does not carry is made. So the same export
+whose `kata comment <uid>` marker is in none of its comments is added with
+`key=urn:kata:comment:<uid>`, an issue closed in kata whose item is open is closed, and a link the item does not carry is made. So the same export
 imported twice changes nothing, and a later export adds the comments, closes and links that
 are new. An issue whose item was deleted in the ledger is left alone (`deleted … left alone`):
 its tombstone keeps the key, and an import does not undo a deletion. ⚠ An issue's title, body,
 labels and priority are written once, when it is filed; a later edit in kata does not reach the
-item. And only the FILING is atomic: the convergence reads the item and then writes, and the
-ledger has no keyed comment, so two imports racing on the same new comment can both add it.
+item. Work metadata is also written once, as JSON in the body; the importer does not guess
+ledger fields for those source keys. State restoration moves only from `filed`, leaving a
+state advanced locally or an item closed locally alone. Imported claims have no lease, since the importer cannot renew
+the source worker's assignment. Unmatched owners remain deferred for an operator to reconcile.
+Both filing and each keyed comment are atomic: concurrent imports leave one item and one copy
+of each comment. Legacy unkeyed comments are recognized by their provenance markers. Claims,
+state, closes and links are separate writes, so the whole import is not a transaction; a
+rerun completes an interrupted import.
 Items imported before the keyed append carry the key only as an `about`;
 [backfill their keys](#upgrading-the-bridges-backfill-the-keys) once, or the next import files
 them again.
