@@ -1341,13 +1341,16 @@ fn layer_take(offer: &str, flags: &config::Flags) {
     };
     match ikigai_gonk::taker::take(binding, door, &ledger, offer) {
         Ok(ikigai_gonk::taker::Took::Filed(n)) => {
-            println!("took <{offer}>; filed as {}", filed(n))
-        }
-        Ok(ikigai_gonk::taker::Took::Already(n)) => {
             println!(
-                "<{offer}> is already taken by this server; filed as {}",
+                "took <{offer}>; filed as {}; claim this local item before working",
                 filed(n)
             )
+        }
+        Ok(ikigai_gonk::taker::Took::Already(n)) => {
+            fail(&format!(
+                "<{offer}> is already taken by this server; filed as {}; claim this local item before working",
+                filed(n)
+            ))
         }
         Err(e) => fail(&e),
     }
