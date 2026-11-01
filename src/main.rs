@@ -1328,13 +1328,8 @@ fn layer_take(offer: &str, flags: &config::Flags) {
             ))
         }));
     let ledger_client = Arc::clone(&client);
-    let ledger: ikigai_gonk::taker::LedgerIssue = Arc::new(move |request| {
-        let target = request.target.to_string();
-        ledger_client
-            .issue(request)
-            .map(|(r, _)| r.bytes)
-            .map_err(|e| format!("{target}: {e}"))
-    });
+    let ledger: ikigai_gonk::taker::LedgerIssue =
+        Arc::new(move |request| ledger_client.issue(request).map(|(r, _)| r.bytes));
     let door = Arc::new(ikigai_gonk::taker::ResolverDoor(client));
     // The item named in its own ledger, with the page that shows it (ledger #1856).
     let filed = |n: i64| match ikigai_ledger::Ledger::parse(&binding.ledger) {

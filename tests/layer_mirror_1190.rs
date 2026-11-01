@@ -977,6 +977,14 @@ impl World {
 
     /// Their side through `door` instead of their own plain one.
     fn theirs_through(&self, door: Arc<dyn Door>) -> Theirs {
+        self.theirs_adapting(door, |_, _, ledger| ledger)
+    }
+
+    fn theirs_adapting(
+        &self,
+        door: Arc<dyn Door>,
+        adapt: impl FnOnce(&Binding, &Arc<Kernel>, taker::LedgerIssue) -> taker::LedgerIssue,
+    ) -> Theirs {
         let certs = tempfile::tempdir().unwrap();
         let line = format!(
             "{LAYER} take quic://127.0.0.1:1 {} ledger=ikigai",
@@ -985,6 +993,7 @@ impl World {
         let binding = layer::parse(&line, std::path::Path::new("/nowhere")).unwrap();
         let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
         let ledger = taker::hub_ledger(&binding, Arc::clone(&hub)).unwrap();
+        let ledger = adapt(&binding, &hub, ledger);
         let taker = Taker::new(binding, door, ledger).unwrap();
         Theirs { hub, taker }
     }
@@ -2158,11 +2167,9 @@ impl World {
     }
 }
 
-/// ★ Ledger #1742: a torn listing held the item it repeated twice, so a pass reported on it
-/// twice. Now a pass on a torn listing reports nothing and says why; the next pass, on a whole
-/// listing, reports once.
+/// Ledger #2806: writes that would tear a whole-ledger listing no longer defer reports.
 #[test]
-fn a_pass_on_a_torn_listing_reports_nothing_and_the_next_reports_once() {
+fn a_pass_ignores_a_torn_whole_ledger_listing() {
     let w = World::new();
     let mirror = w.mirror();
     w.file(
@@ -2174,31 +2181,18 @@ fn a_pass_on_a_torn_listing_reports_nothing_and_the_next_reports_once() {
     assert!(matches!(theirs.taker.take(&offer).unwrap(), Took::Filed(_)));
 
     tear.store(true, Ordering::SeqCst);
-    let report = theirs.taker.pass().unwrap();
-    let progress = report
-        .actions
-        .iter()
-        .filter(|a| a.starts_with("reported Progress"))
-        .count();
-    assert_eq!(
-        progress, 0,
-        "reported on a torn listing: {:?}",
-        report.actions
-    );
-    assert!(
-        report.problems.iter().any(|p| p.contains("torn")),
-        "{:?}",
-        report.problems
-    );
-
-    tear.store(false, Ordering::SeqCst);
     assert_eq!(theirs.reported("Progress"), 1);
+    assert_eq!(
+        theirs.reported("Progress"),
+        0,
+        "reports are still idempotent"
+    );
 }
 
-/// ★ Ledger #1742: a torn listing may be missing the item a take would find, and a take is not
-/// undone, so a take on one refuses and takes nothing; run again on a whole listing, it files.
+/// Ledger #2806: an unrelated write cannot make the offer's key lookup incomplete.
+/// This expectation failed before the fix with "listing was torn ... nothing was taken".
 #[test]
-fn a_take_on_a_torn_listing_takes_nothing() {
+fn a_take_ignores_a_torn_whole_ledger_listing() {
     let w = World::new();
     let mirror = w.mirror();
     w.file(
@@ -2209,17 +2203,190 @@ fn a_take_on_a_torn_listing_takes_nothing() {
     let (theirs, tear) = w.theirs_tearing();
 
     tear.store(true, Ordering::SeqCst);
-    let e = theirs.taker.take(&offer).unwrap_err();
-    assert!(e.contains("torn") && e.contains("nothing was taken"), "{e}");
-    assert!(w.pending().contains(&offer), "the offer was taken");
+    let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
+        panic!("a write during the lookup must not block the take")
+    };
+    assert_eq!(theirs.taker.take(&offer).unwrap(), Took::Already(local));
+}
 
-    tear.store(false, Ordering::SeqCst);
+/// An actual append lands after the key read and before the take. A missed concurrent filing
+/// is safe too: append key= is atomic, and the receipt recovers a lost layer reply.
+#[test]
+fn a_write_during_a_take_still_files_the_offer_once() {
+    let w = World::new();
+    let mirror = w.mirror();
+    w.file(
+        "Port the importer\n\nThe importer reads the old format.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let wrote = Arc::new(AtomicBool::new(false));
+    let written = Arc::clone(&wrote);
+    let theirs = w.theirs_adapting(Arc::new(w.door(&them())), move |_, _, real| {
+        Arc::new(move |request: Request| {
+            let lookup = request.target.as_str().contains(":item:key:");
+            let answer = real(request);
+            if lookup && !written.swap(true, Ordering::SeqCst) {
+                real(
+                    Request::new(
+                        Verb::Sink,
+                        Iri::parse("urn:iki:ledger:ikigai:append").unwrap(),
+                    )
+                    .with_arg("content", ArgRef::Inline(b"Unrelated local write".to_vec())),
+                )
+                .unwrap();
+            }
+            answer
+        })
+    });
+    let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
+        panic!("the offer was not filed")
+    };
+    assert!(
+        wrote.load(Ordering::SeqCst),
+        "no write landed during the take"
+    );
+    assert_eq!(local, 2, "the unrelated write landed before filing");
+    assert_eq!(theirs.item(1)["title"], "Unrelated local write");
+    assert_eq!(theirs.taker.take(&offer).unwrap(), Took::Already(local));
+    assert_eq!(theirs.reported("Progress"), 1);
+}
+
+/// Only a typed NotFound allows a take to proceed. Lookup failures leave the offer pending.
+#[test]
+fn a_failed_key_lookup_never_takes_the_offer() {
+    for failure in ["denied", "unavailable", "malformed"] {
+        let w = World::new();
+        let mirror = w.mirror();
+        w.file(
+            "Port the importer\n\nThe importer reads the old format.",
+            &[],
+        );
+        let offer = offered(&pass(&mirror));
+        let theirs = w.theirs_adapting(Arc::new(w.door(&them())), move |_, _, real| {
+            Arc::new(move |request: Request| {
+                if request.target.as_str().contains(":item:key:") {
+                    return match failure {
+                        "denied" => Err(Error::Denied("lookup denied".into())),
+                        "unavailable" => Err(Error::Endpoint("lookup unavailable".into())),
+                        _ => Ok(b"not JSON".to_vec()),
+                    };
+                }
+                real(request)
+            })
+        });
+        let error = theirs.taker.take(&offer).unwrap_err();
+        assert!(
+            error.contains(match failure {
+                "denied" => "lookup denied",
+                "unavailable" => "lookup unavailable",
+                _ => "not its JSON document",
+            }),
+            "{error}"
+        );
+        assert!(w.pending().contains(&offer), "{failure} consumed the offer");
+    }
+}
+
+/// Past the old 100 × 500 page ceiling, only this binding's item and its comments are read.
+/// Other-layer keys and unkeyed local work do not enter the reporting pass at all.
+#[test]
+fn a_pass_over_fifty_thousand_unrelated_items_reads_only_its_keys() {
+    let w = World::new();
+    let mirror = w.mirror();
+    w.file(
+        "Port the importer\n\nThe importer reads the old format.",
+        &[],
+    );
+    let offer = offered(&pass(&mirror));
+    let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = Arc::clone(&reads);
+    let theirs = w.theirs_adapting(Arc::new(w.door(&them())), move |_, _, real| {
+        Arc::new(move |request: Request| {
+            if request.verb == Verb::Source {
+                assert!(
+                    !request.target.as_str().ends_with(":items"),
+                    "whole-ledger listing"
+                );
+                observed.lock().unwrap().push(request.target.to_string());
+            }
+            real(request)
+        })
+    });
     let Took::Filed(local) = theirs.taker.take(&offer).unwrap() else {
         panic!("not filed")
     };
-    // Filed, a torn listing still finds it: its items are real.
-    tear.store(true, Ordering::SeqCst);
-    assert_eq!(theirs.taker.take(&offer).unwrap(), Took::Already(local));
+    let seed: serde_json::Value = serde_json::from_str(
+        &theirs
+            .gonk(
+                Verb::Sink,
+                "append",
+                &[
+                    ("content", "Unrelated work"),
+                    ("key", "layer:other:offer:1"),
+                    ("as", "application/json"),
+                ],
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let seed = seed["item"]["iri"].as_str().unwrap();
+    let graph = ikigai_ledger::Ledger::parse("ikigai")
+        .unwrap()
+        .graph()
+        .to_string();
+    // Clone real ledger data in batches, omitting its key and replacing its number.
+    for start in (3..50_003).step_by(1000) {
+        let values = (start..start + 1000)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let query = format!(
+            "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#> \
+             INSERT {{ GRAPH <{graph}> {{ ?copy ?p ?o ; ledger:number ?n }} }} \
+             WHERE {{ GRAPH <{graph}> {{ <{seed}> ?p ?o . \
+             FILTER(?p != ledger:number && ?p != ledger:key) }} \
+             VALUES ?n {{ {values} }} BIND(IRI(CONCAT(\"urn:fixture:item:\", STR(?n))) AS ?copy) }}"
+        );
+        Resolver::issue(
+            &*theirs.hub,
+            Request::new(
+                Verb::Sink,
+                Iri::parse("urn:iki:store:graph-update").unwrap(),
+            )
+            .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec()))
+            .with_arg("content", ArgRef::Inline(query.into_bytes())),
+        )
+        .unwrap();
+    }
+    let count: serde_json::Value = serde_json::from_str(
+        &theirs
+            .gonk(
+                Verb::Source,
+                "count",
+                &[("status", "all"), ("as", "application/json")],
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(count["total"], 50_002);
+    reads.lock().unwrap().clear();
+    assert_eq!(theirs.reported("Progress"), 1);
+    let reads = reads.lock().unwrap();
+    assert_eq!(
+        reads.len(),
+        2,
+        "one key SELECT and one item read: {reads:?}"
+    );
+    assert_eq!(reads[0], "urn:iki:store:graph-select");
+    assert_eq!(
+        reads[1],
+        format!(
+            "urn:iki:ledger:ikigai:item:key:{}",
+            taker::filed_key(LAYER, &offer)
+        )
+    );
+    assert_eq!(theirs.item(local)["title"], "Port the importer");
 }
 
 /// Ledger #2797: a hand-back that arrives after its item closed. The ledger refuses
