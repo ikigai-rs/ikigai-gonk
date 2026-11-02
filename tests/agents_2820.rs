@@ -824,8 +824,11 @@ fn a_load_between_writes_asks_the_store_nothing() {
     let names: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
     let reader = Capability::scoped(grants_for_all(&names, Authority::Read).unwrap());
 
-    // A window turns over with the minute, so a pair of loads across one is taken again.
-    let settled = || loop {
+    // A write to `ledger`, then a load and the load after it. A window turns over with the minute,
+    // so a pair across one is taken again, after a write of its own: the retry's first load has to
+    // be cold as well.
+    let after_a_write = |ledger: &str| loop {
+        server.file(ledger, "sample item");
         let (cold, began, _) = one_load(&server, &reader);
         let (warm, _, ended) = one_load(&server, &reader);
         if began == ended {
@@ -834,13 +837,12 @@ fn a_load_between_writes_asks_the_store_nothing() {
     };
     // Per ledger: the chart's counts, its agents, and seven questions per agent.
     let every = NAMES.len() * (1 + 1 + 7 * AGENTS);
-    let (cold, warm) = settled();
-    assert_eq!(cold, every, "cold");
-    assert_eq!(warm, 0, "between writes");
-
-    // ⚠ A write to one ledger: every ledger's answers are asked again.
-    server.file("alpha", "sample item");
-    let (cold, warm) = settled();
-    assert_eq!(cold, every, "after a write");
-    assert_eq!(warm, 0, "and between writes again");
+    // ⚠ A write to one ledger: every ledger's answers are asked again, and then not until the next.
+    for ledger in NAMES {
+        assert_eq!(
+            after_a_write(ledger),
+            (every, 0),
+            "after a write to {ledger}"
+        );
+    }
 }
