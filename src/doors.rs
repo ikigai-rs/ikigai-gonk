@@ -1202,6 +1202,8 @@ fn routes() -> Vec<Route> {
         route("/", "urn:iki:gonk:page:home"),
         // Ledger #1888: every readable ledger, the header menu's "All ledgers".
         route(crate::web::LEDGERS_PATH, crate::web::LEDGERS_IRI),
+        // Ledger #2542: a chart per readable ledger.
+        route(crate::dashboard::PAGE_PATH, crate::dashboard::PAGE_IRI),
         route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
         route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
         // Ledger #775: the doctor, read-only (`web::DoctorView`).
@@ -1290,9 +1292,10 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 19] = [
+pub const GONK_PATHS: [&str; 20] = [
     "/",
     "/l",
+    crate::dashboard::PAGE_PATH,
     "/act",
     "/sparql",
     "/render-rules",

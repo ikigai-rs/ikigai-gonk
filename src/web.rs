@@ -3,6 +3,7 @@
 //! ```text
 //! /                          urn:iki:gonk:page:home                 Source  the first readable ledger
 //! /l                         urn:iki:gonk:page:ledgers              Source  every readable ledger, counted
+//! /dashboard                 urn:iki:gonk:page:dashboard            Source  a chart per readable ledger
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
@@ -97,6 +98,9 @@ const TOTAL_FACE: &str = "application/json";
 /// The listing shell's slot for its rows — see [`render::chunk`].
 const ITEMS_SLOT: &str = "items";
 
+/// The listing shell's slot for its chart ([`crate::dashboard`]).
+const CHART_SLOT: &str = "chart";
+
 /// What the HTML face is built from.
 pub struct Web {
     /// The hub — for `describe()` in `Act`. Every REQUEST goes through the invocation.
@@ -161,6 +165,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         .bind(
             Exact::new(LEDGERS_IRI),
             LedgersIndex {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            Exact::new(crate::dashboard::PAGE_IRI),
+            crate::dashboard::DashboardPage {
                 web: Arc::clone(&web),
             },
         )
@@ -430,6 +440,11 @@ pub(crate) fn nav_on_views(web: &Web, capability: &Capability, ledgers: &[Ledger
     nav_with(web, capability, ledgers, Here::Views, None)
 }
 
+/// [`nav`] on the Dashboard, whose header link carries `aria-current`.
+pub(crate) fn nav_on_dashboard(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
+    nav_with(web, capability, ledgers, Here::Dashboard, None)
+}
+
 /// Where in the ledgers a page is, for the header's menu: one ledger's page (its link carries
 /// `aria-current`), the `/l` index (its "All ledgers" link does), or anywhere else.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -438,6 +453,8 @@ enum Here<'a> {
     Index,
     /// The Views page: not in the ledgers, but its header link is the current page's.
     Views,
+    /// The Dashboard: over the ledgers, and its header link is the current page's.
+    Dashboard,
     Elsewhere,
 }
 
@@ -462,6 +479,15 @@ fn nav_with(
     // per ledger used to be. The `view:ledger` elements below stay for the SPARQL page's
     // `<select>`, which is a form value and keeps its own order.
     let mut out = ledger_menu(ledgers, here);
+    // ★ The Dashboard (ledger #2542), on the browse rule: a chart per readable ledger, so it is
+    // offered to a caller who reads one.
+    if !ledgers.is_empty() {
+        let mut attributes = vec![("href", crate::dashboard::PAGE_PATH)];
+        if here == Here::Dashboard {
+            attributes.push(("current", "true"));
+        }
+        out.push_str(&element("dashboard-link", &attributes, ""));
+    }
     out += &ledgers
         .iter()
         .map(|l| {
@@ -684,7 +710,7 @@ fn ledger_menu(ledgers: &[Ledger], here: Here<'_>) -> String {
 }
 
 /// The picker's order, and the `/l` index's: `default` first, then by name.
-fn menu_order(ledgers: &[Ledger]) -> Vec<&Ledger> {
+pub(crate) fn menu_order(ledgers: &[Ledger]) -> Vec<&Ledger> {
     let mut ordered: Vec<&Ledger> = ledgers.iter().collect();
     ordered.sort_by(|a, b| {
         b.is_default()
@@ -703,7 +729,7 @@ fn menu_order(ledgers: &[Ledger]) -> Vec<&Ledger> {
 /// ```text
 /// /l/default · /l/default/items · /l/default/item/12 · /l/default/doctor
 /// ```
-fn ledger_href(ledger: &Ledger) -> String {
+pub(crate) fn ledger_href(ledger: &Ledger) -> String {
     format!("/l/{}", ikigai_fn::html::url_segment(ledger.name()))
 }
 
@@ -1272,18 +1298,18 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
 }
 
 /// Issue `request` and return its bytes.
-async fn fetch(inv: &Invocation<'_>, request: Request) -> Result<Vec<u8>> {
+pub(crate) async fn fetch(inv: &Invocation<'_>, request: Request) -> Result<Vec<u8>> {
     Ok(inv.issue(request).await?.bytes)
 }
 
-fn request(verb: Verb, iri: &str) -> Result<Request> {
+pub(crate) fn request(verb: Verb, iri: &str) -> Result<Request> {
     Ok(Request::new(
         verb,
         Iri::parse(iri).map_err(|e| Error::Endpoint(format!("`{iri}`: {e}")))?,
     ))
 }
 
-fn with(request: Request, name: &str, value: &str) -> Request {
+pub(crate) fn with(request: Request, name: &str, value: &str) -> Request {
     request.with_arg(name, ArgRef::Inline(value.as_bytes().to_vec()))
 }
 
@@ -1390,6 +1416,13 @@ async fn ledger_listing(
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
+    // The chart over the list (ledger #2542): one more cached read and one more keyed render.
+    children.push_str(&render::slot(CHART_SLOT));
+    let lines = crate::dashboard::Lines::for_status(status);
+    let chart: Vec<_> = crate::dashboard::chart_chunk(inv, ledger, lines, None)
+        .await
+        .into_iter()
+        .collect();
     // ★ The rows go into the shell's slot in chunks of `render::CHUNK_ROWS` items (ledger
     // #443, #519): each window is its own RDF/XML document in the listing's order, so the
     // stylesheet's per-chunk `xsl:sort` and this order agree, and the spliced page is the
@@ -1465,8 +1498,16 @@ async fn ledger_listing(
     );
     let shell = render::render(&doc, full).map_err(render_err)?;
     let items = render::rendered_chunks(inv, &chunks).await?;
+    let chart = crate::dashboard::drawn_charts(inv, chart).await?;
     Ok(html(
-        render::splice(shell, &[(ITEMS_SLOT.to_string(), items)]).map_err(render_err)?,
+        render::splice(
+            shell,
+            &[
+                (CHART_SLOT.to_string(), chart),
+                (ITEMS_SLOT.to_string(), items),
+            ],
+        )
+        .map_err(render_err)?,
     ))
 }
 

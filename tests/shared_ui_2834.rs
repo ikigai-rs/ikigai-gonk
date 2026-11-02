@@ -31,9 +31,10 @@ const XSL: &str = include_str!("../web/gonk.xsl");
 
 /// Pages every caller can open. A refusal's page is held to the same files and the same chooser by
 /// `tests/styled_refusal_2021.rs::is_gonk_shell`.
-const PAGES: [(&str, u16); 5] = [
+const PAGES: [(&str, u16); 6] = [
     ("/", 200),
     ("/l", 200),
+    ("/dashboard", 200),
     ("/l/default", 200),
     ("/sparql", 200),
     ("/queue", 200),

@@ -515,7 +515,8 @@ there.
 | --- | --- | --- |
 | `/` | `urn:iki:gonk:page:home` | the first readable ledger |
 | `/l` | `urn:iki:gonk:page:ledgers` | every ledger this grant may read, with its open and total counts: the header menu's "All ledgers" |
-| `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment |
+| `/dashboard` | `urn:iki:gonk:page:dashboard` | a chart of open and closed counts over time for every ledger this grant may read |
+| `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment, with the chart of its counts under the status line |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
@@ -562,6 +563,16 @@ change, which fails WCAG 3.2.2. The menu and `/l` are computed from the same set
 offered a ledger the grant does not read. The open and total counts are on `/l` only: in the
 menu they were one `count` read per ledger on every page, which took a 41 ms page to 57 ms at
 12 ledgers; without them it is 47 ms, the stylesheet drawing the menu.
+
+**The charts are a view over each ledger's own `urn:iki:ledger:{name}:counts`**, read under the
+viewer's capability and drawn as inline SVG by the stylesheet, with no script and no library. A
+ledger page's chart follows its status filter; the Dashboard shows both lines for every ledger the
+viewer may read, and a ledger they may not read is absent. A chart reaches back 365 days. Between
+writes a Dashboard load asks the store nothing. After a write to any ledger, the next load runs one
+store query per ledger, and one stylesheet transform, for the chart whose numbers moved. `counts`
+refuses a ledger with a closed item that has no `closedAt` until its operator runs the ledger's
+`backfill-closed-at`, and the chart's place says so while the rest of the page works. A chart is as
+of its page's load: gonk's door has no push stream yet.
 
 **Every form issues an action the ledger already declares.** `/act` builds the target from
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
