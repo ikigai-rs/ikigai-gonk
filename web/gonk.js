@@ -1,9 +1,10 @@
-// gonk's only application script: error display for htmx, and the passkey ceremonies.
+// gonk's own page behavior, and the passkey ceremonies. Refusals, the status region, focus after a
+// swap and the theme are ikigai-ui's shell script (`urn:iki:ui:shell.js`, /static/shell.js, ledger
+// #2834), which loads first; a poll that retries on its own says so with `data-ui-quiet` in the
+// markup, so its failures are never messages.
 //
-// Everything the page SHOWS comes from the server as HTML; this file does eleven things htmx
-// cannot. (1) htmx does not swap a 4xx/5xx response, so a refused action would otherwise
-// vanish silently — the error body is written into #flash as TEXT (never as HTML: an error
-// can quote what a caller typed). (2) WebAuthn is a browser API; the ceremony is the
+// Everything the page SHOWS comes from the server as HTML; this file does what htmx cannot. (2)
+// WebAuthn is a browser API; the ceremony is the
 // standard one, with byte fields carried as base64url. (3) the browse family's affordances
 // name the /k/ adapter with a COMMAND in the path, which gonk's door cannot parse back into
 // a resource — so the command is folded into a query value here, one line, grammar-level.
@@ -34,70 +35,59 @@
   const $ = (id) => document.getElementById(id);
   const COOKIE = "gonk_session";
 
+  // A sentence of gonk's own (a sample loaded, a passkey made), in the page's one status region
+  // (D13). A failure with no control to sit beside is an alert; anything else the region's
+  // politeness says.
   function flash(text, kind) {
-    const area = $("flash");
+    const area = $("status");
     if (!area) return;
     area.textContent = "";
     if (!text) return;
     const p = document.createElement("p");
     p.className = "flash " + (kind || "ok");
-    p.setAttribute("role", kind === "error" ? "alert" : "status");
+    if (kind === "error") p.setAttribute("role", "alert");
     p.textContent = text;
     area.appendChild(p);
   }
 
-  // ★ A REFUSAL FROM ONE AFFORDANCE IS NOT A PAGE FAILURE (ledger #442).
-  //
-  // Everything a browse page shows after the first paint is fetched by an affordance of its
-  // own: the tree, a file, an explanation, and — with hx-trigger="load", before anyone has
-  // clicked anything — the recent-pull-requests block. When the caller's grant does not
-  // carry `urn:cap:exec:gh`, that last one answers a typed 403 while the tree underneath is
-  // perfectly fine, and writing it into #flash made the whole page read as broken. So the
-  // message goes where the request came FROM, and the page keeps its head.
-  //
-  // ⚠ This knows nothing about which affordance failed, on purpose — the same rule that
-  // keeps the /k/ rewrite below grammar-level. It asks only where the element sits, which
-  // is why a face that grows a new button tomorrow is covered without an edit here.
-  //
-  // ⚠ Only a 403 disables the control: an authority refusal is permanent for this grant, so
-  // a retry cannot succeed and a live button would lie. Every other status (a 404 from an
-  // unbound facade, a 503, a 500) leaves the control usable — those can change under it.
-  function denyAt(elt, text, status) {
-    if (!elt || !elt.closest || !elt.closest("#browse")) return false;
-    const note = document.createElement("p");
-    note.className = "affordance-error";
-    note.setAttribute("role", "status");
-    note.textContent = text;
-    // An element htmx would have swapped INTO itself (the lazy blocks: no hx-target, or
-    // "this") gets the note in place of its "loading…" placeholder — otherwise that
-    // placeholder sits there spinning forever on a refusal.
-    const target = elt.getAttribute("hx-target");
-    if (!target || target === "this") {
-      elt.textContent = "";
-      elt.appendChild(note);
-    } else {
-      elt.insertAdjacentElement("afterend", note);
-    }
-    if (status === 403) {
-      elt.setAttribute("aria-disabled", "true");
-      elt.setAttribute("data-denied", "true");
-      if (elt.tagName === "BUTTON") elt.disabled = true;
-    }
-    return true;
+  // A sentence already on screen somewhere else, said once in the status region for a screen
+  // reader (D13: a note is plain text, and #status is the one region that announces). It joins
+  // what the region holds, so a visible message there is not taken away.
+  function announce(text) {
+    const area = $("status");
+    if (!area || !text) return;
+    const p = document.createElement("p");
+    p.className = "ui-sr-only";
+    p.textContent = text;
+    area.appendChild(p);
   }
+
+  // ★ A SWAP THAT TOOK NO FOCUS LEAVES FOCUS ALONE. The shell script's rule is that focus is never
+  // left on <body> after a swap, and it reads a page nobody has focused yet as focus lost: the
+  // header's Queue badge, on its first poll, would take focus, and scroll the page to itself, and
+  // a person reading further down would be carried off. Lost focus is the shell script's to
+  // re-home; this puts back only what a swap found on <body> before it began. Registered before
+  // every other settle listener here, and after the shell script's, which loaded first.
+  let noFocusBefore = false;
+  let scrollBefore = [0, 0];
+  document.addEventListener("htmx:beforeSwap", () => {
+    noFocusBefore = !document.activeElement || document.activeElement === document.body;
+    scrollBefore = [window.scrollX, window.scrollY];
+  });
+  document.addEventListener("htmx:afterSettle", (e) => {
+    const target = e.detail && e.detail.target;
+    if (!noFocusBefore || (target && target.id === "main")) return;
+    const moved = document.activeElement;
+    if (moved && moved !== document.body) {
+      moved.blur();
+      window.scrollTo(scrollBefore[0], scrollBefore[1]);
+    }
+  });
 
   // The Layers page's watcher (ledger #1705): its failures are its own, said once in
-  // `#layers-reconnect` (section 9 below), never an alert in #flash on every retry.
+  // `#layers-reconnect` (section 9 below). `data-ui-quiet` keeps the shell script out of them.
   function isWatch(elt) {
     return !!(elt && elt.closest && elt.closest(".layers-watch"));
-  }
-
-  // The header's two badges, Queue and Layers, poll on a timer and retry on their own, so their
-  // failures are not messages either: during a gonk restart each would write an alert into
-  // #flash every ten seconds (ledger #1718 for the Queue badge). The badge keeps its last
-  // number; the next poll that is answered replaces it.
-  function isBadge(elt) {
-    return !!(elt && elt.closest && (elt.closest(".queue-badge") || elt.closest(".layers-badge")));
   }
 
   // The browse page's "On GitHub" link (section 11 below) is fetched by nobody's click: a
@@ -106,33 +96,18 @@
     return !!(elt && elt.closest && elt.closest("#github"));
   }
 
-  function isOwnRetry(elt) {
-    return isWatch(elt) || isBadge(elt) || isGithub(elt);
+  // The Queue's refresh is quiet too: it swaps into itself, and the shell script's note would
+  // take the place of the findings a person is reading. Its failure is a sentence in #status.
+  function isQueueRefresh(elt) {
+    return !!(elt && elt.id === "queue");
   }
-
   document.addEventListener("htmx:responseError", (e) => {
-    if (isOwnRetry(e.detail.elt)) return;
+    if (!isQueueRefresh(e.detail && e.detail.elt)) return;
     const xhr = e.detail.xhr;
-    const text = ((xhr && xhr.responseText) || "The server refused that.").trim();
-    if (denyAt(e.detail.elt, text, xhr && xhr.status)) return;
-    flash(text, "error");
+    flash(((xhr && xhr.responseText) || "The server refused that.").trim(), "error");
   });
   document.addEventListener("htmx:sendError", (e) => {
-    if (isOwnRetry(e.detail && e.detail.elt)) return;
-    flash("The server did not answer.", "error");
-  });
-  // A request clears the last message, unless nobody made it (ledger #666): the header's queue
-  // badge polls on a timer, on every page, so clearing on its request emptied #flash within
-  // one poll of anything being written there, often before anyone had read it.
-  // The Layers page's long poll (ledger #1675) is nobody's request either: it answers whenever
-  // a layer moves, and would wipe a post's "Posted" before anyone read it.
-  document.addEventListener("htmx:beforeRequest", (e) => {
-    const elt = e.detail && e.detail.elt;
-    if (elt && elt.closest && elt.closest(".queue-badge")) return;
-    if (isWatch(elt)) return;
-    if (elt && elt.closest && elt.closest(".layers-badge")) return;
-    if (isGithub(elt)) return;
-    flash("", "ok");
+    if (isQueueRefresh(e.detail && e.detail.elt)) flash("The server did not answer.", "error");
   });
 
   // ---------------------------------------------- the /k/ adapter's path spelling
@@ -148,7 +123,7 @@
   // meet. It is grammar-level and knows nothing about which button was pressed: any /k/
   // request, from any face, present or future, folds the same way. The server's own shell
   // already emits the query form, so a broken rewrite here cannot make the first paint fail
-  // silently — it fails on the first affordance, loudly, in #flash.
+  // silently — it fails on the first affordance, loudly, beside it.
   document.addEventListener("htmx:configRequest", (e) => {
     const path = e.detail && e.detail.path;
     if (typeof path !== "string" || path.slice(0, 3) !== "/k/") return;
@@ -214,9 +189,12 @@
     // simply nothing here to refresh.
     if (!queue) return;
     if (midDecision(queue)) {
-      held = true;
       const notice = $("queue-stale");
-      if (notice) notice.hidden = false;
+      if (notice) {
+        if (notice.hidden) announce(notice.textContent);
+        notice.hidden = false;
+      }
+      held = true;
       return;
     }
     held = false;
@@ -301,7 +279,7 @@
 
   // The Layers page's post form is replaced by its answer (a fresh form, ledger #1675), and the
   // element that had focus goes with it. Focus goes back to the new form's text box, so a
-  // keyboard user keeps their place; the "Posted" sentence is announced from #flash.
+  // keyboard user keeps their place; the "Posted" sentence is announced from #status.
   document.addEventListener("htmx:afterSettle", (e) => {
     const elt = e.detail && e.detail.elt;
     if (!elt || elt.id !== "say") return;
@@ -329,7 +307,9 @@
     const status = $("layers-reconnect");
     if (!status) return;
     status.setAttribute("data-state", state);
-    if (status.textContent !== text) status.textContent = text;
+    if (status.textContent === text) return;
+    status.textContent = text;
+    announce(text);
   }
 
   function watchFailed(elt, status) {
@@ -354,6 +334,7 @@
     );
     const next = document.createElement("div");
     next.className = "layers-watch";
+    next.setAttribute("data-ui-quiet", "");
     next.hidden = true;
     next.setAttribute("hx-get", elt.getAttribute("hx-get"));
     next.setAttribute("hx-swap", "outerHTML");
@@ -949,15 +930,28 @@
       clearTimeout(pending);
       pending = setTimeout(() => {
         status.textContent = sentence;
+        announce(sentence);
       }, 300);
     });
   }
+
+  // SPARQL results swap in place; what is said is their one-line summary, never the table.
+  document.addEventListener("htmx:afterSettle", (e) => {
+    const target = e.detail && e.detail.target;
+    if (!target || target.id !== "results") return;
+    const meta = target.querySelector(".result-meta");
+    if (meta) announce(meta.textContent);
+  });
 
   async function init() {
     wireSamples();
     wireLedgerMenu();
     checkAllWords();
     focusRefusal();
+    // A whole page that came back with a verdict (a Views save): a live region says nothing
+    // about what it was parsed with, so the sentence is said now.
+    const verdict = document.querySelector("main [data-announce]");
+    if (verdict) announce(verdict.textContent);
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page
     if (location.hostname !== "localhost") {

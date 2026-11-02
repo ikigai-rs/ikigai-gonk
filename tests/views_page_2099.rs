@@ -256,7 +256,10 @@ fn the_page_lists_the_readmes_declaration_with_links_and_the_status() {
     assert_eq!(page.status, 200, "{}", page.body);
     let body = &page.body;
     assert!(body.starts_with("<!DOCTYPE html>"), "{body}");
-    assert!(body.contains("<html lang='en'>"), "{body}");
+    assert!(
+        body.contains("<html data-theme='auto' lang='en'>"),
+        "{body}"
+    );
     assert!(body.contains("<h1 id='views-title'>Views</h1>"), "{body}");
     for (name, local, target) in [
         (
@@ -334,7 +337,7 @@ fn add_change_and_remove_each_round_trip_through_the_declaration_and_the_status(
         "{}",
         added.body
     );
-    assert!(added.body.contains("role='status'"), "{}", added.body);
+    assert!(added.body.contains("data-announce=''"), "{}", added.body);
     assert!(gonk.stored().contains("\"urn:iki:gonk:view:rule\""));
     assert_eq!(gonk.views.dynamic().status().installs, 1);
     assert_eq!(

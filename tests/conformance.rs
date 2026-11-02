@@ -364,6 +364,18 @@ const WEB_IDS: [&str; 23] = [
     "gonk-views-save",
 ];
 
+/// `ikigai_ui::space()` in the HTTP door (ledger #2834): the shared UI artifacts, inherited like
+/// the store's and the ledger's, and walked by `ikigai-ui`'s own suite.
+const UI_IDS: [&str; 7] = [
+    "ui-htmx",
+    "ui-shell-js",
+    "ui-template-shell",
+    "ui-template-tokens",
+    "ui-tokens-css",
+    "ui-palette",
+    "ui-theme-chooser",
+];
+
 fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
     http_door_with_space(hub, config).0
 }
@@ -397,6 +409,7 @@ fn the_http_door_adds_exactly_its_pages() {
         .chain(LEDGER_IDS.iter())
         .chain(HUB_IDS.iter())
         .chain(WEB_IDS.iter())
+        .chain(UI_IDS.iter())
         .map(|id| id.to_string())
         .collect();
     assert_eq!(
@@ -404,6 +417,10 @@ fn the_http_door_adds_exactly_its_pages() {
         expected
     );
     let socket = served_ids(&doors::door_kernel(hub));
+    assert!(
+        UI_IDS.iter().all(|id| !socket.contains(*id)),
+        "the shared UI artifacts are the HTTP door's alone: {socket:?}"
+    );
     assert!(
         WEB_IDS.iter().all(|id| !socket.contains(*id)),
         "the pages are the HTTP door's alone: {socket:?}"
@@ -574,7 +591,11 @@ fn the_http_door_conforms() {
         sorted(WEB_IDS.iter().chain(HUB_IDS.iter()).copied()),
         "{report}"
     );
-    assert_eq!(inherited(&report), store_and_ledger(), "{report}");
+    assert_eq!(
+        inherited(&report),
+        sorted(store_and_ledger().into_iter().chain(UI_IDS)),
+        "{report}"
+    );
 }
 
 #[test]

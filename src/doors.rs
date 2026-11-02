@@ -505,7 +505,9 @@ pub fn http_kernel_serving_with_space(
     faces: Vec<Arc<dyn Space>>,
     access: Option<AccessLog>,
 ) -> (Kernel, Arc<dyn Space>) {
-    let mut layers: Vec<Arc<dyn Space>> = vec![Arc::new(pages)];
+    // The shared UI artifacts (ledger #2834) answer this door only: the pages link them, and the
+    // hub and the other doors have no page to link them from.
+    let mut layers: Vec<Arc<dyn Space>> = vec![Arc::new(pages), Arc::new(ikigai_ui::space())];
     layers.extend(faces);
     layers.push(Arc::new(HubSpace::new(hub)));
     let space = Fallback::new(layers).named(spaces::iri(spaces::HTTP_DOOR));
@@ -1224,6 +1226,11 @@ fn routes() -> Vec<Route> {
         route(crate::views_page::PAGE_PATH, crate::views_page::PAGE_IRI),
         route(crate::views_page::SAVE_PATH, crate::views_page::SAVE_IRI),
         route("/auth/{op}", "urn:iki:gonk:passkey:{op}"),
+        // The shared UI artifacts (ledger #2834), by their own names and listed before gonk's
+        // own files: the first row that matches is the one that answers.
+        route("/static/tokens.css", ikigai_ui::TOKENS_CSS),
+        route("/static/shell.js", "urn:iki:ui:shell.js"),
+        route("/static/htmx.min.js", "urn:iki:ui:htmx"),
         route("/static/{name}", "urn:iki:gonk:asset:{name}"),
         route("/k", crate::k::K_IRI),
         // The review queue (ledger #444): the page, the section it swaps, and the

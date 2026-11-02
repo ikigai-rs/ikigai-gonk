@@ -11,7 +11,10 @@
 //! /sparql                    urn:iki:gonk:sparql                    Source/Sink  editor, or the SPARQL 1.1 Protocol by conneg
 //! /sparql/results            urn:iki:gonk:fragment:sparql           Source  results as a fragment
 //! /auth/{op}                 urn:iki:gonk:passkey:{op}              Sink    passkey ceremonies, sessions
-//! /static/{name}             urn:iki:gonk:asset:{name}              Source  css, js, htmx
+//! /static/tokens.css         urn:iki:ui:tokens.css                  Source  the shared tokens (ikigai-ui)
+//! /static/shell.js           urn:iki:ui:shell.js                    Source  the shared shell script
+//! /static/htmx.min.js        urn:iki:ui:htmx                        Source  the shared, pinned htmx
+//! /static/{name}             urn:iki:gonk:asset:{name}              Source  gonk.css, gonk.js
 //! /k?c={command}             urn:iki:gonk:k                         Source/Sink  the browse faces' adapter
 //! /browse/{+iri}             urn:iki:gonk:page:browse:{+iri}        Source  the page they render inside (raw: colons and all)
 //! ```
@@ -742,6 +745,7 @@ impl Endpoint for LedgersIndex {
                 &[
                     ("view", "empty"),
                     ("full", "true"),
+                    ("ui-theme", crate::render::theme_of(inv)),
                     ("title", "No ledger to show"),
                 ],
                 &children,
@@ -775,6 +779,7 @@ impl Endpoint for LedgersIndex {
             &[
                 ("view", "ledgers"),
                 ("full", "true"),
+                ("ui-theme", crate::render::theme_of(inv)),
                 ("title", "Ledgers"),
                 ("count", &count),
             ],
@@ -1408,6 +1413,7 @@ async fn ledger_listing(
         &[
             ("view", "ledger"),
             ("full", flag(full)),
+            ("ui-theme", crate::render::theme_of(inv)),
             ("title", &title),
             ("ledger", ledger.name()),
             ("status", status),
@@ -1613,6 +1619,7 @@ impl Endpoint for LedgerView {
                         &[
                             ("view", "empty"),
                             ("full", "true"),
+                            ("ui-theme", crate::render::theme_of(inv)),
                             ("title", "No ledger to show"),
                         ],
                         &format!(
@@ -1798,6 +1805,7 @@ impl Endpoint for DoctorView {
             &[
                 ("view", "doctor"),
                 ("full", flag(true)),
+                ("ui-theme", crate::render::theme_of(inv)),
                 ("title", &format!("doctor · {}", ledger.name())),
                 ("ledger", ledger.name()),
                 ("page-url", &format!("{}/doctor", ledger_href(&ledger))),
@@ -1884,6 +1892,7 @@ async fn item_card(
         &[
             ("view", "item"),
             ("full", flag(full)),
+            ("ui-theme", crate::render::theme_of(inv)),
             ("title", &title),
             ("ledger", ledger.name()),
             ("page-url", &ledger_href(ledger)),
@@ -2992,7 +3001,12 @@ impl Endpoint for Sparql {
         );
         let doc = envelope(
             "page",
-            &[("view", "sparql"), ("full", "true"), ("title", "SPARQL")],
+            &[
+                ("view", "sparql"),
+                ("full", "true"),
+                ("ui-theme", crate::render::theme_of(inv)),
+                ("title", "SPARQL"),
+            ],
             &children,
         );
         Ok(html(render::render(&doc, true).map_err(render_err)?))
@@ -3323,14 +3337,9 @@ impl Endpoint for RenderRules {
 
 // ------------------------------------------------------------------------------ assets
 
-const ASSETS: [(&str, &str, &str); 3] = [
+const ASSETS: [(&str, &str, &str); 2] = [
     ("gonk.css", "text/css", include_str!("../web/gonk.css")),
     ("gonk.js", "text/javascript", include_str!("../web/gonk.js")),
-    (
-        "htmx.min.js",
-        "text/javascript",
-        include_str!("../web/htmx.min.js"),
-    ),
 ];
 
 struct Asset;
@@ -3357,8 +3366,9 @@ impl Endpoint for Asset {
         Description::new("gonk-asset")
             .title("The HTML face's static files")
             .summary(
-                "gonk.css, gonk.js and htmx 2.0.4, compiled into the binary so the page needs \
-                 no other origin — which is what lets the default same-origin CSP stand.",
+                "gonk.css and gonk.js, compiled into the binary so the page needs no other \
+                 origin — which is what lets the default same-origin CSP stand. The tokens, \
+                 the shell script and htmx beside them under /static/ are ikigai-ui's.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)

@@ -19,15 +19,15 @@ Adapted from the [ACCESSIBILITY.md template](https://github.com/mgifford/ACCESSI
 | Private channel | [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-gonk/security/advisories/new), for anything security-sensitive |
 | Target | WCAG 2.2 Level AA |
 | Status | Evaluation in progress. No conformance claim. |
-| Last reviewed | 2026-10-20 |
-| Next review | when `web/gonk.css`, `web/gonk.xsl`, `web/gonk.js` or the vendored htmx changes in a way a person sees, when `ikigai-web` or `ikigai-browse` moves to a new minor version, or when a page is added |
+| Last reviewed | 2026-11-02 |
+| Next review | when `web/gonk.css`, `web/gonk.xsl` or `web/gonk.js` changes in a way a person sees, when `ikigai-ui`, `ikigai-web` or `ikigai-browse` moves to a new minor version, or when a page is added |
 
 ## Commitment
 
 gonk is where work is filed, read, decided and closed, so a barrier on one of its pages keeps a
 person out of the work itself, not out of a nice-to-have. We aim at WCAG 2.2 AA for everything
 under "In scope". The pages are server-rendered HTML with native controls and few scripts; we
-keep it that way, hold the palette to a measured contrast floor in both color schemes, say
+keep it that way, hold the palettes to a measured contrast floor in every theme, say
 plainly what has not been tested, and record a barrier we find as a known limitation until it
 is fixed.
 
@@ -35,16 +35,16 @@ is fixed.
 
 ### In scope
 
-- **gonk's own pages**, in the light and the dark color scheme and at phone width: the header's
-  ledger menu (its button, its links and its filter) and the `/l` ledgers index, the ledger
+- **gonk's own pages**, in every theme (auto, light, dark, high contrast) and at phone width: the header's
+  theme chooser, its ledger menu (its button, its links and its filter) and the `/l` ledgers index, the ledger
   list and its filters and search, an item page with every form on it (comment, edit, close,
   reopen, claim, defer, label, link, delete, purge), the doctor, the SPARQL editor and its
   result tables, the browse landing page, the "On GitHub" link and its note above a browse page's region, the review Queue (scopes, batch and walk views), the
   Layers page (the overview, a channel with its post form, a task layer, the live updates, the
   "Reconnecting" status and the unreachable-door banner), the unread count on the header's Layers link, the Views page (its table of views, its status, and the add, change and remove forms), the Onboard page (its pending requests, their approve commands and the entitlements' verdicts), the passkey sign-in and enrollment controls, and the empty and
   refusal states each one can show.
-  All of it is rendered by `web/gonk.xsl` and styled by `web/gonk.css`.
-- **The page scripts**: `web/gonk.js` (the header's ledger menu and its filter, status and refusal messages, sample-query toggles, the
+  All of it is rendered by `web/gonk.xsl` and styled by `web/gonk.css` over `ikigai-ui`'s tokens.
+- **The page scripts**: `ikigai-ui`'s `shell.js` as gonk uses it (refusals, the one status region, focus after a swap, the theme), and `web/gonk.js` (the header's ledger menu and its filter, gonk's own status sentences, sample-query toggles, the
   passkey ceremonies, the Queue's held refresh, the Layers page's re-armed poll) and the htmx swaps they drive, with and without
   JavaScript.
 - **The answers the HTTP door gives a browser** that are not pages: refusals and not-found
@@ -59,8 +59,10 @@ is fixed.
 - **The error answers' format when a browser did not navigate to them** (a script's `fetch`, an
   htmx swap, a LAN address over plain `http://`), which comes from the `ikigai-web` library (see
   Known limitations). An error a browser navigates to is gonk's own page (`src/refusal.rs`).
-- **The vendored htmx** (`web/htmx.min.js`, htmx 2.0.4). Its swaps are what the pages do and
-  are covered with them; htmx itself is not reviewed.
+- **htmx** (`urn:iki:ui:htmx`, `ikigai-ui`'s copy of htmx 2.0.4). Its swaps are what the pages do
+  and are covered with them; htmx itself is not reviewed.
+- **`ikigai-ui`'s tokens, shell script and chooser.** Its own tests cover them; a barrier is
+  reported here and fixed there.
 - The operating system's passkey dialog, GitHub's pages, and the browsers and assistive
   technologies people use.
 
@@ -72,8 +74,8 @@ is fixed.
 
 ## Conformance status
 
-**Evaluation in progress** against WCAG 2.2 AA. The palette test gates every pull request; the
-browser run below was one run, by hand, on a scratch server, and it found barriers that are
+**Evaluation in progress** against WCAG 2.2 AA. The palette tests gate every pull request; the
+browser runs below was one run, by hand, on a scratch server, and it found barriers that are
 listed under Known limitations. Automated checks cover part of WCAG, **no screen reader or other
 assistive technology has been used**, and no page has had a manual assessment. Do not infer a
 conformance claim from a green build or from this file.
@@ -82,7 +84,10 @@ conformance claim from a green build or from this file.
 
 | Check | Version | What it covers | What it does not cover |
 |---|---|---|---|
-| `tests/web.rs::the_palette_clears_the_contrast_floor` (`cargo test`, every pull request) | `ikigai-a11y` 0.2.2 (locked; 0.2.1 is the floor) | 12 text pairs of `web/gonk.css`'s palette (foreground, muted, accent, danger and ok on the background and the surface; the two button pairs) at 4.5:1 (SC 1.4.3), in the light and the dark scheme | `--line`, which draws borders and is not held to any floor; any color changed by `opacity`; non-text contrast (SC 1.4.11) |
+| `tests/shared_ui_2834.rs` (`cargo test`, every pull request) | `ikigai-ui` 0.4 test kit, `ikigai-a11y` 0.4 | Every pair in `ikigai-ui`'s floor (text 4.5:1, `--line` and `--focus` 3:1, `--rule` 1.3:1, all of them 7:1 in high contrast), for its three palettes, plus `--ok` as text on both grounds, which gonk draws; light and dark keep gonk's colors; `web/gonk.css` writes no hex color and only text fields and pickers wear `--line`; three files under `/static/` are `ikigai-ui`'s bytes, linked in order with htmx pinned by SRI; every page has one chooser, renders `theme=` with no script, and one live region | Any color changed by `opacity`; `ikigai-browse`'s own palette and syntax theme |
+| axe (WCAG 2.0, 2.1, 2.2 A and AA, no page error or console error), `ikigai-ui`'s `axe/check.mjs` over `cargo run --example axe_site`, by hand, once: it is not a CI job yet (ledger #2834) | axe-core 4.13.0 and playwright 1.64.0, as `ikigai-ui`'s lock pins them, Chromium build 1248 on Linux, 2026-11-02 | The anonymous pages as a static site (home, ledgers, ledger, item, doctor, SPARQL, browse, Queue's sign-in notice) in light, dark and more-contrast media | Signed-in pages (see the row below); a static site runs no server swap |
+| axe over a live scratch gonk, every page in every theme, by hand, once (ledger #2834) | axe-core 4.13.0, `@axe-core/playwright` 4.13.0, playwright 1.64.0, Chromium build 1248 on Linux, 2026-11-02 | Anonymous and signed in through a virtual passkey (ledger, item, doctor, SPARQL, browse landing, a tree, a file view, the Queue with two planted findings in its three views, the Views page, a refusal and a miss), and the Layers overview, a channel and a task layer over `cargo run --example layers-preview`, each in auto over light and dark, light over a dark system, dark over a light system, and high contrast, at 1280 and 320 px, with every `<details>` opened on the door's pages: 240 runs, one violation left, `.browse-size` (Known limitations) A swap's result; Firefox and Safari; no screen reader |
+| Refusal, status and focus against `shell.js` in a browser, and screenshots against the build before, by hand, once (ledger #2834) | playwright 1.64.0, Chromium build 1248 on Linux, 2026-11-02 | A 403 at a form is a plain note with `aria-describedby`, said once in `#status`, and focus stays; a 500 is a note; one announcing region on every page; a query swap keeps focus on Run; a swap that takes the focused control lands focus in the region; a page nobody has focused keeps focus and scroll through a poll and a region's load; the chooser by keyboard with its ring, a choice surviving reload and navigation; with no script Apply reloads with `theme=`; 320 px on every page; no CSP or SRI refusal; a post returns focus to the box; a failed watcher says "Reconnecting" with no alert and recovers. The pull request has the comparison | No screen reader, so nobody has heard any of it; Firefox and Safari |
 | The page-shape tests in `tests/web.rs` and `tests/queue.rs` (`cargo test`, every pull request) | none | A cell link's accessible name contains its visible text (SC 2.5.3); a sample query is a toggle with `aria-pressed`, rendered unpressed; the Queue badge's state is a word and a sentence, not only a color (SC 1.4.1); pages are HTML with no self-closed elements | Everything else about the markup: no test reads `lang`, headings, landmarks or labels as a rule |
 | `tests/layers_page_1675.rs` (`cargo test`, every pull request) | none | The Layers page: "New" and an unread count are words, a refused post's reason is the answer, an unreachable door is one banner, the page's poll does not clear `#flash`, answers at once and replaces the banner and the overview's rows only when they changed (so a poll does not take focus out of the list); its re-arm after a failure is wired in `web/gonk.js` (a bounded backoff, one polite "Reconnecting" sentence in `#layers-reconnect` on both Layers pages, a stop with a sentence on a 403 or a 404) and a failed poll of the page or of the header's count writes nothing into `#flash` (nor, since ledger #1718, of the Queue badge: `tests/web.rs`). A layer not yet read when its page was drawn still has its entries or tuple lists, empty, for the poll to fill. The header's unread count: its number is text inside the link with ", " and " new" beside it for a screen reader (the link's name reads "Layers, 3 new"), a sentence goes to the header's polite live region only when the count rises (never when it is unchanged or falls, and not on the overview or for the open layer, whose own live region says it), and a caller without `urn:cap:gonk:layers:read` gets no badge and a refused count | Everything about how it reads aloud; no test reads labels or landmarks as a rule; no test runs the badge's polling in a browser |
 | The Layers page in the desktop app's built-in browser (Chromium), over `cargo run --example layers-preview` (a scratch layer host, no passkey), by hand, once | the Claude desktop app's browser pane, 2026-10-16 | Dark and light scheme; 320 px wide with no sideways scroll (`scrollWidth` 320 of 320); Tab reaches every entry (its heading is a link to itself), every Reply link, the download link and the links in bodies, in reading order; posting by keyboard (type, Tab, Enter) adds the entry live, writes "Posted to …" in `#flash`, "1 new entry in Talk." in the page's polite live region, and puts focus back in the new form's text box | No axe-core run on this page; no screen reader, so nobody has heard the live region; the task layer and the overview were looked at, not stepped through by keyboard; Firefox and Safari |
@@ -108,10 +113,11 @@ Only what has actually been run. This is not a list of what is supported.
 | Platform | Browser | Assistive technology | What | When |
 |---|---|---|---|---|
 | macOS | Google Chrome 153.0.8010.54, driven by playwright-core 1.63.0 | none | axe-core 4.10.3 over the pages above, light and dark, 1280 and 320 px wide | 2026-10-15, once |
+| Linux | Chromium build 1248, driven by playwright 1.64.0 | none | axe-core 4.13.0 over every page in every theme, 1280 and 320 px wide; the refusal, status, focus and theme checks | 2026-11-02, once (ledger #2834) |
 
 **No screen reader, screen magnifier, speech-input or switch-access software has been used to test
-this repository.** The status and refusal messages are built to be announced (`role="status"`,
-`role="alert"`, an `aria-live` region), but nobody has listened to them. No other browser
+this repository.** The status and refusal messages are built to be announced (`#status`, one polite live region,
+and `role="alert"` for a failure with no control beside it), but nobody has listened to them. No other browser
 engine has been run.
 
 ## Known limitations
@@ -122,18 +128,18 @@ engine has been run.
 | A not-found or refused answer the browser did not NAVIGATE to (a script's `fetch`, an htmx swap), or any error over plain `http://` on a LAN address (where a browser sends no `Sec-Fetch-Mode`), is `ikigai-web`'s minimal page or the sentence as text, not a gonk page | a fetch or swap that fails; a gonk reached over a LAN address | No gonk header or sign-in on it; the minimal page has a title, a language and a `main` landmark | Open the address directly on `localhost`, which gets gonk's page with the sign-in on it (ledger #2021) |
 | The Queue badge's second number (`+N`) is 1.62:1 in light and 1.92:1 in dark: `opacity` on top of the empty state (SC 1.4.3) | the header of every page, signed in with the Queue | Hard or impossible to read at low vision | The same number is in the badge's tooltip and on the Queue page |
 | The Queue badge's state sentence ("NOTHING IS DRAINING THIS QUEUE", the counts and what they mean) is only a `title` on a span inside the link, and the link's name runs the word and the numbers together ("Queue0+0") | the header, signed in | A keyboard, touch or screen-reader user gets two numbers without the sentence that explains them, including the one that says the queue is stuck | The Queue page states the pipeline's state in text |
-| The Queue's filter rows (state, severity, kind, revisit) do not wrap: at 320 px the page scrolls sideways by 42 px (SC 1.4.10) | the Queue | Links to the last filters sit off screen and need horizontal scrolling | Zoom out, or a wider window |
-| The cross-graph SPARQL example scrolls sideways at narrow widths and cannot take focus, so a keyboard cannot scroll it (axe `scrollable-region-focusable`; SC 2.1.1) | the SPARQL page, below the sample buttons, at 320 px | Part of the example query cannot be read by keyboard alone | A wider window; the same text can be selected and copied |
-| Text fields and panels are outlined in `--line`, 1.54:1 against the page in both schemes, and no test holds borders to a floor (SC 1.4.11) | every form | The edge of an empty text field is hard to see at low vision; every field has a visible label | none |
+| A file size or other muted detail in a browse tree is `ikigai-browse`'s `.browse-size`, `opacity: .6` on the page's text: 4.37:1 in light (axe `color-contrast`; SC 1.4.3). The same on the build before ledger #2834 | browse trees, light theme | Slightly under the floor at low vision | The same size is in the file's own view |
+| A browse file view's syntax theme follows the system's scheme alone, so a chosen theme that differs from the system's shows code in the other scheme's colors (each with its own ground, both held to the floor by `ikigai-browse`) | browse file views under a chosen theme | The code block reads as the other scheme; its contrast is its own | Choose Auto |
+| Panels, tables and dividers are `--rule`, a decorative line under 3:1 by design (D12; SC 1.4.11 exempts them); a field's and a picker's border is `--line` at 3:1, and a text field's edge is no longer the barrier it was | every page | A divider is faint at low vision and carries nothing a person needs | High contrast holds every line to 7:1 |
 | Several states are dimmed with `opacity` (a refused control, a folded or kept finding, the empty badge), which the palette test cannot see | the Queue, refused controls | Unmeasured: the browser run saw only an empty Queue | none |
 | Signing in needs JavaScript and a passkey, so without JavaScript the browse pages and the Queue are out of reach; the browse region itself is loaded by script | browse, the Queue | No access to them with scripting off. The ledger's own forms post to `/act`, but no one has checked that path without JavaScript | none |
 | The browse pages have no `h1` once the browse region loads, and their crumb navigation is a second, unnamed navigation landmark (axe `page-has-heading-one`, `landmark-unique`, advisory) | every `/browse/...` page (`ikigai-browse`'s markup) | A heading list starts at a lower level; two landmarks share a name | Tab order and the crumbs' text |
 | The Layers page's live region and its "New" markers have not been heard by any screen reader; an entry arriving live is announced as a count ("1 new entry in Talk."), not read out | the Layers page | Unknown how it sounds; the entries are in the list in reading order | Move to the list; each new entry's heading says "New" |
 | An open Layers page asks for news every three seconds, so a new entry can take up to three seconds to appear; after a failure it asks less often (up to a minute apart), and its "Reconnecting" status has not been heard by any screen reader | the Layers page | A short delay before an entry shows; after gonk restarts, up to a minute before the page notices it is back. Once gonk has restarted the page's sign-in is gone, and the status says to sign in again and reload rather than updating | Reload the page |
-| The header's unread count updates on a ten-second poll, so it can lag an arrival by up to ten seconds, and its live region ("3 new entries in the layers.") has not been heard by any screen reader | the header of every page, signed in with the Layers grant | A count can be briefly stale; unknown how the announcement sounds | The Layers page shows each layer's count |
+| The header's unread count updates on a ten-second poll, so it can lag an arrival by up to ten seconds, and its sentence in `#status` ("3 new entries in the layers.") has not been heard by any screen reader | the header of every page, signed in with the Layers grant | A count can be briefly stale; unknown how the announcement sounds | The Layers page shows each layer's count |
 | The header's ledger menu and its filter's count have not been heard by any screen reader, and axe has not been run on the menu or on `/l` | the header of every page with two or more readable ledgers; `/l` | Unknown how the button's state and the count sound | `/l` lists every ledger in a table |
-| The Views page has not been opened in a browser: its layout at 320 px, its focus order and both color schemes are unchecked, and after a save the answer is a new page, so focus starts at the top rather than at the form that was used | the Views page | Unknown; a keyboard user finds the verdict at the top of the page's main region | none |
-| Where focus lands after a form submits and htmx swaps the item or ledger in place has not been checked | item and ledger forms, the Queue | Unknown; a keyboard user may have to find their place again | none known |
+| After a save on the Views page the answer is a new page, so focus starts at the top rather than at the form that was used; its focus order has not been stepped through | the Views page | A keyboard user finds the verdict at the top of the page's main region | none |
+| A form that submits and swaps the item or ledger in place takes the focused control with it, and focus lands on the swapped region, not the control that was used (`shell.js`, D13) | item and ledger forms, the Queue | A keyboard user is in the right region, and Tab starts from its top | none |
 
 No list like this is complete. Please report what you find.
 
@@ -142,13 +148,13 @@ No list like this is complete. Please report what you find.
 A change to anything in scope:
 
 1. runs `cargo test` (the palette and page-shape tests); CI runs it too, and it must pass. A new
-   color goes inside one of `web/gonk.css`'s marked palette blocks and into the test's pairs,
-   never inline;
+   color is a token in `ikigai-ui`'s palettes, never a value in `web/gonk.css` or inline;
 2. keeps native HTML semantics, adds ARIA only where HTML cannot say it, and keeps visible labels
    as the accessible names (SC 2.5.3);
 3. does not convey anything by color, `opacity` or a tooltip alone: the word is the message;
 4. keeps every control usable by keyboard with the visible focus ring, and announces status in
-   the `#flash` region (or next to the control it belongs to) without moving focus;
+   `#status`, the page's one live region (D13; a note next to its control is plain text the
+   control points at with `aria-describedby`), without moving focus;
 5. keeps every page usable at 320 px wide without the page scrolling sideways (a data table may
    scroll inside its `.table-wrap`);
 6. gives every new picture or icon a text alternative, or `aria-hidden` when the words beside it
@@ -225,6 +231,7 @@ before any conformance claim.
 | 2026-10-16 | A failed poll of the header's Queue badge no longer writes an alert into `#flash` (during a restart it did, every ten seconds), as the Layers count's already did not; a layer the page had not read yet when it was drawn has its (empty) lists, so its live entries arrive without a reload | `tests/web.rs` and `tests/layers_page_1675.rs` (wiring and page shape only; no browser run) (ledger #1718) |
 | 2026-10-18 | The header's one link per ledger is a menu of links: a disclosure button (a `<details>` without a script) naming the current ledger, a filter with a polite count past eight ledgers, Escape returning focus to the button; and `/l`, every readable ledger with its counts | `tests/ledger_picker_1888.rs` and the browser-pane check above (ledger #1888) |
 | 2026-10-22 | The Views page: the named views in a table with headers, their status as a description list, labeled add, change and remove forms that post without a script, the verdict as a status or alert sentence, and no controls at all for a caller who may not change the views | `tests/views_page_2099.rs` (page shape only; no browser run) (ledger #2099) |
+| 2026-11-02 | `ikigai-ui`'s tokens, shell script and htmx (UX 4 phase 1): one status region, notes with `aria-describedby`, a theme chooser (auto, light, dark, high contrast) in every header, `--line` at 3:1 on fields and pickers. Two barriers closed: the Queue's filters wrap at 320 px, and the SPARQL example takes focus; a refusal's long sentence no longer pushes the page sideways | `tests/shared_ui_2834.rs` and the browser rows above (ledger #2834) |
 | 2026-10-17 | A task layer's tuple or take that this gonk tracks as an item links to it with the item's ledger and number as the link's visible text ("tracked here as crew #1"), never a bare number | `tests/layer_links_1856.rs` (page shape only; no browser run) (ledger #1856) |
 
 ## References

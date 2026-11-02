@@ -3855,8 +3855,8 @@ fn a_refused_batch_comes_back_exactly_as_it_was_sent() {
     // And the sentence reaches the page's live region, out of band.
     let oob = tag_with(&refused, "hx-swap-oob");
     assert!(
-        oob.contains("id='flash'") && oob.contains("innerHTML"),
-        "the refusal is announced through #flash: {oob}"
+        oob.contains("id='status'") && oob.contains("innerHTML"),
+        "the refusal is announced through #status: {oob}"
     );
     let announced = &refused[refused.find("hx-swap-oob").expect("oob")..];
     assert!(

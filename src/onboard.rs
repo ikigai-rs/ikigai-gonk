@@ -2669,6 +2669,7 @@ impl Endpoint for Page {
         let mut attributes = vec![
             ("view", "onboard".to_string()),
             ("full", "true".to_string()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", "Onboard".to_string()),
         ];
         if self.web.hub.describe(&iri(PENDING)).is_none() {

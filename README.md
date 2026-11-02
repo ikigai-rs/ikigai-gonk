@@ -119,8 +119,12 @@ The face is hypermedia: server-rendered HTML with [htmx](https://htmx.org) for t
 updates, no single-page app and no build step. Every page is a **transform of a graph face** —
 a ledger page is `urn:iki:ledger:{ledger}:items as=text/turtle`, re-serialized as RDF/XML and
 rendered by one XSLT stylesheet whose templates match on `rdf:type`, server-side through
-`ikigai-xslt`. It works at phone width, follows the system's light or dark scheme, and its
-palette is held to the WCAG AA contrast floor in both by a test.
+`ikigai-xslt`. It works at phone width, and its colors, refusals, status region and focus after
+a swap are [`ikigai-ui`](https://github.com/ikigai-rs/ikigai-ui)'s (ledger #2834). The **Theme**
+chooser in every page's header offers Auto (the system's light or dark, or high contrast when
+the system asks for more), Light, Dark and High contrast. A choice is kept in that browser only
+(`localStorage`, never sent), and with no script its Apply button reloads the page with `theme=`,
+which the page renders. Every palette is held to its contrast floor by a test.
 
 ### Passkeys: who you are, and what that grants
 
@@ -520,7 +524,8 @@ there.
 | `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
 | `/view/{name}` | `urn:iki:gonk:view:{name}` | a named view: whatever its target answers, under your own grant (see "Named views") |
 | `/views` · `POST /views/save` | `urn:iki:gonk:page:views` · `urn:iki:gonk:views:save` | the Views page: the named views in force and the views space's status, and with the declaration's write token a form to add, change or remove each (see "The Views page") |
-| `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js`, `htmx.min.js` |
+| `/static/tokens.css`, `/static/shell.js`, `/static/htmx.min.js` | `urn:iki:ui:tokens.css`, `urn:iki:ui:shell.js`, `urn:iki:ui:htmx` | `ikigai-ui`'s tokens, shell script and htmx, by their own names (ledger #2834) |
+| `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js` |
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, one annotation, or one finding decision (stamped `made=single`) |
@@ -4444,7 +4449,9 @@ unstyled and this door rendered a tree as a cascade of gonk chips (ledger #441).
 are withheld from a caller who cannot read them, together, for the same reason.
 
 `gonk.css` defines **no `browse-*` rule** and must not grow one: a rule here would silently
-win against the family's own sheet and drift the moment browse changed its markup. When this
+win against the family's own sheet and drift the moment browse changed its markup. (It does set
+the sheet's `--browse-*` palette under a chosen theme, which is the override that sheet offers
+a door: its palette follows only the system's scheme.) When this
 door knows the caller cannot annotate, it states that as a FACT on the shell —
 `data-browse-posture="read-only"` — and the layout sheet decides what to hide. Presentation
 only: the annotation Sink requires `urn:cap:annotate` whatever the page shows.
@@ -4462,7 +4469,7 @@ may not use one affordance sees.
 ⚠ **A refusal from one affordance is not a page failure.** Every browse page fetches its
 parts through affordances of its own, including a recent-pull-requests block that loads
 itself; a caller without `urn:cap:exec:gh` gets a typed 403 there while the tree underneath
-is fine. `web/gonk.js` writes such a message where the request came FROM — in place of that
+is fine. `ikigai-ui`'s shell script writes such a message where the request came FROM — in place of that
 block's "loading…", or beside the control that issued it — and only a 403 disables the
 control, because an authority refusal is permanent for that grant while a 404 or a 503 is
 not. ⚠ What this door still cannot do is decide UP FRONT whether a caller may use a control:
@@ -4686,7 +4693,7 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
   Keeping managed checkouts current is `ikigai-gonk checkout --all` on a timer (see
   *Keeping them current*), a command outside the server.
 
-The page's htmx is htmx 2.0.4 (Zero-Clause BSD), vendored as `web/htmx.min.js`.
+The page's htmx is htmx 2.0.4 (Zero-Clause BSD), `ikigai-ui`'s vendored copy, pinned by digest and by the page's `integrity=`.
 
 ## Accessibility
 

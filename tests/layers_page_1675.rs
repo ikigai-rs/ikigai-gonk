@@ -1186,10 +1186,18 @@ fn a_task_layer_is_read_only() {
         page.body
     );
     assert!(!page.body.contains("id='say'"));
+    // The heading is the layer's label, and its theme is a theme: the page's code writes the
+    // label over the title by position, so an attribute put before it would take the label.
+    assert!(
+        page.body.contains("<h1 id='layer-title'>Tasks</h1>"),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains("data-theme='auto'"), "{}", page.body);
     assert_eq!(
         page.body.matches("<form").count(),
-        1,
-        "only the header's passkey form: no out, no take: {}",
+        2,
+        "only the header's passkey form and its theme chooser: no out, no take: {}",
         page.body
     );
     let refused = gonk.post("/layers/tasks/say", &[("body", "x")], &gonk.origin());
@@ -1263,22 +1271,28 @@ fn the_page_reaches_a_scratch_door_over_quic() {
 #[test]
 fn the_page_poll_does_not_clear_the_flash() {
     let js = include_str!("../web/gonk.js");
-    let at = js
+    let shell = std::str::from_utf8(
+        ikigai_ui::artifact("urn:iki:ui:shell.js")
+            .expect("the shell script")
+            .bytes,
+    )
+    .unwrap();
+    // The shell script clears #status before a request unless a quiet element made it.
+    let at = shell
         .find("addEventListener(\"htmx:beforeRequest\"")
         .expect("the clearing listener");
-    let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
-    let skip = body
-        .find("if (isWatch(elt)) return;")
-        .unwrap_or_else(|| panic!("the page's poll is skipped: {body}"));
-    let clear = body
-        .find("flash(\"\", \"ok\")")
-        .expect("other requests clear");
-    assert!(skip < clear, "{body}");
+    let body = &shell[at..at + shell[at..].find("\n  });").expect("the listener ends")];
     assert!(
-        js.contains(".closest(\".layers-watch\")"),
-        "isWatch names the class"
+        body.contains("if (!quiet(d.elt)) status(\"\", false);"),
+        "{body}"
     );
-    assert!(include_str!("../web/gonk.xsl").contains("<div class=\"layers-watch\""));
+    assert!(shell.contains("elt.closest(\"[data-ui-quiet]\")"));
+    // The watcher is quiet as the server draws it and as the script re-arms it.
+    assert!(!js.contains("htmx:beforeRequest"), "gonk.js clears nothing");
+    assert!(js.contains("next.setAttribute(\"data-ui-quiet\", \"\")"));
+    assert!(
+        include_str!("../web/gonk.xsl").contains("<div class=\"layers-watch\" data-ui-quiet=\"\"")
+    );
 }
 
 /// The listener `web/gonk.js` registers for `event`, up to its end.
@@ -1297,8 +1311,8 @@ fn listener<'a>(js: &'a str, event: &str, containing: &str) -> &'a str {
 
 /// ★ Ledger #1705: htmx swaps nothing on a failed ask, so one network error or a gonk restart
 /// used to end the page's chain of watchers for good, silently. `web/gonk.js` re-arms a failed
-/// ask with a bounded backoff, says so once in the page's `#layers-reconnect` status (polite,
-/// not an alert in #flash per retry), and stops with a sentence on a 403 or a 404, which no
+/// ask with a bounded backoff, says so once in the page's `#layers-reconnect` note and in #status
+/// (polite, not an alert per retry; the watcher's `data-ui-quiet` keeps the shell script out), and stops with a sentence on a 403 or a 404, which no
 /// retry fixes. No JavaScript runtime here: this pins the wiring, and the browser check in
 /// ACCESSIBILITY.md is what ran it.
 #[test]
@@ -1308,9 +1322,6 @@ fn a_failed_poll_is_rearmed_with_a_backoff_and_said_once() {
     for event in ["htmx:sendError", "htmx:responseError"] {
         let body = listener(js, event, "watchFailed(");
         assert!(body.contains("if (isWatch(elt)) watchFailed("), "{body}");
-        // And the page-wide handler for the same event leaves the watcher alone.
-        let general = listener(js, event, "flash(");
-        assert!(general.contains("if (isOwnRetry("), "{general}");
     }
     let at = js.find("function watchFailed(").expect("the re-arm");
     let body = &js[at..at + js[at..].find("\n  }\n").expect("its end")];
@@ -1342,10 +1353,8 @@ fn a_failed_poll_is_rearmed_with_a_backoff_and_said_once() {
     // The status is on both Layers pages, a polite live region outside every link.
     let xsl = include_str!("../web/gonk.xsl");
     assert_eq!(
-        xsl.matches(
-            "<p id=\"layers-reconnect\" class=\"note live\" role=\"status\" aria-live=\"polite\"></p>"
-        )
-        .count(),
+        xsl.matches("<p id=\"layers-reconnect\" class=\"note live\"></p>")
+            .count(),
         2
     );
 }
@@ -1409,9 +1418,9 @@ fn badge_count(body: &str) -> Option<u64> {
     body[at..].split('<').next()?.parse().ok()
 }
 
-/// The sentence the count writes into the header's live region, if any.
+/// The sentence the count adds to the page's status region, if any.
 fn badge_announcement(body: &str) -> Option<String> {
-    let marker = "hx-swap-oob='innerHTML' id='layers-badge-live'>";
+    let marker = "<div hx-swap-oob='beforeend' id='status'><p class='ui-sr-only'>";
     let at = body.find(marker)? + marker.len();
     body[at..].split('<').next().map(str::to_string)
 }
@@ -1437,15 +1446,15 @@ fn the_header_counts_what_is_unread_and_falls_when_a_layer_is_opened() {
     );
     assert!(
         ledger.body.contains(
-            "<span class='layers-badge' hx-get='/layers/~/count' hx-swap='outerHTML' \
-             hx-sync='this:drop' hx-trigger='load, every 10s'></span>"
+            "<span class='layers-badge' data-ui-quiet='' hx-get='/layers/~/count' \
+             hx-swap='outerHTML' hx-sync='this:drop' hx-trigger='load, every 10s'></span>"
         ),
         "the first poll is asked again if it fails (ledger #1705): {}",
         ledger.body
     );
     assert!(
-        ledger.body.contains("id='layers-badge-live'"),
-        "the header's live region is in the page before anything is said in it"
+        ledger.body.contains("id='status'") && !ledger.body.contains("layers-badge-live"),
+        "the one status region is in the page before anything is said in it"
     );
 
     // The first answer: the count as text in the link's name ("Layers, 2 new"), the next poll,

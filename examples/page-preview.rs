@@ -20,7 +20,7 @@
 //!
 //! `index.html` (the root list), `tree.html`, `file.html` — each a whole page with the face
 //! ALREADY SWAPPED into `#browse`, because htmx does that swap in a browser and a file on
-//! disk has no server to fetch from — plus `gonk.css`, `gonk.js`, `htmx.min.js` and the
+//! disk has no server to fetch from — plus `tokens.css`, `gonk.css`, `shell.js`, `gonk.js`, `htmx.min.js` and the
 //! browse family's two stylesheets as local files, with every link rewritten to match.
 //!
 //! The leftover `hx-get` attributes are left EXACTLY as browse emitted them: serve the
@@ -66,9 +66,11 @@ fn main() {
 
     std::fs::create_dir_all(&out).expect("the output directory");
     for (name, iri) in [
+        ("tokens.css", ikigai_ui::TOKENS_CSS),
         ("gonk.css", "urn:iki:gonk:asset:gonk.css"),
+        ("shell.js", "urn:iki:ui:shell.js"),
         ("gonk.js", "urn:iki:gonk:asset:gonk.js"),
-        ("htmx.min.js", "urn:iki:gonk:asset:htmx.min.js"),
+        ("htmx.min.js", "urn:iki:ui:htmx"),
         ("style.css", "urn:repo:style"),
         ("layout.css", ikigai_browse::LAYOUT_IRI),
     ] {
@@ -181,6 +183,8 @@ fn local(page: &str) -> String {
     let mut out = page.to_string();
     let k = ikigai_gonk::k::k_url;
     let rewrites: BTreeMap<String, &str> = [
+        ("/static/tokens.css".to_string(), "tokens.css"),
+        ("/static/shell.js".to_string(), "shell.js"),
         ("/static/gonk.css".to_string(), "gonk.css"),
         ("/static/gonk.js".to_string(), "gonk.js"),
         ("/static/htmx.min.js".to_string(), "htmx.min.js"),

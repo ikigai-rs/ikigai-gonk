@@ -325,6 +325,7 @@ impl ViewsPage {
         let mut attributes: Vec<(&str, String)> = vec![
             ("view", "views".to_string()),
             ("full", "true".to_string()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", "Views".to_string()),
             (
                 "intro",

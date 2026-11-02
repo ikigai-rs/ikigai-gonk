@@ -1,56 +1,31 @@
-/* gonk — the ledger's HTML face.
+/* gonk — the ledger's HTML face: its layout, on ikigai-ui's tokens (ledger #2834).
  *
- * ★ The palette is the contract `tests/web.rs::the_palette_clears_the_contrast_floor` holds to
- * ikigai-a11y's WCAG AA floor (4.5:1 for text), in BOTH schemes. The test reads the two
- * marked blocks below; keep every color token inside them and on its own line.
+ * ★ No color is written here. Every color is a `var(--…)` from `/static/tokens.css`
+ * (`urn:iki:ui:tokens.css`), linked before this sheet; its palettes are the contract
+ * `tests/shared_ui_2834.rs` holds to the contrast floor, and that test fails on a hex color in
+ * this file. So gonk.css follows `data-theme` on <html> (the theme chooser in the header) with no
+ * rule of its own.
+ *
+ * ★ Two kinds of line (D12): `--line` is a component border, the edge that identifies a control,
+ * and here that is only the text fields and pickers below. Everything else is `--rule`: a
+ * decorative line, which is what gonk's `--line` was before the split, so the page keeps its look.
  */
 
 :root {
-  color-scheme: light dark;
-  /* palette: light */
-  --bg: #ffffff;
-  --surface: #f4f6f8;
-  --fg: #1b1f24;
-  --muted: #545d68;
-  --accent: #0b5cad;
-  --accent-fg: #ffffff;
-  --danger: #a8200d;
-  --danger-fg: #ffffff;
-  --ok: #19703a;
-  --line: #c9d1d9;
-  /* end palette */
-  --radius: 0.5rem;
-  --gap: 0.75rem;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    /* palette: dark */
-    --bg: #0d1117;
-    --surface: #161b22;
-    --fg: #e6edf3;
-    --muted: #9ea8b3;
-    --accent: #6cb6ff;
-    --accent-fg: #0d1117;
-    --danger: #ff9b8f;
-    --danger-fg: #0d1117;
-    --ok: #5bd07a;
-    --line: #30363d;
-    /* end palette */
-  }
-}
-
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--fg); }
-a { color: var(--accent); text-underline-offset: 0.15em; }
+a { text-underline-offset: 0.15em; }
+/* The token sheet pads `nav a` for pages on the shared shell, which gonk's are not yet (phase 2).
+ * gonk's own navigation keeps its look; a rule with a class still decides for itself. */
+nav a { display: inline; padding: 0; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
 h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 var(--gap); overflow-wrap: anywhere; }
 h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 [hidden] { display: none !important; }
-:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
 .skip { position: absolute; left: -999px; top: 0; }
 .skip:focus { left: 0.5rem; top: 0.5rem; background: var(--bg); padding: 0.5rem; z-index: 10; }
@@ -60,7 +35,7 @@ h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 
 .top {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
-  padding: 0.6rem 1rem; border-bottom: 1px solid var(--line); background: var(--surface);
+  padding: 0.6rem 1rem; border-bottom: 1px solid var(--rule); background: var(--surface);
 }
 .brand { font-weight: 700; color: var(--fg); text-decoration: none; font-size: 1.1rem; }
 .ledgers { position: relative; }
@@ -68,8 +43,11 @@ h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 .auth { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .who, .note { color: var(--muted); font-size: 0.9rem; }
 
+/* The theme chooser is ikigai-ui's; the header's own gap spaces it. */
+.top .ui-theme { margin: 0; }
+
 main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
-.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; margin: 0 0 1rem; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 1rem; margin: 0 0 1rem; }
 .enrol { max-width: 60rem; margin: 1rem auto; }
 
 form { margin: 0; }
@@ -102,7 +80,7 @@ summary { cursor: pointer; color: var(--accent); }
 
 .ledger-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem; margin-bottom: var(--gap); }
 .ledger-head h1 { margin: 0; }
-.filters { display: flex; gap: 0.75rem; }
+.filters { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
 .filters a[aria-current] { font-weight: 700; color: var(--fg); text-decoration: none; }
 .search { display: flex; gap: 0.5rem; margin-left: auto; flex-wrap: wrap; }
 
@@ -110,16 +88,16 @@ summary { cursor: pointer; color: var(--accent); }
  * because it is the answer to "is this everything?" and that question is asked first. */
 .count { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; margin: 0 0 0.4rem; }
 .count .how-many { color: var(--muted); }
-.items { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.items { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
 .row.open, .row.closed {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem;
-  padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--line);
+  padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--rule);
 }
 .num { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 3ch; }
 .title { font-weight: 600; overflow-wrap: anywhere; flex: 1 1 14rem; }
 .closed .title { color: var(--muted); }
 .badges { display: inline-flex; flex-wrap: wrap; gap: 0.35rem; }
-.badge { font-size: 0.8rem; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 0.5rem; }
+.badge { font-size: 0.8rem; color: var(--muted); border: 1px solid var(--rule); border-radius: 999px; padding: 0 0.5rem; }
 .badge.open { color: var(--ok); border-color: var(--ok); }
 .inline { display: inline; }
 
@@ -134,7 +112,7 @@ summary { cursor: pointer; color: var(--accent); }
 .doctor-scope { color: var(--muted); margin: 0 0 1rem; overflow-wrap: break-word; }
 .iri { overflow-wrap: anywhere; }
 .plain { list-style: none; margin: 0; padding: 0; }
-.plain > li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+.plain > li { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
 .rel { color: var(--muted); min-width: 5rem; }
 .comment { display: block !important; }
 .comment-meta { margin: 0; color: var(--muted); font-size: 0.85rem; }
@@ -146,18 +124,47 @@ summary { cursor: pointer; color: var(--accent); }
 .flash.error { border-left-color: var(--danger); }
 .empty, .hint, .result-meta { color: var(--muted); }
 
-/* A refusal that belongs to ONE affordance, shown where that affordance is (web/gonk.js;
- * ledger #442). Deliberately quieter than .flash: the page around it is fine, and a band
- * that shouts would re-create the failure it replaces. ⚠ These are gonk's own chrome
- * classes, not browse's — no `browse-*` rule is defined here (that is #441's whole point,
+/* A refusal that belongs to ONE control, shown beside it by ikigai-ui's shell script as a
+ * `.ui-note` (D13, ledger #442). Deliberately quieter than .flash: the page around it is fine,
+ * and a band that shouts would re-create the failure it replaces. A note the script puts in
+ * #status, having no control to sit beside, wears .flash.error's look. ⚠ These are gonk's own
+ * chrome rules, not browse's: no `browse-*` rule is defined here (that is #441's whole point,
  * and the layout sheet the page links owns those). */
-.affordance-error { color: var(--danger); font-size: 0.9rem; margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-[data-denied="true"] { opacity: 0.6; }
+.ui-note { color: var(--danger); font-size: 0.9rem; margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#status .ui-note { color: inherit; font-size: inherit; border-left: 4px solid var(--danger); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+/* A sentence said for a screen reader alone takes no room: the region stays out of the layout. */
+.flash-area:not(:has(> :not(.ui-sr-only))) { margin-top: 0; }
+[aria-disabled="true"] { opacity: 0.6; }
 
 /* The browse landing page: the roots this grant may read. */
 .root-list { list-style: none; margin: 0; padding: 0; }
-.root-list > li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+.root-list > li { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
 .root-link { font-weight: 600; }
+
+/* The browse layout sheet's palette follows `prefers-color-scheme` alone, so a viewer's theme would
+ * leave its links and rules in the system's. Where a theme is in force (a choice, or
+ * `prefers-contrast: more`), they are the shared tokens; under plain `auto` the sheet's own
+ * values stand. These selectors outrank its `:root`, wherever it is linked. */
+:root[data-theme="light"], :root[data-theme="dark"], :root[data-theme="high-contrast"] {
+  --browse-link: var(--accent);
+  --browse-rule: var(--rule);
+  --browse-flag: var(--warn);
+  --browse-machine: var(--accent);
+  --browse-praise: var(--ok);
+  --browse-mark: color-mix(in srgb, var(--warn) 22%, transparent);
+  --browse-propose: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+@media (prefers-contrast: more) {
+  :root:not([data-theme]), :root[data-theme="auto"] {
+    --browse-link: var(--accent);
+    --browse-rule: var(--rule);
+    --browse-flag: var(--warn);
+    --browse-machine: var(--accent);
+    --browse-praise: var(--ok);
+    --browse-mark: color-mix(in srgb, var(--warn) 22%, transparent);
+    --browse-propose: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+}
 
 /* "On GitHub" above a browse page's region (ledger #1907). The note wraps under the link at
  * phone width rather than pushing the page sideways; a long branch name breaks anywhere. */
@@ -181,10 +188,10 @@ a[target="_blank"]::after { content: "\2197" / ""; margin-left: 0.15em; display:
 /* The cross-graph example. Deliberately NOT a sample: it is a collapsed `details` below the
  * buttons, with a dashed edge rather than the buttons' filled one, so nothing about it invites
  * a click that would load it into the editor (the page sends one graph; see web::CROSS_GRAPH).
- * No color is invented — --surface, --line and --muted are the ones the contrast test already
+ * No color is invented — --surface, --rule and --muted are the ones the contrast test already
  * holds to ikigai-a11y's floor. It scrolls sideways at phone width rather than wrapping a
  * query mid-token; the page body never scrolls, the block does. */
-.cross-graph-text { white-space: pre; overflow-x: auto; background: var(--surface); border: 1px dashed var(--line); padding: 0.75rem; border-radius: var(--radius); margin: 0; }
+.cross-graph-text { white-space: pre; overflow-x: auto; background: var(--surface); border: 1px dashed var(--rule); padding: 0.75rem; border-radius: var(--radius); margin: 0; }
 /* ★ The ACTIVE sample (#370). The STATE is `aria-pressed` on the button — web/gonk.js sets it
  * on click and clears it the moment the editor is typed in — so a screen reader hears which
  * sample the editor holds; this rule is only how that looks. Two signals, because the render
@@ -214,9 +221,9 @@ a[target="_blank"]::after { content: "\2197" / ""; margin-left: 0.15em; display:
  *
  * ⚠ Scoping `anywhere` to `td.uri` — the obvious repair — does NOT work: a shortened status
  * CURIE carries that same class, so it would go on breaking at its colon. */
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--radius); }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
-th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
 /* A column header is a short label; it never wraps, mid-word or otherwise. */
 th { background: var(--surface); white-space: nowrap; }
 td.uri { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
@@ -253,7 +260,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * color alone — the badge carries its word — so the palette here is emphasis, not meaning
  * (WCAG 1.4.1). */
 .queue-head { margin: 0 0 var(--gap); }
-.intray { border-left: 4px solid var(--line); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+.intray { border-left: 4px solid var(--rule); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
 /* Waiting work is the one state worth an accent: it is the number a person came to see. */
 .intray.count, .intray.working { border-left-color: var(--accent); }
 .intray.error, .intray.stuck { border-left-color: var(--danger); }
@@ -271,7 +278,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * other and the link's box is the same height as Browse's and SPARQL's. The gap replaces the
  * pill's own margin; the tighter line-height keeps the pill from re-growing the row. */
 .navlink { display: inline-flex; align-items: center; gap: 0.35rem; }
-.badge-depth { display: inline-block; padding: 0 0.35rem; border: 1px solid var(--line); border-radius: 999px; font-size: 0.8em; line-height: 1.3; }
+.badge-depth { display: inline-block; padding: 0 0.35rem; border: 1px solid var(--rule); border-radius: 999px; font-size: 0.8em; line-height: 1.3; }
 .badge-depth.empty { opacity: 0.55; }
 .badge-depth.count, .badge-depth.working, .badge-depth.recent { color: var(--accent); border-color: var(--accent); }
 .badge-depth.stuck, .badge-depth.error { color: var(--danger); border-color: var(--danger); font-weight: 600; }
@@ -297,9 +304,9 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .stale { border-left: 4px solid var(--accent); background: var(--surface); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
 .stale[hidden] { display: none; }
 .posture { margin: 0 0 var(--gap); }
-.findings { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.findings { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
 .findings:empty { border-top: 0; }
-.finding { padding: 0.75rem 0.25rem; border-bottom: 1px solid var(--line); }
+.finding { padding: 0.75rem 0.25rem; border-bottom: 1px solid var(--rule); }
 .finding-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: baseline; }
 .finding-where { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; overflow-wrap: anywhere; }
 .badge.sev.critical, .badge.sev.major { color: var(--danger); border-color: var(--danger); }
@@ -308,7 +315,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .finding-body { margin: 0.4rem 0; overflow-wrap: anywhere; }
 .finding-quote { white-space: pre-wrap; overflow-x: auto; background: var(--surface); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0.4rem 0; font-size: 0.9em; }
 .finding-prov { margin: 0.25rem 0; overflow-wrap: anywhere; }
-.decision { border-left: 4px solid var(--line); padding: 0.4rem 0.75rem; margin: 0.5rem 0 0; }
+.decision { border-left: 4px solid var(--rule); padding: 0.4rem 0.75rem; margin: 0.5rem 0 0; }
 .decision.published { border-left-color: var(--ok); }
 .decision-line { margin: 0; font-weight: 600; }
 .decision-note { margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -327,7 +334,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .decide-button.decline { background: transparent; color: var(--accent); }
 /* The decline reason word, grouped with its button so it reads as Decline's and nothing
  * else's: one outline around both, the picker the same height as the button. */
-.decide-why { display: inline-flex; align-items: stretch; gap: 0.25rem; padding: 0.15rem; border: 1px solid var(--line); border-radius: var(--radius); }
+.decide-why { display: inline-flex; align-items: stretch; gap: 0.25rem; padding: 0.15rem; border: 1px solid var(--rule); border-radius: var(--radius); }
 .decide-why-word { min-width: 8rem; }
 .decide-mark { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .reason-word { font-weight: 600; }
@@ -338,7 +345,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .filters.kinds { margin-top: 0.35rem; font-size: 0.9em; }
 .filters-label { opacity: 0.8; margin-right: 0.2rem; }
 .folded { opacity: 0.85; }
-.batch { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+.batch { border: 1px solid var(--rule); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
 .group + .group { margin-top: var(--gap); }
 .group-label { font-size: 1rem; margin: 0 0 0.4rem; overflow-wrap: anywhere; }
 .member { display: grid; grid-template-columns: auto 1fr; column-gap: 0.6rem; }
@@ -364,9 +371,9 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 /* The walk: the same group blocks as the batch view, one per burst or batch, and two small
  * forms per decline — the answers with a rating, and the withdrawal with only a note. */
 .filters.walk { margin-top: 0.35rem; font-size: 0.9em; }
-.walk-group { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
+.walk-group { border: 1px solid var(--rule); border-radius: var(--radius); padding: 0.5rem 0.75rem; margin: 0 0 var(--gap); }
 .steers { margin: 0.3rem 0; overflow-wrap: anywhere; }
-.decide.withdraw { border-top: 1px dashed var(--line); padding-top: 0.4rem; }
+.decide.withdraw { border-top: 1px dashed var(--rule); padding-top: 0.4rem; }
 .decide.withdraw > .note { flex: 1 1 100%; margin: 0; }
 
 @media (max-width: 40rem) {
@@ -377,13 +384,13 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 
 /* The judge's standing (ledger #696). The WORDS carry it on every row ("judge: … · <tag>");
    this only sets the line apart and folds a refuted row out of the way. No color is invented:
-   --line and --muted are the contrast-tested tokens. */
+   --rule and --muted are shared tokens. */
 .verdict-line { margin: 0.25rem 0; font-size: 0.9em; font-weight: 600; overflow-wrap: anywhere; }
 .verdict-fold > summary { cursor: pointer; color: var(--muted); overflow-wrap: anywhere; }
 .verdict-fold[open] > summary { margin-bottom: 0.4rem; }
 .judge-answers { margin: 0.25rem 0; font-size: 0.9em; }
 .judge-answers > summary { cursor: pointer; color: var(--muted); }
-.judge-answer-list { margin: 0.25rem 0 0; padding-left: 0.75rem; border-left: 2px solid var(--line); }
+.judge-answer-list { margin: 0.25rem 0 0; padding-left: 0.75rem; border-left: 2px solid var(--rule); }
 .judge-answer-list dt { font-weight: 600; }
 .judge-answer-list dd { margin: 0 0 0.25rem; overflow-wrap: anywhere; }
 /* The "real, reproduced" mark and its form (ledger #696). The WORD carries the mark. */
@@ -397,21 +404,23 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .signin-notice .grant-needed code { overflow-wrap: anywhere; }
 /* The refusal page (ledger #2021): its grant line can be one long IRI. */
 .refusal .grant-needed code { overflow-wrap: anywhere; }
+/* …and so can its sentence, which at phone width would push the page sideways. */
+#refusal-sentence { overflow-wrap: anywhere; }
 
 /* The Onboard page (ledger #2009): fingerprints and commands are long, so they wrap anywhere.
  * Palette tokens only. */
 .onboard-list { list-style: none; margin: 0 0 var(--gap); padding: 0; }
-.onboard-row { padding: 0.6rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.onboard-row { padding: 0.6rem 0; border-bottom: 1px solid var(--rule); overflow-wrap: anywhere; }
 .onboard-row p { margin: 0 0 0.25rem; }
 
 /* The Layers page (ledger #1675). Every state is a WORD first ("New", "3 new"); the weight and
  * the accent only repeat it. No color here that is not a palette token. */
 .layer-list, .entries { list-style: none; margin: 0 0 var(--gap); padding: 0; }
-.layer-row { padding: 0.6rem 0; border-bottom: 1px solid var(--line); }
+.layer-row { padding: 0.6rem 0; border-bottom: 1px solid var(--rule); }
 .layer-row .layer-name { margin: 0 0 0.25rem; }
 .layer-facts { margin: 0 0 0.25rem; }
 .unread.has-unread { font-weight: 700; color: var(--fg); }
-.entry { border-bottom: 1px solid var(--line); padding: 0.6rem 0; overflow-wrap: anywhere; }
+.entry { border-bottom: 1px solid var(--rule); padding: 0.6rem 0; overflow-wrap: anywhere; }
 .entry article { min-width: 0; }
 .entry-head { font-size: 1rem; margin: 0 0 0.2rem; }
 .entry-link { text-decoration: none; }
@@ -450,7 +459,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .ledger-panel {
   position: absolute; left: 0; top: calc(100% + 0.35rem); z-index: 20;
   min-width: 14rem; max-width: min(24rem, calc(100vw - 2rem)); max-height: 70vh; overflow-y: auto;
-  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.5rem;
+  background: var(--bg); border: 1px solid var(--rule); border-radius: var(--radius); padding: 0.5rem;
 }
 .ledger-list { list-style: none; margin: 0; padding: 0; }
 .ledger-list a { display: block; padding: 0.35rem 0.5rem; border-radius: 0.375rem; overflow-wrap: anywhere; }
@@ -459,7 +468,7 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * one; empty alternative text, so it is not read. The script's button carries its own. */
 .ledger-menu > summary::after { content: "\25BE" / ""; }
 .ledger-menu > summary::-webkit-details-marker { display: none; }
-.all-ledgers { display: block; margin-top: 0.35rem; padding: 0.4rem 0.5rem 0.1rem; border-top: 1px solid var(--line); }
+.all-ledgers { display: block; margin-top: 0.35rem; padding: 0.4rem 0.5rem 0.1rem; border-top: 1px solid var(--rule); }
 .all-ledgers[aria-current] { font-weight: 700; color: var(--fg); }
 .ledger-filter { display: grid; gap: 0.25rem; margin: 0 0 0.5rem; }
 .ledger-filter input { width: 100%; }

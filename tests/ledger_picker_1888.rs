@@ -336,9 +336,7 @@ fn the_filter_appears_only_past_eight_and_announces_politely() {
         "{filter}"
     );
     assert!(
-        filter.contains(
-            "aria-live=\"polite\" class=\"note\" id=\"ledger-filter-status\" role=\"status\""
-        ),
+        filter.contains("<p class=\"note\" id=\"ledger-filter-status\"></p>"),
         "{filter}"
     );
 

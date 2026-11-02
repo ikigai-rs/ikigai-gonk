@@ -257,7 +257,10 @@ fn the_http_door_is_pages_then_the_hub() {
 
     assert_eq!(g.layers(ENTRY), [spaces::HTTP_DOOR]);
     assert_eq!(g.kind(spaces::HTTP_DOOR), "Fallback");
-    assert_eq!(g.layers(spaces::HTTP_DOOR), [spaces::PAGES, spaces::HUB]);
+    assert_eq!(
+        g.layers(spaces::HTTP_DOOR),
+        [spaces::PAGES, ikigai_ui::SPACE_ID, spaces::HUB]
+    );
 
     assert_eq!(g.kind(spaces::PAGES), "EndpointSpace");
     let pages = g.strs(spaces::PAGES, &format!("{IK}pattern"));
@@ -378,5 +381,8 @@ fn the_12_5_walk_reaches_every_served_family_and_closes_the_rest() {
     // unbound name ANSWERS (404, not 500), never to what is reachable. The library answers
     // that 404 itself now; `tests/web.rs::a_browser_gets_html_pages_and_a_readable_404`
     // is where the status is pinned.
-    assert_eq!(http.layers(spaces::HTTP_DOOR), [spaces::PAGES, spaces::HUB]);
+    assert_eq!(
+        http.layers(spaces::HTTP_DOOR),
+        [spaces::PAGES, ikigai_ui::SPACE_ID, spaces::HUB]
+    );
 }

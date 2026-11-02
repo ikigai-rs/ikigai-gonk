@@ -41,7 +41,9 @@
   <xsl:template match="view:page">
     <xsl:choose>
       <xsl:when test="@full = 'true'">
-        <html lang="en">
+        <!-- data-theme is auto here; src/render.rs::render writes `theme=` from a chooser with no
+             script. ikigai-ui's shell script applies a remembered choice over auto. -->
+        <html lang="en" data-theme="auto">
           <head>
             <meta charset="utf-8"/>
             <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -54,6 +56,8 @@
                  element, which the CSP refuses; gonk styles no indicator. -->
             <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}</xsl:attribute></meta>
             <title><xsl:value-of select="@title"/> · gonk</title>
+            <!-- The shared tokens first (urn:iki:ui:tokens.css), so gonk's layout wins a tie. -->
+            <link rel="stylesheet" href="/static/tokens.css"/>
             <link rel="stylesheet" href="/static/gonk.css"/>
             <!-- A page that hosts another family's faces links that family's own stylesheet
                  (urn:repo:style, through the /k/ adapter). Withheld when the caller could
@@ -67,7 +71,9 @@
             <xsl:if test="@layout-stylesheet">
               <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@layout-stylesheet"/></xsl:attribute></link>
             </xsl:if>
-            <script src="/static/htmx.min.js" defer="defer"></script>
+            <!-- Without defer, so the theme is on <html> before the first paint (D14). -->
+            <script src="/static/shell.js"></script>
+            <script src="/static/htmx.min.js" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
           </head>
           <body>
@@ -89,6 +95,8 @@
                 <button id="auth-logout" type="button" class="quiet" hidden="hidden">Sign out</button>
                 <a id="auth-localhost" class="note" hidden="hidden">Passkeys need localhost</a>
               </div>
+              <!-- ikigai-ui's theme chooser: src/render.rs::render puts its markup here. -->
+              <xsl:comment>theme-chooser</xsl:comment>
             </header>
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>
@@ -99,7 +107,7 @@
                 <button type="submit">Create passkey</button>
               </form>
             </section>
-            <div id="flash" class="flash-area" role="status" aria-live="polite"></div>
+            <div id="status" class="flash-area" role="status" aria-live="polite"></div>
             <main id="main">
               <xsl:call-template name="body"/>
             </main>
@@ -146,7 +154,7 @@
                 <div class="ledger-filter" data-ledger-filter="true" hidden="hidden">
                   <label for="ledger-filter">Filter ledgers</label>
                   <input id="ledger-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="ledger-filter-status"/>
-                  <p id="ledger-filter-status" class="note" role="status" aria-live="polite"></p>
+                  <p id="ledger-filter-status" class="note"></p>
                 </div>
               </xsl:if>
               <ul class="ledger-list">
@@ -207,7 +215,7 @@
        server did again. -->
   <xsl:template match="view:queue">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Queue<xsl:if test="@depth-url">
-      <span class="queue-badge" hx-swap="innerHTML" hx-sync="this:drop">
+      <span class="queue-badge" data-ui-quiet="" hx-swap="innerHTML" hx-sync="this:drop">
         <xsl:attribute name="hx-get"><xsl:value-of select="@depth-url"/></xsl:attribute>
         <xsl:attribute name="hx-trigger">load, every <xsl:value-of select="@every"/></xsl:attribute>
       </span>
@@ -266,13 +274,13 @@
     </p>
   </xsl:template>
 
-  <!-- The flash as web/gonk.js writes one into #flash: a refusal is an alert. -->
+  <!-- The flash as web/gonk.js writes one into #status: a refusal is an alert. -->
   <xsl:template match="view:flash" mode="announce">
     <p>
       <xsl:attribute name="class">flash <xsl:value-of select="@kind"/></xsl:attribute>
       <xsl:choose>
         <xsl:when test="@kind = 'error'"><xsl:attribute name="role">alert</xsl:attribute></xsl:when>
-        <xsl:otherwise><xsl:attribute name="role">status</xsl:attribute></xsl:otherwise>
+        <xsl:otherwise><xsl:attribute name="data-announce"></xsl:attribute></xsl:otherwise>
       </xsl:choose>
       <xsl:value-of select="."/>
     </p>
@@ -428,19 +436,16 @@
        so a failed poll is simply tried again and nothing here keeps a timer of its own. The
        first badge asks at load AND every interval, so a first poll that fails is tried again
        too (ledger #1705); the answer replaces it, and its timer with it. A failed poll is not
-       written into #flash (web/gonk.js): the badge retries on its own.
-       ★ The live region is OUTSIDE the link, so a sentence in it never becomes part of the
-       link's name; the count's answer writes it (out of band) only when the count rose. -->
+       a message (data-ui-quiet, which ikigai-ui's shell script reads): the badge retries on its own.
+       ★ The sentence goes to #status, OUTSIDE the link, so it never becomes part of the link's
+       name; the count's answer adds it (out of band) only when the count rose. -->
   <xsl:template match="view:layers-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Layers<xsl:if test="@count-url">
-      <span class="layers-badge" hx-swap="outerHTML" hx-sync="this:drop">
+      <span class="layers-badge" data-ui-quiet="" hx-swap="outerHTML" hx-sync="this:drop">
         <xsl:attribute name="hx-get"><xsl:value-of select="@count-url"/></xsl:attribute>
         <xsl:attribute name="hx-trigger">load, every <xsl:value-of select="@every"/></xsl:attribute>
       </span>
     </xsl:if></a>
-    <xsl:if test="@count-url">
-      <span id="layers-badge-live" class="sr-only" role="status" aria-live="polite"></span>
-    </xsl:if>
   </xsl:template>
 
   <!-- The RDF Toolbox (ledger #2021), present only when this server serves one: a
@@ -457,7 +462,7 @@
   </xsl:template>
 
   <xsl:template name="layers-count">
-    <span class="layers-badge" hx-swap="outerHTML" hx-sync="this:drop">
+    <span class="layers-badge" data-ui-quiet="" hx-swap="outerHTML" hx-sync="this:drop">
       <xsl:if test="@url">
         <xsl:attribute name="hx-get"><xsl:value-of select="@url"/></xsl:attribute>
         <xsl:attribute name="hx-trigger">every <xsl:value-of select="@every"/></xsl:attribute>
@@ -465,7 +470,7 @@
       <xsl:if test="@count"><span class="sr-only">, </span><span class="layers-count"><xsl:value-of select="@count"/></span><span class="sr-only"> new</span></xsl:if>
     </span>
     <xsl:if test="@announce">
-      <span id="layers-badge-live" hx-swap-oob="innerHTML"><xsl:value-of select="@announce"/></span>
+      <div id="status" hx-swap-oob="beforeend"><p class="ui-sr-only"><xsl:value-of select="@announce"/></p></div>
     </xsl:if>
   </xsl:template>
 
@@ -480,7 +485,7 @@
   </xsl:template>
 
   <xsl:template match="view:watch">
-    <div class="layers-watch" hidden="hidden" hx-swap="outerHTML">
+    <div class="layers-watch" data-ui-quiet="" hidden="hidden" hx-swap="outerHTML">
       <xsl:attribute name="hx-get"><xsl:value-of select="@url"/></xsl:attribute>
       <xsl:attribute name="hx-trigger"><xsl:value-of select="@trigger"/></xsl:attribute>
     </div>
@@ -500,7 +505,7 @@
       <h1 id="onboard-title"><xsl:value-of select="@title"/></h1>
       <xsl:if test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
       <xsl:if test="@error"><p class="note" role="alert"><xsl:value-of select="@error"/></p></xsl:if>
-      <xsl:if test="@restart"><p class="note" role="status"><xsl:value-of select="@restart"/></p></xsl:if>
+      <xsl:if test="@restart"><p class="note" data-announce=""><xsl:value-of select="@restart"/></p></xsl:if>
       <xsl:if test="not(@note)">
         <h2 id="onboard-pending-title">Waiting for approval</h2>
         <p class="note">Approve on this machine, from a terminal: the command is beside each request.</p>
@@ -565,8 +570,8 @@
       <ul id="layers-list" class="layer-list">
         <xsl:apply-templates select="view:layer-row"/>
       </ul>
-      <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
-      <p id="layers-reconnect" class="note live" role="status" aria-live="polite"></p>
+      <p id="layers-live" class="note live"></p>
+      <p id="layers-reconnect" class="note live"></p>
       <xsl:apply-templates select="view:watch"/>
     </section>
   </xsl:template>
@@ -604,8 +609,8 @@
       <xsl:if test="@no-post"><p class="note"><xsl:value-of select="@no-post"/></p></xsl:if>
       <xsl:if test="@reading"><p class="note"><xsl:value-of select="@reading"/></p></xsl:if>
       <xsl:apply-templates select="view:say"/>
-      <p id="layers-live" class="note live" role="status" aria-live="polite"></p>
-      <p id="layers-reconnect" class="note live" role="status" aria-live="polite"></p>
+      <p id="layers-live" class="note live"></p>
+      <p id="layers-reconnect" class="note live"></p>
       <!-- `@entries` is true, false (read, and empty) or pending (not read yet: the list is
            drawn empty so the poll's entries have somewhere to land, ledger #1718). -->
       <xsl:if test="@entries">
@@ -745,8 +750,8 @@
   <!-- A post's answer: a fresh form in place of the one that posted, and the flash. -->
   <xsl:template name="layers-say">
     <xsl:apply-templates select="view:say"/>
-    <div id="flash" hx-swap-oob="innerHTML">
-      <p class="flash ok" role="status"><xsl:value-of select="@flash"/></p>
+    <div id="status" hx-swap-oob="innerHTML">
+      <p class="flash ok"><xsl:value-of select="@flash"/></p>
     </div>
   </xsl:template>
 
@@ -760,6 +765,7 @@
     </xsl:if>
     <xsl:if test="@announce">
       <p id="layers-live" hx-swap-oob="innerHTML"><xsl:value-of select="@announce"/></p>
+      <div id="status" hx-swap-oob="beforeend"><p class="ui-sr-only"><xsl:value-of select="@announce"/></p></div>
     </xsl:if>
     <xsl:if test="@entries">
       <ol hx-swap-oob="afterbegin:#layer-entries"><xsl:apply-templates select="view:slot[@name = 'entries']"/></ol>
@@ -1007,12 +1013,12 @@
   <xsl:template name="github">
     <xsl:choose>
       <xsl:when test="view:github"><xsl:apply-templates select="view:github"/></xsl:when>
-      <xsl:otherwise><p id="github" class="github" hidden="hidden"></p></xsl:otherwise>
+      <xsl:otherwise><p id="github" class="github" data-ui-quiet="" hidden="hidden"></p></xsl:otherwise>
     </xsl:choose>
   </xsl:template>
 
   <xsl:template match="view:github">
-    <p id="github" class="github">
+    <p id="github" class="github" data-ui-quiet="">
       <a class="github-link">
         <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
         <xsl:attribute name="data-base"><xsl:value-of select="@href"/></xsl:attribute>
@@ -1055,6 +1061,7 @@
         <xsl:attribute name="hx-get"><xsl:value-of select="@refresh-url"/></xsl:attribute>
         <xsl:attribute name="hx-trigger"><xsl:value-of select="@news"/></xsl:attribute>
         <xsl:attribute name="hx-target">#queue</xsl:attribute>
+        <xsl:attribute name="data-ui-quiet"></xsl:attribute>
         <xsl:attribute name="hx-swap">outerHTML</xsl:attribute>
       </xsl:if>
       <header class="queue-head">
@@ -1092,12 +1099,12 @@
       <xsl:apply-templates select="view:backfill"/>
       <xsl:apply-templates select="view:flash"/>
       <!-- ★ The same sentence, ANNOUNCED (ledger #657): a swapped-in paragraph is seen and
-           not heard, so a fragment also carries it out of band into #flash, the polite live
+           not heard, so a fragment also carries it out of band into #status, the polite live
            region every page already has. `innerHTML` keeps that region the element the
            screen reader is already watching. The wrapper is hidden so that, with scripting
            off and nothing to move it, the sentence is not shown twice. -->
       <xsl:if test="view:flash and @full = 'false'">
-        <div id="flash" hx-swap-oob="innerHTML" hidden="hidden">
+        <div id="status" hx-swap-oob="innerHTML" hidden="hidden">
           <xsl:apply-templates select="view:flash" mode="announce"/>
         </div>
       </xsl:if>
@@ -1127,9 +1134,9 @@
       </xsl:if>
       <!-- ⚠ A refresh that was HELD BACK, because a human had a decision open on this list
            (web/gonk.js decides; the sentence is the server's). Hidden until that happens,
-           and `role="status"` so it is announced rather than only seen. -->
+           and web/gonk.js says it in #status, so it is announced rather than only seen. -->
       <xsl:if test="@stale-text">
-        <p class="stale" id="queue-stale" hidden="hidden" role="status"><xsl:value-of select="@stale-text"/></p>
+        <p class="stale" id="queue-stale" hidden="hidden"><xsl:value-of select="@stale-text"/></p>
       </xsl:if>
       <ol class="findings">
         <xsl:apply-templates select="view:finding"/>
@@ -2490,7 +2497,7 @@
         <textarea id="q" name="query" rows="12" spellcheck="false" class="mono"><xsl:value-of select="view:query"/></textarea>
         <button type="submit">Run</button>
       </form>
-      <div id="results" class="results" aria-live="polite">
+      <div id="results" class="results">
         <xsl:apply-templates select="view:results"/>
       </div>
     </section>
@@ -2521,7 +2528,7 @@
     <details class="cross-graph">
       <summary>Joining two graphs — a query for the endpoint, not for this box</summary>
       <p class="hint"><xsl:value-of select="@why"/></p>
-      <pre class="mono cross-graph-text"><xsl:value-of select="."/></pre>
+      <pre class="mono cross-graph-text" tabindex="0"><xsl:value-of select="."/></pre>
     </details>
   </xsl:template>
 
