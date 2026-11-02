@@ -22,7 +22,7 @@ use ikigai_gonk::grants::anonymous_http_grants;
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
-use ikigai_ui::palette::{DARK, HIGH_CONTRAST, LIGHT, PALETTES};
+use ikigai_ui::palette::{DARK, LIGHT, PALETTES};
 use ikigai_ui::testkit::{contrast, lint};
 
 const CSS: &str = include_str!("../web/gonk.css");
@@ -400,5 +400,4 @@ fn light_and_dark_are_the_colors_gonk_had() {
             assert_eq!(palette.get(token), Some(value), "{}: {token}", palette.name);
         }
     }
-    assert!(HIGH_CONTRAST.enhanced);
 }

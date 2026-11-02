@@ -1186,7 +1186,13 @@ fn a_task_layer_is_read_only() {
         page.body
     );
     assert!(!page.body.contains("id='say'"));
-    // A layer's own page has the same theme as any other, whatever its label.
+    // The heading is the layer's label, and its theme is a theme: the page's code writes the
+    // label over the title by position, so an attribute put before it would take the label.
+    assert!(
+        page.body.contains("<h1 id='layer-title'>Tasks</h1>"),
+        "{}",
+        page.body
+    );
     assert!(page.body.contains("data-theme='auto'"), "{}", page.body);
     assert_eq!(
         page.body.matches("<form").count(),

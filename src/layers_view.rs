@@ -2127,9 +2127,9 @@ impl Endpoint for LayerPage {
         let mut attributes = vec![
             ("view", "layer".to_string()),
             ("full", "true".to_string()),
-            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", layer.clone()),
             ("name", layer.clone()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
         ];
         let mut slots: Vec<(String, String)> = Vec::new();
         if !inv.capability.allows(CAP_READ) {

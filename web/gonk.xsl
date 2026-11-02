@@ -2528,7 +2528,7 @@
     <details class="cross-graph">
       <summary>Joining two graphs — a query for the endpoint, not for this box</summary>
       <p class="hint"><xsl:value-of select="@why"/></p>
-      <pre class="mono cross-graph-text"><xsl:value-of select="."/></pre>
+      <pre class="mono cross-graph-text" tabindex="0"><xsl:value-of select="."/></pre>
     </details>
   </xsl:template>
 

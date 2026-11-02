@@ -655,9 +655,6 @@ const THEME_CHOOSER_MARKER: &str = "<!--theme-chooser-->";
 /// envelope's `ui-theme` ([`theme_of`]) on `<html>`, and the chooser's markup, whole, where the
 /// header asks for it, so gonk holds no copy for it to drift from. The shell moves into
 /// `urn:iki:ui:template:shell` in phase 2.
-///
-/// ⚠ Here, not as a computed attribute in the stylesheet: xrust wrote a task layer's label into
-/// `<html>`'s `xsl:attribute`, whatever the envelope said. `tests/layers_page_1675.rs` pins it.
 fn themed(document: &str, page: String) -> String {
     let head = document.split('>').next().unwrap_or_default();
     let theme = head

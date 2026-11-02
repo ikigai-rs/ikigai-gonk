@@ -123,7 +123,7 @@
   // meet. It is grammar-level and knows nothing about which button was pressed: any /k/
   // request, from any face, present or future, folds the same way. The server's own shell
   // already emits the query form, so a broken rewrite here cannot make the first paint fail
-  // silently — it fails on the first affordance, loudly, in #flash.
+  // silently — it fails on the first affordance, loudly, beside it.
   document.addEventListener("htmx:configRequest", (e) => {
     const path = e.detail && e.detail.path;
     if (typeof path !== "string" || path.slice(0, 3) !== "/k/") return;
@@ -279,7 +279,7 @@
 
   // The Layers page's post form is replaced by its answer (a fresh form, ledger #1675), and the
   // element that had focus goes with it. Focus goes back to the new form's text box, so a
-  // keyboard user keeps their place; the "Posted" sentence is announced from #flash.
+  // keyboard user keeps their place; the "Posted" sentence is announced from #status.
   document.addEventListener("htmx:afterSettle", (e) => {
     const elt = e.detail && e.detail.elt;
     if (!elt || elt.id !== "say") return;

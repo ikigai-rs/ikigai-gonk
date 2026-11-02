@@ -404,6 +404,8 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .signin-notice .grant-needed code { overflow-wrap: anywhere; }
 /* The refusal page (ledger #2021): its grant line can be one long IRI. */
 .refusal .grant-needed code { overflow-wrap: anywhere; }
+/* …and so can its sentence, which at phone width would push the page sideways. */
+#refusal-sentence { overflow-wrap: anywhere; }
 
 /* The Onboard page (ledger #2009): fingerprints and commands are long, so they wrap anywhere.
  * Palette tokens only. */
