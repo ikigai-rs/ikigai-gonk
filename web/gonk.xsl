@@ -2084,6 +2084,15 @@
     </li>
   </xsl:template>
 
+  <!-- An author who is not the committer is a claim, and the words say so (ledger #2836). -->
+  <xsl:template name="author-claim">
+    <xsl:if test="view:authorStatus">
+      <xsl:text> (</xsl:text><xsl:value-of select="view:authorStatus"/>
+      <xsl:if test="view:committer">, committed by <xsl:value-of select="view:committer"/></xsl:if>
+      <xsl:text>)</xsl:text>
+    </xsl:if>
+  </xsl:template>
+
   <xsl:template name="badges">
     <span>
       <xsl:attribute name="class">badge <xsl:value-of select="view:status"/></xsl:attribute>
@@ -2191,7 +2200,7 @@
          references after the transform (ledger #989); the value is the ledger they resolve in. -->
     <xsl:if test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:if>
     <dl class="meta">
-      <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/></xsl:if></dd>
+      <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/><xsl:call-template name="author-claim"/></xsl:if></dd>
       <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
       <xsl:if test="view:kind"><dt>Level</dt><dd><code><xsl:value-of select="view:kind"/></code></dd></xsl:if>
       <xsl:if test="ledger:revision"><dt>Revision</dt><dd><code><xsl:value-of select="ledger:revision"/></code></dd></xsl:if>
@@ -2252,7 +2261,7 @@
         <xsl:value-of select="view:created"/>
         <xsl:text> · </xsl:text>
         <xsl:choose>
-          <xsl:when test="view:author"><xsl:value-of select="view:author"/></xsl:when>
+          <xsl:when test="view:author"><xsl:value-of select="view:author"/><xsl:call-template name="author-claim"/></xsl:when>
           <xsl:otherwise>unattributed</xsl:otherwise>
         </xsl:choose>
       </p>

@@ -63,6 +63,7 @@ pub mod mount;
 pub mod nl;
 pub mod onboard;
 pub mod onboard_init;
+pub mod participants;
 pub mod queue;
 pub mod quic;
 pub mod refusal;
@@ -375,10 +376,14 @@ pub fn compose_serving_with_lifecycles(
     // ★ Ledger #775 step 3: every claim's KIND is stamped from the door's principal
     // ([`crate::admit::claim_kind`]) — a passkey is a person, anything else a machine — never
     // from the caller. Sound because every door OVERWRITES `principal` before the hub sees it.
+    // ★ And who may CLAIM an author (ledger #2836): `crate::participants` names the graph that
+    // enrolls a delegate or an import principal. The committer itself is the ledger's to stamp,
+    // from the capability's principal.
     spaces.push(Arc::new(ikigai_ledger::space_with(
         ikigai_ledger::SpaceConfig::default()
             .claim_kind(crate::admit::claim_kind())
-            .lifecycles(lifecycles),
+            .lifecycles(lifecycles)
+            .participants(crate::participants::GRAPH),
     )));
     // ★ The page renderer's chunk resource (`urn:iki:gonk:render`, ledger #519) lives HERE
     // and not in the HTTP door's page space, because the hub holds the one cache in the
@@ -392,6 +397,9 @@ pub fn compose_serving_with_lifecycles(
     // (`crate::sparql`). Bound with the store, always — it reaches nothing the store's own
     // scoped doors do not, and it is what lets `web.mount` prefer this socket.
     spaces.push(Arc::new(sparql::space()));
+    // Aliases are a deployment-wide authority with grants of their own, beside the ledgers
+    // (`crate::grants::alias_grants`).
+    spaces.push(Arc::new(ikigai_ledger::alias::space()));
     // ★ Scripts as resources (ledger #939, [`crate::script`]): `urn:script:*`, the plan doors
     // a plan script reaches and the validator they compose — every door reaches the first two,
     // and none reaches the validator (`crate::doors`). After the store, the ledger and

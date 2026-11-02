@@ -192,6 +192,7 @@ fn re_enrolling_a_hand_widened_grant_names_what_it_would_drop() {
             "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
             "urn:cap:ledger:write:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
+            "urn:cap:store:read:graph:urn:collab:participants",
             "urn:cap:ledger:delete:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default:deleted",
             "urn:cap:browse:read:*",

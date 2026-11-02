@@ -174,6 +174,7 @@ usage:
   ikigai-gonk [serve] [flags]      hold the durable store and serve the ledgers
   ikigai-gonk client add <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
+                     [--alias <ledger>=<scheme>]... [--link-in <ledger>]... [--mirror-to <ledger>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--cert <client.crt>] [--force] [--rotate]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
@@ -211,6 +212,7 @@ usage:
                                    next signed-in request or sign-in
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
+                     [--alias <ledger>=<scheme>]... [--link-in <ledger>]... [--mirror-to <ledger>]...
                      [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
@@ -347,6 +349,13 @@ usage:
                                    append (key urn:iki:finding:<id>), so a re-run files nothing
                                    new; --dry-run reads and files nothing (README, \"Filing
                                    gonk's own findings\")
+  ikigai-gonk ledger enroll <client name or principal IRI> (--acts-for <iri> | --importer) [--socket PATH] [--config PATH]
+                                   as the owner, over the socket: let a principal claim an
+                                   author. --acts-for makes it that principal's delegate (a
+                                   worker machine's author on a hand-back); --importer lets it
+                                   name any foreign actor and claim authored dates. It needs a
+                                   writing --ledger grant, which reads the participants graph.
+                                   `ledger unenroll` takes the same arguments
   ikigai-gonk ledger backfill-keys [--ledger default] [--socket PATH] [--config PATH] [--dry-run]
                                    give the items roborev and kata filed BEFORE keyed appends,
                                    and published findings filed by hand without a key,
@@ -433,6 +442,9 @@ pub enum Command {
         /// `--ledger-graph`: also grant RAW writes to each named ledger's graph
         /// ([`crate::grants::ledger_graph_grants`], ledger #878).
         ledger_graphs: Vec<String>,
+        /// `--alias`, `--link-in` and `--mirror-to`: grants that reach past one ledger
+        /// ([`crate::grants::Across`], ledger #2836).
+        across: Vec<crate::grants::Across>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
         /// `--script <name>=<read|run|publish>`: scripts, each by name (ledger #939).
@@ -520,6 +532,9 @@ pub enum Command {
         /// `--ledger-graph`: also grant RAW writes to each named ledger's graph
         /// ([`crate::grants::ledger_graph_grants`], ledger #878).
         ledger_graphs: Vec<String>,
+        /// `--alias`, `--link-in` and `--mirror-to`: grants that reach past one ledger
+        /// ([`crate::grants::Across`], ledger #2836).
+        across: Vec<crate::grants::Across>,
         /// `--browse <read|derive>` and its `--root`s: the browse family, as a role.
         browse: Option<BrowseGrant>,
         /// `--script <name>=<read|run|publish>`: scripts, each by name (ledger #939).
@@ -562,6 +577,9 @@ pub enum Command {
     KataImport(crate::kata::ImportArgs),
     /// Give the items the bridges filed before keys existed their key, over the socket.
     BackfillKeys(crate::keys::BackfillArgs),
+    /// `ledger enroll` / `ledger unenroll`: write the participants graph over the socket
+    /// ([`crate::participants`], ledger #2836).
+    Enroll(crate::participants::EnrollArgs),
     /// File a browse root's PUBLISHED review findings as ledger items, over the socket.
     FindingsFile(crate::findings::FileArgs),
     /// Print the usage.
@@ -1082,6 +1100,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
         }
         Some("ledger") => {
             args.next();
+            if let Some(word @ ("enroll" | "unenroll")) = args.peek().map(String::as_str) {
+                let remove = word == "unenroll";
+                args.next();
+                return crate::participants::parse_args(remove, args).map(Command::Enroll);
+            }
             return crate::keys::parse_args(args).map(Command::BackfillKeys);
         }
         Some("findings") => {
@@ -1392,6 +1415,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
     let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
     let (mut ledger_graphs, mut scripts, mut nl_draft) = (Vec::new(), Vec::new(), false);
+    let mut across = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
@@ -1429,6 +1453,9 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
             // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
             "--worker" => ledgers.push((value(&mut args, "--worker")?, Authority::Worker)),
             "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
+            flag @ ("--alias" | "--link-in" | "--mirror-to") => {
+                across.push(across_spec(flag, &value(&mut args, flag)?)?);
+            }
             "--force" => force = true,
             "--rotate" => rotate = true,
             other => return Err(format!("client add: unknown argument `{other}`")),
@@ -1440,6 +1467,7 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         ledgers,
         browse_graph,
         ledger_graphs,
+        across,
         browse: browse_grant(role, roots)?,
         scripts,
         nl_draft,
@@ -1468,6 +1496,27 @@ fn browse_graph_authority(spelled: &str) -> Result<Authority, String> {
 }
 
 /// `--nl <role>`: `draft` is the one role (ledger #1138).
+/// One `--alias <ledger>=<scheme>`, `--link-in <ledger>` or `--mirror-to <ledger>`, its names
+/// checked here so a typo refused at parse time is a grant that never exists.
+fn across_spec(flag: &str, spec: &str) -> Result<crate::grants::Across, String> {
+    use crate::grants::Across;
+    let across = match flag {
+        "--alias" => {
+            let (ledger, scheme) = spec
+                .split_once('=')
+                .ok_or_else(|| format!("--alias: expected <ledger>=<scheme>, got `{spec}`"))?;
+            Across::Alias {
+                ledger: ledger.to_string(),
+                scheme: scheme.to_string(),
+            }
+        }
+        "--link-in" => Across::LinkIn(spec.to_string()),
+        _ => Across::MirrorTo(spec.to_string()),
+    };
+    across.tokens().map_err(|e| format!("{flag}: {e}"))?;
+    Ok(across)
+}
+
 fn nl_role(spelled: &str) -> Result<bool, String> {
     match spelled {
         "draft" => Ok(true),
@@ -1580,6 +1629,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Flags::default(),
     );
     let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
+    let mut across = Vec::new();
     let (mut scripts, mut nl_draft) = (Vec::new(), false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1606,6 +1656,9 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
             "--worker" => ledgers.push((value(&mut args, "--worker")?, Authority::Worker)),
             "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
+            flag @ ("--alias" | "--link-in" | "--mirror-to") => {
+                across.push(across_spec(flag, &value(&mut args, flag)?)?);
+            }
             "--force" => force = true,
             "--minutes" => {
                 let spelled = value(&mut args, "--minutes")?;
@@ -1633,6 +1686,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         ledgers,
         browse_graph,
         ledger_graphs,
+        across,
         browse: browse_grant(role, roots)?,
         scripts,
         nl_draft,
@@ -3102,6 +3156,55 @@ mod tests {
     }
 
     #[test]
+    fn grants_past_one_ledger_and_an_enrollment_parse() {
+        use crate::grants::Across;
+        use crate::participants::Role;
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        match parse_args(args(
+            "client add sync --alias acme=gh --link-in acme --mirror-to cli",
+        ))
+        .unwrap()
+        {
+            Command::ClientAdd { across, .. } => assert_eq!(
+                across,
+                [
+                    Across::Alias {
+                        ledger: "acme".to_string(),
+                        scheme: "gh".to_string()
+                    },
+                    Across::LinkIn("acme".to_string()),
+                    Across::MirrorTo("cli".to_string()),
+                ]
+            ),
+            other => panic!("{other:?}"),
+        }
+        for refused in [
+            "client add sync --alias acme",
+            "client add sync --alias acme=key",
+            "client add sync --link-in not/a/ledger",
+            "ledger enroll w1",
+            "ledger enroll w1 --importer --acts-for urn:x",
+        ] {
+            assert!(parse_args(args(refused)).is_err(), "{refused}");
+        }
+        match parse_args(args(
+            "ledger unenroll w1 --acts-for urn:collab:participant:m",
+        ))
+        .unwrap()
+        {
+            Command::Enroll(enroll) => {
+                assert!(enroll.remove);
+                assert_eq!(enroll.principal, "w1");
+                assert_eq!(
+                    enroll.role,
+                    Role::ActsFor("urn:collab:participant:m".to_string())
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn subcommands_parse() {
         let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
         match parse_args(args(
@@ -3114,6 +3217,7 @@ mod tests {
                 ledgers,
                 browse_graph,
                 ledger_graphs,
+                across,
                 browse,
                 scripts,
                 nl_draft,
@@ -3126,6 +3230,7 @@ mod tests {
                 assert!(scripts.is_empty(), "no script grant unless named");
                 assert!(!nl_draft, "no drafting unless named");
                 assert!(ledger_graphs.is_empty(), "no raw grant unless named");
+                assert!(across.is_empty(), "nothing past one ledger unless named");
                 assert!(!rotate);
                 assert!(browse.is_none() && flags.config.is_none());
                 assert_eq!(

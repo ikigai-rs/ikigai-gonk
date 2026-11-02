@@ -986,7 +986,6 @@ impl Mirror {
             .ledger_request(Verb::Sink, "comment")
             .with_arg("item", inline(&item.number.to_string()))
             .with_arg("key", inline(key))
-            .with_arg("author", inline(&self.principal))
             .with_arg("as", inline("application/json"))
             .with_arg("content", inline(text));
         if handback {

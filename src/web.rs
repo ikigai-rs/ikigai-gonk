@@ -1222,8 +1222,15 @@ fn enrich_children(graph: &mut Graph) {
 /// translates, so a relabeled passkey keeps its history and the store never learns a
 /// display name. The file is read at most once per render, and not at all when no author
 /// on the page is a passkey.
+///
+/// ★ An author that is not its committer is a CLAIM (ledger #2836): `view:authorStatus` says so,
+/// in `ikigai-ledger`'s own words, and `view:committer` names who wrote it down. A verified
+/// author is the committer, so it adds nothing. Legacy free text carries no committer and stays
+/// as it reads.
 fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
     let author = format!("{LEDGER_NS}author");
+    let committer = format!("{LEDGER_NS}committer");
+    let source = format!("{LEDGER_NS}authorSource");
     let mut attributed: Vec<(String, String)> = Vec::new();
     for class in ["Item", "Comment"] {
         for subject in graph.subjects_of_type(&format!("{LEDGER_NS}{class}")) {
@@ -1236,15 +1243,26 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
         .iter()
         .any(|(_, who)| identity::passkey_credential(who).is_some())
         .then(|| passkeys.labels());
+    let shown = |who: String| match (identity::passkey_credential(&who), &labels) {
+        (Some(id), Some(labels)) => labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
+        _ => match quic::client_fingerprint(&who) {
+            Some(fingerprint) => quic::client_iri(fingerprint),
+            None => who,
+        },
+    };
     for (subject, who) in attributed {
-        let shown = match (identity::passkey_credential(&who), &labels) {
-            (Some(id), Some(labels)) => labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
-            _ => match quic::client_fingerprint(&who) {
-                Some(fingerprint) => quic::client_iri(fingerprint),
-                None => who,
-            },
+        graph.view(&subject, "author", shown(who));
+        let Some(words) = graph.value(&subject, &source).filter(|s| s != "committer") else {
+            continue;
         };
-        graph.view(&subject, "author", shown);
+        graph.view(
+            &subject,
+            "authorStatus",
+            ikigai_ledger::attribution::author_status(Some(&words)).to_string(),
+        );
+        if let Some(by) = graph.value(&subject, &committer) {
+            graph.view(&subject, "committer", shown(by));
+        }
     }
 }
 
@@ -2052,30 +2070,17 @@ impl Endpoint for Act {
             })?;
         // ★ The door names the author; a form may not. The door mints the signed-in passkey's
         // IRI into the request's capability (`doors::http_cap`, from the session cookie and
-        // never from a body or a query string) — and this adapter forwards it as the ledger's
-        // `author` wherever the target declares one. A form field of that name is refused outright, before the contract
-        // is even consulted: the ledger declares `author` as an ordinary optional string,
-        // so without this line a browser could attribute a comment to anyone, and the same
-        // rule the transport applies to `client` and `principal` applies here.
+        // never from a body or a query string), and the ledger stamps it as committer and
+        // verified author. A form field of that name is refused outright, before the contract
+        // is even consulted: a browser is no delegate's tool, and the same rule the transport
+        // applies to `client` and `principal` applies here.
         if fields.remove("author").is_some() {
             return Err(Error::InvalidArgument {
                 name: "author".to_string(),
                 detail: "the door names the author; a form may not".to_string(),
             });
         }
-        let declares_author = spec
-            .inputs
-            .iter()
-            .any(|input| input.name == "author" && input.source != InputSource::Binding);
         let mut request = Request::new(verb, target_iri);
-        // The door's word is the principal it minted into the capability (ledger #1077) —
-        // the same passkey the transport stamps as `principal` on this write.
-        if let (true, Some(principal)) = (
-            declares_author,
-            crate::admit::principal(crate::access::Door::Http, inv.capability),
-        ) {
-            request = with(request, "author", &principal);
-        }
         // ★ And the door's principal itself, unchanged, on every action (ledger #775): the
         // ledger stamps a claim's KIND from it ([`crate::admit::claim_kind`]), so a signed-in
         // person's claim through this form is a person's. It is the transport's value — a form
@@ -2157,9 +2162,9 @@ impl Endpoint for Act {
                  becomes ONE request to that ledger resource, carrying only the inputs its \
                  contract declares, under the caller's capability — then re-renders the view \
                  named by `_then` (items, card, gone). It holds no authority of its own: the \
-                 ledger resource it reaches enforces its own grant. The write's `author` is \
-                 the door's `principal` (a signed-in passkey's IRI) wherever the target \
-                 declares one; a form field named `author` is refused.",
+                 ledger resource it reaches enforces its own grant. The write's committer is \
+                 the door's `principal` (a signed-in passkey's IRI), which the ledger stamps; \
+                 a form field named `author` is refused.",
             )
             .verb(Verb::Sink)
             .verb(Verb::Meta)

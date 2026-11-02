@@ -152,6 +152,8 @@ fn client_add_worker_mints_the_published_worker_grant() {
             "urn:cap:ledger:claim:default",
             "urn:cap:ledger:comment:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
+            // Gonk's own line (ledger #2836): an enrolled worker claims its author.
+            "urn:cap:store:read:graph:urn:collab:participants",
         ]
     );
 }

@@ -939,3 +939,30 @@ fn the_raw_write_doors_are_the_ids_the_rule_matches() {
     .collect();
     assert_eq!(ids, admit::RAW_WRITE_IDS);
 }
+
+/// The raw-read rule (ledger #2836) names its doors by the same resolved ids, so a rename in the
+/// store fails here rather than silently switching the rule off.
+#[test]
+fn the_raw_read_rule_names_the_doors_the_hub_describes() {
+    let hub = compose(DurableStore::in_memory().expect("an in-memory store"));
+    let ids: Vec<String> = [
+        "urn:iki:store:graph-select",
+        "urn:iki:store:graph-ask",
+        "urn:iki:store:graph-construct",
+        "urn:iki:store:graph-describe",
+        "urn:iki:store:graph-info",
+        "urn:iki:store:graphs",
+        "urn:sparql:select",
+        "urn:sparql:ask",
+        "urn:sparql:construct",
+        "urn:sparql:describe",
+    ]
+    .iter()
+    .map(|iri| {
+        hub.describe(&Iri::parse(*iri).unwrap())
+            .unwrap_or_else(|| panic!("the hub binds {iri}"))
+            .id
+    })
+    .collect();
+    assert_eq!(ids, admit::RAW_READ_IDS);
+}

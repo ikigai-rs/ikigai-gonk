@@ -1,10 +1,10 @@
 //! What a door refuses BEFORE a request reaches anything it names — and who a request is
 //! from, as far as the door itself can say.
 //!
-//! Five decisions live here, made at the outermost endpoint of a door's kernel
+//! Six decisions live here, made at the outermost endpoint of a door's kernel
 //! ([`Admitting`]). The first three are made once per host-issued request and none of them is
-//! a capability question; the fourth reads the capability for a token no endpoint requires; the
-//! fifth re-reads the capability itself:
+//! a capability question; the fourth and sixth read the capability for what its tokens may do
+//! at a raw door; the fifth re-reads the capability itself:
 //!
 //! 1. **Is this request one the door answers at all?** The HTTP door used to answer a foreign
 //!    `Host` (DNS rebinding) and a cross-site write (a form on another site posting here) by
@@ -36,18 +36,17 @@
 //!    marked [`FOREIGN_PAGE`]): a page on another localhost port is same-site, so it carried the
 //!    signed-in session into `explain` and `review` through `ed43af3`.
 //!
-//! 2. **May this request name that author?** Brian's decision (a) on R4: a door refuses an
-//!    `author` that is shaped like a principal this server names ([`is_principal_iri`]) unless
-//!    it is the request's OWN principal ([`principal`]). A free-text author (`chris`,
-//!    `roborev`) renders as text and stays allowed; an author the item page would render AS A
-//!    PERSON can only be the person the door authenticated.
+//! 2. **May a write with no principal name a principal as its author?** ★ Since `ikigai-ledger`
+//!    0.15 (ledger #2836) a write that carries a principal is the LEDGER's to judge: it stamps
+//!    that principal as `ledger:committer`, makes it the verified author when no `author` is
+//!    sent, and accepts an `author` only from an enrolled delegate or import principal
+//!    ([`crate::participants`]), so a door neither fills nor checks one. A write with NO
+//!    principal still records `author` as free text, so a network door refuses one shaped like a
+//!    principal this server names ([`author_refusal`]): an author the item page would render AS
+//!    A PERSON can only be someone a door authenticated.
 //!
-//! 3. **Who wrote this, when the writer did not say?** (R4 option (b), Brian, 2026-10-08.) A
-//!    QUIC write with no `author` is attributed to the client the door authenticated: its
-//!    [`principal`] (minted into the capability) is filled in as `author` wherever the target declares one
-//!    ([`fill_author`]). The HTTP door has done the same since ikigai-web 0.1.27, in the form
-//!    adapter (`crate::web`'s `Act`), and the socket's caller is the owner, who is no
-//!    principal this server names, so it fills nothing.
+//! 3. *(Retired.)* A door filled a missing `author` in until `ikigai-ledger` 0.15, whose
+//!    committer does that from the capability at every door.
 //!
 //! 4. **May this request write the store RAW?** (ledger
 //!    [#878](http://localhost:1060/l/default/item/878), option (b), Brian, 2026-10-09; the
@@ -57,7 +56,8 @@
 //!    `urn:iki:store:graph-update` inserted a `ledger:author` triple naming anyone's passkey,
 //!    and the item page rendered that person. A door now refuses a raw store write against a
 //!    LEDGER graph unless the capability carries the explicit raw grant for that graph
-//!    ([`raw_write_refusal`]). The ledger's own writes are untouched, structurally rather than
+//!    ([`raw_write_refusal`]). The aliases and participants graphs are held to the same rule
+//!    (ledger #2836). The ledger's own writes are untouched, structurally rather than
 //!    by a depth test: `ikigai-ledger` issues its `graph-update` sub-requests inside the HUB
 //!    kernel, under the caller's capability, and the hub has no admission layer — this one
 //!    wraps only what arrives at a door.
@@ -75,21 +75,32 @@
 //!    age out ([`crate::quic::MAX_CONNECTION_AGE`]). The HTTP door has re-read `grants.json` per
 //!    request since it had grants; this brings the QUIC door to the same rule.
 //!
-//! ★ **The socket runs rule 4 and nothing else** (ledger
+//! 6. **May this request read a graph RAW?** (ledger #2836.) A store read token is the same two
+//!    authorities rule 4 found in the write token: the ledger reads a target's graph, the aliases
+//!    graph and the participants graph under the CALLER's capability, so `--mirror-to`,
+//!    `--link-in`, `--alias` and every writing grant carry read tokens that, at a raw door, would
+//!    read a whole other ledger or every ledger's aliases. A raw read is therefore answered
+//!    without them ([`raw_read_scopes`]), and naming such a graph is refused
+//!    ([`raw_read_refusal`]). The ledger's own reads run inside the hub, out of this overlay's
+//!    sight, under the capability as it arrived.
+//!
+//! ★ **The socket runs rules 4 and 6 and nothing else** (ledger
 //! [#899](http://localhost:1060/l/default/item/899)). Its caller is the owner (`0600`, peer UID
 //! checked) and normally holds root, which passes; but the transport passes the caller's
 //! capability through, so an owner process that NARROWED itself to a ledger grant (`cap seal`,
 //! `ikigai mcp --grant` mounted on the socket) carried that grant's store token to the raw doors
 //! and, through `ed43af3`, forged an author there. [`Admitting`] over [`Door::Socket`] holds it
-//! to rule 4 exactly as a network door holds a client. Rules 1–3 stay off at the socket: no door computes a refusal marker there,
+//! to rules 4 and 6 exactly as a network door holds a client. Rules 1–3 stay off at the socket: no door computes a refusal marker there,
 //! and the socket names no principal, so rule 2 would refuse the owner's every principal-shaped
 //! author.
 //!
 //! ⚠ **What the doors cannot reach, stated so nobody believes otherwise.** With rule 2 off, an
 //! owner process sealed to a ledger grant can still FILE an item whose `author` argument names
 //! a principal — the ledger's own argument on a new item, never a triple on someone else's
-//! (pinned in `tests/raw_store_write_878.rs`, `the_socket_keeps_no_author_rule`). An agent that
-//! must not claim a person needs an identity of its own on the QUIC door. The owner at root
+//! (pinned in `tests/raw_store_write_878.rs`, `the_socket_keeps_no_author_rule`). The socket also
+//! passes a carried capability through name included, so that process chooses its own
+//! `ledger:committer` too. An agent that must not claim a person needs an identity of its own on
+//! the QUIC door. The owner at root
 //! writes anything over the socket — that is where migrations and repairs run (`ikigai-gonk
 //! ledger backfill-keys`), and the owner can read and write the dataset's files directly
 //! anyway. And a holder of the raw grant ([`crate::grants::ledger_graph_grants`]) can still
@@ -100,8 +111,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, Body, Capability, Description, Endpoint, Error, InputSource, Invocation, Iri,
-    Representation, Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
+    ArgRef, Body, Capability, Description, Endpoint, Error, Invocation, Iri, Representation,
+    Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
 
 use crate::access::Door;
@@ -394,12 +405,9 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
 
 /// Why `request` may not name the `author` it carries, or `None` when it may.
 ///
-/// An author shaped like a principal ([`is_principal_iri`]) must BE the request's own
-/// ([`principal`]); any other author is text and passes. A QUIC client's own name counts in
-/// either spelling ([`crate::quic::same_client`]): `urn:iki:gonk:client:<fp>` and
-/// `urn:iki:host:gonk:client:<fp>` are one actor, so a client that names itself the old way
-/// still writes as itself — and the old spelling of ANY OTHER fingerprint is refused like the
-/// new one (ledger [#1183](http://localhost:1060/l/default/item/1183)).
+/// A write with a principal passes: the ledger judges its `author` against the committer and the
+/// participants graph. A write with none is recorded as free text, so here an author shaped like
+/// a principal ([`is_principal_iri`]) is refused and any other passes.
 ///
 /// ```
 /// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
@@ -415,108 +423,26 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
 /// let signed_in = anonymous.with_principal(brian).unwrap();
 /// assert!(admit::author_refusal(Door::Http, &anonymous, &append(&[("author", brian)])).is_some());
 /// assert!(admit::author_refusal(Door::Http, &anonymous, &append(&[("author", "chris")])).is_none());
-/// assert!(admit::author_refusal(Door::Http, &signed_in, &append(&[("author", brian)])).is_none());
 /// // A stamped ARGUMENT is not the door's word: only the capability's principal is.
 /// assert!(admit::author_refusal(Door::Http, &anonymous,
 ///     &append(&[("author", brian), ("principal", brian)])).is_some());
-/// // A QUIC client may name itself, and nobody else.
-/// let laptop = ikigai_gonk::quic::client_iri("ab12");
-/// let client = anonymous.with_principal(&laptop).unwrap();
-/// let authored = |author: &str| append(&[("author", author)]);
-/// assert!(admit::author_refusal(Door::Quic, &client, &authored(&laptop)).is_none());
-/// assert!(admit::author_refusal(Door::Quic, &client, &authored(brian)).is_some());
-/// assert!(admit::author_refusal(Door::Quic, &client, &authored("hermes")).is_none());
-/// // Its own name in the pre-2026-10-10 spelling is still itself; another machine's is not.
-/// assert!(admit::author_refusal(Door::Quic, &client, &authored("urn:iki:gonk:client:ab12")).is_none());
-/// assert!(admit::author_refusal(Door::Quic, &client, &authored("urn:iki:gonk:client:cd34")).is_some());
+/// // With a principal, the ledger decides.
+/// assert!(admit::author_refusal(Door::Http, &signed_in, &append(&[("author", brian)])).is_none());
+/// assert!(admit::author_refusal(Door::Http, &signed_in, &append(&[("author", "chris")])).is_none());
 /// ```
 pub fn author_refusal(door: Door, capability: &Capability, request: &Request) -> Option<String> {
     let Some(ArgRef::Inline(bytes)) = request.args.get("author") else {
         return None;
     };
     let author = String::from_utf8_lossy(bytes);
-    if !is_principal_iri(&author) {
-        return None;
-    }
-    let own = principal(door, capability);
-    if own
-        .as_deref()
-        .is_some_and(|own| crate::quic::same_client(own, author.trim()))
-    {
+    if !is_principal_iri(&author) || principal(door, capability).is_some() {
         return None;
     }
     Some(format!(
-        "`author` names a principal ({}), and only the door names one: a write may name its \
-         own principal or a plain-text author, never another identity. {}",
-        author.trim(),
-        match own {
-            Some(own) => format!("This request is from {own}."),
-            None => "This request is from nobody the door authenticated.".to_string(),
-        }
+        "`author` names a principal ({}), and this request is from nobody the door \
+         authenticated: only a door names one",
+        author.trim()
     ))
-}
-
-/// `request` with its door's principal filled in as `author`, when that is what the door
-/// does: a QUIC write that names no author, whose target `description` declares one for the
-/// request's verb. `None` means "leave the request as it is" — any other door, a read, an
-/// author already given (the author rule decides that one), no principal in the capability,
-/// or a target that takes no `author`.
-///
-/// ★ R4 option (b), Brian, 2026-10-08: a write through the QUIC door is attributed to the
-/// client the door authenticated unless it names an author itself. Only where the target
-/// DECLARES `author`, the rule `crate::web`'s form adapter applies on the HTTP door, because
-/// an argument a resource does not declare is one nobody reads.
-///
-/// ```
-/// use ikigai_core::{ArgRef, ArgSpec, Capability, Description, Iri, Request, Verb};
-/// use ikigai_gonk::{access::Door, admit};
-/// let laptop = ikigai_gonk::quic::client_iri("ab12");
-/// let client = Capability::scoped(["urn:cap:ledger:write:default"]).with_principal(&laptop).unwrap();
-/// let append = |args: &[(&str, &str)]| {
-///     args.iter().fold(
-///         Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap()),
-///         |r, (k, v)| r.with_arg(*k, ArgRef::Inline(v.as_bytes().to_vec())),
-///     )
-/// };
-/// let takes_author = Description::new("append")
-///     .verb(Verb::Sink)
-///     .input(ArgSpec::new("author").optional());
-/// let filled = admit::fill_author(Door::Quic, &client, &append(&[]), &takes_author)
-///     .expect("an unnamed QUIC write is attributed");
-/// assert_eq!(filled.args.get("author"), Some(&ArgRef::Inline(laptop.clone().into_bytes())));
-/// // Named already, another door, nobody named, or a target with no `author`: left alone.
-/// let named = append(&[("author", "hermes")]);
-/// assert!(admit::fill_author(Door::Quic, &client, &named, &takes_author).is_none());
-/// assert!(admit::fill_author(Door::Socket, &client, &append(&[]), &takes_author).is_none());
-/// let nobody = Capability::scoped(["urn:cap:ledger:write:default"]);
-/// assert!(admit::fill_author(Door::Quic, &nobody, &append(&[]), &takes_author).is_none());
-/// let no_author = Description::new("append").verb(Verb::Sink);
-/// assert!(admit::fill_author(Door::Quic, &client, &append(&[]), &no_author).is_none());
-/// ```
-pub fn fill_author(
-    door: Door,
-    capability: &Capability,
-    request: &Request,
-    description: &Description,
-) -> Option<Request> {
-    if door != Door::Quic || !request.verb.is_mutating() || request.args.contains_key("author") {
-        return None;
-    }
-    let principal = principal(door, capability)?;
-    let declares = description
-        .action_specs()
-        .into_iter()
-        .find(|spec| spec.verb == request.verb)
-        .is_some_and(|spec| {
-            spec.inputs
-                .iter()
-                .any(|input| input.name == "author" && input.source != InputSource::Binding)
-        });
-    declares.then(|| {
-        request
-            .clone()
-            .with_arg("author", ArgRef::Inline(principal.into_bytes()))
-    })
 }
 
 /// The description ids of `ikigai-store`'s raw write doors: `urn:iki:store:update` (any
@@ -534,8 +460,8 @@ pub const RAW_WRITE_IDS: [&str; 3] = ["store-update", "store-graph-update", "sto
 ///
 /// ```text
 /// not a write, or not a raw store write door            → admitted (the store decides)
-/// urn:iki:store:graph-update naming a LEDGER graph G    → refused unless the capability holds
-///                                                          grants::cap_raw_write_graph(G)
+/// urn:iki:store:graph-update naming a LEDGER graph, the → refused unless the capability holds
+/// aliases graph or the participants graph G                grants::cap_raw_write_graph(G)
 /// urn:iki:store:graph-update naming any other graph     → admitted (the store decides)
 /// urn:iki:store:update, urn:iki:store:load              → refused unless root
 /// ```
@@ -560,6 +486,12 @@ pub const RAW_WRITE_IDS: [&str; 3] = ["store-update", "store-graph-update", "sto
 /// a rule about ledger graphs that two of the three raw doors walked around would be stated
 /// wrong.
 ///
+/// ★ **The aliases graph has the same ambiguity, and the participants graph is worth more than
+/// either** (ledger #2836). An alias grant carries `urn:iki:alias:graph`'s write token for the
+/// ledger's own writes, and as raw authority it would forge a scheme's owner. Who may claim whom
+/// is the participants graph, which is enrolled from the owner's socket
+/// ([`crate::participants`]), so nobody's raw write belongs in it.
+///
 /// ```
 /// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
 /// use ikigai_gonk::{admit, grants};
@@ -583,6 +515,11 @@ pub const RAW_WRITE_IDS: [&str; 3] = ["store-update", "store-graph-update", "sto
 /// let load = Request::new(Verb::Sink, Iri::parse("urn:iki:store:load").unwrap());
 /// assert!(admit::raw_write_refusal(&load, "store-load", &writer).is_some());
 /// assert!(admit::raw_write_refusal(&load, "store-load", &Capability::root()).is_none());
+/// // An alias grant's store token writes through the alias endpoints, not raw.
+/// let aliaser = Capability::scoped(grants::alias_grants("default", "gh").unwrap());
+/// for graph in ["urn:iki:alias:graph", ikigai_gonk::participants::GRAPH] {
+///     assert!(admit::raw_write_refusal(&update(graph), "store-graph-update", &aliaser).is_some());
+/// }
 /// ```
 pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -> Option<String> {
     if !request.verb.is_mutating() || !RAW_WRITE_IDS.contains(&id) {
@@ -603,10 +540,9 @@ pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -
         return None;
     };
     let graph = std::str::from_utf8(bytes).ok()?;
-    let prefix = crate::grants::LEDGER_GRAPH_PREFIX;
-    let is_ledger = graph.len() >= prefix.len()
-        && graph.is_char_boundary(prefix.len())
-        && graph[..prefix.len()].eq_ignore_ascii_case(prefix);
+    let is_ledger = starts_with_ignoring_case(graph, crate::grants::LEDGER_GRAPH_PREFIX)
+        || graph.eq_ignore_ascii_case(ikigai_ledger::alias::GRAPH)
+        || graph.eq_ignore_ascii_case(crate::participants::GRAPH);
     if !is_ledger || capability.allows(&crate::grants::cap_raw_write_graph(graph)) {
         return None;
     }
@@ -619,6 +555,192 @@ pub fn raw_write_refusal(request: &Request, id: &str, capability: &Capability) -
          whose grant an operator minted with `--ledger-graph <ledger>` (`{}`)",
         crate::grants::cap_raw_write_graph(graph)
     ))
+}
+
+/// The store's and `urn:sparql:*`'s doors that read a graph by its store token, by resolved
+/// endpoint id as [`RAW_WRITE_IDS`] are. `store-graphs` is here because it lists what those
+/// tokens name, and `store-graph-info` because it counts a graph's quads.
+///
+/// `urn:iki:store:select` and the other broad doors are not: they need `urn:cap:store:read`,
+/// which [`crate::quic::grant_refusal`] refuses on every grant.
+pub const RAW_READ_IDS: [&str; 10] = [
+    "store-graph-select",
+    "store-graph-ask",
+    "store-graph-construct",
+    "store-graph-describe",
+    "store-graph-info",
+    "store-graphs",
+    "sparql-select",
+    "sparql-ask",
+    "sparql-construct",
+    "sparql-describe",
+];
+
+/// Whether the endpoint described as `id` reads graphs by the caller's store tokens: a
+/// [`RAW_READ_IDS`] door, or a family whose steps do so in sub-requests inside the hub, where
+/// this overlay cannot see them. That is a plan (`plan-eval`), a script (`script-…`, its id
+/// carrying its name) and the `urn:nl:*` family (`nl-…`), which gathers its grounding from the
+/// graphs the caller may read and dry-runs a draft.
+///
+/// ```
+/// use ikigai_gonk::admit::is_raw_read;
+/// assert!(is_raw_read("store-graph-select"));
+/// assert!(is_raw_read("sparql-select"));
+/// assert!(is_raw_read("plan-eval"));
+/// assert!(is_raw_read("script-triage-result"));
+/// assert!(is_raw_read("nl-sparql-check"));
+/// assert!(!is_raw_read("gonk-ledger"));
+/// assert!(!is_raw_read("store-graph-update"), "rule 4's");
+/// ```
+pub fn is_raw_read(id: &str) -> bool {
+    RAW_READ_IDS.contains(&id)
+        || id == "plan-eval"
+        || id == "script"
+        || id.starts_with("script-")
+        || id.starts_with("nl-")
+}
+
+/// Whether `capability` may read `graph` at a raw door, whatever store token it holds.
+///
+/// ```text
+/// root                                            → yes
+/// a ledger's graph, or its graveyard              → with urn:cap:ledger:read:{ledger}, or with
+///                                                   the graph's own raw grant (--ledger-graph)
+/// the aliases graph, the participants graph       → no: root only
+/// any other graph                                 → not this rule's: the store decides
+/// ```
+fn may_read_raw(graph: &str, capability: &Capability) -> bool {
+    if capability.is_root() {
+        return true;
+    }
+    if graph.eq_ignore_ascii_case(ikigai_ledger::alias::GRAPH)
+        || graph.eq_ignore_ascii_case(crate::participants::GRAPH)
+    {
+        return false;
+    }
+    let prefix = crate::grants::LEDGER_GRAPH_PREFIX;
+    if !starts_with_ignoring_case(graph, prefix) {
+        return true;
+    }
+    let name = graph[prefix.len()..].split(':').next().unwrap_or_default();
+    capability.allows(&crate::grants::cap_raw_write_graph(graph))
+        || ikigai_ledger::Ledger::parse(name)
+            .is_ok_and(|ledger| capability.allows(&ledger.cap_read()))
+}
+
+/// The scopes to answer a raw read under, or `None` when `capability` holds no store read token
+/// it may not use at a raw door. Every scope but those, so a principal, a budget and a door's
+/// marker go on with the request, and nothing is widened.
+///
+/// ★ **Taking the tokens away, rather than checking the request, is what covers every path.** A
+/// plan's steps, a script's run and the default dataset of `urn:sparql:*` all read inside the
+/// hub, where no door sees what they name; under this capability the store refuses them by itself
+/// and `urn:iki:store:graphs` leaves the graphs out, so a default UNION answers over the rest.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_gonk::admit::raw_read_scopes;
+/// use ikigai_gonk::grants::{alias_grants, grants_for, mirror_grants, Authority};
+/// let token = |graph: &str| format!("urn:cap:store:read:graph:{graph}");
+/// let acme = token("urn:iki:ledger:graph:acme");
+///
+/// // The mirror's read token, without a read of that ledger, is taken away...
+/// let mut closer = grants_for("cli", Authority::Write).unwrap();
+/// closer.extend(mirror_grants("acme").unwrap());
+/// let kept = raw_read_scopes(&Capability::scoped(closer)).expect("narrowed");
+/// assert!(!kept.contains(&acme));
+/// assert!(kept.contains(&token("urn:iki:ledger:graph:cli")));
+/// assert!(kept.contains(&"urn:cap:store:write:graph:urn:iki:ledger:graph:acme".to_string()));
+/// // ...and with one it stays, though enrollment and aliases do not.
+/// let reader = grants_for("acme", Authority::Write).unwrap();
+/// let kept = raw_read_scopes(&Capability::scoped(reader)).expect("narrowed");
+/// assert!(kept.contains(&acme));
+/// assert!(!kept.contains(&token("urn:collab:participants")));
+/// let kept = raw_read_scopes(&Capability::scoped(alias_grants("acme", "gh").unwrap()));
+/// assert!(!kept.expect("narrowed").contains(&token("urn:iki:alias:graph")));
+/// // A read grant holds nothing to take away, and root reads everything.
+/// let read = Capability::scoped(grants_for("acme", Authority::Read).unwrap());
+/// assert_eq!(raw_read_scopes(&read), None);
+/// assert_eq!(raw_read_scopes(&Capability::root()), None);
+/// ```
+pub fn raw_read_scopes(capability: &Capability) -> Option<Vec<String>> {
+    let held = capability.scopes()?;
+    let prefix = ikigai_store::CAP_READ_GRAPH.trim_end_matches('*');
+    let hidden = |scope: &String| {
+        scope
+            .strip_prefix(prefix)
+            .is_some_and(|graph| !may_read_raw(graph, capability))
+    };
+    held.iter().any(hidden).then(|| {
+        held.iter()
+            .filter(|scope| !hidden(scope))
+            .cloned()
+            .collect()
+    })
+}
+
+/// Why `request`, resolved to the endpoint described as `id`, may not read a graph it NAMES, or
+/// `None`. It says what [`raw_read_scopes`] would otherwise leave to the store, whose sentence is
+/// that the capability lacks a token its holder can see in their grant.
+///
+/// A graph whose token the capability does not hold is the store's to refuse, whether or not it
+/// exists, so this is no existence oracle.
+///
+/// ```
+/// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
+/// use ikigai_gonk::admit::raw_read_refusal;
+/// use ikigai_gonk::grants::{grants_for, mirror_grants, Authority};
+/// let select = |graph: &str| {
+///     Request::new(Verb::Source, Iri::parse("urn:sparql:select").unwrap())
+///         .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec()))
+/// };
+/// let acme = "urn:iki:ledger:graph:acme";
+/// let closer = Capability::scoped(mirror_grants("acme").unwrap());
+/// let why = raw_read_refusal(&select(acme), "sparql-select", &closer).expect("refused");
+/// assert!(why.contains("urn:cap:ledger:read:acme"), "{why}");
+/// // One of several is enough; a list is spelled with commas or whitespace.
+/// let many = format!("urn:iki:browse:graph:default,{acme}");
+/// assert!(raw_read_refusal(&select(&many), "sparql-select", &closer).is_some());
+/// // A reader of the ledger, the owner, and a door that takes no `graph` pass.
+/// let reader = Capability::scoped(grants_for("acme", Authority::Read).unwrap());
+/// assert!(raw_read_refusal(&select(acme), "sparql-select", &reader).is_none());
+/// assert!(raw_read_refusal(&select(acme), "sparql-select", &Capability::root()).is_none());
+/// assert!(raw_read_refusal(&select(acme), "gonk-ledger", &closer).is_none());
+/// ```
+pub fn raw_read_refusal(request: &Request, id: &str, capability: &Capability) -> Option<String> {
+    if !RAW_READ_IDS.contains(&id) {
+        return None;
+    }
+    let Some(ArgRef::Inline(bytes)) = request.args.get("graph") else {
+        return None;
+    };
+    let graph = std::str::from_utf8(bytes)
+        .ok()?
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .find(|graph| {
+            capability.allows(&ikigai_store::cap_read_graph(graph))
+                && !may_read_raw(graph, capability)
+        })?;
+    let prefix = crate::grants::LEDGER_GRAPH_PREFIX;
+    let remedy = if starts_with_ignoring_case(graph, prefix) {
+        let name = graph[prefix.len()..].split(':').next().unwrap_or_default();
+        format!("A ledger's graph is read raw with that ledger's `urn:cap:ledger:read:{name}`")
+    } else {
+        "It is deployment-wide, so it is read raw only by the owner, at root over the socket"
+            .to_string()
+    };
+    Some(format!(
+        "a raw read of the graph <{graph}> is refused at this door. This grant carries that \
+         graph's store token for the ledger's OWN reads, which it issues itself; it is not \
+         authority to read the graph's triples directly. {remedy}"
+    ))
+}
+
+/// Whether `text` starts with `prefix`, ignoring ASCII case.
+fn starts_with_ignoring_case(text: &str, prefix: &str) -> bool {
+    text.len() >= prefix.len()
+        && text.is_char_boundary(prefix.len())
+        && text[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 /// ★ **A machine drafts, a person publishes** (ledger [#939](http://localhost:1060/l/default/item/939)):
@@ -804,7 +926,7 @@ impl Space for Admitting {
 }
 
 /// The endpoint [`Admitting`] resolves to: the real one, behind the door's checks — all of
-/// them at a network door, only [`raw_write_refusal`] at the socket.
+/// them at a network door, only the raw-write and raw-read rules at the socket.
 struct Admitted {
     inner: Arc<dyn Endpoint>,
     door: Door,
@@ -812,21 +934,16 @@ struct Admitted {
 }
 
 impl Admitted {
-    /// Answer `request` (this invocation's own, or the author-filled one) under the
-    /// invocation's capability, or one level down under the narrower one rule 5 found.
+    /// Answer this invocation's request under its capability, or one level down under the
+    /// narrower one rule 5 found.
     async fn answer(
         &self,
         inv: &Invocation<'_>,
-        filled: Option<Request>,
         narrowed: Option<Vec<String>>,
     ) -> Result<Representation> {
-        match (filled, narrowed) {
-            (None, None) => self.inner.invoke(inv).await,
-            (Some(filled), None) => inv.issue(filled).await,
-            (filled, Some(scopes)) => {
-                let request = filled.unwrap_or_else(|| inv.request.clone());
-                inv.issue_attenuated(request, scopes).await
-            }
+        match narrowed {
+            None => self.inner.invoke(inv).await,
+            Some(scopes) => inv.issue_attenuated(inv.request.clone(), scopes).await,
         }
     }
 }
@@ -855,8 +972,21 @@ impl Endpoint for Admitted {
             }
             _ => None,
         };
+        // ★ Rule 6, at EVERY depth like the raw-write rule: a page's own sub-request reaches the
+        // store through this overlay. A call rule 5 narrowed comes back through here at the
+        // next depth, under the narrower capability, and is judged then.
+        let narrowed = match narrowed {
+            None if raw_read_applies(self.inner.name(), inv) => {
+                if let Some(why) = raw_read_refusal(inv.request, self.inner.name(), inv.capability)
+                {
+                    return Err(Error::Denied(why));
+                }
+                raw_read_scopes(inv.capability)
+            }
+            narrowed => narrowed,
+        };
         if !inv.request.verb.is_mutating() {
-            let answer = self.answer(inv, None, narrowed).await;
+            let answer = self.answer(inv, narrowed).await;
             return foreign_page_explained(answer, arrived, inv.capability);
         }
         // ★ At EVERY depth, unlike the checks around it (ledger #878). Nothing inside a door
@@ -877,27 +1007,21 @@ impl Endpoint for Admitted {
                     return Err(Error::Denied(why));
                 }
             }
-            // Attributed by the door: the same request with `author` filled in, issued as
-            // this request's own sub-request, so it resolves to this same endpoint one level
-            // down (where only the raw-write rule runs again, and passes as it did here) under
-            // the same capability. The access log is outside and counts it once, as the request
-            // that arrived.
-            if let Some(filled) = fill_author(self.door, inv.capability, inv.request, &description)
-            {
-                return self.answer(inv, Some(filled), narrowed).await;
-            }
         }
-        self.answer(inv, None, narrowed).await
+        self.answer(inv, narrowed).await
     }
 
     /// A READ at the socket as the endpoint produced its body (ledger #2730), so the backup
     /// archive's download reaches the door as a body over the file rather than being collected
     /// here. That is exactly the case [`invoke`](Self::invoke) answers by calling the endpoint
     /// unchanged: the socket refuses no read and narrows nothing (rules 1 and 5 are the
-    /// network doors'). Every other request is answered by `invoke`, with all its checks, and
-    /// its buffer handed on as a body.
+    /// network doors'). A raw read goes through `invoke` even there (rule 6), and so does every
+    /// other request, with all its checks, and its buffer handed on as a body.
     async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
-        if self.door == Door::Socket && !inv.request.verb.is_mutating() {
+        if self.door == Door::Socket
+            && !inv.request.verb.is_mutating()
+            && !raw_read_applies(self.inner.name(), inv)
+        {
             let answer = self.inner.invoke_body(inv).await;
             return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
         }
@@ -919,6 +1043,12 @@ impl Endpoint for Admitted {
     fn confinement(&self) -> Option<Topology> {
         self.inner.confinement()
     }
+}
+
+/// Whether rule 6 reads this request: below root, on a door or family that reads graphs raw. A
+/// contract (`Meta`) reads none.
+fn raw_read_applies(id: &str, inv: &Invocation<'_>) -> bool {
+    !inv.capability.is_root() && inv.request.verb != Verb::Meta && is_raw_read(id)
 }
 
 /// A derivation refused because the request came from another page reads, from the kernel, as
