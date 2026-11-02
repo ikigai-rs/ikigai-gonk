@@ -7,6 +7,7 @@
 //! setting has one spelling.
 //!
 //! ```toml
+//! # gonk.store.max_scoped_copy_quads = 1000000  # scoped updates; default 250000; see README cost
 //! # the HTTP door (loopback only; this IS the default)
 //! gonk.bind = "127.0.0.1:1062"
 //! # gonk.port = 1062                    # shorthand for gonk.bind = "127.0.0.1:<port>"
@@ -121,7 +122,8 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 42] = [
+const KEYS: [&str; 43] = [
+    "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
     "gonk.onboard",
     "gonk.onboard.door",
@@ -653,6 +655,9 @@ pub struct Flags {
 /// Everything `serve` needs, merged and validated.
 #[derive(Debug)]
 pub struct Settings {
+    /// Optional override of the store's scoped-update copy bound, in quads.
+    /// Applied before store spaces are composed; absent preserves the store default.
+    pub max_scoped_copy_quads: Option<usize>,
     /// The HTTP door's address. Always loopback — see [`refuse_non_loopback`].
     pub http: SocketAddr,
     /// The socket path.
@@ -1966,6 +1971,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         value_for(text, "gonk.http.anonymous_sparql_budget_ms").as_deref(),
     )?;
     Ok(Settings {
+        max_scoped_copy_quads: max_scoped_copy_quads(text)?,
         http,
         socket,
         quic,
@@ -1998,6 +2004,25 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         toolbox: toolbox(text, homes)?,
         onboard,
     })
+}
+
+/// One positive, platform-sized quad count; no line preserves the store's own default.
+fn max_scoped_copy_quads(text: &str) -> Result<Option<usize>, String> {
+    const KEY: &str = "gonk.store.max_scoped_copy_quads";
+    match values_for(text, KEY).as_slice() {
+        [] => Ok(None),
+        [value] => match value.parse::<usize>() {
+            Ok(quads) if quads > 0 => Ok(Some(quads)),
+            _ => Err(format!(
+                "{KEY} = `{value}` must be a positive whole number of quads no greater than {}.",
+                usize::MAX
+            )),
+        },
+        lines => Err(format!(
+            "{KEY} is given {} times; set one copy bound for this store.",
+            lines.len()
+        )),
+    }
 }
 
 /// `gonk.toolbox.dist`: the RDF Toolbox's build directory, `~/`-expanded and checked
@@ -2872,6 +2897,37 @@ mod tests {
         let zero = settings(&Flags::default(), "gonk.backup.keep = \"0\"\n", &homes())
             .expect_err("a rotation that keeps nothing");
         assert!(zero.contains("delete the backup it just took"), "{zero}");
+    }
+
+    #[test]
+    fn scoped_copy_bound_is_optional_positive_and_singular() {
+        let read = |text: &str| settings(&Flags::default(), text, &homes());
+        assert_eq!(read("").unwrap().max_scoped_copy_quads, None);
+        for value in ["1", "1000000", "\"1000000\"", "1_000_000"] {
+            let config = format!("gonk.store.max_scoped_copy_quads = {value}\n");
+            let expected = if value == "1" { 1 } else { 1_000_000 };
+            assert_eq!(read(&config).unwrap().max_scoped_copy_quads, Some(expected));
+        }
+        for value in [
+            "0",
+            "-1",
+            "1.5",
+            "true",
+            "\"\"",
+            "many",
+            "18446744073709551616",
+        ] {
+            let config = format!("gonk.store.max_scoped_copy_quads = {value}\n");
+            let error = read(&config).unwrap_err();
+            assert!(
+                error.contains("must be a positive whole number of quads"),
+                "{error}"
+            );
+        }
+        let error =
+            read("gonk.store.max_scoped_copy_quads = 1\ngonk.store.max_scoped_copy_quads = 2\n")
+                .unwrap_err();
+        assert!(error.contains("given 2 times"), "{error}");
     }
 
     #[test]

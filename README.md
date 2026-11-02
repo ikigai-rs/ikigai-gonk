@@ -3866,6 +3866,23 @@ gonk.backup.every = "24h"
 # gonk.toolbox.dist = "~/.local/share/ikigai-toolbox/dist"  # the RDF Toolbox's build; unset, no /toolbox
 ```
 
+`gonk.store.max_scoped_copy_quads` sets the store's scoped-update copy bound at boot,
+before its spaces are composed. Omit it to keep the store default of 250,000 quads;
+set it once to a positive whole number of quads, then restart:
+
+```toml
+gonk.store.max_scoped_copy_quads = 1000000
+```
+
+This is a stopgap for delete and purge on large ledgers: raising the bound permits
+larger copies, but does not make those operations proportional to the item. A
+whole-graph scoped update holds its copy in memory three times. The
+[store README](https://github.com/ikigai-rs/ikigai-store#readme) measures **+538 MB / 3.7 s
+at 250,000 quads** and **+2.2 GB / 9.3 s at 1,000,000 quads** in release builds.
+Choose a bound the host can afford; updates exceeding it are refused without applying
+partial changes. Zero, invalid or overflowing values, and repeated lines are refused
+at startup with an explanation.
+
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
 The name is spliced into `urn:repo:<name>:…`, so it may not contain `:`, `/`, `{` or `}`, may
 not repeat, and may not be `pr` or `style` (those read as the other family's names); the

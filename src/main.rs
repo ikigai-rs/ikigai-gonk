@@ -293,6 +293,11 @@ fn serve(flags: &config::Flags) -> ! {
             sock = settings.socket.display()
         ))
     });
+    // Configure before any store clone or space captures the scoped-update bound.
+    let store = match settings.max_scoped_copy_quads {
+        Some(quads) => store.with_max_scoped_copy_quads(quads),
+        None => store,
+    };
     let explains = settings.explains();
     // ★★ Obligation 1, checked before a single door opens. The choice above confines browse's
     // reads to one graph; quads it wrote into another are still on disk and no longer visible
