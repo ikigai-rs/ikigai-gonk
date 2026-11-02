@@ -183,7 +183,10 @@ fn lines(html: &str) -> Vec<&str> {
 
 /// The ledger names the Dashboard titled charts with, in order.
 fn charted(page: &str) -> Vec<String> {
-    page.split("<h3 ")
+    // The section the charts are in: the agent panels after it have headings of their own.
+    let charts = page.split("id=\"dashboard-agents\"").next().unwrap();
+    charts
+        .split("<h3 ")
         .skip(1)
         .map(|h3| {
             let link = &h3[h3.find("<a").unwrap()..h3.find("</a>").unwrap()];
@@ -456,14 +459,15 @@ fn a_load_between_writes_asks_the_store_nothing_and_a_write_redraws_one_chart() 
     let names: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
     let reader = Capability::scoped(grants_for_all(&names, Authority::Read).unwrap());
 
-    // Cold: each ledger's counts, one store query each, and each chart's one transform.
-    assert_eq!(one_load(&server, &reader), (4, 4, 4));
+    // Cold: each ledger's counts and its agents (ledger #2820; these ledgers have none), one store
+    // query each, and one transform each for its chart and its agent panel.
+    assert_eq!(one_load(&server, &reader), (8, 8, 4));
     // Between writes: four cached reads, and nothing below them.
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
-    // ⚠ A write to one ledger: every ledger's counts are read again (measured: a store read rests
-    // on the store's write thread, not on one ledger's), and only the chart whose numbers moved
-    // is drawn again, because a chart's render is keyed on its document.
+    // ⚠ A write to one ledger: every ledger's counts and agents are read again (measured: a store
+    // read rests on the store's write thread, not on one ledger's), and only the chart whose
+    // numbers moved is drawn again, because a chart's render is keyed on its document.
     server.seed("beta", 1, 0);
-    assert_eq!(one_load(&server, &reader), (4, 1, 4));
+    assert_eq!(one_load(&server, &reader), (8, 1, 4));
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
 }

@@ -106,6 +106,18 @@ summary { cursor: pointer; color: var(--accent); }
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--gap); }
 .chart-grid .chart { margin: 0; min-width: 0; }
 .dashboard-section > h2 { margin-bottom: 0; }
+/* One ledger's agents (ledger #2820, src/agents.rs). Seven columns fit a wide page only if their
+ * headers wrap, so these do, and a long label gets a floor so `anywhere` cannot squeeze it to a
+ * letter a line (see #368 below). The frame scrolls at phone width, and it is the sr-only text's
+ * containing block: positioned against the page, each link's words hang off the right of the frame
+ * and widen the page. */
+.agent-panel h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.agent-panel .table-wrap { position: relative; }
+.agent-panel .note { margin: 0; }
+.agent-table th { white-space: normal; }
+.agent-table th[scope="col"] { min-width: 5.5rem; }
+.agent-table th[scope="row"] { min-width: 9rem; overflow-wrap: anywhere; }
+.agent-table td { white-space: nowrap; }
 @media (forced-colors: active) {
   .chart-rule, .chart-axis, .chart-line.chart-open, .chart-line.chart-closed { stroke: CanvasText; }
   .chart-dot.chart-open, .chart-dot.chart-closed { fill: CanvasText; }

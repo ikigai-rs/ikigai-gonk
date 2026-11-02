@@ -1,0 +1,23 @@
+# The time from claim to hand-back, shortest first: each hand-back against this holder's latest
+# claim of that item before it. The median is the middle row; of an even count, the lower middle.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?took ?number ?claimed ?back ?handback WHERE {
+  {
+    SELECT ?handback ?item ?back (MAX(?at) AS ?claimed) WHERE {
+      ?handback ledger:handedBackBy ?holder ;
+                ledger:onItem ?item ;
+                dcterms:created ?back .
+      ?claim a ledger:ClaimEvent ;
+             ledger:claimedBy ?holder ;
+             ledger:onItem ?item ;
+             dcterms:created ?at .
+      FILTER(?at <= ?back)
+    }
+    GROUP BY ?handback ?item ?back
+  }
+  ?item ledger:number ?number .
+  BIND(?back - ?claimed AS ?took)
+}
+ORDER BY ?took ?handback

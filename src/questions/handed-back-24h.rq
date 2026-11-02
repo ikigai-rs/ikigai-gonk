@@ -1,0 +1,12 @@
+# This holder's hand-backs in the last 24 hours.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?number ?at ?handback WHERE {
+  ?handback ledger:handedBackBy ?holder ;
+            ledger:onItem ?item ;
+            dcterms:created ?at .
+  ?item ledger:number ?number .
+  FILTER(?at >= ?since)
+}
+ORDER BY DESC(?at)

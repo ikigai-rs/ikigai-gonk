@@ -515,7 +515,7 @@ there.
 | --- | --- | --- |
 | `/` | `urn:iki:gonk:page:home` | the first readable ledger |
 | `/l` | `urn:iki:gonk:page:ledgers` | every ledger this grant may read, with its open and total counts: the header menu's "All ledgers" |
-| `/dashboard` | `urn:iki:gonk:page:dashboard` | a chart of open and closed counts over time for every ledger this grant may read |
+| `/dashboard` | `urn:iki:gonk:page:dashboard` | a chart of open and closed counts over time, and a table of the agents, for every ledger this grant may read |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment, with the chart of its counts under the status line |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
@@ -573,6 +573,30 @@ store query per ledger, and one stylesheet transform, for the chart whose number
 refuses a ledger with a closed item that has no `closedAt` until its operator runs the ledger's
 `backfill-closed-at`, and the chart's place says so while the rest of the page works. A chart is as
 of its page's load: gonk's door has no push stream yet.
+
+**The Dashboard's agents are questions, and each number is its question's answer.** A table per
+ledger has a row per holder that ever took a claim there, and a number per stored question: in
+flight, worked on, completed in 24 hours and in 7 days, handed back in 24 hours, released without a
+hand-back, and the median time from claim to hand-back. Each number links, in a new tab, to `/sparql`
+running that question's text with the holder and the window written in, and the number is the row
+count of that query (the median is the middle row of its query, the lower of two). The questions ship as `.rq` files in
+`src/questions/`:
+
+| resource | what |
+| --- | --- |
+| `urn:iki:gonk:question:name:{name}` | a question's text, with `?holder` and `?since` |
+| `urn:iki:gonk:agent` | who ever took a claim, in `ledger=` or in everything this grant reads |
+| `urn:iki:gonk:agent:holder:{holder}` | that holder's answers in `ledger=`, each with its link, as JSON |
+| `urn:iki:gonk:agent:holder:{holder}:question:name:{name}` | one question through `urn:sparql:select`, in `ledger=` |
+| `urn:iki:gonk:view:agent` | the tables, as HTML; a name gonk serves, so an operator's view of that name is shadowed on the HTTP door |
+
+`{holder}` is the label percent-encoded. These are bound on the HTTP door and read under the
+viewer's capability, so a ledger the viewer may not read is absent. A question sees what the ledger
+recorded: claims and releases from `ikigai-ledger` 0.15 on, and hand-backs that name their holder
+(`ikigai_ledger::attribution::handed_back_by_backfill` recovers older ones). A window starts on the
+minute, so a link asks exactly what the page counted, and the count and the link run one text. With
+`A` agents across `L` ledgers one load asks `L + 7A` more store queries after a write to any ledger,
+and between writes none except the `3A` windowed questions, once a minute.
 
 **Every form issues an action the ledger already declares.** `/act` builds the target from
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a

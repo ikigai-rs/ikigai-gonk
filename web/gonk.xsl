@@ -324,6 +324,7 @@
            only its own element, which is what makes a chunk's rows render as the page's. -->
       <xsl:when test="@view = 'chunk'">
         <xsl:apply-templates select="view:chart"/>
+        <xsl:apply-templates select="view:agent-panel"/>
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
@@ -938,8 +939,8 @@
   </xsl:template>
 
   <!-- /dashboard (ledger #2542, src/dashboard.rs). A section per kind of panel, each a named
-       region under its own h2: the agent panels (ledger #2820) are the next section here. The
-       charts arrive through the slot, one transform each, and carry their own h3s. -->
+       region under its own h2. The charts and the agent panels (ledger #2820) arrive through
+       their slots, one transform each, and carry their own h3s. -->
   <xsl:template name="dashboard">
     <h1><xsl:value-of select="@title"/></h1>
     <section class="dashboard-section" aria-labelledby="dashboard-ledgers">
@@ -949,6 +950,48 @@
         <xsl:apply-templates select="view:slot[@name = 'charts']"/>
       </div>
     </section>
+    <section class="dashboard-section" aria-labelledby="dashboard-agents">
+      <h2 id="dashboard-agents">Agents</h2>
+      <p class="note"><xsl:value-of select="@agents-note"/></p>
+      <xsl:apply-templates select="view:slot[@name = 'agents']"/>
+    </section>
+  </xsl:template>
+
+  <!-- One ledger's agents (src/agents.rs): a row per agent, a column per stored question. The rows
+       arrive through the slot, written there because each is mostly a long link (a transform is
+       quadratic in its nodes). The table scrolls inside its own frame at phone width, reached by
+       the links in it. -->
+  <xsl:template match="view:agent-panel">
+    <section class="panel agent-panel">
+      <xsl:attribute name="aria-labelledby"><xsl:value-of select="@id"/>-title</xsl:attribute>
+      <h3>
+        <xsl:attribute name="id"><xsl:value-of select="@id"/>-title</xsl:attribute>
+        <a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@title"/></a>
+      </h3>
+      <xsl:choose>
+        <xsl:when test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:when>
+        <xsl:otherwise>
+          <div class="table-wrap">
+            <table class="agent-table">
+              <caption class="sr-only">The agents of <xsl:value-of select="@title"/>, one row each</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Agent</th>
+                  <xsl:apply-templates select="view:agent-column"/>
+                </tr>
+              </thead>
+              <tbody>
+                <xsl:apply-templates select="view:slot[@name = 'rows']"/>
+              </tbody>
+            </table>
+          </div>
+        </xsl:otherwise>
+      </xsl:choose>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:agent-column">
+    <th scope="col"><xsl:value-of select="."/></th>
   </xsl:template>
 
   <!-- A ledger's counts over time (src/dashboard.rs computes every number and sentence here).

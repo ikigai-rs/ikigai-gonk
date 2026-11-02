@@ -1,0 +1,8 @@
+# Every holder that ever took a claim in this ledger.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+
+SELECT DISTINCT ?holder WHERE {
+  ?claim a ledger:ClaimEvent ;
+         ledger:claimedBy ?holder .
+}
+ORDER BY ?holder

@@ -37,6 +37,7 @@ mod file_cache;
 
 pub mod access;
 pub mod admit;
+pub mod agents;
 pub mod backfill;
 pub mod backup;
 pub mod batch;
