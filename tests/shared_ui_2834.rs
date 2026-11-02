@@ -402,3 +402,28 @@ fn light_and_dark_are_the_colors_gonk_had() {
         }
     }
 }
+
+/// Ledger #2902: the dependency owns idle-swap focus now. This is a wiring check;
+/// `tests/browser/focus_2902.mjs` exercises real polls, body focus and scroll in Chromium.
+#[test]
+fn the_shared_shell_owns_the_idle_swap_focus_guard() {
+    let shell = std::str::from_utf8(
+        ikigai_ui::artifact("urn:iki:ui:shell.js")
+            .expect("the shared shell")
+            .bytes,
+    )
+    .expect("JavaScript is text");
+    assert!(
+        shell.contains("a && a !== document.body && document.contains(a) ? a : null"),
+        "body focus must be recorded as no prior focus"
+    );
+    assert!(
+        shell.contains("if (!had || !lost()) return;"),
+        "an idle swap must leave focus alone"
+    );
+    let own = include_str!("../web/gonk.js");
+    assert!(
+        !own.contains("noFocusBefore") && !own.contains("scrollBefore"),
+        "gonk must not mask a regression in the shared shell's focus guard"
+    );
+}

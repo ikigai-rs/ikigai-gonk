@@ -62,28 +62,6 @@
     area.appendChild(p);
   }
 
-  // ★ A SWAP THAT TOOK NO FOCUS LEAVES FOCUS ALONE. The shell script's rule is that focus is never
-  // left on <body> after a swap, and it reads a page nobody has focused yet as focus lost: the
-  // header's Queue badge, on its first poll, would take focus, and scroll the page to itself, and
-  // a person reading further down would be carried off. Lost focus is the shell script's to
-  // re-home; this puts back only what a swap found on <body> before it began. Registered before
-  // every other settle listener here, and after the shell script's, which loaded first.
-  let noFocusBefore = false;
-  let scrollBefore = [0, 0];
-  document.addEventListener("htmx:beforeSwap", () => {
-    noFocusBefore = !document.activeElement || document.activeElement === document.body;
-    scrollBefore = [window.scrollX, window.scrollY];
-  });
-  document.addEventListener("htmx:afterSettle", (e) => {
-    const target = e.detail && e.detail.target;
-    if (!noFocusBefore || (target && target.id === "main")) return;
-    const moved = document.activeElement;
-    if (moved && moved !== document.body) {
-      moved.blur();
-      window.scrollTo(scrollBefore[0], scrollBefore[1]);
-    }
-  });
-
   // The Layers page's watcher (ledger #1705): its failures are its own, said once in
   // `#layers-reconnect` (section 9 below). `data-ui-quiet` keeps the shell script out of them.
   function isWatch(elt) {

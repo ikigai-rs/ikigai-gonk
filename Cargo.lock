@@ -2469,9 +2469,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-ui"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6851b3d4dc6317b5a8d51471e8297067b17dd92943bee572fb502d107ed2d7"
+checksum = "4a5afcb08a6a728568b771018eb76f4643de459507808a59ca8d2a219f3913b4"
 dependencies = [
  "futures-executor",
  "ikigai-a11y",

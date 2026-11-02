@@ -373,7 +373,9 @@ const WEB_IDS: [&str; 29] = [
 
 /// `ikigai_ui::space()` in the HTTP door (ledger #2834): the shared UI artifacts, inherited like
 /// the store's and the ledger's, and walked by `ikigai-ui`'s own suite.
-const UI_IDS: [&str; 7] = [
+// 0.4.1 adds the family-aware chooser resolver (ledger #2902).
+const UI_IDS: [&str; 8] = [
+    "ui-chooser",
     "ui-htmx",
     "ui-shell-js",
     "ui-template-shell",
