@@ -1894,8 +1894,8 @@ fn comment_as(server: &Server, iri: &str, id: &str, text: &str, cookie: Option<&
 /// ★ Ledger #76: a write from a signed-in browser carries its author. The door already knew
 /// who the session was (it minted the capability from that knowledge) and told nobody, so a
 /// decision comment typed while signed in landed "(unattributed)". Now the transport stamps
-/// the write with `principal` — the passkey's STABLE IRI — the form adapter forwards it as
-/// the ledger's `author`, and the face renders it as the passkey's CURRENT label.
+/// the write with `principal` — the passkey's STABLE IRI — the ledger stamps it as committer and
+/// verified author (ledger #2836), and the face renders it as the passkey's CURRENT label.
 #[test]
 fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
     let server = Server::start();
@@ -1924,10 +1924,13 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
     // The store holds the IRI — the credential, never the label. A relabeled passkey keeps
     // its history, and two passkeys named alike stay distinct.
     let graph = turtle(&server, &id);
-    assert_eq!(
-        graph.matches(&format!("\"{who}\"")).count(),
-        2,
+    assert!(
+        graph.matches(&format!("<{who}>")).count() >= 2,
         "the item and its comment are both attributed to the passkey IRI: {graph}"
+    );
+    assert!(
+        graph.contains("committer"),
+        "stamped by the ledger: {graph}"
     );
     assert!(
         !graph.contains("software"),
@@ -2043,11 +2046,10 @@ fn an_anonymous_form_write_has_no_author_and_a_form_may_not_name_one() {
 }
 
 /// The mechanical route (`POST /iki/ledger/append`, what `curl` and the cli's HTTP mount
-/// use) is unchanged: the transport stamps `principal` on it too, and the ledger — which
-/// declares `author` and not `principal` — ignores it. Reading `principal` as an `author`
-/// fallback would be `ikigai-ledger`'s own decision, not this server's.
+/// use) attributes as the form does: the ledger reads the capability's principal, not the
+/// `principal` argument, and stamps it as committer and verified author (ledger #2836).
 #[test]
-fn the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it() {
+fn the_mechanical_door_is_attributed_to_the_capabilitys_principal() {
     let server = Server::start();
     let (token, who) = sign_in(
         &server,
@@ -2064,8 +2066,8 @@ fn the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it() {
     let (_, id) = first_item(&appended.body);
     let graph = turtle(&server, &id);
     assert!(
-        !graph.contains(&who) && !graph.contains("author"),
-        "the ledger declares no `principal`, so the mechanical route is exactly as it was: {graph}"
+        graph.contains(&format!("<{who}>")) && graph.contains("committer"),
+        "stamped from the capability: {graph}"
     );
 }
 

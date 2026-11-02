@@ -1047,11 +1047,11 @@ fn a_quic_write_is_logged_attributed_and_may_name_only_its_own_client() {
         let item: serde_json::Value = serde_json::from_slice(&read.bytes).unwrap();
         item["item"]["author"].as_str().map(str::to_string)
     };
-    // Absent: filled from the door's principal.
+    // Absent: the committer, stamped by the ledger from the door's principal.
     assert_eq!(
         author_of(append(None)),
         Some(me.clone()),
-        "absent -> filled"
+        "absent -> the committer"
     );
     // Its own principal: accepted.
     assert_eq!(
@@ -1059,14 +1059,9 @@ fn a_quic_write_is_logged_attributed_and_may_name_only_its_own_client() {
         Some(me.clone()),
         "own -> accepted"
     );
-    // Free text: kept as written.
-    assert_eq!(
-        author_of(append(Some("hermes"))),
-        Some("hermes".to_string()),
-        "free text -> kept"
-    );
-    // Another principal: refused, a client or a passkey alike.
+    // Free text and another principal: refused, a client or a passkey alike (ledger #2836).
     for other in [
+        "hermes".to_string(),
         quic::client_iri("00"),
         "urn:iki:gonk:passkey:Q1JFRC1CUklBTg".to_string(),
     ] {

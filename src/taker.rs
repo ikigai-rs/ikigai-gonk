@@ -258,7 +258,6 @@ fn file(
         .with_arg("content", inline(&format!("{title}\n\n{body}")))
         .with_arg("key", inline(key))
         .with_arg("about", inline(&about))
-        .with_arg("author", inline(&binding.principal()))
         .with_arg("as", inline("application/json"));
     let target = request.target.to_string();
     let answer = ledger(request).map_err(|e| format!("{target}: {e}"))?;

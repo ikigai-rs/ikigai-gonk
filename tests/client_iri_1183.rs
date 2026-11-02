@@ -131,7 +131,7 @@ fn an_unnamed_quic_write_is_filled_and_logged_with_the_new_form() {
 /// prefix were no longer principal-shaped, that string would pass as plain text, and the item
 /// would carry exactly the author the other machine's own writes carry.
 #[test]
-fn the_old_spelling_of_another_machine_is_refused_and_ones_own_is_not() {
+fn the_old_spelling_of_any_machine_is_refused() {
     let hub = hub();
     let (home, capability) = session();
     let door = doors::quic_kernel_with(
@@ -157,17 +157,21 @@ fn the_old_spelling_of_another_machine_is_refused_and_ones_own_is_not() {
         format!(" urn:iki:gonk:client:{OTHER_FP} "),
     ] {
         match append(&forged) {
-            Err(Error::Denied(why)) => assert!(why.contains("names a principal"), "{why}"),
+            Err(Error::Denied(why)) => assert!(why.contains("refused for committer"), "{why}"),
             other => panic!("`{forged}` as an author must be refused: {other:?}"),
         }
     }
-    // Its own name, either spelling: the same actor.
-    append(&format!("urn:iki:gonk:client:{FP}")).expect("its own name in the old spelling");
+    // Since ledger #2836 the ledger judges an author against the committer, exactly: its own
+    // name is the current spelling, and the old one and plain text are refused like the rest.
     append(&format!("urn:iki:host:gonk:client:{FP}")).expect("its own name");
-    // Plain text is plain text.
-    append("hermes").expect("a plain-text author");
+    for refused in [format!("urn:iki:gonk:client:{FP}"), "hermes".to_string()] {
+        assert!(
+            matches!(append(&refused), Err(Error::Denied(_))),
+            "{refused}"
+        );
+    }
 
-    // And nothing forged was filed: three items, none naming the other machine.
+    // And nothing forged was filed: one item, not naming the other machine.
     let listed = block_on(hub.issue(
         request(
             Verb::Source,

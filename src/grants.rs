@@ -86,6 +86,7 @@ impl std::str::FromStr for Authority {
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
 ///         "urn:cap:ledger:write:acme",
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:collab:participants",
 ///     ]
 /// );
 /// // A WORKER: claim and comment, never close (ikigai-ledger's published worker grant).
@@ -97,6 +98,7 @@ impl std::str::FromStr for Authority {
 ///         "urn:cap:ledger:claim:acme",
 ///         "urn:cap:ledger:comment:acme",
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:collab:participants",
 ///     ]
 /// );
 /// // An AUDITOR: read, plus the graveyard's read token, and nothing that writes (ledger #1611).
@@ -109,6 +111,11 @@ impl std::str::FromStr for Authority {
 ///     ]
 /// );
 /// ```
+///
+/// ★ **Every authority that writes also READS the participants graph** (ledger #2836,
+/// [`crate::participants`]): the ledger reads it under the caller's capability to admit a claimed
+/// author, so without the token an enrolled delegate or import principal is refused. Writing as
+/// yourself reads nothing. It says who acts for whom and nothing about any ledger.
 ///
 /// ⚠ **A worker holds the ledger graph's store WRITE token**, because every ledger write goes to
 /// the store under the caller's capability. On a bare kernel that token is raw quad authority
@@ -139,10 +146,12 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
         grants.push(ledger.cap_claim());
         grants.push(ledger.cap_comment());
         grants.push(ikigai_store::cap_write_graph(&graph));
+        grants.push(ikigai_store::cap_read_graph(crate::participants::GRAPH));
         return Ok(grants);
     }
     grants.push(ledger.cap_write());
     grants.push(ikigai_store::cap_write_graph(&graph));
+    grants.push(ikigai_store::cap_read_graph(crate::participants::GRAPH));
     if authority == Authority::Write {
         return Ok(grants);
     }
@@ -164,7 +173,8 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 
 /// Whether `held` already carries `token`, counting what one ledger grant implies about
 /// another: `urn:cap:ledger:write:{L}` covers `…:claim:{L}`, `…:comment:{L}` and `…:close:{L}`
-/// (`ikigai-ledger` 0.7.0), and `…:about:{L}` (0.10.0). Used to say a minted grant ADDS something to what a caller already
+/// (`ikigai-ledger` 0.7.0), `…:about:{L}` (0.10.0) and `…:alias:{L}` (0.16.0), and never
+/// `…:link-in:{L}` (0.17.0: a link in decides what the target's `next` offers). Used to say a minted grant ADDS something to what a caller already
 /// holds, which a literal comparison would misjudge for a worker.
 ///
 /// ```
@@ -175,6 +185,8 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 ///     .iter()
 ///     .all(|t| implied_by(t, &write)));
 /// assert!(implied_by("urn:cap:ledger:about:acme", &write));
+/// assert!(implied_by("urn:cap:ledger:alias:acme", &write));
+/// assert!(!implied_by("urn:cap:ledger:link-in:acme", &write));
 /// assert!(!implied_by("urn:cap:ledger:claim:other", &write));
 /// assert!(!implied_by("urn:cap:ledger:delete:acme", &write));
 /// ```
@@ -182,12 +194,14 @@ pub fn implied_by(token: &str, held: &[String]) -> bool {
     if held.iter().any(|h| h == token) {
         return true;
     }
-    ["claim", "comment", "close", "about"].iter().any(|verb| {
-        token
-            .strip_prefix(&format!("urn:cap:ledger:{verb}:"))
-            .and_then(|name| Ledger::parse(name).ok())
-            .is_some_and(|ledger| held.contains(&ledger.cap_write()))
-    })
+    ["claim", "comment", "close", "about", "alias"]
+        .iter()
+        .any(|verb| {
+            token
+                .strip_prefix(&format!("urn:cap:ledger:{verb}:"))
+                .and_then(|name| Ledger::parse(name).ok())
+                .is_some_and(|ledger| held.contains(&ledger.cap_write()))
+        })
 }
 
 /// The prefix every ledger's graphs share: `urn:iki:ledger:graph:{name}` and its graveyard
@@ -264,6 +278,137 @@ pub fn ledger_graph_grants(ledger: &str) -> Result<Vec<String>, String> {
         ikigai_store::cap_read_graph(&graph),
         ikigai_store::cap_write_graph(&graph),
         cap_raw_write_graph(&graph),
+    ])
+}
+
+/// One grant that reaches past a single ledger (ledger #2836): `--alias`, `--link-in` or
+/// `--mirror-to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Across {
+    /// `--alias <ledger>=<scheme>`: [`alias_grants`].
+    Alias {
+        /// The ledger whose items the holder names.
+        ledger: String,
+        /// The scheme the holder may register.
+        scheme: String,
+    },
+    /// `--link-in <ledger>`: [`link_in_grants`].
+    LinkIn(String),
+    /// `--mirror-to <ledger>`: [`mirror_grants`].
+    MirrorTo(String),
+}
+
+impl Across {
+    /// Every token this grant names.
+    ///
+    /// # Errors
+    ///
+    /// When a ledger or a scheme cannot be one.
+    pub fn tokens(&self) -> Result<Vec<String>, String> {
+        match self {
+            Across::Alias { ledger, scheme } => alias_grants(ledger, scheme),
+            Across::LinkIn(target) => link_in_grants(target),
+            Across::MirrorTo(target) => mirror_grants(target),
+        }
+    }
+}
+
+/// Every token a sync or an importer needs to name `ledger`'s items in `scheme`, beside a
+/// principal, which every alias write is made as: registering the scheme, giving an alias, and
+/// the aliases graph's store grants.
+///
+/// ```
+/// use ikigai_gonk::grants::alias_grants;
+/// assert_eq!(
+///     alias_grants("acme", "gh").unwrap(),
+///     [
+///         "urn:cap:ledger:read:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:ledger:alias:acme",
+///         "urn:cap:alias:scheme:gh",
+///         "urn:cap:store:read:graph:urn:iki:alias:graph",
+///         "urn:cap:store:write:graph:urn:iki:alias:graph",
+///     ]
+/// );
+/// assert!(alias_grants("acme", "key").is_err(), "`key` is reserved");
+/// ```
+///
+/// ⚠ **The aliases graph's read token reveals that items exist**: an alias names an item IRI,
+/// which carries its ledger. So [`grants_for`] never mints it. Its write token is not raw quad
+/// authority, because [`crate::admit::raw_write_refusal`] refuses a raw write to that graph.
+///
+/// # Errors
+///
+/// When `ledger` cannot be a ledger name or `scheme` a scheme name.
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn alias_grants(ledger: &str, scheme: &str) -> Result<Vec<String>, String> {
+    use ikigai_ledger::alias;
+    let scheme = alias::parse_scheme(scheme).map_err(|e| e.to_string())?;
+    let ledger = Ledger::parse(ledger).map_err(|e| e.to_string())?;
+    Ok(vec![
+        ledger.cap_read(),
+        ikigai_store::cap_read_graph(&ledger.graph()),
+        ledger.cap_alias(),
+        alias::cap_scheme(scheme),
+        ikigai_store::cap_read_graph(alias::GRAPH),
+        ikigai_store::cap_write_graph(alias::GRAPH),
+    ])
+}
+
+/// Every token, beyond `write` on the subject's ledger, that links an item of another ledger to
+/// one of `target`, or unlinks it: admission, and the graph the mirror is written in.
+///
+/// ```
+/// use ikigai_gonk::grants::link_in_grants;
+/// assert_eq!(
+///     link_in_grants("acme").unwrap(),
+///     [
+///         "urn:cap:ledger:link-in:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///     ]
+/// );
+/// ```
+///
+/// # Errors
+///
+/// When `target` cannot be a ledger name.
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn link_in_grants(target: &str) -> Result<Vec<String>, String> {
+    let ledger = Ledger::parse(target).map_err(|e| e.to_string())?;
+    let mut grants = vec![ledger.cap_link_in()];
+    grants.extend(mirror_grants(target)?);
+    Ok(grants)
+}
+
+/// The tokens that keep `target`'s mirrors true, for whoever closes or reopens an item that
+/// blocks one in `target` and may not add such a link: without them the close is refused before
+/// anything changes.
+///
+/// ```
+/// use ikigai_gonk::grants::mirror_grants;
+/// assert_eq!(
+///     mirror_grants("acme").unwrap(),
+///     [
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///     ]
+/// );
+/// ```
+///
+/// ★ **They write mirrors and nothing else.** The ledger writes a mirror under the caller's
+/// capability, and [`crate::admit::raw_write_refusal`] refuses the same token at the store's raw
+/// door. With no `urn:cap:ledger:*` token on `target`, no endpoint of that ledger answers either.
+///
+/// # Errors
+///
+/// When `target` cannot be a ledger name.
+#[must_use = "these are capability tokens; minting them and dropping them grants nothing"]
+pub fn mirror_grants(target: &str) -> Result<Vec<String>, String> {
+    let graph = Ledger::parse(target).map_err(|e| e.to_string())?.graph();
+    Ok(vec![
+        ikigai_store::cap_read_graph(&graph),
+        ikigai_store::cap_write_graph(&graph),
     ])
 }
 
@@ -860,6 +1005,7 @@ mod tests {
                 "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
                 "urn:cap:ledger:write:acme",
                 "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+                "urn:cap:store:read:graph:urn:collab:participants",
                 "urn:cap:ledger:delete:acme",
                 "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:deleted",
             ]

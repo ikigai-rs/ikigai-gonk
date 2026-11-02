@@ -310,6 +310,19 @@ pub fn add_client(
     })
 }
 
+/// The IRI of the client `name`, read from the certificate of the bundle `client add` wrote.
+pub fn client_iri_of(layout: &Layout, name: &str) -> Result<String, String> {
+    valid_name(name)?;
+    let crt = layout.clients_dir().join(name).join("client.crt");
+    if !crt.is_file() {
+        return Err(format!(
+            "there is no client `{name}` (no {}) — `ikigai-gonk client list` shows what there is",
+            crt.display()
+        ));
+    }
+    Ok(client_iri(&fingerprint_of(&read(&crt)?, name)?))
+}
+
 fn fingerprint_of(pem: &str, name: &str) -> Result<String, String> {
     ikigai_quic::fingerprint_of_pem(pem)
         .map(|fingerprint| normalize(&fingerprint))

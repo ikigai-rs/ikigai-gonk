@@ -1287,6 +1287,31 @@ fn their_close_hands_back_with_evidence_and_our_item_waits_for_its_dispatcher() 
     let ours = w.item(n);
     assert_eq!(ours["awaiting"], "dispatcher");
     assert_eq!(ours["status"], "open", "nothing closes across");
+    // ★ Ledger #2836: the taker's item and the mirror's hand-back are committed by each side's
+    // mirror principal, verified, on no `author=` of their own.
+    let filed = &theirs.item(local)["attribution"];
+    assert_eq!(
+        filed["committer"],
+        format!("urn:iki:gonk:layer:{LAYER}"),
+        "{filed}"
+    );
+    assert_eq!(filed["author_status"], "verified", "{filed}");
+    let back = ours["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| {
+            c["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("Handed back"))
+        })
+        .expect("the hand-back");
+    assert_eq!(
+        back["attribution"]["committer"],
+        format!("urn:iki:gonk:layer:{LAYER}"),
+        "{back}"
+    );
+    assert_eq!(back["attribution"]["author_status"], "verified", "{back}");
     let handed: Vec<String> = w
         .comments(n)
         .into_iter()

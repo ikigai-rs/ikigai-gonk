@@ -64,6 +64,7 @@ fn main() {
             ledgers,
             browse_graph,
             ledger_graphs,
+            across,
             browse,
             scripts,
             nl_draft,
@@ -87,6 +88,7 @@ fn main() {
                         ledgers: &ledgers,
                         browse_graph,
                         ledger_graphs: &ledger_graphs,
+                        across: &across,
                         scripts: &scripts,
                     },
                     &browse_scopes,
@@ -117,6 +119,7 @@ fn main() {
             ledgers,
             browse_graph,
             ledger_graphs,
+            across,
             browse,
             scripts,
             nl_draft,
@@ -129,6 +132,7 @@ fn main() {
                 ledgers: &ledgers,
                 browse_graph,
                 ledger_graphs: &ledger_graphs,
+                across: &across,
                 scripts: &scripts,
             },
             browse.as_ref(),
@@ -163,6 +167,7 @@ fn main() {
                 .unwrap_or_else(|e| fail(&e));
         }
         Command::BackfillKeys(args) => backfill_keys(&args),
+        Command::Enroll(args) => enroll(&args),
         Command::FindingsFile(args) => findings_file(&args),
         Command::Serve(flags) => serve(&flags),
     }
@@ -1227,6 +1232,8 @@ struct Subjects<'a> {
     ledgers: &'a [(String, Authority)],
     browse_graph: Option<Authority>,
     ledger_graphs: &'a [String],
+    /// `--alias`, `--link-in` and `--mirror-to` (ledger #2836).
+    across: &'a [grants::Across],
     /// `--script <name>=<read|run|publish>` (ledger #939).
     scripts: &'a [(String, grants::ScriptAuthority)],
 }
@@ -1236,6 +1243,7 @@ impl Subjects<'_> {
         self.ledgers.is_empty()
             && self.browse_graph.is_none()
             && self.ledger_graphs.is_empty()
+            && self.across.is_empty()
             && self.scripts.is_empty()
     }
 }
@@ -1271,6 +1279,11 @@ fn scopes_for(subjects: &Subjects<'_>, browse: &[String]) -> Vec<String> {
             add(token);
         }
     }
+    for across in subjects.across {
+        for token in across.tokens().unwrap_or_else(|e| fail(&e)) {
+            add(token);
+        }
+    }
     for token in browse {
         add(token.clone());
     }
@@ -1303,6 +1316,27 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
     let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
+}
+
+/// `ikigai-gonk ledger enroll` and `unenroll` — over the socket of the gonk this config
+/// describes (ledger #2836).
+fn enroll(args: &ikigai_gonk::participants::EnrollArgs) {
+    let homes = Homes::resolve(&args.flags).unwrap_or_else(|e| fail(&e));
+    let principal = ikigai_gonk::participants::principal_iri(&args.principal, &homes.config)
+        .unwrap_or_else(|e| fail(&e));
+    let socket = match &args.socket {
+        Some(path) => path.clone(),
+        None => read_settings(&args.flags).socket,
+    };
+    let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
+    ikigai_gonk::participants::run(
+        &issue,
+        args.remove,
+        &principal,
+        &args.role,
+        &mut std::io::stdout(),
+    )
+    .unwrap_or_else(|e| fail(&e));
 }
 
 /// `ikigai-gonk findings file` — over the socket of the gonk this config describes, under the

@@ -178,7 +178,11 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
 
     assert_eq!(g.kind(spaces::HUB), "Fallback");
     let layers = g.layers(spaces::HUB);
-    assert_eq!(layers.len(), 4, "store, ledger, render, sparql: {layers:?}");
+    assert_eq!(
+        layers.len(),
+        5,
+        "store, ledger, render, sparql, aliases: {layers:?}"
+    );
     for layer in &layers {
         assert_eq!(g.kind(layer), "EndpointSpace", "{layer}");
     }
@@ -218,6 +222,7 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
             "urn:sparql:select"
         ]
     );
+    assert_eq!(layers[4], ikigai_ledger::alias::SPACE_ID);
 
     assert!(
         g.of_kind("OpaqueSpace").is_empty(),
@@ -269,7 +274,7 @@ fn the_http_door_is_pages_then_the_hub() {
 
     // The hub inside the door is the hub: same node, same layers as it reports for itself.
     assert_eq!(g.kind(spaces::HUB), "Fallback");
-    assert_eq!(g.layers(spaces::HUB).len(), 4);
+    assert_eq!(g.layers(spaces::HUB).len(), 5);
 
     assert!(
         g.of_kind("Limit").is_empty(),

@@ -216,8 +216,8 @@ good until it expires.
 - **A signed-in write carries its author.** The door mints the session's principal — the
   passkey's stable IRI `urn:iki:gonk:passkey:<credential id>`, never the label — into the
   request's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077), on
-  reads and writes alike, and the form adapter forwards it as the ledger's `author` wherever
-  the action declares one (file, comment, close, reopen, delete, purge). The page renders that IRI as the
+  reads and writes alike, and the ledger stamps it as the write's committer and verified author
+  (file, comment, close, reopen, delete, purge). The page renders that IRI as the
   passkey's *current* label from `clients.json`, or its credential id once the passkey is
   gone; the store holds only the IRI, so a relabel rewrites nothing. A form field named
   `author` is refused: the door names the author, a submitter may not. An anonymous caller
@@ -320,22 +320,21 @@ HMAC keyed by this server, held nowhere until it is answered. Only an answered c
 remembered (until it expires, so it is single-use), and only a passkey's signature or a spent
 invite answers one, so minting any number of challenges costs no memory and refuses nobody.
 
-**And a write may not name someone else as its author** (ledger #864, R4). An `author` shaped
-like a principal this server names — `urn:iki:gonk:passkey:<id>`, which the item page renders
-as that passkey's label — is refused unless it is the request's own principal, on every route
-(the mechanical `POST /iki/ledger/append?author=…`, the form adapter, the QUIC door). A
-plain-text author (`chris`, `roborev`) renders as text and is kept. The rule binds the
+**And a write may not name someone else as its author** (ledger #864, R4; since ledger #2836 the
+committer model of `ikigai-ledger` 0.15, see [Who wrote it](#who-wrote-it-a-committer-and-a-verified-or-claimed-author)).
+A write with a principal may send only that principal, or an author it is enrolled to claim, on
+every route (the mechanical `POST /iki/ledger/append?author=…`, the QUIC door); the form adapter
+refuses the field outright. Anything else, plain text included, is refused with the remedy. The rule binds the
 `author` ARGUMENT, and a raw store write passes none: through 1d02e53 a ledger writer could
 `INSERT DATA { GRAPH <urn:iki:ledger:graph:default> { … ledger:author "urn:iki:gonk:passkey:…" } }`
 through `urn:iki:store:graph-update` and the item page rendered that passkey's label. Since
 ledger #878 the door refuses a raw store write to a ledger graph — see
 [Raw store writes](#raw-store-writes).
 
-**A write that names no author is attributed by the door** (R4 option (b), 2026-10-08). On the
-HTTP door the form adapter fills `author` from a signed-in session's passkey; on the QUIC door
-every write that names none is filled with the client's `urn:iki:host:gonk:client:<fingerprint>`,
-wherever the target declares `author`. An author given explicitly is kept when it is plain
-text or the request's own principal, and refused when it names another principal.
+**A write that names no author is its committer's** (R4 option (b), 2026-10-08; ledger #2836).
+The ledger stamps the capability's principal, a signed-in session's passkey or the QUIC client's
+`urn:iki:host:gonk:client:<fingerprint>`, as `ledger:committer`, and as the verified author when
+no `author` is sent.
 
 ### SPARQL: the editor page, and the SPARQL 1.1 Protocol
 
@@ -1964,9 +1963,8 @@ changes). An enrolment left behind by the old behavior shows in `client list` as
 `urn:iki:host:gonk:client:<fingerprint>` (`client add` prints it; the fingerprint is the
 lowercase hex SHA-256 of the certificate's DER) and mints that name into the
 session's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077). The access
-log writes it as the `principal` of every QUIC request, reads included; a write that names no
-`author` is attributed to it; and a write may name it as its `author`, and no other principal
-(`crate::admit`). A client that carries a narrower capability of its own — `ikigai mcp --grant
+log writes it as the `principal` of every QUIC request, reads included; and the ledger stamps
+it as every write's committer. A client that carries a narrower capability of its own — `ikigai mcp --grant
 …`, or an `ikigai serve` forwarding an agent's attenuated grant — is named all the same,
 because core's `clamp` keeps the session's principal and never takes one the client carries.
 (Through ikigai-quic 0.1.40 the name rode in the capability as an ordinary scope and the
@@ -2030,11 +2028,50 @@ It may read items, claim one (`sink urn:iki:ledger:claim item=N`), renew its lea
 not close or reopen an item (the dispatcher's verdict, `urn:cap:ledger:close:{L}` or `write`),
 file, label, link, defer or edit one: each is a `Denied` naming the grant that would do. A claim
 is recorded with the client's principal (`urn:iki:host:gonk:client:<fingerprint>`), so another
-worker holding the same five lines cannot release it, whatever holder name it spells.
+worker holding the same six lines cannot release it, whatever holder name it spells.
 ⚠ The store write token is raw quad authority on a bare kernel; behind this server's doors a raw
 `urn:iki:store:graph-update` against a ledger graph is refused without the `--ledger-graph`
 grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
 this through the QUIC door of a real gonk.
+
+#### Who wrote it: a committer and a verified or claimed author
+
+Since `ikigai-ledger` 0.15 (ledger #2836) every entry records `ledger:committer`, the principal the
+door minted, and `ledger:committedAt`. With no `author=` the committer is the verified author. Any
+other `author=` needs an enrollment in this server's participants graph, `urn:collab:participants`,
+and is recorded as a claim; the item page says so and names the committer. Over the socket, where
+no door names a principal, `author=` stays the free text it was.
+
+```sh
+# A worker machine: its hand-backs may claim this author (one principal may run several workers)
+ikigai-gonk ledger enroll lawnboy --acts-for urn:collab:participant:lawnboy-claude
+ikigai-gonk ledger enroll lawnboy --acts-for urn:collab:participant:lawnboy-codex
+# A sync or an importer: may name any foreign actor (an IRI) and claim authored dates
+ikigai-gonk ledger enroll gh-sync --importer
+# Undone the same way
+ikigai-gonk ledger unenroll lawnboy --acts-for urn:collab:participant:lawnboy-codex
+```
+
+`enroll` takes a client's name or a principal's IRI, and writes over the owner's socket: the door
+refuses a raw write to that graph and no grant carries its write token, so nobody enrolls
+themselves. The ledger reads the graph under the caller's capability, so a claimant needs its read
+token. Every writing authority (`worker`, `write`, `delete`, `purge`) carries it, and ⚠ **a grant
+minted before this release does not**: re-mint it with `client add <name> … --force`.
+
+#### Aliases and links across ledgers
+
+Two more grants reach past one ledger, each a flag on `client add` and `passkey invite`, and
+`grants.json` lists what they mint:
+
+| flag | tokens | for |
+| --- | --- | --- |
+| `--alias <ledger>=<scheme>` | read on the ledger, `urn:cap:ledger:alias:{ledger}`, `urn:cap:alias:scheme:{scheme}`, and the store's read and write on `urn:iki:alias:graph` | a sync that names items by an external id. It also needs a principal, so the owner's root socket cannot register a scheme. ⚠ Reading that graph reveals that items exist, in every ledger, so no `--ledger` grant carries it |
+| `--link-in <ledger>` | `urn:cap:ledger:link-in:{ledger}`, and the store's read and write on that ledger's graph | linking or unlinking an item of another ledger to one of `<ledger>`, beside `write` on the subject's. `write` on the target does not stand in |
+| `--mirror-to <ledger>` | the store's read and write on that ledger's graph | closing or reopening an item that blocks one in `<ledger>`, which writes the mirror there. Without it the close is refused before anything changes, naming the tokens |
+
+The store's write tokens here write through the ledger only: the door refuses a raw write to a
+ledger graph and to the aliases and participants graphs ("Raw store writes"), so these grants add
+mirrors and aliases, never triples. `tests/ledger_017_2836.rs` drives all of it through a real gonk.
 
 **An AUDITOR** (ledger #1611) sees what a ledger deleted and can change nothing:
 
@@ -3436,6 +3473,11 @@ more, and through `ed43af3` it could write its ledger graph raw there. What coun
   the rule from being stated wrong. On the socket an owner process COULD seal itself to that
   token, and is refused like any narrowed capability.
 
+**The aliases and participants graphs are held to the same rule** (ledger #2836). An alias grant
+carries `urn:iki:alias:graph`'s store write token for the ledger's own alias writes, and as raw
+authority it would forge a scheme's owner; the participants graph says who may claim whom. A raw
+write to either is refused at a network door, and neither has a grant that writes it raw.
+
 **What is unchanged.** The ledger's own writes — `append`, `comment`, `close`, `link`,
 `label`, editing an item — work for the same caller with the same grant, because the ledger
 issues its `graph-update`s inside the hub kernel, which this check never sees. Reads
@@ -3468,7 +3510,9 @@ The socket runs the raw-write rule and none of the author rules: it names no pri
 request is `principal=owner`), so "a principal-shaped `author` must be the caller's own" would
 refuse the owner's every principal-shaped author. So an owner process sealed to a ledger grant
 can still FILE an item whose `author` argument names a passkey — the ledger's own argument on
-a new item, the same claim as `author=agent-7`, never a triple on someone else's item.
+a new item, the same claim as `author=agent-7`, never a triple on someone else's item. The socket
+passes a carried capability through name included, so such a process chooses its `ledger:committer`
+too.
 `tests/raw_store_write_878.rs` pins it (`the_socket_keeps_no_author_rule`). An agent that
 should not be able to claim a person needs its own identity on the QUIC door, where the author
 rule runs.
@@ -4500,8 +4544,9 @@ What changed for an operator, in one place (ledger #864, #805, #816, #799):
   another localhost port: a `403` at the edge. A GET another page NAVIGATES to gets only the
   read half of the caller's grant, so a link to an explanation from another page answers
   `403` and says why; open it from gonk's own page or type the address;
-- a write whose `author` names another principal (`urn:iki:gonk:passkey:*`,
-  `urn:iki:host:gonk:client:*`, or the old `urn:iki:gonk:client:*`), on every route.
+- a write whose `author` is not its own principal and is not enrolled in the participants graph,
+  on every route (since ledger #2836 plain text too, and the client's own old spelling);
+- a raw write to `urn:iki:alias:graph` or `urn:collab:participants` (ledger #2836).
 
 **Moved**
 
