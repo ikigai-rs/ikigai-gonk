@@ -164,6 +164,19 @@ impl Gonk {
         )
     }
 
+    /// A signed-in read that takes whatever face the resource serves first.
+    fn query(&self, token: &str, path: &str) -> (u16, String) {
+        self.raw(
+            "GET",
+            path,
+            &[
+                ("Accept", "*/*".to_string()),
+                ("Cookie", format!("{}={token}", identity::SESSION_COOKIE)),
+            ],
+            "",
+        )
+    }
+
     fn read(&self, token: &str, path: &str) -> (u16, String) {
         self.raw(
             "GET",
@@ -521,4 +534,260 @@ fn a_blocks_edge_across_ledgers_through_the_http_door() {
     );
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("raw store write"), "{body}");
+}
+
+// ------------------------------------------------------- raw reads across the ledger boundary
+
+/// Every quad in the graphs the query may see, with the graph it is in.
+const EVERY_QUAD: &str = "SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }";
+
+const ACME: &str = "urn:iki:ledger:graph:acme";
+const QUADS_IN_ACME: &str = "SELECT ?s ?o WHERE { GRAPH <urn:iki:ledger:graph:acme> { ?s ?p ?o } }";
+const ALIASES: &str = "urn:iki:alias:graph";
+
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// A read-only plan with one step: `iri` over [`EVERY_QUAD`], and `graph` when named.
+fn plan_over(iri: &str, graph: Option<&str>) -> String {
+    let (named, argument) = graph.map_or((String::new(), ""), |graph| {
+        (
+            format!(
+                "<urn:plan:raw:graph> a ik:Argument ; ik:inputName \"graph\" ; \
+                 ik:value \"{graph}\" .\n"
+            ),
+            "<urn:plan:raw:graph> , ",
+        )
+    });
+    format!(
+        "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+         <urn:plan:raw> a ik:Process ; ik:step <urn:plan:raw:step> ; \
+         ik:result <urn:plan:raw:step> .\n\
+         <urn:plan:raw:step> a ik:Step ; ik:verb \"Source\" ; ik:resolves <{iri}> ; \
+         ik:argument {argument}<urn:plan:raw:query> .\n\
+         <urn:plan:raw:query> a ik:Argument ; ik:inputName \"query\" ; \
+         ik:value \"\"\"{EVERY_QUAD}\"\"\" .\n{named}"
+    )
+}
+
+/// `cli` and `acme` hold one item each, and `closer` holds `write` on `cli` and only the mirror's
+/// tokens on `acme`, as `client add` mints them.
+fn with_a_closer() -> Gonk {
+    let gonk = Gonk::with_quic_prepared("", &|config, home| {
+        gonk_cli(
+            config,
+            home,
+            &[
+                "client",
+                "add",
+                "closer",
+                "--ledger",
+                "cli=write",
+                "--mirror-to",
+                "acme",
+                "--script",
+                "quads=run",
+                "--script",
+                "mine=publish",
+            ],
+        );
+    });
+    items(&gonk);
+    gonk.owner(request(
+        Verb::Sink,
+        "urn:script:quads",
+        &[
+            ("language", "sparql"),
+            ("state", "published"),
+            ("content", QUADS_IN_ACME),
+        ],
+    ))
+    .expect("the owner publishes");
+    gonk
+}
+
+/// ★ Reproduces the review finding on PR 264: a store READ token on another ledger's graph, minted
+/// for the ledger's own mirror write, read that ledger whole at the raw doors.
+#[test]
+fn a_mirror_token_reads_no_other_ledger_over_quic() {
+    let gonk = with_a_closer();
+    let closer =
+        |verb, iri, args: &[(&str, &str)]| gonk.as_client("closer", request(verb, iri, args));
+    for target in [
+        "urn:iki:store:graph-select",
+        "urn:sparql:select",
+        "urn:iki:store:graph-info",
+    ] {
+        match closer(
+            Verb::Source,
+            target,
+            &[("graph", ACME), ("query", EVERY_QUAD)],
+        ) {
+            Err(Error::Denied(why)) => assert!(why.contains("urn:cap:ledger:read:acme"), "{why}"),
+            other => panic!("{target} over acme: {other:?}"),
+        }
+    }
+
+    // The default dataset leaves acme out rather than failing.
+    let union = closer(Verb::Source, "urn:sparql:select", &[("query", EVERY_QUAD)])
+        .expect("the default dataset still answers");
+    let union = String::from_utf8_lossy(&union.bytes).into_owned();
+    assert!(union.contains("In cli"), "{union}");
+    assert!(!union.contains("In acme"), "{union}");
+    assert!(!union.contains(participants::GRAPH), "{union}");
+
+    let graphs = closer(Verb::Source, "urn:iki:store:graphs", &[]).expect("the graph list");
+    let graphs = String::from_utf8_lossy(&graphs.bytes).into_owned();
+    assert!(graphs.contains("urn:iki:ledger:graph:cli"), "{graphs}");
+    assert!(!graphs.contains(ACME), "{graphs}");
+
+    // A script's run is a sub-request inside the hub too, and its publisher can read acme.
+    match closer(Verb::Source, "urn:script:quads:result", &[]) {
+        Err(Error::Denied(why)) => assert!(!why.contains("In acme"), "{why}"),
+        Err(other) => panic!("a script naming acme is Denied, not {other:?}"),
+        Ok(answer) => panic!(
+            "a script read acme: {}",
+            String::from_utf8_lossy(&answer.bytes)
+        ),
+    }
+    // Publishing one that names acme is refused to the same client, on the same grounds.
+    match closer(
+        Verb::Sink,
+        "urn:script:mine",
+        &[
+            ("language", "sparql"),
+            ("state", "draft"),
+            ("content", QUADS_IN_ACME),
+        ],
+    ) {
+        Err(Error::Denied(why)) => assert!(why.contains(ACME), "{why}"),
+        other => panic!("a draft naming acme: {other:?}"),
+    }
+
+    // ★ The ledger's own mirror writes keep working under the same grant, and its link is seen.
+    gonk.owner(request(
+        Verb::Sink,
+        "urn:iki:ledger:cli:link",
+        &[("item", "1"), ("type", "blocks"), ("content", "acme#1")],
+    ))
+    .expect("the owner links across");
+    closer(
+        Verb::Sink,
+        "urn:iki:ledger:cli:close",
+        &[("item", "1"), ("content", "done")],
+    )
+    .expect("the close writes the mirror under the caller's grants");
+}
+
+/// A plan's steps and a draft's dry run read in sub-requests inside the hub, out of the door's
+/// sight. Over the socket, because an owner process sealed to a grant names no principal: a QUIC
+/// client's stamped `principal` is an argument `urn:plan:eval` refuses on every plan.
+#[test]
+fn a_sealed_mirror_token_reads_no_other_ledger_through_a_plan_or_a_draft_check() {
+    let gonk = with_a_closer();
+    let mut grant = grants_for("cli", Authority::Write).unwrap();
+    grant.extend(mirror_grants("acme").unwrap());
+    let sealed = ikigai_core::Capability::scoped(grant);
+    let issue = |verb, iri, args: &[(&str, &str)]| {
+        ikigai_ipc::connect(&gonk.socket)
+            .expect("connect")
+            .issue_as(request(verb, iri, args), &sealed)
+            .map(|(answer, _)| String::from_utf8_lossy(&answer.bytes).into_owned())
+    };
+
+    let named = plan_over("urn:iki:store:graph-select", Some(ACME));
+    match issue(Verb::Source, "urn:plan:eval", &[("in", &named)]) {
+        Err(Error::Denied(why)) => {
+            assert!(why.contains(&ikigai_store::cap_read_graph(ACME)), "{why}")
+        }
+        other => panic!("a plan naming acme: {other:?}"),
+    }
+    let union = plan_over("urn:sparql:select", None);
+    let answer = issue(Verb::Source, "urn:plan:eval", &[("in", &union)]).expect("a plan runs");
+    assert!(answer.contains("In cli"), "{answer}");
+    assert!(!answer.contains("In acme"), "{answer}");
+
+    let draft = format!("SELECT ?s ?o FROM <{ACME}> WHERE {{ ?s ?p ?o }}");
+    let answer = issue(Verb::Source, "urn:nl:sparql:check", &[("content", &draft)]);
+    assert!(
+        !format!("{answer:?}").contains("In acme"),
+        "a draft's dry run read acme: {answer:?}"
+    );
+}
+
+#[test]
+fn a_mirror_token_reads_no_other_ledger_over_http() {
+    let gonk = Gonk::start("");
+    items(&gonk);
+    let mut grant = grants_for("cli", Authority::Write).unwrap();
+    grant.extend(mirror_grants("acme").unwrap());
+    let closer = gonk.sign_in(&grant);
+    let query = encode(EVERY_QUAD);
+    let graph = encode(ACME);
+    for path in [
+        format!("/iki/store/graph-select?graph={graph}&query={query}"),
+        format!("/sparql/select?graph={graph}&query={query}"),
+        format!("/iki/store/graph-info?graph={graph}"),
+    ] {
+        let (status, body) = gonk.query(&closer, &path);
+        assert_eq!(status, 403, "{path}: {body}");
+        assert!(!body.contains("In acme"), "{path}: {body}");
+    }
+    let (status, body) = gonk.query(&closer, &format!("/sparql/select?query={query}"));
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("In cli"), "{body}");
+    assert!(!body.contains("In acme"), "{body}");
+    assert!(!body.contains(participants::GRAPH), "{body}");
+}
+
+/// The aliases graph is deployment-wide and the participants graph is enrollment: a grant's read
+/// token on either serves the ledger's own reads, and no raw reader.
+#[test]
+fn the_alias_and_participants_graphs_are_refused_to_raw_reads() {
+    let gonk = Gonk::start("");
+    items(&gonk);
+    let token = gonk.sign_in(&linker());
+    let (status, body) = gonk.write(&token, "POST", "/iki/alias/scheme/gh", "");
+    assert_eq!(status, 200, "register the scheme: {body}");
+    let (status, body) = gonk.write(&token, "POST", "/iki/alias/scheme/gh/value/7", "cli#1");
+    assert_eq!(status, 200, "give the alias: {body}");
+    let resolve = "/iki/ledger/cli/item/gh:7?as=application/json";
+    let (status, body) = gonk.read(&token, resolve);
+    assert_eq!(
+        status, 200,
+        "the ledger resolves it under the same grant: {body}"
+    );
+    let query = encode(EVERY_QUAD);
+    for raw in [ALIASES, participants::GRAPH] {
+        let graph = encode(raw);
+        for path in [
+            format!("/iki/store/graph-select?graph={graph}&query={query}"),
+            format!("/sparql/select?graph={graph}&query={query}"),
+        ] {
+            let (status, body) = gonk.query(&token, &path);
+            assert_eq!(status, 403, "{path}: {body}");
+        }
+    }
+    let (status, body) = gonk.query(&token, &format!("/sparql/select?query={query}"));
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains(ALIASES), "{body}");
+    assert!(!body.contains(participants::GRAPH), "{body}");
+    // A reader of the ledger still reads it raw, and the owner reads everything.
+    assert!(body.contains("In acme"), "`linker` reads acme: {body}");
+    let root = gonk
+        .owner(request(
+            Verb::Source,
+            "urn:iki:store:graph-select",
+            &[("graph", ALIASES), ("query", EVERY_QUAD)],
+        ))
+        .expect("root reads the aliases graph");
+    assert!(String::from_utf8_lossy(&root.bytes).contains("urn:iki:ledger"));
 }

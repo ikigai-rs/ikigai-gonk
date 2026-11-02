@@ -115,7 +115,8 @@ impl std::str::FromStr for Authority {
 /// ★ **Every authority that writes also READS the participants graph** (ledger #2836,
 /// [`crate::participants`]): the ledger reads it under the caller's capability to admit a claimed
 /// author, so without the token an enrolled delegate or import principal is refused. Writing as
-/// yourself reads nothing. It says who acts for whom and nothing about any ledger.
+/// yourself reads nothing. It says who acts for whom and nothing about any ledger, and the door
+/// refuses the token to raw reads ([`crate::admit::raw_read_scopes`]).
 ///
 /// ⚠ **A worker holds the ledger graph's store WRITE token**, because every ledger write goes to
 /// the store under the caller's capability. On a bare kernel that token is raw quad authority
@@ -334,8 +335,10 @@ impl Across {
 /// ```
 ///
 /// ⚠ **The aliases graph's read token reveals that items exist**: an alias names an item IRI,
-/// which carries its ledger. So [`grants_for`] never mints it. Its write token is not raw quad
-/// authority, because [`crate::admit::raw_write_refusal`] refuses a raw write to that graph.
+/// which carries its ledger. So [`grants_for`] never mints it, and the door keeps it from raw
+/// reads ([`crate::admit::raw_read_scopes`]), so it serves the ledger's alias endpoints alone. Its
+/// write token is not raw quad authority either, because [`crate::admit::raw_write_refusal`]
+/// refuses a raw write to that graph.
 ///
 /// # Errors
 ///
@@ -396,9 +399,11 @@ pub fn link_in_grants(target: &str) -> Result<Vec<String>, String> {
 /// );
 /// ```
 ///
-/// ★ **They write mirrors and nothing else.** The ledger writes a mirror under the caller's
-/// capability, and [`crate::admit::raw_write_refusal`] refuses the same token at the store's raw
-/// door. With no `urn:cap:ledger:*` token on `target`, no endpoint of that ledger answers either.
+/// ★ **They write mirrors and nothing else.** The ledger reads the target and writes a mirror
+/// under the caller's capability, and at the store's raw doors the same tokens are refused:
+/// [`crate::admit::raw_write_refusal`] the write, [`crate::admit::raw_read_scopes`] the read, which
+/// needs `urn:cap:ledger:read:{target}`. With no `urn:cap:ledger:*` token on `target`, no endpoint
+/// of that ledger answers either.
 ///
 /// # Errors
 ///

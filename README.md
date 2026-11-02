@@ -2071,7 +2071,9 @@ Two more grants reach past one ledger, each a flag on `client add` and `passkey 
 
 The store's write tokens here write through the ledger only: the door refuses a raw write to a
 ledger graph and to the aliases and participants graphs ("Raw store writes"), so these grants add
-mirrors and aliases, never triples. `tests/ledger_017_2836.rs` drives all of it through a real gonk.
+mirrors and aliases, never triples. Their read tokens are held the same way: the door keeps them
+from raw reads ("Raw store reads"), so a mirror token does not read the other ledger.
+`tests/ledger_017_2836.rs` drives all of it through a real gonk.
 
 **An AUDITOR** (ledger #1611) sees what a ledger deleted and can change nothing:
 
@@ -3318,7 +3320,8 @@ compiled in.** `urn:repo:*` reads files off the disk and runs `git` and `gh`;
 | `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `--browse read`, or `--browse-graph read` alone | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
 | RAW writes to a LEDGER graph — `urn:iki:store:graph-update` naming `urn:iki:ledger:graph:*` (`urn:cap:gonk:raw-write:graph:<graph>`, ledger #878) | **no** — `403`, though its ledgers' own writes work | only if the grant names it — `--ledger-graph <ledger>` | yes (root) | only if the grant names it — `--ledger-graph <ledger>` |
-| `urn:sparql:{select,ask,construct,describe}` (`urn:cap:store:read:graph:*`, then each graph's token) — by default the UNION of the graphs the caller may read | its ledgers' graphs | + the graphs the passkey's grant names | every named graph (root) | the graphs the grant names |
+| RAW reads of a LEDGER graph, and of the aliases and participants graphs (ledger #2836: [Raw store reads](#raw-store-reads)) | its ledgers' graphs | a ledger's graph only with `urn:cap:ledger:read:{ledger}` or `--ledger-graph <ledger>`; aliases and participants **no** | yes (root) | as signed-in HTTP |
+| `urn:sparql:{select,ask,construct,describe}` (`urn:cap:store:read:graph:*`, then each graph's token) — by default the UNION of the graphs the caller may read | its ledgers' graphs | + the graphs the passkey's grant names, under the raw-read rule | every named graph (root) | the graphs the grant names, under the raw-read rule |
 | `urn:script:{name}:result` and `:runs` — run a script ([scripts](#scripts-saved-queries-and-plans-ledger-939)); a run touches at most the runner's grant ∩ what the publisher held ∩ the ledgers' reads | **PUBLIC scripts only** (`urn:cap:script:run:public`) | + each name the grant names (`--script <name>=run`) | yes (root) | only the names the grant names, or `public=run` |
 | `urn:script:{name}` Sink and Delete — publish, replace, retire (`urn:cap:script:{write,delete}:{name}`) | **no** | each name the grant names (`--script <name>=publish`) | yes (root) | **drafts only** (`state=draft`): a machine drafts, a person publishes |
 | `urn:plan:eval` — a plan typed ad hoc, run under the caller's own capability | read-only plans | read-only plans | any plan (root) | read-only plans |
@@ -3444,6 +3447,41 @@ graph as a path query. (It used to end in a third, a not-found catch-all rendere
 unbound name with a 500, and it is gone now that the library answers 404.) The one `ik:OpaqueSpace` this server can render is a
 `gonk.mount`: a remote whose arrangement lives in another process, which `ikigai-resolve` does
 not yet forward. `tests/topology.rs` sources the resource through every door and walks it.
+
+### Raw store reads
+
+A store read token has the same two meanings a write token has (next section). `ikigai-ledger`
+reads under the CALLER's capability: a link's target to keep its mirror true, the aliases graph to
+resolve an alias, the participants graph to admit a claimed author. So `--mirror-to`, `--link-in`,
+`--alias` and every writing grant carry read tokens for those graphs. Without a rule, a
+`--mirror-to acme` closer could read all of acme through `urn:sparql:select`, though a ledger is a
+boundary for content (#2829).
+
+**The rule: a raw read of a ledger's graph needs that ledger's read.** At every door, and at every
+depth of the door's own kernel:
+
+| graph | a raw read needs |
+| --- | --- |
+| `urn:iki:ledger:graph:{name}`, and its graveyard | `urn:cap:ledger:read:{name}`, or the graph's own raw grant (`--ledger-graph {name}`, an operator's explicit "raw"). Root reads it |
+| `urn:iki:alias:graph` | root. It is deployment-wide: it names every ledger's aliases and item IRIs. No reader needs more, so no token opens it |
+| `urn:collab:participants` | root. It is enrollment, written from the owner's socket, and read raw from there too |
+| any other graph | the store's token, as before |
+
+A raw read is `urn:iki:store:graph-{select,ask,construct,describe,info}`, `urn:iki:store:graphs`,
+`urn:sparql:*`, `urn:plan:eval`, the `urn:script:*` family and the `urn:nl:*` family. What the rule does:
+
+- **It takes the tokens away for the length of the request** (`admit::raw_read_scopes`). So the
+  default UNION of `urn:sparql:*` and `urn:iki:store:graphs` leave those graphs out rather than
+  fail, and a plan step or a script, which read in sub-requests no door sees, meet the store's own
+  refusal. A script a client publishes is checked against what it may read raw, too.
+- **Naming such a graph is refused** with a `403` (`Denied` on QUIC and the socket) that says which
+  token opens it (`admit::raw_read_refusal`).
+- **The ledger is untouched.** Its sub-requests run inside the hub, out of the door's sight, under
+  the capability as it arrived, so mirrors, alias resolution and claimed authors keep working.
+
+⚠ Not covered: `urn:iki:store:select` and the other broad doors, which need `urn:cap:store:read`.
+No grant may carry that token at a network door, and an owner process that seals itself to it could
+read the dataset's files anyway.
 
 ### Raw store writes
 

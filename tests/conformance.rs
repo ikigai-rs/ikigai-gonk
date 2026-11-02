@@ -179,9 +179,11 @@ fn fixtures() -> Suite {
             suite.fixture(
                 Fixture::new(*id, Verb::Source)
                     .arg("query", *query)
-                    .capability(Capability::scoped([ikigai_store::cap_read_graph(
-                        "urn:iki:ledger:graph:default",
-                    )])),
+                    // A ledger's graph needs that ledger's read at a raw door (ledger #2836).
+                    .capability(Capability::scoped([
+                        "urn:cap:ledger:read:default".to_string(),
+                        ikigai_store::cap_read_graph("urn:iki:ledger:graph:default"),
+                    ])),
             )
         })
         // ★ The `urn:sparql:*` faces echo the DATA, which is the ledger's, and its terms are
