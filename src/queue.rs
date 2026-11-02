@@ -1411,6 +1411,7 @@ impl QueuePage {
         let mut attributes: Vec<(&str, String)> = vec![
             ("view", "queue".to_string()),
             ("full", flag(!self.fragment).to_string()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", "Queue".to_string()),
             ("state", state.clone()),
             ("scope", scope.to_string()),

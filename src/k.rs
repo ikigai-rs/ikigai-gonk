@@ -507,7 +507,8 @@ fn view_args(inv: &Invocation<'_>) -> Result<String> {
     };
     let mut out = String::new();
     for name in inv.request.args.keys() {
-        if name == "as" {
+        // `theme` is the page's (`render::theme_of`), never the view's.
+        if name == "as" || name == "theme" {
             continue;
         }
         let value = inv.inline_str(name).map_err(|_| Error::InvalidArgument {
@@ -656,6 +657,7 @@ impl Endpoint for BrowseRoots {
             &[
                 ("view", "roots"),
                 ("full", "true"),
+                ("ui-theme", crate::render::theme_of(inv)),
                 ("title", "Browse"),
                 ("message", message),
             ],
@@ -706,6 +708,7 @@ impl Endpoint for BrowseShell {
         let mut attributes = vec![
             ("view", "browse".to_string()),
             ("full", "true".to_string()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", start.clone()),
         ];
         // ★ Honesty of presentation, never the boundary. A caller without the browse floor

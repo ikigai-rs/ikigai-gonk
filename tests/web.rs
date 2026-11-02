@@ -22,7 +22,6 @@
 //! - [`the_mechanical_door_carries_the_principal_and_the_ledger_ignores_it`]
 //! - [`an_http_delete_answers_with_the_ledgers_text`]
 //! - [`a_post_expecting_100_continue_is_invited_at_once`]
-//! - [`the_palette_clears_the_contrast_floor`]
 //! - [`a_result_column_is_never_narrower_than_its_own_word`]
 //! - [`a_sample_button_is_a_toggle_the_server_renders_unpressed`]
 //! - [`the_active_sample_is_cleared_by_typing_in_the_editor`]
@@ -1670,51 +1669,6 @@ fn a_passkey_identity_adds_its_grant_and_only_its_grant() {
     assert_eq!(after.status, 403, "{after:?}");
 }
 
-#[test]
-fn the_palette_clears_the_contrast_floor() {
-    use ikigai_a11y::color::{ratio, Rgba};
-    let css = include_str!("../web/gonk.css");
-    let floor = 4.5;
-    for scheme in ["light", "dark"] {
-        let start = css
-            .find(&format!("/* palette: {scheme} */"))
-            .unwrap_or_else(|| panic!("no {scheme} palette block"));
-        let block = &css[start..];
-        let block = &block[..block.find("/* end palette */").expect("an end marker")];
-        let token = |name: &str| {
-            let at = block
-                .find(&format!("--{name}:"))
-                .unwrap_or_else(|| panic!("{scheme}: no --{name}"));
-            let value = block[at + name.len() + 3..]
-                .split(';')
-                .next()
-                .unwrap()
-                .trim();
-            Rgba::parse(value).unwrap_or_else(|e| panic!("{scheme} --{name} `{value}`: {e:?}"))
-        };
-        for (fg, bg) in [
-            ("fg", "bg"),
-            ("fg", "surface"),
-            ("muted", "bg"),
-            ("muted", "surface"),
-            ("accent", "bg"),
-            ("accent", "surface"),
-            ("danger", "bg"),
-            ("danger", "surface"),
-            ("ok", "bg"),
-            ("ok", "surface"),
-            ("accent-fg", "accent"),
-            ("danger-fg", "danger"),
-        ] {
-            let got = ratio(token(fg), token(bg));
-            assert!(
-                got >= floor,
-                "{scheme}: --{fg} on --{bg} is {got:.2}:1, under the {floor}:1 floor"
-            );
-        }
-    }
-}
-
 /// The CSS declaration in [`fn@a_result_column_is_never_narrower_than_its_own_word`]'s sights,
 /// as it appears in the file.
 const TABLE_CELL_RULE: &str = "th, td {";
@@ -2626,87 +2580,71 @@ fn the_close_menu_is_the_ledger_contracts_reason_set_in_order() {
     }
 }
 
-/// Ledger [#666](http://localhost:1062/l/default/item/666): `#flash` is cleared before a
-/// request a person made, and NOT before the header badge's timed poll — which runs on every
-/// page every few seconds and used to empty `#flash` before anyone had read it.
+/// Ledger [#666](http://localhost:1062/l/default/item/666): `#status` is cleared before a
+/// request a person made, and NOT before the header badge's timed poll, which runs on every page
+/// every few seconds and used to empty it before anyone had read it. Since ledger #2834 the clear
+/// is ikigai-ui's shell script, which skips a request from inside `[data-ui-quiet]`.
 ///
 /// There is no JavaScript runtime in this suite (see
-/// `the_active_sample_is_cleared_by_typing_in_the_editor`), so what is pinned is the wiring:
-/// the clearing listener returns early for a request from inside `.queue-badge`, before it
-/// clears. The behavior was checked under node with a stubbed DOM before merging.
+/// `the_active_sample_is_cleared_by_typing_in_the_editor`), so what is pinned is the wiring.
 #[test]
 fn the_badge_poll_does_not_clear_the_flash() {
-    let js = include_str!("../web/gonk.js");
-    let at = js
+    let shell = shell_js();
+    let at = shell
         .find("addEventListener(\"htmx:beforeRequest\"")
         .expect("the clearing listener");
-    let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
-    let skip = body
-        .find(".closest(\".queue-badge\")) return;")
-        .unwrap_or_else(|| panic!("the badge's request is skipped: {body}"));
-    let clear = body
-        .find("flash(\"\", \"ok\")")
-        .unwrap_or_else(|| panic!("other requests still clear: {body}"));
-    assert!(skip < clear, "the skip comes before the clear: {body}");
-    assert_eq!(
-        js.matches("htmx:beforeRequest").count(),
-        1,
+    let body = &shell[at..at + shell[at..].find("\n  });").expect("the listener ends")];
+    assert!(
+        body.contains("if (!quiet(d.elt)) status(\"\", false);"),
+        "{body}"
+    );
+    assert!(shell.contains("elt.closest(\"[data-ui-quiet]\")"));
+    assert!(
+        !include_str!("../web/gonk.js").contains("htmx:beforeRequest"),
         "one clearing listener, so no second one clears on the poll"
     );
-    // The badge's markup still carries the class the listener keys on.
     assert!(
-        include_str!("../web/gonk.xsl").contains("<span class=\"queue-badge\""),
-        "the badge is a .queue-badge span"
+        include_str!("../web/gonk.xsl").contains("<span class=\"queue-badge\" data-ui-quiet=\"\""),
+        "the badge is quiet in its markup"
     );
 }
 
 /// Ledger [#1718](http://localhost:1062/l/default/item/1718): a failed poll of the header's
-/// Queue badge writes nothing into `#flash`, as a failed poll of the Layers badge does not
+/// Queue badge writes nothing into `#status`, as a failed poll of the Layers badge does not
 /// (ledger #1705). During a gonk restart the badge's every-ten-seconds poll fails each time, and
 /// each failure was an ALERT (`role="alert"`), so a screen reader was interrupted every ten
 /// seconds for as long as gonk was down. The badge retries on its own; its next answer is the
 /// news.
 ///
 /// No JavaScript runtime here (see `the_badge_poll_does_not_clear_the_flash`): this pins the
-/// wiring. Both page-wide failure handlers return for a request the badge made before they
-/// write into `#flash`, and the predicate they ask covers both badges.
+/// wiring. The shell script's failure handler returns for a quiet element before it writes, both
+/// failures go through it, and both badges are quiet in their markup.
 #[test]
 fn a_failed_badge_poll_is_not_an_alert() {
-    let js = include_str!("../web/gonk.js");
-    let function = |name: &str| {
-        let at = js
-            .find(&format!("function {name}("))
-            .unwrap_or_else(|| panic!("no function {name}"));
-        &js[at..at + js[at..].find("\n  }\n").expect("the function ends")]
-    };
-    let own = function("isOwnRetry");
-    assert!(own.contains("isBadge(elt)"), "{own}");
-    let badge = function("isBadge");
-    for class in [".queue-badge", ".layers-badge"] {
+    let shell = shell_js();
+    let at = shell.find("function fail(").expect("the failure handler");
+    let fail = &shell[at..at + shell[at..].find("\n  }\n").expect("its end")];
+    let skip = fail.find("if (quiet(elt)) return;").expect("{fail}");
+    let write = fail.find("status(text, true)").expect("{fail}");
+    assert!(skip < write, "{fail}");
+    assert_eq!(shell.matches("fail(e.detail,").count(), 2, "{shell}");
+    let xsl = include_str!("../web/gonk.xsl");
+    for badge in ["queue-badge", "layers-badge"] {
         assert!(
-            badge.contains(&format!(".closest(\"{class}\")")),
-            "{class}: {badge}"
+            xsl.contains(&format!("<span class=\"{badge}\" data-ui-quiet=\"\"")),
+            "{badge}"
         );
     }
-    for event in ["htmx:sendError", "htmx:responseError"] {
-        let mut from = 0;
-        let mut general = None;
-        while let Some(at) = js[from..].find(&format!("addEventListener(\"{event}\"")) {
-            let at = from + at;
-            let body = &js[at..at + js[at..].find("\n  });").expect("the listener ends")];
-            if body.contains("flash(") {
-                general = Some(body);
-            }
-            from = at + 1;
-        }
-        let general = general.unwrap_or_else(|| panic!("no {event} listener writes #flash"));
-        let skip = general
-            .find("if (isOwnRetry(")
-            .unwrap_or_else(|| panic!("{event}: {general}"));
-        let write = general.find("flash(").expect("it writes otherwise");
-        assert!(skip < write, "{event}: the badge returns first: {general}");
-    }
-    assert!(include_str!("../web/gonk.xsl").contains("<span class=\"queue-badge\""));
+}
+
+/// `urn:iki:ui:shell.js`, as gonk serves it.
+fn shell_js() -> &'static str {
+    std::str::from_utf8(
+        ikigai_ui::artifact("urn:iki:ui:shell.js")
+            .expect("the shell script")
+            .bytes,
+    )
+    .expect("the shell script is text")
 }
 
 /// Ledger [#446](http://localhost:1062/l/default/item/446): when the header leaves out a section

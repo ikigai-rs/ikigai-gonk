@@ -834,6 +834,7 @@ pub(crate) async fn section(
         ("view", "queue".to_string()),
         ("mode", "batch".to_string()),
         ("full", flag(!page.fragment).to_string()),
+        ("ui-theme", crate::render::theme_of(inv).to_string()),
         ("title", "Queue".to_string()),
         ("state", "pending".to_string()),
         ("scope", scope.to_string()),

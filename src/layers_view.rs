@@ -2042,6 +2042,7 @@ impl Endpoint for Overview {
         let mut attributes = vec![
             ("view", "layers".to_string()),
             ("full", "true".to_string()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", "Layers".to_string()),
         ];
         if !inv.capability.allows(CAP_READ) {
@@ -2126,6 +2127,7 @@ impl Endpoint for LayerPage {
         let mut attributes = vec![
             ("view", "layer".to_string()),
             ("full", "true".to_string()),
+            ("ui-theme", crate::render::theme_of(inv).to_string()),
             ("title", layer.clone()),
             ("name", layer.clone()),
         ];

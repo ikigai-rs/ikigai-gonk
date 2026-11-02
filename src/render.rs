@@ -641,10 +641,43 @@ pub fn render(document: &str, full_page: bool) -> Result<String, String> {
     };
     let body = linkify(&html(&xml));
     Ok(if full_page {
-        format!("<!DOCTYPE html>\n{body}")
+        format!("<!DOCTYPE html>\n{}", themed(document, body))
     } else {
         body
     })
+}
+
+/// Where `web/gonk.xsl` asks for the theme chooser: a comment, which only the stylesheet can
+/// write, since a `<` in text arrives here as `&lt;`.
+const THEME_CHOOSER_MARKER: &str = "<!--theme-chooser-->";
+
+/// Give a full page its theme and ikigai-ui's chooser (ledger #2834, UI conventions D12): the
+/// envelope's `ui-theme` ([`theme_of`]) on `<html>`, and the chooser's markup, whole, where the
+/// header asks for it, so gonk holds no copy for it to drift from. The shell moves into
+/// `urn:iki:ui:template:shell` in phase 2.
+///
+/// ⚠ Here, not as a computed attribute in the stylesheet: xrust wrote a task layer's label into
+/// `<html>`'s `xsl:attribute`, whatever the envelope said. `tests/layers_page_1675.rs` pins it.
+fn themed(document: &str, page: String) -> String {
+    let head = document.split('>').next().unwrap_or_default();
+    let theme = head
+        .split_once(" ui-theme=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .and_then(|(asked, _)| ikigai_ui::THEMES.iter().find(|t| **t == asked).copied())
+        .unwrap_or("auto");
+    let chooser = ikigai_ui::theme_chooser(theme).unwrap_or_default();
+    page.replacen("data-theme='auto'", &format!("data-theme='{theme}'"), 1)
+        .replacen(THEME_CHOOSER_MARKER, &chooser, 1)
+}
+
+/// The theme a page renders in: `theme=` when it is one ikigai-ui knows, else `auto`, so an
+/// unknown value degrades to a readable page. With a script the page's theme is the browser's
+/// business and `theme=` is never sent; this is the chooser's Apply button with no script.
+pub fn theme_of(inv: &Invocation<'_>) -> &'static str {
+    inv.inline_str("theme")
+        .ok()
+        .and_then(|asked| ikigai_ui::THEMES.iter().find(|t| **t == asked).copied())
+        .unwrap_or("auto")
 }
 
 /// The attribute the stylesheet puts on an element whose TEXT is prose a person wrote — an
@@ -1306,7 +1339,7 @@ mod tests {
         );
         let page = render(&doc, true).expect("the stylesheet renders");
         assert!(
-            page.starts_with("<!DOCTYPE html>\n<html lang='en'>"),
+            page.starts_with("<!DOCTYPE html>\n<html data-theme='auto' lang='en'>"),
             "{page}"
         );
         assert!(
