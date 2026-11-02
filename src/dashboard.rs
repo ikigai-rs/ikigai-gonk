@@ -10,7 +10,7 @@
 //! ```
 //!
 //! ★ **A view over the counts resource, read under the VIEWER's capability.** A ledger whose
-//! counts answer `Denied` is left out, the rule [`crate::web::readable_ledgers`] already applies
+//! counts answer `Denied` is left out, the rule `web::readable_ledgers` already applies
 //! to the grants it can see. Any other failure is said where the chart would be, because the
 //! rest of the page is still good: `counts` refuses a ledger holding a closed item with no
 //! `closedAt` until its operator has run `backfill-closed-at`, and its sentence says so.
@@ -466,7 +466,7 @@ async fn counts(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<Day>> {
 }
 
 /// `/dashboard`: a chart per ledger this caller may read. Public like `/l`, and for the same
-/// reason: it lists only what [`readable_ledgers`] allows, and a caller who may read none is told
+/// reason: it lists only what `web::readable_ledgers` allows, and a caller who may read none is told
 /// how to get one.
 pub struct DashboardPage {
     pub web: Arc<Web>,
