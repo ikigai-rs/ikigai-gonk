@@ -81,6 +81,7 @@
             <header class="top">
               <a class="brand" href="/">gonk</a>
               <xsl:apply-templates select="view:ledger-menu"/>
+              <xsl:apply-templates select="view:dashboard-link"/>
               <xsl:apply-templates select="view:browse"/>
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
@@ -307,6 +308,7 @@
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
       <xsl:when test="@view = 'github'"><xsl:call-template name="github"/></xsl:when>
       <xsl:when test="@view = 'ledgers'"><xsl:call-template name="ledgers"/></xsl:when>
+      <xsl:when test="@view = 'dashboard'"><xsl:call-template name="dashboard"/></xsl:when>
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
       <xsl:when test="@view = 'queue-badge'"><xsl:call-template name="queue-badge"/></xsl:when>
       <xsl:when test="@view = 'results'"><xsl:apply-templates select="view:results"/></xsl:when>
@@ -321,6 +323,7 @@
            holds their slot and spliced in by src/render.rs. Every row template below reads
            only its own element, which is what makes a chunk's rows render as the page's. -->
       <xsl:when test="@view = 'chunk'">
+        <xsl:apply-templates select="view:chart"/>
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
@@ -457,6 +460,10 @@
 
   <!-- The Views page (ledger #2099, src/views_page.rs), offered only to a caller whose grant
        reads the views declaration (src/web.rs::nav_with). An ordinary link, beside Layers. -->
+  <xsl:template match="view:dashboard-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Dashboard</a>
+  </xsl:template>
+
   <xsl:template match="view:views-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Views</a>
   </xsl:template>
@@ -928,6 +935,126 @@
         </table>
       </div>
     </section>
+  </xsl:template>
+
+  <!-- /dashboard (ledger #2542, src/dashboard.rs). A section per kind of panel, each a named
+       region under its own h2: the agent panels (ledger #2820) are the next section here. The
+       charts arrive through the slot, one transform each, and carry their own h3s. -->
+  <xsl:template name="dashboard">
+    <h1><xsl:value-of select="@title"/></h1>
+    <section class="dashboard-section" aria-labelledby="dashboard-ledgers">
+      <h2 id="dashboard-ledgers">Ledgers</h2>
+      <p class="note"><xsl:value-of select="@count"/></p>
+      <div class="chart-grid">
+        <xsl:apply-templates select="view:slot[@name = 'charts']"/>
+      </div>
+    </section>
+  </xsl:template>
+
+  <!-- A ledger's counts over time (src/dashboard.rs computes every number and sentence here).
+       The sentence is the text alternative and is on the page for everyone; the svg points at
+       it, and the same numbers are in the table behind the disclosure, whose rows
+       src/dashboard.rs::table_rows writes (a transform is quadratic in its nodes). y is CSS px and x is a
+       percentage of the plot, the lines stretched over their own viewBox, so the text keeps its
+       size at any width: labels overflow the plot into .chart-plot's padding. -->
+  <xsl:template match="view:chart">
+    <figure class="panel chart">
+      <xsl:attribute name="aria-labelledby"><xsl:value-of select="@id"/>-title</xsl:attribute>
+      <figcaption>
+        <xsl:choose>
+          <xsl:when test="@href">
+            <h3>
+              <xsl:attribute name="id"><xsl:value-of select="@id"/>-title</xsl:attribute>
+              <a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@title"/></a>
+            </h3>
+          </xsl:when>
+          <xsl:otherwise>
+            <h2>
+              <xsl:attribute name="id"><xsl:value-of select="@id"/>-title</xsl:attribute>
+              <xsl:value-of select="@title"/>
+            </h2>
+          </xsl:otherwise>
+        </xsl:choose>
+        <p class="note">
+          <xsl:attribute name="id"><xsl:value-of select="@id"/>-summary</xsl:attribute>
+          <xsl:value-of select="@summary"/>
+        </p>
+      </figcaption>
+      <xsl:if test="@drawn = 'true'">
+        <div class="chart-plot">
+          <svg role="img" width="100%">
+            <xsl:attribute name="height"><xsl:value-of select="@height"/></xsl:attribute>
+            <xsl:attribute name="aria-labelledby"><xsl:value-of select="@id"/>-summary</xsl:attribute>
+            <text x="0" y="10" dx="-6" text-anchor="end">Items</text>
+            <xsl:apply-templates select="view:y-tick"/>
+            <svg width="100%" preserveAspectRatio="none">
+              <xsl:attribute name="height"><xsl:value-of select="@height"/></xsl:attribute>
+              <xsl:attribute name="viewBox"><xsl:value-of select="@view-box"/></xsl:attribute>
+              <xsl:apply-templates select="view:series" mode="line"/>
+            </svg>
+            <xsl:apply-templates select="view:series" mode="end"/>
+            <xsl:apply-templates select="view:x-tick"/>
+            <text x="50%" y="172" text-anchor="middle">Date (UTC)</text>
+          </svg>
+        </div>
+        <details class="chart-data">
+          <summary><xsl:value-of select="@table-label"/></summary>
+          <div class="table-wrap">
+            <table>
+              <caption>The first day, the last, and each day a count changed, newest first; a count holds between the rows.</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Date (UTC)</th>
+                  <xsl:if test="@shows-open = 'true'"><th scope="col">Open</th></xsl:if>
+                  <xsl:if test="@shows-closed = 'true'"><th scope="col">Closed</th></xsl:if>
+                </tr>
+              </thead>
+              <tbody>
+                <xsl:apply-templates select="view:slot[@name = 'rows']"/>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </xsl:if>
+    </figure>
+  </xsl:template>
+
+  <xsl:template match="view:y-tick">
+    <line x1="0" x2="100%">
+      <xsl:attribute name="class"><xsl:value-of select="@class"/></xsl:attribute>
+      <xsl:attribute name="y1"><xsl:value-of select="@y"/></xsl:attribute>
+      <xsl:attribute name="y2"><xsl:value-of select="@y"/></xsl:attribute>
+    </line>
+    <text x="0" dx="-6" text-anchor="end">
+      <xsl:attribute name="y"><xsl:value-of select="@label-y"/></xsl:attribute>
+      <xsl:value-of select="@label"/>
+    </text>
+  </xsl:template>
+
+  <xsl:template match="view:x-tick">
+    <text y="156">
+      <xsl:attribute name="x"><xsl:value-of select="@x"/></xsl:attribute>
+      <xsl:attribute name="text-anchor"><xsl:value-of select="@anchor"/></xsl:attribute>
+      <xsl:value-of select="@label"/>
+    </text>
+  </xsl:template>
+
+  <xsl:template match="view:series" mode="line">
+    <polyline>
+      <xsl:attribute name="class">chart-line <xsl:value-of select="@class"/></xsl:attribute>
+      <xsl:attribute name="points"><xsl:value-of select="@points"/></xsl:attribute>
+    </polyline>
+  </xsl:template>
+
+  <xsl:template match="view:series" mode="end">
+    <circle cx="100%" r="3">
+      <xsl:attribute name="class">chart-dot <xsl:value-of select="@class"/></xsl:attribute>
+      <xsl:attribute name="cy"><xsl:value-of select="@end-y"/></xsl:attribute>
+    </circle>
+    <text class="chart-end" x="100%" dx="8">
+      <xsl:attribute name="y"><xsl:value-of select="@label-y"/></xsl:attribute>
+      <xsl:value-of select="@label"/>
+    </text>
   </xsl:template>
 
   <xsl:template match="view:ledger-row">
@@ -1978,6 +2105,7 @@
           <button type="submit" class="quiet">Search</button>
         </form>
       </header>
+      <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
         <form class="panel file" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">

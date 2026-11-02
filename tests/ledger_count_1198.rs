@@ -155,14 +155,17 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
         cold,
         vec![
             read("urn:iki:ledger:default:count", 1, false),
+            read("urn:iki:ledger:default:counts", 1, false),
             read("urn:iki:ledger:default:items", 4, false),
         ]
     );
-    // Both reads are cacheable: the next render asks the hub twice and the store nothing…
+    // ★ Since ledger #2542 the page's chart reads the daily `counts`: one query, cached like the rest.
+    // Every read is cacheable: the next render asks the hub the same and the store nothing…
     assert_eq!(
         one_render(&runtime, &hub, &http),
         vec![
             read("urn:iki:ledger:default:count", 0, true),
+            read("urn:iki:ledger:default:counts", 0, true),
             read("urn:iki:ledger:default:items", 0, true),
         ]
     );
@@ -181,6 +184,7 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
         one_render(&runtime, &hub, &http),
         vec![
             read("urn:iki:ledger:default:count", 1, false),
+            read("urn:iki:ledger:default:counts", 1, false),
             read("urn:iki:ledger:default:items", 4, false),
         ]
     );

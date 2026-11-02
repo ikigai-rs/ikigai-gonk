@@ -84,6 +84,33 @@ summary { cursor: pointer; color: var(--accent); }
 .filters a[aria-current] { font-weight: 700; color: var(--fg); text-decoration: none; }
 .search { display: flex; gap: 0.5rem; margin-left: auto; flex-wrap: wrap; }
 
+/* A ledger's counts over time, inline SVG (ledger #2542, src/dashboard.rs). The plot is the svg's
+ * box, and its labels overflow it into this padding, so their size never depends on its width.
+ * Open and closed differ by dash and label as well as by token, and text wears text tokens. */
+.chart figcaption { margin-bottom: 0.5rem; }
+.chart h2, .chart h3 { margin: 0; font-size: 1rem; }
+.chart .note { margin: 0.25rem 0 0; }
+.chart-plot { padding: 0 5.5rem 0 2.75rem; }
+.chart-plot svg { display: block; overflow: visible; }
+.chart-plot text { fill: var(--muted); font-size: 0.75rem; }
+.chart-plot .chart-end { fill: var(--fg); }
+.chart-rule { stroke: var(--rule); }
+.chart-axis { stroke: var(--muted); }
+.chart-line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.chart-line.chart-open { stroke: var(--accent); }
+.chart-line.chart-closed { stroke: var(--muted); stroke-dasharray: 6 4; }
+.chart-dot.chart-open { fill: var(--accent); }
+.chart-dot.chart-closed { fill: var(--muted); }
+.chart-data table { width: 100%; }
+.chart-data caption { color: var(--muted); font-size: 0.85rem; text-align: left; }
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--gap); }
+.chart-grid .chart { margin: 0; min-width: 0; }
+.dashboard-section > h2 { margin-bottom: 0; }
+@media (forced-colors: active) {
+  .chart-rule, .chart-axis, .chart-line.chart-open, .chart-line.chart-closed { stroke: CanvasText; }
+  .chart-dot.chart-open, .chart-dot.chart-closed { fill: CanvasText; }
+}
+
 /* How many rows this page rendered, and out of how many — above the list, not under it,
  * because it is the answer to "is this everything?" and that question is asked first. */
 .count { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; margin: 0 0 0.4rem; }

@@ -45,6 +45,7 @@ pub mod browse;
 pub mod budget;
 pub mod checkout;
 pub mod config;
+pub mod dashboard;
 pub mod doors;
 pub mod egress;
 pub mod findings;
