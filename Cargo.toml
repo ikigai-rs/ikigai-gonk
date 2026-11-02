@@ -1064,6 +1064,13 @@ ikigai-quic = "0.2.1"
 # outbound surface argued above is unchanged (`cargo tree -e features -i hyper`). `"0.2.1"` is
 # `<0.3.0`.
 ikigai-web = "0.2.1"
+# The shared UI path as resources (UX 4, ledger #2834): `urn:iki:ui:tokens.css`,
+# `urn:iki:ui:shell.js` and `urn:iki:ui:htmx`, bound in the HTTP door's kernel and served under
+# `/static/`, and `theme_chooser`, the markup of the header's theme chooser. It holds no state
+# and does no file I/O: every artifact is compiled in, and gonk binds no override directory.
+# 0.4.0 is the floor: D13's one status region, the `--line`/`--rule` split (#2832) and the
+# chooser (#2835). `"0.4"` is `<0.5.0`.
+ikigai-ui = "0.4"
 # Compression as RESOURCES, for the backup family (`crate::backup`). Bound into the hub,
 # so a backup reaches gzip by resolving `urn:compress:gzip` through the kernel rather than
 # by calling a gzip crate — which is the whole reason a module was built instead of a
@@ -1322,6 +1329,9 @@ p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 # ★ 0.4.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.4.0"` is `<0.5.0`.
 ikigai-a11y = "0.4.0"
+# ikigai-ui's test kit (UI conventions D18): its palettes' contrast floor, the token lints over
+# `web/gonk.css`, and `site`, which the axe example writes its pages with.
+ikigai-ui = { version = "0.4", features = ["testkit"] }
 # The scripted layer host the mirror's tests run against (ledger #1190): the published layer
 # host, in process, behind a door that mints each participant's principal. ★ 0.2.2 is the
 # floor (ledger #1316): it serves `urn:layers:me`, which the mirror and the taker read for

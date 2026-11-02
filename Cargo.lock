@@ -2058,6 +2058,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ikigai-fn"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8185d58be8829545986b8c64d49ff79c0b957614efda8c093585461c02fbe3ac"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "html5ever",
+ "ikigai-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ikigai-fs"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2111,6 +2125,7 @@ dependencies = [
  "ikigai-throttle",
  "ikigai-time",
  "ikigai-toolbox",
+ "ikigai-ui",
  "ikigai-vocab",
  "ikigai-web",
  "ikigai-xslt",
@@ -2449,6 +2464,19 @@ dependencies = [
  "async-trait",
  "ikigai-core",
  "ikigai-fn 0.7.2",
+]
+
+[[package]]
+name = "ikigai-ui"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6851b3d4dc6317b5a8d51471e8297067b17dd92943bee572fb502d107ed2d7"
+dependencies = [
+ "futures-executor",
+ "ikigai-a11y",
+ "ikigai-core",
+ "ikigai-fn 0.9.0",
+ "serde_json",
 ]
 
 [[package]]
@@ -3404,14 +3432,13 @@ dependencies = [
  "oxrdfio",
  "oxrocksdb-sys",
  "oxsdatatypes",
- "rand 0.8.8",
  "rand 0.9.5",
  "rustc-hash 2.1.3",
  "siphasher",
  "sparesults",
  "spareval",
  "spargebra",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3439,7 +3466,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "ryu-js 1.0.3",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3452,9 +3479,9 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxsdatatypes",
- "rand 0.8.8",
+ "rand 0.9.5",
  "sha2 0.11.0",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3467,7 +3494,7 @@ dependencies = [
  "oxrdf",
  "oxrdfxml",
  "oxttl",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3480,7 +3507,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "quick-xml 0.37.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3500,7 +3527,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "034779b2d182d5069cd28b1f921ba334cad708ab1340db9776312464b6874b78"
 dependencies = [
  "js-sys",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3513,7 +3540,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4738,7 +4765,7 @@ dependencies = [
  "memchr",
  "oxrdf",
  "quick-xml 0.37.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4753,7 +4780,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "oxsdatatypes",
- "rand 0.8.8",
+ "rand 0.9.5",
  "regex",
  "rustc-hash 2.1.3",
  "sha1",
@@ -4761,7 +4788,7 @@ dependencies = [
  "sparesults",
  "spargebra",
  "sparopt",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4774,8 +4801,8 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "peg",
- "rand 0.8.8",
- "thiserror 1.0.69",
+ "rand 0.9.5",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4785,7 +4812,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e929a8b41fb443a90d211d26abab73ab465414618e2541fb92f7dc54e03ff578"
 dependencies = [
  "oxrdf",
- "rand 0.8.8",
+ "rand 0.9.5",
  "spargebra",
 ]
 

@@ -54,6 +54,8 @@
                  element, which the CSP refuses; gonk styles no indicator. -->
             <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}</xsl:attribute></meta>
             <title><xsl:value-of select="@title"/> · gonk</title>
+            <!-- The shared tokens first (urn:iki:ui:tokens.css), so gonk's layout wins a tie. -->
+            <link rel="stylesheet" href="/static/tokens.css"/>
             <link rel="stylesheet" href="/static/gonk.css"/>
             <!-- A page that hosts another family's faces links that family's own stylesheet
                  (urn:repo:style, through the /k/ adapter). Withheld when the caller could
@@ -67,7 +69,7 @@
             <xsl:if test="@layout-stylesheet">
               <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@layout-stylesheet"/></xsl:attribute></link>
             </xsl:if>
-            <script src="/static/htmx.min.js" defer="defer"></script>
+            <script src="/static/htmx.min.js" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
           </head>
           <body>
