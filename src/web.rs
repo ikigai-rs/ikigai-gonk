@@ -1430,7 +1430,7 @@ async fn ledger_listing(
     children.push_str(&render::slot(ITEMS_SLOT));
     let mut chunks: Vec<String> = Vec::new();
     for window in graph.windows(&order, render::CHUNK_ROWS) {
-        chunks.push(render::chunk(&window.rdfxml().map_err(render_err)?));
+        chunks.push(render::chunk(&window.view_xml().map_err(render_err)?));
     }
     let title = if ledger.is_default() {
         "Ledger".to_string()
@@ -1927,7 +1927,7 @@ async fn item_card(
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
-    children.push_str(&graph.rdfxml().map_err(render_err)?);
+    children.push_str(&graph.view_xml().map_err(render_err)?);
     let doc = envelope(
         "page",
         &[

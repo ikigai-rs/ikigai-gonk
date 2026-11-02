@@ -213,6 +213,49 @@ impl Graph {
         }
     }
 
+    /// The RDF/XML tree projected for the stylesheet, which reads element names and
+    /// text, not RDF attributes. Keep RDF metadata in unprefixed attributes: xrust
+    /// lowercases prefixed attribute values, and ikigai-xslt 0.5 refuses values whose
+    /// case would change (including every XMLSchema datatype IRI). The graph face
+    /// and [`Graph::rdfxml`] retain their original RDF semantics.
+    pub fn view_xml(&self) -> Result<String, String> {
+        use quick_xml::events::{BytesStart, Event};
+        let xml = self.rdfxml()?;
+        let mut reader = quick_xml::Reader::from_str(&xml);
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        loop {
+            let event = reader.read_event().map_err(|e| format!("view XML: {e}"))?;
+            let event = match event {
+                Event::Eof => break,
+                Event::Start(ref tag) | Event::Empty(ref tag) => {
+                    let name = tag.name();
+                    let name = std::str::from_utf8(name.as_ref())
+                        .map_err(|e| format!("view XML name: {e}"))?;
+                    let mut projected = BytesStart::new(name);
+                    for attribute in tag.attributes() {
+                        let attribute =
+                            attribute.map_err(|e| format!("view XML attribute: {e}"))?;
+                        let key = attribute.key.as_ref();
+                        projected.push_attribute((
+                            key.strip_prefix(b"rdf:").unwrap_or(key),
+                            attribute.value.as_ref(),
+                        ));
+                    }
+                    if matches!(event, Event::Empty(_)) {
+                        Event::Empty(projected.into_owned())
+                    } else {
+                        Event::Start(projected.into_owned())
+                    }
+                }
+                event => event,
+            };
+            writer
+                .write_event(event)
+                .map_err(|e| format!("view XML: {e}"))?;
+        }
+        String::from_utf8(writer.into_inner()).map_err(|e| format!("view XML: {e}"))
+    }
+
     /// RDF/XML, without the XML declaration (it is embedded in an envelope).
     ///
     /// ★ **Each subject's primary type is its FIRST triple**, because that is what makes
@@ -609,36 +652,10 @@ pub const RENDER_BUDGET: std::time::Duration = if cfg!(debug_assertions) {
     std::time::Duration::from_secs(60)
 };
 
-/// Held across every transform this process runs, so renders take turns.
-///
-/// # ★ Why one at a time (ledger #2815)
-///
-/// xrust 2.3 interns every name through `qualname` 0.0.2, whose interner is ONE process-wide
-/// `RwLock` taken for WRITING on every clone and drop of a name — and a transform clones its
-/// template trees, names and all, constantly. So concurrent transforms never ran in parallel:
-/// they queued on that lock, and lost to it besides. Captured with gdb on a 4-core runner
-/// under load (`tests/views_page_2099.rs`, four tests' first page at once): every
-/// `ikigai-xslt` thread inside xrust's `Transform` clone or drop, on or around the lock of
-/// `qualname::unique_string::UNIQUE_STRINGS`, and no page answered in 30 s. And each
-/// concurrent call took a FRESH pooled thread, whose per-thread memo compiles the stylesheet
-/// again (4 s in a debug build, under that same lock).
-///
-/// Taking turns here costs no parallelism (there was none), turns the convoy into a queue,
-/// and leaves the pool one call at a time — so its one warm thread, with the stylesheet
-/// compiled once, answers every render. A render past [`RENDER_BUDGET`] is answered and
-/// releases its turn; the transform it leaves running is the crate's to count.
-static TRANSFORM_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Transform an envelope through [`STYLESHEET`] and serialize the result as HTML. A full
 /// page gets its doctype here, because xrust does not write one.
 pub fn render(document: &str, full_page: bool) -> Result<String, String> {
-    let xml = {
-        // Only the guard is shared, and a panic cannot leave `()` half-written.
-        let _turn = TRANSFORM_TURN
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ikigai_xslt::transform_xml_within(document, STYLESHEET, false, RENDER_BUDGET)?
-    };
+    let xml = ikigai_xslt::transform_xml_within(document, STYLESHEET, false, RENDER_BUDGET)?;
     let body = linkify(&html(&xml));
     Ok(if full_page {
         format!("<!DOCTYPE html>\n{}", themed(document, body))
@@ -1462,6 +1479,37 @@ mod tests {
             "<view:t a=\"&quot;&#39;&lt;&amp;\">\
              &lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;\u{FFFD}&lt;/a&gt;</view:t>"
         );
+    }
+
+    /// The renderer must accept ordinary RDF metadata without losing case or
+    /// rewriting text that happens to look like an attribute.
+    #[test]
+    fn the_view_projection_preserves_mixed_case_rdf_values_and_literal_text() {
+        let graph = Graph::from_turtle(
+            br#"
+@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:Example:Item> a ledger:Item ;
+    dcterms:title 'MixedCase rdf:about="KeepMe"' ;
+    dcterms:created "2026-11-02T12:00:00Z"^^xsd:dateTime ;
+    dcterms:creator <urn:Example:Person> .
+"#,
+        )
+        .unwrap();
+        let rdf = graph.rdfxml().unwrap();
+        assert!(rdf.contains("rdf:about=\"urn:Example:Item\""), "{rdf}");
+        let xml = graph.view_xml().unwrap();
+        assert!(xml.contains("about=\"urn:Example:Item\""), "{xml}");
+        assert!(xml.contains("resource=\"urn:Example:Person\""), "{xml}");
+        assert!(
+            xml.contains("datatype=\"http://www.w3.org/2001/XMLSchema#dateTime\""),
+            "{xml}"
+        );
+        assert!(xml.contains("MixedCase rdf:about="), "{xml}");
+        let rendered = render(&chunk(&xml), false).unwrap();
+        assert!(rendered.contains("MixedCase rdf:about="), "{rendered}");
+        assert!(rendered.contains("KeepMe"), "{rendered}");
     }
 
     /// ★ The dispatch depends on this: the primary type is the typed node element even

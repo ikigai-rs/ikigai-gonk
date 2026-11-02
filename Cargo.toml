@@ -1171,7 +1171,12 @@ toml = "0.8"
 # default refused ordinary pages in a debug build on a loaded machine. `^0.1.3` was `<0.2.0`.
 # ★ 0.4.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.4.0"` is `<0.5.0`.
-ikigai-xslt = "0.4.0"
+# ★ 0.5.1 (ledger #2846): concurrent calls for one stylesheet share one warm thread
+# and compile once per process. This replaces render::TRANSFORM_TURN; the 0.4 caret
+# excluded the 0.5 line. The 0.5 numeric-conversion adapter is covered by the page tests.
+ikigai-xslt = "0.5.1"
+# Read the RDF/XML render projection's attributes without rewriting literal text.
+quick-xml = "0.37.5"
 # The ecosystem's one HTML helper (`ikigai_fn::html`): the header's ledger menu and the `/l`
 # index build their links with `url_segment` (ledger #1888) rather than a private encoder, the
 # field guide's "do not reimplement" rule. 0.5.0 is the floor: the release that added the
