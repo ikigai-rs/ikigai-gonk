@@ -1,5 +1,6 @@
 //! A ledger's open and closed counts as a chart, and the Dashboard page: one chart per ledger the
-//! viewer may read (ledger [#2542](http://localhost:1062/l/default/item/2542)).
+//! viewer may read (ledger [#2542](http://localhost:1062/l/default/item/2542)). Its agent panels are
+//! [`crate::agents`].
 //!
 //! ```text
 //! urn:iki:ledger:{name}:counts days=365     the ledger's own daily series, as CSV
@@ -19,7 +20,7 @@
 //! (`render::rendered_chunks`), so a load between writes asks the store nothing for any ledger. ⚠
 //! A write to ANY ledger costs the next load one store query per ledger, because a store read
 //! rests on the store's write thread rather than on one ledger's, and one transform, for the chart
-//! whose numbers moved (`tests/dashboard_2542.rs`).
+//! whose numbers moved (`tests/dashboard_2542.rs`). The agent panels' cost is [`crate::agents`]'s.
 //!
 //! ⚠ **Not live.** gonk's door has no push stream to declare `data-ui-push` against: no
 //! `EdgeConfig::push`, no `urn:cap:kernel:listen` in any grant, and door kernels that cache
@@ -50,8 +51,11 @@ pub const PAGE_PATH: &str = "/dashboard";
 /// The Dashboard's slot for its charts.
 const CHARTS_SLOT: &str = "charts";
 
-/// A chart's slot for its table's rows.
-const ROWS_SLOT: &str = "rows";
+/// A chart's slot for its table's rows, and an agent panel's ([`crate::agents`]).
+pub(crate) const ROWS_SLOT: &str = "rows";
+
+/// The Dashboard's slot for its agent panels.
+const AGENTS_SLOT: &str = "agents";
 
 /// How many days a chart reaches back. It bounds the polyline and the data table, and so a chart's
 /// document and its one transform, however old a ledger is.
@@ -385,10 +389,10 @@ fn unread(error: &Error) -> String {
     format!("No chart: the counts could not be read{detail}.")
 }
 
-/// One chart, ready to draw: its document for the stylesheet, and its table's rows.
+/// One chart or agent panel, ready to draw: its document for the stylesheet, and its table's rows.
 pub(crate) struct Chart {
-    document: String,
-    rows: String,
+    pub(crate) document: String,
+    pub(crate) rows: String,
 }
 
 /// Draw `charts`, in order: each document's render is keyed on its bytes, so a chart whose numbers
@@ -502,6 +506,7 @@ impl Endpoint for DashboardPage {
             }
         }
         children.push_str(&render::slot(CHARTS_SLOT));
+        children.push_str(&render::slot(AGENTS_SLOT));
         let count = match charts.len() {
             1 => "1 ledger you may read".to_string(),
             n => format!("{n} ledgers you may read"),
@@ -514,14 +519,23 @@ impl Endpoint for DashboardPage {
                 ("ui-theme", render::theme_of(inv)),
                 ("title", "Dashboard"),
                 ("count", &count),
+                ("agents-note", &crate::agents::as_of(inv)),
             ],
             &children,
         );
         let shell = render::render(&doc, true).map_err(crate::web::render_err)?;
         let charts = drawn_charts(inv, charts).await?;
+        let agents = fetch(inv, request(Verb::Source, crate::agents::VIEW_IRI)?).await?;
+        let agents = String::from_utf8_lossy(&agents).into_owned();
         Ok(html(
-            render::splice(shell, &[(CHARTS_SLOT.to_string(), charts)])
-                .map_err(crate::web::render_err)?,
+            render::splice(
+                shell,
+                &[
+                    (CHARTS_SLOT.to_string(), charts),
+                    (AGENTS_SLOT.to_string(), agents),
+                ],
+            )
+            .map_err(crate::web::render_err)?,
         ))
     }
 
@@ -534,8 +548,9 @@ impl Endpoint for DashboardPage {
             .title("The Dashboard, as a page")
             .summary(
                 "A chart of the daily open and closed counts of every ledger this caller may \
-                 read, each linking to its ledger, as an HTML page. A ledger the caller may not \
-                 read is absent. A caller who may read none is told how to get one.",
+                 read, each linking to its ledger, and a table of each ledger's agents, as an \
+                 HTML page. A ledger the caller may not read is absent. A caller who may read \
+                 none is told how to get one.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)

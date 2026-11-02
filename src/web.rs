@@ -3,7 +3,7 @@
 //! ```text
 //! /                          urn:iki:gonk:page:home                 Source  the first readable ledger
 //! /l                         urn:iki:gonk:page:ledgers              Source  every readable ledger, counted
-//! /dashboard                 urn:iki:gonk:page:dashboard            Source  a chart per readable ledger
+//! /dashboard                 urn:iki:gonk:page:dashboard            Source  a chart and the agents per readable ledger
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
@@ -171,6 +171,33 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         .bind(
             Exact::new(crate::dashboard::PAGE_IRI),
             crate::dashboard::DashboardPage {
+                web: Arc::clone(&web),
+            },
+        )
+        // The agents' summaries (ledger #2820) — see [`crate::agents`].
+        .bind(
+            template(crate::agents::QUESTION_TEMPLATE),
+            crate::agents::QuestionText,
+        )
+        .bind(
+            Exact::new(crate::agents::AGENTS_IRI),
+            crate::agents::Agents {
+                web: Arc::clone(&web),
+            },
+        )
+        // ⚠ The longer grammar first: a template's variable matches across colons, so the agent's
+        // would take an answer's IRI as a holder, and it asks for its answers by that IRI.
+        .bind(
+            template(crate::agents::ANSWER_TEMPLATE),
+            crate::agents::Answer,
+        )
+        .bind(
+            template(crate::agents::AGENT_TEMPLATE),
+            crate::agents::Agent,
+        )
+        .bind(
+            Exact::new(crate::agents::VIEW_IRI),
+            crate::agents::AgentView {
                 web: Arc::clone(&web),
             },
         )

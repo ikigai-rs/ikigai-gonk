@@ -1,0 +1,41 @@
+# Items this holder let go without a hand-back: released by itself or a dispatcher, or taken over.
+# A close ends a claim too, and is not letting go. A release is measured from this holder's latest
+# claim of the item before it, so a hand-back on an earlier claim does not excuse a later one.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?number ?title WHERE {
+  {
+    SELECT ?item ?released (MAX(?at) AS ?claimed) WHERE {
+      ?release a ledger:ReleaseEvent ;
+               ledger:claimedBy ?holder ;
+               ledger:releaseReason ?reason ;
+               ledger:onItem ?item ;
+               dcterms:created ?released .
+      FILTER(?reason != "closed")
+      ?claim a ledger:ClaimEvent ;
+             ledger:claimedBy ?holder ;
+             ledger:onItem ?item ;
+             dcterms:created ?at .
+      FILTER(?at <= ?released)
+    }
+    GROUP BY ?item ?released
+  }
+  ?item ledger:number ?number ;
+        dcterms:title ?title .
+  OPTIONAL {
+    SELECT ?item ?released (MAX(?at) AS ?back) WHERE {
+      ?release a ledger:ReleaseEvent ;
+               ledger:claimedBy ?holder ;
+               ledger:onItem ?item ;
+               dcterms:created ?released .
+      ?handback ledger:handedBackBy ?holder ;
+                ledger:onItem ?item ;
+                dcterms:created ?at .
+      FILTER(?at <= ?released)
+    }
+    GROUP BY ?item ?released
+  }
+  FILTER(!BOUND(?back) || ?back <= ?claimed)
+}
+ORDER BY ?number

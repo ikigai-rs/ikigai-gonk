@@ -1,0 +1,12 @@
+# Items this holder ever claimed.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?number ?title WHERE {
+  ?claim a ledger:ClaimEvent ;
+         ledger:claimedBy ?holder ;
+         ledger:onItem ?item .
+  ?item ledger:number ?number ;
+        dcterms:title ?title .
+}
+ORDER BY ?number
