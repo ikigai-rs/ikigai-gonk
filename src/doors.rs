@@ -1227,6 +1227,46 @@ fn routes() -> Vec<Route> {
             "/dashboard/panel/agents",
             crate::dashboard::AGENTS_PANEL_IRI,
         ),
+        // Ledger #2972: the operator's two, each declaring what it requires, and their parts.
+        route("/dashboard/cache", crate::dashboard::CACHE_PAGE_IRI),
+        route("/dashboard/system", crate::dashboard::SYSTEM_PAGE_IRI),
+        route("/dashboard/panel/cache", crate::dashboard::CACHE_PANEL_IRI),
+        route(
+            "/dashboard/panel/system",
+            crate::dashboard::SYSTEM_PANEL_IRI,
+        ),
+        route(
+            "/dashboard/part/entries",
+            "urn:iki:gonk:fragment:dashboard-part:entries",
+        ),
+        route(
+            "/dashboard/part/threads",
+            "urn:iki:gonk:fragment:dashboard-part:threads",
+        ),
+        route(
+            "/dashboard/part/uncached",
+            "urn:iki:gonk:fragment:dashboard-part:uncached",
+        ),
+        route(
+            "/dashboard/part/disk",
+            "urn:iki:gonk:fragment:dashboard-part:disk",
+        ),
+        route(
+            "/dashboard/part/store",
+            "urn:iki:gonk:fragment:dashboard-part:store",
+        ),
+        route(
+            "/dashboard/part/gonk",
+            "urn:iki:gonk:fragment:dashboard-part:gonk",
+        ),
+        route(
+            "/dashboard/part/workers",
+            "urn:iki:gonk:fragment:dashboard-part:workers",
+        ),
+        route(
+            "/dashboard/part/claimed",
+            "urn:iki:gonk:fragment:dashboard-part:claimed",
+        ),
         // Ledger #2967: what an open Dashboard polls. No per-route `cap`, for the reason the
         // Queue's rows take none: each read is the viewer's own.
         route(

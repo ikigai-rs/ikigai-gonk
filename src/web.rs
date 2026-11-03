@@ -7,6 +7,9 @@
 //! /dashboard/ledgers         urn:iki:gonk:page:dashboard:ledgers    Source  a chart per readable ledger
 //! /dashboard/agents          urn:iki:gonk:page:dashboard:agents     Source  an agent table per readable ledger
 //! /dashboard/panel/{tab}     urn:iki:gonk:fragment:dashboard-panel:{tab}      Source  a tab's panel, fetched on a switch
+//! /dashboard/cache           urn:iki:gonk:page:dashboard:cache      Source  the kernel's cache, for urn:cap:kernel:inspect
+//! /dashboard/system          urn:iki:gonk:page:dashboard:system     Source  this server's health, for urn:cap:gonk:system:read
+//! /dashboard/part/{part}     urn:iki:gonk:fragment:dashboard-part:{part}      Source  one part of those two, as polled
 //! /dashboard/chart/{ledger}  urn:iki:gonk:fragment:dashboard-chart:{ledger}   Source  one chart, polled
 //! /dashboard/agents/{ledger} urn:iki:gonk:fragment:dashboard-agents:{ledger}  Source  one agent table, polled
 //! /dashboard/agents-note     urn:iki:gonk:fragment:dashboard-agents-note      Source  the minute the tables are as of, polled
@@ -159,8 +162,9 @@ pub struct Web {
 
 /// Bind the face.
 pub fn space(web: Arc<Web>) -> EndpointSpace {
+    let operator_web = Arc::clone(&web);
     let template = |t: &str| UriTemplate::parse(t).expect("a constant template");
-    EndpointSpace::new()
+    let space = EndpointSpace::new()
         .bind(
             Exact::new("urn:iki:gonk:page:home"),
             LedgerView {
@@ -387,7 +391,9 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
                 web: Arc::clone(&web),
             },
         )
-        .named(crate::spaces::iri(crate::spaces::PAGES))
+        .named(crate::spaces::iri(crate::spaces::PAGES));
+    // The Dashboard's operator tabs (ledger #2972).
+    crate::dashboard::bind_operator(space, &operator_web)
 }
 
 // ------------------------------------------------------------------------------ shared

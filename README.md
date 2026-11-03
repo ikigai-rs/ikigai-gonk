@@ -524,6 +524,7 @@ there.
 | `/dashboard` · `/dashboard/ledgers` · `/dashboard/agents` | `urn:iki:gonk:page:dashboard` · `…:dashboard:ledgers` · `…:dashboard:agents` | the Dashboard's two tabs, each its own page, for every ledger this grant may read: a chart of open and closed counts over time, or a table of the agents. `/dashboard` is the first tab |
 | `/dashboard/panel/ledgers` · `/dashboard/panel/agents` | `urn:iki:gonk:fragment:dashboard-panel:ledgers` · `…:agents` | one tab's panel, what an open Dashboard fetches once on a switch to it |
 | `/dashboard/chart/{ledger}` · `/dashboard/agents/{ledger}` · `/dashboard/agents-note` | `urn:iki:gonk:fragment:dashboard-chart:{ledger}` · `…:dashboard-agents:{ledger}` · `…:dashboard-agents-note` | what an open Dashboard polls every 30 s for the tab it shows: one chart, or one agent table and the minute the tables are as of; `If-None-Match` answers 304 while unchanged |
+| `/dashboard/cache` · `/dashboard/system` · `/dashboard/panel/{cache,system}` · `/dashboard/part/{part}` | `urn:iki:gonk:page:dashboard:{cache,system}` · `urn:iki:gonk:fragment:dashboard-panel:{cache,system}` · `urn:iki:gonk:fragment:dashboard-part:{part}` | the operator's two tabs, their panels and each part as polled; each answers `403` without its capability |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment, with the chart of its counts under the status line |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
@@ -587,6 +588,25 @@ its own URL, so it can be linked and reloaded, and with no script the tabs are p
 whole pages. With a script they are ARIA tabs: a switch fetches the new panel once, the other panel
 is emptied, and Back and Forward move between them. A load of one tab, or its polls, asks none of
 the other's questions.
+
+**Two more tabs are for the operator: Cache and System** (ledger #2972). A viewer whose grant does
+not hold a tab's token never sees it, and its URLs answer `403`, the rule for a ledger they may not
+read. Add the tokens to a grant in `grants.json`:
+
+| Tab | Token | Reads |
+|---|---|---|
+| Cache | `urn:cap:kernel:inspect` | the hub's `urn:kernel:cache`, `:threads` and `:uncached`, under the viewer's capability: names, never argument values. Core counts no hits or misses, and the tab says so |
+| System | `urn:cap:gonk:system:read` | `urn:iki:gonk:system:disk`, `:store`, `:gonk` and `:workers`, each JSON and each requiring the token, at every door that binds it |
+
+⚠ `urn:cap:gonk:system:read` shows the store's total, every graph's name and its quads, and where the
+store and the backups are on disk, whichever ledgers its holder may read. Worker lines and claimed
+items are the exception: they come only from ledgers the viewer may read. `urn:iki:store:info` carries
+one total, so the quads per graph are those the newest backup recorded, labeled as of it; counting
+them live would scan the store on every poll. A volume needs attention under 30 GiB free, the workers'
+own `[disk] floor_gb` default, and a backup 15 minutes past its schedule. An open System tab reads
+`urn:iki:store:info` every 30 seconds, which on a store shared with `ikigai-browse` is a full count
+each time (72 ms per million quads, `ikigai-store`'s own measure). The commit, build time and linked
+crate versions are recorded by `build.rs`; a build with no `.git` or packaged commit says `unknown`.
 
 **The Dashboard's agents are questions, and each number is its question's answer.** A table per
 ledger has a row per holder that ever took a claim there, and a number per stored question: in

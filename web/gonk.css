@@ -106,6 +106,16 @@ summary { cursor: pointer; color: var(--accent); }
 .chart-dot.chart-closed { fill: var(--muted); }
 .chart-data table { width: 100%; }
 .chart-data caption { color: var(--muted); font-size: 0.85rem; text-align: left; }
+/* The Dashboard's operator tabs (ledger #2972): every number is text, and a row that needs attention
+ * says so in words, in bold and behind a bar, not the color alone. */
+.readout { margin-bottom: var(--gap); min-width: 0; }
+.readout-totals { display: flex; flex-wrap: wrap; gap: 0.25rem var(--gap); margin: 0.5rem 0; }
+.readout-totals dt { font-weight: 600; }
+.readout-totals dd { margin: 0; overflow-wrap: anywhere; }
+.readout-state { margin: 0.5rem 0; }
+.readout-state.needs-attention { border-left: 4px solid currentColor; padding-left: 0.5rem; }
+.readout-lines { margin: 0.5rem 0; overflow-wrap: anywhere; }
+.readout-table th[scope="row"] { font-weight: normal; }
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--gap); }
 .chart-grid .chart { margin: 0; min-width: 0; }
 /* The Dashboard's tabs (ledger #2971): links with no script, the ARIA pattern with one. The bar and
