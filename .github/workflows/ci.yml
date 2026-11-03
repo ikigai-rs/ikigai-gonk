@@ -8,3 +8,5 @@ concurrency:
 jobs:
   ci:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
+    with:
+      free-disk: true   # the debug build with RocksDB rebuilt fills the runner's disk (ledger #2969)
