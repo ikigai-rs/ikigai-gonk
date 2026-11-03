@@ -14,7 +14,8 @@
 //! counts answer `Denied` is left out, the rule `web::readable_ledgers` already applies
 //! to the grants it can see. Any other failure is said where the chart would be, because the
 //! rest of the page is still good: `counts` refuses a ledger holding a closed item with no
-//! `closedAt` until its operator has run `backfill-closed-at`, and its sentence says so.
+//! `closedAt` until its operator has run `backfill-closed-at`, and its sentence says so; a read
+//! past the viewer's time budget says that instead (`unread`).
 //!
 //! ★ **What one page costs.** The counts are cached and a chart's render is keyed on its document
 //! (`render::rendered_chunks`), so a load between writes asks the store nothing for any ledger. ⚠
@@ -465,15 +466,35 @@ fn drawn(common: &[(&str, &str)], days: &[Day], lines: Lines) -> String {
     wrap("chart", &attributes, &children)
 }
 
-/// What a read of the counts that failed says, where the chart would have been: `counts`' own
-/// sentence when it has one for a person (the ledger's reads give the same caller the same
-/// sentence at `/iki/ledger/…`), else that there is no chart.
+/// What a read of the counts that failed says, where the chart would have been: why, in a sentence
+/// for a person, so an operator can tell a slow ledger from a broken one (ledger
+/// [#2970](http://localhost:1062/l/default/item/2970)). The words for each class are written here,
+/// because what an error carries is written for a log: a time-budget refusal's cites a ledger item
+/// and talks about SPARQL. Only the ledger's own sentences about its counts are repeated.
 fn unread(error: &Error) -> String {
-    let detail = match error {
-        Error::Endpoint(reason) => format!(": {reason}"),
-        _ => String::new(),
+    let why = match error {
+        Error::Endpoint(reason) if from_the_counts(reason) => reason,
+        Error::Timeout(_) => {
+            "they took longer than your time budget. An operator can raise it with a \
+             urn:cap:store:budget:<ms> grant"
+        }
+        Error::Unavailable(_) | Error::RetryAfter { .. } => {
+            "the store is unavailable right now. Try again shortly"
+        }
+        Error::Unresolved(_) | Error::NotFound(_) => "the store holding them is missing",
+        Error::OverBudget { .. } => "they are more than the store will answer with at once",
+        _ => "this server failed while reading them",
     };
-    format!("No chart: the counts could not be read{detail}.")
+    format!("No chart: the counts could not be read: {why}.")
+}
+
+/// Whether `reason` is one of the sentences `counts` writes about a ledger's own data, each of
+/// which tells its operator what is wrong with the ledger. ⚠ It has to go by the words: `Endpoint`
+/// is also what the store's internal failures arrive as (`store: {e}`, `internal: a SPARQL worker
+/// ended without answering`), and nothing else tells them apart. If the ledger rewords one, it
+/// falls to the plain sentence, and the backfill sentence's test goes red.
+fn from_the_counts(reason: &str) -> bool {
+    reason.starts_with("counts ") || reason.contains("backfill-closed-at")
 }
 
 /// One chart or agent panel, ready to draw: its document for the stylesheet, and its table's rows.
@@ -884,6 +905,75 @@ mod tests {
             date: date.to_string(),
             open,
             closed,
+        }
+    }
+
+    /// ★ Ledger #2970: every class says why, and what the error carries for a log stays out.
+    #[test]
+    fn a_failed_read_says_why_and_echoes_nothing_internal() {
+        let secret = "SECRET internal text";
+        let says = |error: Error, why: &str| {
+            let note = unread(&error);
+            assert_eq!(
+                note,
+                format!("No chart: the counts could not be read: {why}.")
+            );
+            assert!(!note.contains(secret), "{note}");
+        };
+        says(
+            Error::Timeout(secret.into()),
+            "they took longer than your time budget. An operator can raise it with a \
+             urn:cap:store:budget:<ms> grant",
+        );
+        let unavailable = "the store is unavailable right now. Try again shortly";
+        says(Error::Unavailable(secret.into()), unavailable);
+        says(
+            Error::RetryAfter {
+                delay: None,
+                detail: secret.into(),
+            },
+            unavailable,
+        );
+        let missing = "the store holding them is missing";
+        says(Error::NotFound(secret.into()), missing);
+        says(
+            Error::Unresolved(ikigai_core::Iri::parse("urn:iki:store:SECRET").unwrap()),
+            missing,
+        );
+        says(
+            Error::OverBudget {
+                detail: secret.into(),
+            },
+            "they are more than the store will answer with at once",
+        );
+        let failed = "this server failed while reading them";
+        says(Error::Refused(secret.into()), failed);
+        says(Error::Conflict(secret.into()), failed);
+        // `Endpoint` is both the store's internal failures and the ledger's sentences.
+        says(Error::Endpoint(format!("store: {secret}")), failed);
+        says(
+            Error::Endpoint(format!("internal: {secret} ended without answering")),
+            failed,
+        );
+        says(Error::Endpoint(format!("counting quads: {secret}")), failed);
+        says(
+            Error::Endpoint(format!("the ledger's counts carry the row `{secret}`")),
+            failed,
+        );
+    }
+
+    #[test]
+    fn the_ledgers_own_sentences_about_its_counts_are_kept() {
+        for sentence in [
+            "a closed item has no readable closedAt; run backfill-closed-at explicitly before \
+             charting",
+            "counts refuses multiple filed times for one item",
+            "counts found a status event before the item was filed",
+        ] {
+            assert_eq!(
+                unread(&Error::Endpoint(sentence.into())),
+                format!("No chart: the counts could not be read: {sentence}.")
+            );
         }
     }
 
