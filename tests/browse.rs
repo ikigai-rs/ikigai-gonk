@@ -2566,6 +2566,9 @@ fn git_metadata_is_absent_through_both_doors() {
 /// script's side — this fixture anchors nothing — and the behavior itself (fill, never
 /// overwrite a typed quote, the deep link with scripting off) was verified in a real browser
 /// against a probe page of this face, not here: nothing in this crate runs JavaScript.
+/// Since browse 0.20.6 the gutter link is out of the tab order and the `<pre>` is the file's one
+/// tab stop, so the script's line field is the keyboard's way to the fill (ledger #2905), and
+/// `tests/browser/quote_keyboard_2905.mjs` walks it in Chromium with the keyboard alone.
 #[test]
 fn the_line_hook_names_what_the_file_view_emits() {
     let dir = scratch_root();
@@ -2579,7 +2582,8 @@ fn the_line_hook_names_what_the_file_view_emits() {
     assert_eq!(status, 200, "{file}");
     for emitted in [
         "<span class=\"browse-line\" id=\"L1\">",
-        "<a class=\"browse-ln\" href=\"#L1\">1</a>",
+        "<a class=\"browse-ln\" href=\"#L1\" tabindex=\"-1\">1</a>",
+        "tabindex=\"0\"><code>",
         "<form class=\"browse-annotate\"",
         "<input name=\"exact\"",
         // browse 0.15.0: the context fields the hook fills, so a repeated quote anchors on
@@ -2600,6 +2604,8 @@ fn the_line_hook_names_what_the_file_view_emits() {
         "input[name=\"suffix\"]",
         "a.browse-ln",
         ".browse-line",
+        "input.gonk-quote-line",
+        "button.gonk-quote-go",
         "a.browse-annotation-marker",
         "a.browse-proposal-marker",
         "^#L(\\d+)$",
@@ -2734,7 +2740,7 @@ fn an_annotate_from_the_file_view_returns_to_it_with_the_new_card_focused() {
         "`focus` is a declared input of the file face: {returned}"
     );
     assert!(
-        returned.contains("id=\"L4\"><a class=\"browse-ln\" href=\"#L4\">4</a>"),
+        returned.contains("id=\"L4\"><a class=\"browse-ln\" href=\"#L4\" tabindex=\"-1\">4</a>"),
         "the reader is back on the file: {returned}"
     );
     assert!(

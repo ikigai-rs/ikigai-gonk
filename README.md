@@ -707,9 +707,11 @@ For example, `workflow.ttl` can give `tasks` a `closed` state:
 
 ```turtle
 @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
 <urn:iki:ledger:lifecycle:workflow> a ledger:Lifecycle ;
+    owl:versionInfo "1" ;
     ledger:hasState <urn:iki:ledger:lifecycle:workflow:filed>,
                     <urn:iki:ledger:lifecycle:workflow:closed> .
 <urn:iki:ledger:lifecycle:workflow:filed> rdfs:label "filed" ;
@@ -725,6 +727,9 @@ flight; each other state must either be in flight or name a drain responsible fo
 Unassigned ledgers retain the built-in kata-flight lifecycle. Several ledgers may load the
 same file; different file contents declaring the same lifecycle name are refused, as are
 duplicate assignments, invalid ledger names, missing files and invalid lifecycle documents.
+A lifecycle must say its version (`ikigai-ledger` 0.18.0), because every transition records the
+version it was checked against: a document without one is refused at startup with a sentence that
+says so, and upgrading means adding the `owl:versionInfo` line above to it.
 All files are read and validated at startup, before the store or doors open. Restart to
 load changes. `~/` expands to the home directory; relative paths use the process's working
 directory. Changing a lifecycle does not migrate stored states: the doctor reports states
@@ -790,6 +795,12 @@ gutter self-link `href="#L{n}"`; clicking the number selects the line (`#L42` in
 gutter click, on `hashchange` and when a deep-linked view arrives. A quote the person has TYPED is
 never overwritten. It is a hook on browse's own selection, not a new one: with scripting off the
 `#L{n}` deep link and the gutter links work exactly as before, and the quote is typed by hand.
+
+A gutter link is out of the tab order and the `<pre>` is the file's one tab stop (ikigai-browse
+0.20.6), so the script also adds a *line to quote* field and a *quote line* button to the annotate
+form (ledger #2905): type a number and press Enter, or Tab to the button, and the line is selected
+and quoted the same way, with focus left where it was. The field shows the selected line, so the
+button alone quotes a deep link's line. The status region says the new quote, or why there is none.
 
 **What a browser may do here is entirely its grant.** `/k` runs every request under the
 per-request capability above — so a cross-site `POST` mints nothing, a rebound `Host` reads

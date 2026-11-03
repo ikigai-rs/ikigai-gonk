@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-gonk"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -276,8 +276,17 @@ ikigai-store = { version = "0.3.1", features = ["persistent"] }
 # ★ 0.17.0 (ledger #2836), and an API floor: 0.15 stamps a committer and refuses a principal's
 # free-text `author=` (`crate::participants`, `crate::admit`), `ikigai_ledger::alias` (0.16) is
 # bound beside the ledger's space, and `Ledger::cap_link_in` (0.17) is minted by
-# `crate::grants`. `"0.17.0"` is `<0.18.0`.
-ikigai-ledger = "0.17.0"
+# `crate::grants`. `"0.17.0"` was `<0.18.0`, a ceiling, so this had to move.
+# ★ 0.18.0 (ledger #2905): Chris's lifecycle and history asks (#2841-#2843, #2863-#2865), delete and
+# purge at any number of dependents (#2922, #2941), an importer's dated replay (#2928, #2934,
+# #2939), `claimedModified` (#2932), and `next` rows with cross-ledger links (#2931). gonk names
+# none of it by name, but three of its changes reach gonk: two more resources behind every door
+# (`…:history`, an importer's Sink, and `…:item:{id}:history`, pinned in `tests/conformance.rs`), a
+# lifecycle document must say its version or gonk refuses to start (the README says the line to
+# add), and a page of items runs six store queries, not four (`tests/ledger_count_1198.rs`). It
+# requires ikigai-store `^0.3.3`, so the lock moves that crate under the `"0.3.1"` floor above.
+# `"0.18.0"` is `<0.19.0`.
+ikigai-ledger = "0.18.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
@@ -672,7 +681,12 @@ ikigai-nl = "0.5.0"
 # `200`. `"0.19.0"` is `<0.20.0`.
 # ★ 0.20.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.20.0"` is `<0.21.0`.
-ikigai-browse = "0.20.0"
+# ★ 0.20.7 is the floor now, a BEHAVIOR one (ledger #2905, ikigai-rs/ikigai-browse PR 140): gutter
+# links are out of the tab order (`tabindex="-1"`, since 0.20.6), so a file is one tab stop, the
+# `<pre>`. Tab no longer reaches a line, so `web/gonk.js` adds a line field to the annotate form in
+# the same change, and `tests/browse.rs` and `tests/browser/quote_keyboard_2905.mjs` hold the two
+# together. 0.20.7 requires ikigai-fn 0.9, so the lock drops the 0.8 that 0.20.3 kept.
+ikigai-browse = "0.20.7"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

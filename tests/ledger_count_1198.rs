@@ -138,6 +138,21 @@ fn read(target: &str, store_queries: usize, cache_hit: bool) -> Read {
     }
 }
 
+/// ★ The page's reads are a fixed number of queries, never one per item (ledger #2905): a page of
+/// 25 rows costs what a page of 5 does.
+#[test]
+fn a_longer_page_runs_no_more_store_queries() {
+    let (runtime, hub, http, _config) = served(25);
+    assert_eq!(
+        one_render(&runtime, &hub, &http),
+        vec![
+            read("urn:iki:ledger:default:count", 1, false),
+            read("urn:iki:ledger:default:counts", 1, false),
+            read("urn:iki:ledger:default:items", 6, false),
+        ]
+    );
+}
+
 #[test]
 fn one_render_reads_the_count_and_one_page_of_rows() {
     let (runtime, hub, http, _config) = served(5);
@@ -150,13 +165,15 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
     // through 0.11.1: loading a set of items now runs one query of its own for the INBOUND
     // `parent` edges, so every face of an item can name its children (`<child> ledger:parent
     // <item>` in the Turtle this page reads). The count is unchanged at one.
+    // ⚠ And SIX since ikigai-ledger 0.18.0 (its #2927): a row carries its cross-ledger links, the page's links out
+    // and mirrors in, two queries for the whole page. A second test holds them to not growing.
     let cold = one_render(&runtime, &hub, &http);
     assert_eq!(
         cold,
         vec![
             read("urn:iki:ledger:default:count", 1, false),
             read("urn:iki:ledger:default:counts", 1, false),
-            read("urn:iki:ledger:default:items", 4, false),
+            read("urn:iki:ledger:default:items", 6, false),
         ]
     );
     // ★ Since ledger #2542 the page's chart reads the daily `counts`: one query, cached like the rest.
@@ -185,7 +202,7 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
         vec![
             read("urn:iki:ledger:default:count", 1, false),
             read("urn:iki:ledger:default:counts", 1, false),
-            read("urn:iki:ledger:default:items", 4, false),
+            read("urn:iki:ledger:default:items", 6, false),
         ]
     );
 }
