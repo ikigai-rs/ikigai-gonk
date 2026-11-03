@@ -99,6 +99,7 @@
               <!-- ikigai-ui's theme chooser: src/render.rs::render puts its markup here. -->
               <xsl:comment>theme-chooser</xsl:comment>
             </header>
+            <xsl:apply-templates select="view:first-passkey"/>
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>
               <p>This link carries a one-time invite. Creating the passkey enrolls it under the grant the invite names; after that, signing in with it gives this browser that grant.</p>
@@ -130,6 +131,13 @@
       <span class="signed-out"><xsl:value-of select="@signed-out"/></span>
       <span class="signed-in" hidden="hidden"><xsl:value-of select="@signed-in"/></span>
     </span>
+  </xsl:template>
+
+  <!-- No passkey is enrolled, so a sign-in cannot succeed (ledger #1847, src/web.rs::nav_with).
+       Plain text with no script, since the command works without one. web/gonk.js points the
+       sign-in buttons at it and takes it down once an invite link is open or a passkey exists. -->
+  <xsl:template match="view:first-passkey">
+    <p id="first-passkey" class="first-passkey">No passkey is enrolled on this server yet, so signing in cannot work. First, where this server runs, run <code><xsl:value-of select="@command"/></code>, then open the link it prints in a browser on that machine.</p>
   </xsl:template>
 
   <!-- The header's ledger picker (ledger #1888, src/web.rs::ledger_menu). Every value here is

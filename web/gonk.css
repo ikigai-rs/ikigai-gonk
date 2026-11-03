@@ -49,6 +49,9 @@ h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
 .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 1rem; margin: 0 0 1rem; }
 .enrol { max-width: 60rem; margin: 1rem auto; }
+/* No passkey enrolled yet (ledger #1847): the column main reads in, and a long command wraps. */
+.first-passkey { max-width: 60rem; margin: 0.75rem auto 0; padding: 0 1rem; }
+.first-passkey code { overflow-wrap: anywhere; }
 
 form { margin: 0; }
 label { font-size: 0.9rem; color: var(--muted); }

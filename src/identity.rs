@@ -742,6 +742,15 @@ impl Passkeys {
         read_passkeys(&self.layout).map(|m| m.len()).unwrap_or(0)
     }
 
+    /// Whether this server has no passkey at all, so no sign-in can succeed yet: what a page says
+    /// beside its sign-in button (ledger [#1847](http://localhost:1062/l/default/item/1847)). Read
+    /// from `clients.json` on every call, so the sentence is gone on the page after an enrollment.
+    /// ★ Unlike [`Passkeys::enrolled_count`], an unreadable file is NOT "none": a page must not
+    /// tell a person with passkeys to go and make one because a read failed.
+    pub fn none_enrolled(&self) -> bool {
+        read_passkeys(&self.layout).is_ok_and(|enrolled| enrolled.is_empty())
+    }
+
     /// Every enrolled passkey's CURRENT label, by credential id — what a page renders a
     /// [`passkey_iri`] author as. Re-read from `clients.json` on every call, like every
     /// other use of that file, so a relabel shows on the next request; an unreadable file

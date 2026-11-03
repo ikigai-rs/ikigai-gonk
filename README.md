@@ -139,6 +139,10 @@ another ledger, or browsing and explaining the repositories
 ([the `--browse` roles](#provisioning-a-browsing-identity-the---browse-roles)), belongs to an
 identity:
 
+An invite comes first: a fresh gonk has no passkey, so the system's sign-in dialog can only fail,
+and until one is enrolled every page says so above its content and names the command (ledger
+#1847).
+
 ```sh
 ikigai-gonk passkey invite brian --ledger default=delete
 ```
@@ -214,7 +218,9 @@ good until it expires.
   minimal page. ⚠ A browser sends the fetch metadata this keys on (`Sec-Fetch-Mode`) only to
   `localhost` or HTTPS, so over plain `http://` on a LAN address the page is the minimal one.
 - **An identity is strictly stronger than anonymous.** A signed-in caller holds the anonymous
-  grant plus its own, and `passkey invite` refuses a grant that adds nothing. The anonymous
+  grant plus its own, and `passkey invite` refuses a grant that adds nothing, such as
+  `--ledger default=read` on a ledger anonymous already reads (`=write` adds to it, since
+  anonymous only reads: ledger #1687). The anonymous
   grant includes running and reading PUBLIC scripts; publishing one takes
   `--script <name>=publish` ([scripts](#scripts-saved-queries-and-plans-ledger-939)).
 - **A signed-in write carries its author.** The door mints the session's principal — the

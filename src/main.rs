@@ -1883,7 +1883,8 @@ fn passkey_invite(
     let scopes = scopes_for(subjects, &role_tokens(browse, nl_draft, &settings));
     // ★ An identity must be STRICTLY stronger than an anonymous loopback caller, or signing
     // in would be a ceremony that changes nothing — and a grant that looked like it limited
-    // someone would not.
+    // someone would not. Since ledger #1687 that caller only reads, so `=write` passes here and
+    // is the next step up the refusal offers (ledger #1847), on the ledger that was asked for.
     let anonymous =
         grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
     if scopes
@@ -1891,13 +1892,16 @@ fn passkey_invite(
         .all(|scope| grants::implied_by(scope, &anonymous))
     {
         fail(&format!(
-            "that grant adds nothing: an anonymous loopback caller already reads {}. \
-             Invite with more — `--ledger {}=delete`, or a ledger outside `gonk.http.ledger`",
+            "that grant adds nothing: an anonymous loopback caller already holds all of it, so \
+             signing in with it would change nothing. Such a caller writes nothing, but it reads \
+             {} (`gonk.http.ledger`) and reads and runs public scripts. Invite with more: \
+             `--ledger {}=write`, or a ledger outside `gonk.http.ledger`",
             settings.http_ledgers.join(", "),
-            settings
-                .http_ledgers
+            subjects
+                .ledgers
                 .first()
-                .map(String::as_str)
+                .map(|(ledger, _)| ledger.as_str())
+                .or(settings.http_ledgers.first().map(String::as_str))
                 .unwrap_or("default")
         ));
     }
