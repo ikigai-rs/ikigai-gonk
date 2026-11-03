@@ -1330,6 +1330,35 @@ fn enrich_children(graph: &mut Graph) {
     }
 }
 
+/// `view:browseRepo` for every `repo:<name>` label naming a root this caller may read, in place
+/// (ledger [#2977](http://localhost:1062/l/default/item/2977)).
+///
+/// [`crate::k::readable_roots`] is the header's own test, `ikigai-browse`'s two exact ones, so a
+/// label naming no root and a root this grant does not read add nothing: a link into a refusal
+/// is worse than no link. The label itself stays a plain badge either way.
+///
+/// The value is `{href} {name}`, the same one-value shape as `view:closeReason`, because the
+/// stylesheet cannot pair two repeated properties. A root's name may hold a space and its
+/// href, encoded, never does, so the first space is the seam.
+fn enrich_repo_labels(graph: &mut Graph, web: &Web, capability: &Capability) {
+    let readable = crate::k::readable_roots(web, capability);
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        for label in graph.values(&item, &format!("{LEDGER_NS}label")) {
+            let Some(root) = label.strip_prefix("repo:") else {
+                continue;
+            };
+            if readable.iter().any(|name| name == root) {
+                let tree = crate::k::tree_iri(&ikigai_fn::html::url_segment(root));
+                graph.view(
+                    &item,
+                    "browseRepo",
+                    format!("{}/{tree} {root}", crate::k::ROOTS_PATH),
+                );
+            }
+        }
+    }
+}
+
 /// `view:author` for every item and comment that carries `ledger:author`, in place.
 ///
 /// An author that is a passkey IRI ([`identity::passkey_iri`] — what the door stamps on a
@@ -1999,6 +2028,7 @@ async fn item_card(
     enrich_items(&mut graph, ledger, inv, "open");
     enrich_close_reasons(&mut graph, &web.hub, ledger);
     enrich_children(&mut graph);
+    enrich_repo_labels(&mut graph, web, inv.capability);
     enrich_authors(&mut graph, &web.passkeys);
     // The ledger a comment's `ledger #N` references resolve in (`render::linkify`, ledger #989).
     for comment in graph.subjects_of_type(&format!("{LEDGER_NS}Comment")) {

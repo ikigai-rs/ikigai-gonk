@@ -773,6 +773,11 @@ open http://127.0.0.1:1062/browse                             # the roots this g
 open http://127.0.0.1:1062/browse/urn:repo:ikigai-core:tree   # straight into one
 ```
 
+**An item's page links its repositories.** Each `repo:<name>` label naming a root the caller may
+read gets a `Browse <name>` link under the item's labels, to `/browse/urn:repo:<name>:tree`. Any
+other label, or a caller without that root's read, sees the plain label. A ledger's rows carry no
+such link: the label is enough there, and a link per row is another tab stop on every row.
+
 **The header carries a `Browse` link** whenever the caller may read at least one configured
 root, next to the ledgers and `SPARQL`, and it lands on `/browse` — the list. One link rather
 than one per root: seven repository names in a header stop being a header, and there is no
