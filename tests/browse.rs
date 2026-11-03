@@ -3330,6 +3330,7 @@ impl HttpDoorHarness {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            holder_aliases: Default::default(),
             toolbox: false,
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));

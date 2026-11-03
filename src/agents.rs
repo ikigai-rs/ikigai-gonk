@@ -22,6 +22,12 @@
 //! held the item never names one. A question's answer is one ledger's: the SPARQL page reads one
 //! ledger's graph, so an agent working in two ledgers has a row in each.
 //!
+//! ★ **A holder is a row, and a row may be signed with several names** (`gonk.holder.alias`,
+//! [`crate::holders`], ledger #3034). A rule reads the time of the event that carries the signature,
+//! so [`filled`] writes each signature's own test beside its triples, and a number and its link still
+//! ask one text. A row no rule touches is asked exactly as it was. The list of agents ([`agents_query`])
+//! folds the same way, and a table says in a sentence which rules fill its rows.
+//!
 //! ★ **A window ends on the minute.** `?since` is floored to the minute, so its text is the same
 //! for every load in that minute, and a load between writes reads from the cache. A window's
 //! number can be up to a minute behind the clock, and the page says the minute.
@@ -53,6 +59,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::dashboard::{agents_path, drawn_chart, live, of_one_ledger, Chart, ROWS_SLOT};
+use crate::holders::HolderAliases;
 use crate::render::{self, element, wrap};
 use crate::rules::sparql_string;
 use crate::web::{
@@ -191,7 +198,14 @@ fn question(name: &str) -> Result<&'static Question> {
 /// with the square. A query past its budget also holds up that caller's next ones, so that is the
 /// difference between a page that works and one that does not. The label is escaped for the grammar
 /// it lands in ([`sparql_string`]), so it can only ever be a string.
-pub fn filled(question: &Question, holder: &str, since: Option<&str>) -> String {
+///
+/// A holder a rule touches goes through [`folded`] instead, which keeps the label in the text.
+pub fn filled(
+    question: &Question,
+    holder: &str,
+    since: Option<&str>,
+    aliases: &HolderAliases,
+) -> String {
     // The window first: the label is the one free text, so nothing may be substituted after it.
     let text = match since {
         Some(since) => parameter(
@@ -201,8 +215,70 @@ pub fn filled(question: &Question, holder: &str, since: Option<&str>) -> String 
         ),
         None => question.text.to_string(),
     };
+    if aliases.touches(holder) {
+        return folded(&text, holder, aliases);
+    }
     let holder = format!("\"{}\"", sparql_string(holder));
     parameter(&text, "?holder", &holder)
+}
+
+/// The terms a question dates a signature with.
+const SIGNATURE_TIMES: [&str; 2] = ["dcterms:created ", "ledger:claimedAt "];
+
+/// `text` with each `?holder` a variable of its own, held to `holder`'s row by [`crate::holders`]'s
+/// clause, written after the triples it sits in.
+///
+/// ★ **Each signature is tested at its own time**, so a claim before a rule's date and a hand-back
+/// after it are told apart, and two names that fold into one row join as one holder.
+///
+/// ⚠ The stored text's shape is what this reads: `?holder` stands in a block of triples ending ` .`
+/// at the end of a line, and later in that block is the time, under a term in [`SIGNATURE_TIMES`].
+/// `tests::every_question_can_be_folded` holds every question to it; nothing outside this file's
+/// constants ever reaches here, and text written in afterward is never read again.
+fn folded(text: &str, holder: &str, aliases: &HolderAliases) -> String {
+    let mut out = String::with_capacity(2 * text.len());
+    let mut rest = text;
+    let mut signature = 0;
+    while let Some(at) = rest.find("?holder") {
+        let after = &rest[at + "?holder".len()..];
+        if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            out.push_str(&rest[..at + "?holder".len()]);
+            rest = after;
+            continue;
+        }
+        let end = after.find(" .\n").map(|end| end + " .".len());
+        let block = end.map_or(after, |end| &after[..end]);
+        let time = SIGNATURE_TIMES
+            .iter()
+            .find_map(|term| block.split_once(term))
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .unwrap_or_else(|| panic!("a stored question signs with no time in: {block}"));
+        signature += 1;
+        let signed = format!("?signed{signature}");
+        out.push_str(&rest[..at]);
+        out.push_str(&signed);
+        out.push_str(block);
+        out.push_str("\n  ");
+        out.push_str(&aliases.row_clause(holder, &signed, time));
+        rest = &after[block.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The question behind [`AGENTS_IRI`]: its stored text, or with no rule to read, each claim's row
+/// worked out from its signature and its time.
+fn agents_query(aliases: &HolderAliases) -> String {
+    if aliases.is_empty() {
+        return AGENTS_QUERY.to_string();
+    }
+    AGENTS_QUERY.replace(
+        "ledger:claimedBy ?holder .",
+        &format!(
+            "ledger:claimedBy ?signed ;\n         dcterms:created ?at .\n  BIND({} AS ?holder)",
+            aliases.row_expression("?signed", "?at")
+        ),
+    )
 }
 
 /// `text` with the whole variable `name` replaced by `term`, and a longer name left alone.
@@ -413,7 +489,8 @@ impl Endpoint for Agents {
             }
             readable.join(" ")
         };
-        let answer = asked(inv, &graph, AGENTS_QUERY).await?;
+        let query = agents_query(&self.web.holder_aliases);
+        let answer = asked(inv, &graph, &query).await?;
         Ok(answer.with_expiry(ikigai_core::Expiry::Always))
     }
 
@@ -425,8 +502,9 @@ impl Endpoint for Agents {
         let desc = Description::new(self.name())
             .title("Who ever took a claim")
             .summary(
-                "Each distinct holder on a `ledger:ClaimEvent`, through `urn:sparql:select` under \
-                 the caller's capability: in `ledger`, or in every ledger the caller may read.",
+                "Each distinct holder on a `ledger:ClaimEvent`, after any `gonk.holder.alias` rules, \
+                 through `urn:sparql:select` under the caller's capability: in `ledger`, or in \
+                 every ledger the caller may read.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -438,7 +516,9 @@ impl Endpoint for Agents {
 }
 
 /// One question's answer for one holder.
-pub struct Answer;
+pub struct Answer {
+    pub web: Arc<Web>,
+}
 
 #[async_trait]
 impl Endpoint for Answer {
@@ -464,7 +544,12 @@ impl Endpoint for Answer {
                 })
             }
         };
-        let query = filled(question, &holder, since.as_deref());
+        let query = filled(
+            question,
+            &holder,
+            since.as_deref(),
+            &self.web.holder_aliases,
+        );
         let answer = asked(inv, &ledger.graph(), &query).await?;
         Ok(answer.with_expiry(ikigai_core::Expiry::Always))
     }
@@ -477,9 +562,9 @@ impl Endpoint for Answer {
         let desc = Description::new(self.name())
             .title("One question, asked of one agent")
             .summary(
-                "The stored question with this holder written in, through `urn:sparql:select`, \
-                 over `ledger`'s graph, under the caller's capability. `{holder}` is the holder's \
-                 label, percent-encoded.",
+                "The stored question with this holder written in, and any `gonk.holder.alias` \
+                 rules that touch it, through `urn:sparql:select`, over `ledger`'s graph, under \
+                 the caller's capability. `{holder}` is the holder's label, percent-encoded.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -516,7 +601,9 @@ fn answered(reads: Reads, results: &Value) -> Result<Option<String>> {
 }
 
 /// `urn:iki:gonk:agent:holder:{holder}`: each question's answer in `ledger`, with its link.
-pub struct Agent;
+pub struct Agent {
+    pub web: Arc<Web>,
+}
 
 #[async_trait]
 impl Endpoint for Agent {
@@ -551,7 +638,12 @@ impl Endpoint for Agent {
                     .map_err(|e| e.to_string())
                     .and_then(|v| answered(question.reads, &v).map_err(|e| e.to_string())),
             };
-            let query = filled(question, &holder, since.as_deref());
+            let query = filled(
+                question,
+                &holder,
+                since.as_deref(),
+                &self.web.holder_aliases,
+            );
             let mut row =
                 json!({ "question": question.name, "href": sparql_href(&ledger, &query) });
             match answer {
@@ -690,21 +782,22 @@ async fn holders(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<String>> {
         .collect())
 }
 
-/// The rows of `ledger`'s table, or `Denied` when this viewer may not read it.
-async fn rows(inv: &Invocation<'_>, ledger: &Ledger) -> Result<String> {
+/// The rows of `ledger`'s table and whom they name, or `Denied` when this viewer may not read it.
+async fn rows(inv: &Invocation<'_>, ledger: &Ledger) -> Result<(String, Vec<String>)> {
     let mut out = String::new();
-    for holder in holders(inv, ledger).await? {
-        let iri = format!("urn:iki:gonk:agent:holder:{}", url_segment(&holder));
+    let holders = holders(inv, ledger).await?;
+    for holder in &holders {
+        let iri = format!("urn:iki:gonk:agent:holder:{}", url_segment(holder));
         let read = with(request(Verb::Source, &iri)?, "ledger", ledger.name());
         let answers: Value = serde_json::from_slice(&fetch(inv, read).await?)
             .map_err(|e| Error::Endpoint(format!("the answers were not JSON: {e}")))?;
-        out.push_str(&row(&holder, &answers)?);
+        out.push_str(&row(holder, &answers)?);
     }
-    Ok(out)
+    Ok((out, holders))
 }
 
 /// One ledger's panel, or `None` when this viewer may not read the ledger.
-async fn panel(inv: &Invocation<'_>, ledger: &Ledger) -> Option<Chart> {
+async fn panel(inv: &Invocation<'_>, ledger: &Ledger, aliases: &HolderAliases) -> Option<Chart> {
     let id = format!("agents-{}", ledger.name());
     let href = ledger_href(ledger);
     let mut attributes = vec![
@@ -712,18 +805,25 @@ async fn panel(inv: &Invocation<'_>, ledger: &Ledger) -> Option<Chart> {
         ("title", ledger.name()),
         ("href", href.as_str()),
     ];
+    let mut applied = None;
     let (note, rows) = match rows(inv, ledger).await {
         Err(Error::Denied(_)) => return None,
         Err(error) => (
             format!("The agents could not be read: {error}."),
             String::new(),
         ),
-        Ok(rows) if rows.is_empty() => (
+        Ok((rows, _)) if rows.is_empty() => (
             "No agent has claimed an item in this ledger yet.".to_string(),
             rows,
         ),
-        Ok(rows) => (String::new(), rows),
+        Ok((rows, holders)) => {
+            applied = aliases.sentence(&holders);
+            (String::new(), rows)
+        }
     };
+    if let Some(sentence) = &applied {
+        attributes.push(("aliases", sentence.as_str()));
+    }
     let children = if note.is_empty() {
         let columns: String = QUESTIONS
             .iter()
@@ -743,8 +843,12 @@ async fn panel(inv: &Invocation<'_>, ledger: &Ledger) -> Option<Chart> {
 
 /// One ledger's panel as its fragment, or `None` when this viewer may not read the ledger. The page
 /// and the poll both come through here.
-async fn panel_fragment(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Option<String>> {
-    let Some(panel) = panel(inv, ledger).await else {
+async fn panel_fragment(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    aliases: &HolderAliases,
+) -> Result<Option<String>> {
+    let Some(panel) = panel(inv, ledger, aliases).await else {
         return Ok(None);
     };
     let drawn = drawn_chart(inv, panel).await?;
@@ -763,7 +867,7 @@ impl Endpoint for AgentView {
         let ledgers = readable_ledgers(&self.web, inv.capability);
         let mut panels = String::new();
         for ledger in menu_order(&ledgers) {
-            if let Some(panel) = panel_fragment(inv, ledger).await? {
+            if let Some(panel) = panel_fragment(inv, ledger, &self.web.holder_aliases).await? {
                 panels.push_str(&panel);
             }
         }
@@ -778,9 +882,10 @@ impl Endpoint for AgentView {
         Description::new(self.name())
             .title("The agents' panels")
             .summary(
-                "A table per ledger this caller may read: a row per agent, a column per stored \
-                 question, each number linking to the SPARQL page asking that question in a new \
-                 tab. A ledger the caller may not read is absent.",
+                "A table per ledger this caller may read: a row per agent, after any \
+                 `gonk.holder.alias` rules, which a sentence over the table names, and a column \
+                 per stored question, each number linking to the SPARQL page asking that question \
+                 in a new tab. A ledger the caller may not read is absent.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -790,7 +895,9 @@ impl Endpoint for AgentView {
 }
 
 /// `urn:iki:gonk:fragment:dashboard-agents:{ledger}`: what an open Dashboard asks for one table.
-pub struct AgentFragment;
+pub struct AgentFragment {
+    pub web: Arc<Web>,
+}
 
 #[async_trait]
 impl Endpoint for AgentFragment {
@@ -798,7 +905,7 @@ impl Endpoint for AgentFragment {
         html_only(inv)?;
         let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
         require_read(inv.capability, &ledger)?;
-        panel_fragment(inv, &ledger)
+        panel_fragment(inv, &ledger, &self.web.holder_aliases)
             .await?
             .map(html)
             .ok_or_else(|| Error::Denied("this grant does not read that ledger's agents".into()))
@@ -894,7 +1001,7 @@ mod tests {
         let hostile = "x\" } } #\n";
         for question in &QUESTIONS {
             let since = question.window_ms.map(|_| "2026-11-02T14:37:00.000Z");
-            let query = filled(question, hostile, since);
+            let query = filled(question, hostile, since, &HolderAliases::default());
             assert!(query.contains("\"x\\\" } } #\\n\""), "{query}");
             assert!(
                 spargebra::SparqlParser::new().parse_query(&query).is_ok(),
@@ -911,12 +1018,95 @@ mod tests {
         }
     }
 
+    fn rules(lines: &[&str]) -> HolderAliases {
+        let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        HolderAliases::parse(&lines).unwrap()
+    }
+
+    fn since_for(question: &Question) -> Option<&'static str> {
+        question.window_ms.map(|_| "2026-11-02T14:37:00.000Z")
+    }
+
+    /// ★ Every `?holder` in every question is replaced, parses, and is tested at a time.
+    #[test]
+    fn every_question_can_be_folded() {
+        let aliases = rules(&["a -> b before 2026-10-21", "a -> c", "d -> c"]);
+        for question in &QUESTIONS {
+            let query = filled(question, "c", since_for(question), &aliases);
+            assert!(!query.contains("?holder"), "{query}");
+            assert!(
+                query.contains("VALUES ?signed1 { \"c\" \"a\" \"d\" }"),
+                "{query}"
+            );
+            let signatures = question.text.matches("?holder").count();
+            assert_eq!(query.matches("FILTER(IF(").count(), signatures, "{query}");
+            assert!(
+                spargebra::SparqlParser::new().parse_query(&query).is_ok(),
+                "{}: {query}",
+                question.name
+            );
+        }
+    }
+
+    /// A row no rule touches asks exactly what it asked before there were rules.
+    #[test]
+    fn a_holder_no_rule_touches_is_asked_as_it_always_was() {
+        let aliases = rules(&["a -> b before 2026-10-21", "a -> c"]);
+        for question in &QUESTIONS {
+            let since = since_for(question);
+            assert_eq!(
+                filled(question, "other", since, &aliases),
+                filled(question, "other", since, &HolderAliases::default()),
+            );
+        }
+    }
+
+    /// ⚠ An old name asked for directly has a row of what no rule takes, and may be empty; it is
+    /// never the whole history, or the old row would double the counts of the new ones.
+    #[test]
+    fn a_name_every_rule_takes_is_tested_as_well() {
+        let aliases = rules(&["a -> b before 2026-10-21", "a -> c"]);
+        let query = filled(&QUESTIONS[1], "a", None, &aliases);
+        assert!(query.contains("VALUES ?signed1 { \"a\" }"), "{query}");
+        assert!(query.contains(" = \"a\")"), "{query}");
+    }
+
+    #[test]
+    fn a_label_in_a_rule_can_only_be_a_string() {
+        let aliases = rules(&["x\" } } # -> b", "?signed1 -> b"]);
+        for question in &QUESTIONS {
+            let query = filled(question, "b", since_for(question), &aliases);
+            assert!(
+                spargebra::SparqlParser::new().parse_query(&query).is_ok(),
+                "{}: {query}",
+                question.name
+            );
+        }
+        let query = agents_query(&aliases);
+        assert!(
+            spargebra::SparqlParser::new().parse_query(&query).is_ok(),
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn the_list_of_agents_is_stored_text_until_there_is_a_rule() {
+        assert_eq!(agents_query(&HolderAliases::default()), AGENTS_QUERY);
+        let query = agents_query(&rules(&["a -> b before 2026-10-21", "a -> c"]));
+        assert_ne!(query, AGENTS_QUERY);
+        assert!(query.contains("AS ?holder)"), "{query}");
+        assert!(
+            spargebra::SparqlParser::new().parse_query(&query).is_ok(),
+            "{query}"
+        );
+    }
+
     /// ⚠ A label that spells a parameter is still only a label.
     #[test]
     fn a_label_spelling_a_parameter_is_not_substituted() {
         let since = Some("2026-11-02T14:37:00.000Z");
         for hostile in ["?since", "?holder", "a ?since b ?holder c"] {
-            let query = filled(&QUESTIONS[2], hostile, since);
+            let query = filled(&QUESTIONS[2], hostile, since, &HolderAliases::default());
             assert!(query.contains(&format!("\"{hostile}\"")), "{query}");
             assert!(
                 spargebra::SparqlParser::new().parse_query(&query).is_ok(),

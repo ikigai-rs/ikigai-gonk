@@ -981,6 +981,7 @@ fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     let pages = onboard::bind_page(ikigai_gonk::web::space(Arc::clone(&face)), &face);

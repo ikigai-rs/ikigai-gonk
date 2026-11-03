@@ -619,7 +619,7 @@ count of that query (the median is the middle row of its query, the lower of two
 | resource | what |
 | --- | --- |
 | `urn:iki:gonk:question:name:{name}` | a question's text, with `?holder` and `?since` |
-| `urn:iki:gonk:agent` | who ever took a claim, in `ledger=` or in everything this grant reads |
+| `urn:iki:gonk:agent` | who ever took a claim, by row after any `gonk.holder.alias`, in `ledger=` or in everything this grant reads |
 | `urn:iki:gonk:agent:holder:{holder}` | that holder's answers in `ledger=`, each with its link, as JSON |
 | `urn:iki:gonk:agent:holder:{holder}:question:name:{name}` | one question through `urn:sparql:select`, in `ledger=` |
 | `urn:iki:gonk:view:agent` | the tables, as HTML; a name gonk serves, so an operator's view of that name is shadowed on the HTTP door |
@@ -636,6 +636,31 @@ and between writes none except the `3A` windowed questions, once a minute.
 `ikigai-ledger`'s own naming (`urn:iki:ledger:{ledger}:{action}`, or `…:item:{id}`), refuses a
 verb the target does not describe, and refuses any field that the verb's contract does not
 name. It runs under the caller's capability, so the ledger's checks decide.
+
+### One loop, one row: `gonk.holder.alias` (ledger #3034)
+
+A worker signs its claims and hand-backs with a holder name, and the ledger keeps what it signed. A
+renamed loop would have two rows on the Dashboard's Agents tab, so an alias says which row a name
+counts in:
+
+```toml
+gonk.holder.alias = "lawnboy -> lawnboy-claude before 2026-10-21"
+gonk.holder.alias = "lawnboy -> lawnboy-codex"
+```
+
+The rule is `<holder> -> <row>`, with `before <YYYY-MM-DD>` when the name meant another loop once. A
+date is the UTC midnight it starts, and `before` excludes it. Each event is read at its own time: its
+`dcterms:created`, or for an item still held, `ledger:claimedAt`, which a renewal moves. Rules are
+tried in file order and the first match decides; a name no rule matches is its own row. A rule takes
+one step: `a -> b` and `b -> c` put `a`'s events in `b`'s row, so name the final row in each.
+
+The rules are written into the SPARQL the tab asks, so a number and the question its link opens
+answer alike, and a table says in a sentence which rules fill its rows. `urn:iki:gonk:agent` and
+`urn:iki:gonk:agent:holder:{holder}` answer by rows too; an old name asked for directly answers for
+whatever no rule takes from it. No ledger's records change, and a raw question about
+`ledger:claimedBy` still sees the names as signed. A holder no rule mentions is asked exactly as it
+was. A rule that cannot be read (no arrow, a date that is not a date, a row with a space in it) or
+that could never match stops the server at start, naming the line.
 
 ### The RDF Toolbox at `/toolbox` (ledger #1933)
 
@@ -3916,6 +3941,9 @@ gonk.http.ledger = "default"
 gonk.browse.root = "core=~/git-personal/ikigai-core"
 # repeatable; the GitHub repository a root's "On GitHub" links name when its origin does not
 # gonk.browse.github = "core=ikigai-rs/ikigai-core"
+# repeatable, first match wins; which row a holder counts in on the Dashboard's Agents tab
+# gonk.holder.alias = "lawnboy -> lawnboy-claude before 2026-10-21"
+# gonk.holder.alias = "lawnboy -> lawnboy-codex"
 gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 # gonk.explain.file.provider = "urn:llm:coder:ask"     # the tiers, and the per-call ceilings
 # gonk.explain.file.max_tokens = 400                   # file 400, dir 600, review 800, pr 600

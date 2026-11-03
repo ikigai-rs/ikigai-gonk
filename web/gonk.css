@@ -136,6 +136,7 @@ summary { cursor: pointer; color: var(--accent); }
 .agent-panel h3 { margin: 0 0 0.5rem; font-size: 1rem; }
 .agent-panel .table-wrap { position: relative; }
 .agent-panel .note { margin: 0; }
+.agent-panel .note + .table-wrap { margin-top: 0.5rem; }
 .agent-table th { white-space: normal; }
 .agent-table th[scope="col"] { min-width: 5.5rem; }
 .agent-table th[scope="row"] { min-width: 9rem; overflow-wrap: anywhere; }

@@ -143,6 +143,7 @@ fn door_and_hub(
         // gate every test here sees is the one the shipped binary applies.
         queue: QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     (
@@ -2184,6 +2185,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
         epochs: Some(watch.epochs()),
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     Counting {

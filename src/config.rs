@@ -23,6 +23,8 @@
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! # the GitHub repository a root's "On GitHub" links name, when its origin does not; repeatable
 //! # gonk.browse.github = "core=ikigai-rs/ikigai-core"
+//! # which row a holder counts in on the Agents tab; repeatable, first match wins (src/holders.rs)
+//! # gonk.holder.alias = "lawnboy -> lawnboy-claude before 2026-10-21"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.mount.calls_per_hour = 2000   # calls that reach the mounted model, every caller
 //!                                       # together (this IS the default; 0 for none)
@@ -122,7 +124,8 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 43] = [
+const KEYS: [&str; 44] = [
+    "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
     "gonk.onboard",
@@ -704,6 +707,8 @@ pub struct Settings {
     pub review: Option<crate::trigger::Trigger>,
     /// Which severities the Queue page asks a human about (`gonk.queue.serious`).
     pub queue: QueuePolicy,
+    /// Which name each holder counts under on the Dashboard's Agents tab (`gonk.holder.alias`).
+    pub holder_aliases: crate::holders::HolderAliases,
     /// Whether every door writes one access line per request to stderr (`gonk.log.access`,
     /// on unless a line says `false`) — see [`crate::access`].
     pub access_log: bool,
@@ -1990,6 +1995,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         backup,
         review,
         queue: queue_policy(text)?,
+        holder_aliases: crate::holders::HolderAliases::parse(&values_for(
+            text,
+            crate::holders::KEY,
+        ))?,
         access_log: access_log(text)?,
         script_dir: value_for(text, "gonk.script.dir")
             .map(|spelled| expand_home(&spelled, &homes.home))
@@ -2686,6 +2695,22 @@ mod tests {
             let refused = with(line).map(|_| ()).unwrap_err();
             assert!(refused.contains(says), "{line}: {refused}");
         }
+    }
+
+    /// Ledger #3034: a bad rule stops the server at start, naming the line.
+    #[test]
+    fn a_holder_alias_line_is_read_or_stops_the_start_naming_it() {
+        let with = |text: &str| settings(&Flags::default(), text, &homes());
+        assert!(with("").unwrap().holder_aliases.is_empty());
+        let read = with(
+            "gonk.holder.alias = \"a -> b before 2026-10-21\"\ngonk.holder.alias = \"a -> c\"\n",
+        )
+        .unwrap();
+        assert_eq!(read.holder_aliases.signers("c"), ["c", "a"]);
+        let refused = with("gonk.holder.alias = \"a b\"\n")
+            .map(|_| ())
+            .unwrap_err();
+        assert!(refused.contains("gonk.holder.alias = \"a b\""), "{refused}");
     }
 
     /// Ledger #496: absent, the line means exactly `DEFAULT_QUEUE_SERIOUS`; present, it is

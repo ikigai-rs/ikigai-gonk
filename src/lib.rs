@@ -54,6 +54,7 @@ pub mod findings_summary;
 pub mod github;
 pub mod grants;
 pub mod history;
+pub mod holders;
 pub mod identity;
 pub mod k;
 pub mod kata;

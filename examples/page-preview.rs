@@ -138,6 +138,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         rules: rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     // ⚠ The watcher is dropped with this function, so the previewed pages are a SNAPSHOT.

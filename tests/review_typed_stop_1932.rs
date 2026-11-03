@@ -230,6 +230,7 @@ fn gonk(fails: Fails, calls: Window) -> Gonk {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     let access = Arc::new(Mutex::new(Vec::<String>::new()));

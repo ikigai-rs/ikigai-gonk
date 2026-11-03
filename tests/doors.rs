@@ -326,6 +326,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     let kernel = Arc::new(doors::http_kernel(hub, ikigai_gonk::web::space(face)));
@@ -481,6 +482,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     let kernel = Arc::new(doors::http_kernel(
