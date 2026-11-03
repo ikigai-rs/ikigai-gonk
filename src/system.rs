@@ -19,7 +19,7 @@
 //!
 //! ★ **This module reads the store and the backup status as ITSELF, and only those two.** Their
 //! tokens (`urn:cap:store:read`, `urn:cap:gonk:backup`) read or export every graph, so no grant may
-//! hold them and a viewer's capability could never reach them. So [`Store`] answers from them under
+//! hold them and a viewer's capability could never reach them. So [`STORE`] answers from them under
 //! [`store_scopes`], after the kernel has checked [`CAP_READ`], and returns counts and times, never
 //! a quad. `urn:iki:store:info` carries one total, not a count per graph, so the per-graph counts are
 //! the ones the newest backup recorded, labeled as of that backup: a live count per graph is a scan

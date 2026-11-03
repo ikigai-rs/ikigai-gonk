@@ -13,12 +13,12 @@
 //! one is not disturbed by another's answer.
 //!
 //! ★ **A viewer whose grant does not include a tab never sees it**, the rule for a ledger they may
-//! not read: [`crate::dashboard::offered`] leaves it off the page, and its page, panel and parts
+//! not read: `dashboard::offered` leaves it off the page, and its page, panel and parts
 //! each declare the capability and answer `403` without it.
 //!
 //! ⚠ **The hub's cache, not this door's.** A door kernel caches nothing (`crate::doors`), and it
 //! answers `urn:kernel:*` itself, so `urn:kernel:cache` asked through the invocation is an empty
-//! readout of the wrong kernel. [`hub_read`] issues to the hub under the VIEWER's capability, which
+//! readout of the wrong kernel. `hub_read` issues to the hub under the VIEWER's capability, which
 //! is the one place a page reaches past its invocation, and it grants nothing: the hub checks
 //! `urn:cap:kernel:inspect` against that same capability.
 //!

@@ -32,7 +32,7 @@
 //!
 //! ★ **Two more, for the operator** (ledger [#2972](http://localhost:1062/l/default/item/2972)).
 //! [`Tab::Cache`] and [`Tab::System`] are built the same way and hold [`crate::operator`]'s parts.
-//! A viewer whose grant does not include one never sees it ([`offered`]), and asking its URL answers
+//! A viewer whose grant does not include one never sees it (`offered`), and asking its URL answers
 //! `403` ([`Tab::capability`] is declared and enforced).
 //!
 //! ★ **Live by polling** (ledger [#2967](http://localhost:1062/l/default/item/2967)). Each chart and
