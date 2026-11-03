@@ -8,12 +8,14 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, TraceEvent, Tracer, Verb};
 use ikigai_gonk::grants::{grants_for, grants_for_all, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_ledger::Ledger;
+use ikigai_store::budget::TimeBudget;
 use ikigai_store::DurableStore;
 
 const CSS: &str = include_str!("../web/gonk.css");
@@ -28,6 +30,11 @@ struct Server {
 impl Server {
     /// A server configured with `configured` ledgers, whose anonymous caller holds `anonymous`.
     fn start(configured: &[&str], anonymous: Vec<String>) -> Server {
+        Self::over(DurableStore::in_memory().unwrap(), configured, anonymous)
+    }
+
+    /// [`Server::start`] over a store the test has set up.
+    fn over(store: DurableStore, configured: &[&str], anonymous: Vec<String>) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -35,7 +42,7 @@ impl Server {
         let addr = listener.local_addr().unwrap();
         let config = tempfile::tempdir().unwrap();
         let layout = quic::Layout::in_config_home(config.path());
-        let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
+        let hub = Arc::new(compose(store));
         let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
@@ -336,6 +343,36 @@ fn a_ledger_whose_counts_refuse_keeps_its_page_and_says_why() {
     assert_eq!(charted(&dashboard), ["default", "alpha"]);
     assert!(dashboard.contains("backfill-closed-at"), "{dashboard}");
     assert_eq!(lines(&dashboard).len(), 2, "alpha's chart still draws");
+}
+
+/// ★ Ledger #2970: the same refusal a slow ledger gets on a real page, from the store's own clock.
+/// A base of zero runs out before any read answers, for every caller but root, who seeds here
+/// (root's budget is the ceiling). A viewer holding no budget grant gets the base, as a signed-in
+/// viewer does the real 5 s. The sentence says it was the clock and who can change that, and
+/// none of the store's own text about it reaches the page.
+#[test]
+fn a_time_budget_refusal_says_the_counts_took_too_long_and_how_to_raise_it() {
+    let store = DurableStore::in_memory()
+        .unwrap()
+        .with_time_budget(TimeBudget::new(Duration::ZERO).with_max_overdue(64));
+    let server = Server::over(
+        store,
+        &["default"],
+        grants_for_all(&["default".to_string()], Authority::Read).unwrap(),
+    );
+    server.seed("default", 1, 1);
+    let page = server.ok("/dashboard");
+    let chart = chart(&page);
+    assert!(
+        chart.contains(
+            "No chart: the counts could not be read: they took longer than your time budget"
+        ),
+        "{chart}"
+    );
+    assert!(chart.contains("urn:cap:store:budget:&lt;ms&gt;"), "{chart}");
+    for internal in ["ledger #964", "SPARQL", "ran past", "timeout:"] {
+        assert!(!chart.contains(internal), "{internal}: {chart}");
+    }
 }
 
 #[test]
