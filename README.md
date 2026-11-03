@@ -521,8 +521,9 @@ there.
 | --- | --- | --- |
 | `/` | `urn:iki:gonk:page:home` | the first readable ledger |
 | `/l` | `urn:iki:gonk:page:ledgers` | every ledger this grant may read, with its open and total counts: the header menu's "All ledgers" |
-| `/dashboard` | `urn:iki:gonk:page:dashboard` | a chart of open and closed counts over time, and a table of the agents, for every ledger this grant may read |
-| `/dashboard/chart/{ledger}` · `/dashboard/agents/{ledger}` · `/dashboard/agents-note` | `urn:iki:gonk:fragment:dashboard-chart:{ledger}` · `…:dashboard-agents:{ledger}` · `…:dashboard-agents-note` | what an open Dashboard polls every 30 s: one chart, one agent table, the minute the tables are as of; `If-None-Match` answers 304 while unchanged |
+| `/dashboard` · `/dashboard/ledgers` · `/dashboard/agents` | `urn:iki:gonk:page:dashboard` · `…:dashboard:ledgers` · `…:dashboard:agents` | the Dashboard's two tabs, each its own page, for every ledger this grant may read: a chart of open and closed counts over time, or a table of the agents. `/dashboard` is the first tab |
+| `/dashboard/panel/ledgers` · `/dashboard/panel/agents` | `urn:iki:gonk:fragment:dashboard-panel:ledgers` · `…:agents` | one tab's panel, what an open Dashboard fetches once on a switch to it |
+| `/dashboard/chart/{ledger}` · `/dashboard/agents/{ledger}` · `/dashboard/agents-note` | `urn:iki:gonk:fragment:dashboard-chart:{ledger}` · `…:dashboard-agents:{ledger}` · `…:dashboard-agents-note` | what an open Dashboard polls every 30 s for the tab it shows: one chart, or one agent table and the minute the tables are as of; `If-None-Match` answers 304 while unchanged |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment, with the chart of its counts under the status line |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
@@ -580,6 +581,12 @@ store query per ledger, and one stylesheet transform, for the chart whose number
 refuses a ledger with a closed item that has no `closedAt` until its operator runs the ledger's
 `backfill-closed-at`, and the chart's place says so while the rest of the page works. A chart is as
 of its page's load: gonk's door has no push stream yet.
+
+**The Dashboard is two tabs, Ledgers and Agents, and only the one shown costs anything.** Each has
+its own URL, so it can be linked and reloaded, and with no script the tabs are plain links between
+whole pages. With a script they are ARIA tabs: a switch fetches the new panel once, the other panel
+is emptied, and Back and Forward move between them. A load of one tab, or its polls, asks none of
+the other's questions.
 
 **The Dashboard's agents are questions, and each number is its question's answer.** A table per
 ledger has a row per holder that ever took a claim there, and a number per stored question: in

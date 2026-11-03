@@ -139,9 +139,14 @@ impl Server {
 
     /// A browser's navigation to the page.
     fn page(&self) -> String {
+        self.page_at("/dashboard")
+    }
+
+    /// A browser's navigation to `path`.
+    fn page_at(&self, path: &str) -> String {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
         let head = format!(
-            "GET /dashboard HTTP/1.1\r\nHost: localhost:{}\r\nAccept: text/html,*/*;q=0.8\r\n\
+            "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nAccept: text/html,*/*;q=0.8\r\n\
              Sec-Fetch-Site: none\r\nConnection: close\r\n\r\n",
             self.addr.port()
         );
@@ -238,13 +243,13 @@ fn a_fragment_answers_304_while_unchanged_and_200_after_a_write() {
 fn the_page_is_made_of_the_fragments_it_polls() {
     let server = Server::readers(&["default", "alpha"], &["default", "alpha"]);
     server.file("alpha", "sample item");
-    let page = server.page();
-    for path in [
-        "/dashboard/chart/default",
-        "/dashboard/chart/alpha",
-        "/dashboard/agents/default",
-        "/dashboard/agents/alpha",
+    for (tab, path) in [
+        ("/dashboard/ledgers", "/dashboard/chart/default"),
+        ("/dashboard/ledgers", "/dashboard/chart/alpha"),
+        ("/dashboard/agents", "/dashboard/agents/default"),
+        ("/dashboard/agents", "/dashboard/agents/alpha"),
     ] {
+        let page = server.page_at(tab);
         let fragment = server.ok(path).body.replace('\'', "\"");
         assert!(page.contains(&fragment), "{path}: {fragment}\n\n{page}");
         for wired in [
@@ -261,6 +266,7 @@ fn the_page_is_made_of_the_fragments_it_polls() {
         }
     }
     // The sentence that names the tables' minute moves with them, and is not news.
+    let page = server.page_at("/dashboard/agents");
     assert!(page.contains("data-live=\"note\""), "{page}");
     assert!(page.contains("hx-get=\"/dashboard/agents-note\""), "{page}");
     assert!(server.ok("/dashboard/agents-note").body.contains("As of "));
@@ -312,9 +318,10 @@ fn a_chart_whose_counts_refuse_keeps_its_sentence_and_is_not_polled() {
     );
     assert!(page.contains("hx-get=\"/dashboard/chart/alpha\""), "{page}");
     // Its agent table is still good, and the other chart still draws.
+    let agents = server.page_at("/dashboard/agents");
     assert!(
-        page.contains("hx-get=\"/dashboard/agents/default\""),
-        "{page}"
+        agents.contains("hx-get=\"/dashboard/agents/default\""),
+        "{agents}"
     );
     // A page open across the moment it began refusing: its answer brings the sentence and no timer.
     let refused = server.if_none_match("/dashboard/chart/default", &healthy.etag());
@@ -334,6 +341,9 @@ fn a_ledger_the_viewer_may_not_read_is_refused_whatever_the_validator() {
     let server = Server::readers(&["default", "secret"], &["default"]);
     server.file("secret", "sample item");
     assert!(!server.page().contains("/dashboard/chart/secret"));
+    assert!(!server
+        .page_at("/dashboard/agents")
+        .contains("/dashboard/agents/secret"));
     for path in ["/dashboard/chart/secret", "/dashboard/agents/secret"] {
         assert_eq!(server.get(path, "").status, 403, "{path}");
         assert_eq!(server.if_none_match(path, "*").status, 403, "{path}");

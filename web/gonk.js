@@ -865,6 +865,7 @@
   function wireDashboard() {
     const button = $("dashboard-pause");
     if (!button) return;
+    wireDashboardTabs();
     livePaused = liveRemembered();
     button.hidden = false;
     liveDraw();
@@ -876,6 +877,150 @@
       liveRefresh();
     });
     document.addEventListener("visibilitychange", liveRefresh);
+  }
+
+  // --------------------------------------------- the Dashboard's tabs (ledger #2971)
+  //
+  // Each tab is a link to a whole page, which is all it is with no script. Here it is the WAI-ARIA
+  // tabs pattern. A tab shows as it is selected, arrow keys included: its panel is one fetch of
+  // bytes the server keeps cached. Focus stays on the tab, never going into the panel by itself.
+  //
+  // ★ THE HIDDEN PANEL IS EMPTY, not held. Its fragments, and with them their timers, are gone, so
+  // it cannot poll, and coming back fetches it fresh once whether or not the updates are paused: a
+  // person asked to see it, which is not the updating that WCAG 2.2.2 lets them stop. From then on
+  // its fragments poll, and `liveHeld` applies, as for a panel the page loaded with.
+  //
+  // ★ `fetch`, not an htmx swap, so the shell's rule for a swap (focus to what it brought) has
+  // nothing to act on.
+  let tabAsk = null;
+
+  const dashboardTabs = () => Array.from(document.querySelectorAll("#dashboard-tabs a"));
+  const tabPanel = (tab) => $(tab.getAttribute("data-panel"));
+  const tabShown = () =>
+    dashboardTabs().find((tab) => tab.getAttribute("aria-selected") === "true");
+
+  // What this URL shows: `/dashboard` is the first tab.
+  function tabOfLocation() {
+    const tabs = dashboardTabs();
+    return tabs.find((tab) => tab.getAttribute("href") === location.pathname) || tabs[0];
+  }
+
+  function tabSelect(shown) {
+    for (const tab of dashboardTabs()) {
+      const selected = tab === shown;
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+      tabPanel(tab).hidden = !selected;
+    }
+    document.title = shown.getAttribute("data-title");
+  }
+
+  // Said in the panel, so it stays until the person acts, with the way out that needs no script.
+  function tabFailed(tab, panel) {
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "gonk did not answer, so this panel did not load. ";
+    const again = document.createElement("a");
+    again.href = tab.getAttribute("href");
+    again.textContent = "Load it again";
+    note.appendChild(again);
+    panel.replaceChildren(note);
+    announce("gonk did not answer, so this panel did not load.");
+  }
+
+  async function tabShow(tab) {
+    const from = tabShown();
+    if (tab === from) return;
+    if (tabAsk) tabAsk.abort();
+    const ask = new AbortController();
+    tabAsk = ask;
+    const left = tabPanel(from);
+    for (const elt of left.querySelectorAll("[data-live][hx-get]")) {
+      window.htmx.trigger(elt, "htmx:abort");
+    }
+    // Back from a link in the panel: its element is going, and the tab is the nearest place.
+    if (left.contains(document.activeElement)) tab.focus();
+    left.replaceChildren();
+    tabSelect(tab);
+    const panel = tabPanel(tab);
+    const waiting = document.createElement("p");
+    waiting.className = "note";
+    waiting.textContent = "Loading…";
+    panel.replaceChildren(waiting);
+    let response;
+    let html;
+    try {
+      response = await fetch(tab.getAttribute("data-panel-href"), {
+        headers: { Accept: "text/html" },
+        credentials: "same-origin",
+        signal: ask.signal,
+      });
+      if (response.ok) html = await response.text();
+    } catch (_) {
+      if (ask.signal.aborted) return; // a later switch took over
+    }
+    if (ask.signal.aborted) return;
+    if (html === undefined) {
+      tabFailed(tab, panel);
+      if (response) liveFailed(response.status);
+      return;
+    }
+    panel.innerHTML = html;
+    window.htmx.process(panel);
+    liveAnswered();
+  }
+
+  function tabPick(tab) {
+    if (tab === tabShown()) return;
+    history.pushState({ dashboardTab: tab.getAttribute("href") }, "", tab.getAttribute("href"));
+    tabShow(tab);
+  }
+
+  function tabKey(e) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const tabs = dashboardTabs();
+    const at = tabs.indexOf(e.target);
+    if (at < 0) return;
+    let next;
+    if (e.key === "ArrowRight") next = tabs[(at + 1) % tabs.length];
+    else if (e.key === "ArrowLeft") next = tabs[(at - 1 + tabs.length) % tabs.length];
+    else if (e.key === "Home") next = tabs[0];
+    else if (e.key === "End") next = tabs[tabs.length - 1];
+    else if (e.key === " ") next = tabs[at]; // a tab answers Space, and a link would scroll
+    else return;
+    e.preventDefault();
+    next.focus();
+    tabPick(next);
+  }
+
+  // With no htmx nothing here could poll or swap, so the links stay the plain links they work as.
+  function wireDashboardTabs() {
+    const list = $("dashboard-tabs");
+    if (!list || !window.htmx) return;
+    list.setAttribute("role", "tablist");
+    list.setAttribute("aria-label", "Dashboard views");
+    const shown = dashboardTabs().find((tab) => tab.hasAttribute("aria-current"));
+    for (const tab of dashboardTabs()) {
+      tab.removeAttribute("aria-current");
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", tab.getAttribute("data-panel"));
+      tabPanel(tab).setAttribute("role", "tabpanel");
+      tab.addEventListener("click", (e) => {
+        // A new tab or window is the link's own business.
+        if (e.button || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        e.preventDefault();
+        tabPick(tab);
+      });
+    }
+    tabSelect(shown);
+    list.addEventListener("keydown", tabKey);
+    window.addEventListener("popstate", () => {
+      const tab = tabOfLocation();
+      if (tab === tabShown()) return;
+      tabShow(tab);
+      // No key or click brought this, so nothing else has said which tab is showing.
+      announce(tab.textContent.trim() + " shown.");
+    });
   }
 
   // ------------------------------------------------------------------ sign-in notices

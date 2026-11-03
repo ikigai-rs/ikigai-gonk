@@ -358,14 +358,15 @@ fn the_dashboard_lists_exactly_the_ledgers_the_viewer_may_read() {
     assert!(page.contains(": 2 open, 1 closed."), "{page}");
     assert!(page.contains(": 1 open, 0 closed."), "{page}");
     assert!(page.contains("Data table for alpha"), "{page}");
-    // One h1, the section's h2 over its h3s, and a named region for the next section to sit beside.
+    // One h1, the panel's h2 over its h3s (its tab is what a person reads), and a region named by
+    // that tab (ledger #2971).
     assert_eq!(page.matches("<h1").count(), 1, "{page}");
     assert!(
-        page.contains("aria-labelledby=\"dashboard-ledgers\""),
+        page.contains("aria-labelledby=\"dashboard-tab-ledgers\""),
         "{page}"
     );
     assert!(
-        page.contains("<h2 id=\"dashboard-ledgers\">Ledgers</h2>"),
+        page.contains("<h2 class=\"sr-only\" id=\"dashboard-ledgers\">Ledgers</h2>"),
         "{page}"
     );
     assert!(page.contains(" lang=\"en\""), "{page}");
@@ -459,15 +460,15 @@ fn a_load_between_writes_asks_the_store_nothing_and_a_write_redraws_one_chart() 
     let names: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
     let reader = Capability::scoped(grants_for_all(&names, Authority::Read).unwrap());
 
-    // Cold: each ledger's counts and its agents (ledger #2820; these ledgers have none), one store
-    // query each, and one transform each for its chart and its agent panel.
-    assert_eq!(one_load(&server, &reader), (8, 8, 4));
+    // Cold: each ledger's counts, one store query each, and one transform each for its chart. The
+    // agents are the other tab's (ledger #2971; `tests/agents_2820.rs` holds that tab's cost).
+    assert_eq!(one_load(&server, &reader), (4, 4, 4));
     // Between writes: four cached reads, and nothing below them.
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
-    // ⚠ A write to one ledger: every ledger's counts and agents are read again (measured: a store
+    // ⚠ A write to one ledger: every ledger's counts are read again (measured: a store
     // read rests on the store's write thread, not on one ledger's), and only the chart whose
     // numbers moved is drawn again, because a chart's render is keyed on its document.
     server.seed("beta", 1, 0);
-    assert_eq!(one_load(&server, &reader), (8, 1, 4));
+    assert_eq!(one_load(&server, &reader), (4, 1, 4));
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
 }

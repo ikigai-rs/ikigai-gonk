@@ -3,7 +3,10 @@
 //! ```text
 //! /                          urn:iki:gonk:page:home                 Source  the first readable ledger
 //! /l                         urn:iki:gonk:page:ledgers              Source  every readable ledger, counted
-//! /dashboard                 urn:iki:gonk:page:dashboard            Source  a chart and the agents per readable ledger
+//! /dashboard                 urn:iki:gonk:page:dashboard            Source  the first tab, as /dashboard/ledgers
+//! /dashboard/ledgers         urn:iki:gonk:page:dashboard:ledgers    Source  a chart per readable ledger
+//! /dashboard/agents          urn:iki:gonk:page:dashboard:agents     Source  an agent table per readable ledger
+//! /dashboard/panel/{tab}     urn:iki:gonk:fragment:dashboard-panel:{tab}      Source  a tab's panel, fetched on a switch
 //! /dashboard/chart/{ledger}  urn:iki:gonk:fragment:dashboard-chart:{ledger}   Source  one chart, polled
 //! /dashboard/agents/{ledger} urn:iki:gonk:fragment:dashboard-agents:{ledger}  Source  one agent table, polled
 //! /dashboard/agents-note     urn:iki:gonk:fragment:dashboard-agents-note      Source  the minute the tables are as of, polled
@@ -175,6 +178,36 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             Exact::new(crate::dashboard::PAGE_IRI),
             crate::dashboard::DashboardPage {
                 web: Arc::clone(&web),
+                tab: crate::dashboard::Tab::Ledgers,
+            },
+        )
+        // A URL per tab, and what a switch fetches (ledger #2971).
+        .bind(
+            Exact::new(crate::dashboard::LEDGERS_PAGE_IRI),
+            crate::dashboard::DashboardPage {
+                web: Arc::clone(&web),
+                tab: crate::dashboard::Tab::Ledgers,
+            },
+        )
+        .bind(
+            Exact::new(crate::dashboard::AGENTS_PAGE_IRI),
+            crate::dashboard::DashboardPage {
+                web: Arc::clone(&web),
+                tab: crate::dashboard::Tab::Agents,
+            },
+        )
+        .bind(
+            Exact::new(crate::dashboard::LEDGERS_PANEL_IRI),
+            crate::dashboard::PanelFragment {
+                web: Arc::clone(&web),
+                tab: crate::dashboard::Tab::Ledgers,
+            },
+        )
+        .bind(
+            Exact::new(crate::dashboard::AGENTS_PANEL_IRI),
+            crate::dashboard::PanelFragment {
+                web: Arc::clone(&web),
+                tab: crate::dashboard::Tab::Agents,
             },
         )
         // What an open Dashboard polls (ledger #2967).
