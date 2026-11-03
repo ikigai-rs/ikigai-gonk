@@ -818,12 +818,7 @@ fn serve(flags: &config::Flags) -> ! {
             // (ledger #2021).
             toolbox: settings.toolbox.is_some(),
         });
-        let pages = ikigai_gonk::layers_view::bind(
-            web::space(Arc::clone(&face)),
-            &face,
-            layers_view,
-        );
-        let pages = ikigai_gonk::onboard::bind_page(pages, &face);
+        let pages = web::door_space(Arc::clone(&face), layers_view);
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
         let faces = settings
             .toolbox
