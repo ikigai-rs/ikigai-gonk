@@ -215,17 +215,24 @@
        slower than the interval ran back to back forever, and every one of them was work the
        server did again. -->
   <xsl:template match="view:queue">
-    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Queue<xsl:if test="@depth-url">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@depth-url"><xsl:attribute name="aria-describedby">queue-state</xsl:attribute></xsl:if>Queue<xsl:if test="@depth-url">
       <span class="queue-badge" data-ui-quiet="" hx-swap="innerHTML" hx-sync="this:drop">
         <xsl:attribute name="hx-get"><xsl:value-of select="@depth-url"/></xsl:attribute>
         <xsl:attribute name="hx-trigger">load, every <xsl:value-of select="@every"/></xsl:attribute>
       </span>
+      <span id="queue-state" hidden="hidden"></span>
     </xsl:if></a>
   </xsl:template>
 
   <!-- The badge's own answer: one number, one state word as a class, and the depth
-       resource's whole sentence as the tooltip. `stuck` is the one a person is looking
-       for — armed, not empty, nothing running.
+       resource's whole sentence. `stuck` is the one a person is looking for — armed, not
+       empty, nothing running — so it and `error` are also words a person can see.
+
+       The sentence is the link's description as well as the pointer's tooltip (ledger #1651):
+       a `title` on a span reaches no keyboard, touch or screen reader. `#queue-state` is hidden,
+       which keeps it out of the link's name, and a description may still point at it. It sits
+       outside the swapped badge so that the link never points at nothing, and each poll replaces
+       it out of band. The Queue page says the same sentence on screen, one tap away.
 
        ⚠ Two things ride along that are NOT the number (ledger #469, and both are computed
        in src/queue.rs — this file decides nothing):
@@ -253,11 +260,16 @@
            the rest — minted and counted, not queued. Both computed in src/queue.rs; the
            tooltip's sentence says which is which, so the split is readable and not only
            visible. -->
-      <span class="serious"><xsl:value-of select="@count"/></span>
+      <span class="sr-only">, </span>
+      <xsl:if test="@kind = 'stuck' or @kind = 'error'">
+        <span class="state"><xsl:value-of select="@kind"/></span><span class="sr-only">, </span>
+      </xsl:if>
+      <span class="serious"><xsl:value-of select="@count"/></span><span class="sr-only"> serious</span>
       <xsl:if test="@other">
-        <span class="other"><xsl:text>+</xsl:text><xsl:value-of select="@other"/></span>
+        <span class="sr-only">, </span><span class="other"><xsl:text>+</xsl:text><xsl:value-of select="@other"/></span><span class="sr-only"> other</span>
       </xsl:if>
     </span>
+    <span id="queue-state" hidden="hidden" hx-swap-oob="true"><xsl:value-of select="@title"/></span>
   </xsl:template>
 
   <xsl:template match="view:ledger" mode="option">
