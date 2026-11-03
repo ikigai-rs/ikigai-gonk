@@ -52,7 +52,7 @@ use ikigai_ledger::Ledger;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::dashboard::{drawn_charts, Chart, ROWS_SLOT};
+use crate::dashboard::{agents_path, drawn_chart, live, of_one_ledger, Chart, ROWS_SLOT};
 use crate::render::{self, element, wrap};
 use crate::rules::sparql_string;
 use crate::web::{
@@ -737,7 +737,18 @@ async fn panel(inv: &Invocation<'_>, ledger: &Ledger) -> Option<Chart> {
     Some(Chart {
         document: render::chunk(&wrap("agent-panel", &attributes, &children)),
         rows,
+        live: true,
     })
+}
+
+/// One ledger's panel as its fragment, or `None` when this viewer may not read the ledger. The page
+/// and the poll both come through here.
+async fn panel_fragment(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Option<String>> {
+    let Some(panel) = panel(inv, ledger).await else {
+        return Ok(None);
+    };
+    let drawn = drawn_chart(inv, panel).await?;
+    Ok(Some(live("agents", &agents_path(ledger), &drawn)))
 }
 
 /// `urn:iki:gonk:view:agent`: one panel per ledger the viewer may read, as HTML.
@@ -750,13 +761,13 @@ impl Endpoint for AgentView {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
         let ledgers = readable_ledgers(&self.web, inv.capability);
-        let mut panels = Vec::new();
+        let mut panels = String::new();
         for ledger in menu_order(&ledgers) {
-            if let Some(panel) = panel(inv, ledger).await {
-                panels.push(panel);
+            if let Some(panel) = panel_fragment(inv, ledger).await? {
+                panels.push_str(&panel);
             }
         }
-        Ok(html(drawn_charts(inv, panels).await?))
+        Ok(html(panels))
     }
 
     fn name(&self) -> &str {
@@ -775,6 +786,38 @@ impl Endpoint for AgentView {
             .verb(Verb::Meta)
             .input(as_html_arg())
             .output(HTML)
+    }
+}
+
+/// `urn:iki:gonk:fragment:dashboard-agents:{ledger}`: what an open Dashboard asks for one table.
+pub struct AgentFragment;
+
+#[async_trait]
+impl Endpoint for AgentFragment {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
+        require_read(inv.capability, &ledger)?;
+        panel_fragment(inv, &ledger)
+            .await?
+            .map(html)
+            .ok_or_else(|| Error::Denied("this grant does not read that ledger's agents".into()))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-fragment-dashboard-agents"
+    }
+
+    fn describe(&self) -> Description {
+        of_one_ledger(
+            Description::new(self.name())
+                .title("One ledger's agent table, as a fragment")
+                .summary(
+                    "The table the Dashboard draws for one ledger this caller may read. Its ETag \
+                     is a hash of these bytes, so an unchanged table answers If-None-Match with a \
+                     304. A table with agents changes once a minute, as its links name the minute.",
+                ),
+        )
     }
 }
 

@@ -109,6 +109,11 @@ summary { cursor: pointer; color: var(--accent); }
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--gap); }
 .chart-grid .chart { margin: 0; min-width: 0; }
 .dashboard-section > h2 { margin-bottom: 0; }
+/* A polled fragment's element adds no box (ledger #2967): a chart is still the grid's item. Nothing
+ * here animates, so an update has no motion to turn off. */
+.dashboard-live { display: contents; }
+.dashboard-live-control { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem var(--gap); }
+.dashboard-live-control button[hidden] { display: none; }
 /* One ledger's agents (ledger #2820, src/agents.rs). Seven columns fit a wide page only if their
  * headers wrap, so these do, and a long label gets a floor so `anywhere` cannot squeeze it to a
  * letter a line (see #368 below). The frame scrolls at phone width, and it is the sr-only text's

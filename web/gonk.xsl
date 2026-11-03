@@ -963,6 +963,13 @@
        their slots, one transform each, and carry their own h3s. -->
   <xsl:template name="dashboard">
     <h1><xsl:value-of select="@title"/></h1>
+    <!-- Ledger #2967, WCAG 2.2.2. web/gonk.js shows the control and rewrites the sentence: with no
+         script nothing polls, so the sentence as drawn is true and there is nothing to pause. -->
+    <p class="dashboard-live-control">
+      <button type="button" id="dashboard-pause" hidden="hidden">Pause updates</button>
+      <span id="dashboard-live-state">
+        <xsl:attribute name="data-running"><xsl:value-of select="@live-running"/></xsl:attribute>These numbers are as of when this page loaded.</span>
+    </p>
     <section class="dashboard-section" aria-labelledby="dashboard-ledgers">
       <h2 id="dashboard-ledgers">Ledgers</h2>
       <p class="note"><xsl:value-of select="@count"/></p>
@@ -972,7 +979,7 @@
     </section>
     <section class="dashboard-section" aria-labelledby="dashboard-agents">
       <h2 id="dashboard-agents">Agents</h2>
-      <p class="note"><xsl:value-of select="@agents-note"/></p>
+      <xsl:apply-templates select="view:slot[@name = 'agents-note']"/>
       <xsl:apply-templates select="view:slot[@name = 'agents']"/>
     </section>
   </xsl:template>
