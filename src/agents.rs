@@ -25,7 +25,7 @@
 //! ★ **A holder is a row, and a row may be signed with several names** (`gonk.holder.alias`,
 //! [`crate::holders`], ledger #3034). A rule reads the time of the event that carries the signature,
 //! so [`filled`] writes each signature's own test beside its triples, and a number and its link still
-//! ask one text. A row no rule touches is asked exactly as it was. The list of agents ([`agents_query`])
+//! ask one text. A row no rule touches is asked exactly as it was. The list of agents (`agents_query`)
 //! folds the same way, and a table says in a sentence which rules fill its rows.
 //!
 //! ★ **A window ends on the minute.** `?since` is floored to the minute, so its text is the same
@@ -199,7 +199,7 @@ fn question(name: &str) -> Result<&'static Question> {
 /// difference between a page that works and one that does not. The label is escaped for the grammar
 /// it lands in ([`sparql_string`]), so it can only ever be a string.
 ///
-/// A holder a rule touches goes through [`folded`] instead, which keeps the label in the text.
+/// A holder a rule touches goes through `folded` instead, which keeps the label in the text.
 pub fn filled(
     question: &Question,
     holder: &str,
