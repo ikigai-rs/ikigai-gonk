@@ -747,7 +747,9 @@ pub fn page_of(request: &HttpRequest, bind: SocketAddr) -> Page {
         None => request
             .header("referer")
             .is_some_and(|referer| !ours(&origin_of(referer))),
-    } || request.header("origin").is_some_and(|origin| !ours(origin));
+    } || request
+        .header("origin")
+        .is_some_and(|origin| !own_form_post(origin, site) && !ours(origin));
     if !foreign {
         return Page::Ours;
     }
@@ -1120,16 +1122,25 @@ fn is_our_origin(origin: &str, bind: SocketAddr) -> bool {
         .any(|name| origin == format!("http://{name}:{port}"))
 }
 
+/// ★ **`Origin: null` is this server's own form only when `Sec-Fetch-Site` says `same-origin`**
+/// (ledger #1651). Under the door's `Referrer-Policy: no-referrer` a browser sends `Origin: null`
+/// with a plain form's POST, so with no script every form on every page was refused as a
+/// cross-site write. `null` alone proves nothing: a sandboxed frame and a cross-site redirect send
+/// it too, but a browser labels those `cross-site`, and a page cannot set that header. With no
+/// `Sec-Fetch-Site` to read (an older browser, a LAN address over plain `http://`) it stays foreign.
+fn own_form_post(origin: &str, site: Option<&str>) -> bool {
+    origin.trim() == "null" && site == Some("same-origin")
+}
+
 /// A browser's `Origin` and `Sec-Fetch-Site`, when present, name this server.
 fn same_origin(request: &HttpRequest, bind: SocketAddr) -> bool {
-    if let Some(site) = request.header("sec-fetch-site") {
-        if !matches!(site.trim(), "same-origin" | "none") {
-            return false;
-        }
+    let site = request.header("sec-fetch-site").map(str::trim);
+    if site.is_some_and(|site| !matches!(site, "same-origin" | "none")) {
+        return false;
     }
     match request.header("origin") {
         None => true,
-        Some(origin) => is_our_origin(origin, bind),
+        Some(origin) => own_form_post(origin, site) || is_our_origin(origin, bind),
     }
 }
 

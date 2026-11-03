@@ -1581,6 +1581,24 @@ fn the_header_badge_renders_the_depth_and_polls_for_it() {
     // ★ The whole sentence rides as the tooltip, so color is never the message (WCAG 1.4.1)
     // and the one fact that tells a slow queue from a stuck one is readable.
     assert!(badge.contains("NOTHING IS DRAINING"), "{badge}");
+    // ★ And a tooltip reaches only a pointer (ledger #1651): the sentence is the link's
+    // description too, replaced out of band beside the badge, and the numbers say what they count.
+    assert!(
+        rendered.contains("aria-describedby='queue-state'")
+            && rendered.contains("<span hidden='hidden' id='queue-state'></span>"),
+        "{rendered}"
+    );
+    let state = badge
+        .split("<span hidden='hidden' hx-swap-oob='true' id='queue-state'>")
+        .nth(1)
+        .unwrap_or_else(|| panic!("the sentence out of band: {badge}"));
+    assert!(state.contains("NOTHING IS DRAINING"), "{badge}");
+    assert!(
+        badge.contains("<span class='sr-only'> serious</span>")
+            && badge.contains("<span class='sr-only'> other</span>"),
+        "{badge}"
+    );
+    assert!(!badge.contains("class='state'"), "not stuck: {badge}");
 
     // ⚠ No queue configured: NOTHING, not a zero. A zero on the badge says "empty queue",
     // which is a different statement (ledger #446).
@@ -1627,6 +1645,26 @@ fn armed_trigger(spaces: &TempDir) -> Trigger {
     };
     ikigai_gonk::trigger::prepare(&trigger).expect("the tree");
     trigger
+}
+
+/// A stuck queue is the one state a person must act on, so it is a word anyone can see and not
+/// only a color and a sentence (ledger #1651). A request a pass took and never settled is stuck.
+#[test]
+fn a_stuck_queue_says_so_in_a_word() {
+    let dir = scratch_root();
+    let spaces = tempfile::tempdir().expect("a spaces tree");
+    let trigger = armed_trigger(&spaces);
+    let claimed = trigger.dir().join(ikigai_intray::PROCESSING_DIR);
+    std::fs::create_dir_all(&claimed).expect("staging");
+    std::fs::write(claimed.join("lost.tuple"), "()").expect("a lost request");
+    let activity = Arc::new(ikigai_gonk::trigger::Activity::default());
+    let (served, _config) = door_watching(&dir, Some(trigger), activity, true);
+    let stuck = badge(&served);
+    assert!(stuck.contains("badge-depth stuck"), "{stuck}");
+    assert!(
+        stuck.contains("<span class='state'>stuck</span>"),
+        "{stuck}"
+    );
 }
 
 /// ⚠ **One cadence, two spellings, and nothing but this test holding them together.**
