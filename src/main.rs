@@ -510,6 +510,13 @@ fn serve(flags: &config::Flags) -> ! {
         trigger_spaces.push(Arc::new(onboard.space()));
     }
     trigger_spaces.push(Arc::new(live_roots.space()));
+    // ★ The System tab's resources (ledger #2972, `system`): told each door below, once it is bound.
+    let system = ikigai_gonk::system::System::new(
+        store_path.clone(),
+        settings.backup.dir.clone(),
+        settings.backup.every,
+    );
+    trigger_spaces.push(Arc::new(system.space()));
     // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();
@@ -533,6 +540,7 @@ fn serve(flags: &config::Flags) -> ! {
         .0,
     );
     scripts.attach(&hub);
+    system.attach(&hub);
     let onboard_line = match (&onboard, &settings.onboard) {
         (Some(onboard), Some(config)) => {
             onboard.attach(&hub);
@@ -707,6 +715,7 @@ fn serve(flags: &config::Flags) -> ! {
         settings.socket.clone(),
         doors::door_kernel_with(Arc::clone(&hub), access(access::Door::Socket)),
     );
+    system.listening("socket", settings.socket.display().to_string());
     std::thread::spawn(move || {
         let error = ikigai_ipc::serve(door, &socket).err();
         fail(&format!(
@@ -744,6 +753,7 @@ fn serve(flags: &config::Flags) -> ! {
                 .local_addr()
                 .map(|local| std::net::SocketAddr::new(addr.ip(), local.port()))
                 .unwrap_or(addr);
+            system.listening("QUIC", bound.to_string());
             // The count line stays as it was (a harness reads the port from it); each client
             // follows on a line of its own, named rather than counted (ledger #427).
             let mut line = format!(
@@ -837,6 +847,7 @@ fn serve(flags: &config::Flags) -> ! {
         // where `localhost` would name a port nothing listens on — and then the banner says
         // passkeys cannot work there.
         let bound = std::net::SocketAddr::new(settings.http.ip(), port);
+        system.listening("HTTP", bound.to_string());
         eprintln!(
             "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s), sessions {} h or {} min idle; anonymous SPARQL budget {} ms",
             doors::http_url(bound),

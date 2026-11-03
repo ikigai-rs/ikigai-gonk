@@ -385,7 +385,7 @@ fn the_hidden_panel_asks_the_store_nothing() {
 fn a_panel_lists_only_what_the_viewer_may_read() {
     let server = Server::readers(&["default", "secret"], &["default"]);
     server.file("secret", "sample item");
-    for tab in Tab::ALL {
+    for tab in Tab::EVERYONE {
         let panel = server.panel(tab);
         assert!(panel.contains("/l/default"), "{panel}");
         assert!(!panel.contains("secret"), "{panel}");
@@ -393,7 +393,7 @@ fn a_panel_lists_only_what_the_viewer_may_read() {
     // Nothing readable: a page says how to get in with no tabs on it, and a page held open since
     // the grant was lost gets a panel with nothing in it to poll.
     let nobody = Server::readers(&["default"], &[]);
-    for tab in Tab::ALL {
+    for tab in Tab::EVERYONE {
         let page = nobody.page(&tab.path());
         assert!(page.contains("Sign in to read the ledgers."), "{page}");
         assert!(!page.contains("dashboard-tabs"), "{page}");

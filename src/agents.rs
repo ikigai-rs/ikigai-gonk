@@ -237,7 +237,7 @@ fn since_of(now_ms: u64, window_ms: u64) -> String {
 }
 
 /// The kernel's clock, in milliseconds. A window with no clock is refused, never read as all time.
-fn now_ms(inv: &Invocation<'_>) -> Result<u64> {
+pub(crate) fn now_ms(inv: &Invocation<'_>) -> Result<u64> {
     inv.now().map(|t| t.as_millis()).ok_or_else(|| {
         Error::Endpoint("this kernel has no clock, so a window has no start".to_string())
     })

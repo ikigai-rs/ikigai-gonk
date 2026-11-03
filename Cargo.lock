@@ -2121,6 +2121,7 @@ dependencies = [
  "oxsdatatypes",
  "p256",
  "quick-xml 0.37.5",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",

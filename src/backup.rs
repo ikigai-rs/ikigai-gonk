@@ -2807,7 +2807,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// A duration as an operator reads it.
-fn humanize(duration: Duration) -> String {
+pub(crate) fn humanize(duration: Duration) -> String {
     let seconds = duration.as_secs();
     match seconds {
         0 => "less than a second".to_string(),

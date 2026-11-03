@@ -339,7 +339,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 33] = [
+const WEB_IDS: [&str; 40] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -352,6 +352,14 @@ const WEB_IDS: [&str; 33] = [
     "gonk-page-ledgers",
     "gonk-page-dashboard",
     "gonk-fragment-dashboard-panel",
+    // The operator's two tabs and what they read that needs a ledger's name (ledger #2972).
+    "gonk-page-dashboard-cache",
+    "gonk-page-dashboard-system",
+    "gonk-fragment-dashboard-panel-cache",
+    "gonk-fragment-dashboard-panel-system",
+    "gonk-fragment-dashboard-cache",
+    "gonk-fragment-dashboard-system",
+    "gonk-system-workers",
     "gonk-fragment-dashboard-chart",
     "gonk-fragment-dashboard-agents",
     "gonk-fragment-dashboard-agents-note",

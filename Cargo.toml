@@ -1326,6 +1326,11 @@ ikigai-secret = "0.3.0"
 # this adds an edge, not a package. `"0.12.1"` is `<0.13.0`.
 hmac = "0.12.1"
 
+# The free space on a volume, for the Dashboard's System tab (ledger #2972, `crate::system`): the
+# safe `statvfs`, as this crate forbids `unsafe`. Already in this graph, so an edge, not a package.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 # The authz benchmark reads the Linux thread CPU clock outside latency samples.
 libc = "0.2"

@@ -30,6 +30,11 @@
 //! no timer to hold back and its questions are not asked, on a load or a poll. With no script the
 //! tabs are plain links between the pages; `web/gonk.js` turns them into the ARIA pattern.
 //!
+//! ★ **Two more, for the operator** (ledger [#2972](http://localhost:1062/l/default/item/2972)).
+//! [`Tab::Cache`] and [`Tab::System`] are built the same way and hold [`crate::operator`]'s parts.
+//! A viewer whose grant does not include one never sees it (`offered`), and asking its URL answers
+//! `403` ([`Tab::capability`] is declared and enforced).
+//!
 //! ★ **Live by polling** (ledger [#2967](http://localhost:1062/l/default/item/2967)). Each chart and
 //! each agent table is its own fragment (`live`), and an open page asks for it every
 //! [`POLL_EVERY`] with the validator of the answer it holds, so an unchanged one costs no body:
@@ -55,7 +60,10 @@
 //! at the same size: a single `viewBox` would shrink the labels along with the lines.
 
 use async_trait::async_trait;
-use ikigai_core::{Description, Endpoint, Error, Invocation, Representation, Result, Verb};
+use ikigai_core::{
+    Capability, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Representation,
+    Result, Verb,
+};
 use ikigai_fn::html::{attr, html_text, url_segment};
 use ikigai_ledger::Ledger;
 use std::sync::Arc;
@@ -86,30 +94,79 @@ pub const LEDGERS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:ledge
 /// The Agents tab's panel, as a fragment.
 pub const AGENTS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:agents";
 
+/// The Cache tab, as a page.
+pub const CACHE_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:cache";
+/// The System tab, as a page.
+pub const SYSTEM_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:system";
+/// The Cache tab's panel, as a fragment.
+pub const CACHE_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:cache";
+/// The System tab's panel, as a fragment.
+pub const SYSTEM_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:system";
+
 /// A tab of the Dashboard. `/dashboard` itself shows the first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Ledgers,
     Agents,
+    /// An operator's ([`crate::operator`]): needs `urn:cap:kernel:inspect`.
+    Cache,
+    /// An operator's ([`crate::system`]): needs `urn:cap:gonk:system:read`.
+    System,
 }
 
 impl Tab {
     /// Every tab, in the order the page lists them.
-    pub const ALL: [Tab; 2] = [Tab::Ledgers, Tab::Agents];
+    pub const ALL: [Tab; 4] = [Tab::Ledgers, Tab::Agents, Tab::Cache, Tab::System];
+    /// The tabs anyone who may read a ledger is offered.
+    pub const EVERYONE: [Tab; 2] = [Tab::Ledgers, Tab::Agents];
+    /// The tabs only their grant's holder is offered, or may ask for.
+    pub const OPERATOR: [Tab; 2] = [Tab::Cache, Tab::System];
 
     /// What its ids and paths call it.
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Tab::Ledgers => "ledgers",
             Tab::Agents => "agents",
+            Tab::Cache => "cache",
+            Tab::System => "system",
         }
     }
 
     /// What a person reads on it.
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Tab::Ledgers => "Ledgers",
             Tab::Agents => "Agents",
+            Tab::Cache => "Cache",
+            Tab::System => "System",
+        }
+    }
+
+    /// What its page, panel and parts require, or `None` for a tab anyone may ask for.
+    pub fn capability(self) -> Option<&'static str> {
+        match self {
+            Tab::Ledgers | Tab::Agents => None,
+            Tab::Cache => Some(crate::operator::CAP_INSPECT),
+            Tab::System => Some(crate::system::CAP_READ),
+        }
+    }
+
+    /// `description`, declaring [`Tab::capability`].
+    pub(crate) fn declared(self, description: Description) -> Description {
+        match self.capability() {
+            Some(capability) => description.requires(capability),
+            None => description,
+        }
+    }
+
+    /// Enforce [`Tab::capability`], as well as declaring it.
+    pub(crate) fn require(self, capability: &Capability) -> Result<()> {
+        match self.capability() {
+            Some(needed) if !capability.allows(needed) => Err(Error::Denied(format!(
+                "the Dashboard's {} tab needs {needed} in the grant",
+                self.label()
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -670,8 +727,14 @@ async fn counts(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<Day>> {
 /// ★ Written here, not by the stylesheet, so a switch's fetch is these bytes with no page around
 /// them: the charts and tables in it have had their transforms, and the rest is a heading and a
 /// sentence.
-async fn panel_html(inv: &Invocation<'_>, ledgers: &[Ledger], tab: Tab) -> Result<String> {
+async fn panel_html(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledgers: &[Ledger],
+    tab: Tab,
+) -> Result<String> {
     Ok(match tab {
+        Tab::Cache | Tab::System => crate::operator::panel(web, inv, tab).await,
         Tab::Ledgers => {
             let mut charts = Vec::new();
             for ledger in menu_order(ledgers) {
@@ -700,11 +763,26 @@ async fn panel_html(inv: &Invocation<'_>, ledgers: &[Ledger], tab: Tab) -> Resul
     })
 }
 
+/// Whether this viewer is offered `tab`. An operator tab they may not read is not on their page at
+/// all, the rule for a ledger they may not read; nor is the System tab on a server that does not
+/// bind its resources, the rule `onboard::offers_page` keeps for a page with nothing behind it.
+pub(crate) fn offered(web: &Web, capability: &Capability, tab: Tab) -> bool {
+    match tab {
+        Tab::Ledgers | Tab::Agents => true,
+        Tab::Cache => capability.allows(crate::operator::CAP_INSPECT),
+        Tab::System => {
+            capability.allows(crate::system::CAP_READ)
+                && ikigai_core::Iri::parse(crate::system::DISK)
+                    .is_ok_and(|iri| web.hub.describe(&iri).is_some())
+        }
+    }
+}
+
 /// A tab's link and its panel's element: the panel it shows holds [`PANEL_SLOT`], the other nothing.
-fn tabs_and_panels(shown: Tab) -> String {
+fn tabs_and_panels(shown: Tab, tabs: &[Tab]) -> String {
     let mut links = String::new();
     let mut panels = String::new();
-    for tab in Tab::ALL {
+    for &tab in tabs {
         let current = if tab == shown { "true" } else { "false" };
         let attributes = [
             ("name", tab.name()),
@@ -736,9 +814,16 @@ pub struct DashboardPage {
 impl Endpoint for DashboardPage {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
+        self.tab.require(inv.capability)?;
         let ledgers = readable_ledgers(&self.web, inv.capability);
         let mut children = nav_on_dashboard(&self.web, inv.capability, &ledgers);
-        if ledgers.is_empty() {
+        // The tabs this viewer has, and the one asked for, whose capability is checked above.
+        let tabs: Vec<Tab> = Tab::ALL
+            .into_iter()
+            .filter(|&tab| tab == self.tab || offered(&self.web, inv.capability, tab))
+            .collect();
+        let operator = tabs.iter().any(|tab| tab.capability().is_some());
+        if ledgers.is_empty() && !operator {
             children.push_str(&Lacking::ledgers().element());
             let doc = envelope(
                 "page",
@@ -754,8 +839,8 @@ impl Endpoint for DashboardPage {
                 render::render(&doc, true).map_err(crate::web::render_err)?,
             ));
         }
-        let panel = panel_html(inv, &ledgers, self.tab).await?;
-        children.push_str(&tabs_and_panels(self.tab));
+        let panel = panel_html(&self.web, inv, &ledgers, self.tab).await?;
+        children.push_str(&tabs_and_panels(self.tab, &tabs));
         let title = format!("Dashboard: {}", self.tab.label());
         let doc = envelope(
             "page",
@@ -783,11 +868,15 @@ impl Endpoint for DashboardPage {
     }
 
     fn name(&self) -> &str {
-        "gonk-page-dashboard"
+        match self.tab {
+            Tab::Cache => "gonk-page-dashboard-cache",
+            Tab::System => "gonk-page-dashboard-system",
+            Tab::Ledgers | Tab::Agents => "gonk-page-dashboard",
+        }
     }
 
     fn describe(&self) -> Description {
-        Description::new(self.name())
+        let description = Description::new(self.name())
             .title("The Dashboard, as a page")
             .summary(
                 "One tab of the Dashboard as an HTML page: a chart of the daily open and closed \
@@ -800,7 +889,8 @@ impl Endpoint for DashboardPage {
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .input(as_html_arg())
-            .output(HTML)
+            .output(HTML);
+        self.tab.declared(description)
     }
 }
 
@@ -816,16 +906,21 @@ pub struct PanelFragment {
 impl Endpoint for PanelFragment {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
+        self.tab.require(inv.capability)?;
         let ledgers = readable_ledgers(&self.web, inv.capability);
-        Ok(html(panel_html(inv, &ledgers, self.tab).await?))
+        Ok(html(panel_html(&self.web, inv, &ledgers, self.tab).await?))
     }
 
     fn name(&self) -> &str {
-        "gonk-fragment-dashboard-panel"
+        match self.tab {
+            Tab::Cache => "gonk-fragment-dashboard-panel-cache",
+            Tab::System => "gonk-fragment-dashboard-panel-system",
+            Tab::Ledgers | Tab::Agents => "gonk-fragment-dashboard-panel",
+        }
     }
 
     fn describe(&self) -> Description {
-        Description::new(self.name())
+        let description = Description::new(self.name())
             .title("One Dashboard tab's panel, as a fragment")
             .summary(
                 "What the Dashboard's page draws under this tab, with no page around it: the \
@@ -835,8 +930,48 @@ impl Endpoint for PanelFragment {
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .input(as_html_arg())
-            .output(HTML)
+            .output(HTML);
+        self.tab.declared(description)
     }
+}
+
+/// [`Tab::OPERATOR`]'s pages, panels and parts, and the workers' resource: what `web::space` binds.
+pub(crate) fn bind_operator(mut space: EndpointSpace, web: &Arc<Web>) -> EndpointSpace {
+    for (tab, page, panel) in [
+        (Tab::Cache, CACHE_PAGE_IRI, CACHE_PANEL_IRI),
+        (Tab::System, SYSTEM_PAGE_IRI, SYSTEM_PANEL_IRI),
+    ] {
+        space = space
+            .bind(
+                Exact::new(page),
+                DashboardPage {
+                    web: Arc::clone(web),
+                    tab,
+                },
+            )
+            .bind(
+                Exact::new(panel),
+                PanelFragment {
+                    web: Arc::clone(web),
+                    tab,
+                },
+            );
+    }
+    for part in crate::operator::Part::ALL {
+        space = space.bind(
+            Exact::new(part.iri()),
+            crate::operator::PartFragment {
+                web: Arc::clone(web),
+                part,
+            },
+        );
+    }
+    space.bind(
+        Exact::new(crate::operator::WORKERS),
+        crate::operator::Workers {
+            web: Arc::clone(web),
+        },
+    )
 }
 
 /// `urn:iki:gonk:fragment:dashboard-chart:{ledger}`: what an open Dashboard asks for one chart.

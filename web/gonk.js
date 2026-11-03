@@ -795,6 +795,16 @@
     }, LIVE_SAY_AFTER_MS);
   }
 
+  function liveSayAttention(elt, next) {
+    const bad = (root) => root.querySelector(".needs-attention");
+    const was = bad(elt);
+    const now = bad(next);
+    if (!was === !now) return;
+    const heading = next.querySelector("h3");
+    const name = heading ? heading.textContent.trim() : "A row";
+    announce(now ? name + " needs attention." : name + " no longer needs attention.");
+  }
+
   // What a fragment shows, whichever of the live page or an answer it is read from.
   function liveShape(elt) {
     const copy = elt.cloneNode(true);
@@ -844,7 +854,11 @@
     detail.serverResponse = holder.innerHTML;
     const frame = elt.querySelector(".table-wrap");
     if (frame && frame.scrollLeft) liveScroll.set(key, frame.scrollLeft);
-    if (elt.getAttribute("data-live") !== "note") liveSay();
+    const kind = elt.getAttribute("data-live");
+    // An operator's readout moves on every poll (the uptime, the cache), which is not news. What
+    // needs attention changing is, in words (ledger #2972).
+    if (kind === "readout") liveSayAttention(elt, next);
+    else if (kind !== "note") liveSay();
   });
   document.addEventListener("htmx:afterSettle", () => {
     if (!liveScroll.size) return;
