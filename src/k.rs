@@ -595,7 +595,7 @@ fn configured_root<'a>(web: &Web, start: &'a str) -> Option<&'a str> {
 }
 
 /// The tree IRI a root's link opens on — the browse family's own entry face.
-fn tree_iri(root: &str) -> String {
+pub(crate) fn tree_iri(root: &str) -> String {
     format!("urn:repo:{root}:tree")
 }
 
