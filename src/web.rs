@@ -390,10 +390,11 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             crate::views_page::SaveView {
                 web: Arc::clone(&web),
             },
-        )
-        .named(crate::spaces::iri(crate::spaces::PAGES));
-    // The Dashboard's operator tabs (ledger #2972).
+        );
+    // The Dashboard's operator tabs (ledger #2972). Named after them: a bind clears a space's name,
+    // which `tests/topology.rs` pins.
     crate::dashboard::bind_operator(space, &operator_web)
+        .named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
 // ------------------------------------------------------------------------------ shared
