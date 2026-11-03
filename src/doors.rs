@@ -1215,6 +1215,18 @@ fn routes() -> Vec<Route> {
         route(crate::web::LEDGERS_PATH, crate::web::LEDGERS_IRI),
         // Ledger #2542: a chart per readable ledger.
         route(crate::dashboard::PAGE_PATH, crate::dashboard::PAGE_IRI),
+        // Ledger #2971: a URL per tab, and the panel a switch fetches. Literal, and neither
+        // `ledgers` nor `agents` is `agents/{ledger}`.
+        route("/dashboard/ledgers", crate::dashboard::LEDGERS_PAGE_IRI),
+        route("/dashboard/agents", crate::dashboard::AGENTS_PAGE_IRI),
+        route(
+            "/dashboard/panel/ledgers",
+            crate::dashboard::LEDGERS_PANEL_IRI,
+        ),
+        route(
+            "/dashboard/panel/agents",
+            crate::dashboard::AGENTS_PANEL_IRI,
+        ),
         // Ledger #2967: what an open Dashboard polls. No per-route `cap`, for the reason the
         // Queue's rows take none: each read is the viewer's own.
         route(

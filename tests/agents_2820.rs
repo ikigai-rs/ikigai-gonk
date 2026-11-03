@@ -227,7 +227,7 @@ impl Server {
 
     /// What the Dashboard says of `holder` in `ledger`: each column's visible number and its link.
     fn cells(&self, ledger: &str, holder: &str) -> Vec<(String, String)> {
-        let page = self.ok("/dashboard");
+        let page = self.ok("/dashboard/agents");
         cells_in(&page, ledger, holder)
     }
 
@@ -326,7 +326,7 @@ fn the_dashboard_has_a_panel_of_the_agents() {
     let server = Server::readers(&["default"], &["default"]);
     server.file("default", "sample item");
     server.claim("default", "1", "lawnboy-claude");
-    let page = server.ok("/dashboard");
+    let page = server.ok("/dashboard/agents");
     assert!(page.contains(">Agents</h2>"), "{page}");
     let panel = agents_panel(&page, "default").expect("a panel for the ledger");
     assert!(panel.contains("lawnboy-claude"), "{panel}");
@@ -536,7 +536,7 @@ fn the_panel_is_a_table_whose_links_say_what_they_count() {
     let server = Server::readers(&["default", "empty"], &["default", "empty"]);
     server.file("default", "sample item");
     server.claim("default", "1", "lawnboy-claude");
-    let page = server.ok("/dashboard");
+    let page = server.ok("/dashboard/agents");
     let panel = agents_panel(&page, "default").unwrap();
     assert!(panel.contains("<table"), "{panel}");
     assert!(panel.contains("<caption"), "{panel}");
@@ -593,7 +593,7 @@ fn a_panel_appears_only_for_ledgers_the_viewer_may_read() {
     server.file("secret", "sample item");
     server.claim("secret", "2", "hidden-agent");
 
-    let (status, page) = server.page("/dashboard");
+    let (status, page) = server.page("/dashboard/agents");
     assert_eq!(status, 200, "{page}");
     assert!(agents_panel(&page, "default").is_some(), "{page}");
     assert!(agents_panel(&page, "secret").is_none(), "{page}");
@@ -667,7 +667,7 @@ fn a_hostile_label_stays_a_label() {
     server.file("default", "sample item");
     server.claim("default", "2", "someone-else");
 
-    let page = server.ok("/dashboard");
+    let page = server.ok("/dashboard/agents");
     assert!(!page.contains("<script>alert"), "{page}");
     let cells = cells_in(&page, "default", hostile);
     assert_eq!(cells[0].0, "1");
@@ -785,8 +785,8 @@ impl Tracer for Collect {
     }
 }
 
-/// The store queries of one Dashboard load, and the minute it began and ended in.
-fn one_load(server: &Server, reader: &Capability) -> (usize, u64, u64) {
+/// The store queries of one load of a Dashboard `page`, and the minute it began and ended in.
+fn one_load(server: &Server, page: &str, reader: &Capability) -> (usize, u64, u64) {
     let minute = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -798,7 +798,7 @@ fn one_load(server: &Server, reader: &Capability) -> (usize, u64, u64) {
     let trace = Arc::new(Collect::default());
     server.hub.set_tracer(trace.clone());
     server
-        .ask("urn:iki:gonk:page:dashboard", &[], reader)
+        .ask(page, &[], reader)
         .expect("the Dashboard renders");
     server.hub.clear_tracer();
     let events = std::mem::take(&mut *trace.0.lock().unwrap());
@@ -827,22 +827,31 @@ fn a_load_between_writes_asks_the_store_nothing() {
     // A write to `ledger`, then a load and the load after it. A window turns over with the minute,
     // so a pair across one is taken again, after a write of its own: the retry's first load has to
     // be cold as well.
-    let after_a_write = |ledger: &str| loop {
+    let after_a_write = |page: &str, ledger: &str| loop {
         server.file(ledger, "sample item");
-        let (cold, began, _) = one_load(&server, &reader);
-        let (warm, _, ended) = one_load(&server, &reader);
+        let (cold, began, _) = one_load(&server, page, &reader);
+        let (warm, _, ended) = one_load(&server, page, &reader);
         if began == ended {
             return (cold, warm);
         }
     };
-    // Per ledger: the chart's counts, its agents, and seven questions per agent.
-    let every = NAMES.len() * (1 + 1 + 7 * AGENTS);
+    // ★ Each tab asks its own questions and none of the other's (ledger #2971). Per ledger, the
+    // Ledgers tab: the chart's counts. The Agents tab: its agents, and seven questions per agent.
+    let tabs = [
+        ("urn:iki:gonk:page:dashboard:ledgers", NAMES.len()),
+        (
+            "urn:iki:gonk:page:dashboard:agents",
+            NAMES.len() * (1 + 7 * AGENTS),
+        ),
+    ];
     // ⚠ A write to one ledger: every ledger's answers are asked again, and then not until the next.
-    for ledger in NAMES {
-        assert_eq!(
-            after_a_write(ledger),
-            (every, 0),
-            "after a write to {ledger}"
-        );
+    for (page, every) in tabs {
+        for ledger in NAMES {
+            assert_eq!(
+                after_a_write(page, ledger),
+                (every, 0),
+                "{page}, after a write to {ledger}"
+            );
+        }
     }
 }

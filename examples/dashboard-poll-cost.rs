@@ -1,9 +1,12 @@
 //! `cargo run --release --example dashboard-poll-cost [-- <items> <agents> <polls>]`: what one poll
-//! of an open Dashboard costs gonk, on an idle ledger and on a busy one (ledger #2967).
+//! of an open Dashboard costs gonk, on an idle ledger and on a busy one (ledger #2967), by the tab
+//! that asks it, and what a switch to each tab costs (ledger #2971).
 //!
 //! One ledger over real HTTP, its items spread over 300 days so the chart is a real one, and
 //! `agents` holders who each hold a claim. A poll is one fragment asked with the validator of its
-//! last answer, as `web/gonk.js` asks.
+//! last answer, as `web/gonk.js` asks. A round of the Ledgers tab is one chart per ledger; of the
+//! Agents tab, one table per ledger and the sentence over them. A switch is one panel, asked with
+//! no validator. The tab not shown asks for nothing, so it has no row.
 //!
 //! - **idle**: nothing writes between polls.
 //! - **busy**: one write before every poll, the worst a ledger can do to a poll: at the 30 s cadence
@@ -84,9 +87,11 @@ fn measure(
     hub: &Arc<Kernel>,
     path: &str,
     polls: usize,
+    conditional: bool,
     write: Option<&dyn Fn(usize)>,
 ) {
-    let (_, _, mut tag) = poll(addr, path, "");
+    let (_, _, first) = poll(addr, path, "");
+    let mut tag = if conditional { first } else { String::new() };
     let (mut took, mut bytes, mut ok, mut not_modified) = (Vec::new(), 0, 0, 0);
     let (mut queries, mut transforms) = (0, 0);
     for n in 0..polls {
@@ -110,7 +115,9 @@ fn measure(
             304 => not_modified += 1,
             other => panic!("{path} answered {other}"),
         }
-        tag = etag;
+        if conditional {
+            tag = etag;
+        }
     }
     took.sort_by(f64::total_cmp);
     println!(
@@ -124,6 +131,18 @@ fn measure(
         queries as f64 / polls as f64,
         transforms as f64 / polls as f64,
     );
+}
+
+fn measure_both(
+    addr: SocketAddr,
+    hub: &Arc<Kernel>,
+    path: &str,
+    polls: usize,
+    conditional: bool,
+    write: &dyn Fn(usize),
+) {
+    measure("idle", addr, hub, path, polls, conditional, None);
+    measure("busy", addr, hub, path, polls, conditional, Some(write));
 }
 
 fn main() {
@@ -222,8 +241,12 @@ fn main() {
         let title = format!("another sample {n}");
         root_issue(&hub, Verb::Sink, &append, &[("content", &title)]);
     };
-    for path in ["/dashboard/chart/default", "/dashboard/agents/default"] {
-        measure("idle", addr, &hub, path, polls, None);
-        measure("busy", addr, &hub, path, polls, Some(&write));
-    }
+    println!("A poll of the Ledgers tab, one per ledger:");
+    measure_both(addr, &hub, "/dashboard/chart/default", polls, true, &write);
+    println!("A poll of the Agents tab, one per ledger, and the sentence once:");
+    measure_both(addr, &hub, "/dashboard/agents/default", polls, true, &write);
+    measure_both(addr, &hub, "/dashboard/agents-note", polls, true, &write);
+    println!("A switch to each tab, once:");
+    measure_both(addr, &hub, "/dashboard/panel/ledgers", polls, false, &write);
+    measure_both(addr, &hub, "/dashboard/panel/agents", polls, false, &write);
 }

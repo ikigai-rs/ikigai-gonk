@@ -958,11 +958,12 @@
     </section>
   </xsl:template>
 
-  <!-- /dashboard (ledger #2542, src/dashboard.rs). A section per kind of panel, each a named
-       region under its own h2. The charts and the agent panels (ledger #2820) arrive through
-       their slots, one transform each, and carry their own h3s. -->
+  <!-- /dashboard (ledger #2542, src/dashboard.rs). Two tabs (ledger #2971), each its own page: with
+       no script they are plain links with aria-current, and web/gonk.js gives them the ARIA tabs
+       pattern, whose keys only a script can honor. The shown panel's slot holds its heading, its
+       charts or agent panels (ledger #2820), and the other panel is empty and hidden. -->
   <xsl:template name="dashboard">
-    <h1><xsl:value-of select="@title"/></h1>
+    <h1><xsl:value-of select="@heading"/></h1>
     <!-- Ledger #2967, WCAG 2.2.2. web/gonk.js shows the control and rewrites the sentence: with no
          script nothing polls, so the sentence as drawn is true and there is nothing to pause. -->
     <p class="dashboard-live-control">
@@ -970,17 +971,30 @@
       <span id="dashboard-live-state">
         <xsl:attribute name="data-running"><xsl:value-of select="@live-running"/></xsl:attribute>These numbers are as of when this page loaded.</span>
     </p>
-    <section class="dashboard-section" aria-labelledby="dashboard-ledgers">
-      <h2 id="dashboard-ledgers">Ledgers</h2>
-      <p class="note"><xsl:value-of select="@count"/></p>
-      <div class="chart-grid">
-        <xsl:apply-templates select="view:slot[@name = 'charts']"/>
-      </div>
-    </section>
-    <section class="dashboard-section" aria-labelledby="dashboard-agents">
-      <h2 id="dashboard-agents">Agents</h2>
-      <xsl:apply-templates select="view:slot[@name = 'agents-note']"/>
-      <xsl:apply-templates select="view:slot[@name = 'agents']"/>
+    <div class="dashboard-tabs" id="dashboard-tabs">
+      <xsl:apply-templates select="view:dashboard-tab"/>
+    </div>
+    <xsl:apply-templates select="view:dashboard-panel"/>
+  </xsl:template>
+
+  <xsl:template match="view:dashboard-tab">
+    <a class="dashboard-tab">
+      <xsl:attribute name="id">dashboard-tab-<xsl:value-of select="@name"/></xsl:attribute>
+      <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+      <xsl:attribute name="data-panel">dashboard-panel-<xsl:value-of select="@name"/></xsl:attribute>
+      <xsl:attribute name="data-panel-href"><xsl:value-of select="@panel-href"/></xsl:attribute>
+      <xsl:attribute name="data-title">Dashboard: <xsl:value-of select="@label"/> · gonk</xsl:attribute>
+      <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>
+      <xsl:value-of select="@label"/>
+    </a>
+  </xsl:template>
+
+  <xsl:template match="view:dashboard-panel">
+    <section class="dashboard-section">
+      <xsl:attribute name="id">dashboard-panel-<xsl:value-of select="@name"/></xsl:attribute>
+      <xsl:attribute name="aria-labelledby">dashboard-tab-<xsl:value-of select="@name"/></xsl:attribute>
+      <xsl:if test="@current != 'true'"><xsl:attribute name="hidden">hidden</xsl:attribute></xsl:if>
+      <xsl:apply-templates select="view:slot"/>
     </section>
   </xsl:template>
 

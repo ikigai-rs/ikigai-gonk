@@ -108,7 +108,11 @@ summary { cursor: pointer; color: var(--accent); }
 .chart-data caption { color: var(--muted); font-size: 0.85rem; text-align: left; }
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: var(--gap); }
 .chart-grid .chart { margin: 0; min-width: 0; }
-.dashboard-section > h2 { margin-bottom: 0; }
+/* The Dashboard's tabs (ledger #2971): links with no script, the ARIA pattern with one. The bar and
+ * the weight say which is shown, not the color alone; the ring is the global :focus-visible. */
+.dashboard-tabs { display: flex; flex-wrap: wrap; gap: 0 var(--gap); border-bottom: 1px solid var(--rule); margin-bottom: var(--gap); }
+.dashboard-tab { padding: 0.5rem 0.75rem; border-bottom: 3px solid transparent; }
+.dashboard-tab[aria-current="page"], .dashboard-tab[aria-selected="true"] { border-bottom-color: var(--accent); font-weight: 600; text-decoration: none; }
 /* A polled fragment's element adds no box (ledger #2967): a chart is still the grid's item. Nothing
  * here animates, so an update has no motion to turn off. */
 .dashboard-live { display: contents; }

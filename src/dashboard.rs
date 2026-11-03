@@ -22,6 +22,13 @@
 //! rests on the store's write thread rather than on one ledger's, and one transform, for the chart
 //! whose numbers moved (`tests/dashboard_2542.rs`). The agent panels' cost is [`crate::agents`]'s.
 //!
+//! ★ **Two tabs, and only the one shown costs anything** (ledger
+//! [#2971](http://localhost:1062/l/default/item/2971)). [`Tab::Ledgers`] and [`Tab::Agents`] each
+//! have a URL that answers a whole page drawing that panel alone, and a fragment that is the panel
+//! (`panel_html`, which both come through). The other panel is an empty, `hidden` element: it holds
+//! no timer to hold back and its questions are not asked, on a load or a poll. With no script the
+//! tabs are plain links between the pages; `web/gonk.js` turns them into the ARIA pattern.
+//!
 //! ★ **Live by polling** (ledger [#2967](http://localhost:1062/l/default/item/2967)). Each chart and
 //! each agent table is its own fragment (`live`), and an open page asks for it every
 //! [`POLL_EVERY`] with the validator of the answer it holds, so an unchanged one costs no body:
@@ -63,17 +70,58 @@ pub const PAGE_IRI: &str = "urn:iki:gonk:page:dashboard";
 /// [`PAGE_IRI`]'s path, the header's "Dashboard".
 pub const PAGE_PATH: &str = "/dashboard";
 
-/// The Dashboard's slot for its charts.
-const CHARTS_SLOT: &str = "charts";
+/// The Dashboard's slot for the panel it shows.
+const PANEL_SLOT: &str = "panel";
 
 /// A chart's slot for its table's rows, and an agent panel's ([`crate::agents`]).
 pub(crate) const ROWS_SLOT: &str = "rows";
 
-/// The Dashboard's slot for its agent panels.
-const AGENTS_SLOT: &str = "agents";
+/// The Ledgers tab, as a page.
+pub const LEDGERS_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:ledgers";
+/// The Agents tab, as a page.
+pub const AGENTS_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:agents";
+/// The Ledgers tab's panel, as a fragment.
+pub const LEDGERS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:ledgers";
+/// The Agents tab's panel, as a fragment.
+pub const AGENTS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:agents";
 
-/// The Dashboard's slot for the sentence over its agent panels.
-const AGENTS_NOTE_SLOT: &str = "agents-note";
+/// A tab of the Dashboard. `/dashboard` itself shows the first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Ledgers,
+    Agents,
+}
+
+impl Tab {
+    /// Every tab, in the order the page lists them.
+    pub const ALL: [Tab; 2] = [Tab::Ledgers, Tab::Agents];
+
+    /// What its ids and paths call it.
+    fn name(self) -> &'static str {
+        match self {
+            Tab::Ledgers => "ledgers",
+            Tab::Agents => "agents",
+        }
+    }
+
+    /// What a person reads on it.
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Ledgers => "Ledgers",
+            Tab::Agents => "Agents",
+        }
+    }
+
+    /// Its page's path.
+    pub fn path(self) -> String {
+        format!("{PAGE_PATH}/{}", self.name())
+    }
+
+    /// Its panel's path, what the script fetches on a switch.
+    pub fn panel_path(self) -> String {
+        format!("{PAGE_PATH}/panel/{}", self.name())
+    }
+}
 
 /// One chart, as a fragment.
 pub const CHART_TEMPLATE: &str = "urn:iki:gonk:fragment:dashboard-chart:{ledger}";
@@ -88,7 +136,7 @@ pub const NOTE_IRI: &str = "urn:iki:gonk:fragment:dashboard-agents-note";
 /// [`NOTE_IRI`]'s path. Literal, and `agents-note` is not `agents/{ledger}`.
 pub const NOTE_PATH: &str = "/dashboard/agents-note";
 
-/// How often an open Dashboard asks for each fragment, as `hx-trigger` spells it.
+/// How often an open Dashboard asks for each fragment of the panel it shows, as `hx-trigger` spells it.
 ///
 /// A constant rather than a setting: nothing has asked to tune it, and a floor would have to be
 /// held for whatever a setting said. `POLL_EVERY_WORDS` is the same cadence for a person.
@@ -596,11 +644,71 @@ async fn counts(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<Day>> {
         .map_err(|row| Error::Endpoint(format!("the ledger's counts carry {row}")))
 }
 
-/// `/dashboard`: a chart per ledger this caller may read. Public like `/l`, and for the same
-/// reason: it lists only what `web::readable_ledgers` allows, and a caller who may read none is told
-/// how to get one.
+/// A tab's panel, as the page and the fragment both draw it. Only its own tab's questions are asked.
+///
+/// ★ Written here, not by the stylesheet, so a switch's fetch is these bytes with no page around
+/// them: the charts and tables in it have had their transforms, and the rest is a heading and a
+/// sentence.
+async fn panel_html(inv: &Invocation<'_>, ledgers: &[Ledger], tab: Tab) -> Result<String> {
+    Ok(match tab {
+        Tab::Ledgers => {
+            let mut charts = Vec::new();
+            for ledger in menu_order(ledgers) {
+                if let Some(chart) = chart_fragment(inv, ledger).await? {
+                    charts.push(chart);
+                }
+            }
+            let count = match charts.len() {
+                1 => "1 ledger you may read".to_string(),
+                n => format!("{n} ledgers you may read"),
+            };
+            format!(
+                "<h2 class=\"sr-only\" id=\"dashboard-ledgers\">Ledgers</h2>\
+                 <p class=\"note\">{count}</p><div class=\"chart-grid\">{}</div>",
+                charts.concat()
+            )
+        }
+        Tab::Agents => {
+            let agents = fetch(inv, request(Verb::Source, crate::agents::VIEW_IRI)?).await?;
+            format!(
+                "<h2 class=\"sr-only\" id=\"dashboard-agents\">Agents</h2>{}{}",
+                agents_note(inv),
+                String::from_utf8_lossy(&agents)
+            )
+        }
+    })
+}
+
+/// A tab's link and its panel's element: the panel it shows holds [`PANEL_SLOT`], the other nothing.
+fn tabs_and_panels(shown: Tab) -> String {
+    let mut links = String::new();
+    let mut panels = String::new();
+    for tab in Tab::ALL {
+        let current = if tab == shown { "true" } else { "false" };
+        let attributes = [
+            ("name", tab.name()),
+            ("label", tab.label()),
+            ("current", current),
+        ];
+        let (path, panel_path) = (tab.path(), tab.panel_path());
+        let mut link = attributes.to_vec();
+        link.extend([("href", path.as_str()), ("panel-href", panel_path.as_str())]);
+        links.push_str(&element("dashboard-tab", &link, ""));
+        panels.push_str(&if tab == shown {
+            wrap("dashboard-panel", &attributes, &render::slot(PANEL_SLOT))
+        } else {
+            element("dashboard-panel", &attributes, "")
+        });
+    }
+    links + &panels
+}
+
+/// `/dashboard`, `/dashboard/ledgers` and `/dashboard/agents`: one tab's panel, whole, with no script
+/// needed. Public like `/l`, and for the same reason: it lists only what `web::readable_ledgers`
+/// allows, and a caller who may read none is told how to get one.
 pub struct DashboardPage {
     pub web: Arc<Web>,
+    pub tab: Tab,
 }
 
 #[async_trait]
@@ -625,50 +733,31 @@ impl Endpoint for DashboardPage {
                 render::render(&doc, true).map_err(crate::web::render_err)?,
             ));
         }
-        let mut charts = Vec::new();
-        for ledger in menu_order(&ledgers) {
-            if let Some(chart) = chart_fragment(inv, ledger).await? {
-                charts.push(chart);
-            }
-        }
-        children.push_str(&render::slot(CHARTS_SLOT));
-        children.push_str(&render::slot(AGENTS_NOTE_SLOT));
-        children.push_str(&render::slot(AGENTS_SLOT));
-        let count = match charts.len() {
-            1 => "1 ledger you may read".to_string(),
-            n => format!("{n} ledgers you may read"),
-        };
+        let panel = panel_html(inv, &ledgers, self.tab).await?;
+        children.push_str(&tabs_and_panels(self.tab));
+        let title = format!("Dashboard: {}", self.tab.label());
         let doc = envelope(
             "page",
             &[
                 ("view", "dashboard"),
                 ("full", "true"),
                 ("ui-theme", render::theme_of(inv)),
-                ("title", "Dashboard"),
-                ("count", &count),
+                ("title", &title),
+                ("heading", "Dashboard"),
                 (
                     "live-running",
                     &format!(
-                        "These numbers update every {POLL_EVERY_WORDS} while this tab is showing."
+                        "These numbers update every {POLL_EVERY_WORDS} while this browser tab is \
+                         showing."
                     ),
                 ),
             ],
             &children,
         );
         let shell = render::render(&doc, true).map_err(crate::web::render_err)?;
-        let charts = charts.concat();
-        let agents = fetch(inv, request(Verb::Source, crate::agents::VIEW_IRI)?).await?;
-        let agents = String::from_utf8_lossy(&agents).into_owned();
         Ok(html(
-            render::splice(
-                shell,
-                &[
-                    (CHARTS_SLOT.to_string(), charts),
-                    (AGENTS_NOTE_SLOT.to_string(), agents_note(inv)),
-                    (AGENTS_SLOT.to_string(), agents),
-                ],
-            )
-            .map_err(crate::web::render_err)?,
+            render::splice(shell, &[(PANEL_SLOT.to_string(), panel)])
+                .map_err(crate::web::render_err)?,
         ))
     }
 
@@ -680,11 +769,47 @@ impl Endpoint for DashboardPage {
         Description::new(self.name())
             .title("The Dashboard, as a page")
             .summary(
-                "A chart of the daily open and closed counts of every ledger this caller may \
-                 read, each linking to its ledger, and a table of each ledger's agents, as an \
-                 HTML page. A ledger the caller may not read is absent. A caller who may read \
-                 none is told how to get one. An open page refreshes each chart and table from \
-                 its own fragment.",
+                "One tab of the Dashboard as an HTML page: a chart of the daily open and closed \
+                 counts of every ledger this caller may read, each linking to its ledger, or a \
+                 table of each ledger's agents. A ledger the caller may not read is absent. A \
+                 caller who may read none is told how to get one. An open page refreshes the \
+                 shown tab's charts or tables from their own fragments, and the other tab asks \
+                 nothing.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(as_html_arg())
+            .output(HTML)
+    }
+}
+
+/// `urn:iki:gonk:fragment:dashboard-panel:{ledgers,agents}`: what an open Dashboard fetches once, on
+/// a switch to that tab. Public like the page: a caller who has lost every ledger gets a panel with
+/// none in it, whose first line says so.
+pub struct PanelFragment {
+    pub web: Arc<Web>,
+    pub tab: Tab,
+}
+
+#[async_trait]
+impl Endpoint for PanelFragment {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledgers = readable_ledgers(&self.web, inv.capability);
+        Ok(html(panel_html(inv, &ledgers, self.tab).await?))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-fragment-dashboard-panel"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title("One Dashboard tab's panel, as a fragment")
+            .summary(
+                "What the Dashboard's page draws under this tab, with no page around it: the \
+                 charts or the agent tables of every ledger this caller may read, each of which \
+                 then polls its own fragment.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
