@@ -22,9 +22,24 @@
 //! rests on the store's write thread rather than on one ledger's, and one transform, for the chart
 //! whose numbers moved (`tests/dashboard_2542.rs`). The agent panels' cost is [`crate::agents`]'s.
 //!
-//! ⚠ **Not live.** gonk's door has no push stream to declare `data-ui-push` against: no
+//! ★ **Live by polling** (ledger [#2967](http://localhost:1062/l/default/item/2967)). Each chart and
+//! each agent table is its own fragment (`live`), and an open page asks for it every
+//! [`POLL_EVERY`] with the validator of the answer it holds, so an unchanged one costs no body:
+//! the transport answers `If-None-Match` from the bytes this module composed, after composing them
+//! under the viewer's capability, so a viewer who lost the grant gets the `403` rather than a `304`.
+//! The answers stay `no-store` (`Expiry::Always`), so no browser cache holds a viewer's numbers
+//! and the validator is `web/gonk.js`'s to send; that file also holds the pause control, the
+//! hidden tab, a focused panel and the one polite sentence. With no script the page is as of its
+//! load and says so.
+//!
+//! ⚠ **Polling, not push.** gonk's door has no push stream to declare `data-ui-push` against: no
 //! `EdgeConfig::push`, no `urn:cap:kernel:listen` in any grant, and door kernels that cache
-//! nothing, so a door's stream would hear no cut. A chart is as of the page's load.
+//! nothing, so a door's stream would hear no cut.
+//!
+//! ⚠ **A panel with agents changes its bytes once a minute** even when no number moved, because a
+//! link's query holds the window's minute ([`crate::agents`]). So that panel's next poll is a `200`
+//! with a body, and `web/gonk.js` compares it without its links and leaves the page alone: a link
+//! keeps asking what its number answered.
 //!
 //! ★ **Why the plot has two coordinate systems.** Lengths along y are CSS pixels, so label spacing
 //! holds at any width. Lengths along x are percentages of the plot (the lines, in a nested `svg`
@@ -33,14 +48,14 @@
 
 use async_trait::async_trait;
 use ikigai_core::{Description, Endpoint, Error, Invocation, Representation, Result, Verb};
-use ikigai_fn::html::html_text;
+use ikigai_fn::html::{attr, html_text, url_segment};
 use ikigai_ledger::Ledger;
 use std::sync::Arc;
 
 use crate::render::{self, element, envelope, wrap};
 use crate::web::{
-    fetch, html, html_only, ledger_href, menu_order, nav_on_dashboard, readable_ledgers, request,
-    with, Lacking, Web,
+    arg, as_html_arg, binding, fetch, html, html_only, ledger_href, menu_order, nav_on_dashboard,
+    readable_ledgers, request, require_read, with, Lacking, Web, HTML,
 };
 
 /// The Dashboard page.
@@ -56,6 +71,30 @@ pub(crate) const ROWS_SLOT: &str = "rows";
 
 /// The Dashboard's slot for its agent panels.
 const AGENTS_SLOT: &str = "agents";
+
+/// The Dashboard's slot for the sentence over its agent panels.
+const AGENTS_NOTE_SLOT: &str = "agents-note";
+
+/// One chart, as a fragment.
+pub const CHART_TEMPLATE: &str = "urn:iki:gonk:fragment:dashboard-chart:{ledger}";
+/// [`CHART_TEMPLATE`]'s path.
+pub const CHART_ROUTE: &str = "/dashboard/chart/{ledger}";
+/// One ledger's agent table, as a fragment.
+pub const AGENTS_TEMPLATE: &str = "urn:iki:gonk:fragment:dashboard-agents:{ledger}";
+/// [`AGENTS_TEMPLATE`]'s path.
+pub const AGENTS_ROUTE: &str = "/dashboard/agents/{ledger}";
+/// The sentence over the agent tables, as a fragment: it names the minute they are as of.
+pub const NOTE_IRI: &str = "urn:iki:gonk:fragment:dashboard-agents-note";
+/// [`NOTE_IRI`]'s path. Literal, and `agents-note` is not `agents/{ledger}`.
+pub const NOTE_PATH: &str = "/dashboard/agents-note";
+
+/// How often an open Dashboard asks for each fragment, as `hx-trigger` spells it.
+///
+/// A constant rather than a setting: nothing has asked to tune it, and a floor would have to be
+/// held for whatever a setting said. `POLL_EVERY_WORDS` is the same cadence for a person.
+pub const POLL_EVERY: &str = "30s";
+/// [`POLL_EVERY`] as the page says it.
+const POLL_EVERY_WORDS: &str = "30 seconds";
 
 /// How many days a chart reaches back. It bounds the polyline and the data table, and so a chart's
 /// document and its one transform, however old a ledger is.
@@ -393,6 +432,59 @@ fn unread(error: &Error) -> String {
 pub(crate) struct Chart {
     pub(crate) document: String,
     pub(crate) rows: String,
+    /// Whether a poll could change it. A ledger whose counts refuse until its operator has run
+    /// `backfill-closed-at` keeps its sentence and is not asked again.
+    pub(crate) live: bool,
+}
+
+/// What every poll's element says: asked every [`POLL_EVERY`] or on `gonk:refresh` (a resume or a
+/// tab shown again), replaced whole so a refused chart's answer takes the timer with it, its
+/// failures never a message, and a tick during an ask dropped rather than queued (ledger #947).
+fn polled(kind: &str, path: &str) -> String {
+    format!(
+        "data-live=\"{kind}\" data-ui-quiet=\"\" hx-get=\"{}\" \
+         hx-trigger=\"every {POLL_EVERY}, gonk:refresh\" hx-swap=\"outerHTML\" \
+         hx-sync=\"this:drop\"",
+        attr(path)
+    )
+}
+
+/// `html` as a fragment that polls `path`. `.dashboard-live` is `display: contents`, so the element
+/// changes nothing about the layout around it.
+pub(crate) fn live(kind: &str, path: &str, html: &str) -> String {
+    format!(
+        "<div class=\"dashboard-live\" {}>{html}</div>",
+        polled(kind, path)
+    )
+}
+
+/// What a fragment of one ledger declares: a read of that ledger, under the viewer's capability.
+pub(crate) fn of_one_ledger(description: Description) -> Description {
+    description
+        .verb(Verb::Source)
+        .verb(Verb::Meta)
+        .requires(ikigai_ledger::CAP_READ)
+        .requires(ikigai_store::CAP_READ_GRAPH)
+        .input(
+            arg("ledger", "Which ledger.")
+                .binding()
+                .default_value("default")
+                .optional(),
+        )
+        .input(as_html_arg())
+        .output(HTML)
+}
+
+/// The path of the agent table [`AGENTS_ROUTE`] names.
+pub(crate) fn agents_path(ledger: &Ledger) -> String {
+    format!("{PAGE_PATH}/agents/{}", url_segment(ledger.name()))
+}
+
+/// Whether a read of the counts failed for good: `counts` refuses a ledger holding a closed item
+/// with no `closedAt` until its operator has run `backfill-closed-at`, and no poll can change that.
+/// Any other failure is worth asking again. `tests/dashboard_2542.rs` pins this sentence.
+fn refused_for_good(error: &Error) -> bool {
+    matches!(error, Error::Endpoint(reason) if reason.contains("backfill-closed-at"))
 }
 
 /// Draw `charts`, in order: each document's render is keyed on its bytes, so a chart whose numbers
@@ -400,11 +492,43 @@ pub(crate) struct Chart {
 pub(crate) async fn drawn_charts(inv: &Invocation<'_>, charts: Vec<Chart>) -> Result<String> {
     let mut out = String::new();
     for chart in charts {
-        let html = render::rendered_chunks(inv, &[chart.document]).await?;
-        let slots = [(ROWS_SLOT.to_string(), chart.rows)];
-        out.push_str(&render::splice(html, &slots).map_err(crate::web::render_err)?);
+        out.push_str(&drawn_chart(inv, chart).await?);
     }
     Ok(out)
+}
+
+/// One of [`drawn_charts`].
+pub(crate) async fn drawn_chart(inv: &Invocation<'_>, chart: Chart) -> Result<String> {
+    let html = render::rendered_chunks(inv, &[chart.document]).await?;
+    let slots = [(ROWS_SLOT.to_string(), chart.rows)];
+    render::splice(html, &slots).map_err(crate::web::render_err)
+}
+
+/// A Dashboard chart as its fragment, or `None` when this viewer may not read the ledger's counts.
+/// The page and the poll both come through here, so they cannot draw different things.
+async fn chart_fragment(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Option<String>> {
+    let href = ledger_href(ledger);
+    let Some(chart) = chart_chunk(inv, ledger, Lines::Both, Some(&href)).await else {
+        return Ok(None);
+    };
+    let is_live = chart.live;
+    let drawn = drawn_chart(inv, chart).await?;
+    Ok(Some(if is_live {
+        let path = format!("{PAGE_PATH}/chart/{}", url_segment(ledger.name()));
+        live("chart", &path, &drawn)
+    } else {
+        format!("<div class=\"dashboard-live\">{drawn}</div>")
+    }))
+}
+
+/// The sentence over the agent panels, as its fragment. It is asked for like a panel, so the minute
+/// it names moves with them, and it is not news: `web/gonk.js` announces nothing for it.
+fn agents_note(inv: &Invocation<'_>) -> String {
+    format!(
+        "<p class=\"note\" {}>{}</p>",
+        polled("note", NOTE_PATH),
+        html_text(&crate::agents::as_of(inv))
+    )
 }
 
 /// One chart, or `None` when this viewer may not read the ledger's counts. `link` makes it a
@@ -429,9 +553,11 @@ pub(crate) async fn chart_chunk(
         common.push(("href", href));
     }
     let mut rows = String::new();
+    let mut live = true;
     let chart = match counts(inv, ledger).await {
         Err(Error::Denied(_)) => return None,
         Err(error) => {
+            live = !refused_for_good(&error);
             let note = unread(&error);
             common.extend([("drawn", "false"), ("summary", note.as_str())]);
             element("chart", &common, "")
@@ -454,6 +580,7 @@ pub(crate) async fn chart_chunk(
     Some(Chart {
         document: render::chunk(&chart),
         rows,
+        live,
     })
 }
 
@@ -500,12 +627,12 @@ impl Endpoint for DashboardPage {
         }
         let mut charts = Vec::new();
         for ledger in menu_order(&ledgers) {
-            let href = ledger_href(ledger);
-            if let Some(chart) = chart_chunk(inv, ledger, Lines::Both, Some(&href)).await {
+            if let Some(chart) = chart_fragment(inv, ledger).await? {
                 charts.push(chart);
             }
         }
         children.push_str(&render::slot(CHARTS_SLOT));
+        children.push_str(&render::slot(AGENTS_NOTE_SLOT));
         children.push_str(&render::slot(AGENTS_SLOT));
         let count = match charts.len() {
             1 => "1 ledger you may read".to_string(),
@@ -519,12 +646,17 @@ impl Endpoint for DashboardPage {
                 ("ui-theme", render::theme_of(inv)),
                 ("title", "Dashboard"),
                 ("count", &count),
-                ("agents-note", &crate::agents::as_of(inv)),
+                (
+                    "live-running",
+                    &format!(
+                        "These numbers update every {POLL_EVERY_WORDS} while this tab is showing."
+                    ),
+                ),
             ],
             &children,
         );
         let shell = render::render(&doc, true).map_err(crate::web::render_err)?;
-        let charts = drawn_charts(inv, charts).await?;
+        let charts = charts.concat();
         let agents = fetch(inv, request(Verb::Source, crate::agents::VIEW_IRI)?).await?;
         let agents = String::from_utf8_lossy(&agents).into_owned();
         Ok(html(
@@ -532,6 +664,7 @@ impl Endpoint for DashboardPage {
                 shell,
                 &[
                     (CHARTS_SLOT.to_string(), charts),
+                    (AGENTS_NOTE_SLOT.to_string(), agents_note(inv)),
                     (AGENTS_SLOT.to_string(), agents),
                 ],
             )
@@ -550,12 +683,70 @@ impl Endpoint for DashboardPage {
                 "A chart of the daily open and closed counts of every ledger this caller may \
                  read, each linking to its ledger, and a table of each ledger's agents, as an \
                  HTML page. A ledger the caller may not read is absent. A caller who may read \
-                 none is told how to get one.",
+                 none is told how to get one. An open page refreshes each chart and table from \
+                 its own fragment.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
-            .input(crate::web::as_html_arg())
-            .output(crate::web::HTML)
+            .input(as_html_arg())
+            .output(HTML)
+    }
+}
+
+/// `urn:iki:gonk:fragment:dashboard-chart:{ledger}`: what an open Dashboard asks for one chart.
+pub struct ChartFragment;
+
+#[async_trait]
+impl Endpoint for ChartFragment {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
+        require_read(inv.capability, &ledger)?;
+        chart_fragment(inv, &ledger)
+            .await?
+            .map(html)
+            .ok_or_else(|| Error::Denied("this grant does not read that ledger's counts".into()))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-fragment-dashboard-chart"
+    }
+
+    fn describe(&self) -> Description {
+        of_one_ledger(
+            Description::new(self.name())
+                .title("One Dashboard chart, as a fragment")
+                .summary(
+                    "The chart the Dashboard draws for one ledger this caller may read. Its ETag \
+                     is a hash of these bytes, so an unchanged chart answers If-None-Match with a \
+                     304.",
+                ),
+        )
+    }
+}
+
+/// `urn:iki:gonk:fragment:dashboard-agents-note`: the sentence over the agent tables.
+pub struct NoteFragment;
+
+#[async_trait]
+impl Endpoint for NoteFragment {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        Ok(html(agents_note(inv)))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-fragment-dashboard-agents-note"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title("The sentence over the Dashboard's agent tables, as a fragment")
+            .summary("What a number in the agent tables does, and the minute they are as of.")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(as_html_arg())
+            .output(HTML)
     }
 }
 

@@ -522,6 +522,7 @@ there.
 | `/` | `urn:iki:gonk:page:home` | the first readable ledger |
 | `/l` | `urn:iki:gonk:page:ledgers` | every ledger this grant may read, with its open and total counts: the header menu's "All ledgers" |
 | `/dashboard` | `urn:iki:gonk:page:dashboard` | a chart of open and closed counts over time, and a table of the agents, for every ledger this grant may read |
+| `/dashboard/chart/{ledger}` · `/dashboard/agents/{ledger}` · `/dashboard/agents-note` | `urn:iki:gonk:fragment:dashboard-chart:{ledger}` · `…:dashboard-agents:{ledger}` · `…:dashboard-agents-note` | what an open Dashboard polls every 30 s: one chart, one agent table, the minute the tables are as of; `If-None-Match` answers 304 while unchanged |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment, with the chart of its counts under the status line |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |

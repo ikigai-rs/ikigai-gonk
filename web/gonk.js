@@ -56,11 +56,12 @@
   // what the region holds, so a visible message there is not taken away.
   function announce(text) {
     const area = $("status");
-    if (!area || !text) return;
+    if (!area || !text) return null;
     const p = document.createElement("p");
     p.className = "ui-sr-only";
     p.textContent = text;
     area.appendChild(p);
+    return p;
   }
 
   // The Layers page's watcher (ledger #1705): its failures are its own, said once in
@@ -689,6 +690,194 @@
     if (url) target.setAttribute("data-view-url", url);
   });
 
+  // --------------------------------------------- the Dashboard's polling (ledger #2967)
+  //
+  // Every chart and agent table is a fragment with `hx-trigger="every 30s, gonk:refresh"`
+  // (src/dashboard.rs); this is what htmx cannot say. WCAG 2.2.2: a person can pause it, and the
+  // choice is remembered in this browser. An ask is not sent while paused, while the tab is hidden
+  // (Page Visibility), or for a panel focus is inside: replacing it would take the focused link,
+  // and the shell would then have to move focus, so that panel waits for the next ask after focus
+  // leaves. Coming back asks at once, so nobody reads old numbers for up to 30 s.
+  //
+  // ★ Held at `htmx:confirm`, the one event before the shell marks the target `aria-busy`: a request
+  // canceled after that mark never reaches the `afterRequest` that clears it.
+  //
+  // ★ `If-None-Match` is sent from here because the answers are `no-store`: no browser cache holds
+  // a viewer's numbers, so no browser would send it. htmx's rule for `[23]..` is to swap, and a 304
+  // has no body, so a 304 must be told not to.
+  //
+  // ★ An answer that differs only in its links is not news. A table with agents has links that
+  // name the minute, so its bytes change once a minute whatever the numbers do. It is compared
+  // without them and left alone: a link keeps asking what its number answered, and a phone reader's
+  // sideways scroll stays. What the person opened stays open, and a real update is one polite
+  // sentence however many fragments moved.
+  const LIVE_PAUSED = "gonk:dashboard-paused";
+  const LIVE_SAY_AFTER_MS = 500;
+  const liveTags = new Map();
+  const liveScroll = new Map();
+  let livePaused = false;
+  let liveFailing = false;
+  let liveStopped = false;
+  let liveSaid = null;
+  let liveSayTimer = null;
+
+  const isLive = (elt) => !!(elt && elt.matches && elt.matches("[data-live]"));
+  const livePolls = () => document.querySelectorAll("[data-live][hx-get]");
+
+  function liveHeld(elt) {
+    return livePaused || liveStopped || document.hidden || elt.contains(document.activeElement);
+  }
+
+  function liveRemembered() {
+    try {
+      return window.localStorage.getItem(LIVE_PAUSED) === "true";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function liveRemember(paused) {
+    try {
+      if (paused) window.localStorage.setItem(LIVE_PAUSED, "true");
+      else window.localStorage.removeItem(LIVE_PAUSED);
+    } catch (_) {
+      // Storage refused (a private window, blocked site data): paused until the page is left.
+    }
+  }
+
+  // The state in words, on screen. Only a change the person did not just make is announced.
+  function liveDraw() {
+    const button = $("dashboard-pause");
+    const state = $("dashboard-live-state");
+    if (!button || !state) return;
+    button.hidden = liveStopped;
+    button.textContent = livePaused ? "Resume updates" : "Pause updates";
+    state.textContent = liveStopped
+      ? "Updates stopped: gonk no longer accepts this page's sign-in. Sign in again, then reload the page."
+      : livePaused
+        ? "Updates are paused. These numbers stay as they are until you resume."
+        : liveFailing
+          ? "gonk did not answer the last update, so these numbers may be behind. This page keeps asking."
+          : state.getAttribute("data-running");
+  }
+
+  function liveRefresh() {
+    if (livePaused || liveStopped || document.hidden || !window.htmx) return;
+    for (const elt of livePolls()) window.htmx.trigger(elt, "gonk:refresh");
+  }
+
+  function liveFailed(status) {
+    if (status === 403 || status === 404) {
+      if (liveStopped) return;
+      liveStopped = true;
+      liveDraw();
+      announce($("dashboard-live-state").textContent);
+    } else if (!liveFailing) {
+      liveFailing = true;
+      liveDraw();
+      announce($("dashboard-live-state").textContent);
+    }
+  }
+
+  function liveAnswered() {
+    if (!liveFailing) return;
+    liveFailing = false;
+    liveDraw();
+  }
+
+  // One sentence for a round of polls, replacing the last so a tab left open does not grow the
+  // region. A new node is what a screen reader hears, so the same words are said again.
+  function liveSay() {
+    clearTimeout(liveSayTimer);
+    liveSayTimer = setTimeout(() => {
+      if (liveSaid) liveSaid.remove();
+      liveSaid = announce("Counts updated.");
+    }, LIVE_SAY_AFTER_MS);
+  }
+
+  // What a fragment shows, whichever of the live page or an answer it is read from.
+  function liveShape(elt) {
+    const copy = elt.cloneNode(true);
+    for (const a of copy.querySelectorAll('a[target="_blank"]')) a.removeAttribute("href");
+    for (const d of copy.querySelectorAll("details")) d.removeAttribute("open");
+    return copy.innerHTML;
+  }
+
+  document.addEventListener("htmx:confirm", (e) => {
+    if (isLive(e.target) && liveHeld(e.target)) e.preventDefault();
+  });
+  document.addEventListener("htmx:configRequest", (e) => {
+    if (!isLive(e.target)) return;
+    const tag = liveTags.get(e.target.getAttribute("hx-get"));
+    if (tag) e.detail.headers["If-None-Match"] = tag;
+  });
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    const elt = e.target;
+    if (!isLive(elt)) return;
+    const detail = e.detail;
+    if (detail.xhr.status === 304) {
+      detail.shouldSwap = false;
+      liveAnswered();
+      return;
+    }
+    if (!detail.shouldSwap) return; // a refusal or a failure, said below
+    liveAnswered();
+    // Held since it was asked for: no validator is kept, so the next ask brings this answer again.
+    if (liveHeld(elt)) {
+      detail.shouldSwap = false;
+      return;
+    }
+    const key = elt.getAttribute("hx-get");
+    const tag = detail.xhr.getResponseHeader("ETag");
+    if (tag) liveTags.set(key, tag);
+    const holder = document.createElement("template");
+    holder.innerHTML = detail.serverResponse;
+    const next = holder.content.firstElementChild;
+    if (!next || liveShape(next) === liveShape(elt)) {
+      detail.shouldSwap = false;
+      return;
+    }
+    const open = Array.from(elt.querySelectorAll("details"), (d) => d.open);
+    next.querySelectorAll("details").forEach((d, n) => {
+      if (open[n]) d.setAttribute("open", "");
+    });
+    detail.serverResponse = holder.innerHTML;
+    const frame = elt.querySelector(".table-wrap");
+    if (frame && frame.scrollLeft) liveScroll.set(key, frame.scrollLeft);
+    if (elt.getAttribute("data-live") !== "note") liveSay();
+  });
+  document.addEventListener("htmx:afterSettle", () => {
+    if (!liveScroll.size) return;
+    for (const elt of livePolls()) {
+      const left = liveScroll.get(elt.getAttribute("hx-get"));
+      const frame = left && elt.querySelector(".table-wrap");
+      if (frame) frame.scrollLeft = left;
+    }
+    liveScroll.clear();
+  });
+  document.addEventListener("htmx:responseError", (e) => {
+    if (isLive(e.target)) liveFailed(e.detail.xhr ? e.detail.xhr.status : 0);
+  });
+  document.addEventListener("htmx:sendError", (e) => {
+    if (isLive(e.target)) liveFailed(0);
+  });
+
+  function wireDashboard() {
+    const button = $("dashboard-pause");
+    if (!button) return;
+    livePaused = liveRemembered();
+    button.hidden = false;
+    liveDraw();
+    button.addEventListener("click", () => {
+      livePaused = !livePaused;
+      liveRemember(livePaused);
+      liveDraw();
+      announce(livePaused ? "Updates paused." : "Updates resumed.");
+      liveRefresh();
+    });
+    document.addEventListener("visibilitychange", liveRefresh);
+  }
+
   // ------------------------------------------------------------------ sign-in notices
 
   // ★ A PAGE THE GRANT DOES NOT REACH SAYS SO IN WORDS (ledger #739). The server renders both
@@ -1043,6 +1232,7 @@
   async function init() {
     wireSamples();
     wireLedgerMenu();
+    wireDashboard();
     checkAllWords();
     focusRefusal();
     // A whole page that came back with a verdict (a Views save): a live region says nothing

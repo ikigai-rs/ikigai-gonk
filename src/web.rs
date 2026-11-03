@@ -4,6 +4,9 @@
 //! /                          urn:iki:gonk:page:home                 Source  the first readable ledger
 //! /l                         urn:iki:gonk:page:ledgers              Source  every readable ledger, counted
 //! /dashboard                 urn:iki:gonk:page:dashboard            Source  a chart and the agents per readable ledger
+//! /dashboard/chart/{ledger}  urn:iki:gonk:fragment:dashboard-chart:{ledger}   Source  one chart, polled
+//! /dashboard/agents/{ledger} urn:iki:gonk:fragment:dashboard-agents:{ledger}  Source  one agent table, polled
+//! /dashboard/agents-note     urn:iki:gonk:fragment:dashboard-agents-note      Source  the minute the tables are as of, polled
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
@@ -173,6 +176,19 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             crate::dashboard::DashboardPage {
                 web: Arc::clone(&web),
             },
+        )
+        // What an open Dashboard polls (ledger #2967).
+        .bind(
+            template(crate::dashboard::CHART_TEMPLATE),
+            crate::dashboard::ChartFragment,
+        )
+        .bind(
+            template(crate::dashboard::AGENTS_TEMPLATE),
+            crate::agents::AgentFragment,
+        )
+        .bind(
+            Exact::new(crate::dashboard::NOTE_IRI),
+            crate::dashboard::NoteFragment,
         )
         // The agents' summaries (ledger #2820) — see [`crate::agents`].
         .bind(
@@ -350,7 +366,7 @@ pub(crate) fn html(text: String) -> Representation {
     )
 }
 
-fn arg(name: &str, summary: &str) -> ArgSpec {
+pub(crate) fn arg(name: &str, summary: &str) -> ArgSpec {
     ArgSpec::new(name).summary(summary).class(XSD_STRING)
 }
 

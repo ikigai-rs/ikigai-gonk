@@ -1215,6 +1215,17 @@ fn routes() -> Vec<Route> {
         route(crate::web::LEDGERS_PATH, crate::web::LEDGERS_IRI),
         // Ledger #2542: a chart per readable ledger.
         route(crate::dashboard::PAGE_PATH, crate::dashboard::PAGE_IRI),
+        // Ledger #2967: what an open Dashboard polls. No per-route `cap`, for the reason the
+        // Queue's rows take none: each read is the viewer's own.
+        route(
+            crate::dashboard::CHART_ROUTE,
+            crate::dashboard::CHART_TEMPLATE,
+        ),
+        route(
+            crate::dashboard::AGENTS_ROUTE,
+            crate::dashboard::AGENTS_TEMPLATE,
+        ),
+        route(crate::dashboard::NOTE_PATH, crate::dashboard::NOTE_IRI),
         route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
         route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
         // Ledger #775: the doctor, read-only (`web::DoctorView`).
