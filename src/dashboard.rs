@@ -23,7 +23,7 @@
 //! whose numbers moved (`tests/dashboard_2542.rs`). The agent panels' cost is [`crate::agents`]'s.
 //!
 //! ★ **Live by polling** (ledger [#2967](http://localhost:1062/l/default/item/2967)). Each chart and
-//! each agent table is its own fragment ([`live`]), and an open page asks for it every
+//! each agent table is its own fragment (`live`), and an open page asks for it every
 //! [`POLL_EVERY`] with the validator of the answer it holds, so an unchanged one costs no body:
 //! the transport answers `If-None-Match` from the bytes this module composed, after composing them
 //! under the viewer's capability, so a viewer who lost the grant gets the `403` rather than a `304`.
@@ -91,7 +91,7 @@ pub const NOTE_PATH: &str = "/dashboard/agents-note";
 /// How often an open Dashboard asks for each fragment, as `hx-trigger` spells it.
 ///
 /// A constant rather than a setting: nothing has asked to tune it, and a floor would have to be
-/// held for whatever a setting said. [`POLL_EVERY_WORDS`] is the same cadence for a person.
+/// held for whatever a setting said. `POLL_EVERY_WORDS` is the same cadence for a person.
 pub const POLL_EVERY: &str = "30s";
 /// [`POLL_EVERY`] as the page says it.
 const POLL_EVERY_WORDS: &str = "30 seconds";
