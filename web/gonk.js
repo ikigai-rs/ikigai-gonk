@@ -14,7 +14,8 @@
 // finding's word picker is required exactly while its box is ticked and no batch word stands
 // behind it — a condition over three controls, which no static attribute can state (ledger
 // #657). (6) a line selected by its number in a browse file view fills that view's annotate
-// quote — browse ships no scripts, and the selection is browse's own  (ledger #658). (7) a
+// quote — browse ships no scripts, and the selection is browse's own  (ledger #658) — and the
+// form gets a line field, the keyboard's way to the same fill (ledger #2905). (7) a
 // page a caller's grant does not reach says "sign in" to a signed-out visitor and "your grant
 // doesn't include it" to a signed-in one, and which of the two is a question about the
 // session that only this script asks of the server on a read (ledger #739). (8) the Layers page's
@@ -411,19 +412,109 @@
 
   function fillFromHash() {
     const m = location.hash.match(LINE_HASH);
-    if (m) fillQuote(m[1]);
+    if (m) {
+      showLine(m[1]);
+      fillQuote(m[1]);
+    }
   }
+
+  // ★ The keyboard's way to a line (ledger #2905). Since ikigai-browse 0.20.6 a file is one tab
+  // stop, the `<pre>`, and a gutter link is out of the tab order, so Tab no longer reaches the
+  // hook above. The annotate form gets a line field and a button, which select the line by the
+  // same hash and fill the same quote. The field shows the selected line, so the button alone
+  // quotes a deep link's line. It has no `name`, so it is never posted, and no `min` or `max`:
+  // a number left in it must not stop the annotation it has nothing to do with.
+  function addLineControls() {
+    if (!document.querySelector("#browse .browse-line")) return; // a pull request's form has none
+    for (const form of document.querySelectorAll("#browse form.browse-annotate")) {
+      if (form.querySelector("input.gonk-quote-line")) continue;
+      const label = document.createElement("label");
+      label.className = "browse-field";
+      label.textContent = "line to quote ";
+      const input = document.createElement("input");
+      input.className = "gonk-quote-line";
+      input.inputMode = "numeric";
+      input.autocomplete = "off";
+      label.appendChild(input);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gonk-quote-go";
+      button.textContent = "quote line";
+      const quote = form.querySelector('input[name="exact"]');
+      form.insertBefore(button, quote.closest("label"));
+      form.insertBefore(label, button);
+      const m = location.hash.match(LINE_HASH);
+      if (m) input.value = m[1];
+    }
+  }
+
+  function showLine(n) {
+    for (const input of document.querySelectorAll("#browse input.gonk-quote-line")) {
+      input.value = n;
+    }
+  }
+
+  // ⚠ A fragment navigation takes focus off the control, so it is put back: the person pressed
+  // Enter there and has the note still to write. A typed quote stays, as above, and is said here
+  // because this is a request, where a gutter click's fill is only a convenience.
+  function quoteLine(form) {
+    const wanted = form.querySelector("input.gonk-quote-line").value.trim();
+    if (!/^[1-9]\d*$/.test(wanted)) {
+      flash("The line to quote needs a line number.", "error");
+      return;
+    }
+    const n = String(Number(wanted));
+    const span = document.getElementById("L" + n);
+    if (!span || !span.matches(".browse-line")) {
+      const count = document.querySelectorAll("#browse .browse-line").length;
+      flash("This file has " + count + " lines, so there is no line " + n + ".", "error");
+      return;
+    }
+    if (!lineText(span).trim()) {
+      flash("Line " + n + " is blank, so there is nothing to quote.", "error");
+      return;
+    }
+    const quote = form.querySelector('input[name="exact"]');
+    if (quote.value !== "" && quote.value !== quote.dataset.gonkFilled) {
+      flash("The quote is one you typed, so it stays. Clear it to quote line " + n + ".", "error");
+      return;
+    }
+    if (location.hash === "#L" + n) {
+      fillQuote(n);
+      return;
+    }
+    const focused = document.activeElement;
+    location.hash = "#L" + n; // `hashchange` fills it, once
+    focused.focus();
+  }
+
+  document.addEventListener("click", (e) => {
+    const go = e.target && e.target.closest && e.target.closest("#browse button.gonk-quote-go");
+    if (go) quoteLine(go.form);
+  });
+  // Enter in a form's field submits it; in this field it means the button beside it.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !e.target.matches || !e.target.matches("#browse input.gonk-quote-line")) {
+      return;
+    }
+    e.preventDefault();
+    quoteLine(e.target.form);
+  });
 
   // The gutter click covers a line clicked twice, which moves no hash; `hashchange` covers
   // every other way the selection moves (back, forward, a typed URL).
   document.addEventListener("click", (e) => {
     const ln = e.target && e.target.closest && e.target.closest("#browse a.browse-ln");
     const m = ln && (ln.getAttribute("href") || "").match(LINE_HASH);
-    if (m) fillQuote(m[1]);
+    if (m) {
+      showLine(m[1]);
+      fillQuote(m[1]);
+    }
   });
   window.addEventListener("hashchange", fillFromHash);
   // A deep link into a view already on the page when this script runs (a deferred script
   // runs after parsing, so the lines are there if the server drew them inline).
+  addLineControls();
   fillFromHash();
   // ★ A deep link SCROLLS to its line too (ledger #682 item 1). The browser scrolls to a
   // fragment once, at load, and the file view is not there yet: the browse shell fetches it
@@ -437,6 +528,7 @@
   // A deep link (`…#L42`) names a line before the file view has arrived: fill once it has.
   // ⚠ Only for the swap that brought that line in — the header badge settles a swap every
   // ten seconds on every page, and must not re-fill a field the person has just emptied.
+  document.addEventListener("htmx:afterSettle", addLineControls);
   document.addEventListener("htmx:afterSettle", (e) => {
     const m = location.hash.match(LINE_HASH);
     const target = e.detail && e.detail.target;

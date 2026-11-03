@@ -2,8 +2,10 @@ use ikigai_gonk::config::{settings, Flags, Homes};
 
 const WORKFLOW: &str = r#"
 @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 <urn:iki:ledger:lifecycle:workflow> a ledger:Lifecycle ;
+    owl:versionInfo "1" ;
     ledger:hasState <urn:iki:ledger:lifecycle:workflow:filed>,
                     <urn:iki:ledger:lifecycle:workflow:closed> .
 <urn:iki:ledger:lifecycle:workflow:filed> rdfs:label "filed" ;
@@ -136,6 +138,19 @@ fn lifecycle_configuration_is_validated_before_serving() {
         .unwrap_err();
         assert!(error.contains(expected), "{error}");
     }
+    // ikigai-ledger 0.18.0: every transition records the document's version, so it must have one.
+    std::fs::write(
+        dir.path().join("unversioned.ttl"),
+        WORKFLOW.replace("owl:versionInfo \"1\" ;", ""),
+    )
+    .unwrap();
+    let error = settings(
+        &Flags::default(),
+        "gonk.ledger.lifecycle = \"tasks ~/unversioned.ttl\"\n",
+        &homes,
+    )
+    .unwrap_err();
+    assert!(error.contains("declares no version"), "{error}");
     let line = "gonk.ledger.lifecycle = \"tasks ~/workflow.ttl\"\n";
     let error = settings(&Flags::default(), &line.repeat(2), &homes).unwrap_err();
     assert!(error.contains("assigned more than once"), "{error}");
