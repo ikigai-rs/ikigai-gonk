@@ -714,6 +714,32 @@
       if (inside) inside.hidden = !signedIn;
       if (button) button.hidden = signedIn || !canSignIn;
     });
+    describeSignIn(scope);
+  }
+
+  // ★ WITH NO PASSKEY ENROLLED, A SIGN-IN BUTTON SAYS WHY IT WILL FAIL (ledger #1847). The sentence
+  // is the server's, in the page; this points each button at it, as a note beside its control is
+  // (ACCESSIBILITY.md), keeping a description the button already has (a refusal's sentence).
+  function describeSignIn(scope) {
+    const note = $("first-passkey");
+    if (!note || note.hidden) return;
+    scope.querySelectorAll("#auth-login, .signin-here").forEach((button) => {
+      const ids = (button.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+      if (!ids.includes(note.id)) button.setAttribute("aria-describedby", ids.concat(note.id).join(" "));
+    });
+  }
+
+  // An invite link in hand, or a passkey just created, makes the sentence false. A hidden element
+  // still describes what points at it, so the buttons let go of it too.
+  function hideFirstPasskey() {
+    const note = $("first-passkey");
+    if (!note) return;
+    note.hidden = true;
+    document.querySelectorAll('[aria-describedby~="first-passkey"]').forEach((button) => {
+      const ids = button.getAttribute("aria-describedby").split(/\s+/).filter((id) => id !== note.id);
+      if (ids.length) button.setAttribute("aria-describedby", ids.join(" "));
+      else button.removeAttribute("aria-describedby");
+    });
   }
 
   // ★ A REFUSAL PAGE PUTS FOCUS WHERE THE WAY ON IS (ledger #2021, D13). The page a browser gets
@@ -856,6 +882,7 @@
       });
       history.replaceState(null, "", location.pathname + location.search);
       $("enrol").hidden = true;
+      hideFirstPasskey();
       // ★ Do NOT chain navigator.credentials.get() here. When create() resolves, the system
       // passkey sheet still holds focus, and Chrome refuses get() from an unfocused document
       // ("The document is not focused") — found by the first real Touch ID enrollment. A click
@@ -1059,6 +1086,7 @@
 
     const m = location.hash.match(/^#invite=([A-Za-z0-9_-]+)$/);
     if (m) {
+      hideFirstPasskey();
       $("enrol").hidden = false;
       $("enrol-form").addEventListener("submit", (e) => {
         e.preventDefault();

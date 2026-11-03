@@ -625,6 +625,21 @@ fn nav_with(
             "",
         ));
     }
+    // ★ A sign-in that cannot succeed says so BEFORE it is pressed (ledger #1847). With no passkey
+    // enrolled the system's dialog is all a person gets, and its failure (on WSL2 the Windows
+    // dialog, then an iPhone QR) says nothing about gonk. The ledger in the command is one this
+    // caller already reads, so the sentence tells a signed-out visitor nothing new.
+    if web.passkeys.none_enrolled() {
+        let ledger = ledgers.first().map_or("<ledger>", Ledger::name);
+        out.push_str(&element(
+            "first-passkey",
+            &[(
+                "command",
+                &format!("ikigai-gonk passkey invite <name> --ledger {ledger}=write"),
+            )],
+            "",
+        ));
+    }
     out
 }
 
