@@ -3029,6 +3029,107 @@ fn the_header_offers_browse_only_where_a_root_is_readable() {
     );
 }
 
+/// File an item carrying `labels` (comma-separated) straight at the ledger; its number.
+fn file_labeled(hub: &Kernel, labels: &str) -> i64 {
+    use ikigai_resolve::Resolver;
+    let request = Request::new(
+        Verb::Sink,
+        Iri::parse("urn:iki:ledger:default:append").expect("the append's name"),
+    )
+    .with_arg("content", ArgRef::Inline(b"A labeled item".to_vec()))
+    .with_arg("labels", ArgRef::Inline(labels.as_bytes().to_vec()))
+    .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    let (answer, _) = Resolver::issue(hub, request).expect("the append");
+    let json: serde_json::Value = serde_json::from_slice(&answer.bytes).expect("its JSON");
+    json.pointer("/item/number")
+        .and_then(serde_json::Value::as_i64)
+        .expect("its number")
+}
+
+/// ★ Ledger #2977: a `repo:` label naming a root this viewer may read links to that root's
+/// tree from the item's page, and every other label, or viewer, gets the plain label alone.
+#[test]
+fn an_item_links_its_repo_labels_to_the_trees_this_viewer_may_read() {
+    const LINK: &str = "<a href='/browse/urn:repo:demo:tree'>Browse demo</a>";
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(Arc::clone(&hub));
+    let served = file_labeled(&hub, "repo:demo,repo:not-served,demo");
+    let unknown = file_labeled(&hub, "repo:not-served,repo:,repo:demo:tree,repo:Demo");
+    let hostile = file_labeled(&hub, "repo:demo' onmouseover='x");
+    let item = |number: i64| format!("/l/default/item/{number}");
+
+    // A viewer who reads every root: one link, named for the repository, and every label still
+    // said as a label.
+    let every = door.enrol_and_sign_in_with(browsing_scopes());
+    let (status, page) = door.get_html(&item(served), Some(&every));
+    assert_eq!(status, 200, "{page}");
+    assert!(page.contains(LINK), "a served root links: {page}");
+    assert_eq!(page.matches("Browse demo").count(), 1, "{page}");
+    assert!(!page.contains("Browse not-served"), "{page}");
+    for label in ["repo:demo", "repo:not-served", ">demo<"] {
+        assert!(page.contains(label), "the label stays: {label}: {page}");
+    }
+    let (status, tree) = door.get_html("/browse/urn:repo:demo:tree", Some(&every));
+    assert_eq!(status, 200, "the link opens: {tree}");
+
+    // The htmx fragment a form's swap draws is the same card.
+    let (status, card) = door.get_html(&format!("{}/card", item(served)), Some(&every));
+    assert_eq!(status, 200, "{card}");
+    assert!(card.contains(LINK), "{card}");
+
+    // Labels naming no root stay text, whatever their shape, for the same viewer.
+    for number in [unknown, hostile] {
+        let (status, page) = door.get_html(&item(number), Some(&every));
+        assert_eq!(status, 200, "{page}");
+        assert!(!page.contains("Browse "), "no link: {page}");
+        assert!(!page.contains("/browse/urn:repo:"), "no link: {page}");
+    }
+
+    // A grant naming that one root is enough.
+    let mut named = grants_for("default", Authority::Read).expect("the ledger's tokens");
+    named.push(format!("{}demo", ikigai_browse::CAP_PREFIX));
+    let token = door.enrol_and_sign_in_as("one-root", named);
+    let (_, page) = door.get_html(&item(served), Some(&token));
+    assert!(page.contains(LINK), "the named root links: {page}");
+
+    // A grant naming another root, a ledger reader with no browse grant, and nobody at all each
+    // see the plain label and no link.
+    let mut elsewhere = grants_for("default", Authority::Read).expect("the ledger's tokens");
+    elsewhere.push(format!("{}elsewhere", ikigai_browse::CAP_PREFIX));
+    let elsewhere = door.enrol_and_sign_in_as("another-root", elsewhere);
+    let reader = door.enrol_and_sign_in_as(
+        "ledger-only",
+        grants_for("default", Authority::Read).expect("the ledger's tokens"),
+    );
+    for session in [Some(elsewhere.as_str()), Some(reader.as_str()), None] {
+        let (status, page) = door.get_html(&item(served), session);
+        assert_eq!(status, 200, "{page}");
+        assert!(page.contains("repo:demo"), "the label stays: {page}");
+        assert!(!page.contains("Browse demo"), "no link: {page}");
+        assert!(!page.contains("/browse/urn:repo:demo"), "no link: {page}");
+    }
+
+    // A ledger's rows say the label and carry no link: the item's page alone has it.
+    let (status, list) = door.get_html("/l/default", Some(&every));
+    assert_eq!(status, 200, "{list}");
+    assert!(list.contains("repo:demo"), "{list}");
+    assert!(!list.contains("Browse demo"), "{list}");
+}
+
+/// A root's name may hold what a URL may not (`check_root_name` refuses only `:`, `/`, `{` and
+/// `}`), so the link encodes it. The encoded spelling opens the same tree.
+#[test]
+fn a_repo_links_href_is_encoded_and_still_opens_the_tree() {
+    let dir = scratch_root();
+    let (hub, _watch) = served(&dir);
+    let door = HttpDoorHarness::start(hub);
+    let every = door.enrol_and_sign_in_with(browsing_scopes());
+    let (status, tree) = door.get_html("/browse/urn:repo:%64emo:tree", Some(&every));
+    assert_eq!(status, 200, "{tree}");
+    assert!(tree.contains("urn:repo:demo:tree"), "{tree}");
+}
+
 /// ★★ **An anonymous caller cannot derive**, which is the whole economic boundary of this
 /// door: a click on Explain spends inference, and the only net grant gonk mints is
 /// `--browse derive`'s, for a named identity — never for whoever reaches loopback.

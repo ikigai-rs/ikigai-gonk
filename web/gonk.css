@@ -153,6 +153,8 @@ summary { cursor: pointer; color: var(--accent); }
 .inline { display: inline; }
 
 .item-head { margin-bottom: var(--gap); }
+/* A root's name can be long and unbroken, so it wraps rather than widening the page at 320 px. */
+.item-browse { list-style: none; margin: 0.35rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; overflow-wrap: anywhere; }
 .crumbs { margin: 0 0 0.25rem; display: flex; gap: 0.5rem; }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--gap); }
 .meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0 0 1rem; }

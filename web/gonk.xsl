@@ -2414,6 +2414,16 @@
       </p>
       <h1 class="item-title"><xsl:value-of select="dcterms:title"/></h1>
       <p class="badges"><xsl:call-template name="badges"/></p>
+      <!-- A repo: label's way into its repository, present only for a root this caller may read
+           (src/web.rs::enrich_repo_labels, ledger #2977). The item's page alone: a link per
+           row would be another tab stop on every row of a ledger. -->
+      <xsl:if test="view:browseRepo">
+        <ul class="item-browse">
+          <xsl:for-each select="view:browseRepo">
+            <li><a><xsl:attribute name="href"><xsl:value-of select="substring-before(., ' ')"/></xsl:attribute>Browse <xsl:value-of select="substring-after(., ' ')"/></a></li>
+          </xsl:for-each>
+        </ul>
+      </xsl:if>
     </header>
     <!-- data-linkify: src/render.rs::linkify links this text's http(s) URLs and `ledger #N`
          references after the transform (ledger #989); the value is the ledger they resolve in. -->
