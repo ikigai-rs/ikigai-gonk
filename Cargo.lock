@@ -2221,9 +2221,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-ledger"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76db178205fabc78574164fb37300a2e979e76661da78af4c24aacc9e72e02cd"
+checksum = "6dc8f9c35cf4f5ead56b0d7932934ae310548379f0b7f75f48f26d820a8a6433"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",

@@ -286,7 +286,11 @@ ikigai-store = { version = "0.3.1", features = ["persistent"] }
 # add), and a page of items runs six store queries, not four (`tests/ledger_count_1198.rs`). It
 # requires ikigai-store `^0.3.3`, so the lock moves that crate under the `"0.3.1"` floor above.
 # `"0.18.0"` is `<0.19.0`.
-ikigai-ledger = "0.18.0"
+# ★ 0.18.1 (ledger #2969), a BEHAVIOR floor: `counts` joins status history once, so a default-sized
+# ledger (about 2,900 items) answers in under a second on older Oxigraph planners instead of
+# timing out past a signed-in viewer's 5 s store budget, which left the Dashboard's chart for
+# `default` empty. `"0.18.1"` is `<0.19.0`.
+ikigai-ledger = "0.18.1"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
