@@ -11,9 +11,10 @@
 //! `urn:iki:gonk:system:workers` is the fourth row. It reads ledgers, so it lives where the ledgers'
 //! names do: [`crate::operator::Workers`].
 //!
-//! ★ **[`CAP_READ`] is a real grant, and an operator's alone.** It says how large every graph is
-//! and what it is called, which names ledgers its holder may not read, and where the store and the
-//! backups are on disk. An anonymous caller never holds it (`grants::anonymous_http_grants` mints
+//! ★ **[`CAP_READ`] is a real grant, and an operator's alone.** It says where the store and the
+//! backups are on disk and how large the store is. A graph's name is information too (a private
+//! ledger's names a project), so [`STORE`] names only the graphs its caller may read and counts the
+//! rest ([`readable_graphs`], ledger #3039). An anonymous caller never holds it (`grants::anonymous_http_grants` mints
 //! ledger tokens only), and a page another site navigated to loses it
 //! (`admit::FOREIGN_PAGE_KEEPS` is an allowlist).
 //!
@@ -37,6 +38,7 @@ use ikigai_core::{
     Capability, Description, Endpoint, EndpointSpace, Error, Exact, Expiry, Invocation, Iri,
     Kernel, ReprType, Representation, Request, Result, Verb,
 };
+use ikigai_ledger::Ledger;
 use serde_json::{json, Value};
 
 /// What every System resource requires, and the System tab with them.
@@ -157,6 +159,36 @@ pub(crate) fn require(capability: &Capability) -> Result<()> {
             "reading this server's health needs {CAP_READ} in the grant"
         )))
     }
+}
+
+/// Whether `capability` may read the graph called `graph`, as a key of a backup's count table.
+///
+/// A ledger's graph answers [`crate::web::require_read`], the test every ledger page and
+/// `urn:iki:gonk:agent` use. Any other graph answers its own store token alone, and so does a
+/// graveyard on top of its ledger's test: it is a read tier of its own (`audit`), and how much a
+/// ledger has deleted is what this row would say about it.
+fn may_read_graph(capability: &Capability, graph: &str) -> bool {
+    let named = graph.strip_prefix(crate::grants::LEDGER_GRAPH_PREFIX);
+    let ledger = named
+        .map(|name| name.strip_suffix(":deleted").unwrap_or(name))
+        .and_then(|name| Ledger::parse(name).ok());
+    capability.allows(&ikigai_store::cap_read_graph(graph))
+        && ledger.is_none_or(|ledger| crate::web::require_read(capability, &ledger).is_ok())
+}
+
+/// Of a backup's `graphs` table, the rows `capability` may read and how many it may not. Nothing
+/// of a hidden row leaves here but that it was one.
+pub fn readable_graphs(graphs: &Value, capability: &Capability) -> (Value, usize) {
+    let Some(table) = graphs.as_object() else {
+        return (Value::Null, 0);
+    };
+    let readable: serde_json::Map<String, Value> = table
+        .iter()
+        .filter(|(graph, _)| may_read_graph(capability, graph))
+        .map(|(graph, quads)| (graph.clone(), quads.clone()))
+        .collect();
+    let hidden = table.len() - readable.len();
+    (Value::Object(readable), hidden)
 }
 
 /// A live answer: never cached, since time alone moves every number in it.
@@ -286,7 +318,7 @@ fn info_line<'a>(info: &'a str, key: &str) -> Option<&'a str> {
 struct StoreEndpoint(Arc<System>);
 
 impl StoreEndpoint {
-    async fn answer(&self, now_ms: u64) -> Value {
+    async fn answer(&self, capability: &Capability, now_ms: u64) -> Value {
         let system = &self.0;
         let info = system
             .read_as("urn:iki:store:info", &store_scopes(), None)
@@ -313,12 +345,16 @@ impl StoreEndpoint {
             // Said by class: what an error carries is written for a log.
             Err(error) => (None, None, Some(error.class().to_string())),
         };
+        let (graphs, hidden) = newest.map_or((Value::Null, 0), |n| {
+            readable_graphs(&n["graphs"], capability)
+        });
         json!({
             "quads": quads,
             "backing": backing,
             "unread": unread,
             "size_bytes": size_on_disk(&system.store_path),
-            "graphs": newest.map_or(Value::Null, |n| n["graphs"].clone()),
+            "graphs": graphs,
+            "graphs_hidden": hidden,
             "backup": {
                 "family_bound": status.is_some(),
                 "taken_at_ms": taken,
@@ -336,7 +372,7 @@ impl Endpoint for StoreEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         require(inv.capability)?;
         let now_ms = crate::agents::now_ms(inv)?;
-        Ok(live(self.answer(now_ms).await))
+        Ok(live(self.answer(inv.capability, now_ms).await))
     }
 
     fn name(&self) -> &str {
@@ -348,9 +384,9 @@ impl Endpoint for StoreEndpoint {
             self.name(),
             "How large the store is, and how old its last backup",
             "The dataset's total quads and backing from urn:iki:store:info, the store's bytes on \
-             disk, the quads per graph the newest backup recorded, and that backup's time and \
-             age with whether it is older than its schedule allows. Counts and times, never a \
-             quad.",
+             disk, the quads per graph the newest backup recorded for each graph this \
+             capability may read and how many more it may not, and that backup's time and age \
+             with whether it is older than its schedule allows. Counts and times, never a quad.",
         )
     }
 }
@@ -424,6 +460,63 @@ mod tests {
         assert!(!backup_late(Some(day + BACKUP_GRACE), Some(day)));
         assert!(backup_late(Some(day + BACKUP_GRACE + HOUR), Some(day)));
         assert!(!backup_late(Some(30 * day), None), "nothing promised");
+    }
+
+    /// Ledger #3039: which rows a grant sees, against the ledger's own graph names.
+    #[test]
+    fn a_grant_sees_only_the_graphs_it_may_read() {
+        let ledger = Ledger::parse("sample").unwrap();
+        let other = Ledger::parse("sample-other").unwrap();
+        let graphs = json!({
+            ledger.graph(): 1,
+            ledger.deleted_graph(): 2,
+            other.graph(): 3,
+            other.deleted_graph(): 4,
+            "urn:iki:browse:graph:sample": 5,
+            "urn:iki:ledger:graph:Not-A-Ledger": 6,
+            "": 7,
+        });
+        let names = |capability: &Capability| {
+            let (table, hidden) = readable_graphs(&graphs, capability);
+            let names: Vec<String> = table.as_object().unwrap().keys().cloned().collect();
+            (names, hidden)
+        };
+        let graph_token = |graph: &str| ikigai_store::cap_read_graph(graph);
+
+        let nothing = Capability::scoped([CAP_READ]);
+        assert_eq!(names(&nothing), (vec![], 7));
+
+        // A ledger takes both of its tokens, and neither alone is enough.
+        let reader = Capability::scoped([ledger.cap_read(), graph_token(&ledger.graph())]);
+        assert_eq!(names(&reader), (vec![ledger.graph()], 6));
+        assert_eq!(names(&Capability::scoped([ledger.cap_read()])), (vec![], 7));
+        assert_eq!(
+            names(&Capability::scoped([graph_token(&ledger.graph())])),
+            (vec![], 7)
+        );
+
+        // A graveyard is its own read, on top of its ledger's.
+        let auditor = Capability::scoped([
+            ledger.cap_read(),
+            graph_token(&ledger.graph()),
+            graph_token(&ledger.deleted_graph()),
+        ]);
+        let (seen, hidden) = names(&auditor);
+        assert!(seen.contains(&ledger.deleted_graph()), "{seen:?}");
+        assert_eq!(hidden, 5);
+        let graveyard_alone = Capability::scoped([graph_token(&ledger.deleted_graph())]);
+        assert_eq!(names(&graveyard_alone), (vec![], 7));
+
+        // A graph that is no ledger's answers its own token.
+        let browser = Capability::scoped([graph_token("urn:iki:browse:graph:sample")]);
+        assert_eq!(
+            names(&browser),
+            (vec!["urn:iki:browse:graph:sample".to_string()], 6)
+        );
+
+        assert_eq!(names(&Capability::root()).1, 0);
+        // No backup is no table, not a table of nothing.
+        assert_eq!(readable_graphs(&Value::Null, &nothing), (Value::Null, 0));
     }
 
     #[test]

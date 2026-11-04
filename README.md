@@ -598,9 +598,12 @@ read. Add the tokens to a grant in `grants.json`:
 | Cache | `urn:cap:kernel:inspect` | the hub's `urn:kernel:cache`, `:threads` and `:uncached`, under the viewer's capability: names, never argument values. Core counts no hits or misses, and the tab says so |
 | System | `urn:cap:gonk:system:read` | `urn:iki:gonk:system:disk`, `:store`, `:gonk` and `:workers`, each JSON and each requiring the token, at every door that binds it |
 
-⚠ `urn:cap:gonk:system:read` shows the store's total, every graph's name and its quads, and where the
-store and the backups are on disk, whichever ledgers its holder may read. Worker lines and claimed
-items are the exception: they come only from ledgers the viewer may read. `urn:iki:store:info` carries
+⚠ `urn:cap:gonk:system:read` shows the store's total and where the store and the backups are on disk,
+whichever ledgers its holder may read. A graph's name is information, so the store row names only the
+graphs the viewer may read, and counts the rest ("And 4 more graphs this grant cannot read."): a
+ledger's graph takes the ledger's read tokens, a ledger's graveyard its own token as well, and any other
+graph its own token (ledger #3039). Worker lines and claimed items, likewise, come only from ledgers
+the viewer may read. `urn:iki:store:info` carries
 one total, so the quads per graph are those the newest backup recorded, labeled as of it; counting
 them live would scan the store on every poll. A volume needs attention under 30 GiB free, the workers'
 own `[disk] floor_gb` default, and a backup 15 minutes past its schedule. An open System tab reads
