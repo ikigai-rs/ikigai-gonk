@@ -86,6 +86,7 @@ impl Server {
             rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
+            holder_aliases: Default::default(),
             toolbox: true,
         });
         let toolbox = Toolbox::at(dist.path().to_path_buf()).unwrap();

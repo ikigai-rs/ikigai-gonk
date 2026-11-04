@@ -1,5 +1,6 @@
 # Every holder that ever took a claim in this ledger.
 PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
 
 SELECT DISTINCT ?holder WHERE {
   ?claim a ledger:ClaimEvent ;

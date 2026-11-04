@@ -131,6 +131,7 @@ fn door_with(
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
         queue: QueuePolicy::default(),
         epochs: None,
+        holder_aliases: Default::default(),
         toolbox: false,
     });
     (

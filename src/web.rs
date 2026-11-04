@@ -158,6 +158,9 @@ pub struct Web {
     /// no entry: a header link to a `/toolbox` that answers `404` is a door nobody should be
     /// shown, the rule ledger #442 set for Browse.
     pub toolbox: bool,
+    /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
+    /// [#3034](http://localhost:1062/l/default/item/3034)).
+    pub holder_aliases: crate::holders::HolderAliases,
 }
 
 /// Bind the face.
@@ -221,7 +224,9 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         )
         .bind(
             template(crate::dashboard::AGENTS_TEMPLATE),
-            crate::agents::AgentFragment,
+            crate::agents::AgentFragment {
+                web: Arc::clone(&web),
+            },
         )
         .bind(
             Exact::new(crate::dashboard::NOTE_IRI),
@@ -242,11 +247,15 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         // would take an answer's IRI as a holder, and it asks for its answers by that IRI.
         .bind(
             template(crate::agents::ANSWER_TEMPLATE),
-            crate::agents::Answer,
+            crate::agents::Answer {
+                web: Arc::clone(&web),
+            },
         )
         .bind(
             template(crate::agents::AGENT_TEMPLATE),
-            crate::agents::Agent,
+            crate::agents::Agent {
+                web: Arc::clone(&web),
+            },
         )
         .bind(
             Exact::new(crate::agents::VIEW_IRI),
@@ -3587,6 +3596,7 @@ mod tests {
             rules: crate::rules::DEFAULT_RULES.into(),
             queue: crate::config::QueuePolicy::default(),
             epochs: None,
+            holder_aliases: Default::default(),
             toolbox: false,
         };
         let root = Capability::root();

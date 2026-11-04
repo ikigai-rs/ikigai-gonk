@@ -1012,6 +1012,7 @@
       <xsl:choose>
         <xsl:when test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:when>
         <xsl:otherwise>
+          <xsl:if test="@aliases"><p class="note"><xsl:value-of select="@aliases"/></p></xsl:if>
           <div class="table-wrap">
             <table class="agent-table">
               <caption class="sr-only">The agents of <xsl:value-of select="@title"/>, one row each</caption>
