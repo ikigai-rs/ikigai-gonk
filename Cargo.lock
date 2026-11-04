@@ -1066,7 +1066,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1939,9 +1939,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-browse"
-version = "0.20.7"
+version = "0.20.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85dc9202d3bd8a30c2460a6867bfefdccce0678a05875bbc277b42b4d25399bc"
+checksum = "230a67b7c2bd5f32d202dc4e4597f386d3eed5685173a4c1e4011d99cdaf175c"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1951,6 +1951,7 @@ dependencies = [
  "ikigai-store",
  "notify",
  "oxigraph",
+ "rustix",
  "serde_json",
  "sha2 0.10.9",
  "syntect",
@@ -3407,9 +3408,9 @@ dependencies = [
 
 [[package]]
 name = "oxigraph"
-version = "0.5.12"
+version = "0.5.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eede7fd83363baccff1b09ae33eca1072f637f8a50894b49ab7097a390db9a3"
+checksum = "9b993c12c391a7733c93171f9d07fbd80e4b99060ce3e4c76e0875cb3e63d0a8"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
@@ -3500,9 +3501,9 @@ dependencies = [
 
 [[package]]
 name = "oxrocksdb-sys"
-version = "0.5.12"
+version = "0.5.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80f6fb657a167b8cea892d8a43c0c94409659a7cffa4fd8a197dbceb7a974a1c"
+checksum = "b3ab00e254d81066a73af8f26dcfd1acb76c9b4cc51d7d239e3ab37c3065fb4f"
 dependencies = [
  "bindgen",
  "cc",
@@ -4037,7 +4038,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4409,7 +4410,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4758,9 +4759,9 @@ dependencies = [
 
 [[package]]
 name = "spareval"
-version = "0.2.8"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04145291b411c31eb6f40cb63c9701dc623af58c28cf4a85edf7ba0608027587"
+checksum = "072b1b44c9003e54a7b0817b65ce156d94ab46250dcefe0f24a9b3cc4020c1c6"
 dependencies = [
  "hex",
  "json-event-parser",
@@ -4795,9 +4796,9 @@ dependencies = [
 
 [[package]]
 name = "sparopt"
-version = "0.3.8"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e929a8b41fb443a90d211d26abab73ab465414618e2541fb92f7dc54e03ff578"
+checksum = "8c1d1327a49bef5f6f294a2ddcf01635c5449a0654e9a35d3f50d7a45e4ecc78"
 dependencies = [
  "oxrdf",
  "rand 0.9.5",
@@ -5024,7 +5025,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5511,7 +5512,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

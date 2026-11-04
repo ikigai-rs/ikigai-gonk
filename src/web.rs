@@ -406,6 +406,20 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
         .named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
+/// The page space the live HTTP door serves: [`space`], the layers pages and `/onboard`.
+///
+/// `main` and `tests/topology.rs` both build it here, so the name the test reads is the name the
+/// door has. It is named again after the last bind, because a bind clears a space's name
+/// (ledger [#3038](http://localhost:1062/l/default/item/3038)): anonymous, the door's pages are
+/// a skolem IRI in `urn:kernel:topology`, and a trace credits their hits to the door around them.
+pub fn door_space(
+    web: Arc<Web>,
+    layers_view: Option<Arc<crate::layers_view::LayersView>>,
+) -> EndpointSpace {
+    let pages = crate::layers_view::bind(space(Arc::clone(&web)), &web, layers_view);
+    crate::onboard::bind_page(pages, &web).named(crate::spaces::iri(crate::spaces::PAGES))
+}
+
 // ------------------------------------------------------------------------------ shared
 
 pub(crate) fn html(text: String) -> Representation {

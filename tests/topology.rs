@@ -60,7 +60,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         holder_aliases: Default::default(),
         toolbox: false,
     });
-    doors::http_kernel(hub, ikigai_gonk::web::space(face))
+    doors::http_kernel(hub, ikigai_gonk::web::door_space(face, None))
 }
 
 /// `Source urn:kernel:topology` under exactly the capability it declares.
@@ -269,6 +269,10 @@ fn the_http_door_is_pages_then_the_hub() {
         "urn:iki:gonk:page:home",
         "urn:iki:gonk:act",
         "urn:iki:gonk:sparql",
+        // Bound after `web::space` named the space, and a bind clears a name (ledger #3038):
+        // the `spaces::PAGES` node above holding these is the door's pages staying named.
+        ikigai_gonk::layers_view::PAGE_IRI,
+        ikigai_gonk::onboard::PAGE_IRI,
     ] {
         assert!(
             pages.iter().any(|p| p == expected),
