@@ -639,6 +639,8 @@ fn store_html(store: &Value, now_ms: u64) -> String {
         ("Last backup", backup_at),
         ("Schedule", schedule),
     ]));
+    let hidden = store["graphs_hidden"].as_u64().unwrap_or(0);
+    let graphs_word = if hidden == 1 { "graph" } else { "graphs" };
     match store["graphs"].as_object() {
         Some(graphs) if !graphs.is_empty() => {
             let rows: String = graphs
@@ -650,7 +652,16 @@ fn store_html(store: &Value, now_ms: u64) -> String {
                  would scan the store on every poll.</p>",
             );
             out.push_str(&table("Quads per graph", &["Graph", "Quads"], &rows));
+            if hidden > 0 {
+                out.push_str(&format!(
+                    "<p class=\"note\">And {hidden} more {graphs_word} this grant cannot read.</p>"
+                ));
+            }
         }
+        _ if hidden > 0 => out.push_str(&format!(
+            "<p class=\"note\">Quads per graph as of the last backup: {hidden} {graphs_word} \
+             this grant cannot read, and none it can.</p>"
+        )),
         _ => out.push_str(
             "<p class=\"note\">Quads per graph come from the last backup's record, and there is \
              none to read.</p>",

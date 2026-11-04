@@ -540,3 +540,99 @@ fn a_readout_says_only_a_change_in_what_needs_attention() {
     assert!(JS.contains("\" needs attention.\""));
     assert!(JS.contains("\" no longer needs attention.\""));
 }
+
+/// Ledger #3039: a graph's name is information, so `urn:cap:gonk:system:read` shows only the graphs
+/// the viewer may read and counts the rest, in the resource as well as in the tab.
+#[test]
+fn a_viewer_never_sees_the_name_of_a_graph_it_may_not_read() {
+    const SECRET: &str = "sample-private";
+    let server = Server::start(
+        &["default", SECRET],
+        &["default"],
+        &[INSPECT, system::CAP_READ],
+    );
+    server.act("default", "append", &[("content", "sample item")]);
+    server.act(SECRET, "append", &[("content", "sample item")]);
+    futures::executor::block_on(Kernel::issue(
+        &server.hub,
+        request(Verb::Source, backup::BACKUP, &[]),
+        &Capability::root(),
+    ))
+    .expect("a backup");
+    let store_as = |capability: &Capability| -> serde_json::Value {
+        let answer = futures::executor::block_on(Kernel::issue(
+            &server.hub,
+            request(Verb::Source, system::STORE, &[]),
+            capability,
+        ))
+        .expect("the store row");
+        serde_json::from_slice(&answer.bytes).unwrap()
+    };
+    let secret_graph = Ledger::parse(SECRET).unwrap().graph();
+
+    // The tab, over HTTP: this viewer's ledger by name, the other's nowhere in it.
+    let row = server.fragment(&Part::Store.path());
+    assert!(row.contains("urn:iki:ledger:graph:default"), "{row}");
+    assert!(!row.contains(SECRET), "{row}");
+    assert!(
+        row.contains("1 more graph this grant cannot read"),
+        "the rest as one count: {row}"
+    );
+    let tab = server.page("/dashboard/system");
+    assert!(!tab.contains(SECRET), "{tab}");
+
+    // The resource says the same at any door, so no caller reads around the tab.
+    let reader = {
+        let mut scopes = grants_for_all(&["default".to_string()], Authority::Read).unwrap();
+        scopes.push(system::CAP_READ.to_string());
+        Capability::scoped(scopes)
+    };
+    let answer = store_as(&reader);
+    assert!(
+        answer["graphs"]
+            .get("urn:iki:ledger:graph:default")
+            .is_some(),
+        "{answer}"
+    );
+    assert!(!answer.to_string().contains(SECRET), "{answer}");
+    assert_eq!(answer["graphs_hidden"], 1, "{answer}");
+
+    // Holding the System token alone reads no graph, and says how many there are.
+    let holder = store_as(&Capability::scoped([system::CAP_READ]));
+    assert_eq!(holder["graphs"], serde_json::json!({}), "{holder}");
+    assert_eq!(holder["graphs_hidden"], 2, "{holder}");
+
+    // On the same server, a grant that holds both reads both: nothing is kept between viewers.
+    let both = store_as(&Capability::scoped(
+        grants_for_all(
+            &["default".to_string(), SECRET.to_string()],
+            Authority::Read,
+        )
+        .unwrap()
+        .into_iter()
+        .chain([system::CAP_READ.to_string()]),
+    ));
+    assert!(both["graphs"].get(&secret_graph).is_some(), "{both}");
+    assert_eq!(both["graphs_hidden"], 0, "{both}");
+}
+
+/// With every graph hidden the row must not say there is no record of them.
+#[test]
+fn a_viewer_who_reads_no_graph_is_told_how_many_there_are() {
+    let server = Server::start(&["default"], &[], &[system::CAP_READ]);
+    server.act("default", "append", &[("content", "sample item")]);
+    futures::executor::block_on(Kernel::issue(
+        &server.hub,
+        request(Verb::Source, backup::BACKUP, &[]),
+        &Capability::root(),
+    ))
+    .expect("a backup");
+    let row = server.fragment(&Part::Store.path());
+    assert!(!row.contains("urn:iki:ledger:graph"), "{row}");
+    assert!(
+        !row.contains("Quads per graph</caption>"),
+        "no table: {row}"
+    );
+    assert!(!row.contains("none to read"), "{row}");
+    assert!(row.contains("1 graph this grant cannot read"), "{row}");
+}
