@@ -11,11 +11,15 @@
 //! `urn:iki:gonk:system:workers` is the fourth row. It reads ledgers, so it lives where the ledgers'
 //! names do: [`crate::operator::Workers`].
 //!
-//! ★ **[`CAP_READ`] is a real grant, and an operator's alone.** It says how large every graph is
-//! and what it is called, which names ledgers its holder may not read, and where the store and the
-//! backups are on disk. An anonymous caller never holds it (`grants::anonymous_http_grants` mints
-//! ledger tokens only), and a page another site navigated to loses it
-//! (`admit::FOREIGN_PAGE_KEEPS` is an allowlist).
+//! ★ **[`CAP_READ`] is a real grant, and an operator's alone.** It says how large the store is and
+//! where it and the backups are on disk. An anonymous caller never holds it
+//! (`grants::anonymous_http_grants` mints ledger tokens only), and a page another site navigated to
+//! loses it (`admit::FOREIGN_PAGE_KEEPS` is an allowlist).
+//!
+//! ★ **It does not say what a graph is called (ledger #3039).** A graph's name names a project, and
+//! this token is meant for a second operator, so [`STORE`] lists a graph only to a holder who may
+//! read it ([`may_see_graph`]) and counts the rest. The hold is here, not in the page, because this
+//! JSON answers at every door.
 //!
 //! ★ **This module reads the store and the backup status as ITSELF, and only those two.** Their
 //! tokens (`urn:cap:store:read`, `urn:cap:gonk:backup`) read or export every graph, so no grant may
@@ -37,6 +41,7 @@ use ikigai_core::{
     Capability, Description, Endpoint, EndpointSpace, Error, Exact, Expiry, Invocation, Iri,
     Kernel, ReprType, Representation, Request, Result, Verb,
 };
+use ikigai_ledger::Ledger;
 use serde_json::{json, Value};
 
 /// What every System resource requires, and the System tab with them.
@@ -157,6 +162,38 @@ pub(crate) fn require(capability: &Capability) -> Result<()> {
             "reading this server's health needs {CAP_READ} in the grant"
         )))
     }
+}
+
+/// The ledger a graph is part of: the ledger's own graph or its graveyard, and nothing else under
+/// that prefix, however it begins.
+fn ledger_of_graph(graph: &str) -> Option<Ledger> {
+    let rest = graph.strip_prefix(crate::grants::LEDGER_GRAPH_PREFIX)?;
+    let ledger = Ledger::parse(rest.strip_suffix(":deleted").unwrap_or(rest)).ok()?;
+    (ledger.graph() == graph || ledger.deleted_graph() == graph).then_some(ledger)
+}
+
+/// Whether [`STORE`] names `graph` to this holder: a ledger's graphs by the test every ledger list
+/// uses (`web::require_read`), and any other by the store's own token for that one graph.
+pub(crate) fn may_see_graph(capability: &Capability, graph: &str) -> bool {
+    match ledger_of_graph(graph) {
+        Some(ledger) => crate::web::require_read(capability, &ledger).is_ok(),
+        None => capability.allows(&ikigai_store::cap_read_graph(graph)),
+    }
+}
+
+/// `graphs` as this holder may see them, and how many were left out. Anything but an object (no
+/// backup has recorded any) stays as it is.
+fn seen_graphs(graphs: Value, capability: &Capability) -> (Value, usize) {
+    let Value::Object(graphs) = graphs else {
+        return (graphs, 0);
+    };
+    let total = graphs.len();
+    let seen: serde_json::Map<String, Value> = graphs
+        .into_iter()
+        .filter(|(graph, _)| may_see_graph(capability, graph))
+        .collect();
+    let hidden = total - seen.len();
+    (Value::Object(seen), hidden)
 }
 
 /// A live answer: never cached, since time alone moves every number in it.
@@ -286,7 +323,7 @@ fn info_line<'a>(info: &'a str, key: &str) -> Option<&'a str> {
 struct StoreEndpoint(Arc<System>);
 
 impl StoreEndpoint {
-    async fn answer(&self, now_ms: u64) -> Value {
+    async fn answer(&self, now_ms: u64, capability: &Capability) -> Value {
         let system = &self.0;
         let info = system
             .read_as("urn:iki:store:info", &store_scopes(), None)
@@ -313,12 +350,17 @@ impl StoreEndpoint {
             // Said by class: what an error carries is written for a log.
             Err(error) => (None, None, Some(error.class().to_string())),
         };
+        let (graphs, graphs_hidden) = seen_graphs(
+            newest.map_or(Value::Null, |n| n["graphs"].clone()),
+            capability,
+        );
         json!({
             "quads": quads,
             "backing": backing,
             "unread": unread,
             "size_bytes": size_on_disk(&system.store_path),
-            "graphs": newest.map_or(Value::Null, |n| n["graphs"].clone()),
+            "graphs": graphs,
+            "graphs_hidden": graphs_hidden,
             "backup": {
                 "family_bound": status.is_some(),
                 "taken_at_ms": taken,
@@ -336,7 +378,7 @@ impl Endpoint for StoreEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         require(inv.capability)?;
         let now_ms = crate::agents::now_ms(inv)?;
-        Ok(live(self.answer(now_ms).await))
+        Ok(live(self.answer(now_ms, inv.capability).await))
     }
 
     fn name(&self) -> &str {
@@ -348,9 +390,9 @@ impl Endpoint for StoreEndpoint {
             self.name(),
             "How large the store is, and how old its last backup",
             "The dataset's total quads and backing from urn:iki:store:info, the store's bytes on \
-             disk, the quads per graph the newest backup recorded, and that backup's time and \
-             age with whether it is older than its schedule allows. Counts and times, never a \
-             quad.",
+             disk, the quads per graph the newest backup recorded for the graphs this caller may \
+             read with a count of the rest, and that backup's time and age with whether it is \
+             older than its schedule allows. Counts and times, never a quad.",
         )
     }
 }
@@ -442,6 +484,58 @@ mod tests {
         std::fs::write(dir.path().join("sub/b"), [0; 5]).unwrap();
         assert_eq!(size_on_disk(dir.path()), 15);
         assert_eq!(size_on_disk(&dir.path().join("missing")), 0);
+    }
+
+    #[test]
+    fn a_graph_is_named_only_to_a_holder_who_may_read_it() {
+        let reader = Capability::scoped(
+            crate::grants::grants_for("sample", crate::grants::Authority::Read).unwrap(),
+        );
+        for graph in [
+            "urn:iki:ledger:graph:sample",
+            "urn:iki:ledger:graph:sample:deleted",
+        ] {
+            assert!(may_see_graph(&reader, graph), "{graph}");
+        }
+        for graph in [
+            "urn:iki:ledger:graph:other",
+            "urn:iki:ledger:graph:other:deleted",
+            // Under the prefix and no ledger's: the sample's name does not open it.
+            "urn:iki:ledger:graph:sample:other",
+            "urn:iki:ledger:graph:sample:deleted:deleted",
+            "urn:iki:browse:graph:sample",
+            "",
+        ] {
+            assert!(!may_see_graph(&reader, graph), "{graph:?}");
+        }
+
+        // One of a ledger's two read tokens is not its read, as for every ledger list.
+        let half = Capability::scoped([Ledger::parse("sample").unwrap().cap_read()]);
+        assert!(!may_see_graph(&half, "urn:iki:ledger:graph:sample"));
+
+        // A graph that is no ledger's goes by its own token, so "cannot read" stays true.
+        let browse = "urn:iki:browse:graph:sample";
+        let holder = Capability::scoped([ikigai_store::cap_read_graph(browse)]);
+        assert!(may_see_graph(&holder, browse));
+        assert!(may_see_graph(&Capability::root(), ""));
+    }
+
+    #[test]
+    fn what_is_left_out_is_counted_and_no_record_stays_none() {
+        let reader = Capability::scoped(
+            crate::grants::grants_for("sample", crate::grants::Authority::Read).unwrap(),
+        );
+        let (seen, hidden) = seen_graphs(
+            json!({
+                "urn:iki:ledger:graph:sample": 3,
+                "urn:iki:ledger:graph:other": 4,
+                "urn:iki:browse:graph:sample": 5,
+            }),
+            &reader,
+        );
+        assert_eq!(seen, json!({ "urn:iki:ledger:graph:sample": 3 }));
+        assert_eq!(hidden, 2);
+        assert_eq!(seen_graphs(Value::Null, &reader), (Value::Null, 0));
     }
 
     #[test]
