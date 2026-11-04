@@ -18,7 +18,7 @@
 //!
 //! ★ **It does not say what a graph is called (ledger #3039).** A graph's name names a project, and
 //! this token is meant for a second operator, so [`STORE`] lists a graph only to a holder who may
-//! read it ([`may_see_graph`]) and counts the rest. The hold is here, not in the page, because this
+//! read it (`may_see_graph`) and counts the rest. The hold is here, not in the page, because this
 //! JSON answers at every door.
 //!
 //! ★ **This module reads the store and the backup status as ITSELF, and only those two.** Their
