@@ -690,7 +690,10 @@ ikigai-nl = "0.5.0"
 # `<pre>`. Tab no longer reaches a line, so `web/gonk.js` adds a line field to the annotate form in
 # the same change, and `tests/browse.rs` and `tests/browser/quote_keyboard_2905.mjs` hold the two
 # together. 0.20.7 requires ikigai-fn 0.9, so the lock drops the 0.8 that 0.20.3 kept.
-ikigai-browse = "0.20.7"
+# ★ 0.20.8 is the floor now, a SECURITY one (ledger #2894, #2960; ikigai-browse PR 142, 143): a
+# checkout read walks from a held root handle with a no-follow open on every component, so a
+# path component swapped for a symlink between the check and the open cannot escape a browse root.
+ikigai-browse = "0.20.8"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
