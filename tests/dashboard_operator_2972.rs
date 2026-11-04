@@ -468,6 +468,75 @@ fn the_system_tab_says_what_each_row_is_and_what_to_do() {
     assert!(store.contains("Quads per graph"), "{store}");
 }
 
+/// Ledger #3039: `urn:cap:gonk:system:read` says how the store is, not what its ledgers are called.
+/// A graph's name names a project, so the name goes with the read of its ledger and the rest are
+/// one count, in the page and in the JSON both.
+#[test]
+fn a_viewer_without_a_ledgers_read_token_never_sees_its_name() {
+    let server = Server::start(&["default", "secret"], &["default"], &[system::CAP_READ]);
+    server.act("default", "append", &[("content", "sample item")]);
+    server.act("secret", "append", &[("content", "hidden title")]);
+    futures::executor::block_on(Kernel::issue(
+        &server.hub,
+        request(Verb::Source, backup::BACKUP, &[]),
+        &Capability::root(),
+    ))
+    .expect("a backup");
+
+    let store_as = |capability: &Capability| -> serde_json::Value {
+        let answer = futures::executor::block_on(Kernel::issue(
+            &server.hub,
+            request(Verb::Source, system::STORE, &[]),
+            capability,
+        ))
+        .expect("the store's row");
+        serde_json::from_slice(&answer.bytes).unwrap()
+    };
+    let everything = store_as(&Capability::root());
+    let every_graph = everything["graphs"].as_object().unwrap();
+    assert!(
+        every_graph.contains_key("urn:iki:ledger:graph:secret"),
+        "the backup recorded it: {everything}"
+    );
+
+    let mut scopes = grants_for_all(&["default".to_string()], Authority::Read).unwrap();
+    scopes.push(system::CAP_READ.to_string());
+    let viewer = store_as(&Capability::scoped(scopes));
+    let shown = viewer["graphs"].as_object().unwrap();
+    assert!(!viewer.to_string().contains("secret"), "{viewer}");
+    assert_eq!(everything["graphs_hidden"], 0);
+    assert!(
+        shown.contains_key("urn:iki:ledger:graph:default"),
+        "{viewer}"
+    );
+    let hidden = (every_graph.len() - shown.len()) as u64;
+    assert!(hidden >= 1, "{viewer}");
+    assert_eq!(viewer["graphs_hidden"], hidden, "{viewer}");
+
+    let part = server.fragment(&Part::Store.path());
+    assert!(part.contains("urn:iki:ledger:graph:default"), "{part}");
+    let more = if hidden == 1 {
+        "And 1 more graph this grant cannot read.".to_string()
+    } else {
+        format!("And {hidden} more graphs this grant cannot read.")
+    };
+    assert!(part.contains(&more), "{part}");
+    for path in [
+        Part::Store.path(),
+        Tab::System.panel_path(),
+        Tab::System.path(),
+    ] {
+        let (status, body) = server.get(&path, "same-origin");
+        assert_eq!(status, 200, "{path}: {body}");
+        assert!(!body.contains("secret"), "{path}: {body}");
+    }
+
+    // A holder of the token and of no ledger has a count, and no table of nothing.
+    let no_ledger = store_as(&Capability::scoped([system::CAP_READ]));
+    assert_eq!(no_ledger["graphs"], serde_json::json!({}), "{no_ledger}");
+    assert_eq!(no_ledger["graphs_hidden"], every_graph.len() as u64);
+}
+
 #[test]
 fn the_workers_rows_are_each_status_items_latest_lines_as_data() {
     let server = Server::start(&["default", "secret"], &["default"], &[system::CAP_READ]);

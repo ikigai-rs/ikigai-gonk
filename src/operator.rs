@@ -639,6 +639,7 @@ fn store_html(store: &Value, now_ms: u64) -> String {
         ("Last backup", backup_at),
         ("Schedule", schedule),
     ]));
+    let hidden = store["graphs_hidden"].as_u64().unwrap_or(0);
     match store["graphs"].as_object() {
         Some(graphs) if !graphs.is_empty() => {
             let rows: String = graphs
@@ -650,7 +651,18 @@ fn store_html(store: &Value, now_ms: u64) -> String {
                  would scan the store on every poll.</p>",
             );
             out.push_str(&table("Quads per graph", &["Graph", "Quads"], &rows));
+            match hidden {
+                0 => {}
+                1 => out.push_str("<p class=\"note\">And 1 more graph this grant cannot read.</p>"),
+                n => out.push_str(&format!(
+                    "<p class=\"note\">And {n} more graphs this grant cannot read.</p>"
+                )),
+            }
         }
+        _ if hidden > 0 => out.push_str(&format!(
+            "<p class=\"note\">Graphs in the last backup's record that this grant cannot read: \
+             {hidden}. It can read none of them, so none is named.</p>"
+        )),
         _ => out.push_str(
             "<p class=\"note\">Quads per graph come from the last backup's record, and there is \
              none to read.</p>",
@@ -1065,6 +1077,28 @@ impl Endpoint for Workers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_graphs_a_grant_cannot_read_are_one_count_in_words() {
+        let drawn = |graphs: Value, hidden: u64| {
+            store_html(&json!({ "graphs": graphs, "graphs_hidden": hidden }), 0)
+        };
+        let one = json!({ "urn:iki:ledger:graph:sample": 3 });
+        let none = drawn(one.clone(), 0);
+        assert!(none.contains("<table"), "{none}");
+        assert!(!none.contains("cannot read"), "{none}");
+        let single = drawn(one.clone(), 1);
+        assert!(single.contains("And 1 more graph this grant cannot read."));
+        let many = drawn(one, 4);
+        assert!(many.contains("And 4 more graphs this grant cannot read."));
+        // With nothing to list there is no empty table, and it is not "no backup".
+        let all = drawn(json!({}), 4);
+        assert!(!all.contains("<table"), "{all}");
+        assert!(all.contains("cannot read: 4."), "{all}");
+        assert!(!all.contains("there is none to read"), "{all}");
+        let unrecorded = drawn(Value::Null, 0);
+        assert!(unrecorded.contains("there is none to read"), "{unrecorded}");
+    }
 
     #[test]
     fn a_query_string_in_a_name_is_cut() {
