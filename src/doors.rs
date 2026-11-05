@@ -1280,6 +1280,10 @@ fn routes() -> Vec<Route> {
         route(crate::dashboard::NOTE_PATH, crate::dashboard::NOTE_IRI),
         route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
         route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
+        route(
+            "/l/{ledger}/lifecycle",
+            "urn:iki:gonk:page:lifecycle:{ledger}",
+        ),
         // Ledger #775: the doctor, read-only (`web::DoctorView`).
         route("/l/{ledger}/doctor", "urn:iki:gonk:page:doctor:{ledger}"),
         route(

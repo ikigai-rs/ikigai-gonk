@@ -22,13 +22,14 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 10] = [
+const PAGES: [(&str, &str); 11] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
     ("ledger.html", "/l/default"),
     ("closed.html", "/l/default?status=closed"),
     ("item.html", "/l/default/item/1"),
+    ("lifecycle.html", "/l/default/lifecycle"),
     ("doctor.html", "/l/default/doctor"),
     ("sparql.html", "/sparql"),
     ("browse.html", "/browse"),
