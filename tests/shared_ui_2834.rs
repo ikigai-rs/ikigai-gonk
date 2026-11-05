@@ -31,13 +31,14 @@ const XSL: &str = include_str!("../web/gonk.xsl");
 
 /// Pages every caller can open. A refusal's page is held to the same files and the same chooser by
 /// `tests/styled_refusal_2021.rs::is_gonk_shell`.
-const PAGES: [(&str, u16); 8] = [
+const PAGES: [(&str, u16); 9] = [
     ("/", 200),
     ("/l", 200),
     ("/dashboard", 200),
     ("/dashboard/ledgers", 200),
     ("/dashboard/agents", 200),
     ("/l/default", 200),
+    ("/l/default/lifecycle", 200),
     ("/sparql", 200),
     ("/queue", 200),
 ];
@@ -208,7 +209,14 @@ fn every_page_shows_the_one_chooser_and_renders_a_theme_with_no_script() {
         );
     }
     // Apply with no script: a GET form, so the page itself renders what it was asked.
-    for path in ["/", "/l", "/l/default", "/sparql", "/queue"] {
+    for path in [
+        "/",
+        "/l",
+        "/l/default",
+        "/l/default/lifecycle",
+        "/sparql",
+        "/queue",
+    ] {
         for theme in ikigai_ui::THEMES {
             let page = gonk.page(&format!("{path}?theme={theme}"), 200);
             assert!(

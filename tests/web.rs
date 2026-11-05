@@ -37,7 +37,7 @@ mod common;
 use common::Authenticator;
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
-use ikigai_gonk::{compose, doors, quic, web};
+use ikigai_gonk::{doors, quic, web};
 use ikigai_store::DurableStore;
 use p256::ecdsa::SigningKey;
 
@@ -82,6 +82,16 @@ impl Server {
         browse_roots: Vec<String>,
         ledgers: &[&str],
     ) -> Server {
+        Self::start_with_lifecycles(rules, anonymous, browse_roots, ledgers, Default::default())
+    }
+
+    fn start_with_lifecycles(
+        rules: &str,
+        anonymous: Vec<String>,
+        browse_roots: Vec<String>,
+        ledgers: &[&str],
+        lifecycles: ikigai_ledger::Lifecycles,
+    ) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -89,7 +99,20 @@ impl Server {
         let addr = listener.local_addr().unwrap();
         let config = tempfile::tempdir().unwrap();
         let layout = quic::Layout::in_config_home(config.path());
-        let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
+        let hub = Arc::new(
+            ikigai_gonk::compose_serving_with_lifecycles(
+                DurableStore::in_memory().unwrap(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                lifecycles,
+            )
+            .0,
+        );
         let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
@@ -2702,8 +2725,8 @@ fn the_header_says_when_a_section_is_withheld_and_only_then() {
 /// Nothing in it said what "lifecycle" or "kata-flight" meant, or what "checked" was.
 ///
 /// Pinned here: one paragraph, in reading order, that names the lifecycle as a LINK to its
-/// states (the ledger's own `urn:iki:ledger:lifecycle:{name}`, through the mechanical
-/// `/iki/…` door, which a browser can follow), marks the checked time as a `<time>` and says
+/// states (the ledger's own lifecycle, through its HTML page), marks the checked time as a
+/// `<time>` and says
 /// it is when the cached check last ran (decided in ledger #1567), and labels the checks.
 /// The paragraph is not in a grid or flex container, so at any width it flows as a sentence.
 /// A clean bill reads as a sentence about those checks, not a bare "No problems."
@@ -2755,7 +2778,7 @@ fn the_doctor_says_what_it_judged_against_on_one_line() {
         "{line}"
     );
     assert!(
-        line.contains("<a href='/iki/ledger/lifecycle/kata-flight'>kata-flight lifecycle</a>"),
+        line.contains("<a href='/l/default/lifecycle'>kata-flight lifecycle</a>"),
         "the lifecycle is a link to its states: {line}"
     );
     assert!(
@@ -2792,7 +2815,7 @@ fn the_doctor_says_what_it_judged_against_on_one_line() {
     assert!(!page.body.contains("No problems."), "{page:?}");
 
     // ★ The link goes somewhere a browser can read: the lifecycle's states, in order.
-    let states = server.page("/iki/ledger/lifecycle/kata-flight", None);
+    let states = server.page("/l/default/lifecycle", None);
     assert_eq!(states.status, 200, "{states:?}");
     for state in [
         "filed",
@@ -2860,4 +2883,130 @@ fn a_multi_ledger_passkey_defaults_to_default_in_both_pickers() {
             }
         }
     }
+}
+
+#[test]
+fn a_lifecycle_is_an_html_table_in_state_order() {
+    let server = Server::start();
+    let page = server.page("/l/default/lifecycle", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(
+        page.body
+            .contains("<h1 id='lifecycle-title'>kata-flight lifecycle</h1>"),
+        "{page:?}"
+    );
+    assert!(
+        page.body.contains("<th scope='col'>In flight</th>"),
+        "{page:?}"
+    );
+    assert!(page.body.contains("<th scope='col'>Drain</th>"), "{page:?}");
+    assert!(page.body.contains("<th scope='col'>Items</th>"), "{page:?}");
+    let mut previous = 0;
+    for state in [
+        "filed",
+        "queued",
+        "reviewed",
+        "resolving",
+        "refining",
+        "shipping",
+    ] {
+        let at = page
+            .body
+            .find(&format!("<th scope='row'>{state}</th>"))
+            .unwrap_or_else(|| panic!("{state}: {page:?}"));
+        assert!(at > previous, "states stay in lifecycle order");
+        previous = at;
+    }
+}
+
+#[test]
+fn lifecycle_counts_include_closed_and_implicit_filed_items_only_in_this_ledger() {
+    let server = Server::start();
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        r#"
+        @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+        <urn:test:one> a ledger:Item ; ledger:status ledger:open .
+        <urn:test:two> a ledger:Item ; ledger:status ledger:closed .
+        <urn:test:three> a ledger:Item ; ledger:state <urn:iki:ledger:lifecycle:kata-flight:filed> .
+        <urn:test:four> a ledger:Item ; ledger:state <urn:iki:ledger:lifecycle:kata-flight:queued> .
+        <urn:test:five> a ledger:Item ; ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> .
+        <urn:test:not-item> ledger:state <urn:iki:ledger:lifecycle:kata-flight:queued> .
+    "#,
+    );
+    load(
+        &server,
+        "urn:iki:ledger:graph:other",
+        r#"
+        <urn:test:other> a <https://ikigai-rs.dev/ns/ledger#Item> .
+    "#,
+    );
+    let page = server.page("/l/default/lifecycle", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    for row in [
+        "<th scope='row'>filed</th><td>No</td><td>triage</td><td>3</td>",
+        "<th scope='row'>queued</th><td>No</td><td>review-gate</td><td>1</td>",
+        "<th scope='row'>resolving</th><td>Yes</td><td>None (held by a claim)</td><td>1</td>",
+        "<th scope='row'>shipping</th><td>Yes</td><td>None (held by a claim)</td><td>0</td>",
+    ] {
+        assert!(page.body.contains(row), "missing {row}: {page:?}");
+    }
+    assert!(
+        page.head
+            .to_ascii_lowercase()
+            .contains("content-security-policy:"),
+        "{page:?}"
+    );
+    assert!(
+        page.body.contains("tabindex='0'"),
+        "scrollable table is keyboard reachable"
+    );
+    let forbidden = server.page("/l/other/lifecycle", None);
+    assert_eq!(forbidden.status, 403, "{forbidden:?}");
+}
+
+#[test]
+fn a_lifecycle_page_uses_the_named_ledgers_definition_and_escapes_its_text() {
+    let definition = r#"
+        @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        <urn:iki:ledger:lifecycle:custom> a ledger:Lifecycle ; owl:versionInfo "1" ;
+            rdfs:comment "A <script> & summary" ;
+            ledger:hasState <urn:iki:ledger:lifecycle:custom:filed>, <urn:iki:ledger:lifecycle:custom:done> .
+        <urn:iki:ledger:lifecycle:custom:filed> rdfs:label "filed" ; ledger:order 0 ;
+            ledger:inFlight false ; ledger:drain "<script> & owner" .
+        <urn:iki:ledger:lifecycle:custom:done> rdfs:label "done" ; ledger:order 1 ;
+            ledger:inFlight false ; ledger:drain "archive" .
+    "#;
+    let lifecycles = ikigai_ledger::Lifecycles::new(vec![
+        ikigai_ledger::Lifecycle::kata_flight(),
+        ikigai_ledger::Lifecycle::parse(definition).unwrap(),
+    ])
+    .assign("tasks", "custom");
+    let server = Server::start_with_lifecycles(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("tasks", Authority::Read).unwrap(),
+        Vec::new(),
+        &["default", "tasks"],
+        lifecycles,
+    );
+    let page = server.page("/l/tasks/lifecycle?theme=dark", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.body.contains("custom lifecycle"), "{page:?}");
+    assert!(
+        page.body.contains("A &lt;script&gt; &amp; summary"),
+        "{page:?}"
+    );
+    assert!(page.body.contains("data-theme='dark'"), "{page:?}");
+    assert!(page.body.contains("<th scope='row'>done</th>"), "{page:?}");
+    assert!(
+        !page.body.contains("<th scope='row'>queued</th>"),
+        "{page:?}"
+    );
+    assert!(page.body.contains("&lt;script&gt; &amp; owner"), "{page:?}");
+    assert!(!page.body.contains("<script> & owner"), "{page:?}");
+    assert!(page.body.contains("href='/l/tasks'"), "{page:?}");
+    assert!(page.body.contains("href='/l/tasks/doctor'"), "{page:?}");
 }

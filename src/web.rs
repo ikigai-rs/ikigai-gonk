@@ -14,6 +14,7 @@
 //! /dashboard/agents/{ledger} urn:iki:gonk:fragment:dashboard-agents:{ledger}  Source  one agent table, polled
 //! /dashboard/agents-note     urn:iki:gonk:fragment:dashboard-agents-note      Source  the minute the tables are as of, polled
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
+//! /l/{ledger}/lifecycle      urn:iki:gonk:page:lifecycle:{ledger}   Source  ordered states and item counts
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
 //! /l/{ledger}/item/{id}/card urn:iki:gonk:fragment:item:{…}:{id}    Source  the same, as a fragment
@@ -289,6 +290,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             ItemView {
                 web: Arc::clone(&web),
                 full: false,
+            },
+        )
+        .bind(
+            template("urn:iki:gonk:page:lifecycle:{ledger}"),
+            LifecycleView {
+                web: Arc::clone(&web),
             },
         )
         .bind(
@@ -1910,6 +1917,156 @@ impl Endpoint for LedgerView {
     }
 }
 
+// --------------------------------------------------------------------- lifecycle page
+
+/// A read-only view of the ledger's configured lifecycle. Both the definition and the
+/// grouped item counts are read through the hub under the viewer's capability.
+struct LifecycleView {
+    web: Arc<Web>,
+}
+
+#[async_trait]
+impl Endpoint for LifecycleView {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        html_only(inv)?;
+        let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
+        require_read(inv.capability, &ledger)?;
+        let doctor: ikigai_ledger::json::DoctorDocument = serde_json::from_slice(
+            &fetch(
+                inv,
+                with(
+                    request(Verb::Source, &format!("{}doctor", ledger.prefix()))?,
+                    "as",
+                    "application/json",
+                ),
+            )
+            .await?,
+        )
+        .map_err(|e| {
+            Error::Endpoint(format!(
+                "the ledger's doctor answered no DoctorDocument: {e}"
+            ))
+        })?;
+        let definition = fetch(
+            inv,
+            with(
+                request(
+                    Verb::Source,
+                    &format!("urn:iki:ledger:lifecycle:{}", doctor.lifecycle),
+                )?,
+                "as",
+                "text/turtle",
+            ),
+        )
+        .await?;
+        let definition = std::str::from_utf8(&definition)
+            .map_err(|e| Error::Endpoint(format!("the lifecycle is not UTF-8: {e}")))?;
+        let lifecycle = ikigai_ledger::Lifecycle::parse(definition)?;
+        // No listing limit: count all items, including closed ones. An absent state is
+        // filed, just as it is in the ledger's state resource. DISTINCT avoids duplicate
+        // base-class assertions affecting the count. Bad states remain the doctor's job.
+        let query = format!(
+            "SELECT ?state (COUNT(DISTINCT ?item) AS ?count) WHERE {{ \
+             ?item a <{LEDGER_NS}Item> . OPTIONAL {{ ?item <{LEDGER_NS}state> ?state }} \
+             }} GROUP BY ?state"
+        );
+        let read = with(
+            with(
+                with(request(Verb::Source, "urn:sparql:select")?, "query", &query),
+                "graph",
+                &ledger.graph(),
+            ),
+            "as",
+            "application/sparql-results+json",
+        );
+        let results: Value = serde_json::from_slice(&fetch(inv, read).await?).map_err(|e| {
+            Error::Endpoint(format!("the lifecycle counts are not SPARQL JSON: {e}"))
+        })?;
+        let bindings = results["results"]["bindings"]
+            .as_array()
+            .ok_or_else(|| Error::Endpoint("the lifecycle counts have no bindings".into()))?;
+        let mut counts = BTreeMap::<String, u64>::new();
+        let filed = lifecycle
+            .state(ikigai_ledger::lifecycle::FILED)
+            .expect("validated lifecycle has filed");
+        for row in bindings {
+            let state = row["state"]["value"].as_str().unwrap_or(&filed.iri);
+            let count = row["count"]["value"]
+                .as_str()
+                .and_then(|n| n.parse::<u64>().ok())
+                .ok_or_else(|| Error::Endpoint("the lifecycle count is not an integer".into()))?;
+            *counts.entry(state.to_string()).or_default() += count;
+        }
+        let mut states = String::new();
+        for state in lifecycle.states() {
+            states.push_str(&element(
+                "lifecycle-state",
+                &[
+                    ("name", &state.name),
+                    ("in-flight", if state.in_flight { "Yes" } else { "No" }),
+                    (
+                        "drain",
+                        state.drain.as_deref().unwrap_or("None (held by a claim)"),
+                    ),
+                    (
+                        "count",
+                        &counts.get(&state.iri).copied().unwrap_or(0).to_string(),
+                    ),
+                ],
+                "",
+            ));
+        }
+        let mut children = nav(
+            &self.web,
+            inv.capability,
+            &readable_ledgers(&self.web, inv.capability),
+            Some(ledger.name()),
+        );
+        children.push_str(&render::wrap(
+            "lifecycle",
+            &[
+                ("name", lifecycle.name()),
+                ("ledger", ledger.name()),
+                ("ledger-href", &ledger_href(&ledger)),
+                ("doctor-href", &format!("{}/doctor", ledger_href(&ledger))),
+            ],
+            &format!(
+                "{}{}",
+                element("summary", &[], lifecycle.summary().unwrap_or("")),
+                states
+            ),
+        ));
+        let page = envelope(
+            "page",
+            &[
+                ("view", "lifecycle"),
+                ("full", flag(true)),
+                ("ui-theme", crate::render::theme_of(inv)),
+                ("title", &format!("lifecycle · {}", ledger.name())),
+                ("ledger", ledger.name()),
+                ("page-url", &format!("{}/lifecycle", ledger_href(&ledger))),
+            ],
+            &children,
+        );
+        Ok(html(render::render(&page, true).map_err(render_err)?))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-page-lifecycle"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title("A ledger's lifecycle, as a page")
+            .summary("The states in order, whether each is in flight, its drain, and its item count, including closed items. Read-only.")
+            .verb(Verb::Source).verb(Verb::Meta)
+            .requires(ikigai_ledger::CAP_READ)
+            .requires(ikigai_store::CAP_READ_GRAPH)
+            .input(arg("ledger", "Which ledger.").binding().default_value("default").optional())
+            .input(as_html_arg()).output(HTML)
+    }
+}
+
 // ------------------------------------------------------------------------ the doctor
 
 /// `/l/{ledger}/doctor`: the ledger's doctor (ikigai-ledger 0.5.0, ledger #775) as a page —
@@ -1974,14 +2131,10 @@ impl Endpoint for DoctorView {
             &[
                 ("ledger", ledger.name()),
                 ("lifecycle", &doc.lifecycle),
-                // Ledger #1604: the lifecycle's states, `urn:iki:ledger:lifecycle:{name}`,
-                // through the mechanical `/iki/…` door — its plain face lists them in order.
+                // Ledger #1617: the same lifecycle in gonk's browser face.
                 (
                     "lifecycle-href",
-                    &format!(
-                        "/iki/ledger/lifecycle/{}",
-                        ikigai_fn::html::url_segment(&doc.lifecycle)
-                    ),
+                    &format!("{}/lifecycle", ledger_href(&ledger)),
                 ),
                 ("checked", &when(&doc.checked_at)),
                 ("checked-at", &doc.checked_at),

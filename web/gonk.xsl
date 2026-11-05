@@ -320,6 +320,7 @@
     <xsl:choose>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
+      <xsl:when test="@view = 'lifecycle'"><xsl:apply-templates select="view:lifecycle"/></xsl:when>
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
       <xsl:when test="@view = 'refusal'"><xsl:apply-templates select="view:refusal"/></xsl:when>
@@ -2323,6 +2324,29 @@
     <xsl:if test="view:deferred = 'true'"><span class="badge deferred">deferred</span></xsl:if>
     <xsl:if test="ledger:claimedBy"><span class="badge claimed">claimed by <xsl:value-of select="ledger:claimedBy"/></span></xsl:if>
     <xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each>
+  </xsl:template>
+
+  <!-- Ledger #1617: the configured lifecycle, with counts from the viewer's ledger. -->
+  <xsl:template match="view:lifecycle">
+    <section class="panel lifecycle" aria-labelledby="lifecycle-title">
+      <p class="crumbs"><a><xsl:attribute name="href"><xsl:value-of select="@ledger-href"/></xsl:attribute><xsl:value-of select="@ledger"/></a></p>
+      <h1 id="lifecycle-title"><xsl:value-of select="@name"/><xsl:text> lifecycle</xsl:text></h1>
+      <p class="note"><xsl:value-of select="view:summary"/></p>
+      <p>In-flight items are worked under a claim. A drain names who picks up an item parked in a state.</p>
+      <p>Counts include open and closed items. An item with no explicit state is filed. Counts are as of this page load.</p>
+      <div class="table-wrap" tabindex="0" role="region" aria-labelledby="lifecycle-table-title">
+        <table>
+          <caption id="lifecycle-table-title">States in lifecycle order</caption>
+          <thead><tr><th scope="col">State</th><th scope="col">In flight</th><th scope="col">Drain</th><th scope="col">Items</th></tr></thead>
+          <tbody><xsl:apply-templates select="view:lifecycle-state"/></tbody>
+        </table>
+      </div>
+      <p>Items with unrecognized or multiple states need attention. <a><xsl:attribute name="href"><xsl:value-of select="@doctor-href"/></xsl:attribute>Check this ledger with Doctor</a>.</p>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:lifecycle-state">
+    <tr><th scope="row"><xsl:value-of select="@name"/></th><td><xsl:value-of select="@in-flight"/></td><td><xsl:value-of select="@drain"/></td><td><xsl:value-of select="@count"/></td></tr>
   </xsl:template>
 
   <!-- ============================================================ the doctor -->
