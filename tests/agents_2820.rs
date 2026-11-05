@@ -550,10 +550,14 @@ fn the_panel_is_a_table_whose_links_say_what_they_count() {
         panel.contains("<th scope=\"row\">lawnboy-claude</th>"),
         "{panel}"
     );
-    assert_eq!(panel.matches("target=\"_blank\"").count(), COLUMNS.len());
+    // A row for the agent and the totals row.
+    assert_eq!(
+        panel.matches("target=\"_blank\"").count(),
+        2 * COLUMNS.len()
+    );
     assert_eq!(
         panel.matches("target=\"_blank\" rel=\"noopener\"").count(),
-        COLUMNS.len(),
+        2 * COLUMNS.len(),
         "{panel}"
     );
     let links: Vec<String> = panel
@@ -569,6 +573,13 @@ fn the_panel_is_a_table_whose_links_say_what_they_count() {
         "lawnboy-claude: 0 handed back in the last 24 hours, opens in a new tab",
         "lawnboy-claude: 0 released without a hand-back, opens in a new tab",
         "lawnboy-claude: none from claim to hand-back, the median, opens in a new tab",
+        "All agents: 1 in flight, opens in a new tab",
+        "All agents: 1 worked on, opens in a new tab",
+        "All agents: 0 completed in the last 24 hours, opens in a new tab",
+        "All agents: 0 completed in the last 7 days, opens in a new tab",
+        "All agents: 0 handed back in the last 24 hours, opens in a new tab",
+        "All agents: 0 released without a hand-back, opens in a new tab",
+        "All agents: none from claim to hand-back, the median, opens in a new tab",
     ]) {
         assert_eq!(link, want);
     }
@@ -837,12 +848,13 @@ fn a_load_between_writes_asks_the_store_nothing() {
         }
     };
     // ★ Each tab asks its own questions and none of the other's (ledger #2971). Per ledger, the
-    // Ledgers tab: the chart's counts. The Agents tab: its agents, and seven questions per agent.
+    // Ledgers tab: the chart's counts. The Agents tab: its agents, seven questions per agent, and
+    // the seven again across all of them for the totals row (ledger #3178).
     let tabs = [
         ("urn:iki:gonk:page:dashboard:ledgers", NAMES.len()),
         (
             "urn:iki:gonk:page:dashboard:agents",
-            NAMES.len() * (1 + 7 * AGENTS),
+            NAMES.len() * (1 + 7 * (AGENTS + 1)),
         ),
     ];
     // ⚠ A write to one ledger: every ledger's answers are asked again, and then not until the next.
@@ -855,4 +867,142 @@ fn a_load_between_writes_asks_the_store_nothing() {
             );
         }
     }
+}
+
+/// The totals row of `ledger` in `page`: each column's visible number and its link.
+fn totals_in(page: &str, ledger: &str) -> Vec<(String, String)> {
+    let panel =
+        agents_panel(page, ledger).unwrap_or_else(|| panic!("no panel for {ledger}: {page}"));
+    let foot = panel
+        .split_once("<tfoot>")
+        .and_then(|(_, rest)| rest.split_once("</tfoot>"))
+        .unwrap_or_else(|| panic!("no totals row: {panel}"))
+        .0;
+    assert!(
+        foot.starts_with("<tr><th scope=\"row\">All agents</th>"),
+        "{foot}"
+    );
+    cells_in(
+        &format!("id=\"agents-{ledger}-title\"{foot}</section>"),
+        ledger,
+        "All agents",
+    )
+}
+
+/// ★ The reproduction of ledger #3178: two agents worked the same item, and the totals row counts it
+/// once. A sum of the column would say 5 worked on; there are 3 items.
+#[test]
+fn a_total_is_the_distinct_count_never_the_columns_sum() {
+    let server = Server::readers(&["default"], &["default"]);
+    for n in 1..=3 {
+        server.file("default", &format!("sample item {n}"));
+    }
+    let (ann, bob) = ("ann", "bob");
+    // 1: both worked it and both handed it back; bob's was last, and it closed done.
+    server.claim("default", "1", ann);
+    server.hand_back("default", "1");
+    server.release("default", "1");
+    server.claim("default", "1", bob);
+    server.hand_back("default", "1");
+    server.close("default", "1", "done");
+    // 2: ann holds it.
+    server.claim("default", "2", ann);
+    // 3: both let it go with no hand-back.
+    server.claim("default", "3", ann);
+    server.release("default", "3");
+    server.claim("default", "3", bob);
+    server.release("default", "3");
+
+    let page = server.ok("/dashboard/agents");
+    let numbers = |holder: &str| -> Vec<String> {
+        cells_in(&page, "default", holder)
+            .into_iter()
+            .map(|c| c.0)
+            .collect()
+    };
+    assert_eq!(numbers(ann)[..6], ["1", "3", "0", "0", "1", "1"]);
+    assert_eq!(numbers(bob)[..6], ["0", "2", "1", "1", "1", "1"]);
+    let totals = totals_in(&page, "default");
+    let shown: Vec<&str> = totals.iter().map(|c| c.0.as_str()).collect();
+    // By hand: in flight {2}; worked on {1, 2, 3}, not 3 + 2; completed {1}, not ann's 0 + bob's 1
+    // read twice; two hand-backs, each one agent's; released {3}, not 1 + 1.
+    assert_eq!(shown[..6], ["1", "3", "1", "1", "2", "1"], "{totals:?}");
+    // The median of both hand-backs, never "none".
+    assert!(!["none", "unavailable"].contains(&shown[6]), "{totals:?}");
+
+    // Each total is its own link's answer, through the SPARQL face, like every other cell.
+    for (column, (shown, href)) in COLUMNS.iter().zip(&totals) {
+        let answer = server.through_the_face(href);
+        if *column == "median-claim-to-handback" {
+            assert_eq!(rows_of(&answer), 2, "every hand-back: {href}");
+        } else {
+            assert_eq!(rows_of(&answer).to_string(), *shown, "{column}: {href}");
+        }
+    }
+
+    // The set's own resource answers the same, and the stored text is the per-holder one, asked
+    // with `?holder` free.
+    let reader =
+        Capability::scoped(grants_for_all(&["default".to_string()], Authority::Read).unwrap());
+    let worked: Value = serde_json::from_slice(
+        &server
+            .ask(
+                "urn:iki:gonk:agent:question:name:worked-on",
+                &[("ledger", "default")],
+                &reader,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rows_of(&worked), 3);
+}
+
+/// A viewer who reads one ledger sees that ledger's totals, and the set's resource refuses the other.
+#[test]
+fn a_viewer_sees_totals_only_over_what_they_may_read() {
+    let server = Server::readers(&["default", "secret"], &["default"]);
+    server.file("default", "sample item");
+    server.claim("default", "1", "shared-agent");
+    for n in 1..=3 {
+        server.file("secret", "sample item");
+        server.claim("secret", &n.to_string(), "hidden-agent");
+    }
+    let page = server.ok("/dashboard/agents");
+    assert!(agents_panel(&page, "secret").is_none(), "{page}");
+    let totals = totals_in(&page, "default");
+    assert_eq!(totals[0].0, "1", "{totals:?}");
+    assert_eq!(totals[1].0, "1", "{totals:?}");
+    assert!(totals
+        .iter()
+        .all(|(_, href)| href.contains("ledger=default&")));
+
+    let reader =
+        Capability::scoped(grants_for_all(&["default".to_string()], Authority::Read).unwrap());
+    for name in COLUMNS {
+        let iri = format!("urn:iki:gonk:agent:question:name:{name}");
+        let refused = server
+            .ask(&iri, &[("ledger", "secret")], &reader)
+            .expect_err(&iri);
+        assert!(
+            matches!(refused, ikigai_core::Error::Denied(_)),
+            "{iri}: {refused}"
+        );
+    }
+}
+
+/// The poll's fragment carries the totals row, so a refresh moves it with the rows.
+#[test]
+fn the_polled_table_updates_the_totals() {
+    let server = Server::readers(&["default"], &["default"]);
+    server.file("default", "sample item");
+    server.claim("default", "1", "ann");
+    let fragment = "/dashboard/agents/default";
+    let before = server.ok(fragment);
+    assert_eq!(totals_in(&before, "default")[0].0, "1");
+    server.file("default", "another");
+    server.claim("default", "2", "bob");
+    let after = server.ok(fragment);
+    let totals = totals_in(&after, "default");
+    assert_eq!(totals[0].0, "2", "{totals:?}");
+    assert_eq!(totals[1].0, "2", "{totals:?}");
 }

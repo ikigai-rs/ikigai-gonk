@@ -6,6 +6,7 @@
 //! urn:iki:gonk:agent                                         Source  who ever took a claim, `ledger=` or all this grant reads
 //! urn:iki:gonk:agent:holder:{holder}                         Source  that holder's answers in `ledger=`, each with its link, as JSON
 //! urn:iki:gonk:agent:holder:{holder}:question:name:{name}    Source  one question, through `urn:sparql:select`
+//! urn:iki:gonk:agent:question:name:{name}                    Source  one question asked once of every holder
 //! urn:iki:gonk:view:agent                                    Source  the panels: a table per readable ledger, as HTML
 //! ```
 //!
@@ -42,6 +43,15 @@
 //! one ledger of 6,000 items, ten agents with 300 hand-backs each and one with 3,000: 109 ms between
 //! writes and 1.1 s after one, and no question over 60 ms, for the busiest agent.
 //!
+//! ★ **A total is the question asked once, never the column's sum** (ledger #3178). The set's own
+//! resource, `urn:iki:gonk:agent:question:name:{name}`, is the stored text with `?holder` left a
+//! variable ([`across`]), so a total is the distinct rows over every holder: two agents who worked
+//! the same item are two in their own rows and one in the total, and a sum would count it twice.
+//! The median is the middle of every hand-back, not a median of the rows' medians. A hand-back is
+//! one holder's, so its total is also its column's sum. No alias rule applies: every signature is
+//! somebody's, and a total counts them all. The totals row is the table's `<tfoot>`, and costs a
+//! panel seven more questions, cached like the rest.
+//!
 //! ⚠ **Write a question with grouping, not `NOT EXISTS`.** The store's planner runs a correlated
 //! `NOT EXISTS` over the events per row, and a question past the store's budget holds up that
 //! caller's next ones too (`every_question_answers_for_a_busy_agent`).
@@ -77,6 +87,10 @@ pub const QUESTION_TEMPLATE: &str = "urn:iki:gonk:question:name:{name}";
 pub const AGENT_TEMPLATE: &str = "urn:iki:gonk:agent:holder:{holder}";
 /// The grammar of one answer.
 pub const ANSWER_TEMPLATE: &str = "urn:iki:gonk:agent:holder:{holder}:question:name:{name}";
+/// The grammar of one answer across every holder: the set's own.
+pub const TOTAL_TEMPLATE: &str = "urn:iki:gonk:agent:question:name:{name}";
+/// The totals row's header, and whom its links name.
+pub const ALL_AGENTS: &str = "All agents";
 
 /// The stored query behind [`AGENTS_IRI`].
 const AGENTS_QUERY: &str = include_str!("questions/agents.rq");
@@ -207,19 +221,32 @@ pub fn filled(
     aliases: &HolderAliases,
 ) -> String {
     // The window first: the label is the one free text, so nothing may be substituted after it.
-    let text = match since {
+    let text = across(question, since);
+    if aliases.touches(holder) {
+        return folded(&text, holder, aliases);
+    }
+    let holder = format!("\"{}\"", sparql_string(holder));
+    parameter(&text, "?holder", &holder)
+}
+
+/// `question`'s text asked of every holder at once: the window written in and `?holder` left a
+/// variable, so the store answers the distinct rows across all of them.
+///
+/// ⚠ **Never the sum of a column.** "Worked on", say, is `SELECT DISTINCT` on the item, and two
+/// agents can work the same item: each row counts it, the sum would count it twice, and this counts
+/// it once. Each question's rows already name what they count (an item, or a hand-back), so leaving
+/// `?holder` free asks the same question of the set. The questions that join two events of one
+/// holder (the median, released) join them inside one block, where `?holder` is one variable, so a
+/// claim is still matched to its own holder's hand-back or release.
+pub fn across(question: &Question, since: Option<&str>) -> String {
+    match since {
         Some(since) => parameter(
             question.text,
             "?since",
             &format!("\"{}\"^^<{XSD_DATE_TIME}>", sparql_string(since)),
         ),
         None => question.text.to_string(),
-    };
-    if aliases.touches(holder) {
-        return folded(&text, holder, aliases);
     }
-    let holder = format!("\"{}\"", sparql_string(holder));
-    parameter(&text, "?holder", &holder)
 }
 
 /// The terms a question dates a signature with.
@@ -526,24 +553,7 @@ impl Endpoint for Answer {
         let holder = decode_holder(&binding(inv, "holder")?)?;
         let question = question(&binding(inv, "name")?)?;
         let ledger = asked_ledger(inv)?;
-        let given = inv.inline_str("since").ok();
-        let since = match (question.window_ms, given) {
-            (Some(_), Some(since)) if is_instant(since) => Some(since.to_string()),
-            (None, None) => None,
-            (Some(window), None) => Some(since_of(now_ms(inv)?, window)),
-            (Some(_), Some(since)) => {
-                return Err(Error::InvalidArgument {
-                    name: "since".to_string(),
-                    detail: format!("`{since}` is not a UTC dateTime ending in `Z`"),
-                })
-            }
-            (None, Some(_)) => {
-                return Err(Error::InvalidArgument {
-                    name: "since".to_string(),
-                    detail: format!("`{}` has no window", question.name),
-                })
-            }
-        };
+        let since = asked_since(inv, question)?;
         let query = filled(
             question,
             &holder,
@@ -572,15 +582,77 @@ impl Endpoint for Answer {
             .input(holder_arg())
             .input(name_arg(QUESTIONS.iter().map(|q| q.name)))
             .input(ledger_arg())
-            .input(
-                ArgSpec::new("since")
-                    .summary(
-                        "Where a windowed question's window starts, a UTC dateTime; the start of \
-                         this minute's window when omitted. Refused on a question with no window.",
-                    )
-                    .class(XSD_DATE_TIME)
-                    .optional(),
+            .input(since_arg())
+            .input(face_arg());
+        RESULT_FACES.iter().fold(desc, |d, face| d.output(*face))
+    }
+}
+
+fn since_arg() -> ArgSpec {
+    ArgSpec::new("since")
+        .summary(
+            "Where a windowed question's window starts, a UTC dateTime; the start of this \
+             minute's window when omitted. Refused on a question with no window.",
+        )
+        .class(XSD_DATE_TIME)
+        .optional()
+}
+
+/// The `since` argument, checked, or this minute's window when it is absent.
+fn asked_since(inv: &Invocation<'_>, question: &Question) -> Result<Option<String>> {
+    let given = inv.inline_str("since").ok();
+    Ok(match (question.window_ms, given) {
+        (Some(_), Some(since)) if is_instant(since) => Some(since.to_string()),
+        (None, None) => None,
+        (Some(window), None) => Some(since_of(now_ms(inv)?, window)),
+        (Some(_), Some(since)) => {
+            return Err(Error::InvalidArgument {
+                name: "since".to_string(),
+                detail: format!("`{since}` is not a UTC dateTime ending in `Z`"),
+            })
+        }
+        (None, Some(_)) => {
+            return Err(Error::InvalidArgument {
+                name: "since".to_string(),
+                detail: format!("`{}` has no window", question.name),
+            })
+        }
+    })
+}
+
+/// `urn:iki:gonk:agent:question:name:{name}`: one question asked once of every holder in `ledger`,
+/// the totals row's number ([`across`]).
+pub struct Total;
+
+#[async_trait]
+impl Endpoint for Total {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let question = question(&binding(inv, "name")?)?;
+        let ledger = asked_ledger(inv)?;
+        let since = asked_since(inv, question)?;
+        let query = across(question, since.as_deref());
+        let answer = asked(inv, &ledger.graph(), &query).await?;
+        Ok(answer.with_expiry(ikigai_core::Expiry::Always))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-agents-total"
+    }
+
+    fn describe(&self) -> Description {
+        let desc = Description::new(self.name())
+            .title("One question, asked once of every agent")
+            .summary(
+                "The stored question with `?holder` left free, through `urn:sparql:select`, over \
+                 `ledger`'s graph, under the caller's capability: the distinct rows across every \
+                 holder, never the sum of each holder's, so an item two agents worked is one.",
             )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(ikigai_store::CAP_READ_GRAPH)
+            .input(name_arg(QUESTIONS.iter().map(|q| q.name)))
+            .input(ledger_arg())
+            .input(since_arg())
             .input(face_arg());
         RESULT_FACES.iter().fold(desc, |d, face| d.output(*face))
     }
@@ -611,47 +683,7 @@ impl Endpoint for Agent {
         let segment = binding(inv, "holder")?;
         let holder = decode_holder(&segment)?;
         let ledger = asked_ledger(inv)?;
-        let mut answers = Vec::with_capacity(QUESTIONS.len());
-        for question in &QUESTIONS {
-            let since = match question.window_ms {
-                Some(window) => Some(since_of(now_ms(inv)?, window)),
-                None => None,
-            };
-            let mut read = with(
-                request(
-                    Verb::Source,
-                    &format!(
-                        "urn:iki:gonk:agent:holder:{segment}:question:name:{}",
-                        question.name
-                    ),
-                )?,
-                "ledger",
-                ledger.name(),
-            );
-            if let Some(since) = &since {
-                read = with(read, "since", since);
-            }
-            let answer = match fetch(inv, read).await {
-                Err(denied @ Error::Denied(_)) => return Err(denied),
-                Err(error) => Err(error.to_string()),
-                Ok(bytes) => serde_json::from_slice(&bytes)
-                    .map_err(|e| e.to_string())
-                    .and_then(|v| answered(question.reads, &v).map_err(|e| e.to_string())),
-            };
-            let query = filled(
-                question,
-                &holder,
-                since.as_deref(),
-                &self.web.holder_aliases,
-            );
-            let mut row =
-                json!({ "question": question.name, "href": sparql_href(&ledger, &query) });
-            match answer {
-                Ok(value) => row["answer"] = json!(value),
-                Err(error) => row["error"] = json!(error),
-            }
-            answers.push(row);
-        }
+        let answers = answers(inv, &ledger, Some(&holder), &self.web.holder_aliases).await?;
         let list = json!({ "holder": holder, "ledger": ledger.name(), "answers": answers });
         Ok(Representation::new(
             ReprType::new("application/json"),
@@ -680,6 +712,53 @@ impl Endpoint for Agent {
             .input(ledger_arg())
             .output("application/json")
     }
+}
+
+/// Each question's answer in `ledger` for `holder`, or for every holder at once when `None`, with
+/// its link: the rows of [`Agent`], and the totals row's.
+async fn answers(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    holder: Option<&str>,
+    aliases: &HolderAliases,
+) -> Result<Vec<Value>> {
+    let mut answers = Vec::with_capacity(QUESTIONS.len());
+    for question in &QUESTIONS {
+        let since = match question.window_ms {
+            Some(window) => Some(since_of(now_ms(inv)?, window)),
+            None => None,
+        };
+        let iri = match holder {
+            Some(holder) => format!(
+                "urn:iki:gonk:agent:holder:{}:question:name:{}",
+                url_segment(holder),
+                question.name
+            ),
+            None => format!("urn:iki:gonk:agent:question:name:{}", question.name),
+        };
+        let mut read = with(request(Verb::Source, &iri)?, "ledger", ledger.name());
+        if let Some(since) = &since {
+            read = with(read, "since", since);
+        }
+        let answer = match fetch(inv, read).await {
+            Err(denied @ Error::Denied(_)) => return Err(denied),
+            Err(error) => Err(error.to_string()),
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|v| answered(question.reads, &v).map_err(|e| e.to_string())),
+        };
+        let query = match holder {
+            Some(holder) => filled(question, holder, since.as_deref(), aliases),
+            None => across(question, since.as_deref()),
+        };
+        let mut row = json!({ "question": question.name, "href": sparql_href(ledger, &query) });
+        match answer {
+            Ok(value) => row["answer"] = json!(value),
+            Err(error) => row["error"] = json!(error),
+        }
+        answers.push(row);
+    }
+    Ok(answers)
 }
 
 /// An `xsd:dayTimeDuration` in words, its two largest units: `2 d 3 h`, `4 min 5 s`. `None` for
@@ -782,10 +861,18 @@ async fn holders(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<String>> {
         .collect())
 }
 
-/// The rows of `ledger`'s table and whom they name, or `Denied` when this viewer may not read it.
-async fn rows(inv: &Invocation<'_>, ledger: &Ledger) -> Result<(String, Vec<String>)> {
-    let mut out = String::new();
+/// The body and foot of `ledger`'s table and whom its rows name, or `Denied` when this viewer may
+/// not read it. With no holder it is empty, and the panel says so in a sentence.
+async fn rows(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    aliases: &HolderAliases,
+) -> Result<(String, Vec<String>)> {
     let holders = holders(inv, ledger).await?;
+    if holders.is_empty() {
+        return Ok((String::new(), holders));
+    }
+    let mut out = String::from("<tbody>");
     for holder in &holders {
         let iri = format!("urn:iki:gonk:agent:holder:{}", url_segment(holder));
         let read = with(request(Verb::Source, &iri)?, "ledger", ledger.name());
@@ -793,6 +880,12 @@ async fn rows(inv: &Invocation<'_>, ledger: &Ledger) -> Result<(String, Vec<Stri
             .map_err(|e| Error::Endpoint(format!("the answers were not JSON: {e}")))?;
         out.push_str(&row(holder, &answers)?);
     }
+    // ★ The totals: each question asked once over every holder, never the column's sum, which
+    // would count an item two agents worked twice ([`across`]).
+    let totals = json!({ "answers": answers(inv, ledger, None, aliases).await? });
+    out.push_str("</tbody><tfoot>");
+    out.push_str(&row(ALL_AGENTS, &totals)?);
+    out.push_str("</tfoot>");
     Ok((out, holders))
 }
 
@@ -806,7 +899,7 @@ async fn panel(inv: &Invocation<'_>, ledger: &Ledger, aliases: &HolderAliases) -
         ("href", href.as_str()),
     ];
     let mut applied = None;
-    let (note, rows) = match rows(inv, ledger).await {
+    let (note, rows) = match rows(inv, ledger, aliases).await {
         Err(Error::Denied(_)) => return None,
         Err(error) => (
             format!("The agents could not be read: {error}."),
