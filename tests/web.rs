@@ -3646,3 +3646,25 @@ fn outgoing_links_keep_all_rows_across_render_chunks() {
         "the listing's order across chunks"
     );
 }
+
+#[test]
+fn outgoing_link_rows_do_not_render_the_members_body() {
+    let server = Server::start();
+    let (record, id) = linked_fixture(&server, "default", "Plan for a large record");
+    // The body alone fits the renderer's byte limit, but enriching a full card duplicates
+    // it into view:content. A listing row needs neither copy.
+    let content = format!("A member with a large body\n\n{}", "x".repeat(600_000));
+    let (member, _) = linked_fixture(&server, "default", &content);
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!("<{record}> <https://ikigai-rs.dev/ns/ledger#related> <{member}> ."),
+    );
+    let page = server.page(&format!("/l/default/item/{id}/card"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(links_panel(&page.body).contains("A member with a large body"));
+    assert!(
+        page.body.len() < 20_000,
+        "the row does not carry a member body"
+    );
+}

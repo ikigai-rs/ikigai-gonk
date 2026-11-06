@@ -2531,9 +2531,37 @@ async fn linked_row(inv: &Invocation<'_>, ledger: &Ledger, target: &str) -> Opti
     }
     let read = with(request(Verb::Source, target).ok()?, "as", "text/turtle");
     let mut row = Graph::from_turtle(&fetch(inv, read).await.ok()?).ok()?;
+    // An item face includes its body, comments and outgoing edges; the listing row needs
+    // only these fields. In particular, a large body must not be duplicated into
+    // view:content and spend the bounded row chunk's byte budget (#3197).
     row.retain(|t| {
-        matches!(&t.subject,
-        NamedOrBlankNode::NamedNode(s) if s.as_str() == target)
+        let predicate = t.predicate.as_str();
+        let displayed = matches!(
+            predicate,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                | "http://purl.org/dc/terms/title"
+                | "http://purl.org/dc/terms/created"
+                | "http://purl.org/dc/terms/modified"
+        ) || predicate.strip_prefix(LEDGER_NS).is_some_and(|local| {
+            matches!(
+                local,
+                "number"
+                    | "status"
+                    | "closedReason"
+                    | "priority"
+                    | "deferred"
+                    | "state"
+                    | "claimedBy"
+                    | "claimKind"
+                    | "lease"
+                    | "leaseExpires"
+                    | "awaiting"
+                    | "label"
+            )
+        });
+        displayed
+            && matches!(&t.subject,
+            NamedOrBlankNode::NamedNode(s) if s.as_str() == target)
     });
     if !row
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
