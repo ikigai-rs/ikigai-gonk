@@ -2184,13 +2184,30 @@
           <xsl:attribute name="action"><xsl:value-of select="@page-url"/></xsl:attribute>
           <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/></xsl:attribute>
           <input type="hidden" name="status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
-          <label class="sr-only" for="search-text">Search titles</label>
-          <input id="search-text" type="search" name="text" placeholder="Search titles">
-            <xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute>
-          </input>
+          <input type="hidden" name="limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
+          <div class="search-field">
+            <label for="search-text">Search titles</label>
+            <input id="search-text" type="search" name="text" placeholder="Search titles">
+              <xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute>
+            </input>
+          </div>
+          <div class="search-field">
+            <label for="search-labels">Labels (all must match)</label>
+            <input id="search-labels" name="labels" type="text" aria-describedby="label-filter-help">
+              <xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute>
+            </input>
+          </div>
+          <div class="search-field">
+            <label for="search-without">Without (none may match)</label>
+            <input id="search-without" name="without" type="text" aria-describedby="label-filter-help">
+              <xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute>
+            </input>
+          </div>
           <button type="submit" class="quiet">Search</button>
+          <p id="label-filter-help" class="note">Separate labels with commas.</p>
         </form>
       </header>
+      <xsl:apply-templates select="view:label-filters"/>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
@@ -2199,6 +2216,10 @@
           <input type="hidden" name="_then" value="items"/>
           <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="@ledger"/></xsl:attribute></input>
           <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
+          <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute></input>
+          <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute></input>
+          <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
+          <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
           <textarea id="file-content" name="content" rows="3" required="required"></textarea>
           <details>
@@ -2264,12 +2285,33 @@
     </section>
   </xsl:template>
 
+  <xsl:template match="view:label-filters">
+    <div class="active-filters">
+      <p>Label filters in force. The chart counts this status across all labels. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
+      <ul><xsl:apply-templates select="view:filter-term"/></ul>
+    </div>
+  </xsl:template>
+
+  <xsl:template match="view:filter-term">
+    <li><xsl:value-of select="@description"/><xsl:text>: </xsl:text><strong><xsl:value-of select="@term"/></strong><xsl:text>. </xsl:text>
+      <a><xsl:attribute name="href"><xsl:value-of select="@remove"/></xsl:attribute>Remove <xsl:value-of select="@term"/></a><xsl:text> · </xsl:text>
+      <a><xsl:attribute name="href"><xsl:value-of select="@move"/></xsl:attribute><xsl:value-of select="@action"/><xsl:value-of select="' '"/><xsl:value-of select="@term"/></a>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:label-chip">
+    <span class="label-actions">
+      <a class="badge label"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@term"/></a><xsl:value-of select="' '"/>
+      <a class="note"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@term"/></a>
+    </span>
+  </xsl:template>
+
   <xsl:template name="status-link">
     <xsl:param name="status"/>
     <a hx-target="#ledger" hx-swap="outerHTML">
-      <xsl:attribute name="href"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
-      <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
-      <xsl:attribute name="hx-push-url"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
+      <xsl:attribute name="href"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/><xsl:value-of select="@status-tail"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/>?status=<xsl:value-of select="$status"/><xsl:value-of select="@status-tail"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/><xsl:value-of select="@status-tail"/></xsl:attribute>
       <xsl:if test="@status = $status"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
       <xsl:value-of select="$status"/>
     </a>
@@ -2294,6 +2336,10 @@
             <input type="hidden" name="_then" value="items"/>
             <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
             <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
+            <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="view:listLabels"/></xsl:attribute></input>
+            <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="view:listWithout"/></xsl:attribute></input>
+            <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="view:listText"/></xsl:attribute></input>
+            <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
             <button type="submit" class="quiet small">
               <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> with the ledger's default reason</xsl:attribute>
@@ -2323,7 +2369,10 @@
     <span class="badge priority"><xsl:value-of select="view:priority"/></span>
     <xsl:if test="view:deferred = 'true'"><span class="badge deferred">deferred</span></xsl:if>
     <xsl:if test="ledger:claimedBy"><span class="badge claimed">claimed by <xsl:value-of select="ledger:claimedBy"/></span></xsl:if>
-    <xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each>
+    <xsl:choose>
+      <xsl:when test="view:label-chip"><xsl:apply-templates select="view:label-chip"/></xsl:when>
+      <xsl:otherwise><xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each></xsl:otherwise>
+    </xsl:choose>
   </xsl:template>
 
   <!-- Ledger #1617: the configured lifecycle, with counts from the viewer's ledger. -->

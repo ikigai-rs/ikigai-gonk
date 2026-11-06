@@ -22,11 +22,19 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 11] = [
+const PAGES: [(&str, &str); 13] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
     ("ledger.html", "/l/default"),
+    (
+        "label-filter.html",
+        "/l/default?labels=needs-person&without=blocked",
+    ),
+    (
+        "label-empty.html",
+        "/l/default?labels=missing&without=blocked",
+    ),
     ("closed.html", "/l/default?status=closed"),
     ("item.html", "/l/default/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
@@ -86,6 +94,10 @@ fn main() {
         .with_arg(
             "content",
             ArgRef::Inline(b"An item for the checker to read".to_vec()),
+        )
+        .with_arg(
+            "labels",
+            ArgRef::Inline(b"needs-person,book:ikigai".to_vec()),
         ),
         &Capability::root(),
     ))
