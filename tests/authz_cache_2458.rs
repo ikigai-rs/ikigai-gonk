@@ -53,6 +53,7 @@ impl Fixture {
             anonymous: vec![],
             bind: "127.0.0.1:1062".parse().unwrap(),
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: 5000,
         };
         let request = ikigai_web::HttpRequest {

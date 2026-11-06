@@ -694,10 +694,10 @@ fn nav_with(
         ));
     }
     // ★ The RDF Toolbox (ledger [#2021](http://localhost:1062/l/default/item/2021)), when this
-    // server serves one. No grant gates it: the door adds the toolbox's file reads to the
-    // anonymous grant whenever the build is configured (`main`, `Toolbox::grants`), and a
-    // signed-in caller holds the anonymous grant plus its own, so every caller of a server that
-    // has it may open it.
+    // server serves one. No grant gates it: the toolbox's file reads are among the door's public
+    // reads whenever the build is configured (`main`, `Toolbox::grants`, `HttpDoor::public`),
+    // which the anonymous loopback caller and every live passkey session hold from any peer
+    // (ledger #3202), so every caller this server serves at all may open it.
     if web.toolbox {
         out.push_str(&element(
             "toolbox-link",
@@ -706,8 +706,8 @@ fn nav_with(
         ));
     }
     // ★ A deployment's own pages (ledger [#3199](http://localhost:1062/l/default/item/3199)),
-    // beside Views and Layers. Ungated on the toolbox's rule: the door adds each face's read to
-    // the anonymous grant (`main`, `Face::grants`), and what the face's scripts then fetch is
+    // beside Views and Layers. Ungated on the toolbox's rule: each face's read is one of the
+    // door's public reads (`main`, `Face::grants`, `HttpDoor::public`), and what the face's scripts then fetch is
     // judged under the viewer's own capability.
     for name in &web.faces {
         let href = format!("{}/{name}", crate::face::PATH);

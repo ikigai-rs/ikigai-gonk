@@ -11,9 +11,12 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 
+mod common;
+
+use common::Authenticator;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
-use ikigai_gonk::grants::{anonymous_http_grants, toolbox_read_grants};
-use ikigai_gonk::identity::Passkeys;
+use ikigai_gonk::grants::{anonymous_http_grants, grants_for, toolbox_read_grants, Authority};
+use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::toolbox::{self, Toolbox};
 use ikigai_gonk::{compose, config, doors, quic, web};
 use ikigai_store::DurableStore;
@@ -46,6 +49,7 @@ fn build(dir: &Path) {
 struct Server {
     addr: SocketAddr,
     hub: Arc<Kernel>,
+    layout: quic::Layout,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -58,6 +62,21 @@ impl Server {
 
     /// The same door, whose anonymous caller reads exactly the ledgers `readable` names.
     fn start_reading(with_toolbox: bool, readable: &[String]) -> Server {
+        Server::start_from(with_toolbox, readable, None)
+    }
+
+    /// The same door, as a caller on ANOTHER MACHINE reaches it: every request's capability
+    /// is computed with a non-loopback peer in place of the test connection's loopback one.
+    /// The transport, the edge and the cookie are the real ones (ledger #3202).
+    fn start_remote(with_toolbox: bool, readable: &[String]) -> Server {
+        Server::start_from(with_toolbox, readable, Some("192.0.2.7".parse().unwrap()))
+    }
+
+    fn start_from(
+        with_toolbox: bool,
+        readable: &[String],
+        peer: Option<std::net::IpAddr>,
+    ) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -68,7 +87,7 @@ impl Server {
         build(dist.path());
         let layout = quic::Layout::in_config_home(config.path());
         let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-        let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
+        let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
@@ -82,10 +101,8 @@ impl Server {
             faces: Vec::new(),
         });
         let toolbox = with_toolbox.then(|| Toolbox::at(dist.path().to_path_buf()).unwrap());
-        let mut anonymous = anonymous_http_grants(readable).unwrap();
-        if let Some(toolbox) = &toolbox {
-            anonymous.extend(toolbox.grants());
-        }
+        let anonymous = anonymous_http_grants(readable).unwrap();
+        let public = toolbox.as_ref().map(Toolbox::grants).unwrap_or_default();
         let faces = toolbox.as_ref().map(Toolbox::spaces).unwrap_or_default();
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
@@ -97,6 +114,7 @@ impl Server {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public,
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         let edge = doors::edge_config(door.clone());
@@ -105,17 +123,27 @@ impl Server {
         } else {
             edge
         };
+        let cap = doors::http_cap(door);
+        let cap: ikigai_web::CapFn = match peer {
+            None => cap,
+            Some(peer) => Arc::new(move |request: &ikigai_web::HttpRequest| {
+                cap(&ikigai_web::HttpRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    headers: request.headers.clone(),
+                    body: request.body.clone(),
+                    peer: Some(peer),
+                })
+            }),
+        };
         std::thread::spawn(move || {
-            runtime.block_on(ikigai_web::serve_with_listener(
-                http,
-                doors::http_cap(door),
-                listener,
-                edge,
-            ))
+            runtime.block_on(ikigai_web::serve_with_listener(http, cap, listener, edge))
         });
         Server {
             addr,
             hub,
+            layout,
             _dirs: vec![config, dist],
         }
     }
@@ -145,6 +173,63 @@ impl Server {
             .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec()));
         futures::executor::block_on(Kernel::issue(&self.hub, request, &Capability::root()))
             .expect("append");
+    }
+
+    fn origin(&self) -> String {
+        format!("http://localhost:{}", self.addr.port())
+    }
+
+    /// A same-origin JSON POST, as the passkey ceremonies send.
+    fn post_json(&self, path: &str, body: &str) -> Response {
+        let mut stream = TcpStream::connect(self.addr).expect("connect");
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: application/json\r\n\
+             Content-Type: application/json\r\nOrigin: {origin}\r\nSec-Fetch-Site: same-origin\r\n\
+             Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            port = self.addr.port(),
+            origin = self.origin(),
+            len = body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        Response::parse(&response)
+    }
+
+    /// Enroll a passkey under a grant that READS the `default` ledger and nothing else, sign
+    /// in over HTTP, and return the session token.
+    fn sign_in(&self) -> String {
+        let authenticator = Authenticator::new();
+        let invite = identity::invite(
+            &self.layout,
+            "person",
+            &grants_for("default", Authority::Read).unwrap(),
+            false,
+            30,
+            identity::now_seconds(),
+        )
+        .unwrap();
+        let challenge = |op: &str| {
+            let answer = self.post_json(&format!("/auth/{op}"), "{}");
+            assert_eq!(answer.status, 200, "{answer:?}");
+            let v: serde_json::Value =
+                serde_json::from_slice(&answer.body).expect("a JSON challenge");
+            v["challenge"].as_str().unwrap().to_string()
+        };
+        let c = challenge("register-options");
+        let registered = self.post_json(
+            "/auth/register",
+            &authenticator.register_body(&c, &invite, &self.origin()),
+        );
+        assert_eq!(registered.status, 200, "{registered:?}");
+        let c = challenge("login-options");
+        let login = self.post_json(
+            "/auth/login",
+            &authenticator.login_body(&c, &self.origin(), 1),
+        );
+        assert_eq!(login.status, 200, "{login:?}");
+        let v: serde_json::Value = serde_json::from_slice(&login.body).expect("a JSON session");
+        v["session"].as_str().unwrap().to_string()
     }
 
     /// A person opening a page by typing its address.
@@ -376,6 +461,52 @@ fn a_caller_without_the_ledger_read_gets_the_samples() {
         check.text().contains(r#"about="urn:iki:ledger:items""#),
         "{check:?}"
     );
+}
+
+/// ★ Ledger [#3202](http://localhost:1062/l/default/item/3202): a viewer signed in from ANOTHER
+/// machine loads the toolbox (its page, its script, its engine) under their passkey session,
+/// with nothing copied into their grant by hand. Its input is still read under that session's
+/// own grant, and a caller from another machine with no session gets nothing.
+#[test]
+fn the_toolbox_loads_for_a_viewer_signed_in_from_another_machine() {
+    // The anonymous grant reads nothing, so whatever the session reads is its own grant's.
+    let gonk = Server::start_remote(true, &[]);
+    gonk.file("An item the toolbox reads");
+
+    // No session: a caller from another machine is refused the toolbox's files.
+    let js = gonk.get("/toolbox/app.js", "*/*");
+    assert_eq!(js.status, 403, "{js:?}");
+    assert!(!js.contains(APP_JS.as_bytes()), "{js:?}");
+    let page = gonk.open("/toolbox");
+    assert_ne!(page.status, 200, "{page:?}");
+
+    let session = gonk.sign_in();
+    let cookie = format!("Cookie: gonk_session={session}\r\n");
+    let same = format!("Sec-Fetch-Site: same-origin\r\n{cookie}");
+    let page = gonk.fetch("/toolbox", "text/html", &same);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(media(&page).starts_with("text/html"), "{page:?}");
+    let js = gonk.fetch("/toolbox/app.js", "*/*", &same);
+    assert_eq!(js.status, 200, "{js:?}");
+    assert!(js.contains(APP_JS.as_bytes()), "{js:?}");
+    let wasm = gonk.fetch("/toolbox/engine.wasm", "*/*", &same);
+    assert_eq!(wasm.status, 200, "{wasm:?}");
+    assert!(wasm.contains(WASM), "the engine's bytes");
+
+    // Its inputs: the session's ledger reads, another ledger stays refused.
+    let input = gonk.fetch(
+        "/toolbox/input/urn%3Aiki%3Aledger%3Adefault%3Aitems",
+        "*/*",
+        &same,
+    );
+    assert_eq!(input.status, 200, "{input:?}");
+    assert!(input.contains(b"An item the toolbox reads"), "{input:?}");
+    let secret = gonk.fetch(
+        "/toolbox/input/urn%3Aiki%3Aledger%3Asecret%3Aitems",
+        "*/*",
+        &same,
+    );
+    assert_eq!(secret.status, 403, "{secret:?}");
 }
 
 #[test]

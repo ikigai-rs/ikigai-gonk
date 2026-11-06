@@ -383,6 +383,7 @@ fn a_browser_negotiates_the_targets_faces_through_a_view() {
         anonymous: grants_for("default", Authority::Read).unwrap(),
         bind: addr,
         passkeys: None,
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     let server = runtime.spawn(ikigai_web::serve_with_listener(
