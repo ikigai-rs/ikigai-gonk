@@ -88,6 +88,7 @@ impl Server {
             anonymous: grants_for("default", Authority::Read).unwrap(),
             bind: addr,
             passkeys: passkeys.then_some(keys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         std::thread::spawn(move || {

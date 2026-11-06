@@ -83,6 +83,7 @@ fn a_plain_forms_null_origin_is_ours_only_when_the_browser_says_same_origin() {
         anonymous: Vec::new(),
         bind,
         passkeys: None,
+        public: Vec::new(),
         anonymous_sparql_budget_ms: 0,
     };
     let own = post(&[("origin", "null"), ("sec-fetch-site", "same-origin")]);

@@ -2378,7 +2378,7 @@
       <span class="badges">
         <xsl:call-template name="badges"/>
       </span>
-      <xsl:if test="view:canWrite = 'true'">
+      <xsl:if test="view:canWrite = 'true' and not(view:linked)">
         <xsl:if test="view:status = 'open'">
           <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
             <input type="hidden" name="_action" value="close"/>
@@ -2396,6 +2396,19 @@
             </button>
           </form>
         </xsl:if>
+      </xsl:if>
+      <xsl:if test="view:canUnlink = 'true'">
+        <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <input type="hidden" name="_action" value="link"/>
+          <input type="hidden" name="_verb" value="Delete"/>
+          <input type="hidden" name="_then" value="card"/>
+          <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:sourceLedger"/></xsl:attribute></input>
+          <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:sourceId"/></xsl:attribute></input>
+          <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:sourceItem"/></xsl:attribute></input>
+          <input type="hidden" name="content"><xsl:attribute name="value"><xsl:value-of select="view:target"/></xsl:attribute></input>
+          <input type="hidden" name="type"><xsl:attribute name="value"><xsl:value-of select="view:rel"/></xsl:attribute></input>
+          <button type="submit" class="quiet small"><xsl:attribute name="aria-label">Unlink <xsl:value-of select="dcterms:title"/> (<xsl:value-of select="view:rel"/>)</xsl:attribute>Unlink</button>
+        </form>
       </xsl:if>
     </li>
   </xsl:template>
@@ -2504,18 +2517,25 @@
 
   <!-- ============================================================ one item -->
 
+  <xsl:template match="view:link-group">
+    <div class="link-group">
+      <h3><xsl:value-of select="@relation"/><xsl:text> · </xsl:text><xsl:value-of select="@ledger"/></h3>
+      <p class="count"><xsl:value-of select="view:rollup"/></p>
+      <ol class="items"><xsl:apply-templates select="view:slot"/></ol>
+    </div>
+  </xsl:template>
+
   <xsl:template name="item">
     <article id="item" class="item-page">
       <xsl:apply-templates select="view:flash"/>
       <xsl:apply-templates select="rdf:RDF/ledger:Item" mode="card"/>
-      <xsl:if test="count(rdf:RDF/view:Link) &gt; 0">
+      <xsl:if test="view:link-group or view:unavailable-link">
         <section class="panel links" aria-labelledby="links-title">
           <h2 id="links-title">Links</h2>
-          <ul class="plain">
-            <xsl:apply-templates select="rdf:RDF/view:Link">
-              <xsl:sort select="view:order"/>
-            </xsl:apply-templates>
-          </ul>
+          <xsl:apply-templates select="view:link-group"/>
+          <xsl:if test="view:unavailable-link">
+            <ul class="plain"><xsl:apply-templates select="view:unavailable-link/rdf:RDF/view:Link"/></ul>
+          </xsl:if>
         </section>
       </xsl:if>
       <!-- The inbound parent edges (ledger #1501): src/web.rs::enrich_children. -->

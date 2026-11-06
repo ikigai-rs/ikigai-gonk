@@ -9,22 +9,29 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 
+mod common;
+
+use common::Authenticator;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::face::{self, Face};
-use ikigai_gonk::grants::anonymous_http_grants;
-use ikigai_gonk::identity::Passkeys;
+use ikigai_gonk::grants::{anonymous_http_grants, grants_for, Authority};
+use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::{compose, config, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const INDEX: &str = "<!doctype html><title>Demo face</title><script src=\"js/app.js\"></script>\n";
-const APP_JS: &str = "fetch('/iki/ledger/items');\n";
+const INDEX: &str = "<!doctype html><title>Demo face</title><link rel=\"stylesheet\" href=\"app.css\"><script type=\"module\" src=\"js/app.js\"></script>\n";
+const APP_JS: &str = "import './kit.js';\nfetch('/iki/ledger/items');\n";
+const KIT_JS: &str = "export const ready = true;\n";
+const APP_CSS: &str = "body { color: inherit; }\n";
 const SECRET: &str = "outside the face, never served";
 
 /// A scratch face directory, and beside it (`outside`) a secret the face must never reach.
 fn build(dir: &Path, outside: &Path) {
     std::fs::write(dir.join("index.html"), INDEX).unwrap();
+    std::fs::write(dir.join("app.css"), APP_CSS).unwrap();
     std::fs::create_dir(dir.join("js")).unwrap();
     std::fs::write(dir.join("js").join("app.js"), APP_JS).unwrap();
+    std::fs::write(dir.join("js").join("kit.js"), KIT_JS).unwrap();
     std::fs::write(dir.join(".env.txt"), SECRET).unwrap();
     std::fs::write(dir.join("notes.key"), SECRET).unwrap();
     std::fs::write(outside.join("secret.html"), SECRET).unwrap();
@@ -40,6 +47,7 @@ fn build(dir: &Path, outside: &Path) {
 struct Server {
     addr: SocketAddr,
     hub: Arc<Kernel>,
+    layout: quic::Layout,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -52,6 +60,17 @@ impl Server {
 
     /// The same door, whose anonymous caller reads exactly the ledgers `readable` names.
     fn start_reading(with_face: bool, readable: &[String]) -> Server {
+        Server::start_from(with_face, readable, None)
+    }
+
+    /// The same door, as a caller on ANOTHER MACHINE reaches it: every request's capability
+    /// is computed with `peer` (a non-loopback address) in place of the loopback address the
+    /// test's own connection has. The transport, the edge and the cookie are the real ones.
+    fn start_remote(with_face: bool, readable: &[String]) -> Server {
+        Server::start_from(with_face, readable, Some("192.0.2.7".parse().unwrap()))
+    }
+
+    fn start_from(with_face: bool, readable: &[String], peer: Option<std::net::IpAddr>) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -63,7 +82,7 @@ impl Server {
         build(dist.path(), outside.path());
         let layout = quic::Layout::in_config_home(config.path());
         let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
-        let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
+        let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string()],
@@ -85,10 +104,8 @@ impl Server {
         } else {
             Vec::new()
         };
-        let mut anonymous = anonymous_http_grants(readable).unwrap();
-        for face in &faces {
-            anonymous.extend(face.grants());
-        }
+        let anonymous = anonymous_http_grants(readable).unwrap();
+        let public: Vec<String> = faces.iter().flat_map(Face::grants).collect();
         let faces = face::spaces(&faces);
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
@@ -100,21 +117,32 @@ impl Server {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public,
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         let edge = doors::edge_config(door.clone());
         let edge = if with_face { face::route(edge) } else { edge };
+        let cap = doors::http_cap(door);
+        let cap: ikigai_web::CapFn = match peer {
+            None => cap,
+            Some(peer) => Arc::new(move |request: &ikigai_web::HttpRequest| {
+                cap(&ikigai_web::HttpRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    headers: request.headers.clone(),
+                    body: request.body.clone(),
+                    peer: Some(peer),
+                })
+            }),
+        };
         std::thread::spawn(move || {
-            runtime.block_on(ikigai_web::serve_with_listener(
-                http,
-                doors::http_cap(door),
-                listener,
-                edge,
-            ))
+            runtime.block_on(ikigai_web::serve_with_listener(http, cap, listener, edge))
         });
         Server {
             addr,
             hub,
+            layout,
             _dirs: vec![config, dist, outside],
         }
     }
@@ -144,6 +172,62 @@ impl Server {
             .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec()));
         futures::executor::block_on(Kernel::issue(&self.hub, request, &Capability::root()))
             .expect("append");
+    }
+
+    fn origin(&self) -> String {
+        format!("http://localhost:{}", self.addr.port())
+    }
+
+    /// A same-origin JSON POST, as the passkey ceremonies send.
+    fn post_json(&self, path: &str, body: &str) -> Response {
+        let mut stream = TcpStream::connect(self.addr).expect("connect");
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: application/json\r\n\
+             Content-Type: application/json\r\nOrigin: {origin}\r\nSec-Fetch-Site: same-origin\r\n\
+             Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            port = self.addr.port(),
+            origin = self.origin(),
+            len = body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        Response::parse(&response)
+    }
+
+    /// Enroll a passkey under a grant that READS the `default` ledger and nothing else, sign
+    /// in over HTTP, and return the session token.
+    fn sign_in(&self) -> String {
+        let authenticator = Authenticator::new();
+        let invite = identity::invite(
+            &self.layout,
+            "person",
+            &grants_for("default", Authority::Read).unwrap(),
+            false,
+            30,
+            identity::now_seconds(),
+        )
+        .unwrap();
+        let challenge = |op: &str| {
+            let answer = self.post_json(&format!("/auth/{op}"), "{}");
+            assert_eq!(answer.status, 200, "{answer:?}");
+            let v: serde_json::Value = serde_json::from_str(&answer.text()).unwrap();
+            v["challenge"].as_str().unwrap().to_string()
+        };
+        let c = challenge("register-options");
+        let registered = self.post_json(
+            "/auth/register",
+            &authenticator.register_body(&c, &invite, &self.origin()),
+        );
+        assert_eq!(registered.status, 200, "{registered:?}");
+        let c = challenge("login-options");
+        let login = self.post_json(
+            "/auth/login",
+            &authenticator.login_body(&c, &self.origin(), 1),
+        );
+        assert_eq!(login.status, 200, "{login:?}");
+        let v: serde_json::Value = serde_json::from_str(&login.text()).unwrap();
+        v["session"].as_str().unwrap().to_string()
     }
 
     /// A person opening a page by typing its address.
@@ -229,6 +313,40 @@ fn a_face_serves_under_the_doors_default_csp() {
         Some(ikigai_web::HTML_DOOR_CSP),
         "{script:?}"
     );
+}
+
+/// The slash form is the base for relative stylesheet, module and module-import URLs.
+/// The bare form remains an index response until the redirect is available upstream.
+#[test]
+fn slash_front_page_loads_relative_assets_and_bare_front_page_still_serves() {
+    let gonk = Server::start(true);
+    let base = "/face/name/demo/";
+    let page = gonk.open(base);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert_eq!(page.text(), INDEX);
+
+    // ./kit.js in js/app.js resolves beside that module, to js/kit.js.
+    for (relative, content_type, content) in [
+        ("app.css", "text/css", APP_CSS),
+        ("js/app.js", "text/javascript", APP_JS),
+        ("js/kit.js", "text/javascript", KIT_JS),
+    ] {
+        let asset = gonk.get(&format!("{base}{relative}"), "*/*");
+        assert_eq!(asset.status, 200, "{relative}: {asset:?}");
+        assert!(media(&asset).starts_with(content_type), "{asset:?}");
+        assert_eq!(asset.text(), content);
+    }
+    for path in ["/face/name/demo", "/face/name/demo?view=compact"] {
+        let bare = gonk.open(path);
+        assert_eq!(bare.status, 200, "{bare:?}");
+        assert_eq!(bare.text(), INDEX);
+        assert_eq!(bare.header("location"), None);
+    }
+    for path in ["/face/name/unknown", "/face/name/unknown/"] {
+        let missing = gonk.open(path);
+        assert_eq!(missing.status, 404, "{missing:?}");
+        assert_eq!(missing.header("location"), None);
+    }
 }
 
 /// ★ Path traversal out of the directory is refused, however it is spelled, and the secret
@@ -332,6 +450,55 @@ fn a_faces_fetch_is_judged_under_the_viewers_grant() {
     assert!(!refused.text().contains("may not read"), "{refused:?}");
 }
 
+/// ★ Ledger [#3202](http://localhost:1062/l/default/item/3202): a viewer signed in from ANOTHER
+/// machine loads the face (its page and its script) under their passkey session, with nothing
+/// copied into their grant by hand. What the face then fetches is still judged under that
+/// session's own grant, and a caller from another machine with no session gets nothing.
+#[test]
+fn a_face_loads_for_a_viewer_signed_in_from_another_machine() {
+    let script = "Sec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n";
+    // The anonymous grant reads nothing, so whatever the session reads is its own grant's.
+    let gonk = Server::start_remote(true, &[]);
+    gonk.file("An item the signed-in viewer reads");
+
+    // No session: a caller from another machine is refused the face and the ledger.
+    let page = gonk.open("/face/name/demo");
+    assert_eq!(page.status, 403, "{page:?}");
+    assert!(!page.text().contains("Demo face"), "{page:?}");
+    let script_file = gonk.get("/face/name/demo/js/app.js", "*/*");
+    assert_eq!(script_file.status, 403, "{script_file:?}");
+    assert_eq!(
+        gonk.fetch("/iki/ledger/items", "text/turtle", script)
+            .status,
+        403
+    );
+
+    let session = gonk.sign_in();
+    let cookie = format!("Cookie: gonk_session={session}\r\n");
+    let html = format!("Sec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: navigate\r\n{cookie}");
+    let page = gonk.fetch("/face/name/demo", "text/html", &html);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert_eq!(page.text(), INDEX);
+    let loaded = gonk.fetch(
+        "/face/name/demo/js/app.js",
+        "*/*",
+        &format!("Sec-Fetch-Site: same-origin\r\nSec-Fetch-Dest: script\r\n{cookie}"),
+    );
+    assert_eq!(loaded.status, 200, "{loaded:?}");
+    assert_eq!(loaded.text(), APP_JS);
+
+    // The face's fetches: the session's ledger reads, another ledger stays refused.
+    let fetched = format!("{script}{cookie}");
+    let read = gonk.fetch("/iki/ledger/items", "text/turtle", &fetched);
+    assert_eq!(read.status, 200, "{read:?}");
+    assert!(
+        read.text().contains("An item the signed-in viewer reads"),
+        "{read:?}"
+    );
+    let other = gonk.fetch("/iki/ledger/secret/items", "text/turtle", &fetched);
+    assert_eq!(other.status, 403, "{other:?}");
+}
+
 /// With no `gonk.face` line there is no face, and the header offers none.
 #[test]
 fn no_line_no_face() {
@@ -351,7 +518,7 @@ fn the_header_links_each_face() {
     let page = home.text();
     let header = &page[..page.find("</header>").expect("a header")];
     assert!(
-        header.contains("<a class='navlink' href='/face/name/demo'>demo</a>"),
+        header.contains("<a class='navlink' href='/face/name/demo/'>demo</a>"),
         "{header}"
     );
 }
@@ -375,6 +542,7 @@ fn a_face_line_is_checked_at_start() {
     let configured = settings("gonk.face = \"ops ~/ops\"\n").unwrap();
     assert_eq!(configured.faces.len(), 1);
     assert_eq!(configured.faces[0].name(), "ops");
+    assert_eq!(configured.faces[0].href(), "/face/name/ops/");
     assert_eq!(configured.faces[0].dir(), ops.as_path());
 
     let missing = settings("gonk.face = \"ops ~/nowhere\"\n").unwrap_err();

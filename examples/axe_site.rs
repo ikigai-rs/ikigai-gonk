@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 15] = [
+const PAGES: [(&str, &str); 16] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -37,6 +37,7 @@ const PAGES: [(&str, &str); 15] = [
     ),
     ("closed.html", "/l/default?status=closed"),
     ("item.html", "/l/default/item/1"),
+    ("linked-item.html", "/l/default/item/4"),
     ("named-ledger.html", "/l/crew"),
     ("named-item.html", "/l/crew/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
@@ -77,6 +78,19 @@ fn get(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
     (status, response[split + 4..].to_vec())
 }
 
+fn appended_iri(bytes: &[u8], ledger: &str) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let prefix = format!("urn:iki:ledger:{ledger}:item:");
+    let id: String = text
+        .split(&prefix)
+        .nth(1)
+        .expect("the append names its item")
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    format!("{prefix}{id}")
+}
+
 fn main() {
     let out = PathBuf::from(std::env::args().nth(1).expect("usage: axe_site <out-dir>"));
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
@@ -104,7 +118,7 @@ fn main() {
         &Capability::root(),
     ))
     .expect("the scratch item");
-    block_on(Kernel::issue(
+    let crew = block_on(Kernel::issue(
         &hub,
         Request::new(
             Verb::Sink,
@@ -167,6 +181,36 @@ fn main() {
         &Capability::root(),
     ))
     .expect("the badge facts");
+    // #3197: an outgoing flight plan with live badges, another readable ledger,
+    // a self-link and unavailable/external IRIs. No inbound links are introduced.
+    let record = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg("content", ArgRef::Inline(b"A live flight plan".to_vec())),
+        &Capability::root(),
+    ))
+    .expect("the flight plan");
+    let record = appended_iri(&record.bytes, "default");
+    let crew = appended_iri(&crew.bytes, "crew");
+    let links = format!(
+        "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+         <{record}> ledger:related <{flying}>, <{waiting}>, <{crew}> ; \
+         ledger:parent <{record}> ; ledger:blocks <urn:iki:ledger:private:item:01unreadable> ; \
+         ledger:about <urn:external:record:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz> .",
+        flying = seeded[0], waiting = seeded[1],
+    );
+    block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:store:load").unwrap())
+            .with_arg("content", ArgRef::Inline(links.into_bytes()))
+            .with_arg("format", ArgRef::Inline(b"text/turtle".to_vec()))
+            .with_arg(
+                "graph",
+                ArgRef::Inline(b"urn:iki:ledger:graph:default".to_vec()),
+            ),
+        &Capability::root(),
+    ))
+    .expect("the outgoing flight-plan links");
     let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
@@ -191,6 +235,7 @@ fn main() {
             .expect("the anonymous grant"),
         bind: addr,
         passkeys: Some(passkeys),
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     let edge = doors::edge_config(door.clone());

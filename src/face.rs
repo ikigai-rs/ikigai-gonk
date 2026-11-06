@@ -35,8 +35,9 @@
 //! Each directory is bound at `urn:iki:face:name:{name}:dir:{path}` with ikigai-fs's
 //! `FileEndpoint`, a jail at that directory: it refuses `..`, an absolute path, any
 //! non-canonical spelling and a symbolic link anywhere in the path, in the jail or out of it.
-//! The door's anonymous loopback caller holds `urn:cap:fs:read:{directory}` and nothing else
-//! there ([`Face::grants`]): nobody holds an `fs` write or delete token, so a face is read-only
+//! The door's anonymous loopback caller and every live passkey session, from any peer, hold
+//! `urn:cap:fs:read:{directory}` and nothing else there ([`Face::grants`], one of the door's
+//! public reads, [`crate::doors::HttpDoor::public`], ledger #3202): nobody holds an `fs` write or delete token, so a face is read-only
 //! at every name. On top of that, [`FaceFile`] serves only names whose extension is in
 //! [`MEDIA_TYPES`] (which fixes the media type) and refuses every hidden name (a segment that
 //! starts with `.`, such as `.git` or `.env`), each as `404` with no sub-request.
@@ -165,9 +166,9 @@ impl Face {
         &self.dir
     }
 
-    /// Where the face's front page is served: `/face/name/{name}`.
+    /// The slash URL to link to for the face's front page: `/face/name/{name}/`.
     pub fn href(&self) -> String {
-        format!("{PATH}/{}", self.name)
+        format!("{PATH}/{}/", self.name)
     }
 
     /// The IRI the face's directory is bound at: `urn:iki:face:name:{name}:dir:`.

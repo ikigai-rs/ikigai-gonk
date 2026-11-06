@@ -557,7 +557,7 @@ there.
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
 | `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
 | `/toolbox` · `/toolbox/{…}` | `urn:iki:gonk:page:toolbox` · `urn:toolbox:{…}` | the RDF Toolbox, only when `gonk.toolbox.dist` is set (see "The RDF Toolbox") |
-| `/face/name/{name}` · `/face/name/{name}/{…}` | `urn:face:name:{name}:index.html` · `urn:face:name:{name}:{…}` | a deployment's own pages, only when a `gonk.face` line names one (see "A deployment's own pages") |
+| `/face/name/{name}/` · `/face/name/{name}/{…}` | `urn:face:name:{name}:index.html` · `urn:face:name:{name}:{…}` | a deployment's own pages, only when a `gonk.face` line names one (see "A deployment's own pages") |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
@@ -675,7 +675,7 @@ whatever no rule takes from it. No ledger's records change, and a raw question a
 was. A rule that cannot be read (no arrow, a date that is not a date, a row with a space in it) or
 that could never match stops the server at start, naming the line.
 
-### A deployment's own pages at `/face/name/{name}` (ledger #3199)
+### A deployment's own pages at `/face/name/{name}/` (ledger #3199)
 
 A deployment can write its own HTML and scripts and have gonk serve them from gonk's origin, so
 they read and write through gonk's existing routes with the viewer's own passkey session:
@@ -684,14 +684,22 @@ they read and write through gonk's existing routes with the viewer's own passkey
 gonk.face = "ops ~/.local/share/ops-face"
 ```
 
-One `<name> <directory>` line per face, repeatable. `/face/name/ops` serves `index.html`, and
+One `<name> <directory>` line per face, repeatable. `/face/name/ops/` serves `index.html`, and
 `/face/name/ops/js/app.js` serves `js/app.js`. The directory is jailed (no `..`, no symbolic
 link, no hidden name, only the extensions in `face::MEDIA_TYPES`), read-only, and served under
 the door's default CSP (`script-src 'self'`, no inline script). Every fetch a face makes is
 judged under the viewer's capability, so a face reaches nothing its viewer could not reach by
 hand. A line naming something that is not a directory stops the server at start. Each face gets
-a header link, named by its name. Like the toolbox, the directory's read is added to the
-anonymous loopback caller's grant.
+a header link, named by its name. Like the toolbox, the directory's read
+(`urn:cap:fs:read:{directory}`) is one of the door's public reads: the anonymous loopback caller
+and every live passkey session hold it, from this machine or another (ledger #3202), so a viewer
+signed in from another machine loads the face with no token copied into their grant. A caller
+from another machine with no session gets nothing.
+
+Link and bookmark the slash form, `/face/name/ops/`, so relative stylesheet and module paths
+resolve inside the face's directory. The bare `/face/name/ops` still serves `index.html`; gonk
+does not redirect it yet. Until gonk redirects, a face may use absolute paths (for example,
+`/face/name/ops/app.css`) if it must also work at the bare form.
 
 ### The RDF Toolbox at `/toolbox` (ledger #1933)
 
@@ -751,8 +759,9 @@ new build copied over the old one is served at once, with no restart.
 - a read on exactly the toolbox's files for the anonymous loopback caller, one
   `urn:cap:fs:read:<dist>/<name>` for each name in `ikigai_toolbox::FILES`
   (`grants::toolbox_read_grants`), because the toolbox reads its build under its caller's
-  capability. A signed-in passkey holds it too, since a passkey holds the anonymous grant plus its
-  own. Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
+  capability. Every live passkey session holds it too, from this machine or another, with no token
+  copied into its grant (ledger #3202); a caller from another machine with no session does not.
+  Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
   by `/toolbox/…` and by the directory's own name (`/iki/toolbox/dist/…`) alike.
 - the toolbox's own Content-Security-Policy (`ikigai_toolbox::TOOLBOX_CSP`) on the `/toolbox`
   rows and no others: it adds `'wasm-unsafe-eval'`, which lets the page's worker compile the
