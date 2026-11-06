@@ -14,7 +14,8 @@ The local patch consists of:
   response goes through the existing HEAD and global security/CORS policy. All other
   requests use the original answer path. Endpoint `Location` envelopes remain write-only.
 
-Gonk registers only configured face names. This avoids redirecting unknown faces, changing
+Gonk pins this patched version exactly, so an unlocked resolve cannot replace it with a
+newer registry release that lacks the local API. Gonk registers only configured face names. This avoids redirecting unknown faces, changing
 the file jail or media types, loosening CSP, or implementing a second HTTP listener. The
 published library has no hook for read redirects: its route redirect and endpoint Location
 support both implement Post/Redirect/Get (303). The copy is isolated in the first PR commit

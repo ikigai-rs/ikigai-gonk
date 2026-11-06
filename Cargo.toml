@@ -1084,7 +1084,9 @@ ikigai-quic = "0.2.1"
 # with `hyper-util`'s tokio glue): new packages in the lock, and SERVER code only, so the
 # outbound surface argued above is unchanged (`cargo tree -e features -i hyper`). `"0.2.1"` is
 # `<0.3.0`.
-ikigai-web = "0.2.1"
+# The local 0.2.3 patch below adds directory redirects (ledger #3220). Pin it exactly so
+# an unlocked build cannot select a newer registry release without that local API.
+ikigai-web = "=0.2.3"
 # The shared UI path as resources (UX 4, ledger #2834): `urn:iki:ui:tokens.css`,
 # `urn:iki:ui:shell.js` and `urn:iki:ui:htmx`, bound in the HTTP door's kernel and served under
 # `/static/`, and `theme_chooser`, the markup of the header's theme chooser. It holds no state
