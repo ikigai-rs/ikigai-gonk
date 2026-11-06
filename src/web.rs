@@ -1249,8 +1249,8 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
             "short",
             ledger.number(number.parse::<i64>().unwrap_or_default()),
         );
-        // Only single-ledger listings and item cards call this enrichment. Keep `short`
-        // qualified for action names; the visible number is local to this page's ledger.
+        // Each enrichment uses one ledger, including an outgoing-link partition. Keep
+        // `short` qualified for action names; the visible number is local to that ledger.
         graph.view(&item, "localNumber", format!("#{number}"));
         graph.view(&item, "href", format!("{}/item/{id}", ledger_href(ledger)));
         graph.view(&item, "ledger", ledger.name());
@@ -2519,6 +2519,170 @@ struct ItemView {
     full: bool,
 }
 
+struct LinkedRow {
+    modified: String,
+    target: String,
+    graph: Graph,
+}
+
+async fn linked_row(inv: &Invocation<'_>, ledger: &Ledger, target: &str) -> Option<Graph> {
+    if !inv.capability.allows(&ledger.cap_read()) {
+        return None;
+    }
+    let read = with(request(Verb::Source, target).ok()?, "as", "text/turtle");
+    let mut row = Graph::from_turtle(&fetch(inv, read).await.ok()?).ok()?;
+    // An item face includes its body, comments and outgoing edges; the listing row needs
+    // only these fields. In particular, a large body must not be duplicated into
+    // view:content and spend the bounded row chunk's byte budget (#3197).
+    row.retain(|t| {
+        let predicate = t.predicate.as_str();
+        let displayed = matches!(
+            predicate,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                | "http://purl.org/dc/terms/title"
+                | "http://purl.org/dc/terms/created"
+                | "http://purl.org/dc/terms/modified"
+        ) || predicate.strip_prefix(LEDGER_NS).is_some_and(|local| {
+            matches!(
+                local,
+                "number"
+                    | "status"
+                    | "closedReason"
+                    | "priority"
+                    | "deferred"
+                    | "state"
+                    | "claimedBy"
+                    | "claimKind"
+                    | "lease"
+                    | "leaseExpires"
+                    | "awaiting"
+                    | "label"
+            )
+        });
+        displayed
+            && matches!(&t.subject,
+            NamedOrBlankNode::NamedNode(s) if s.as_str() == target)
+    });
+    if !row
+        .subjects_of_type(&format!("{LEDGER_NS}Item"))
+        .iter()
+        .any(|item| item == target)
+    {
+        return None;
+    }
+    enrich_items(&mut row, ledger, inv, "all");
+    enrich_states(&mut row, inv).await;
+    Some(row)
+}
+
+/// Outgoing flight-plan rows (#3197), partitioned by relation and ledger. Reads use the
+/// page's invocation, including its capability; failures disclose only the stored target IRI.
+/// Separate row graphs keep self-links and target comments/actions out of the source card.
+struct LinkedItems {
+    xml: String,
+    slots: Vec<(String, String)>,
+}
+
+async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedItems> {
+    let mut cache: BTreeMap<String, Option<Graph>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), Vec<LinkedRow>> = BTreeMap::new();
+    let mut unavailable = String::new();
+    for link in graph.subjects_of_type(&format!("{}Link", render::VIEW_NS)) {
+        let target = graph
+            .value(&link, &format!("{}target", render::VIEW_NS))
+            .unwrap_or_default();
+        if let Some((ledger, canonical)) = Ledger::item_iri(&target).as_ref() {
+            if !cache.contains_key(canonical) {
+                cache.insert(canonical.clone(), linked_row(inv, ledger, canonical).await);
+            }
+            if let Some(Some(cached)) = cache.get(canonical) {
+                let mut row = cached.windows(std::slice::from_ref(canonical), 1).remove(0);
+                row.view(canonical, "linked", "true");
+                for (from, to) in [
+                    ("ledger", "sourceLedger"),
+                    ("id", "sourceId"),
+                    ("item", "sourceItem"),
+                    ("target", "target"),
+                    ("rel", "rel"),
+                    ("canUnlink", "canUnlink"),
+                ] {
+                    if let Some(value) = graph.value(&link, &format!("{}{from}", render::VIEW_NS)) {
+                        row.view(canonical, to, value);
+                    }
+                }
+                let rel = graph
+                    .value(&link, &format!("{}rel", render::VIEW_NS))
+                    .unwrap_or_default();
+                let modified = row
+                    .value(canonical, &format!("{DCTERMS}modified"))
+                    .unwrap_or_default();
+                groups
+                    .entry((rel, ledger.name().to_string()))
+                    .or_default()
+                    .push(LinkedRow {
+                        modified,
+                        target: canonical.clone(),
+                        graph: row,
+                    });
+                continue;
+            }
+        }
+        let mut fallback = graph.windows(std::slice::from_ref(&link), 1).remove(0);
+        let href = format!("{}href", render::VIEW_NS);
+        let text = format!("{}text", render::VIEW_NS);
+        fallback.retain(|t| t.predicate.as_str() != href && t.predicate.as_str() != text);
+        fallback.view(&link, "text", target);
+        unavailable.push_str(&render::wrap(
+            "unavailable-link",
+            &[],
+            &fallback.view_xml().map_err(render_err)?,
+        ));
+    }
+    let mut output = String::new();
+    let mut slots = Vec::new();
+    for ((rel, ledger), mut members) in groups {
+        members.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| a.target.cmp(&b.target))
+        });
+        let mut states: BTreeMap<String, usize> = BTreeMap::new();
+        let mut row_xml = Vec::new();
+        for member in &members {
+            let state = member
+                .graph
+                .value(&member.target, &format!("{}state", render::VIEW_NS))
+                .unwrap_or_default();
+            *states.entry(state).or_default() += 1;
+            row_xml.push(member.graph.view_xml().map_err(render_err)?);
+        }
+        let counts = states
+            .iter()
+            .map(|(state, count)| format!("{state}: {count}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let noun = if members.len() == 1 { "item" } else { "items" };
+        let summary = format!(
+            "{} linked {noun}. {counts}. As of this page load; most recently updated first.",
+            members.len()
+        );
+        // Keep the same bounded, content-keyed row transforms as the ledger listing.
+        let chunks: Vec<_> = row_xml
+            .chunks(render::CHUNK_ROWS)
+            .map(|window| render::chunk(&window.concat()))
+            .collect();
+        let key = format!("link-row:{rel}:{ledger}");
+        slots.push((key.clone(), render::rendered_chunks(inv, &chunks).await?));
+        output.push_str(&render::wrap(
+            "link-group",
+            &[("relation", &rel), ("ledger", &ledger)],
+            &format!("{}{}", element("rollup", &[], &summary), render::slot(&key)),
+        ));
+    }
+    output.push_str(&unavailable);
+    Ok(LinkedItems { xml: output, slots })
+}
+
 async fn item_card(
     web: &Web,
     inv: &Invocation<'_>,
@@ -2559,6 +2723,8 @@ async fn item_card(
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
     children.push_str(&graph.view_xml().map_err(render_err)?);
+    let linked = outgoing_links(&graph, inv).await?;
+    children.push_str(&linked.xml);
     let doc = envelope(
         "page",
         &[
@@ -2571,7 +2737,10 @@ async fn item_card(
         ],
         &children,
     );
-    Ok(html(render::render(&doc, full).map_err(render_err)?))
+    let shell = render::render(&doc, full).map_err(render_err)?;
+    Ok(html(
+        render::splice(shell, &linked.slots).map_err(render_err)?,
+    ))
 }
 
 #[async_trait]
