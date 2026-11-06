@@ -1883,6 +1883,11 @@ async fn ledger_listing(
         fetch(inv, rows_read).await?
     };
     let mut graph = Graph::from_turtle(&bytes).map_err(render_err)?;
+    if priority_filtered {
+        // This path reads item triples directly, rather than the ledger's model face.
+        // Presentation belongs to the enrichment below, never to stored graph data.
+        graph.retain(|triple| !triple.predicate.as_str().starts_with(render::VIEW_NS));
+    }
     let (shown, order) = newest_rows(&mut graph, wanted);
     let count = Count {
         shown,

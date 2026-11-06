@@ -697,6 +697,35 @@ fn facets_respect_grants_named_ledgers_empty_matches_and_escaped_terms() {
     );
 }
 
+#[test]
+fn priority_listing_uses_only_computed_presentation_fields() {
+    let server = Server::start_configured(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("default", Authority::Read).unwrap(),
+    );
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        r#"
+        @prefix l: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix d: <http://purl.org/dc/terms/> .
+        @prefix view: <urn:iki:gonk:view#> .
+        <urn:iki:ledger:item:reserved> a l:Item; l:number 7; d:title "Projected item";
+          l:status l:open; l:priority 1;
+          view:href "/stored-presentation"; view:canWrite "true" ."#,
+    );
+    let page = server.page("/l/default?priority=1", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.body.contains("Projected item"), "{page:?}");
+    assert!(!page.body.contains("/stored-presentation"), "{page:?}");
+    assert!(
+        !page
+            .body
+            .contains("name='_action' type='hidden' value='close'"),
+        "{page:?}"
+    );
+}
+
 #[derive(Default)]
 struct FacetTrace(std::sync::Mutex<Vec<ikigai_core::TraceEvent>>);
 
