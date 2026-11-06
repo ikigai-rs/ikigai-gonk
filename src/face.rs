@@ -166,9 +166,9 @@ impl Face {
         &self.dir
     }
 
-    /// Where the face's front page is served: `/face/name/{name}`.
+    /// The slash URL to link to for the face's front page: `/face/name/{name}/`.
     pub fn href(&self) -> String {
-        format!("{PATH}/{}", self.name)
+        format!("{PATH}/{}/", self.name)
     }
 
     /// The IRI the face's directory is bound at: `urn:iki:face:name:{name}:dir:`.

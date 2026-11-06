@@ -19,15 +19,19 @@ use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::{compose, config, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const INDEX: &str = "<!doctype html><title>Demo face</title><script src=\"js/app.js\"></script>\n";
-const APP_JS: &str = "fetch('/iki/ledger/items');\n";
+const INDEX: &str = "<!doctype html><title>Demo face</title><link rel=\"stylesheet\" href=\"app.css\"><script type=\"module\" src=\"js/app.js\"></script>\n";
+const APP_JS: &str = "import './kit.js';\nfetch('/iki/ledger/items');\n";
+const KIT_JS: &str = "export const ready = true;\n";
+const APP_CSS: &str = "body { color: inherit; }\n";
 const SECRET: &str = "outside the face, never served";
 
 /// A scratch face directory, and beside it (`outside`) a secret the face must never reach.
 fn build(dir: &Path, outside: &Path) {
     std::fs::write(dir.join("index.html"), INDEX).unwrap();
+    std::fs::write(dir.join("app.css"), APP_CSS).unwrap();
     std::fs::create_dir(dir.join("js")).unwrap();
     std::fs::write(dir.join("js").join("app.js"), APP_JS).unwrap();
+    std::fs::write(dir.join("js").join("kit.js"), KIT_JS).unwrap();
     std::fs::write(dir.join(".env.txt"), SECRET).unwrap();
     std::fs::write(dir.join("notes.key"), SECRET).unwrap();
     std::fs::write(outside.join("secret.html"), SECRET).unwrap();
@@ -311,6 +315,40 @@ fn a_face_serves_under_the_doors_default_csp() {
     );
 }
 
+/// The slash form is the base for relative stylesheet, module and module-import URLs.
+/// The bare form remains an index response until the redirect is available upstream.
+#[test]
+fn slash_front_page_loads_relative_assets_and_bare_front_page_still_serves() {
+    let gonk = Server::start(true);
+    let base = "/face/name/demo/";
+    let page = gonk.open(base);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert_eq!(page.text(), INDEX);
+
+    // ./kit.js in js/app.js resolves beside that module, to js/kit.js.
+    for (relative, content_type, content) in [
+        ("app.css", "text/css", APP_CSS),
+        ("js/app.js", "text/javascript", APP_JS),
+        ("js/kit.js", "text/javascript", KIT_JS),
+    ] {
+        let asset = gonk.get(&format!("{base}{relative}"), "*/*");
+        assert_eq!(asset.status, 200, "{relative}: {asset:?}");
+        assert!(media(&asset).starts_with(content_type), "{asset:?}");
+        assert_eq!(asset.text(), content);
+    }
+    for path in ["/face/name/demo", "/face/name/demo?view=compact"] {
+        let bare = gonk.open(path);
+        assert_eq!(bare.status, 200, "{bare:?}");
+        assert_eq!(bare.text(), INDEX);
+        assert_eq!(bare.header("location"), None);
+    }
+    for path in ["/face/name/unknown", "/face/name/unknown/"] {
+        let missing = gonk.open(path);
+        assert_eq!(missing.status, 404, "{missing:?}");
+        assert_eq!(missing.header("location"), None);
+    }
+}
+
 /// ★ Path traversal out of the directory is refused, however it is spelled, and the secret
 /// beside the directory never reaches the response.
 #[test]
@@ -480,7 +518,7 @@ fn the_header_links_each_face() {
     let page = home.text();
     let header = &page[..page.find("</header>").expect("a header")];
     assert!(
-        header.contains("<a class='navlink' href='/face/name/demo'>demo</a>"),
+        header.contains("<a class='navlink' href='/face/name/demo/'>demo</a>"),
         "{header}"
     );
 }
@@ -504,6 +542,7 @@ fn a_face_line_is_checked_at_start() {
     let configured = settings("gonk.face = \"ops ~/ops\"\n").unwrap();
     assert_eq!(configured.faces.len(), 1);
     assert_eq!(configured.faces[0].name(), "ops");
+    assert_eq!(configured.faces[0].href(), "/face/name/ops/");
     assert_eq!(configured.faces[0].dir(), ops.as_path());
 
     let missing = settings("gonk.face = \"ops ~/nowhere\"\n").unwrap_err();
