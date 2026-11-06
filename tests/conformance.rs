@@ -339,7 +339,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 41] = [
+const WEB_IDS: [&str; 42] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -371,6 +371,7 @@ const WEB_IDS: [&str; 41] = [
     "gonk-view-agent",
     "gonk-page-ledger",
     "gonk-fragment-items",
+    "gonk-fragment-facet",
     "gonk-page-item",
     "gonk-fragment-item",
     "gonk-page-doctor",
@@ -573,6 +574,14 @@ fn the_http_door_conforms() {
              a face. Its action declares `urn:cap:annotate` and the browse wildcard, so ENFORCED \
              saw the kernel refuse it under no grants. The face a batch serves is exercised \
              where a browse root exists, by `tests/queue.rs`'s batch tests",
+        )
+        .fixture(
+            Fixture::new("gonk-fragment-facet", Verb::Source)
+                .binding("ledger", "default")
+                .capability(Capability::scoped([
+                    "urn:cap:ledger:read:default".to_string(),
+                    ikigai_store::cap_read_graph("urn:iki:ledger:graph:default"),
+                ])),
         )
         .fixture(Fixture::new("gonk-page-item", Verb::Source).binding("id", &a))
         .fixture(Fixture::new("gonk-fragment-item", Verb::Source).binding("id", &a))
