@@ -114,6 +114,59 @@ fn main() {
         &Capability::root(),
     ))
     .expect("the named-ledger scratch item");
+    // Ledger #3195: rows whose badges carry the hub's own facts, so axe reads every one in
+    // every theme: an in-flight state held by a claim whose lease has run out, and an item
+    // handed back to its dispatcher. Written into the store, because a lease cannot be issued
+    // already expired and a scratch site should not sleep to see one end.
+    let mut seeded = Vec::new();
+    for title in [
+        "An item in flight under an expired lease",
+        "An item handed back",
+    ] {
+        let answer = block_on(Kernel::issue(
+            &hub,
+            Request::new(
+                Verb::Sink,
+                Iri::parse("urn:iki:ledger:append").expect("an IRI"),
+            )
+            .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec())),
+            &Capability::root(),
+        ))
+        .expect("a badge scratch item");
+        let text = String::from_utf8_lossy(&answer.bytes).into_owned();
+        let prefix = "urn:iki:ledger:default:item:";
+        let at = text.find(prefix).expect("the append names its item");
+        let id: String = text[at + prefix.len()..]
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        seeded.push(format!("{prefix}{id}"));
+    }
+    let facts = format!(
+        "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         <{flying}> ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> ; \
+         ledger:claimedBy \"w1\" ; ledger:claimKind ledger:machine ; ledger:lease \"30m\" ; \
+         ledger:leaseExpires \"2001-01-01T00:00:00.000Z\"^^xsd:dateTime ; ledger:deferred true .\n\
+         <{waiting}> ledger:awaiting <urn:iki:ledger:awaiting:dispatcher> .\n",
+        flying = seeded[0],
+        waiting = seeded[1],
+    );
+    block_on(Kernel::issue(
+        &hub,
+        Request::new(
+            Verb::Sink,
+            Iri::parse("urn:iki:store:load").expect("an IRI"),
+        )
+        .with_arg("content", ArgRef::Inline(facts.into_bytes()))
+        .with_arg("format", ArgRef::Inline(b"text/turtle".to_vec()))
+        .with_arg(
+            "graph",
+            ArgRef::Inline(b"urn:iki:ledger:graph:default".to_vec()),
+        ),
+        &Capability::root(),
+    ))
+    .expect("the badge facts");
     let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),

@@ -2374,8 +2374,23 @@
       <xsl:if test="view:reason"> · <xsl:value-of select="view:reason"/></xsl:if>
     </span>
     <span class="badge priority"><xsl:value-of select="view:priority"/></span>
+    <!-- Ledger #3195: the hub's own facts, each one badge whose words carry it (color is only
+         emphasis): the lifecycle state, in flight when the lifecycle document says so; the
+         claim's holder, an expired lease said in words; and whom a handed-back item awaits. -->
+    <span>
+      <xsl:attribute name="class">badge state<xsl:if test="view:stateInFlight = 'true'"> in-flight</xsl:if></xsl:attribute>
+      <xsl:text>state: </xsl:text><xsl:value-of select="view:state"/>
+      <xsl:if test="view:stateInFlight = 'true'"> · in flight</xsl:if>
+    </span>
     <xsl:if test="view:deferred = 'true'"><span class="badge deferred">deferred</span></xsl:if>
-    <xsl:if test="ledger:claimedBy"><span class="badge claimed">claimed by <xsl:value-of select="ledger:claimedBy"/></span></xsl:if>
+    <xsl:if test="ledger:claimedBy">
+      <span>
+        <xsl:attribute name="class">badge claimed<xsl:if test="view:leaseExpired = 'true'"> expired</xsl:if></xsl:attribute>
+        <xsl:text>claimed by </xsl:text><xsl:value-of select="ledger:claimedBy"/>
+        <xsl:if test="view:leaseExpired = 'true'"> · lease expired</xsl:if>
+      </span>
+    </xsl:if>
+    <xsl:if test="view:awaiting"><span class="badge awaiting">awaiting <xsl:value-of select="view:awaiting"/></span></xsl:if>
     <xsl:choose>
       <xsl:when test="view:label-chip"><xsl:apply-templates select="view:label-chip"/></xsl:when>
       <xsl:otherwise><xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each></xsl:otherwise>
