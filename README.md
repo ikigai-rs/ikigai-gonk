@@ -684,8 +684,11 @@ link, no hidden name, only the extensions in `face::MEDIA_TYPES`), read-only, an
 the door's default CSP (`script-src 'self'`, no inline script). Every fetch a face makes is
 judged under the viewer's capability, so a face reaches nothing its viewer could not reach by
 hand. A line naming something that is not a directory stops the server at start. Each face gets
-a header link, named by its name. Like the toolbox, the directory's read is added to the
-anonymous loopback caller's grant.
+a header link, named by its name. Like the toolbox, the directory's read
+(`urn:cap:fs:read:{directory}`) is one of the door's public reads: the anonymous loopback caller
+and every live passkey session hold it, from this machine or another (ledger #3202), so a viewer
+signed in from another machine loads the face with no token copied into their grant. A caller
+from another machine with no session gets nothing.
 
 ### The RDF Toolbox at `/toolbox` (ledger #1933)
 
@@ -745,8 +748,9 @@ new build copied over the old one is served at once, with no restart.
 - a read on exactly the toolbox's files for the anonymous loopback caller, one
   `urn:cap:fs:read:<dist>/<name>` for each name in `ikigai_toolbox::FILES`
   (`grants::toolbox_read_grants`), because the toolbox reads its build under its caller's
-  capability. A signed-in passkey holds it too, since a passkey holds the anonymous grant plus its
-  own. Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
+  capability. Every live passkey session holds it too, from this machine or another, with no token
+  copied into its grant (ledger #3202); a caller from another machine with no session does not.
+  Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
   by `/toolbox/…` and by the directory's own name (`/iki/toolbox/dist/…`) alike.
 - the toolbox's own Content-Security-Policy (`ikigai_toolbox::TOOLBOX_CSP`) on the `/toolbox`
   rows and no others: it adds `'wasm-unsafe-eval'`, which lets the page's worker compile the

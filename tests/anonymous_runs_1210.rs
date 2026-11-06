@@ -354,6 +354,7 @@ fn over_http_an_anonymous_plan_and_check_stop_at_the_door_budget() {
         anonymous: anonymous_http_grants(&["default".to_string()]).unwrap(),
         bind: addr,
         passkeys: Some(passkeys),
+        public: Vec::new(),
         anonymous_sparql_budget_ms: DOOR_MS,
     };
     std::thread::spawn(move || {

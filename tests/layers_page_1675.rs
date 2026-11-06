@@ -374,6 +374,7 @@ impl Gonk {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         std::thread::spawn(move || {
