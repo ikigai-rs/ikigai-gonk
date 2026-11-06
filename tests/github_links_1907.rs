@@ -165,6 +165,10 @@ fn href(kernel: &Kernel, iri: &str) -> Option<String> {
 
 /// The browse page `/browse/{start}` as the HTTP door renders it, under `cap`.
 fn shell(hub: &Arc<Kernel>, start: &str, cap: &Capability) -> String {
+    page(hub, &format!("urn:iki:gonk:page:browse:{start}"), cap)
+}
+
+fn page(hub: &Arc<Kernel>, iri: &str, cap: &Capability) -> String {
     let config = tempfile::tempdir().expect("a config home");
     let layout = quic::Layout::in_config_home(config.path());
     let face = Arc::new(web::Web {
@@ -179,13 +183,7 @@ fn shell(hub: &Arc<Kernel>, start: &str, cap: &Capability) -> String {
         toolbox: false,
     });
     let http = doors::http_kernel(Arc::clone(hub), web::space(face));
-    read(
-        &http,
-        &format!("urn:iki:gonk:page:browse:{start}"),
-        &[("as", "text/html")],
-        cap,
-    )
-    .unwrap_or_else(|e| panic!("the browse page for {start}: {e}"))
+    read(&http, iri, &[("as", "text/html")], cap).unwrap_or_else(|e| panic!("the page {iri}: {e}"))
 }
 
 // ---------------------------------------------------------------- the tests
@@ -517,4 +515,70 @@ fn a_selected_line_carries_onto_a_file_link_and_nothing_else_does() {
         fragment.contains("return LINES_HASH.test(href) ? href : \"\";"),
         "{fragment}"
     );
+}
+
+/// Ledger #3198's minimum reproduction: a configured browse root really contains the
+/// object, and the viewer has root authority, but the item's about-target is plain text.
+/// Keep this opt-in until ikigai-repo supplies object lookup; it asserts the requested
+/// behavior and intentionally fails on the current implementation.
+fn git_about_link(kind: &str) {
+    let (dir, head) = scratch(None);
+    let sha = match kind {
+        "commit" => head,
+        "blob" => git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]),
+        _ => unreachable!(),
+    };
+    let target = format!("urn:git:{kind}:{sha}");
+    let (hub, _watch) = served(dir.path(), &[]);
+    let filed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg(
+                "content",
+                ArgRef::Inline(b"Git object link reproduction".to_vec()),
+            )
+            .with_arg("about", ArgRef::Inline(target.as_bytes().to_vec())),
+        &Capability::root(),
+    ))
+    .expect("file an item about the existing git object");
+    let filed = String::from_utf8(filed.bytes).unwrap();
+    let prefix = "urn:iki:ledger:default:item:";
+    let rest = filed.split_once(prefix).expect("the filed item IRI").1;
+    let id: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    assert!(!id.is_empty(), "{filed}");
+    let html = page(
+        &hub,
+        &format!("urn:iki:gonk:page:item:default:{id}"),
+        &Capability::root(),
+    );
+    assert!(html.contains(&target), "the about IRI is visible: {html}");
+    let linked = html.split("<a ").any(|anchor| {
+        let Some((attributes, body)) = anchor.split_once('>') else {
+            return false;
+        };
+        attributes.contains("href=")
+            && body
+                .split("</a>")
+                .next()
+                .is_some_and(|text| text.contains(&target))
+    });
+    assert!(
+        linked,
+        "an existing {kind} should link into the configured clone: {html}"
+    );
+}
+
+#[test]
+#[ignore = "#3198: blocked on ikigai-repo object lookup; run explicitly to reproduce"]
+fn an_about_commit_in_a_browse_root_links_to_code() {
+    git_about_link("commit");
+}
+
+#[test]
+#[ignore = "#3198: blocked on ikigai-repo object lookup; run explicitly to reproduce"]
+fn an_about_blob_in_a_browse_root_links_to_code() {
+    git_about_link("blob");
 }
