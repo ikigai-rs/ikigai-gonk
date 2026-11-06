@@ -50,7 +50,10 @@
 //! The median is the middle of every hand-back, not a median of the rows' medians. A hand-back is
 //! one holder's, so its total is also its column's sum. No alias rule applies: every signature is
 //! somebody's, and a total counts them all. The totals row is the table's `<tfoot>`, and costs a
-//! panel seven more questions, cached like the rest.
+//! panel seven more questions, cached like the rest. Released and the median ask their own
+//! all-holders text (`src/questions/*-all.rq`, [`Question::total`]): the same rows, with each
+//! claim joined on the item and matched to its holder in a filter, since with `?holder` free the
+//! planner joins every release to every claim of its holder, past the store's budget.
 //!
 //! ⚠ **Write a question with grouping, not `NOT EXISTS`.** The store's planner runs a correlated
 //! `NOT EXISTS` over the events per row, and a question past the store's budget holds up that
@@ -134,6 +137,9 @@ pub struct Question {
     pub window_ms: Option<u64>,
     /// How its answer is read.
     pub reads: Reads,
+    /// Its text asked of every holder at once, where leaving `?holder` free in [`Question::text`]
+    /// would cost too much ([`across`]); `None` asks that text with `?holder` free.
+    pub total: Option<&'static str>,
 }
 
 /// Every question, in the panel's order.
@@ -145,6 +151,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "in flight",
         window_ms: None,
         reads: Reads::Rows,
+        total: None,
     },
     Question {
         name: "worked-on",
@@ -153,6 +160,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "worked on",
         window_ms: None,
         reads: Reads::Rows,
+        total: None,
     },
     Question {
         name: "completed-24h",
@@ -161,6 +169,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "completed in the last 24 hours",
         window_ms: Some(DAY_MS),
         reads: Reads::Rows,
+        total: None,
     },
     Question {
         name: "completed-7d",
@@ -169,6 +178,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "completed in the last 7 days",
         window_ms: Some(7 * DAY_MS),
         reads: Reads::Rows,
+        total: None,
     },
     Question {
         name: "handed-back-24h",
@@ -177,6 +187,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "handed back in the last 24 hours",
         window_ms: Some(DAY_MS),
         reads: Reads::Rows,
+        total: None,
     },
     Question {
         name: "released",
@@ -185,6 +196,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "released without a hand-back",
         window_ms: None,
         reads: Reads::Rows,
+        total: Some(include_str!("questions/released-all.rq")),
     },
     Question {
         name: "median-claim-to-handback",
@@ -193,6 +205,7 @@ pub const QUESTIONS: [Question; 7] = [
         says: "from claim to hand-back, the median",
         window_ms: None,
         reads: Reads::Median,
+        total: Some(include_str!("questions/median-claim-to-handback-all.rq")),
     },
 ];
 
@@ -221,7 +234,7 @@ pub fn filled(
     aliases: &HolderAliases,
 ) -> String {
     // The window first: the label is the one free text, so nothing may be substituted after it.
-    let text = across(question, since);
+    let text = windowed(question.text, since);
     if aliases.touches(holder) {
         return folded(&text, holder, aliases);
     }
@@ -236,16 +249,23 @@ pub fn filled(
 /// agents can work the same item: each row counts it, the sum would count it twice, and this counts
 /// it once. Each question's rows already name what they count (an item, or a hand-back), so leaving
 /// `?holder` free asks the same question of the set. The questions that join two events of one
-/// holder (the median, released) join them inside one block, where `?holder` is one variable, so a
-/// claim is still matched to its own holder's hand-back or release.
+/// holder (the median, released) match each to its own holder, so a claim still counts only
+/// against its own holder's hand-back or release; they ask [`Question::total`], which joins the two
+/// on the item and matches the holder in a filter, since the store's planner joins on a free
+/// `?holder` first, every release to every claim of that holder, past the store's budget.
 pub fn across(question: &Question, since: Option<&str>) -> String {
+    windowed(question.total.unwrap_or(question.text), since)
+}
+
+/// `text` with the window written in where `?since` stands.
+fn windowed(text: &str, since: Option<&str>) -> String {
     match since {
         Some(since) => parameter(
-            question.text,
+            text,
             "?since",
             &format!("\"{}\"^^<{XSD_DATE_TIME}>", sparql_string(since)),
         ),
-        None => question.text.to_string(),
+        None => text.to_string(),
     }
 }
 
@@ -636,7 +656,7 @@ impl Endpoint for Total {
     }
 
     fn name(&self) -> &str {
-        "gonk-agents-total"
+        "gonk-agents-answer"
     }
 
     fn describe(&self) -> Description {
