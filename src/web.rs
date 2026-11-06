@@ -1506,6 +1506,14 @@ struct LabelFilters<'a> {
     without: Option<&'a str>,
 }
 
+enum LabelChange<'a> {
+    Clear,
+    Require(&'a str),
+    Exclude(&'a str),
+    RemoveRequired(&'a str),
+    RemoveExcluded(&'a str),
+}
+
 impl LabelFilters<'_> {
     fn append(&self, mut query: String) -> String {
         for (name, value) in [("labels", self.labels), ("without", self.without)] {
@@ -1532,26 +1540,28 @@ impl LabelFilters<'_> {
         terms
     }
 
-    fn url(
-        &self,
-        listing: &Listing<'_>,
-        page: &str,
-        term: Option<&str>,
-        side: Option<bool>,
-    ) -> String {
+    fn url(&self, listing: &Listing<'_>, page: &str, change: LabelChange<'_>) -> String {
         let mut labels = Self::terms(self.labels);
         let mut without = Self::terms(self.without);
-        if let Some(term) = term {
-            labels.retain(|t| *t != term);
-            without.retain(|t| *t != term);
-            match side {
-                Some(true) => labels.push(term),
-                Some(false) => without.push(term),
-                None => {}
+        match change {
+            LabelChange::Clear => {
+                labels.clear();
+                without.clear();
             }
-        } else {
-            labels.clear();
-            without.clear();
+            LabelChange::Require(term) => {
+                without.retain(|t| *t != term);
+                if !labels.contains(&term) {
+                    labels.push(term);
+                }
+            }
+            LabelChange::Exclude(term) => {
+                labels.retain(|t| *t != term);
+                if !without.contains(&term) {
+                    without.push(term);
+                }
+            }
+            LabelChange::RemoveRequired(term) => labels.retain(|t| *t != term),
+            LabelChange::RemoveExcluded(term) => without.retain(|t| *t != term),
         }
         let labels = labels.join(",");
         let without = without.join(",");
@@ -1582,8 +1592,30 @@ impl LabelFilters<'_> {
                         ("description", description),
                         ("term", term),
                         ("action", action),
-                        ("remove", &self.url(listing, page, Some(term), None)),
-                        ("move", &self.url(listing, page, Some(term), Some(!side))),
+                        (
+                            "remove",
+                            &self.url(
+                                listing,
+                                page,
+                                if side {
+                                    LabelChange::RemoveRequired(term)
+                                } else {
+                                    LabelChange::RemoveExcluded(term)
+                                },
+                            ),
+                        ),
+                        (
+                            "move",
+                            &self.url(
+                                listing,
+                                page,
+                                if side {
+                                    LabelChange::Exclude(term)
+                                } else {
+                                    LabelChange::Require(term)
+                                },
+                            ),
+                        ),
                     ],
                     "",
                 ));
@@ -1594,7 +1626,7 @@ impl LabelFilters<'_> {
         }
         render::wrap(
             "label-filters",
-            &[("clear", &self.url(listing, page, None, None))],
+            &[("clear", &self.url(listing, page, LabelChange::Clear))],
             &terms,
         )
     }
@@ -1608,8 +1640,14 @@ impl LabelFilters<'_> {
                     "label-chip",
                     &[
                         ("term", term),
-                        ("include", &self.url(listing, page, Some(term), Some(true))),
-                        ("exclude", &self.url(listing, page, Some(term), Some(false))),
+                        (
+                            "include",
+                            &self.url(listing, page, LabelChange::Require(term)),
+                        ),
+                        (
+                            "exclude",
+                            &self.url(listing, page, LabelChange::Exclude(term)),
+                        ),
                     ],
                     "",
                 )
@@ -3982,6 +4020,30 @@ mod tests {
         }
         assert!(header.contains("<view:withheld"));
         assert_eq!(header, nav_for(&web, &partial));
+    }
+
+    #[test]
+    fn conflicting_terms_can_be_removed_independently() {
+        let filters = LabelFilters {
+            labels: Some("same,keep"),
+            without: Some("same,skip"),
+        };
+        let listing = Listing {
+            status: "all",
+            text: None,
+            labels: filters.labels,
+            without: filters.without,
+            limit: None,
+            offset: Some("50"),
+        };
+        assert_eq!(
+            filters.url(&listing, "/l/default", LabelChange::RemoveRequired("same")),
+            "/l/default?status=all&labels=keep&without=same%2Cskip"
+        );
+        assert_eq!(
+            filters.url(&listing, "/l/default", LabelChange::RemoveExcluded("same")),
+            "/l/default?status=all&labels=same%2Ckeep&without=skip"
+        );
     }
 
     #[test]
