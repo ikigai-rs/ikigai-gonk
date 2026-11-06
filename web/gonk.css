@@ -561,3 +561,13 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .view-form .kind legend { font-weight: 400; font-size: 0.9rem; color: var(--muted); margin: 0 0.5rem 0 0; float: left; }
 .view-form .grid input { width: 100%; }
 .views .meta dd { overflow-wrap: anywhere; }
+
+/* The counts arrive after the list; their links wrap even for a single long label. */
+.listing-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(12rem, 18rem); gap: var(--gap); align-items: start; }
+.listing-results, .listing-facet-panel { min-width: 0; }
+.listing-facet-panel { overflow-wrap: anywhere; }
+.facet-terms { padding-left: 1.25rem; }
+.facet-terms li { margin-bottom: 0.5rem; }
+@media (max-width: 50rem) {
+  .listing-body { grid-template-columns: minmax(0, 1fr); }
+}
