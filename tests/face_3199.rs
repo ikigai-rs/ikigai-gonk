@@ -16,8 +16,10 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, config, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const INDEX: &str = "<!doctype html><title>Demo face</title><script src=\"js/app.js\"></script>\n";
-const APP_JS: &str = "fetch('/iki/ledger/items');\n";
+const INDEX: &str = "<!doctype html><title>Demo face</title><link rel=\"stylesheet\" href=\"app.css\"><script type=\"module\" src=\"js/app.js\"></script>\n";
+const APP_JS: &str = "import './kit.js';\nfetch('/iki/ledger/items');\n";
+const KIT_JS: &str = "export const ready = true;\n";
+const APP_CSS: &str = "body { color: navy; }\n";
 const SECRET: &str = "outside the face, never served";
 
 /// A scratch face directory, and beside it (`outside`) a secret the face must never reach.
@@ -25,6 +27,8 @@ fn build(dir: &Path, outside: &Path) {
     std::fs::write(dir.join("index.html"), INDEX).unwrap();
     std::fs::create_dir(dir.join("js")).unwrap();
     std::fs::write(dir.join("js").join("app.js"), APP_JS).unwrap();
+    std::fs::write(dir.join("js").join("kit.js"), KIT_JS).unwrap();
+    std::fs::write(dir.join("app.css"), APP_CSS).unwrap();
     std::fs::write(dir.join(".env.txt"), SECRET).unwrap();
     std::fs::write(dir.join("notes.key"), SECRET).unwrap();
     std::fs::write(outside.join("secret.html"), SECRET).unwrap();
@@ -89,11 +93,11 @@ impl Server {
         for face in &faces {
             anonymous.extend(face.grants());
         }
-        let faces = face::spaces(&faces);
+        let spaces = face::spaces(&faces);
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
             web::space(face),
-            faces,
+            spaces,
             None,
         ));
         let door = doors::HttpDoor {
@@ -103,7 +107,11 @@ impl Server {
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         let edge = doors::edge_config(door.clone());
-        let edge = if with_face { face::route(edge) } else { edge };
+        let edge = if with_face {
+            face::route(edge, &faces)
+        } else {
+            edge
+        };
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
                 http,
@@ -126,9 +134,13 @@ impl Server {
 
     /// A GET carrying `metadata` (whole header lines) as its fetch metadata.
     fn fetch(&self, path: &str, accept: &str, metadata: &str) -> Response {
+        self.request("GET", path, accept, metadata)
+    }
+
+    fn request(&self, method: &str, path: &str, accept: &str, metadata: &str) -> Response {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
         let head = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: {accept}\r\n\
+            "{method} {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: {accept}\r\n\
              {metadata}Connection: close\r\n\r\n",
             port = self.addr.port()
         );
@@ -201,12 +213,117 @@ fn media(response: &Response) -> String {
     response.header("content-type").unwrap_or_default()
 }
 
+/// The front page needs a directory URL so a browser resolves relative assets inside it.
+#[test]
+fn the_bare_face_redirects_to_its_directory() {
+    let gonk = Server::start(true);
+    for method in ["GET", "HEAD"] {
+        for query in ["", "?", "?tab=queue&filter=a%2Fb&filter=c+d&flag&empty="] {
+            let response = gonk.request(
+                method,
+                &format!("/face/name/demo{query}"),
+                "text/html",
+                "Sec-Fetch-Site: same-origin\r\n",
+            );
+            assert_eq!(response.status, 308, "{method}: {response:?}");
+            assert_eq!(
+                response.header("location").as_deref(),
+                Some(format!("/face/name/demo/{query}").as_str()),
+                "{method}: {response:?}"
+            );
+            if method == "HEAD" {
+                assert!(response.body.is_empty(), "{response:?}");
+            }
+        }
+    }
+}
+
+/// A configured directory is the only bare name redirected, for both read methods.
+#[test]
+fn an_unknown_face_is_not_redirected() {
+    let gonk = Server::start(true);
+    for method in ["GET", "HEAD"] {
+        for path in ["/face/name/unknown?tab=queue", "/face/name/unknown/"] {
+            let response = gonk.request(method, path, "*/*", "Sec-Fetch-Site: same-origin\r\n");
+            assert_eq!(response.status, 404, "{method} {path}: {response:?}");
+            assert_eq!(response.header("location"), None, "{response:?}");
+        }
+    }
+}
+
+/// Browser URL resolution keeps a document's stylesheet and a module's imports in the face.
+#[test]
+fn relative_stylesheets_and_module_imports_load_from_the_directory_url() {
+    let gonk = Server::start(true);
+    let document = url::Url::parse(&format!("http://{}/face/name/demo/", gonk.addr)).unwrap();
+    let page = gonk.open(document.path());
+    assert_eq!(page.status, 200, "{page:?}");
+    assert_eq!(page.text(), INDEX);
+    assert!(page.text().contains("href=\"app.css\""));
+    assert!(page.text().contains("type=\"module\" src=\"js/app.js\""));
+
+    let stylesheet = document.join("app.css").unwrap();
+    let css = gonk.get(stylesheet.path(), "text/css");
+    assert_eq!(css.status, 200, "{css:?}");
+    assert!(media(&css).starts_with("text/css"), "{css:?}");
+    assert_eq!(css.text(), APP_CSS);
+
+    let module = document.join("js/app.js").unwrap();
+    let js = gonk.get(module.path(), "*/*");
+    assert_eq!(js.status, 200, "{js:?}");
+    assert!(media(&js).starts_with("text/javascript"), "{js:?}");
+    assert_eq!(js.text(), APP_JS);
+    assert!(js.text().contains("import './kit.js'"));
+
+    let imported = module.join("./kit.js").unwrap();
+    let kit = gonk.get(imported.path(), "*/*");
+    assert_eq!(kit.status, 200, "{kit:?}");
+    assert!(media(&kit).starts_with("text/javascript"), "{kit:?}");
+    assert_eq!(kit.text(), KIT_JS);
+
+    let head = gonk.request(
+        "HEAD",
+        document.path(),
+        "text/html",
+        "Sec-Fetch-Site: same-origin\r\n",
+    );
+    assert_eq!(head.status, 200, "{head:?}");
+    assert!(media(&head).starts_with("text/html"), "{head:?}");
+    assert!(head.body.is_empty(), "{head:?}");
+
+    // This is where the browser asked before the bare document URL was redirected.
+    let bare = url::Url::parse(&format!("http://{}/face/name/demo", gonk.addr)).unwrap();
+    for relative in ["app.css", "js/app.js"] {
+        let wrong = bare.join(relative).unwrap();
+        let response = gonk.get(wrong.path(), "*/*");
+        assert_eq!(response.status, 404, "{wrong}: {response:?}");
+    }
+}
+
+/// The directory redirect must not turn an admission refusal into a navigable answer.
+#[test]
+fn the_bare_face_still_obeys_admission() {
+    let gonk = Server::start(true);
+    let response = gonk.fetch(
+        "/face/name/demo?tab=queue",
+        "text/html",
+        "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: script\r\n",
+    );
+    assert_eq!(response.status, 403, "{response:?}");
+    assert_eq!(response.header("location"), None, "{response:?}");
+    assert_eq!(
+        response.header("content-security-policy").as_deref(),
+        Some(ikigai_web::HTML_DOOR_CSP),
+        "{response:?}"
+    );
+}
+
 /// ★ The front page and a file in a subdirectory serve with their media types and the door's
 /// DEFAULT policy, the one every gonk page has: `script-src 'self'`, no inline script.
 #[test]
 fn a_face_serves_under_the_doors_default_csp() {
     let gonk = Server::start(true);
-    let page = gonk.open("/face/name/demo");
+    let page = gonk.open("/face/name/demo/");
     assert_eq!(page.status, 200, "{page:?}");
     assert!(media(&page).starts_with("text/html"), "{page:?}");
     assert_eq!(page.text(), INDEX);
@@ -304,7 +421,7 @@ fn a_face_is_read_only() {
     stream.read_to_end(&mut response).unwrap();
     let response = Response::parse(&response);
     assert_ne!(response.status / 100, 2, "{response:?}");
-    assert_eq!(gonk.open("/face/name/demo").text(), INDEX);
+    assert_eq!(gonk.open("/face/name/demo/").text(), INDEX);
 }
 
 /// ★ What a face's page fetches runs under the VIEWER's grant: a viewer who reads the ledger
@@ -316,7 +433,7 @@ fn a_faces_fetch_is_judged_under_the_viewers_grant() {
 
     let reader = Server::start(true);
     reader.file("An item the face reads");
-    assert_eq!(reader.open("/face/name/demo").status, 200);
+    assert_eq!(reader.open("/face/name/demo/").status, 200);
     let read = reader.fetch("/iki/ledger/items", "text/turtle", script);
     assert_eq!(read.status, 200, "{read:?}");
     assert!(read.text().contains("An item the face reads"), "{read:?}");
@@ -326,7 +443,7 @@ fn a_faces_fetch_is_judged_under_the_viewers_grant() {
 
     let stranger = Server::start_reading(true, &[]);
     stranger.file("An item the stranger may not read");
-    assert_eq!(stranger.open("/face/name/demo").status, 200);
+    assert_eq!(stranger.open("/face/name/demo/").status, 200);
     let refused = stranger.fetch("/iki/ledger/items", "text/turtle", script);
     assert_eq!(refused.status, 403, "{refused:?}");
     assert!(!refused.text().contains("may not read"), "{refused:?}");
@@ -351,7 +468,7 @@ fn the_header_links_each_face() {
     let page = home.text();
     let header = &page[..page.find("</header>").expect("a header")];
     assert!(
-        header.contains("<a class='navlink' href='/face/name/demo'>demo</a>"),
+        header.contains("<a class='navlink' href='/face/name/demo/'>demo</a>"),
         "{header}"
     );
 }

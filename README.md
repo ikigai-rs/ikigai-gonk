@@ -548,7 +548,7 @@ there.
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
 | `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
 | `/toolbox` · `/toolbox/{…}` | `urn:iki:gonk:page:toolbox` · `urn:toolbox:{…}` | the RDF Toolbox, only when `gonk.toolbox.dist` is set (see "The RDF Toolbox") |
-| `/face/name/{name}` · `/face/name/{name}/{…}` | `urn:face:name:{name}:index.html` · `urn:face:name:{name}:{…}` | a deployment's own pages, only when a `gonk.face` line names one (see "A deployment's own pages") |
+| `/face/name/{name}/` · `/face/name/{name}/{…}` | `urn:face:name:{name}:index.html` · `urn:face:name:{name}:{…}` | a deployment's own pages, only when a `gonk.face` line names one (see "A deployment's own pages") |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
@@ -666,7 +666,7 @@ whatever no rule takes from it. No ledger's records change, and a raw question a
 was. A rule that cannot be read (no arrow, a date that is not a date, a row with a space in it) or
 that could never match stops the server at start, naming the line.
 
-### A deployment's own pages at `/face/name/{name}` (ledger #3199)
+### A deployment's own pages at `/face/name/{name}/` (ledger #3199)
 
 A deployment can write its own HTML and scripts and have gonk serve them from gonk's origin, so
 they read and write through gonk's existing routes with the viewer's own passkey session:
@@ -675,9 +675,12 @@ they read and write through gonk's existing routes with the viewer's own passkey
 gonk.face = "ops ~/.local/share/ops-face"
 ```
 
-One `<name> <directory>` line per face, repeatable. `/face/name/ops` serves `index.html`, and
-`/face/name/ops/js/app.js` serves `js/app.js`. The directory is jailed (no `..`, no symbolic
-link, no hidden name, only the extensions in `face::MEDIA_TYPES`), read-only, and served under
+One `<name> <directory>` line per face, repeatable. `/face/name/ops/` serves `index.html`, and
+`/face/name/ops/js/app.js` serves `js/app.js`. A GET or HEAD of `/face/name/ops` redirects
+permanently (308) to `/face/name/ops/`, keeping the query string, so relative stylesheets and
+module imports resolve inside the face. An unknown face name is still 404. The directory is
+jailed (no `..`, no symbolic link, no hidden name, only the extensions in `face::MEDIA_TYPES`),
+read-only, and served under
 the door's default CSP (`script-src 'self'`, no inline script). Every fetch a face makes is
 judged under the viewer's capability, so a face reaches nothing its viewer could not reach by
 hand. A line naming something that is not a directory stops the server at start. Each face gets

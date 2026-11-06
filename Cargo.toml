@@ -1084,7 +1084,9 @@ ikigai-quic = "0.2.1"
 # with `hyper-util`'s tokio glue): new packages in the lock, and SERVER code only, so the
 # outbound surface argued above is unchanged (`cargo tree -e features -i hyper`). `"0.2.1"` is
 # `<0.3.0`.
-ikigai-web = "0.2.1"
+# The local 0.2.3 patch below adds directory redirects (ledger #3220). Pin it exactly so
+# an unlocked build cannot select a newer registry release without that local API.
+ikigai-web = "=0.2.3"
 # The shared UI path as resources (UX 4, ledger #2834): `urn:iki:ui:tokens.css`,
 # `urn:iki:ui:shell.js` and `urn:iki:ui:htmx`, bound in the HTTP door's kernel and served under
 # `/static/`, and `theme_chooser`, the markup of the header's theme chooser. It holds no state
@@ -1335,6 +1337,8 @@ hmac = "0.12.1"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+# Resolve face asset references exactly as a browser resolves their document/module URLs.
+url = "2"
 # The authz benchmark reads the Linux thread CPU clock outside latency samples.
 libc = "0.2"
 # The module recipe as one test, walked over the kernel `main` serves. ⚠ This pin is a
@@ -1398,3 +1402,7 @@ age = "0.11.1"
 [[bench]]
 name = "authz"
 harness = false
+
+# Local HTTP directory redirects for configured faces (ledger #3220); never published.
+[patch.crates-io]
+ikigai-web = { path = "vendor/ikigai-web" }

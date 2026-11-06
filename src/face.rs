@@ -13,7 +13,7 @@
 //! server at start, naming the key ([`Face::at`]), as does a name given twice.
 //!
 //! ```text
-//! /face/name/{name}                 urn:face:name:{name}:index.html   the face's front page
+//! /face/name/{name}/                urn:face:name:{name}:index.html   the face's front page
 //! /face/name/{name}/{a}/…/{file}    urn:face:name:{name}:{a}:…:{file} one file, {a}/…/{file} on disk
 //! ```
 //!
@@ -67,7 +67,7 @@ pub const PATH: &str = "/face/name";
 /// The IRI prefix a face's files answer under: `urn:face:name:{name}:{path}`.
 pub const IRI: &str = "urn:face:name:";
 
-/// The file `/face/name/{name}` answers.
+/// The file `/face/name/{name}/` answers.
 pub const INDEX: &str = "index.html";
 
 /// The extensions a face may serve, and the media type each one is served with. Anything else
@@ -165,9 +165,9 @@ impl Face {
         &self.dir
     }
 
-    /// Where the face's front page is served: `/face/name/{name}`.
+    /// Where the face's front page is served: `/face/name/{name}/`.
     pub fn href(&self) -> String {
-        format!("{PATH}/{}", self.name)
+        format!("{PATH}/{}/", self.name)
     }
 
     /// The IRI the face's directory is bound at: `urn:iki:face:name:{name}:dir:`.
@@ -337,9 +337,10 @@ impl Endpoint for FaceFile {
     }
 }
 
-/// The `/face/name/{name}` row: a face's front page, [`INDEX`]. Its files take the door's
-/// mechanical mapping. No row carries a CSP of its own, so every face is under the door's
-/// default policy.
+/// The index row: a face's front page, [`INDEX`]. The door matches it with or without
+/// the trailing slash; [`route`] redirects configured bare names before dispatch. Its files
+/// take the door's mechanical mapping. No row carries a CSP of its own, so every face is
+/// under the door's default policy.
 ///
 /// ```
 /// let rows = ikigai_gonk::face::routes();
@@ -359,8 +360,13 @@ pub fn routes() -> Vec<Route> {
     }]
 }
 
-/// `config` with the [`routes`] appended, for a door that serves at least one face.
-pub fn route(mut config: EdgeConfig) -> EdgeConfig {
+/// `config` with the [`routes`] appended and GET/HEAD redirects from each configured
+/// face's bare URL to its directory URL, keeping the query. Unknown names still route
+/// to an unbound face and answer 404.
+pub fn route(mut config: EdgeConfig, faces: &[Face]) -> EdgeConfig {
     config.routes.routes.extend(routes());
+    config
+        .directory_redirects
+        .extend(faces.iter().map(|face| format!("{PATH}/{}", face.name())));
     config
 }

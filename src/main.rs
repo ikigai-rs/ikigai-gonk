@@ -943,7 +943,7 @@ fn serve(flags: &config::Flags) -> ! {
         let edge = if settings.faces.is_empty() {
             edge
         } else {
-            ikigai_gonk::face::route(edge)
+            ikigai_gonk::face::route(edge, &settings.faces)
         };
         // A browser navigating to an error gets it in gonk's own page, with the passkey
         // sign-in on it when signing in would cure it (ledger #2021).
