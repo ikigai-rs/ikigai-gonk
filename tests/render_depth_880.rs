@@ -52,6 +52,7 @@ fn server() -> Server {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
     let door = doors::HttpDoor {

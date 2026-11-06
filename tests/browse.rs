@@ -3332,6 +3332,7 @@ impl HttpDoorHarness {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         // ★ The anonymous grant this server ships: the configured ledgers, read and write.

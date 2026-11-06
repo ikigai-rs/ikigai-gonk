@@ -419,6 +419,7 @@ fn http_door_with_space(hub: Arc<Kernel>, config: &std::path::Path) -> (Kernel, 
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     doors::http_kernel_serving_with_space(hub, ikigai_gonk::web::space(face), Vec::new(), None)
 }

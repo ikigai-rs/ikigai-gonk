@@ -251,6 +251,7 @@ fn over_http_an_anonymous_run_is_refused_at_the_door_budget() {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
     let door = doors::HttpDoor {

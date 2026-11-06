@@ -204,6 +204,11 @@ fn serve(flags: &config::Flags) -> ! {
     if let Some(toolbox) = &settings.toolbox {
         http_grants.extend(toolbox.grants());
     }
+    // And a read on each `gonk.face` directory (ledger #3199, `face::Face::grants`): a face is
+    // read under its caller's capability, and nobody holds a write there.
+    for face in &settings.faces {
+        http_grants.extend(face.grants());
+    }
 
     // Authority is decided before the store opens: a broken authority file stops the server
     // instead of degrading it. `grants.json` feeds BOTH identity doors (certificates and
@@ -818,14 +823,18 @@ fn serve(flags: &config::Flags) -> ! {
             // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
             // (ledger #2021).
             toolbox: settings.toolbox.is_some(),
+            // The header offers each `gonk.face` by name (ledger #3199).
+            faces: settings.faces.iter().map(|f| f.name().to_string()).collect(),
         });
         let pages = web::door_space(Arc::clone(&face), layers_view);
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
-        let faces = settings
+        let mut faces = settings
             .toolbox
             .as_ref()
             .map(|toolbox| toolbox.spaces())
             .unwrap_or_default();
+        // A deployment's own pages (ledger #3199), in this door alone, jailed and read-only.
+        faces.extend(ikigai_gonk::face::spaces(&settings.faces));
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
             pages,
@@ -930,6 +939,11 @@ fn serve(flags: &config::Flags) -> ! {
         let edge = match settings.toolbox {
             Some(_) => ikigai_gonk::toolbox::route(edge),
             None => edge,
+        };
+        let edge = if settings.faces.is_empty() {
+            edge
+        } else {
+            ikigai_gonk::face::route(edge)
         };
         // A browser navigating to an error gets it in gonk's own page, with the passkey
         // sign-in on it when signing in would cure it (ledger #2021).

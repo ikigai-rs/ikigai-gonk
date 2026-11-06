@@ -133,6 +133,7 @@ fn door_with(
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),

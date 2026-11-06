@@ -159,6 +159,10 @@ pub struct Web {
     /// no entry: a header link to a `/toolbox` that answers `404` is a door nobody should be
     /// shown, the rule ledger #442 set for Browse.
     pub toolbox: bool,
+    /// The names of the deployment's own pages this server serves (`gonk.face`,
+    /// [`crate::face`], ledger [#3199](http://localhost:1062/l/default/item/3199)), each offered
+    /// in the header at `/face/name/{name}`. Empty for none.
+    pub faces: Vec<String>,
     /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
     /// [#3034](http://localhost:1062/l/default/item/3034)).
     pub holder_aliases: crate::holders::HolderAliases,
@@ -698,6 +702,18 @@ fn nav_with(
         out.push_str(&element(
             "toolbox-link",
             &[("href", crate::toolbox::PATH)],
+            "",
+        ));
+    }
+    // ★ A deployment's own pages (ledger [#3199](http://localhost:1062/l/default/item/3199)),
+    // beside Views and Layers. Ungated on the toolbox's rule: the door adds each face's read to
+    // the anonymous grant (`main`, `Face::grants`), and what the face's scripts then fetch is
+    // judged under the viewer's own capability.
+    for name in &web.faces {
+        let href = format!("{}/{name}", crate::face::PATH);
+        out.push_str(&element(
+            "face-link",
+            &[("href", href.as_str()), ("name", name.as_str())],
             "",
         ));
     }
@@ -3999,6 +4015,7 @@ mod tests {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         };
         let root = Capability::root();
         let ledgers = readable_ledgers(&web, &root);

@@ -79,6 +79,7 @@ impl Server {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: with_toolbox,
+            faces: Vec::new(),
         });
         let toolbox = with_toolbox.then(|| Toolbox::at(dist.path().to_path_buf()).unwrap());
         let mut anonymous = anonymous_http_grants(readable).unwrap();
