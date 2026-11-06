@@ -1258,6 +1258,9 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
             "short",
             ledger.number(number.parse::<i64>().unwrap_or_default()),
         );
+        // Only single-ledger listings and item cards call this enrichment. Keep `short`
+        // qualified for action names; the visible number is local to this page's ledger.
+        graph.view(&item, "localNumber", format!("#{number}"));
         graph.view(&item, "href", format!("{}/item/{id}", ledger_href(ledger)));
         graph.view(&item, "ledger", ledger.name());
         graph.view(&item, "ledgerHref", ledger_href(ledger));
