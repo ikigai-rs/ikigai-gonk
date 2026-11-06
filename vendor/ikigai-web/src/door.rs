@@ -120,7 +120,29 @@ where
         return upload::exchange(shared, head, body, plan).await;
     }
     match read_body(&shared.config, head, body).await {
-        Ok(req) => reply(answer(shared, req).await),
+        Ok(req) => {
+            // This is edge policy, after intake and admission, rather than an endpoint's
+            // Location envelope (which remains restricted to Post/Redirect/Get). Keep the
+            // query from the wire: decoding and re-encoding loses its original spelling.
+            if matches!(req.method.as_str(), "GET" | "HEAD")
+                && shared.config.directory_redirects.contains(&req.path)
+            {
+                if let Some(refused) = crate::refuse_admission(shared, &req) {
+                    return render(refused);
+                }
+                let mut location = format!("{}/", req.path);
+                if let Some(query) = parts.uri.query() {
+                    location.push('?');
+                    location.push_str(query);
+                }
+                let mut resp = Resp::status(308, "Permanent Redirect");
+                resp.headers.push(("Location".to_string(), location));
+                let mut resp = crate::finish(resp, &req, &shared.config);
+                crate::apply_edge_policy(&mut resp, &shared.config, &req, None);
+                return render(resp);
+            }
+            reply(answer(shared, req).await)
+        }
         Err(refused) => unread(render(*refused)),
     }
 }

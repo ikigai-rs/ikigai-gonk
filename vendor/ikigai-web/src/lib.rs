@@ -498,6 +498,10 @@ pub struct EdgeConfig {
     /// the host may swap it (e.g. when a watched route file changes) without a restart; each
     /// request reads whatever the handle currently holds. `None` → the static `routes`.
     pub live_routes: Option<LiveRoutes>,
+    /// Explicit directory paths, without a trailing slash, whose GET and HEAD requests
+    /// answer 308 to the slash form. Admission still runs first; the raw query is preserved.
+    /// Only listed paths redirect, with no change to routing or endpoint responses.
+    pub directory_redirects: Vec<String>,
     /// The largest request body accepted, in bytes; a larger one is refused with `413`,
     /// before it is read when its `Content-Length` says so, and as soon as it passes the bound
     /// when it is chunked. Never truncated. Default [`DEFAULT_MAX_BODY_BYTES`]. Raise it for a
@@ -677,6 +681,7 @@ impl Default for EdgeConfig {
             cors: CorsPolicy::default(),
             routes: RouteTable::default(),
             live_routes: None,
+            directory_redirects: Vec::new(),
             routes_only: false,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             principal_fn: None,

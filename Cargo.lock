@@ -2130,6 +2130,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "url",
 ]
 
 [[package]]
@@ -2481,8 +2482,6 @@ dependencies = [
 [[package]]
 name = "ikigai-web"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "665636d8a37e78dea9251749786ec26b7791eb0e45c51d515da8c842cad6d0cf"
 dependencies = [
  "blake3",
  "bytes",
