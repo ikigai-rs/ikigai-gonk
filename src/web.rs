@@ -1842,7 +1842,7 @@ async fn ledger_listing(
             ("text", text.unwrap_or("")),
             ("labels", labels.unwrap_or("")),
             ("without", without.unwrap_or("")),
-            ("limit", limit.unwrap_or("")),
+            ("limit", &wanted.to_string()),
             ("status-tail", &status_tail),
             ("page-url", &page_url),
             ("items-url", &items_url),

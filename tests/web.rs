@@ -313,6 +313,12 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
             None,
         );
         assert_eq!(response.status, 200, "{response:?}");
+        assert!(
+            response
+                .body
+                .contains("name='limit' type='hidden' value='50'"),
+            "a form response without an explicit limit still has a valid search form: {response:?}"
+        );
         filed.push(first_item(&response.body));
     }
     let closed = server.form(
