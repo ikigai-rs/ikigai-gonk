@@ -22,13 +22,15 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 11] = [
+const PAGES: [(&str, &str); 13] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
     ("ledger.html", "/l/default"),
     ("closed.html", "/l/default?status=closed"),
     ("item.html", "/l/default/item/1"),
+    ("named-ledger.html", "/l/crew"),
+    ("named-item.html", "/l/crew/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
     ("doctor.html", "/l/default/doctor"),
     ("sparql.html", "/sparql"),
@@ -90,10 +92,20 @@ fn main() {
         &Capability::root(),
     ))
     .expect("the scratch item");
+    block_on(Kernel::issue(
+        &hub,
+        Request::new(
+            Verb::Sink,
+            Iri::parse("urn:iki:ledger:crew:append").expect("an IRI"),
+        )
+        .with_arg("content", ArgRef::Inline(b"A crew item".to_vec())),
+        &Capability::root(),
+    ))
+    .expect("the named-ledger scratch item");
     let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
-        ledgers: vec!["default".to_string()],
+        ledgers: vec!["default".to_string(), "crew".to_string()],
         browse_roots: Vec::new().into(),
         passkeys: Arc::clone(&passkeys),
         rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
@@ -109,7 +121,8 @@ fn main() {
         None,
     ));
     let door = doors::HttpDoor {
-        anonymous: anonymous_http_grants(&["default".to_string()]).expect("the anonymous grant"),
+        anonymous: anonymous_http_grants(&["default".to_string(), "crew".to_string()])
+            .expect("the anonymous grant"),
         bind: addr,
         passkeys: Some(passkeys),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
