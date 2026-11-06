@@ -10,3 +10,13 @@ jobs:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
     with:
       free-disk: true   # the debug build with RocksDB rebuilt fills the runner's disk (ledger #2969)
+  # axe through ikigai-ui's reusable workflow (UI conventions D13, D18; ledger #2900): every page the
+  # `axe_site` example writes, in every theme, under light, dark and more-contrast media, served with
+  # the door's CSP; any WCAG 2.2 A/AA violation, page error or console error fails it. The example
+  # renders the anonymous pages only: browse trees (and .browse-size's light-theme contrast, a known
+  # limitation) are not in the fixture yet.
+  axe:
+    uses: ikigai-rs/ikigai-ui/.github/workflows/axe.yml@main
+    with:
+      prepare: cargo run --locked --example axe_site -- target/axe-site
+      site: target/axe-site
