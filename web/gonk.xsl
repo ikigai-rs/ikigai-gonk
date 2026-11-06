@@ -2328,10 +2328,10 @@
   <xsl:template match="ledger:Item">
     <li>
       <xsl:attribute name="class">row <xsl:value-of select="view:status"/></xsl:attribute>
-      <span class="num"><xsl:value-of select="view:short"/></span>
+      <span class="num"><xsl:value-of select="view:localNumber"/></span>
       <a class="title">
         <xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute>
-        <xsl:value-of select="dcterms:title"/>
+        <xsl:value-of select="dcterms:title"/><span class="sr-only"> (in <xsl:value-of select="view:ledger"/>)</span>
       </a>
       <span class="badges">
         <xsl:call-template name="badges"/>
@@ -2491,7 +2491,7 @@
     <header class="item-head">
       <p class="crumbs">
         <a><xsl:attribute name="href"><xsl:value-of select="view:ledgerHref"/></xsl:attribute><xsl:value-of select="view:ledger"/></a>
-        <span class="num"><xsl:value-of select="view:short"/></span>
+        <span class="num"><xsl:value-of select="view:localNumber"/></span>
       </p>
       <h1 class="item-title"><xsl:value-of select="dcterms:title"/></h1>
       <p class="badges"><xsl:call-template name="badges"/></p>

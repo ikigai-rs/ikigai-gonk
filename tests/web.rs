@@ -3200,3 +3200,74 @@ fn a_lifecycle_page_uses_the_named_ledgers_definition_and_escapes_its_text() {
     assert!(page.body.contains("href='/l/tasks'"), "{page:?}");
     assert!(page.body.contains("href='/l/tasks/doctor'"), "{page:?}");
 }
+
+// A single-ledger context makes the visible ledger prefix redundant (ledger #3215).
+#[test]
+fn single_ledger_rows_use_bare_numbers_and_name_the_ledger_in_the_link() {
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("crew", Authority::Write).unwrap(),
+        Vec::new(),
+        &["crew"],
+    );
+    assert_eq!(server.page("/l/default", None).status, 403);
+    let filed = server.form(
+        &[
+            ("_ledger", "crew"),
+            ("_action", "append"),
+            ("_then", "items"),
+            ("content", "A crew item"),
+        ],
+        None,
+    );
+    assert_eq!(filed.status, 200, "{filed:?}");
+    let iri_start = filed.body.find("urn:iki:ledger:crew:item:").unwrap();
+    let id: String = filed.body[iri_start + "urn:iki:ledger:crew:item:".len()..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let href = format!("/l/crew/item/{id}");
+    for path in ["/l/crew", "/l/crew/items"] {
+        let page = server.page(path, None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert!(
+            page.body.contains("<span class='num'>#1</span>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains("A crew item<span class='sr-only'> (in crew)</span>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body.contains(&format!("class='title' href='{href}'")),
+            "{page:?}"
+        );
+        assert!(
+            !page.body.contains("<span class='num'>crew#1</span>"),
+            "{page:?}"
+        );
+    }
+    let card = server.page(&href, None);
+    assert_eq!(card.status, 200, "{card:?}");
+    assert!(
+        card.body.contains("<span class='num'>#1</span>"),
+        "{card:?}"
+    );
+    for media in ["text/turtle", "application/json"] {
+        let data = server.raw(
+            "GET",
+            &format!("/iki/ledger/crew/item/{id}"),
+            &[("Accept", media.to_string())],
+            "",
+        );
+        assert_eq!(data.status, 200, "{data:?}");
+        assert!(
+            data.body
+                .contains(&format!("urn:iki:ledger:crew:item:{id}")),
+            "{data:?}"
+        );
+        assert!(!data.body.contains("sr-only"), "{data:?}");
+        assert!(!data.body.contains("urn:iki:gonk:view:"), "{data:?}");
+    }
+}
