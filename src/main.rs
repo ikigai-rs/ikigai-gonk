@@ -183,6 +183,9 @@ fn bridge_door(
 }
 
 fn serve(flags: &config::Flags) -> ! {
+    // Before any line is written: the log names each caller, so it is owner-only and rotated
+    // daily, 14 kept (ledger #3159).
+    ikigai_gonk::logfile::narrow_and_rotate();
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let (config_path, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     // Not prefixed with the config path: a setting may have come from a flag, and a message

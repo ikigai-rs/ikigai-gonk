@@ -100,8 +100,8 @@
 //!
 //! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
 //! what an access log is for, and a server that is slow for a long time logs every slow poll
-//! for as long as it is slow — on purpose: that is the incident. Rotation of the file is
-//! launchd's (or `newsyslog`'s) and is not this module's to do.
+//! for as long as it is slow — on purpose: that is the incident. The FILE is owner-only and
+//! rotated daily, fourteen kept, by [`crate::logfile`] (ledger #3159).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -190,7 +190,8 @@ struct Polls {
 }
 
 impl AccessLog {
-    /// Lines to this process's stderr — which launchd sends to `/tmp/ikigai-gonk.log`.
+    /// Lines to this process's stderr — which launchd sends to `~/Library/Logs/ikigai-gonk/gonk.log`,
+    /// owner-only and rotated daily by [`crate::logfile`] (ledger #3159).
     ///
     /// ★ ONE `write_all` per line, newline included, on the locked handle. `eprintln!` formats
     /// straight into unbuffered stderr and can issue a write per piece, which lets two doors'
