@@ -3271,3 +3271,106 @@ fn single_ledger_rows_use_bare_numbers_and_name_the_ledger_in_the_link() {
         assert!(!data.body.contains("urn:iki:gonk:view:"), "{data:?}");
     }
 }
+
+/// Ledger #3195: a row shows the hub's own facts as badges, each with its words: the lifecycle
+/// state (an in-flight one said so, from the lifecycle document), the claim's holder with an
+/// expired lease marked, awaiting with whom it awaits, and deferred as before. None of them is
+/// a label, so a label spelled like one adds no badge.
+#[test]
+fn a_row_shows_its_state_claim_awaiting_and_deferred_as_badges() {
+    let server = Server::start();
+    let mut last = String::new();
+    for title in ["In flight", "Held long ago", "Handed back", "Plain"] {
+        let filed = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "append"),
+                ("_then", "items"),
+                ("content", title),
+            ],
+            None,
+        );
+        assert_eq!(filed.status, 200, "{filed:?}");
+        last = filed.body;
+    }
+    let prefix = "urn:iki:ledger:default:item:";
+    let mut items: Vec<String> = last
+        .match_indices(prefix)
+        .map(|(at, _)| {
+            let id: String = last[at + prefix.len()..]
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            format!("{prefix}{id}")
+        })
+        .collect();
+    items.sort();
+    items.dedup();
+    assert_eq!(items.len(), 4, "{items:?}");
+    let iri_of = |title: &str| -> String {
+        let turtle = items
+            .iter()
+            .find(|iri| {
+                let id = iri.rsplit_once(":item:").unwrap().1;
+                turtle(&server, id).contains(title)
+            })
+            .unwrap_or_else(|| panic!("no item titled {title}"));
+        turtle.clone()
+    };
+    let (flying, held, waiting) = (
+        iri_of("In flight"),
+        iri_of("Held long ago"),
+        iri_of("Handed back"),
+    );
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            r#"
+            @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            <{flying}> ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> ;
+                ledger:claimedBy "w1" ; ledger:claimKind ledger:machine ;
+                ledger:lease "1h" ; ledger:leaseExpires "2999-01-01T00:00:00.000Z"^^xsd:dateTime ;
+                ledger:label "lifecycle:shipping" .
+            <{held}> ledger:state <urn:iki:ledger:lifecycle:kata-flight:queued> ;
+                ledger:claimedBy "w2" ; ledger:claimKind ledger:machine ;
+                ledger:lease "30m" ; ledger:leaseExpires "2001-01-01T00:00:00.000Z"^^xsd:dateTime ;
+                ledger:deferred true .
+            <{waiting}> ledger:awaiting <urn:iki:ledger:awaiting:dispatcher> .
+            "#
+        ),
+    );
+    for path in ["/l/default", "/l/default?theme=dark"] {
+        let page = server.page(path, None);
+        assert_eq!(page.status, 200, "{page:?}");
+        for badge in [
+            "<span class='badge state in-flight'>state: resolving · in flight</span>",
+            "<span class='badge state'>state: queued</span>",
+            "<span class='badge state'>state: filed</span>",
+            "<span class='badge claimed'>claimed by w1</span>",
+            "<span class='badge claimed expired'>claimed by w2 · lease expired</span>",
+            "<span class='badge awaiting'>awaiting dispatcher</span>",
+            "<span class='badge deferred'>deferred</span>",
+        ] {
+            assert!(page.body.contains(badge), "missing {badge}: {page:?}");
+        }
+        assert!(
+            !page.body.contains("state: shipping"),
+            "a label is never the state: {page:?}"
+        );
+        assert_eq!(
+            page.body.matches("class='badge awaiting'").count(),
+            1,
+            "{page:?}"
+        );
+    }
+    let id = flying.rsplit_once(":item:").unwrap().1;
+    let card = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(card.status, 200, "{card:?}");
+    assert!(
+        card.body
+            .contains("<span class='badge state in-flight'>state: resolving · in flight</span>"),
+        "{card:?}"
+    );
+}

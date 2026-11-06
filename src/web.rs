@@ -1300,6 +1300,25 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
         if let Some(lease) = graph.value(&item, &format!("{LEDGER_NS}lease")) {
             graph.view(&item, "lease", lease);
         }
+        // Ledger #3195: an expired lease is marked on the row, against the KERNEL clock the
+        // ledger stamped the expiry from (`ikigai_ledger::claim`). Both sides are the ledger's
+        // own `YYYY-MM-DDTHH:MM:SS.mmmZ`, so they compare as text. No clock, no mark: a page
+        // that cannot tell says nothing rather than guess.
+        if let (Some(expires), Some(now)) = (
+            graph.value(&item, &format!("{LEDGER_NS}leaseExpires")),
+            inv.now(),
+        ) {
+            let now = ikigai_ledger::sparql::iso8601(now.as_millis());
+            graph.view(&item, "leaseExpired", flag(expires <= now));
+        }
+        // Who an open item waits on after a hand-back, in the ledger's own word for it.
+        if let Some(awaiting) = graph.value(&item, &format!("{LEDGER_NS}awaiting")) {
+            graph.view(
+                &item,
+                "awaiting",
+                ikigai_ledger::model::awaiting_name(&awaiting).to_string(),
+            );
+        }
 
         // Links and about-targets become view nodes, because a repeated sub-element that needs
         // its item's IRI cannot reach it in xrust (no parent axis worth trusting, no variable).
@@ -1341,6 +1360,51 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
             .value(&comment, &format!("{DCTERMS}created"))
             .unwrap_or_default();
         graph.view(&comment, "created", when(&created));
+    }
+}
+
+/// `view:stateInFlight` for every item whose lifecycle state the lifecycle document declares
+/// in flight, in place (ledger [#3195](http://localhost:1062/l/default/item/3195)).
+///
+/// The state's look is the lifecycle's, never a label's: the state IRI names its lifecycle
+/// (`urn:iki:ledger:lifecycle:{lc}:{state}`), and that document is read once per lifecycle on
+/// the page, through the hub, under the viewer's own capability, as the lifecycle page reads
+/// it. An item with no state is `filed`, and no row is read for it. A document the viewer
+/// cannot read, or one that does not parse, leaves the badge plain (its words still name the
+/// state): the row is the item's, and a lifecycle read failing must not take the page down.
+async fn enrich_states(graph: &mut Graph, inv: &Invocation<'_>) {
+    let mut documents: BTreeMap<String, Option<ikigai_ledger::Lifecycle>> = BTreeMap::new();
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let Some(state) = graph.value(&item, &format!("{LEDGER_NS}state")) else {
+            continue;
+        };
+        let Some((lifecycle, _)) = state
+            .strip_prefix(ikigai_ledger::lifecycle::PREFIX)
+            .and_then(|rest| rest.rsplit_once(':'))
+        else {
+            continue;
+        };
+        let iri = format!("{}{lifecycle}", ikigai_ledger::lifecycle::PREFIX);
+        if !documents.contains_key(&iri) {
+            let read = match request(Verb::Source, &iri) {
+                Ok(read) => with(read, "as", "text/turtle"),
+                Err(_) => {
+                    documents.insert(iri.clone(), None);
+                    continue;
+                }
+            };
+            let parsed = fetch(inv, read).await.ok().and_then(|bytes| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| ikigai_ledger::Lifecycle::parse(text).ok())
+            });
+            documents.insert(iri.clone(), parsed);
+        }
+        if let Some(Some(document)) = documents.get(&iri) {
+            if document.state_by_iri(&state).is_some_and(|s| s.in_flight) {
+                graph.view(&item, "stateInFlight", "true");
+            }
+        }
     }
 }
 
@@ -1790,6 +1854,7 @@ async fn ledger_listing(
         offset,
     };
     enrich_items(&mut graph, ledger, inv, status);
+    enrich_states(&mut graph, inv).await;
     for item in &order {
         for (name, value) in [
             ("listLabels", labels),
@@ -2470,6 +2535,7 @@ async fn item_card(
     );
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, "open");
+    enrich_states(&mut graph, inv).await;
     enrich_close_reasons(&mut graph, &web.hub, ledger);
     enrich_children(&mut graph);
     enrich_repo_labels(&mut graph, web, inv.capability);

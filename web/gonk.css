@@ -166,6 +166,9 @@ summary { cursor: pointer; color: var(--accent); }
 .badges { display: inline-flex; flex-wrap: wrap; gap: 0.35rem; }
 .badge { font-size: 0.8rem; color: var(--muted); border: 1px solid var(--rule); border-radius: 999px; padding: 0 0.5rem; }
 .badge.open { color: var(--ok); border-color: var(--ok); }
+/* Ledger #3195: emphasis only; each badge says its fact in words. */
+.badge.state.in-flight, .badge.awaiting { color: var(--accent); border-color: var(--accent); }
+.badge.claimed.expired { color: var(--danger); border-color: var(--danger); border-style: dashed; }
 .inline { display: inline; }
 
 .item-head { margin-bottom: var(--gap); }
