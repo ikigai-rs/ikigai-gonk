@@ -182,6 +182,8 @@ summary { cursor: pointer; color: var(--accent); }
 /* Ledger #1604: the doctor's scope is one sentence that flows and wraps like text at any
  * width. Never `.meta`, whose grid split it into cells; `tests/web.rs` holds it to no layout. */
 .doctor-scope { color: var(--muted); margin: 0 0 1rem; overflow-wrap: break-word; }
+/* Outgoing linked-item partitions (#3197): long ledger/state names wrap at phone width. */
+.link-group { overflow-wrap: anywhere; }
 .iri { overflow-wrap: anywhere; }
 .plain { list-style: none; margin: 0; padding: 0; }
 .plain > li { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }

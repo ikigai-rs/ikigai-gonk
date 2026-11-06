@@ -947,7 +947,7 @@ fn an_item_page_lists_its_children_as_links() {
     assert_eq!(child.status, 200, "{child:?}");
     assert!(
         child.body.contains(&format!(
-            "<a href='/l/default/item/{parent_id}'>default {parent_id}</a>"
+            "<a class='title' href='/l/default/item/{parent_id}'>The epic<span class='sr-only'> (in default)</span></a>"
         )),
         "{child:?}"
     );
@@ -3372,5 +3372,277 @@ fn a_row_shows_its_state_claim_awaiting_and_deferred_as_badges() {
         card.body
             .contains("<span class='badge state in-flight'>state: resolving · in flight</span>"),
         "{card:?}"
+    );
+}
+
+/// Ledger #3197: the record's outgoing members are live listing rows, not identifiers.
+#[test]
+fn outgoing_links_are_live_rows_with_state_rollups() {
+    let server = Server::start();
+    let (record, id) = file(&server, "Flight plan");
+    let (member, member_id) = file(&server, "A live member");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!("<{record}> <https://ikigai-rs.dev/ns/ledger#related> <{member}> ."),
+    );
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let links = page
+        .body
+        .split("id='links-title'")
+        .nth(1)
+        .expect("Links panel");
+    let links = links.split("</section>").next().unwrap();
+    assert!(
+        links.contains("A live member"),
+        "linked title absent: {links}"
+    );
+    assert!(
+        links.contains("class='row open'"),
+        "not a ledger row: {links}"
+    );
+    assert!(links.contains("filed: 1"), "no state rollup: {links}");
+    assert!(
+        links.contains(&format!("/l/default/item/{member_id}")),
+        "{links}"
+    );
+}
+
+/// Fixture writes bypass the viewer's grant; page reads below must still use it.
+fn linked_fixture(server: &Server, ledger: &str, title: &str) -> (String, String) {
+    let request = ikigai_core::Request::new(
+        ikigai_core::Verb::Sink,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:append")).unwrap(),
+    )
+    .with_arg(
+        "content",
+        ikigai_core::ArgRef::Inline(title.as_bytes().to_vec()),
+    );
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap();
+    let text = String::from_utf8(answer.bytes).unwrap();
+    let prefix = format!("urn:iki:ledger:{ledger}:item:");
+    let rest = text.split(&prefix).nth(1).unwrap();
+    let id: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    (format!("{prefix}{id}"), id)
+}
+
+fn links_panel(html: &str) -> &str {
+    html.split("id='links-title'")
+        .nth(1)
+        .expect("Links panel")
+        .split("</section>")
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn outgoing_links_respect_the_viewers_grant_and_partition_by_relation_and_ledger() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    grants.extend(ikigai_gonk::grants::link_in_grants("crew").unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let (record, id) = linked_fixture(&server, "default", "Record <plan>");
+    let (member, _) = linked_fixture(&server, "crew", "Crew <member> & partner");
+    let (secret, _) = linked_fixture(&server, "private", "Never disclose this title");
+    let missing = "urn:iki:ledger:crew:item:01missing";
+    load(&server, "urn:iki:ledger:graph:default", &format!(
+        "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+         <{record}> ledger:related <{member}>, <{secret}>, <{missing}> ; ledger:parent <{record}> ; ledger:about <urn:external:record> ."
+    ));
+    // A real edge carries the ledger's link node and mirror, so unlink exercises the
+    // same representation a browser-created link uses (raw triples are read fixtures).
+    let linked = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "link"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &record),
+            ("type", "blocks"),
+            ("content", &member),
+        ],
+        None,
+    );
+    assert_eq!(linked.status, 200, "{linked:?}");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert_eq!(
+            page.body.matches("<h1").count(),
+            1,
+            "self-link must not become another card"
+        );
+        let links = links_panel(&page.body);
+        assert_eq!(
+            links.matches("Crew &lt;member&gt; &amp; partner").count(),
+            4,
+            "one title and one unlink name per relation: {links}"
+        );
+        assert!(
+            links.contains("blocks · crew") && links.contains("related · crew"),
+            "{links}"
+        );
+        assert!(links.contains("parent · default"), "{links}");
+        assert!(!page.body.contains("Never disclose this title"), "{page:?}");
+        for target in [&secret, missing, "urn:external:record"] {
+            assert!(
+                links.contains(&format!("<code class='iri'>{target}</code>")),
+                "bare unavailable IRI: {links}"
+            );
+        }
+        assert!(!links.contains("href='/l/private/item/"), "{links}");
+        assert!(
+            !links.contains("name='_action' type='hidden' value='close'"),
+            "linked rows must return to their source card"
+        );
+        assert!(
+            links.contains(&format!("name='_id' type='hidden' value='{id}'")),
+            "unlink addresses the source: {links}"
+        );
+    }
+    // Unlink as a browser does: the response is the refreshed record, not the member.
+    let unlinked = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "link"),
+            ("_verb", "Delete"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &record),
+            ("type", "blocks"),
+            ("content", &member),
+        ],
+        None,
+    );
+    assert_eq!(unlinked.status, 200, "{unlinked:?}");
+    let links = links_panel(&unlinked.body);
+    assert!(
+        !links.contains("blocks · crew") && links.contains("related · crew"),
+        "{links}"
+    );
+}
+
+#[test]
+fn outgoing_links_refresh_badges_rollups_and_listing_order_without_following_another_hop() {
+    let server = Server::start();
+    let (record, id) = linked_fixture(&server, "default", "Live plan");
+    let (first, first_id) = linked_fixture(&server, "default", "First member");
+    let (second, _) = linked_fixture(&server, "default", "Second member");
+    let (grandchild, _) = linked_fixture(&server, "default", "Never follow another hop");
+    load(&server, "urn:iki:ledger:graph:default", &format!(
+        "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+         <{record}> ledger:related <{first}>, <{second}> .\n\
+         <{first}> ledger:related <{grandchild}> ; ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> ; ledger:claimedBy \"worker\" ; ledger:deferred true ."
+    ));
+    let listing = server.page("/l/default?status=all", None);
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    let links = links_panel(&page.body);
+    assert_eq!(
+        links.find("First member") < links.find("Second member"),
+        listing.body.find("First member") < listing.body.find("Second member"),
+        "same listing order: {links}"
+    );
+    assert!(links.contains("filed: 1; resolving: 1"), "{links}");
+    assert!(
+        links.contains("claimed by worker") && links.contains(">deferred</span>"),
+        "{links}"
+    );
+    assert!(!links.contains("Never follow another hop"), "{links}");
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_id", &first_id),
+            ("_then", "card"),
+            ("item", &first),
+            ("reason", "done"),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    let page = server.page(&format!("/l/default/item/{id}/card"), None);
+    let links = links_panel(&page.body);
+    assert!(
+        links.contains("class='row closed'"),
+        "closed members stay in the plan: {links}"
+    );
+    assert!(links.contains("closed · done"), "{links}");
+    let edited = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "item"),
+            ("_id", &first_id),
+            ("_then", "card"),
+            ("content", "Renamed member"),
+            ("priority", "1"),
+        ],
+        None,
+    );
+    assert_eq!(edited.status, 200, "{edited:?}");
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    let links = links_panel(&page.body);
+    assert!(
+        links.contains("Renamed member") && links.contains(">p1</span>"),
+        "{links}"
+    );
+    assert!(
+        !links.contains("First member"),
+        "the target read must not be stale: {links}"
+    );
+}
+
+#[test]
+fn outgoing_links_keep_all_rows_across_render_chunks() {
+    let server = Server::start();
+    let (record, id) = linked_fixture(&server, "default", "A larger flight plan");
+    let mut targets = Vec::new();
+    for n in 0..12 {
+        targets.push(linked_fixture(&server, "default", &format!("Plan member {n:02}")).0);
+    }
+    let edges = targets
+        .iter()
+        .map(|target| format!("<{target}>"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!("<{record}> <https://ikigai-rs.dev/ns/ledger#related> {edges} ."),
+    );
+    let page = server.page(&format!("/l/default/item/{id}/card"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let links = links_panel(&page.body);
+    assert_eq!(links.matches("class='row open'").count(), 12, "{links}");
+    assert!(links.contains("12 linked items. filed: 12."), "{links}");
+    assert!(
+        !links.contains("gonk-slot"),
+        "every chunk is spliced: {links}"
+    );
+    let listing = server.page("/l/default?status=all", None);
+    let positions = |text: &str| {
+        let mut order: Vec<_> = (0..12)
+            .map(|n| (text.find(&format!("Plan member {n:02}")).unwrap(), n))
+            .collect();
+        order.sort();
+        order.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        positions(links),
+        positions(&listing.body),
+        "the listing's order across chunks"
     );
 }
