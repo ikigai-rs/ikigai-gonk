@@ -1,5 +1,8 @@
 # ikigai-gonk
 
+**Website:** [gonk.ikigai-rs.dev](https://gonk.ikigai-rs.dev/), with what gonk does and how to start. The
+[gonk Book](https://ikigai-rs.github.io/ikigai-tutorial/gonk/introduction.html) teaches it chapter by chapter.
+
 **A standalone work-ledger server for [ikigai](https://github.com/ikigai-rs).** One binary
 holds the machine's durable RDF store and serves named ledgers — items, comments, labels,
 links, claims, and a ranked `next` — through three doors: HTTP on loopback port 1062, with a
