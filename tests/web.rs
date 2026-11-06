@@ -556,69 +556,59 @@ fn listing_facets_count_the_whole_match_without_blocking_the_list() {
 }
 
 #[test]
-fn priority_facet_links_filter_pages_and_keep_the_other_filters() {
+fn priority_counts_are_text_and_list_uses_ledger_resources() {
+    use ikigai_core::{Capability, Iri, Request, Verb};
     let server = Server::start();
-    for (title, priority) in [
-        ("Team first", "1"),
-        ("Team second", "2"),
-        ("Team unset", ""),
+    seed(&server);
+    let trace = Arc::new(FacetTrace::default());
+    server.hub.set_tracer(trace.clone());
+    for resource in [
+        "urn:iki:gonk:page:ledger:default",
+        "urn:iki:gonk:fragment:items:default",
     ] {
-        assert_eq!(
-            server
-                .form(
-                    &[
-                        ("_ledger", "default"),
-                        ("_action", "append"),
-                        ("_then", "items"),
-                        ("content", title),
-                        ("labels", "team"),
-                        ("priority", priority),
-                    ],
-                    None
-                )
-                .status,
-            200
-        );
-    }
-    for (priority, expected) in [("1", 1), ("!1", 2), ("unset", 1), ("!unset", 2)] {
-        let path = format!(
-            "/l/default?labels=team&text=Team&priority={}&limit=1",
-            encode(priority)
-        );
-        let page = server.page(&path, None);
-        assert_eq!(page.status, 200, "{path}: {page:?}");
-        assert!(
-            page.body.contains(if expected == 1 {
-                "1 open items"
-            } else {
-                "of 2 open items"
-            }),
-            "{path}: {page:?}"
-        );
-        match priority {
-            "1" => assert!(page.body.contains("Team first"), "{page:?}"),
-            "unset" => assert!(page.body.contains("Team unset"), "{page:?}"),
-            "!1" => assert!(!page.body.contains("Team first"), "{page:?}"),
-            "!unset" => assert!(!page.body.contains("Team unset"), "{page:?}"),
-            _ => unreachable!(),
+        let mut request = Request::new(Verb::Source, Iri::parse(resource).unwrap());
+        for (name, value) in [
+            ("status", "open"),
+            ("labels", "repo:ikigai-gonk"),
+            ("without", "absent"),
+            ("text", "Refuse"),
+            ("priority", "1"),
+        ] {
+            request =
+                request.with_arg(name, ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()));
+        }
+        let response = futures::executor::block_on(server.http.issue_traced(
+            request,
+            &Capability::scoped(grants_for("default", Authority::Read).unwrap()),
+            Arc::new(FacetTrace::default()),
+        ))
+        .unwrap();
+        let body = String::from_utf8_lossy(&response.bytes);
+        assert!(!body.contains("search-priority"), "priority form remains");
+        let events = std::mem::take(&mut *trace.0.lock().unwrap());
+        for suffix in ["count", "items"] {
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.target == format!("urn:iki:ledger:default:{suffix}")),
+                "missing ledger {suffix}: {events:?}"
+            );
         }
         assert!(
-            page.body.contains("name='_priority' type='hidden'"),
-            "{page:?}"
-        );
-        let facets = server.page(
-            &format!("/l/default/facet?labels=team&priority={}", encode(priority)),
-            None,
-        );
-        assert_eq!(facets.status, 200, "{facets:?}");
-        assert!(
-            facets.body.contains(&format!("team ({expected})")),
-            "{facets:?}"
+            !events
+                .iter()
+                .any(|e| e.target == "urn:iki:store:graph-construct"),
+            "list bypassed ledger: {events:?}"
         );
     }
-    for path in ["/l/default?priority=typo", "/l/default/facet?priority=typo"] {
-        assert_eq!(server.page(path, None).status, 400, "{path}");
-    }
+    server.hub.clear_tracer();
+    let facets = server.page("/l/default/facet?labels=repo:ikigai-gonk", None);
+    assert!(facets.body.contains("Priority 1 (2)"), "{facets:?}");
+    assert!(
+        !facets.body.contains("priority="),
+        "priority link remains: {facets:?}"
+    );
+    assert!(!facets.body.contains("Exclude Priority"), "{facets:?}");
 }
 
 #[test]
@@ -693,35 +683,6 @@ fn facets_respect_grants_named_ledgers_empty_matches_and_escaped_terms() {
     assert_eq!(page.status, 200, "{page:?}");
     assert!(
         page.body.contains("<h1>Labels and priority counts</h1>"),
-        "{page:?}"
-    );
-}
-
-#[test]
-fn priority_listing_uses_only_computed_presentation_fields() {
-    let server = Server::start_configured(
-        ikigai_gonk::rules::DEFAULT_RULES,
-        grants_for("default", Authority::Read).unwrap(),
-    );
-    load(
-        &server,
-        "urn:iki:ledger:graph:default",
-        r#"
-        @prefix l: <https://ikigai-rs.dev/ns/ledger#> .
-        @prefix d: <http://purl.org/dc/terms/> .
-        @prefix view: <urn:iki:gonk:view#> .
-        <urn:iki:ledger:item:reserved> a l:Item; l:number 7; d:title "Projected item";
-          l:status l:open; l:priority 1;
-          view:href "/stored-presentation"; view:canWrite "true" ."#,
-    );
-    let page = server.page("/l/default?priority=1", None);
-    assert_eq!(page.status, 200, "{page:?}");
-    assert!(page.body.contains("Projected item"), "{page:?}");
-    assert!(!page.body.contains("/stored-presentation"), "{page:?}");
-    assert!(
-        !page
-            .body
-            .contains("name='_action' type='hidden' value='close'"),
         "{page:?}"
     );
 }

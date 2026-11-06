@@ -51,8 +51,6 @@ try {
           await page.keyboard.press("Tab");
           assert.ok(await without.evaluate((node) => node === document.activeElement));
           await page.keyboard.press("Tab");
-          assert.ok(await page.getByRole("textbox", { name: "Priority", exact: true }).evaluate((node) => node === document.activeElement));
-          await page.keyboard.press("Tab");
           assert.ok(await page.getByRole("button", { name: "Search", exact: true }).evaluate((node) => node === document.activeElement));
           if (file !== "ledger.html") {
             await page.keyboard.press("Tab");

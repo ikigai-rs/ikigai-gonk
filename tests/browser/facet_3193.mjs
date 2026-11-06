@@ -72,6 +72,8 @@ try {
               assert.ok((await fallback.getAttribute("href")).includes("page=true"));
             }
           }
+          assert.equal(await page.locator("#search-priority").count(), 0);
+          assert.equal(await page.locator(".facet-terms a").filter({ hasText: "Priority" }).count(), 0);
           assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${file}: no page overflow`);
           if (javaScriptEnabled) {
             const result = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();

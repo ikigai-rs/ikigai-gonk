@@ -2218,19 +2218,11 @@
               <xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute>
             </input>
           </div>
-          <div class="search-field">
-            <label for="search-priority">Priority</label>
-            <input id="search-priority" name="priority" type="text" aria-describedby="priority-filter-help">
-              <xsl:attribute name="value"><xsl:value-of select="@priority"/></xsl:attribute>
-            </input>
-          </div>
           <button type="submit" class="quiet">Search</button>
-          <p id="priority-filter-help" class="note">Priority: use 0–4 or unset; prefix with ! to exclude.</p>
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
         </form>
       </header>
       <xsl:apply-templates select="view:label-filters"/>
-      <xsl:if test="@priority != ''"><p>Priority filter (the chart includes every priority): <strong><xsl:value-of select="@priority"/></strong>. <a><xsl:attribute name="href"><xsl:value-of select="@clear-priority"/></xsl:attribute>Clear priority filter</a></p></xsl:if>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
@@ -2241,7 +2233,6 @@
           <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
           <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute></input>
           <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute></input>
-          <input type="hidden" name="_priority"><xsl:attribute name="value"><xsl:value-of select="@priority"/></xsl:attribute></input>
           <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
           <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
@@ -2323,7 +2314,7 @@
 
   <xsl:template match="view:facet">
     <div id="listing-facet" data-loaded="true">
-      <p>Counts cover the whole filtered list, including items on other pages. Choose a count to require its label or priority, or choose Exclude.</p>
+      <p>Counts cover the whole filtered list, including items on other pages. Choose a label count to require its label, or choose Exclude. Priority counts are informational.</p>
       <xsl:choose>
         <xsl:when test="@empty = 'true'"><p>No labels or priorities match.</p></xsl:when>
         <xsl:otherwise><ul class="facet-terms"><xsl:apply-templates select="view:facet-term"/><xsl:apply-templates select="view:slot"/></ul></xsl:otherwise>
@@ -2333,8 +2324,13 @@
 
   <xsl:template match="view:facet-term">
     <li>
-      <a><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</a><xsl:text> · </xsl:text>
-      <a><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@name"/></a>
+      <xsl:choose>
+        <xsl:when test="@include != ''">
+          <a><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</a><xsl:text> · </xsl:text>
+          <a><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@name"/></a>
+        </xsl:when>
+        <xsl:otherwise><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</xsl:otherwise>
+      </xsl:choose>
     </li>
   </xsl:template>
 
@@ -2391,7 +2387,6 @@
             <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
             <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="view:listLabels"/></xsl:attribute></input>
             <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="view:listWithout"/></xsl:attribute></input>
-            <input type="hidden" name="_priority"><xsl:attribute name="value"><xsl:value-of select="view:listPriority"/></xsl:attribute></input>
             <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="view:listText"/></xsl:attribute></input>
             <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>

@@ -12,21 +12,8 @@ pub(super) struct Facet {
     pub(super) web: Arc<Web>,
 }
 
-fn priority_term(value: &str) -> Result<(&str, bool)> {
-    let (term, exclude) = value
-        .strip_prefix('!')
-        .map_or((value, false), |v| (v, true));
-    if !matches!(term, "0" | "1" | "2" | "3" | "4" | "unset") {
-        return Err(Error::InvalidArgument {
-            name: "priority".into(),
-            detail: "use 0–4 or unset; prefix with ! to exclude that priority".into(),
-        });
-    }
-    Ok((term, exclude))
-}
-
 /// The same base requirements and label/title/status semantics as ikigai-ledger 0.18.
-/// Values are SPARQL literals, never query syntax. Priority is this page's extra filter.
+/// Values are SPARQL literals, never query syntax.
 fn pattern(listing: &Listing<'_>) -> Result<String> {
     let mut body = format!(
         "?item a <{LEDGER_NS}Item> ; <{LEDGER_NS}number> ?number ; \
@@ -72,46 +59,20 @@ fn pattern(listing: &Listing<'_>) -> Result<String> {
             literal(text)
         ));
     }
-    if let Some(value) = listing.priority.filter(|v| !v.is_empty()) {
-        let (term, exclude) = priority_term(value)?;
-        let exists = if (term == "unset") != exclude {
-            "NOT EXISTS"
-        } else {
-            "EXISTS"
-        };
-        let object = if term == "unset" {
-            "?filteredPriority"
-        } else {
-            term
-        };
-        body.push_str(&format!(
-            "FILTER {exists} {{ ?item <{LEDGER_NS}priority> {object} }}\n"
-        ));
-    }
     Ok(body)
 }
 
-async fn query(
-    inv: &Invocation<'_>,
-    ledger: &Ledger,
-    query: &str,
-    construct: bool,
-) -> Result<Vec<u8>> {
-    let (resource, face) = if construct {
-        ("urn:sparql:construct", "text/turtle")
-    } else {
-        ("urn:sparql:select", "application/sparql-results+json")
-    };
+async fn query(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> Result<Vec<u8>> {
     fetch(
         inv,
         with(
             with(
-                with(request(Verb::Source, resource)?, "query", query),
+                with(request(Verb::Source, "urn:sparql:select")?, "query", query),
                 "graph",
                 &ledger.graph(),
             ),
             "as",
-            face,
+            "application/sparql-results+json",
         ),
     )
     .await
@@ -126,59 +87,6 @@ fn bindings(bytes: &[u8]) -> Result<Vec<Value>> {
         .ok_or_else(|| Error::Endpoint("listing count has no bindings".into()))
 }
 
-/// Priority-filtered pages use the same pattern as the facets. Other pages retain the
-/// ledger's existing count/items resources. Page in subjects before loading their triples.
-pub(super) async fn total(
-    inv: &Invocation<'_>,
-    ledger: &Ledger,
-    listing: &Listing<'_>,
-) -> Result<usize> {
-    let q = format!(
-        "SELECT (COUNT(DISTINCT ?item) AS ?count) WHERE {{ {} }}",
-        pattern(listing)?
-    );
-    let rows = bindings(&query(inv, ledger, &q, false).await?)?;
-    rows.first()
-        .and_then(|r| r["count"]["value"].as_str())
-        .and_then(|n| n.parse().ok())
-        .ok_or_else(|| Error::Endpoint("listing total is not an integer".into()))
-}
-
-pub(super) async fn items(
-    inv: &Invocation<'_>,
-    ledger: &Ledger,
-    listing: &Listing<'_>,
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<u8>> {
-    let q = format!(
-        "CONSTRUCT {{ ?item ?p ?o }} WHERE {{ \
-         {{ SELECT ?item (MAX(COALESCE(?modified, ?created, \"\")) AS ?recency) (MAX(?number) AS ?n) \
-         WHERE {{ {} OPTIONAL {{ ?item <{DCTERMS}modified> ?modified }} \
-         OPTIONAL {{ ?item <{DCTERMS}created> ?created }} }} \
-         GROUP BY ?item ORDER BY DESC(?recency) DESC(?n) LIMIT {limit} OFFSET {offset} }} \
-         ?item ?p ?o }}", pattern(listing)?
-    );
-    query(inv, ledger, &q, true).await
-}
-
-pub(super) fn priority_url(listing: &Listing<'_>, page: &str, value: &str) -> String {
-    let filters = LabelFilters {
-        labels: listing.labels,
-        without: listing.without,
-    };
-    let base = Listing {
-        priority: None,
-        ..*listing
-    };
-    let url = filters.url(&base, page, LabelChange::Keep);
-    if value.is_empty() {
-        url
-    } else {
-        format!("{url}&priority={}", ikigai_fn::html::url_segment(value))
-    }
-}
-
 #[async_trait]
 impl Endpoint for Facet {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
@@ -189,14 +97,12 @@ impl Endpoint for Facet {
         let text = optional(inv, "text");
         let labels = optional(inv, "labels");
         let without = optional(inv, "without");
-        let priority = optional(inv, "priority");
         let limit = optional(inv, "limit");
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
             labels: labels.as_deref(),
             without: without.as_deref(),
-            priority: priority.as_deref(),
             limit: limit.as_deref(),
             offset: None,
         };
@@ -214,7 +120,7 @@ impl Endpoint for Facet {
              }} GROUP BY ?kind ?value ORDER BY ?kind ?value",
             pattern(&listing)?
         );
-        let rows = bindings(&query(inv, &ledger, &q, false).await?)?;
+        let rows = bindings(&query(inv, &ledger, &q).await?)?;
         let filters = LabelFilters {
             labels: listing.labels,
             without: listing.without,
@@ -230,13 +136,7 @@ impl Endpoint for Facet {
                 .and_then(|v| v.parse::<u64>().ok())
                 .ok_or_else(|| Error::Endpoint("facet count is not an integer".into()))?;
             let (name, include, exclude) = if row["kind"]["value"] == "priority" {
-                // Reject invalid out-of-band priorities rather than inventing a filter.
-                priority_term(term)?;
-                (
-                    format!("Priority {term}"),
-                    priority_url(&listing, &page, term),
-                    priority_url(&listing, &page, &format!("!{term}")),
-                )
+                (format!("Priority {term}"), String::new(), String::new())
             } else {
                 (
                     format!("Label {term}"),
@@ -309,7 +209,6 @@ impl Endpoint for Facet {
             .input(arg("labels", "Comma-separated required labels.").optional())
             .input(arg("without", "Comma-separated excluded labels.").optional())
             .input(arg("text", "Case-insensitive title substring.").optional())
-            .input(arg("priority", "0–4 or unset, optionally prefixed with ! to exclude.").optional())
             .input(arg("limit", "Preserve this list page size in filter links; counts are unbounded.").optional())
             .input(arg("page", "A whole page for a browser without scripts.").one_of(["true", "false"]).optional())
             .input(as_html_arg()).output(HTML)
