@@ -999,9 +999,9 @@
     </section>
   </xsl:template>
 
-  <!-- One ledger's agents (src/agents.rs): a row per agent, a column per stored question. The rows
-       arrive through the slot, written there because each is mostly a long link (a transform is
-       quadratic in its nodes). The table scrolls inside its own frame at phone width, reached by
+  <!-- One ledger's agents (src/agents.rs): a row per agent, a column per stored question, and a
+       <tfoot> row of the totals, "All agents". The <tbody> and <tfoot> arrive through the slot,
+       written there because each row is mostly a long link (a transform is quadratic in its nodes). The table scrolls inside its own frame at phone width, reached by
        the links in it. -->
   <xsl:template match="view:agent-panel">
     <section class="panel agent-panel">
@@ -1023,9 +1023,7 @@
                   <xsl:apply-templates select="view:agent-column"/>
                 </tr>
               </thead>
-              <tbody>
-                <xsl:apply-templates select="view:slot[@name = 'rows']"/>
-              </tbody>
+              <xsl:apply-templates select="view:slot[@name = 'rows']"/>
             </table>
           </div>
         </xsl:otherwise>

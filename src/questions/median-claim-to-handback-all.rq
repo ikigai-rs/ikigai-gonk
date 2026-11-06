@@ -1,0 +1,25 @@
+# median-claim-to-handback.rq asked of every holder at once, for the totals row (ledger #3178): every
+# hand-back against its own holder's latest claim of that item before it, so the median is over
+# every hand-back, never a median of medians. The claim is joined on the item and matched to the
+# hand-back's holder in a filter, for the same reason as released-all.rq.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?took ?number ?claimed ?back ?handback WHERE {
+  {
+    SELECT ?handback ?item ?back (MAX(?at) AS ?claimed) WHERE {
+      ?handback ledger:handedBackBy ?holder ;
+                ledger:onItem ?item ;
+                dcterms:created ?back .
+      ?claim a ledger:ClaimEvent ;
+             ledger:onItem ?item ;
+             ledger:claimedBy ?claimer ;
+             dcterms:created ?at .
+      FILTER(sameTerm(?claimer, ?holder) && ?at <= ?back)
+    }
+    GROUP BY ?handback ?item ?back
+  }
+  ?item ledger:number ?number .
+  BIND(?back - ?claimed AS ?took)
+}
+ORDER BY ?took ?handback

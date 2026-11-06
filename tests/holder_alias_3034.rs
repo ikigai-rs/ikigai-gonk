@@ -289,9 +289,10 @@ fn visible(html: &str) -> String {
 }
 
 /// The agents a panel lists, in order.
+/// The agents' rows, in the table's body: the totals row in its foot is no agent (ledger #3178).
 fn row_names(panel: &str) -> Vec<String> {
-    panel
-        .split("<tr>")
+    let body = panel.split_once("<tfoot>").map_or(panel, |(body, _)| body);
+    body.split("<tr>")
         .filter(|row| row.contains("<td>"))
         .map(|row| visible(row.split_once("</th>").unwrap().0))
         .collect()
