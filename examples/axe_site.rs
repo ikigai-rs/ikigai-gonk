@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 13] = [
+const PAGES: [(&str, &str); 15] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
