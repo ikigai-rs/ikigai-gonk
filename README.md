@@ -4640,7 +4640,12 @@ numerals and summed — X + M + L — for the orientation NetKernel 3 was built 
 
 ## Running it as a service
 
-A `launchd` agent needs only the binary; everything else comes from the config home.
+A `launchd` agent needs only the binary; everything else comes from the config home. Its log
+lives in an owner-only directory — create it once, before loading the agent:
+
+```sh
+mkdir -m 700 -p ~/Library/Logs/ikigai-gonk
+```
 
 ```xml
 <plist version="1.0"><dict>
@@ -4648,14 +4653,30 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   <key>ProgramArguments</key><array><string>/Users/you/.cargo/bin/ikigai-gonk</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/ikigai-gonk.log</string>
+  <key>StandardOutPath</key><string>/Users/you/Library/Logs/ikigai-gonk/gonk.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/ikigai-gonk/gonk.log</string>
 </dict></plist>
 ```
+
+⚠ **Until ledger #3159 the log was `/tmp/ikigai-gonk.log`**, which launchd creates `0644`:
+every local account could read who called gonk and when. Moving an existing install: create the
+directory above, change both paths in the plist, `launchctl bootout` and `bootstrap` the agent,
+then delete `/tmp/ikigai-gonk.log` (or move it into the new directory as `gonk.log.1` if its
+lines are still wanted, and `chmod 600` it).
+
+**The log file is owner-only and rotated by gonk** (ledger #3159, [`src/logfile.rs`](src/logfile.rs)).
+At start `serve` sets its stdout and stderr to `0600` when they are regular files, whatever mode
+launchd created them with, and warns when the directory they are in is open to anyone else.
+Once a day (UTC midnight, and at a start on a later day than the file was last written) it
+renames `gonk.log` to `gonk.log.1`, shifts the older ones up by one, deletes `gonk.log.15`, and
+writes on in a fresh `0600` `gonk.log`. **Access lines are kept for 14 days** after the day they
+were written, plus the current day; nothing older than `gonk.log.14` is kept. A pipe or a
+terminal on stderr is left alone and never rotated.
 
 ### The access log
 
 Every door writes one line per request to stderr, so under that agent a slow page can be read
-back from `/tmp/ikigai-gonk.log` after the fact (ledger #739). The grammar is `ikigai-log`'s —
+back from `~/Library/Logs/ikigai-gonk/gonk.log` (and the 14 days of `gonk.log.N` beside it) after the fact (ledger #739). The grammar is `ikigai-log`'s —
 time, class, subject IRI, then `key=value` columns, every key on every line in this order:
 
 ```text
@@ -4689,8 +4710,8 @@ only when it fails, when it takes a second or more (so the `dur=[0-9]\{4,\}` gre
 finds every slow one), or when that poll has written no quiet line for ten minutes, to show it
 is alive. The sample is per polled resource and by time (ledger #1718): the Queue badge, the
 header's Layers count and an open Layers page's three-second poll each write one quiet line per
-ten minutes, however many pages ask. Every other request is still one line. The file itself is still unrotated:
-that is the launchd install's to do (`newsyslog`), not gonk's.
+ten minutes, however many pages ask. Every other request is still one line. The file itself is rotated daily, 14 kept (ledger
+#3159, above).
 
 ## Upgrading past audit round 4 (ledger #864)
 
