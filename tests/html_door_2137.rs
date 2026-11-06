@@ -91,8 +91,7 @@ impl Server {
             faces: Vec::new(),
         });
         let toolbox = Toolbox::at(dist.path().to_path_buf()).unwrap();
-        let mut anonymous = anonymous_http_grants(&["default".to_string()]).unwrap();
-        anonymous.extend(toolbox.grants());
+        let anonymous = anonymous_http_grants(&["default".to_string()]).unwrap();
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
             web::space(face),
@@ -103,6 +102,7 @@ impl Server {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public: toolbox.grants(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         let edge = toolbox::route(doors::edge_config(door.clone()));
@@ -189,6 +189,7 @@ fn the_preset_is_the_one_ikigai_web_names() {
         anonymous: Vec::new(),
         bind: "127.0.0.1:1062".parse().unwrap(),
         passkeys: None,
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     });
     let security = config.security.expect("the door sends security headers");

@@ -2,7 +2,7 @@
 //!
 //! | door | transport | who can reach it | capability |
 //! |---|---|---|---|
-//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow READ tokens (never write, ledger #1687), and the run and read of PUBLIC scripts ([`crate::script::ANONYMOUS`]), for an anonymous loopback caller, plus the grant of a signed-in passkey; nothing for a non-loopback peer; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
+//! | HTTP | `ikigai-web`, loopback TCP | any local process | [`http_cap`]: the configured ledgers' narrow READ tokens (never write, ledger #1687), and the run and read of PUBLIC scripts ([`crate::script::ANONYMOUS`]), for an anonymous loopback caller, plus the grant of a signed-in passkey; the reads of the door's public files (each `gonk.face` directory and the toolbox build, [`HttpDoor::public`], ledger #3202) for both, from any peer; nothing for a non-loopback peer with no session; refused at the edge, before `OPTIONS`, `?description` or dispatch — `421 Misdirected Request` for a foreign `Host`, `403` for a cross-site write or a read another page LOADS ([`http_admit`]); only the read half of all that for a read another page NAVIGATES to ([`page_of`], ledger #880). And a NAME in the authority — the signed-in passkey's stable IRI, minted into the capability as `urn:cap:principal:<iri>` by [`http_cap`] (ledger #1077), and still stamped on every write as `principal` by [`http_principal`] |
 //! | socket | `ikigai-ipc`, `0600` Unix socket, peer UID checked | this user only | root — the owner, who can read the dataset's files anyway — or whatever an owner process narrowed itself to (`cap seal`, `ikigai mcp --grant`), which the transport passes through. One admission rule: a narrowed capability may not write a ledger graph raw without the operator's raw grant ([`crate::admit::raw_write_refusal`], ledger #899) |
 //! | QUIC | `ikigai-quic`, mutual TLS | a certificate this server trusts | the grant that certificate's fingerprint maps to in `clients.json`; refused when it maps to none. And a NAME in the authority — `urn:iki:host:gonk:client:<fingerprint>` (`urn:iki:gonk:client:<fingerprint>` before 2026-10-10, still recognized; ledger #1183), minted into the session capability ([`crate::quic::authority`], ledger #1077), which core's clamp keeps whatever capability the client carries: a write naming no `author` is attributed to it, and one naming another identity is refused ([`crate::admit`]) |
 //!
@@ -531,6 +531,13 @@ pub struct HttpDoor {
     /// What an ANONYMOUS loopback caller holds: READ on the ledgers in `gonk.http.ledger`
     /// ([`crate::grants::anonymous_http_grants`]; write too until ledger #1687).
     pub anonymous: Vec<String>,
+    /// The read tokens for the door's PUBLIC files — every `gonk.face` directory
+    /// ([`crate::face::Face::grants`]) and the toolbox build ([`crate::toolbox::Toolbox::grants`])
+    /// — which the anonymous loopback caller AND every live passkey session hold, wherever its
+    /// peer is (ledger [#3202](http://localhost:1062/l/default/item/3202)). Computed by gonk,
+    /// never copied into a grant by hand. Only `urn:cap:fs:read:` on those files: what a face's
+    /// page then fetches is judged under the caller's own grant. Empty for none.
+    pub public: Vec<String>,
     /// The address the door is bound to, its port resolved (never the `0` a config may ask
     /// for), which the `Host` and `Origin` checks require: the loopback names, and this
     /// address's own IP, each with this port ([`http_refusal`], ledger
@@ -552,7 +559,8 @@ pub struct HttpDoor {
 /// Host not this server's loopback name?        → REFUSED  (DNS rebinding)
 /// a write from another origin or site?         → REFUSED  (cross-site request forgery)
 /// a read another page LOADS?                   → REFUSED  (ledger #880)
-/// otherwise  (loopback peer ? anonymous : ∅)  ∪  (a live passkey session ? its grant : ∅),
+/// otherwise  (loopback peer ? anonymous : ∅)  ∪  (a live passkey session ? its grant : ∅)
+///            ∪  (loopback peer or a live session ? the public files' reads : ∅) (ledger #3202),
 ///            and only its READ half when another page NAVIGATED here (ledger #880)
 /// ```
 ///
@@ -941,23 +949,34 @@ fn http_scopes_for(
     if let Some(marker) = http_refusal(door, request) {
         return vec![marker.to_string()];
     }
-    let mut scopes: Vec<String> = match request.peer {
-        Some(peer) if is_loopback(peer) => door.anonymous.clone(),
-        _ => Vec::new(),
+    let loopback = request.peer.is_some_and(is_loopback);
+    let mut scopes: Vec<String> = if loopback {
+        door.anonymous.clone()
+    } else {
+        Vec::new()
     };
     let signed_in = identity.is_some();
-    if let Some(identity) = identity {
-        // Preserve anonymous order (including duplicates), then first occurrence order
-        // from the grant, while membership checks are expected constant time.
-        let mut seen: std::collections::HashSet<&str> = scopes.iter().map(String::as_str).collect();
-        let granted: Vec<String> = identity
-            .scopes
-            .iter()
-            .filter(|scope| seen.insert(scope.as_str()))
-            .cloned()
-            .collect();
-        scopes.extend(granted);
-    }
+    // ★ Ledger #3202: the door's public files (each face, the toolbox) are read by whoever the
+    // door serves at all — the anonymous loopback caller and every live session, from any peer.
+    // A non-loopback caller with no session still gets nothing.
+    let public: &[String] = if loopback || signed_in {
+        &door.public
+    } else {
+        &[]
+    };
+    // Preserve anonymous order (including duplicates), then first occurrence order from the
+    // public files and the grant, while membership checks are expected constant time.
+    let mut seen: std::collections::HashSet<&str> = scopes.iter().map(String::as_str).collect();
+    let granted = identity
+        .map(|identity| identity.scopes.as_slice())
+        .unwrap_or(&[]);
+    let added: Vec<String> = public
+        .iter()
+        .chain(granted)
+        .filter(|scope| seen.insert(scope.as_str()))
+        .cloned()
+        .collect();
+    scopes.extend(added);
     // ★ Ledger #880: another page's navigation carries the READ half, whatever it names — so
     // `<a href="/k?c=source urn:repo:R:explain:P">` on a page at another localhost port, which
     // rides the signed-in session, cannot spend inference or archive an answer.

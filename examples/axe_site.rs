@@ -138,6 +138,7 @@ fn main() {
             .expect("the anonymous grant"),
         bind: addr,
         passkeys: Some(passkeys),
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     let edge = doors::edge_config(door.clone());

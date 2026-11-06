@@ -197,17 +197,19 @@ fn serve(flags: &config::Flags) -> ! {
     config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
     // The anonymous loopback caller: its ledgers' READ tokens (ledger #1687), and the right to run
     // and read a PUBLIC script (ledger #939, `script::ANONYMOUS`).
-    // And, when `gonk.toolbox.dist` is set, a read on exactly the toolbox's files (ledger #1933,
-    // `grants::toolbox_read_grants`): the toolbox reads its build under its caller's capability.
-    let mut http_grants =
+    let http_grants =
         grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
-    if let Some(toolbox) = &settings.toolbox {
-        http_grants.extend(toolbox.grants());
-    }
-    // And a read on each `gonk.face` directory (ledger #3199, `face::Face::grants`): a face is
+    // The door's PUBLIC files, read by the anonymous loopback caller and by every live passkey
+    // session from any peer (ledger #3202, `doors::HttpDoor::public`): when `gonk.toolbox.dist`
+    // is set, a read on exactly the toolbox's files (ledger #1933, `grants::toolbox_read_grants`),
+    // and a read on each `gonk.face` directory (ledger #3199, `face::Face::grants`). Each is
     // read under its caller's capability, and nobody holds a write there.
+    let mut public_reads: Vec<String> = Vec::new();
+    if let Some(toolbox) = &settings.toolbox {
+        public_reads.extend(toolbox.grants());
+    }
     for face in &settings.faces {
-        http_grants.extend(face.grants());
+        public_reads.extend(face.grants());
     }
 
     // Authority is decided before the store opens: a broken authority file stops the server
@@ -927,6 +929,7 @@ fn serve(flags: &config::Flags) -> ! {
         // `edge_config`) are computed from the same cookie by the same `HttpDoor`.
         let door = doors::HttpDoor {
             anonymous: http_grants,
+            public: public_reads,
             // The address actually bound: the configured IP, with the port the listener got
             // (a config may ask for 0). Its IP is one of the names the door answers to
             // (ledger #1045).
