@@ -320,6 +320,13 @@
   <xsl:template name="body">
     <xsl:choose>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
+      <xsl:when test="@view = 'facet'">
+        <xsl:if test="@full = 'true'">
+          <h1>Labels and priority counts</h1>
+          <p><a><xsl:attribute name="href"><xsl:value-of select="@back"/></xsl:attribute>Back to the filtered list</a></p>
+        </xsl:if>
+        <xsl:apply-templates select="view:facet"/>
+      </xsl:when>
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
       <xsl:when test="@view = 'lifecycle'"><xsl:apply-templates select="view:lifecycle"/></xsl:when>
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
@@ -347,6 +354,7 @@
       <xsl:when test="@view = 'chunk'">
         <xsl:apply-templates select="view:chart"/>
         <xsl:apply-templates select="view:agent-panel"/>
+        <xsl:apply-templates select="view:facet-term"/>
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
@@ -2210,11 +2218,19 @@
               <xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute>
             </input>
           </div>
+          <div class="search-field">
+            <label for="search-priority">Priority</label>
+            <input id="search-priority" name="priority" type="text" aria-describedby="priority-filter-help">
+              <xsl:attribute name="value"><xsl:value-of select="@priority"/></xsl:attribute>
+            </input>
+          </div>
           <button type="submit" class="quiet">Search</button>
+          <p id="priority-filter-help" class="note">Priority: use 0–4 or unset; prefix with ! to exclude.</p>
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
         </form>
       </header>
       <xsl:apply-templates select="view:label-filters"/>
+      <xsl:if test="@priority != ''"><p>Priority filter (the chart includes every priority): <strong><xsl:value-of select="@priority"/></strong>. <a><xsl:attribute name="href"><xsl:value-of select="@clear-priority"/></xsl:attribute>Clear priority filter</a></p></xsl:if>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
@@ -2225,6 +2241,7 @@
           <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
           <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute></input>
           <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute></input>
+          <input type="hidden" name="_priority"><xsl:attribute name="value"><xsl:value-of select="@priority"/></xsl:attribute></input>
           <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
           <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
@@ -2250,6 +2267,8 @@
           <button type="submit">File</button>
         </form>
       </xsl:if>
+      <div class="listing-body">
+        <div class="listing-results">
       <!-- ⚠ `@has-rows`, not `count(rdf:RDF/ledger:Item)`: the rows are rendered in chunks
            apart from this shell (ledger #519), so the shell holds none of them and the
            count is the Rust side's (`web::Count`), evaluated once. -->
@@ -2289,12 +2308,39 @@
           <xsl:apply-templates select="view:slot[@name = 'items']"/>
         </ol>
       </xsl:if>
+        </div>
+        <aside class="listing-facet-panel" aria-labelledby="listing-facet-title">
+          <h2 id="listing-facet-title">Labels and priorities</h2>
+          <p><a><xsl:attribute name="href"><xsl:value-of select="@facet-url"/>&amp;page=true</xsl:attribute>Open labels and priority counts</a></p>
+          <div id="listing-facet" hx-trigger="load" hx-target="this" hx-swap="outerHTML" data-ui-quiet="true">
+            <xsl:attribute name="hx-get"><xsl:value-of select="@facet-url"/></xsl:attribute>
+            <p>Counts load separately from the list. With scripts off, open the counts link.</p>
+          </div>
+        </aside>
+      </div>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:facet">
+    <div id="listing-facet" data-loaded="true">
+      <p>Counts cover the whole filtered list, including items on other pages. Choose a count to require its label or priority, or choose Exclude.</p>
+      <xsl:choose>
+        <xsl:when test="@empty = 'true'"><p>No labels or priorities match.</p></xsl:when>
+        <xsl:otherwise><ul class="facet-terms"><xsl:apply-templates select="view:facet-term"/><xsl:apply-templates select="view:slot"/></ul></xsl:otherwise>
+      </xsl:choose>
+    </div>
+  </xsl:template>
+
+  <xsl:template match="view:facet-term">
+    <li>
+      <a><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</a><xsl:text> · </xsl:text>
+      <a><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@name"/></a>
+    </li>
   </xsl:template>
 
   <xsl:template match="view:label-filters">
     <div class="active-filters">
-      <p>Label filters in force. The chart counts this status across all labels. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
+      <p>Label filters in force. The chart counts this status across all labels and priorities. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
       <ul><xsl:apply-templates select="view:filter-term"/></ul>
     </div>
   </xsl:template>
@@ -2345,6 +2391,7 @@
             <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
             <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="view:listLabels"/></xsl:attribute></input>
             <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="view:listWithout"/></xsl:attribute></input>
+            <input type="hidden" name="_priority"><xsl:attribute name="value"><xsl:value-of select="view:listPriority"/></xsl:attribute></input>
             <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="view:listText"/></xsl:attribute></input>
             <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>

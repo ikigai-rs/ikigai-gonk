@@ -1281,6 +1281,10 @@ fn routes() -> Vec<Route> {
         route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
         route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
         route(
+            "/l/{ledger}/facet",
+            "urn:iki:gonk:fragment:facet:ledger:{ledger}",
+        ),
+        route(
             "/l/{ledger}/lifecycle",
             "urn:iki:gonk:page:lifecycle:{ledger}",
         ),
