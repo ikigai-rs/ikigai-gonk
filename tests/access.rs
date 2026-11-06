@@ -71,6 +71,7 @@ fn serve_http(sink: ikigai_gonk::access::Sink) -> (SocketAddr, tempfile::TempDir
         anonymous: grants_for("default", Authority::Write).unwrap(),
         bind: addr,
         passkeys: None,
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     std::thread::spawn(move || {
