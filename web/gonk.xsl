@@ -89,6 +89,7 @@
               <xsl:apply-templates select="view:onboard-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <xsl:apply-templates select="view:toolbox-link"/>
+              <xsl:apply-templates select="view:face-link"/>
               <div id="auth" class="auth">
                 <xsl:apply-templates select="view:withheld"/>
                 <span id="auth-who" class="who" hidden="hidden"></span>
@@ -476,6 +477,12 @@
   <!-- The RDF Toolbox (ledger #2021), present only when this server serves one: a
        gonk.toolbox.dist line (src/web.rs::nav_with, Web::toolbox). The toolbox is its own page
        with its own script and CSP, so this is an ordinary link: a full navigation, never a swap. -->
+  <!-- A deployment's own pages (ledger #3199, src/face.rs), one link per `gonk.face`, named by
+       the face's name: an ordinary link, beside the Toolbox. -->
+  <xsl:template match="view:face-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a>
+  </xsl:template>
+
   <xsl:template match="view:toolbox-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Toolbox</a>
   </xsl:template>

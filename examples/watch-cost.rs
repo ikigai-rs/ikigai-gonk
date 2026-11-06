@@ -163,6 +163,7 @@ fn main() {
         queue: QueuePolicy::default(),
         epochs: Some(epochs),
         toolbox: false,
+        faces: Vec::new(),
         holder_aliases: Default::default(),
     });
     let door = doors::http_kernel(Arc::clone(&hub), web::space(face));

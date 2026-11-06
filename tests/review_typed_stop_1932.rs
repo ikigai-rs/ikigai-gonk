@@ -232,6 +232,7 @@ fn gonk(fails: Fails, calls: Window) -> Gonk {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let access = Arc::new(Mutex::new(Vec::<String>::new()));
     let into = Arc::clone(&access);

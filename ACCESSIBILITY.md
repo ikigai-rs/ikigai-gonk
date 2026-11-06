@@ -64,6 +64,11 @@ is fixed.
   and are covered with them; htmx itself is not reviewed.
 - **`ikigai-ui`'s tokens, shell script and chooser.** Its own tests cover them; a barrier is
   reported here and fixed there.
+- **A deployment's own pages** (`gonk.face`, `/face/name/{name}/…`, ledger #3199). Their HTML,
+  scripts and styles are the deployment's, served as written; gonk does not render or check
+  them, and a barrier in them is the deployment's to fix. gonk's part is the header link to each
+  face, which is in scope: an ordinary link whose visible text and accessible name are the
+  face's configured name, beside the Toolbox.
 - The operating system's passkey dialog, GitHub's pages, and the browsers and assistive
   technologies people use.
 
@@ -272,6 +277,7 @@ before any conformance claim.
 | 2026-11-03 | An item page links each `repo:` label naming a root the viewer may read to that repository's tree, with link text that names it ("Browse ikigai-engine") | `tests/browse.rs` (page shape only; no browser run) (ledger #2977) |
 | 2026-11-03 | An agent table with holder aliases says which apply, in a sentence before the table | `tests/holder_alias_3034.rs` (page shape only; no browser run) (ledger #3034) |
 | 2026-11-03 | The System tab's Store row names only the graphs the viewer may read, and says how many it leaves out in a sentence after the table, or in place of it when there is none to list | `tests/dashboard_operator_2972.rs` and the unit tests in `src/operator.rs` (page text only; no browser run) (ledger #3039) |
+| 2026-11-06 | The header links each configured face (`gonk.face`) by its name, an ordinary keyboard-reachable link with the same visible text and accessible name; the face's own pages are listed under "Not ours to fix" | `tests/face_3199.rs` (page shape only; the header link is a `navlink` like the Toolbox's, so it shares its contrast and focus ring; no browser run) (ledger #3199) |
 | 2026-10-17 | A task layer's tuple or take that this gonk tracks as an item links to it with the item's ledger and number as the link's visible text ("tracked here as crew #1"), never a bare number | `tests/layer_links_1856.rs` (page shape only; no browser run) (ledger #1856) |
 
 ## References

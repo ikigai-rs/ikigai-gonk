@@ -82,6 +82,7 @@ fn served(
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = doors::http_kernel(Arc::clone(&hub), web::space(face));
     (runtime, hub, http, config)

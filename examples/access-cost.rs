@@ -82,6 +82,7 @@ fn main() {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         })
     };
     let anonymous = Capability::scoped(grants_for("default", Authority::Write).unwrap());

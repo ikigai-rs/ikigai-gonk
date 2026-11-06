@@ -140,6 +140,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     // ⚠ The watcher is dropped with this function, so the previewed pages are a SNAPSHOT.
     // That is what a file on disk is anyway.
