@@ -161,7 +161,7 @@ pub struct Web {
     pub toolbox: bool,
     /// The names of the deployment's own pages this server serves (`gonk.face`,
     /// [`crate::face`], ledger [#3199](http://localhost:1062/l/default/item/3199)), each offered
-    /// in the header at `/face/name/{name}`. Empty for none.
+    /// in the header at `/face/name/{name}/`. Empty for none.
     pub faces: Vec<String>,
     /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
     /// [#3034](http://localhost:1062/l/default/item/3034)).
@@ -710,7 +710,7 @@ fn nav_with(
     // the anonymous grant (`main`, `Face::grants`), and what the face's scripts then fetch is
     // judged under the viewer's own capability.
     for name in &web.faces {
-        let href = format!("{}/{name}", crate::face::PATH);
+        let href = format!("{}/{name}/", crate::face::PATH);
         out.push_str(&element(
             "face-link",
             &[("href", href.as_str()), ("name", name.as_str())],
