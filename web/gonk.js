@@ -64,6 +64,22 @@
     return p;
   }
 
+  // Whole-match counts arrive independently. The fallback link lives outside the swap,
+  // so arrival cannot remove a focused control. Failures leave the list and link usable.
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    if (target && target.id === "listing-facet") announce("Labels and priority counts loaded.");
+  });
+  function facetFailure(e) {
+    const elt = e.detail && e.detail.elt;
+    if (!elt || !elt.isConnected || elt.id !== "listing-facet") return;
+    const sentence = "Counts could not load. Open the counts link or reload to try again.";
+    elt.textContent = sentence;
+    announce(sentence);
+  }
+  document.addEventListener("htmx:responseError", facetFailure);
+  document.addEventListener("htmx:sendError", facetFailure);
+
   // The Layers page's watcher (ledger #1705): its failures are its own, said once in
   // `#layers-reconnect` (section 9 below). `data-ui-quiet` keeps the shell script out of them.
   function isWatch(elt) {

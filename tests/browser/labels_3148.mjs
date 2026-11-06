@@ -10,7 +10,8 @@ const root = await Deno.realPath(Deno.args[0] ?? "target/axe-site");
 const types = JSON.parse(await Deno.readTextFile(`${root}/_types.json`));
 const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen() {} }, async (request) => {
   const url = new URL(request.url);
-  const type = types[url.pathname];
+  const path = url.pathname;
+  const type = types[path];
   if (!type) return new Response("Not found", { status: 404 });
   let body = await Deno.readFile(`${root}${url.pathname}`);
   if (type.startsWith("text/html")) {
@@ -50,6 +51,8 @@ try {
           await page.keyboard.press("Tab");
           assert.ok(await without.evaluate((node) => node === document.activeElement));
           await page.keyboard.press("Tab");
+          assert.ok(await page.getByRole("textbox", { name: "Priority", exact: true }).evaluate((node) => node === document.activeElement));
+          await page.keyboard.press("Tab");
           assert.ok(await page.getByRole("button", { name: "Search", exact: true }).evaluate((node) => node === document.activeElement));
           if (file !== "ledger.html") {
             await page.keyboard.press("Tab");
@@ -58,7 +61,7 @@ try {
             assert.equal(await page.getByRole("link", { name: "Require blocked", exact: true }).count(), 1);
           }
           if (file === "label-filter.html") {
-            assert.equal(await page.getByRole("link", { name: "Exclude needs-person", exact: true }).count(), 2);
+            assert.equal(await page.locator(".active-filters, .label-actions").getByRole("link", { name: "Exclude needs-person", exact: true }).count(), 2);
             assert.equal(await page.locator(".label-actions a.badge").count(), 2);
           }
           if (file === "label-empty.html") assert.ok(await page.getByText("No items match.", { exact: true }).isVisible());

@@ -16,6 +16,7 @@
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/lifecycle      urn:iki:gonk:page:lifecycle:{ledger}   Source  ordered states and item counts
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
+//! /l/{ledger}/facet          urn:iki:gonk:fragment:facet:ledger:{ledger} Source  whole-match label/priority counts
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
 //! /l/{ledger}/item/{id}/card urn:iki:gonk:fragment:item:{…}:{id}    Source  the same, as a fragment
 //! /act                       urn:iki:gonk:act                       Sink    a form → one ledger action
@@ -80,6 +81,8 @@ use crate::quic;
 use crate::render::{self, element, envelope, Graph};
 use crate::rows;
 use crate::rules::{self, Rules};
+
+mod facet;
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
@@ -273,6 +276,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             LedgerView {
                 web: Arc::clone(&web),
                 shape: Shape::Page,
+            },
+        )
+        .bind(
+            template(facet::TEMPLATE),
+            facet::Facet {
+                web: Arc::clone(&web),
             },
         )
         .bind(
@@ -1569,6 +1578,7 @@ struct LedgerView {
 
 /// Render one ledger's listing — the page, the fragment, and the view `Act` returns.
 /// What a listing request asks for: which items, and how much of the answer to draw.
+#[derive(Clone, Copy)]
 struct Listing<'a> {
     /// `open`, `closed` or `all`.
     status: &'a str,
@@ -1576,6 +1586,7 @@ struct Listing<'a> {
     text: Option<&'a str>,
     labels: Option<&'a str>,
     without: Option<&'a str>,
+    priority: Option<&'a str>,
     /// How many rows to render — see [`rows::rows_wanted`]. The filter above is what gets
     /// COUNTED; this is only what gets drawn.
     limit: Option<&'a str>,
@@ -1583,13 +1594,26 @@ struct Listing<'a> {
     offset: Option<&'a str>,
 }
 
-/// URL and presentation state only. Matching and counting stay in ikigai-ledger.
+impl Listing<'_> {
+    fn append_priority(&self, mut query: String) -> String {
+        if let Some(value) = self.priority.filter(|v| !v.is_empty()) {
+            query.push_str(&format!(
+                "&priority={}",
+                ikigai_fn::html::url_segment(value)
+            ));
+        }
+        query
+    }
+}
+
+/// URL and presentation state only. Matching stays in the ledger and `facet::pattern`.
 struct LabelFilters<'a> {
     labels: Option<&'a str>,
     without: Option<&'a str>,
 }
 
 enum LabelChange<'a> {
+    Keep,
     Clear,
     Require(&'a str),
     Exclude(&'a str),
@@ -1627,6 +1651,7 @@ impl LabelFilters<'_> {
         let mut labels = Self::terms(self.labels);
         let mut without = Self::terms(self.without);
         match change {
+            LabelChange::Keep => {}
             LabelChange::Clear => {
                 labels.clear();
                 without.clear();
@@ -1659,7 +1684,7 @@ impl LabelFilters<'_> {
         if let Some(text) = listing.text.filter(|t| !t.is_empty()) {
             query.push_str(&format!("&text={}", ikigai_fn::html::url_segment(text)));
         }
-        format!("{page}{}", filter.append(query))
+        format!("{page}{}", listing.append_priority(filter.append(query)))
     }
 
     fn active(&self, listing: &Listing<'_>, page: &str) -> String {
@@ -1791,6 +1816,7 @@ async fn ledger_listing(
         text,
         labels,
         without,
+        priority,
         limit,
         offset,
     } = *listing;
@@ -1826,7 +1852,12 @@ async fn ledger_listing(
         Ok(read)
     };
     // The total first: an offset past it is refused before anything is drawn.
-    let total = ledger_total(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
+    let priority_filtered = priority.is_some_and(|v| !v.is_empty());
+    let total = if priority_filtered {
+        facet::total(inv, ledger, listing).await?
+    } else {
+        ledger_total(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?
+    };
     if offset > 0 && offset >= total {
         return Err(Error::InvalidArgument {
             name: "offset".to_string(),
@@ -1846,7 +1877,12 @@ async fn ledger_listing(
         "offset",
         &offset.to_string(),
     );
-    let mut graph = Graph::from_turtle(&fetch(inv, rows_read).await?).map_err(render_err)?;
+    let bytes = if priority_filtered {
+        facet::items(inv, ledger, listing, wanted, offset).await?
+    } else {
+        fetch(inv, rows_read).await?
+    };
+    let mut graph = Graph::from_turtle(&bytes).map_err(render_err)?;
     let (shown, order) = newest_rows(&mut graph, wanted);
     let count = Count {
         shown,
@@ -1861,6 +1897,7 @@ async fn ledger_listing(
             ("listWithout", without),
             ("listText", text),
             ("listLimit", limit),
+            ("listPriority", priority),
         ] {
             graph.view(item, name, value.unwrap_or(""));
         }
@@ -1897,10 +1934,19 @@ async fn ledger_listing(
     };
     let page_url = ledger_href(ledger);
     let items_url = format!("{}/items", ledger_href(ledger));
-    let query = count.more_query(status, text).map(|q| filters.append(q));
-    let next = count.next_query(status, text).map(|q| filters.append(q));
+    let query = count
+        .more_query(status, text)
+        .map(|q| listing.append_priority(filters.append(q)));
+    let next = count
+        .next_query(status, text)
+        .map(|q| listing.append_priority(filters.append(q)));
     children.push_str(&filters.active(listing, &page_url));
-    let status_tail = filters.append(String::new());
+    let facet_url = format!(
+        "{page_url}/facet{}",
+        filters.url(listing, "", LabelChange::Keep)
+    );
+    let clear_priority = facet::priority_url(listing, &page_url, "");
+    let status_tail = listing.append_priority(filters.append(String::new()));
     let status_tail = if let Some(text) = text.filter(|t| !t.is_empty()) {
         format!("{status_tail}&text={}", ikigai_fn::html::url_segment(text))
     } else {
@@ -1930,6 +1976,9 @@ async fn ledger_listing(
             ("status-tail", &status_tail),
             ("page-url", &page_url),
             ("items-url", &items_url),
+            ("facet-url", &facet_url),
+            ("priority", priority.unwrap_or("")),
+            ("clear-priority", &clear_priority),
             ("count", &count.sentence(status)),
             ("more", flag(query.is_some())),
             ("more-label", &count.more_label()),
@@ -2122,6 +2171,7 @@ impl Endpoint for LedgerView {
         let text = optional(inv, "text");
         let labels = optional(inv, "labels");
         let without = optional(inv, "without");
+        let priority = optional(inv, "priority");
         let limit = optional(inv, "limit");
         let offset = optional(inv, "offset");
         let ledger = match self.shape {
@@ -2162,6 +2212,7 @@ impl Endpoint for LedgerView {
                 text: text.as_deref(),
                 labels: labels.as_deref(),
                 without: without.as_deref(),
+                priority: priority.as_deref(),
                 limit: limit.as_deref(),
                 offset: offset.as_deref(),
             },
@@ -2223,6 +2274,13 @@ impl Endpoint for LedgerView {
         .input(arg("text", "A case-insensitive substring of the title.").optional())
         .input(arg("labels", "Comma-separated labels: every label must match.").optional())
         .input(arg("without", "Comma-separated labels: none may match.").optional())
+        .input(
+            arg(
+                "priority",
+                "0–4 or unset; prefix with ! to exclude that priority.",
+            )
+            .optional(),
+        )
         .input(
             arg("limit", &rows::limit_summary())
                 .default_value(rows::ROWS.to_string())
@@ -2726,6 +2784,7 @@ impl Endpoint for Act {
         let list_status = take("_status").unwrap_or_else(|| "open".to_string());
         let list_labels = take("_labels");
         let list_without = take("_without");
+        let list_priority = take("_priority");
         let list_text = take("_text");
         let list_limit = take("_limit");
         let target = if action == "item" {
@@ -2829,6 +2888,7 @@ impl Endpoint for Act {
                     text: list_text.as_deref(),
                     labels: list_labels.as_deref(),
                     without: list_without.as_deref(),
+                    priority: list_priority.as_deref(),
                     limit: list_limit.as_deref(),
                     offset: None,
                 };
@@ -4119,6 +4179,7 @@ mod tests {
             text: None,
             labels: filters.labels,
             without: filters.without,
+            priority: None,
             limit: None,
             offset: Some("50"),
         };
