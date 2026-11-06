@@ -160,6 +160,7 @@ fn main() {
     // static server can answer the pages' lazy request (queries do not change a11y).
     for (name, path) in [
         ("l/default/facet", "/l/default/facet"),
+        ("l/crew/facet", "/l/crew/facet"),
         ("facet.fragment", "/l/default/facet"),
         ("facet-empty.fragment", "/l/default/facet?labels=missing"),
         ("facet-page.html", "/l/default/facet?page=true"),
