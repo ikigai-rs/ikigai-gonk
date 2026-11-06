@@ -159,6 +159,10 @@ pub struct Web {
     /// no entry: a header link to a `/toolbox` that answers `404` is a door nobody should be
     /// shown, the rule ledger #442 set for Browse.
     pub toolbox: bool,
+    /// The names of the deployment's own pages this server serves (`gonk.face`,
+    /// [`crate::face`], ledger [#3199](http://localhost:1062/l/default/item/3199)), each offered
+    /// in the header at `/face/name/{name}`. Empty for none.
+    pub faces: Vec<String>,
     /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
     /// [#3034](http://localhost:1062/l/default/item/3034)).
     pub holder_aliases: crate::holders::HolderAliases,
@@ -698,6 +702,18 @@ fn nav_with(
         out.push_str(&element(
             "toolbox-link",
             &[("href", crate::toolbox::PATH)],
+            "",
+        ));
+    }
+    // ★ A deployment's own pages (ledger [#3199](http://localhost:1062/l/default/item/3199)),
+    // beside Views and Layers. Ungated on the toolbox's rule: the door adds each face's read to
+    // the anonymous grant (`main`, `Face::grants`), and what the face's scripts then fetch is
+    // judged under the viewer's own capability.
+    for name in &web.faces {
+        let href = format!("{}/{name}", crate::face::PATH);
+        out.push_str(&element(
+            "face-link",
+            &[("href", href.as_str()), ("name", name.as_str())],
             "",
         ));
     }
@@ -1494,11 +1510,208 @@ struct Listing<'a> {
     status: &'a str,
     /// A case-insensitive substring of the title.
     text: Option<&'a str>,
+    labels: Option<&'a str>,
+    without: Option<&'a str>,
     /// How many rows to render — see [`rows::rows_wanted`]. The filter above is what gets
     /// COUNTED; this is only what gets drawn.
     limit: Option<&'a str>,
     /// How many matching items to skip — see [`rows::offset_wanted`].
     offset: Option<&'a str>,
+}
+
+/// URL and presentation state only. Matching and counting stay in ikigai-ledger.
+struct LabelFilters<'a> {
+    labels: Option<&'a str>,
+    without: Option<&'a str>,
+}
+
+enum LabelChange<'a> {
+    Clear,
+    Require(&'a str),
+    Exclude(&'a str),
+    RemoveRequired(&'a str),
+    RemoveExcluded(&'a str),
+}
+
+impl LabelFilters<'_> {
+    fn append(&self, mut query: String) -> String {
+        for (name, value) in [("labels", self.labels), ("without", self.without)] {
+            if let Some(value) = value.filter(|v| !v.is_empty()) {
+                query.push_str(&format!("&{name}={}", ikigai_fn::html::url_segment(value)));
+            }
+        }
+        query
+    }
+
+    // This splits terms for the controls, never to decide which items match.
+    fn terms(value: Option<&str>) -> Vec<&str> {
+        let mut terms = Vec::new();
+        for term in value
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            if !terms.contains(&term) {
+                terms.push(term);
+            }
+        }
+        terms
+    }
+
+    fn url(&self, listing: &Listing<'_>, page: &str, change: LabelChange<'_>) -> String {
+        let mut labels = Self::terms(self.labels);
+        let mut without = Self::terms(self.without);
+        match change {
+            LabelChange::Clear => {
+                labels.clear();
+                without.clear();
+            }
+            LabelChange::Require(term) => {
+                without.retain(|t| *t != term);
+                if !labels.contains(&term) {
+                    labels.push(term);
+                }
+            }
+            LabelChange::Exclude(term) => {
+                labels.retain(|t| *t != term);
+                if !without.contains(&term) {
+                    without.push(term);
+                }
+            }
+            LabelChange::RemoveRequired(term) => labels.retain(|t| *t != term),
+            LabelChange::RemoveExcluded(term) => without.retain(|t| *t != term),
+        }
+        let labels = labels.join(",");
+        let without = without.join(",");
+        let filter = LabelFilters {
+            labels: Some(&labels),
+            without: Some(&without),
+        };
+        let mut query = format!("?status={}", listing.status);
+        if let Some(limit) = listing.limit {
+            query.push_str(&format!("&limit={}", ikigai_fn::html::url_segment(limit)));
+        }
+        if let Some(text) = listing.text.filter(|t| !t.is_empty()) {
+            query.push_str(&format!("&text={}", ikigai_fn::html::url_segment(text)));
+        }
+        format!("{page}{}", filter.append(query))
+    }
+
+    fn active(&self, listing: &Listing<'_>, page: &str) -> String {
+        let mut terms = String::new();
+        for (side, value, description, action) in [
+            (true, self.labels, "Must have label", "Exclude"),
+            (false, self.without, "Must not have label", "Require"),
+        ] {
+            for term in Self::terms(value) {
+                terms.push_str(&element(
+                    "filter-term",
+                    &[
+                        ("description", description),
+                        ("term", term),
+                        ("action", action),
+                        (
+                            "remove",
+                            &self.url(
+                                listing,
+                                page,
+                                if side {
+                                    LabelChange::RemoveRequired(term)
+                                } else {
+                                    LabelChange::RemoveExcluded(term)
+                                },
+                            ),
+                        ),
+                        (
+                            "move",
+                            &self.url(
+                                listing,
+                                page,
+                                if side {
+                                    LabelChange::Exclude(term)
+                                } else {
+                                    LabelChange::Require(term)
+                                },
+                            ),
+                        ),
+                    ],
+                    "",
+                ));
+            }
+        }
+        if terms.is_empty() {
+            return String::new();
+        }
+        render::wrap(
+            "label-filters",
+            &[("clear", &self.url(listing, page, LabelChange::Clear))],
+            &terms,
+        )
+    }
+
+    fn chips(&self, graph: &Graph, item: &str, listing: &Listing<'_>, page: &str) -> String {
+        graph
+            .values(item, &format!("{LEDGER_NS}label"))
+            .iter()
+            .map(|term| {
+                element(
+                    "label-chip",
+                    &[
+                        ("term", term),
+                        (
+                            "include",
+                            &self.url(listing, page, LabelChange::Require(term)),
+                        ),
+                        (
+                            "exclude",
+                            &self.url(listing, page, LabelChange::Exclude(term)),
+                        ),
+                    ],
+                    "",
+                )
+            })
+            .collect()
+    }
+}
+
+/// Add row-local presentation elements to the render projection, leaving the RDF untouched.
+/// Chunk rendering can then read each row independently, including its encoded filter links.
+fn listing_chips(
+    graph: &Graph,
+    filters: &LabelFilters<'_>,
+    listing: &Listing<'_>,
+    page: &str,
+) -> Result<String> {
+    use quick_xml::events::Event;
+    let xml = graph.view_xml().map_err(render_err)?;
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    loop {
+        let event = reader.read_event().map_err(|e| render_err(e.to_string()))?;
+        if matches!(event, Event::Eof) {
+            break;
+        }
+        writer
+            .write_event(event.borrow())
+            .map_err(|e| render_err(e.to_string()))?;
+        if let Event::Start(tag) = &event {
+            if tag.name().as_ref() == b"ledger:Item" {
+                for attribute in tag.attributes() {
+                    let attribute = attribute.map_err(|e| render_err(e.to_string()))?;
+                    if attribute.key.as_ref() == b"about" {
+                        let item = attribute
+                            .unescape_value()
+                            .map_err(|e| render_err(e.to_string()))?;
+                        writer.get_mut().extend_from_slice(
+                            filters.chips(graph, &item, listing, page).as_bytes(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    String::from_utf8(writer.into_inner()).map_err(|e| render_err(e.to_string()))
 }
 
 async fn ledger_listing(
@@ -1512,6 +1725,8 @@ async fn ledger_listing(
     let Listing {
         status,
         text,
+        labels,
+        without,
         limit,
         offset,
     } = *listing;
@@ -1538,6 +1753,11 @@ async fn ledger_listing(
         );
         if let Some(text) = text {
             read = with(read, "text", text);
+        }
+        for (name, value) in [("labels", labels), ("without", without)] {
+            if let Some(value) = value {
+                read = with(read, name, value);
+            }
         }
         Ok(read)
     };
@@ -1570,6 +1790,16 @@ async fn ledger_listing(
         offset,
     };
     enrich_items(&mut graph, ledger, inv, status);
+    for item in &order {
+        for (name, value) in [
+            ("listLabels", labels),
+            ("listWithout", without),
+            ("listText", text),
+            ("listLimit", limit),
+        ] {
+            graph.view(item, name, value.unwrap_or(""));
+        }
+    }
     enrich_authors(&mut graph, &web.passkeys);
     let ledgers = readable_ledgers(web, inv.capability);
     let mut children = nav(web, inv.capability, &ledgers, Some(ledger.name()));
@@ -1588,9 +1818,12 @@ async fn ledger_listing(
     // stylesheet's per-chunk `xsl:sort` and this order agree, and the spliced page is the
     // one a single transform produced. `render::chunk` has the numbers.
     children.push_str(&render::slot(ITEMS_SLOT));
+    let filters = LabelFilters { labels, without };
+    let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
     for window in graph.windows(&order, render::CHUNK_ROWS) {
-        chunks.push(render::chunk(&window.view_xml().map_err(render_err)?));
+        let xml = listing_chips(&window, &filters, listing, &page_url)?;
+        chunks.push(render::chunk(&xml));
     }
     let title = if ledger.is_default() {
         "Ledger".to_string()
@@ -1599,8 +1832,23 @@ async fn ledger_listing(
     };
     let page_url = ledger_href(ledger);
     let items_url = format!("{}/items", ledger_href(ledger));
-    let query = count.more_query(status, text);
-    let next = count.next_query(status, text);
+    let query = count.more_query(status, text).map(|q| filters.append(q));
+    let next = count.next_query(status, text).map(|q| filters.append(q));
+    children.push_str(&filters.active(listing, &page_url));
+    let status_tail = filters.append(String::new());
+    let status_tail = if let Some(text) = text.filter(|t| !t.is_empty()) {
+        format!("{status_tail}&text={}", ikigai_fn::html::url_segment(text))
+    } else {
+        status_tail
+    };
+    let status_tail = if let Some(limit) = limit {
+        format!(
+            "{status_tail}&limit={}",
+            ikigai_fn::html::url_segment(limit)
+        )
+    } else {
+        status_tail
+    };
     let doc = envelope(
         "page",
         &[
@@ -1611,6 +1859,10 @@ async fn ledger_listing(
             ("ledger", ledger.name()),
             ("status", status),
             ("text", text.unwrap_or("")),
+            ("labels", labels.unwrap_or("")),
+            ("without", without.unwrap_or("")),
+            ("limit", &wanted.to_string()),
+            ("status-tail", &status_tail),
             ("page-url", &page_url),
             ("items-url", &items_url),
             ("count", &count.sentence(status)),
@@ -1803,6 +2055,8 @@ impl Endpoint for LedgerView {
         html_only(inv)?;
         let status = optional(inv, "status").unwrap_or_else(|| "open".to_string());
         let text = optional(inv, "text");
+        let labels = optional(inv, "labels");
+        let without = optional(inv, "without");
         let limit = optional(inv, "limit");
         let offset = optional(inv, "offset");
         let ledger = match self.shape {
@@ -1841,6 +2095,8 @@ impl Endpoint for LedgerView {
             &Listing {
                 status: &status,
                 text: text.as_deref(),
+                labels: labels.as_deref(),
+                without: without.as_deref(),
                 limit: limit.as_deref(),
                 offset: offset.as_deref(),
             },
@@ -1900,6 +2156,8 @@ impl Endpoint for LedgerView {
                 .optional(),
         )
         .input(arg("text", "A case-insensitive substring of the title.").optional())
+        .input(arg("labels", "Comma-separated labels: every label must match.").optional())
+        .input(arg("without", "Comma-separated labels: none may match.").optional())
         .input(
             arg("limit", &rows::limit_summary())
                 .default_value(rows::ROWS.to_string())
@@ -2400,6 +2658,10 @@ impl Endpoint for Act {
         let id = take("_id");
         let then = take("_then").unwrap_or_else(|| "items".to_string());
         let list_status = take("_status").unwrap_or_else(|| "open".to_string());
+        let list_labels = take("_labels");
+        let list_without = take("_without");
+        let list_text = take("_text");
+        let list_limit = take("_limit");
         let target = if action == "item" {
             ledger.item(
                 id.as_deref()
@@ -2498,8 +2760,10 @@ impl Endpoint for Act {
             _ => {
                 let listing = Listing {
                     status: &list_status,
-                    text: None,
-                    limit: None,
+                    text: list_text.as_deref(),
+                    labels: list_labels.as_deref(),
+                    without: list_without.as_deref(),
+                    limit: list_limit.as_deref(),
                     offset: None,
                 };
                 ledger_listing(&self.web, inv, &ledger, &listing, false, flash).await
@@ -3754,6 +4018,7 @@ mod tests {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         };
         let root = Capability::root();
         let ledgers = readable_ledgers(&web, &root);
@@ -3775,6 +4040,45 @@ mod tests {
         }
         assert!(header.contains("<view:withheld"));
         assert_eq!(header, nav_for(&web, &partial));
+    }
+
+    #[test]
+    fn conflicting_terms_can_be_removed_independently() {
+        let filters = LabelFilters {
+            labels: Some("same,keep"),
+            without: Some("same,skip"),
+        };
+        let listing = Listing {
+            status: "all",
+            text: None,
+            labels: filters.labels,
+            without: filters.without,
+            limit: None,
+            offset: Some("50"),
+        };
+        assert_eq!(
+            filters.url(&listing, "/l/default", LabelChange::RemoveRequired("same")),
+            "/l/default?status=all&labels=keep&without=same%2Cskip"
+        );
+        assert_eq!(
+            filters.url(&listing, "/l/default", LabelChange::RemoveExcluded("same")),
+            "/l/default?status=all&labels=same%2Ckeep&without=skip"
+        );
+    }
+
+    #[test]
+    fn next_page_carries_encoded_label_filters() {
+        let count = Count {
+            shown: rows::MAX_ROWS,
+            total: rows::MAX_ROWS + 1,
+            offset: 0,
+        };
+        let filters = LabelFilters {
+            labels: Some("book:ikigai,c++ & café"),
+            without: Some("blocked,decide"),
+        };
+        let query = filters.append(count.next_query("closed", Some("queue & review")).unwrap());
+        assert_eq!(query, format!("?status=closed&limit={0}&offset={0}&text=queue%20%26%20review&labels=book%3Aikigai%2Cc%2B%2B%20%26%20caf%C3%A9&without=blocked%2Cdecide", rows::MAX_ROWS));
     }
 
     /// ★ Ledger #480: a page the CAP stopped says so, beside what it drew and out of what; a

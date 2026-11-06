@@ -85,7 +85,12 @@ summary { cursor: pointer; color: var(--accent); }
 .ledger-head h1 { margin: 0; }
 .filters { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
 .filters a[aria-current] { font-weight: 700; color: var(--fg); text-decoration: none; }
-.search { display: flex; gap: 0.5rem; margin-left: auto; flex-wrap: wrap; }
+.search { display: flex; gap: 0.5rem; width: 100%; flex-wrap: wrap; align-items: end; }
+.search-field { display: grid; gap: 0.25rem; flex: 1 1 12rem; min-width: 0; }
+.search-field input { width: 100%; min-width: 0; }
+.search > .note { flex-basis: 100%; margin: 0; }
+.active-filters, .label-actions { overflow-wrap: anywhere; }
+.label-actions, .badges { max-width: 100%; }
 
 /* A ledger's counts over time, inline SVG (ledger #2542, src/dashboard.rs). The plot is the svg's
  * box, and its labels overflow it into this padding, so their size never depends on its width.

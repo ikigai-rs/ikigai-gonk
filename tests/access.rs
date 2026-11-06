@@ -47,6 +47,7 @@ fn web_face(hub: &Arc<Kernel>, config: &tempfile::TempDir, port: u16) -> Arc<web
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     })
 }
 

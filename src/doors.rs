@@ -1370,7 +1370,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 20] = [
+pub const GONK_PATHS: [&str; 21] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
@@ -1388,6 +1388,8 @@ pub const GONK_PATHS: [&str; 20] = [
     crate::onboard::PAGE_PATH,
     // The RDF Toolbox's rows ([`crate::toolbox::routes`]), when `gonk.toolbox.dist` adds them.
     crate::toolbox::PATH,
+    // A deployment's own pages ([`crate::face::routes`]), when `gonk.face` adds them.
+    "/face/",
     "/iki/",
     "/script/",
     "/nl/",

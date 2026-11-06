@@ -228,6 +228,7 @@ fn main() {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, Some(view));
     let http = Arc::new(doors::http_kernel(Arc::clone(&hub), pages));

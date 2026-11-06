@@ -137,6 +137,7 @@ impl Server {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel_with(
             Arc::clone(&hub),

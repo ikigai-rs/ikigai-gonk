@@ -145,6 +145,7 @@ fn door_and_hub(
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),
@@ -2187,6 +2188,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
         epochs: Some(watch.epochs()),
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     Counting {
         door: doors::http_kernel(Arc::clone(&hub), web::space(face)),

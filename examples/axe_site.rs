@@ -27,6 +27,14 @@ const PAGES: [(&str, &str); 13] = [
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
     ("ledger.html", "/l/default"),
+    (
+        "label-filter.html",
+        "/l/default?labels=needs-person&without=blocked",
+    ),
+    (
+        "label-empty.html",
+        "/l/default?labels=missing&without=blocked",
+    ),
     ("closed.html", "/l/default?status=closed"),
     ("item.html", "/l/default/item/1"),
     ("named-ledger.html", "/l/crew"),
@@ -88,6 +96,10 @@ fn main() {
         .with_arg(
             "content",
             ArgRef::Inline(b"An item for the checker to read".to_vec()),
+        )
+        .with_arg(
+            "labels",
+            ArgRef::Inline(b"needs-person,book:ikigai".to_vec()),
         ),
         &Capability::root(),
     ))
@@ -113,6 +125,7 @@ fn main() {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = Arc::new(doors::http_kernel_serving(
         hub,

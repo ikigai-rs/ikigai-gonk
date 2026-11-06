@@ -983,6 +983,7 @@ fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let pages = onboard::bind_page(ikigai_gonk::web::space(Arc::clone(&face)), &face);
     let http = ikigai_gonk::doors::http_kernel_serving(Arc::clone(&a.hub), pages, Vec::new(), None);

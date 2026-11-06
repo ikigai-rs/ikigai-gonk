@@ -59,6 +59,7 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     doors::http_kernel(hub, ikigai_gonk::web::door_space(face, None))
 }

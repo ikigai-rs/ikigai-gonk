@@ -124,7 +124,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 44] = [
+const KEYS: [&str; 45] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -169,6 +169,7 @@ const KEYS: [&str; 44] = [
     "gonk.review.judge",
     "gonk.review.judge_max_tokens",
     crate::toolbox::KEY,
+    crate::face::KEY,
 ];
 
 /// How to invoke the binary.
@@ -730,6 +731,9 @@ pub struct Settings {
     /// The RDF Toolbox's build directory (`gonk.toolbox.dist`, [`crate::toolbox`]), or `None`:
     /// no `/toolbox`, and nothing else changes.
     pub toolbox: Option<crate::toolbox::Toolbox>,
+    /// A deployment's own pages (`gonk.face`, [`crate::face`], ledger #3199), one per line;
+    /// empty for none: no `/face/name/…`, and nothing else changes.
+    pub faces: Vec<crate::face::Face>,
     /// The onboarding controller's door and files (`gonk.onboard`, [`crate::onboard`]), or
     /// `None`: no `urn:iki:onboard:*`, and nothing else changes.
     pub onboard: Option<crate::onboard::Config>,
@@ -2011,6 +2015,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),
         )?,
         toolbox: toolbox(text, homes)?,
+        faces: crate::face::parse_all(&values_for(text, crate::face::KEY), &homes.home)?,
         onboard,
     })
 }

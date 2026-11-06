@@ -124,6 +124,7 @@ impl Server {
             epochs: None,
             holder_aliases: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
@@ -288,6 +289,195 @@ fn file(server: &Server, content: &str) -> (String, String) {
     );
     assert_eq!(filed.status, 200, "{filed:?}");
     first_item(&filed.body)
+}
+
+#[test]
+fn ledger_label_filters_use_the_ledgers_count_and_listing() {
+    let server = Server::start();
+    let mut filed = Vec::new();
+    for (title, labels) in [
+        ("Matching queue", "needs-person,book:ikigai"),
+        ("Other queue", "decide"),
+        ("Excluded queue", "needs-person,book:ikigai,blocked"),
+        ("Closed queue", "needs-person,book:ikigai"),
+        ("Matching elsewhere", "needs-person"),
+        ("Encoded queue", "c++ & café/?#%=yes"),
+    ] {
+        let response = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "append"),
+                ("_then", "items"),
+                ("content", title),
+                ("labels", labels),
+            ],
+            None,
+        );
+        assert_eq!(response.status, 200, "{response:?}");
+        assert!(
+            response
+                .body
+                .contains("name='limit' type='hidden' value='50'"),
+            "a form response without an explicit limit still has a valid search form: {response:?}"
+        );
+        filed.push(first_item(&response.body));
+    }
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &filed[3].0),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+
+    for (filter, titles) in [
+        (
+            "labels=needs-person",
+            vec!["Matching queue", "Excluded queue", "Matching elsewhere"],
+        ),
+        ("without=needs-person", vec!["Other queue", "Encoded queue"]),
+        (
+            "labels=needs-person,book%3Aikigai&without=blocked&text=queue",
+            vec!["Matching queue"],
+        ),
+        (
+            "status=closed&labels=needs-person&without=blocked&text=queue",
+            vec!["Closed queue"],
+        ),
+        (
+            "status=all&labels=needs-person&without=blocked&text=queue",
+            vec!["Matching queue", "Closed queue"],
+        ),
+        ("labels=missing", vec![]),
+        ("labels=needs-person&without=needs-person", vec![]),
+    ] {
+        let count = server.raw(
+            "GET",
+            &format!("/iki/ledger/count?as=application%2Fjson&{filter}"),
+            &[("Accept", "application/json".into())],
+            "",
+        );
+        assert_eq!(count.status, 200, "{count:?}");
+        let count: serde_json::Value = serde_json::from_str(&count.body).unwrap();
+        assert_eq!(count["total"], titles.len(), "{filter}");
+        for path in ["/l/default", "/l/default/items"] {
+            let page = server.page(&format!("{path}?{filter}"), None);
+            assert_eq!(page.status, 200, "{page:?}");
+            assert_eq!(
+                page.body.matches("<li class='row ").count(),
+                titles.len(),
+                "{page:?}"
+            );
+            for title in &titles {
+                assert!(page.body.contains(title), "{page:?}");
+            }
+            if titles.is_empty() {
+                assert!(page.body.contains("No items match."), "{page:?}");
+            } else {
+                assert!(
+                    page.body.contains(&format!(
+                        "{} {} items",
+                        titles.len(),
+                        if filter.starts_with("status=closed") {
+                            "closed"
+                        } else {
+                            "open"
+                        }
+                    )) || (filter.starts_with("status=all") && page.body.contains("2 items")),
+                    "{page:?}"
+                );
+            }
+        }
+    }
+    let filtered = server.page(
+        "/l/default?labels=needs-person&without=absent&text=queue&limit=1",
+        None,
+    );
+    assert!(
+        filtered
+            .body
+            .contains("limit=2&amp;text=queue&amp;labels=needs-person&amp;without=absent"),
+        "{filtered:?}"
+    );
+    assert!(
+        filtered.body.contains(
+            "status=closed&amp;labels=needs-person&amp;without=absent&amp;text=queue&amp;limit=1"
+        ),
+        "{filtered:?}"
+    );
+    // Row chips add a term to either side, preserving the other filters and resetting paging.
+    assert!(filtered.body.contains("href='/l/default?status=open&amp;limit=1&amp;text=queue&amp;labels=needs-person%2Cbook%3Aikigai&amp;without=absent'"), "{filtered:?}");
+    assert!(filtered.body.contains("href='/l/default?status=open&amp;limit=1&amp;text=queue&amp;labels=needs-person&amp;without=absent%2Cbook%3Aikigai'"), "{filtered:?}");
+    // Active terms can be removed or moved, including an excluded term.
+    for url in [
+        "?status=open&amp;limit=1&amp;text=queue&amp;without=absent",
+        "?status=open&amp;limit=1&amp;text=queue&amp;without=absent%2Cneeds-person",
+        "?status=open&amp;limit=1&amp;text=queue&amp;labels=needs-person%2Cabsent",
+    ] {
+        assert!(filtered.body.contains(url), "{filtered:?}");
+    }
+    let term = "c++ & café/?#%=yes";
+    let encoded = ikigai_fn::html::url_segment(term);
+    let all = server.page("/l/default", None);
+    assert!(
+        all.body.contains(&format!(
+            "href='/l/default?status=open&amp;limit=50&amp;labels={encoded}'"
+        )),
+        "{all:?}"
+    );
+    let encoded_page = server.page(&format!("/l/default?labels={encoded}"), None);
+    assert_eq!(encoded_page.status, 200, "{encoded_page:?}");
+    assert!(
+        encoded_page.body.contains("Encoded queue"),
+        "{encoded_page:?}"
+    );
+    assert_eq!(
+        encoded_page.body.matches("<li class='row ").count(),
+        1,
+        "{encoded_page:?}"
+    );
+    assert!(
+        encoded_page.body.contains("value='c++ &amp; café/?#%=yes'"),
+        "{encoded_page:?}"
+    );
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &filed[0].0),
+            ("_labels", "needs-person,book:ikigai"),
+            ("_without", "blocked"),
+            ("_text", "queue"),
+            ("_limit", "1"),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(closed.body.contains("No items match."), "{closed:?}");
+    assert!(
+        closed.body.contains("value='needs-person,book:ikigai'"),
+        "{closed:?}"
+    );
+    assert!(closed.body.contains("value='blocked'"), "{closed:?}");
+    assert!(closed.body.contains("value='queue'"), "{closed:?}");
+}
+
+#[test]
+fn ledger_label_filters_do_not_widen_the_viewers_capability() {
+    for grants in [Vec::new(), vec!["urn:cap:ledger:read:default".to_string()]] {
+        let server = Server::start_configured(ikigai_gonk::rules::DEFAULT_RULES, grants);
+        for path in [
+            "/l/default?labels=private",
+            "/l/default/items?without=private",
+        ] {
+            let response = server.page(path, None);
+            assert_eq!(response.status, 403, "{response:?}");
+        }
+    }
 }
 
 /// ★ **A listing renders a BOUNDED number of rows and says so.** `xrust` costs ~6–15 ms per
