@@ -129,6 +129,7 @@ impl Server {
                 cap(&ikigai_web::HttpRequest {
                     method: request.method.clone(),
                     path: request.path.clone(),
+                    raw_target: request.raw_target.clone(),
                     query: request.query.clone(),
                     headers: request.headers.clone(),
                     body: request.body.clone(),
