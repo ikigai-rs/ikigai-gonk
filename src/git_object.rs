@@ -212,7 +212,7 @@ impl Endpoint for Object {
                         path,
                     );
                     let body = Kernel::issue(&self.kernel, read, inv.capability).await?;
-                    html.push_str(&format!("<p>File: <code class='iri'>{}</code> at commit <code class='iri'>{}</code></p><pre class='graph' tabindex='0' aria-label='File contents'><code>{}</code></pre>", html_text(path), html_text(commit), html_text(&String::from_utf8_lossy(&body.bytes))));
+                    html.push_str(&format!("<p>File: <code class='iri'>{}</code> at commit <code class='iri'>{}</code></p><pre class='graph' tabindex='0' role='region' aria-label='File contents'><code>{}</code></pre>", html_text(path), html_text(commit), html_text(&String::from_utf8_lossy(&body.bytes))));
                 } else {
                     html.push_str("<p>This blob has no path in retained reachable history.</p>");
                 }
