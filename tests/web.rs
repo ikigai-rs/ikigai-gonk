@@ -4038,3 +4038,184 @@ fn a_blocks_cycle_answers_the_ledgers_refusal_in_the_panel() {
         assert!(!links.contains("in landing order"), "{links}");
     }
 }
+
+/// Append to `ledger` as root, through the hub: what no anonymous door may write.
+fn root_append(server: &Server, ledger: &str, content: &str, labels: &str) {
+    let mut request = ikigai_core::Request::new(
+        ikigai_core::Verb::Sink,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:append")).unwrap(),
+    )
+    .with_arg(
+        "content",
+        ikigai_core::ArgRef::Inline(content.as_bytes().to_vec()),
+    );
+    if !labels.is_empty() {
+        request = request.with_arg(
+            "labels",
+            ikigai_core::ArgRef::Inline(labels.as_bytes().to_vec()),
+        );
+    }
+    futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("appending to {ledger}: {e}"));
+}
+
+/// The total a page's count sentence names, from its first number.
+fn page_total(body: &str) -> usize {
+    let at = body.find("class='how-many'").expect("a count sentence") + "class='how-many'>".len();
+    let sentence = &body[at..at + body[at..].find('<').unwrap()];
+    // "N items", or "showing … of N items".
+    sentence
+        .split_whitespace()
+        .rev()
+        .find_map(|w| w.parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("no total in `{sentence}`"))
+}
+
+/// ★ Ledger #3216: `ledgers=` on the ledger page and its fragment lists the UNION of the named
+/// ledgers, read by the ledger's own `items`/`count` under the viewer's capability. A named
+/// ledger the viewer may not read is left out (and the page says so), the count is the union's,
+/// rows say which ledger they are from, and paging, status tabs, search and the label links all
+/// keep the union.
+#[test]
+fn a_ledger_page_lists_the_union_of_the_ledgers_it_names() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("alpha", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "alpha", "secret"],
+    );
+    root_append(&server, "default", "Default shared one", "shared");
+    root_append(&server, "default", "Default plain one", "");
+    root_append(&server, "alpha", "Alpha shared one", "shared");
+    root_append(&server, "alpha", "Alpha shared two", "shared,extra");
+    root_append(&server, "alpha", "Alpha plain one", "");
+    root_append(&server, "secret", "Secret shared one", "shared");
+
+    // The union page: both readable ledgers, never the unreadable one.
+    let union = "ledgers=default%2Calpha%2Csecret";
+    let page = server.page(&format!("/l/default?{union}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    for title in [
+        "Default shared one",
+        "Default plain one",
+        "Alpha shared one",
+        "Alpha shared two",
+        "Alpha plain one",
+    ] {
+        assert!(page.body.contains(title), "{title} missing: {page:?}");
+    }
+    assert!(!page.body.contains("Secret shared one"), "{page:?}");
+    assert_eq!(page_total(&page.body), 5, "{page:?}");
+    // Rows name their ledger, and link to their own ledger's item page.
+    assert!(page.body.contains("alpha#1"), "{page:?}");
+    assert!(page.body.contains("default#1"), "{page:?}");
+    assert!(
+        page.body.contains("aria-label='Close default#1"),
+        "{page:?}"
+    );
+    assert!(page.body.contains("href='/l/alpha/item/"), "{page:?}");
+    // The page says what it covers and what it left out.
+    assert!(
+        page.body.contains("Listing ledgers alpha, default."),
+        "{page:?}"
+    );
+    assert!(
+        page.body
+            .contains("Left out, because you may not read them: secret."),
+        "{page:?}"
+    );
+    // Status tabs, the facet and the search form keep the union.
+    assert!(
+        page.body.contains(&format!(
+            "href='/l/default?status=closed&amp;{union}&amp;limit=50'"
+        )),
+        "{page:?}"
+    );
+    assert!(
+        page.body.contains(&format!(
+            "/l/default/facet?status=open&amp;limit=50&amp;{union}"
+        )),
+        "{page:?}"
+    );
+    assert!(
+        page.body
+            .contains("name='ledgers' type='hidden' value='default,alpha,secret'"),
+        "{page:?}"
+    );
+
+    // The count agrees with the single-ledger pages it is the union of.
+    let single = |path: &str| page_total(&server.page(path, None).body);
+    assert_eq!(
+        single("/l/default?status=all") + single("/l/alpha?status=all"),
+        5
+    );
+
+    // Filters over the union: the label filter, and a search, each counted over both.
+    let filtered = server.page(&format!("/l/default?labels=shared&{union}"), None);
+    assert_eq!(filtered.status, 200, "{filtered:?}");
+    assert_eq!(page_total(&filtered.body), 3, "{filtered:?}");
+    assert!(!filtered.body.contains("plain one"), "{filtered:?}");
+    // A label chip's links keep the union.
+    assert!(
+        filtered
+            .body
+            .contains(&format!("labels=shared%2Cextra&amp;{union}")),
+        "{filtered:?}"
+    );
+    let searched = server.page(&format!("/l/default/items?text=alpha&{union}"), None);
+    assert_eq!(searched.status, 200, "{searched:?}");
+    assert_eq!(page_total(&searched.body), 3, "{searched:?}");
+
+    // The facet counts the same union.
+    let facets = server.page(&format!("/l/default/facet?{union}"), None);
+    assert_eq!(facets.status, 200, "{facets:?}");
+    assert!(facets.body.contains("shared (3)"), "{facets:?}");
+    assert!(facets.body.contains("extra (1)"), "{facets:?}");
+
+    // Paging over the union: two rows a page, the next link keeps `ledgers=`, and the pages
+    // together hold every row once.
+    let mut seen = Vec::new();
+    let mut path = format!("/l/default?limit=2&{union}");
+    for _ in 0..3 {
+        let page = server.page(&path, None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert_eq!(page_total(&page.body), 5, "{page:?}");
+        for title in [
+            "Default shared one",
+            "Default plain one",
+            "Alpha shared one",
+            "Alpha shared two",
+            "Alpha plain one",
+        ] {
+            if page.body.contains(&format!(">{title}<")) {
+                seen.push(title);
+            }
+        }
+        match page.body.find("class='more'") {
+            Some(at) => {
+                let href = &page.body[at..];
+                let start = href.find("href='").unwrap() + "href='".len();
+                path = href[start..start + href[start..].find('\'').unwrap()].replace("&amp;", "&");
+                assert!(path.contains(union), "{path}");
+            }
+            None => break,
+        }
+    }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 5, "{seen:?}");
+
+    // Only unreadable ledgers: an empty, honest page, and nothing read from them.
+    let none = server.page("/l/default?ledgers=secret", None);
+    assert_eq!(none.status, 200, "{none:?}");
+    assert!(none.body.contains("No items match."), "{none:?}");
+    assert!(!none.body.contains("Secret shared one"), "{none:?}");
+    let facets = server.page("/l/default/facet?ledgers=secret", None);
+    assert!(!facets.body.contains("shared ("), "{facets:?}");
+}

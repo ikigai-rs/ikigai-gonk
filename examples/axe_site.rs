@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 16] = [
+const PAGES: [(&str, &str); 17] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -39,6 +39,11 @@ const PAGES: [(&str, &str); 16] = [
     ("item.html", "/l/default/item/1"),
     ("linked-item.html", "/l/default/item/4"),
     ("named-ledger.html", "/l/crew"),
+    // A `ledgers=` union (#3216): rows from two ledgers, and a named one left out unread.
+    (
+        "ledger-union.html",
+        "/l/default?ledgers=default,crew,secret",
+    ),
     ("named-item.html", "/l/crew/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
     ("doctor.html", "/l/default/doctor"),

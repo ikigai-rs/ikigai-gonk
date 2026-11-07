@@ -97,12 +97,14 @@ impl Endpoint for Facet {
         let text = optional(inv, "text");
         let labels = optional(inv, "labels");
         let without = optional(inv, "without");
+        let union = union_arg(optional(inv, "ledgers"));
         let limit = optional(inv, "limit");
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
             labels: labels.as_deref(),
             without: without.as_deref(),
+            ledgers: union.as_deref(),
             limit: limit.as_deref(),
             offset: None,
         };
@@ -120,22 +122,51 @@ impl Endpoint for Facet {
              }} GROUP BY ?kind ?value ORDER BY ?kind ?value",
             pattern(&listing)?
         );
-        let rows = bindings(&query(inv, &ledger, &q).await?)?;
+        // ★ A `ledgers=` union (ledger #3216) counts each member graph the viewer may read,
+        // with the same two read checks the ledger's own union makes, and adds the counts: an
+        // item lives in one graph, so per-graph DISTINCT counts sum to the union's. A member
+        // it may not read is left out without being queried, as the listing leaves it out.
+        let members: Vec<Ledger> = match union.as_deref() {
+            None => vec![ledger.clone()],
+            Some(union) => {
+                let mut members = Vec::new();
+                for name in union_names(union) {
+                    let member = Ledger::parse(name)?;
+                    if require_read(inv.capability, &member).is_ok() {
+                        members.push(member);
+                    }
+                }
+                members
+            }
+        };
+        let mut counts: BTreeMap<(String, String), u64> = BTreeMap::new();
+        for member in &members {
+            for row in bindings(&query(inv, member, &q).await?)? {
+                let kind = row["kind"]["value"]
+                    .as_str()
+                    .ok_or_else(|| Error::Endpoint("facet has no kind".into()))?;
+                let term = row["value"]["value"]
+                    .as_str()
+                    .ok_or_else(|| Error::Endpoint("facet has no value".into()))?;
+                let count = row["count"]["value"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or_else(|| Error::Endpoint("facet count is not an integer".into()))?;
+                *counts
+                    .entry((kind.to_string(), term.to_string()))
+                    .or_default() += count;
+            }
+        }
         let filters = LabelFilters {
             labels: listing.labels,
             without: listing.without,
+            ledgers: listing.ledgers,
         };
         let page = ledger_href(&ledger);
         let mut terms = Vec::new();
-        for row in rows {
-            let term = row["value"]["value"]
-                .as_str()
-                .ok_or_else(|| Error::Endpoint("facet has no value".into()))?;
-            let count = row["count"]["value"]
-                .as_str()
-                .and_then(|v| v.parse::<u64>().ok())
-                .ok_or_else(|| Error::Endpoint("facet count is not an integer".into()))?;
-            let (name, include, exclude) = if row["kind"]["value"] == "priority" {
+        for ((kind, term), count) in &counts {
+            let (term, count) = (term.as_str(), *count);
+            let (name, include, exclude) = if kind == "priority" {
                 (format!("Priority {term}"), String::new(), String::new())
             } else {
                 (
@@ -208,6 +239,7 @@ impl Endpoint for Facet {
             .input(arg("status", "open, closed, or all.").one_of(["open", "closed", "all"]).default_value("open").optional())
             .input(arg("labels", "Comma-separated required labels.").optional())
             .input(arg("without", "Comma-separated excluded labels.").optional())
+            .input(arg("ledgers", "Comma-separated ledgers: count their union, as the list does.").optional())
             .input(arg("text", "Case-insensitive title substring.").optional())
             .input(arg("limit", "Preserve this list page size in filter links; counts are unbounded.").optional())
             .input(arg("page", "A whole page for a browser without scripts.").one_of(["true", "false"]).optional())

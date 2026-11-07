@@ -2203,6 +2203,10 @@
           <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/></xsl:attribute>
           <input type="hidden" name="status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
           <input type="hidden" name="limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
+          <!-- A `ledgers=` union (ledger #3216) is kept by a search, as by every link below. -->
+          <xsl:if test="@ledgers != ''">
+            <input type="hidden" name="ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
+          </xsl:if>
           <div class="search-field">
             <label for="search-text">Search titles</label>
             <input id="search-text" type="search" name="text" placeholder="Search titles">
@@ -2225,6 +2229,7 @@
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
         </form>
       </header>
+      <xsl:apply-templates select="view:union"/>
       <xsl:apply-templates select="view:label-filters"/>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
@@ -2236,6 +2241,7 @@
           <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
           <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute></input>
           <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute></input>
+          <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
           <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
           <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
@@ -2337,6 +2343,16 @@
     </li>
   </xsl:template>
 
+  <!-- A `ledgers=` union (ledger #3216): which ledgers the list covers, and which named ones
+       it left out because this viewer may not read them. Plain text, read in order. -->
+  <xsl:template match="view:union">
+    <div class="active-filters union">
+      <p><xsl:value-of select="@listed"/>
+        <xsl:if test="@left-out != ''"><xsl:text> Left out, because you may not read them: </xsl:text><xsl:value-of select="@left-out"/>.</xsl:if>
+        <xsl:text> The chart and the file form are for </xsl:text><a><xsl:attribute name="href"><xsl:value-of select="../@page-url"/></xsl:attribute><xsl:value-of select="../@ledger"/></a> alone.</p>
+    </div>
+  </xsl:template>
+
   <xsl:template match="view:label-filters">
     <div class="active-filters">
       <p>Label filters in force. The chart counts this status across all labels and priorities. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
@@ -2390,6 +2406,7 @@
             <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
             <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="view:listLabels"/></xsl:attribute></input>
             <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="view:listWithout"/></xsl:attribute></input>
+            <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="view:listLedgers"/></xsl:attribute></input>
             <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="view:listText"/></xsl:attribute></input>
             <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>

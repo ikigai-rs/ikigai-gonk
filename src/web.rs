@@ -1209,10 +1209,35 @@ fn enrich_close_reasons(graph: &mut Graph, hub: &Kernel, ledger: &Ledger) {
 
 /// The view triples an item needs, added to `graph` in place.
 fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_status: &str) {
-    let can_write = inv.capability.allows(&ledger.cap_write());
-    let can_delete = inv.capability.allows(&ledger.cap_delete());
-    let can_purge = inv.capability.allows(&ledger.cap_purge());
+    enrich_rows(graph, ledger, inv, list_status, false);
+}
+
+/// The ledger an item IRI (`urn:iki:ledger:{name}:item:{id}`) belongs to, if it names one.
+fn item_ledger(item: &str) -> Option<Ledger> {
+    let name = item
+        .strip_prefix("urn:iki:ledger:")?
+        .rsplit_once(":item:")?
+        .0;
+    Ledger::parse(name).ok()
+}
+
+/// [`enrich_items`], and with `union` (a `ledgers=` listing, ledger #3216) each row is
+/// enriched for its OWN ledger, read from its IRI: its link, its forms' `_ledger`, its grant
+/// checks, and a visible number that names the ledger (`alpha#12`), since rows from several
+/// ledgers share one list.
+fn enrich_rows(
+    graph: &mut Graph,
+    page_ledger: &Ledger,
+    inv: &Invocation<'_>,
+    list_status: &str,
+    union: bool,
+) {
     for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let own = union.then(|| item_ledger(&item)).flatten();
+        let ledger = own.as_ref().unwrap_or(page_ledger);
+        let can_write = inv.capability.allows(&ledger.cap_write());
+        let can_delete = inv.capability.allows(&ledger.cap_delete());
+        let can_purge = inv.capability.allows(&ledger.cap_purge());
         let id = item
             .rsplit_once(":item:")
             .map(|(_, id)| id)
@@ -1256,11 +1281,20 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
         graph.view(
             &item,
             "short",
-            ledger.number(number.parse::<i64>().unwrap_or_default()),
+            if union {
+                format!("{}#{number}", ledger.name())
+            } else {
+                ledger.number(number.parse::<i64>().unwrap_or_default())
+            },
         );
         // Each enrichment uses one ledger, including an outgoing-link partition. Keep
         // `short` qualified for action names; the visible number is local to that ledger.
-        graph.view(&item, "localNumber", format!("#{number}"));
+        let number_shown = if union {
+            format!("{}#{number}", ledger.name())
+        } else {
+            format!("#{number}")
+        };
+        graph.view(&item, "localNumber", number_shown);
         graph.view(&item, "href", format!("{}/item/{id}", ledger_href(ledger)));
         graph.view(&item, "ledger", ledger.name());
         graph.view(&item, "ledgerHref", ledger_href(ledger));
@@ -1585,6 +1619,10 @@ struct Listing<'a> {
     text: Option<&'a str>,
     labels: Option<&'a str>,
     without: Option<&'a str>,
+    /// `ledgers=alpha,beta` (ledger #3216): list the union of these ledgers instead of the
+    /// page's own, passed through unchanged to the ledger's `items` and `count`, which read
+    /// each under the viewer's own grants and leave out one it may not read.
+    ledgers: Option<&'a str>,
     /// How many rows to render — see [`rows::rows_wanted`]. The filter above is what gets
     /// COUNTED; this is only what gets drawn.
     limit: Option<&'a str>,
@@ -1596,6 +1634,16 @@ struct Listing<'a> {
 struct LabelFilters<'a> {
     labels: Option<&'a str>,
     without: Option<&'a str>,
+    /// Not a label filter, but carried by every link the filters build, so paging, status
+    /// tabs, search and the label links all keep a `ledgers=` union (ledger #3216).
+    ledgers: Option<&'a str>,
+}
+
+/// A `ledgers=` value worth carrying: blank is "not given", the single-ledger page.
+fn union_arg(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 enum LabelChange<'a> {
@@ -1609,7 +1657,11 @@ enum LabelChange<'a> {
 
 impl LabelFilters<'_> {
     fn append(&self, mut query: String) -> String {
-        for (name, value) in [("labels", self.labels), ("without", self.without)] {
+        for (name, value) in [
+            ("labels", self.labels),
+            ("without", self.without),
+            ("ledgers", self.ledgers),
+        ] {
             if let Some(value) = value.filter(|v| !v.is_empty()) {
                 query.push_str(&format!("&{name}={}", ikigai_fn::html::url_segment(value)));
             }
@@ -1662,6 +1714,7 @@ impl LabelFilters<'_> {
         let filter = LabelFilters {
             labels: Some(&labels),
             without: Some(&without),
+            ledgers: self.ledgers,
         };
         let mut query = format!("?status={}", listing.status);
         if let Some(limit) = listing.limit {
@@ -1802,9 +1855,12 @@ async fn ledger_listing(
         text,
         labels,
         without,
+        ledgers: union,
         limit,
         offset,
     } = *listing;
+    // ⚠ The page's own ledger is still read whole (its chart, its file form), so it stays
+    // required; the union's members are the ledger's to check, one by one (ledger #3216).
     require_read(inv.capability, ledger)?;
     if !matches!(status, "open" | "closed" | "all") {
         return Err(Error::InvalidArgument {
@@ -1829,7 +1885,7 @@ async fn ledger_listing(
         if let Some(text) = text {
             read = with(read, "text", text);
         }
-        for (name, value) in [("labels", labels), ("without", without)] {
+        for (name, value) in [("labels", labels), ("without", without), ("ledgers", union)] {
             if let Some(value) = value {
                 read = with(read, name, value);
             }
@@ -1837,7 +1893,8 @@ async fn ledger_listing(
         Ok(read)
     };
     // The total first: an offset past it is refused before anything is drawn.
-    let total = ledger_total(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
+    let counted = ledger_counted(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
+    let total = counted.total;
     if offset > 0 && offset >= total {
         return Err(Error::InvalidArgument {
             name: "offset".to_string(),
@@ -1864,12 +1921,13 @@ async fn ledger_listing(
         total,
         offset,
     };
-    enrich_items(&mut graph, ledger, inv, status);
+    enrich_rows(&mut graph, ledger, inv, status, union.is_some());
     enrich_states(&mut graph, inv).await;
     for item in &order {
         for (name, value) in [
             ("listLabels", labels),
             ("listWithout", without),
+            ("listLedgers", union),
             ("listText", text),
             ("listLimit", limit),
         ] {
@@ -1894,14 +1952,26 @@ async fn ledger_listing(
     // stylesheet's per-chunk `xsl:sort` and this order agree, and the spliced page is the
     // one a single transform produced. `render::chunk` has the numbers.
     children.push_str(&render::slot(ITEMS_SLOT));
-    let filters = LabelFilters { labels, without };
+    if union.is_some() {
+        children.push_str(&union_note(union, counted.ledgers.as_deref()));
+    }
+    let filters = LabelFilters {
+        labels,
+        without,
+        ledgers: union,
+    };
     let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
     for window in graph.windows(&order, render::CHUNK_ROWS) {
         let xml = listing_chips(&window, &filters, listing, &page_url)?;
         chunks.push(render::chunk(&xml));
     }
-    let title = if ledger.is_default() {
+    let title = if union.is_some() {
+        match counted.ledgers.as_deref() {
+            Some(listed) if !listed.is_empty() => format!("Ledgers {}", listed.join(", ")),
+            _ => "Ledgers".to_string(),
+        }
+    } else if ledger.is_default() {
         "Ledger".to_string()
     } else {
         format!("Ledger {}", ledger.name())
@@ -1941,6 +2011,7 @@ async fn ledger_listing(
             ("text", text.unwrap_or("")),
             ("labels", labels.unwrap_or("")),
             ("without", without.unwrap_or("")),
+            ("ledgers", union.unwrap_or("")),
             ("limit", &wanted.to_string()),
             ("status-tail", &status_tail),
             ("page-url", &page_url),
@@ -2092,9 +2163,47 @@ impl Count {
 /// many items its filter matches, counted by the ledger. A face without one is an error, never
 /// a guess.
 fn ledger_total(json: &[u8]) -> Result<usize> {
+    ledger_counted(json).map(|doc| doc.total)
+}
+
+/// The whole `count` document: its `total`, and on a `ledgers=` read the names that passed
+/// the viewer's read checks (`ledgers`).
+fn ledger_counted(json: &[u8]) -> Result<ikigai_ledger::json::CountDocument> {
     serde_json::from_slice::<ikigai_ledger::json::CountDocument>(json)
-        .map(|doc| doc.total)
         .map_err(|e| Error::Endpoint(format!("the ledger's count: {e}")))
+}
+
+/// The names a `ledgers=` value asks for, trimmed, blank and repeated ones dropped, in the
+/// order given. Only for the words on the page: the ledger itself reads and checks them.
+fn union_names(union: &str) -> Vec<&str> {
+    let mut names: Vec<&str> = Vec::new();
+    for name in union.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// What a union listing covers, in words (ledger #3216): the ledgers listed, as the ledger's
+/// `count` named them, and the ones it left out because this viewer may not read them. The
+/// viewer named every one of them, so saying which were left out tells them nothing new.
+fn union_note(union: Option<&str>, listed: Option<&[String]>) -> String {
+    let listed = listed.unwrap_or_default();
+    let left_out: Vec<&str> = union_names(union.unwrap_or_default())
+        .into_iter()
+        .filter(|name| !listed.iter().any(|l| l == name))
+        .collect();
+    let sentence = if listed.is_empty() {
+        "Listing no ledgers: you may read none of those named.".to_string()
+    } else {
+        format!("Listing ledgers {}.", listed.join(", "))
+    };
+    element(
+        "union",
+        &[("listed", &sentence), ("left-out", &left_out.join(", "))],
+        "",
+    )
 }
 
 /// Cut `graph` down to the `rows` most recently updated items, and say how many it kept and
@@ -2138,6 +2247,7 @@ impl Endpoint for LedgerView {
         let text = optional(inv, "text");
         let labels = optional(inv, "labels");
         let without = optional(inv, "without");
+        let union = union_arg(optional(inv, "ledgers"));
         let limit = optional(inv, "limit");
         let offset = optional(inv, "offset");
         let ledger = match self.shape {
@@ -2178,6 +2288,7 @@ impl Endpoint for LedgerView {
                 text: text.as_deref(),
                 labels: labels.as_deref(),
                 without: without.as_deref(),
+                ledgers: union.as_deref(),
                 limit: limit.as_deref(),
                 offset: offset.as_deref(),
             },
@@ -2239,6 +2350,14 @@ impl Endpoint for LedgerView {
         .input(arg("text", "A case-insensitive substring of the title.").optional())
         .input(arg("labels", "Comma-separated labels: every label must match.").optional())
         .input(arg("without", "Comma-separated labels: none may match.").optional())
+        .input(
+            arg(
+                "ledgers",
+                "Comma-separated ledger names: list their union instead, each read under the \
+                 caller's own grants; one it may not read is left out.",
+            )
+            .optional(),
+        )
         .input(
             arg("limit", &rows::limit_summary())
                 .default_value(rows::ROWS.to_string())
@@ -3045,6 +3164,7 @@ impl Endpoint for Act {
         let list_status = take("_status").unwrap_or_else(|| "open".to_string());
         let list_labels = take("_labels");
         let list_without = take("_without");
+        let list_ledgers = union_arg(take("_ledgers"));
         let list_text = take("_text");
         let list_limit = take("_limit");
         let target = if action == "item" {
@@ -3148,6 +3268,7 @@ impl Endpoint for Act {
                     text: list_text.as_deref(),
                     labels: list_labels.as_deref(),
                     without: list_without.as_deref(),
+                    ledgers: list_ledgers.as_deref(),
                     limit: list_limit.as_deref(),
                     offset: None,
                 };
@@ -4432,12 +4553,14 @@ mod tests {
         let filters = LabelFilters {
             labels: Some("same,keep"),
             without: Some("same,skip"),
+            ledgers: None,
         };
         let listing = Listing {
             status: "all",
             text: None,
             labels: filters.labels,
             without: filters.without,
+            ledgers: None,
             limit: None,
             offset: Some("50"),
         };
@@ -4461,6 +4584,7 @@ mod tests {
         let filters = LabelFilters {
             labels: Some("book:ikigai,c++ & café"),
             without: Some("blocked,decide"),
+            ledgers: None,
         };
         let query = filters.append(count.next_query("closed", Some("queue & review")).unwrap());
         assert_eq!(query, format!("?status=closed&limit={0}&offset={0}&text=queue%20%26%20review&labels=book%3Aikigai%2Cc%2B%2B%20%26%20caf%C3%A9&without=blocked%2Cdecide", rows::MAX_ROWS));
