@@ -3833,7 +3833,7 @@ fn outgoing_links_respect_the_viewers_grant_and_partition_by_relation_and_ledger
 }
 
 #[test]
-fn outgoing_links_refresh_badges_rollups_and_listing_order_without_following_another_hop() {
+fn outgoing_links_refresh_badges_rollups_and_landing_order_without_following_another_hop() {
     let server = Server::start();
     let (record, id) = linked_fixture(&server, "default", "Live plan");
     let (first, first_id) = linked_fixture(&server, "default", "First member");
@@ -3844,13 +3844,12 @@ fn outgoing_links_refresh_badges_rollups_and_listing_order_without_following_ano
          <{record}> ledger:related <{first}>, <{second}> .\n\
          <{first}> ledger:related <{grandchild}> ; ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> ; ledger:claimedBy \"worker\" ; ledger:deferred true ."
     ));
-    let listing = server.page("/l/default?status=all", None);
     let page = server.page(&format!("/l/default/item/{id}"), None);
     let links = links_panel(&page.body);
-    assert_eq!(
+    // No blocks links and no priorities: the ledger's landing order is number order (#3226).
+    assert!(
         links.find("First member") < links.find("Second member"),
-        listing.body.find("First member") < listing.body.find("Second member"),
-        "same listing order: {links}"
+        "landing order: {links}"
     );
     assert!(links.contains("filed: 1; resolving: 1"), "{links}");
     assert!(
@@ -3928,18 +3927,16 @@ fn outgoing_links_keep_all_rows_across_render_chunks() {
         !links.contains("gonk-slot"),
         "every chunk is spliced: {links}"
     );
-    let listing = server.page("/l/default?status=all", None);
-    let positions = |text: &str| {
-        let mut order: Vec<_> = (0..12)
-            .map(|n| (text.find(&format!("Plan member {n:02}")).unwrap(), n))
-            .collect();
-        order.sort();
-        order.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
-    };
+    let mut order: Vec<_> = (0..12)
+        .map(|n| (links.find(&format!("Plan member {n:02}")).unwrap(), n))
+        .collect();
+    order.sort();
+    // No blocks links and no priorities: the ledger's landing order is number order (#3226),
+    // the reverse of the listing's newest first, kept across the chunk boundary.
     assert_eq!(
-        positions(links),
-        positions(&listing.body),
-        "the listing's order across chunks"
+        order.into_iter().map(|(_, n)| n).collect::<Vec<_>>(),
+        (0..12).collect::<Vec<_>>(),
+        "the landing order across chunks"
     );
 }
 
@@ -3963,4 +3960,81 @@ fn outgoing_link_rows_do_not_render_the_members_body() {
         page.body.len() < 20_000,
         "the row does not carry a member body"
     );
+}
+
+/// Ledger #3226: a relation group reads in the ledger's `sort=landing` order, so a blocker
+/// comes before what it blocks. The chain below differs from both the old modified-descending
+/// order (C, B, A) and number order (A, B, C).
+#[test]
+fn a_blocks_chain_inside_a_related_group_renders_in_landing_order() {
+    let server = Server::start();
+    let (a, _) = file(&server, "Alpha lands first");
+    let (b, _) = file(&server, "Bravo lands last");
+    let (c, _) = file(&server, "Charlie lands second");
+    let (record, id) = file(&server, "Flight plan");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+             <{record}> ledger:related <{a}>, <{b}>, <{c}> .\n\
+             <{a}> ledger:blocks <{c}> .\n\
+             <{c}> ledger:blocks <{b}> ."
+        ),
+    );
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let links = links_panel(&page.body);
+        let related = links
+            .split("<h3>related · default</h3>")
+            .nth(1)
+            .expect("the related group");
+        let at = |title: &str| {
+            related
+                .find(title)
+                .unwrap_or_else(|| panic!("{title} absent: {related}"))
+        };
+        assert!(
+            at("Alpha lands first") < at("Charlie lands second")
+                && at("Charlie lands second") < at("Bravo lands last"),
+            "not in landing order: {related}"
+        );
+        assert!(links.contains("in landing order"), "{links}");
+        assert!(!links.contains("most recently updated first"), "{links}");
+    }
+}
+
+/// Ledger #3226: a cycle in the blocks graph is the ledger's refusal, said in the panel; the
+/// page and its rows still render.
+#[test]
+fn a_blocks_cycle_answers_the_ledgers_refusal_in_the_panel() {
+    let server = Server::start();
+    let (a, _) = file(&server, "Around one way");
+    let (b, _) = file(&server, "Around the other");
+    let (record, id) = file(&server, "Circular plan");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+             <{record}> ledger:related <{a}>, <{b}> .\n\
+             <{a}> ledger:blocks <{b}> .\n\
+             <{b}> ledger:blocks <{a}> ."
+        ),
+    );
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let links = links_panel(&page.body);
+        assert!(
+            links.contains("Around one way") && links.contains("Around the other"),
+            "the rows still render: {links}"
+        );
+        assert!(
+            links.contains("landing order cannot be computed because the matching readable blocks graph has a cycle"),
+            "the ledger's refusal is not in the panel: {links}"
+        );
+        assert!(!links.contains("in landing order"), "{links}");
+    }
 }

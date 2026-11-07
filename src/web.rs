@@ -2536,9 +2536,40 @@ struct ItemView {
 }
 
 struct LinkedRow {
-    modified: String,
+    short: String,
+    number: i64,
     target: String,
     graph: Graph,
+}
+
+/// One ledger's own landing order (#3226): its open items' short numbers, each blocker before
+/// what it blocks, as `items sort=landing` answers under the page's capability. The plain face
+/// is the ledger's fixed, greppable line (`#12  open  p1  title`), so only the first word of
+/// each line before the footer is read. A refusal, such as a blocks cycle naming its items, is
+/// the ledger's own sentence.
+async fn landing_order(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+) -> std::result::Result<Vec<String>, String> {
+    let read = request(Verb::Source, &format!("{}items", ledger.prefix()))
+        .map_err(|_| "the ledger did not answer its landing order".to_string())?;
+    let read = [
+        ("sort", "landing"),
+        ("status", "open"),
+        ("limit", &usize::MAX.to_string()),
+        ("as", "text/plain"),
+    ]
+    .iter()
+    .fold(read, |read, (name, value)| with(read, name, value));
+    match fetch(inv, read).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .take_while(|line| !line.trim().is_empty())
+            .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+            .collect()),
+        Err(Error::InvalidArgument { detail, .. }) => Err(detail),
+        Err(_) => Err("the ledger did not answer its landing order".to_string()),
+    }
 }
 
 async fn linked_row(inv: &Invocation<'_>, ledger: &Ledger, target: &str) -> Option<Graph> {
@@ -2629,14 +2660,16 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedIte
                 let rel = graph
                     .value(&link, &format!("{}rel", render::VIEW_NS))
                     .unwrap_or_default();
-                let modified = row
-                    .value(canonical, &format!("{DCTERMS}modified"))
+                let number = row
+                    .value(canonical, &format!("{LEDGER_NS}number"))
+                    .and_then(|n| n.parse::<i64>().ok())
                     .unwrap_or_default();
                 groups
                     .entry((rel, ledger.name().to_string()))
                     .or_default()
                     .push(LinkedRow {
-                        modified,
+                        short: ledger.number(number),
+                        number,
                         target: canonical.clone(),
                         graph: row,
                     });
@@ -2658,17 +2691,52 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedIte
             &fallback.view_xml().map_err(render_err)?,
         ));
     }
+    // One landing read per target ledger, shared by its relation groups.
+    let mut landings: BTreeMap<String, std::result::Result<BTreeMap<String, usize>, String>> =
+        BTreeMap::new();
+    for (_, ledger) in groups.keys() {
+        if landings.contains_key(ledger) {
+            continue;
+        }
+        let order = match Ledger::parse(ledger) {
+            Ok(parsed) => landing_order(inv, &parsed).await,
+            Err(_) => Err("the ledger did not answer its landing order".to_string()),
+        };
+        let ranks = order.map(|shorts| {
+            shorts
+                .into_iter()
+                .enumerate()
+                .map(|(rank, short)| (short, rank))
+                .collect()
+        });
+        landings.insert(ledger.clone(), ranks);
+    }
     let mut output = String::new();
     let mut slots = Vec::new();
     for ((rel, ledger), mut members) in groups {
-        members.sort_by(|a, b| {
-            b.modified
-                .cmp(&a.modified)
-                .then_with(|| a.target.cmp(&b.target))
-        });
+        // What must land first comes first: a closed member has already landed, then the
+        // open ones in the ledger's landing order. A refused order falls back to numbers.
+        let order = match &landings[&ledger] {
+            Ok(ranks) => {
+                members.sort_by_key(|m| (ranks.get(&m.short).copied(), m.number));
+                "in landing order, closed items first, then each blocker before what it blocks."
+                    .to_string()
+            }
+            Err(refusal) => {
+                members.sort_by_key(|m| m.number);
+                format!(
+                    "in number order, because the ledger refused its landing order: {}.",
+                    refusal.trim_end_matches('.')
+                )
+            }
+        };
         let mut states: BTreeMap<String, usize> = BTreeMap::new();
         let mut row_xml = Vec::new();
-        for member in &members {
+        for (rank, member) in members.iter_mut().enumerate() {
+            // The chunk stylesheet sorts its rows; this key keeps them in the order above.
+            member
+                .graph
+                .view(&member.target, "landing", format!("{rank:06}"));
             let state = member
                 .graph
                 .value(&member.target, &format!("{}state", render::VIEW_NS))
@@ -2683,7 +2751,7 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedIte
             .join("; ");
         let noun = if members.len() == 1 { "item" } else { "items" };
         let summary = format!(
-            "{} linked {noun}. {counts}. As of this page load; most recently updated first.",
+            "{} linked {noun}. {counts}. As of this page load; {order}",
             members.len()
         );
         // Keep the same bounded, content-keyed row transforms as the ledger listing.
