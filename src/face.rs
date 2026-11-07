@@ -13,9 +13,13 @@
 //! server at start, naming the key ([`Face::at`]), as does a name given twice.
 //!
 //! ```text
-//! /face/name/{name}                 urn:face:name:{name}:index.html   the face's front page
+//! /face/name/{name}/                urn:face:name:{name}:index.html   the face's front page
 //! /face/name/{name}/{a}/…/{file}    urn:face:name:{name}:{a}:…:{file} one file, {a}/…/{file} on disk
 //! ```
+//!
+//! The bare `/face/name/{name}` answers `308` to `/face/name/{name}/`, its query kept ([`route`],
+//! ledger [#3231](http://localhost:1062/l/default/item/3231)): a face's relative assets resolve
+//! against its front page's URL, so only the slash form loads them.
 //!
 //! The second row is the door's mechanical mapping (path segments joined by `:`), so a face
 //! may have subdirectories; [`FaceFile`] turns the `:`s back into `/`s. That is unambiguous
@@ -57,7 +61,7 @@ use ikigai_core::{
     ArgRef, ArgSpec, Body, Description, Endpoint, EndpointSpace, Error, Invocation, Iri, ReprType,
     Representation, Request, Space, UriTemplate, Verb,
 };
-use ikigai_web::{EdgeConfig, Route};
+use ikigai_web::{EdgeConfig, ReadRedirect, Route};
 
 /// The config key: one `<name> <directory>` line per face.
 pub const KEY: &str = "gonk.face";
@@ -68,7 +72,7 @@ pub const PATH: &str = "/face/name";
 /// The IRI prefix a face's files answer under: `urn:face:name:{name}:{path}`.
 pub const IRI: &str = "urn:face:name:";
 
-/// The file `/face/name/{name}` answers.
+/// The file `/face/name/{name}/` answers.
 pub const INDEX: &str = "index.html";
 
 /// The extensions a face may serve, and the media type each one is served with. Anything else
@@ -360,8 +364,23 @@ pub fn routes() -> Vec<Route> {
     }]
 }
 
-/// `config` with the [`routes`] appended, for a door that serves at least one face.
+/// `config` with the [`routes`] appended, for a door that serves at least one face, and the
+/// bare front page redirected to the slash form (ledger #3231).
+///
+/// The redirect is ikigai-web's trailing-slash read rule over `/face/name/`: a `GET` or `HEAD`
+/// of a path exactly one segment below it answers `308` with `/` appended and the raw query
+/// kept, before any endpoint runs. A file below a face (`/face/name/{name}/js/app.js`) is two
+/// or more segments below, so it is never redirected, and the slash form serves as before.
+///
+/// ```
+/// let config = ikigai_gonk::face::route(ikigai_web::EdgeConfig::default());
+/// assert_eq!(config.read_redirects.len(), 1);
+/// ```
 pub fn route(mut config: EdgeConfig) -> EdgeConfig {
     config.routes.routes.extend(routes());
+    config.read_redirects.push(
+        ReadRedirect::trailing_slash(&format!("{PATH}/"))
+            .expect("the face prefix is an absolute path ending in /"),
+    );
     config
 }
