@@ -4865,17 +4865,7 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
 
 The page's htmx is htmx 2.0.4 (Zero-Clause BSD), `ikigai-ui`'s vendored copy, pinned by digest and by the page's `integrity=`.
 
-## Accessibility
-
-The browser face aims at WCAG 2.2 AA and makes no conformance claim.
-[ACCESSIBILITY.md](ACCESSIBILITY.md) says what is in scope, what has been tested and with what,
-the barriers we know about, and how to report one (an issue with the `accessibility` label).
-
-## License
-
-MIT OR Apache-2.0.
-
-### Linking Git evidence to code
+## Linking Git evidence to code
 
 Item pages recognize full `urn:git:commit:<sha>` and `urn:git:blob:<sha>` IRIs in
 `about` targets and close evidence, including evidence retained after reopening.
@@ -4906,3 +4896,13 @@ rendering a page. Clones are queried through ikigai-repo, with no network fetch.
 lookups are cached by full SHA; missing objects can be retried after they arrive. Wrong
 object types, unreadable clones, invalid IRIs and unresolved objects remain plain text.
 Only a configured clone that is also the same named browse root has a local fallback.
+
+## Accessibility
+
+The browser face aims at WCAG 2.2 AA and makes no conformance claim.
+[ACCESSIBILITY.md](ACCESSIBILITY.md) says what is in scope, what has been tested and with what,
+the barriers we know about, and how to report one (an issue with the `accessibility` label).
+
+## License
+
+MIT OR Apache-2.0.
