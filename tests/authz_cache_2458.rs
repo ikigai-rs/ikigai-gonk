@@ -59,6 +59,7 @@ impl Fixture {
         let request = ikigai_web::HttpRequest {
             method: "GET".into(),
             path: "/l/default".into(),
+            raw_target: "/l/default".into(),
             query: vec![],
             body: vec![],
             headers: vec![

@@ -368,6 +368,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
     let with_cookie = |cookie: Option<&str>| ikigai_web::HttpRequest {
         method: "POST".into(),
         path: "/iki/ledger/append".into(),
+        raw_target: "/iki/ledger/append".into(),
         query: Vec::new(),
         headers: cookie
             .map(|c| vec![("cookie".to_string(), format!("gonk_session={c}"))])
@@ -396,6 +397,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
             &ikigai_web::HttpRequest {
                 method: "GET".into(),
                 path: "/iki/ledger/items".into(),
+                raw_target: "/iki/ledger/items".into(),
                 query: Vec::new(),
                 headers: vec![("host".into(), "localhost".into())],
                 body: Vec::new(),
