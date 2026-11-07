@@ -52,6 +52,7 @@ pub mod egress;
 pub mod face;
 pub mod findings;
 pub mod findings_summary;
+pub mod git_object;
 pub mod github;
 pub mod grants;
 pub mod history;
@@ -432,6 +433,9 @@ pub fn compose_serving_with_lifecycles(
         }
         // ★ And "On GitHub" (ledger #1907, [`crate::github`]), which composes over the same
         // `state` probe under the same authority.
+        if let Some(objects) = browse.git_objects() {
+            spaces.push(objects);
+        }
         if let Some(github) = browse.github() {
             spaces.push(github);
         }

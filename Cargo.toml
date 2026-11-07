@@ -707,7 +707,10 @@ ikigai-browse = "0.21.0"
 # (ledger #1706) the space no longer serves `urn:system:exec` (a caller-built argv was a grant to
 # run anything), and the hub answers that name `Unresolved`. The catalog pins in
 # `tests/browse.rs` drop `system-exec` accordingly. `"0.3.1"` is `<0.4.0`.
+# Object lookup by full SHA (ledger #3204), used by git_object's repository map.
 ikigai-repo = "0.5.0"
+# URL-template validation; already present transitively through the HTTP stack.
+url = "2"
 # The tuplespace behind the git-event review trigger (`crate::trigger`, ledger #261):
 # `urn:space:{name}` — `out` drops a tuple, `rd` reads without consuming, `take` claims one
 # with an atomic rename compare-and-swap. Linked for ONE property that is not a

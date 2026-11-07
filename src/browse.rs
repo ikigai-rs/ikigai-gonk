@@ -395,6 +395,7 @@ pub fn wire(
     graph: &Graph,
     config_home: Option<PathBuf>,
 ) -> Wired {
+    let roots_for_objects = roots.clone();
     let first = roots.first().map(|(name, _)| name.clone());
     let root_names = roots
         .iter()
@@ -435,7 +436,11 @@ pub fn wire(
         .reading_contracts_through(first)
         .with_history(Arc::new(history))
         .with_github(Arc::new(github))
-        .with_repo(Arc::new(repo)),
+        .with_repo(Arc::new(repo))
+        .with_git_objects(Arc::new(crate::git_object::space(
+            "browse",
+            &crate::git_object::browse_repositories(&roots_for_objects),
+        ))),
         style,
     }
 }
@@ -568,6 +573,7 @@ pub fn cached_reads(
             contract_root: None,
             history: None,
             github: None,
+            git_objects: None,
             repo: None,
         })),
         epochs,
@@ -604,6 +610,7 @@ struct Arrangement {
     history: Option<Arc<dyn Space>>,
     /// "On GitHub" over the same roots ([`CachedReads::with_github`]), threaded.
     github: Option<Arc<dyn Space>>,
+    git_objects: Option<Arc<dyn Space>>,
     /// The dev-tooling facades confined to the same roots ([`CachedReads::with_repo`]), threaded.
     repo: Option<Arc<dyn Space>>,
 }
@@ -743,6 +750,22 @@ impl CachedReads {
         Some(Arc::new(Part {
             arrangement: Arc::clone(&self.arrangement),
             which: Which::Github,
+        }))
+    }
+
+    /// Carry SHA-keyed Git object links with the current browse roots.
+    #[must_use]
+    pub fn with_git_objects(mut self, objects: Arc<dyn Space>) -> Self {
+        self.current_mut().git_objects = Some(threaded(objects));
+        self
+    }
+
+    /// Git object links in the arrangement in force.
+    pub fn git_objects(&self) -> Option<Arc<dyn Space>> {
+        self.current().git_objects.as_ref()?;
+        Some(Arc::new(Part {
+            arrangement: Arc::clone(&self.arrangement),
+            which: Which::GitObjects,
         }))
     }
 
@@ -903,6 +926,7 @@ impl Space for CachedReads {
 enum Which {
     History,
     Github,
+    GitObjects,
     Repo,
 }
 
@@ -920,6 +944,7 @@ impl Part {
         match self.which {
             Which::History => current.history.clone(),
             Which::Github => current.github.clone(),
+            Which::GitObjects => current.git_objects.clone(),
             Which::Repo => current.repo.clone(),
         }
     }

@@ -4882,6 +4882,38 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
 
 The page's htmx is htmx 2.0.4 (Zero-Clause BSD), `ikigai-ui`'s vendored copy, pinned by digest and by the page's `integrity=`.
 
+## Linking Git evidence to code
+
+Item pages recognize full `urn:git:commit:<sha>` and `urn:git:blob:<sha>` IRIs in
+`about` targets and close evidence, including evidence retained after reopening.
+Configure local clones and optional web URL templates in `config.toml`:
+
+```toml
+gonk.repository = "core=~/git/ikigai-core"
+gonk.repository.commit = "core=https://github.com/ikigai-rs/ikigai-core/commit/{sha}"
+gonk.repository.blob = "core=https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}"
+```
+
+Each key is repeatable, keyed by repository name. `{sha}` is the object's full SHA;
+for blobs, `{commit}` and `{path}` name its first appearance in retained reachable
+history. Each path segment is URL encoded. Templates must use HTTP or HTTPS, without
+credentials. Unknown names, duplicate names/templates, missing directories and unknown
+placeholders stop startup. Repository map changes take a restart.
+
+Configured repositories are searched in configuration order, followed by the browse roots.
+A `gonk.browse.root` also supplies a local fallback: the link opens gonk's object view,
+which identifies the commit or shows the blob's historical file contents. Its separate
+"current working tree" link explicitly names that destination; the commit view does not
+show a diff. A blob without a path in retained history is identified without file contents.
+An external blob template using only `{sha}` can link such an object directly.
+
+Resolution requires the viewer's `urn:cap:browse:read:<name>` (or the all-roots grant)
+**and** `urn:cap:exec:git`, which ikigai-repo requires. No grant is minted or widened by
+rendering a page. Clones are queried through ikigai-repo, with no network fetch. Positive
+lookups are cached by full SHA; missing objects can be retried after they arrive. Wrong
+object types, unreadable clones, invalid IRIs and unresolved objects remain plain text.
+Only a configured clone that is also the same named browse root has a local fallback.
+
 ## Accessibility
 
 The browser face aims at WCAG 2.2 AA and makes no conformance claim.

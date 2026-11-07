@@ -698,6 +698,8 @@ pub struct Settings {
     /// root's "On GitHub" links name in place of its origin's ([`crate::github`]), normalized
     /// to `https://github.com/{owner}/{repo}`.
     pub browse_github: Vec<(String, String)>,
+    /// Local clone map and commit/blob URL templates (#3198).
+    pub repositories: Vec<crate::git_object::Repository>,
     /// The mounted peers. Empty means `urn:llm:*` resolves nowhere, and the explanation
     /// families are therefore not bound — see [`Settings::explains`].
     pub mounts: Vec<Mount>,
@@ -1889,6 +1891,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     };
     let browse_roots = browse_roots(flags, text, homes)?;
     let browse_github = browse_github(text, &browse_roots)?;
+    let repositories = crate::git_object::configured(text, &homes.home, &browse_roots)?;
     let mounts = mounts(flags, text, homes)?;
     let mut layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
     if let Some(deny) = layer_deny(text, homes)? {
@@ -2004,6 +2007,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         session_max_seconds,
         browse_roots,
         browse_github,
+        repositories,
         mounts,
         layers,
         layers_view,
