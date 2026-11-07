@@ -37,10 +37,28 @@
 //! A login answers a single-use challenge; the assertion is verified against the stored
 //! key for the exact origin `http://localhost:<port>` and RP ID `localhost`, with user
 //! verification REQUIRED (an identity that grants authority is a biometric or a PIN, not a
-//! tap). Success mints a 256-bit session token, kept only as its SHA-256, for
-//! [`SESSION_SECONDS`] at most, and for [`DEFAULT_IDLE_SECONDS`] (`gonk.http.session_idle_minutes`)
-//! after the last request that carried it. Sessions live in memory: a restart signs everyone
-//! out, which is the safe direction to be wrong in.
+//! tap). Success mints a 256-bit session token, kept only as its SHA-256, for the session's
+//! absolute lifetime at most (`gonk.http.session_max_hours`, see [`Passkeys::lifetime`]), and for
+//! [`DEFAULT_IDLE_SECONDS`] (`gonk.http.session_idle_minutes`) after the last request that
+//! carried it.
+//!
+//! # Sessions survive a restart (ledger [#3229](http://localhost:1062/l/default/item/3229))
+//!
+//! Every live session is written to `gonk/sessions.json` beside the enrolled passkeys: the
+//! SHA-256 of its token (never the token), its principal, its grant, when it was issued, when
+//! it was last used and when it ends, and how far this server has read `gonk/passkeys.log`.
+//! The file is written whole, to a temporary file renamed over it, readable by this user only.
+//! A server starting over the same directory loads the sessions that have not expired and
+//! drops the rest, and reads the log from where the last one stopped, so a `passkey logout
+//! --all` or `passkey revoke` run while it was down still ends their sessions. An ending
+//! (sign-out, sign out everywhere, a revoke, an expired lifetime) is written before the
+//! request that caused it answers, so nothing ended comes back after a restart.
+//!
+//! A session whose grant can only READ may run up to [`READ_ONLY_SESSION_SECONDS`] (30 days)
+//! when the setting says so; one whose grant can do anything else ends after
+//! [`SESSION_SECONDS`] (12 h) whatever the setting says. The grant is re-read on every
+//! request, so a read-only grant widened to write ends its long sessions 12 h after their
+//! sign-in.
 //!
 //! # Ending a session (ledger [#1824](http://localhost:1062/l/default/item/1824))
 //!
@@ -68,8 +86,8 @@
 //! builds on (0.1.63) builds every response from a kernel representation and has no way to
 //! add a `Set-Cookie` header; `ikigai_web::with_headers` (ikigai-rs/ikigai-cli PR 516) is the
 //! seam, and it is not in a published release yet. The mitigations are the ones that remain:
-//! `SameSite=Strict`, a strict same-origin CSP with no inline script, and a token that dies
-//! with the process.
+//! `SameSite=Strict`, a strict same-origin CSP with no inline script, and a token whose
+//! lifetime is bounded (12 h for any grant that can write).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -91,8 +109,39 @@ pub const RP_ID: &str = "localhost";
 /// The cookie the page stores its session token in.
 pub const SESSION_COOKIE: &str = "gonk_session";
 
-/// How long a session lasts at most, however busy it is (the absolute bound).
+/// How long a session whose grant can WRITE (anything beyond read) lasts at most, however
+/// busy it is and whatever `gonk.http.session_max_hours` says; also that setting's default.
 pub const SESSION_SECONDS: u64 = 12 * 60 * 60;
+
+/// The longest `gonk.http.session_max_hours` may make a session, which only a READ-ONLY grant
+/// gets: 30 days. Never unbounded: a stolen cookie still reads everything its grant covers.
+pub const READ_ONLY_SESSION_SECONDS: u64 = 720 * 60 * 60;
+
+/// Whether every scope in `scopes` only reads (`urn:cap:<family>:read:…`). Anything else —
+/// write, claim, comment, an alias scheme, a token this rule does not know — can write, and
+/// so is held to [`SESSION_SECONDS`]. An empty list is not read-only: it grants nothing, and
+/// gains nothing from a longer session.
+///
+/// ```
+/// use ikigai_gonk::identity::read_only;
+/// let read = ["urn:cap:ledger:read:acme".to_string(),
+///             "urn:cap:store:read:graph:urn:iki:ledger:graph:acme".to_string()];
+/// assert!(read_only(&read));
+/// let mut write = read.to_vec();
+/// write.push("urn:cap:ledger:comment:acme".to_string());
+/// assert!(!read_only(&write));
+/// assert!(!read_only(&[]));
+/// ```
+pub fn read_only(scopes: &[String]) -> bool {
+    !scopes.is_empty()
+        && scopes.iter().all(|s| {
+            let mut parts = s.split(':');
+            parts.next() == Some("urn")
+                && parts.next() == Some("cap")
+                && parts.next().is_some()
+                && parts.next() == Some("read")
+        })
+}
 
 /// How long a session lasts with no request carrying it (the idle bound), when no
 /// `gonk.http.session_idle_minutes` line says otherwise: one hour.
@@ -500,11 +549,26 @@ const SEALED_BYTES: usize = NONCE_BYTES + 1 + 8 + 32;
 
 struct Session {
     credential_id: String,
-    /// The absolute end, [`SESSION_SECONDS`] after the sign-in.
+    /// The grant the passkey was enrolled under at the sign-in (what the file records; the
+    /// scopes themselves are re-read on every request).
+    grant: String,
+    /// When the sign-in opened it.
+    issued: u64,
+    /// The absolute end: [`Passkeys::lifetime`] after the sign-in.
     expires: u64,
     /// The last request that carried this session, for the idle bound.
     last_seen: u64,
+    /// The `last_seen` the file holds: a request writes the file only once this is
+    /// [`SEEN_WRITE_SECONDS`] behind, so a polling page does not write it every few seconds.
+    stored_seen: u64,
 }
+
+/// How stale the file's `last_seen` may be before a request writes it again. A restart can
+/// only make the idle bound end a session this much SOONER, never later.
+const SEEN_WRITE_SECONDS: u64 = 60;
+
+/// The `gonk/sessions.json` format version this server writes and reads.
+const SESSIONS_FORMAT: u64 = 1;
 
 impl Session {
     /// Why this session is over at `now`, or `None` while it is live.
@@ -530,6 +594,8 @@ struct State {
     sessions: HashMap<String, Session>,
     /// How many bytes of [`audit_log`] this server has read: the lines past it are news.
     log_seen: u64,
+    /// The sessions or `log_seen` changed since `gonk/sessions.json` was last written.
+    dirty: bool,
 }
 
 impl State {
@@ -538,8 +604,113 @@ impl State {
         let before = self.sessions.len();
         self.sessions
             .retain(|_, s| s.credential_id != credential_id);
-        before - self.sessions.len()
+        let ended = before - self.sessions.len();
+        self.dirty |= ended > 0;
+        ended
     }
+
+    /// The file's contents: every session, keyed by its token's hash, and the log offset.
+    fn stored(&self) -> Value {
+        let sessions: Map<String, Value> = self
+            .sessions
+            .iter()
+            .map(|(hash, s)| {
+                (
+                    hash.clone(),
+                    json!({
+                        "principal": passkey_iri(&s.credential_id),
+                        "grant": s.grant,
+                        "issued": s.issued,
+                        "last_seen": s.last_seen,
+                        "expires": s.expires,
+                    }),
+                )
+            })
+            .collect();
+        json!({
+            "format": SESSIONS_FORMAT,
+            "log_seen": self.log_seen,
+            "sessions": sessions,
+        })
+    }
+}
+
+/// Read `gonk/sessions.json`: its sessions not yet expired at `now`, and how far the server
+/// that wrote it had read the log. `None` when there is no file (a first start) or it cannot
+/// be read as one this server wrote — then no session is restored, the safe direction.
+fn load_sessions(layout: &Layout, now: u64) -> Option<(HashMap<String, Session>, u64, bool)> {
+    let path = layout.sessions_json();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!(
+                "ikigai-gonk: reading {}: {e}; no session restored",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let doc: Value = match serde_json::from_str(&text) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!(
+                "ikigai-gonk: {} is not JSON ({e}); no session restored",
+                path.display()
+            );
+            return None;
+        }
+    };
+    if doc.get("format").and_then(Value::as_u64) != Some(SESSIONS_FORMAT) {
+        eprintln!(
+            "ikigai-gonk: {} is not format {SESSIONS_FORMAT}; no session restored",
+            path.display()
+        );
+        return None;
+    }
+    let log_seen = doc.get("log_seen").and_then(Value::as_u64).unwrap_or(0);
+    let mut sessions = HashMap::new();
+    let mut dropped = false;
+    for (hash, entry) in doc
+        .get("sessions")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let field = |name: &str| entry.get(name).and_then(Value::as_u64);
+        let credential = entry
+            .get("principal")
+            .and_then(Value::as_str)
+            .and_then(passkey_credential);
+        let grant = entry.get("grant").and_then(Value::as_str);
+        let well_formed = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        match (
+            well_formed,
+            credential,
+            grant,
+            field("issued"),
+            field("last_seen"),
+            field("expires"),
+        ) {
+            (true, Some(credential), Some(grant), Some(issued), Some(last_seen), Some(expires))
+                if expires > now && expires.saturating_sub(issued) <= READ_ONLY_SESSION_SECONDS =>
+            {
+                sessions.insert(
+                    hash.clone(),
+                    Session {
+                        credential_id: credential.to_string(),
+                        grant: grant.to_string(),
+                        issued,
+                        expires,
+                        last_seen,
+                        stored_seen: last_seen,
+                    },
+                );
+            }
+            _ => dropped = true,
+        }
+    }
+    Some((sessions, log_seen, dropped))
 }
 
 /// The most of [`audit_log`] one read takes, in bytes. A larger backlog is read over the next
@@ -569,6 +740,8 @@ pub struct Passkeys {
     layout: Layout,
     origin: String,
     idle_seconds: u64,
+    /// `gonk.http.session_max_hours`, in seconds: see [`Passkeys::lifetime`].
+    max_seconds: u64,
     audit: Option<crate::access::Sink>,
     state: Mutex<State>,
 }
@@ -587,23 +760,93 @@ pub struct Identity {
 
 impl Passkeys {
     /// A relying party for the page served at `http://localhost:{port}`, with the
-    /// [`DEFAULT_IDLE_SECONDS`] idle bound and no audit lines.
-    ///
-    /// Lines already in [`audit_log`] are history: no session existed when they were written,
-    /// so this server reads only what is appended after it starts.
+    /// [`DEFAULT_IDLE_SECONDS`] idle bound, a [`SESSION_SECONDS`] lifetime and no audit lines,
+    /// holding the sessions `gonk/sessions.json` keeps that have not expired by the wall clock.
     pub fn new(layout: Layout, port: u16) -> Passkeys {
-        let log_seen = std::fs::metadata(audit_log(&layout))
+        Passkeys::new_at(layout, port, now_seconds())
+    }
+
+    /// [`Passkeys::new`], with the clock reading `now`.
+    ///
+    /// With no `gonk/sessions.json`, lines already in [`audit_log`] are history: no session
+    /// existed when they were written, so this server reads only what is appended after it
+    /// starts. With one, it reads from where the server that wrote it stopped, so a sign-out
+    /// written while no server ran still ends what it names. (A log now shorter than that was
+    /// replaced, and is read from its start, which can only end sessions.)
+    pub fn new_at(layout: Layout, port: u16, now: u64) -> Passkeys {
+        let log_len = std::fs::metadata(audit_log(&layout))
             .map(|m| m.len())
             .unwrap_or(0);
-        Passkeys {
+        let state = match load_sessions(&layout, now) {
+            Some((sessions, log_seen, dropped)) => State {
+                sessions,
+                log_seen: if log_seen > log_len { 0 } else { log_seen },
+                dirty: dropped,
+                ..State::default()
+            },
+            None => State {
+                log_seen: log_len,
+                ..State::default()
+            },
+        };
+        let passkeys = Passkeys {
             layout,
             origin: format!("http://localhost:{port}"),
             idle_seconds: DEFAULT_IDLE_SECONDS,
+            max_seconds: SESSION_SECONDS,
             audit: None,
-            state: Mutex::new(State {
-                log_seen,
-                ..State::default()
-            }),
+            state: Mutex::new(state),
+        };
+        if let Ok(mut state) = passkeys.state.lock() {
+            passkeys.read_log(&mut state);
+            passkeys.save(&mut state);
+        }
+        passkeys
+    }
+
+    /// The same relying party with `gonk.http.session_max_hours` at `seconds`: the absolute
+    /// lifetime of a session whose grant is read-only, capped at [`SESSION_SECONDS`] for any
+    /// other. Clamped to [`READ_ONLY_SESSION_SECONDS`]; the setting refuses more at load.
+    pub fn with_max_seconds(mut self, seconds: u64) -> Passkeys {
+        self.max_seconds = seconds.clamp(1, READ_ONLY_SESSION_SECONDS);
+        self
+    }
+
+    /// `gonk.http.session_max_hours`, in seconds.
+    pub fn max_seconds(&self) -> u64 {
+        self.max_seconds
+    }
+
+    /// How long a session whose grant holds `scopes` lasts at most: the setting if every scope
+    /// only reads ([`read_only`]), and never more than [`SESSION_SECONDS`] otherwise.
+    pub fn lifetime(&self, scopes: &[String]) -> u64 {
+        if read_only(scopes) {
+            self.max_seconds
+        } else {
+            self.max_seconds.min(SESSION_SECONDS)
+        }
+    }
+
+    /// Write `gonk/sessions.json` if anything in it changed. A failure is said on stderr and
+    /// the session table in memory stands: refusing a sign-out because the disk is full would
+    /// keep the session open, the wrong direction.
+    fn save(&self, state: &mut State) {
+        if !state.dirty {
+            return;
+        }
+        let path = self.layout.sessions_json();
+        let written =
+            quic::pretty(&state.stored()).and_then(|text| quic::write_private(&path, &text));
+        match written {
+            Ok(()) => {
+                state.dirty = false;
+                for session in state.sessions.values_mut() {
+                    session.stored_seen = session.last_seen;
+                }
+            }
+            // No `gonk/` directory: nothing is enrolled, so no session can be open to keep.
+            Err(_) if state.sessions.is_empty() && !path.parent().is_some_and(|d| d.is_dir()) => {}
+            Err(e) => eprintln!("ikigai-gonk: sessions not saved: {e}"),
         }
     }
 
@@ -676,6 +919,7 @@ impl Passkeys {
         };
         if len < state.log_seen {
             state.log_seen = 0;
+            state.dirty = true;
         }
         if len == state.log_seen {
             return;
@@ -697,6 +941,7 @@ impl Passkeys {
         let Some(end) = bytes.iter().rposition(|&b| b == b'\n') else {
             if bytes.len() as u64 == LOG_READ_MAX {
                 state.log_seen += LOG_READ_MAX;
+                state.dirty = true;
             }
             return;
         };
@@ -729,6 +974,7 @@ impl Passkeys {
             }
         }
         state.log_seen += whole.len() as u64;
+        state.dirty = true;
     }
 
     /// The only origin a ceremony is accepted from.
@@ -969,24 +1215,32 @@ impl Passkeys {
         drop(lock);
         let scopes = scopes_of(&self.layout, &enrolled.grant)?;
         let token = random_b64(32)?;
-        let expires = now + SESSION_SECONDS;
+        let expires = now + self.lifetime(&scopes);
         let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
         // ★ Before the new session exists: a revocation already in the log ends the OLD
         // sessions of this credential, never the one this sign-in opens.
         self.read_log(&mut state);
         let idle = self.idle_seconds;
+        let before = state.sessions.len();
         state.sessions.retain(|_, s| s.over(now, idle).is_none());
+        state.dirty |= state.sessions.len() != before;
         if state.sessions.len() >= MAX_PENDING {
+            self.save(&mut state);
             return Err(format!("{MAX_PENDING} sessions are already open"));
         }
         state.sessions.insert(
             sha256_hex(token.as_bytes()),
             Session {
                 credential_id: id,
+                grant: enrolled.grant.clone(),
+                issued: now,
                 expires,
                 last_seen: now,
+                stored_seen: now,
             },
         );
+        state.dirty = true;
+        self.save(&mut state);
         Ok((
             token,
             Identity {
@@ -1000,11 +1254,12 @@ impl Passkeys {
     /// End a session. Unknown tokens are not an error: signing out twice is still signed out.
     /// Writes one `gonk:Logout` line, `sessions=0` for a token that named none.
     pub fn logout(&self, token: &str) {
-        let ended = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.sessions.remove(&sha256_hex(token.as_bytes())));
+        let ended = self.state.lock().ok().and_then(|mut state| {
+            let ended = state.sessions.remove(&sha256_hex(token.as_bytes()));
+            state.dirty |= ended.is_some();
+            self.save(&mut state);
+            ended
+        });
         self.audit(
             "gonk:Logout",
             AuditLine {
@@ -1025,7 +1280,12 @@ impl Passkeys {
     pub fn logout_all(&self, token: &str, now: u64) -> Option<usize> {
         let who = self.identity(token, now)?;
         let credential = who.enrolled.credential_id;
-        let ended = self.state.lock().ok()?.end_sessions(&credential);
+        let ended = {
+            let mut state = self.state.lock().ok()?;
+            let ended = state.end_sessions(&credential);
+            self.save(&mut state);
+            ended
+        };
         self.audit(
             "gonk:Logout",
             AuditLine {
@@ -1051,12 +1311,17 @@ impl Passkeys {
     /// holds authentication only.) A live session's idle clock restarts.
     pub fn identity(&self, token: &str, now: u64) -> Option<Identity> {
         let key = sha256_hex(token.as_bytes());
-        let (credential_id, expires) = {
+        let (credential_id, issued, expires) = {
             let mut state = self.state.lock().ok()?;
             self.read_log(&mut state);
-            let session = state.sessions.get(&key)?;
+            let Some(session) = state.sessions.get(&key) else {
+                self.save(&mut state);
+                return None;
+            };
             if let Some(why) = session.over(now, self.idle_seconds) {
                 let ended = state.sessions.remove(&key);
+                state.dirty = true;
+                self.save(&mut state);
                 drop(state);
                 self.audit(
                     "gonk:Logout",
@@ -1072,7 +1337,13 @@ impl Passkeys {
                 );
                 return None;
             }
-            (session.credential_id.clone(), session.expires)
+            let found = (
+                session.credential_id.clone(),
+                session.issued,
+                session.expires,
+            );
+            self.save(&mut state);
+            found
         };
         let Some(enrolled) = self
             .layout
@@ -1081,7 +1352,12 @@ impl Passkeys {
             .get(&credential_id)
             .cloned()
         else {
-            let ended = self.state.lock().ok()?.end_sessions(&credential_id);
+            let ended = {
+                let mut state = self.state.lock().ok()?;
+                let ended = state.end_sessions(&credential_id);
+                self.save(&mut state);
+                ended
+            };
             self.audit(
                 "gonk:Logout",
                 AuditLine {
@@ -1097,11 +1373,39 @@ impl Passkeys {
             return None;
         };
         let scopes = scopes_of(&self.layout, &enrolled.grant).ok()?;
+        // ★ The grant is re-read NOW: a session opened read-only whose grant has since been
+        // widened to write ends where a write session would have, 12 h after its sign-in.
+        let expires = expires.min(issued.saturating_add(self.lifetime(&scopes)));
         {
             let mut state = self.state.lock().ok()?;
+            if expires <= now {
+                let ended = state.sessions.remove(&key);
+                state.dirty |= ended.is_some();
+                self.save(&mut state);
+                drop(state);
+                if ended.is_some() {
+                    self.audit(
+                        "gonk:Logout",
+                        AuditLine {
+                            op: "session",
+                            door: "http",
+                            outcome: "ok",
+                            credential: Some(&credential_id),
+                            authenticated: true,
+                            sessions: 1,
+                            why: Some("expired"),
+                        },
+                    );
+                }
+                return None;
+            }
             // Gone if it ended while this request was reading the files: no identity then.
             let session = state.sessions.get_mut(&key)?;
             session.last_seen = session.last_seen.max(now);
+            if session.last_seen >= session.stored_seen.saturating_add(SEEN_WRITE_SECONDS) {
+                state.dirty = true;
+                self.save(&mut state);
+            }
         }
         Some(Identity {
             enrolled,
@@ -1223,35 +1527,227 @@ mod tests {
     /// Enroll a passkey `id` under a fresh `brian` grant and open a session for it at `now`,
     /// straight into the table (no assertion: these tests are about what a session does after).
     fn session_for(rp: &Passkeys, id: &str, now: u64) -> String {
+        session_as(rp, id, "brian", Authority::Write, now)
+    }
+
+    /// [`session_for`] under the grant `grant` holding `authority` over `default`, written to
+    /// `gonk/sessions.json` as a sign-in writes it.
+    fn session_as(rp: &Passkeys, id: &str, grant: &str, authority: Authority, now: u64) -> String {
         if quic::read_grants(&rp.layout.grants_json())
-            .map(|g| !g.contains_key("brian"))
+            .map(|g| !g.contains_key(grant))
             .unwrap_or(true)
         {
-            let scopes = grants_for("default", Authority::Write).unwrap();
-            quic::put_grant(&rp.layout, "brian", &scopes, false).unwrap();
+            let scopes = grants_for("default", authority).unwrap();
+            quic::put_grant(&rp.layout, grant, &scopes, false).unwrap();
         }
         write_passkey(
             &rp.layout,
             &rp.layout.lock_clients().unwrap(),
             &Enrolled {
                 credential_id: id.to_string(),
-                grant: "brian".to_string(),
+                grant: grant.to_string(),
                 label: id.to_string(),
                 public_key: "AAAA".to_string(),
                 sign_count: 0,
             },
         )
         .unwrap();
+        let scopes = scopes_of(&rp.layout, grant).unwrap();
         let token = random_b64(32).unwrap();
-        rp.state.lock().unwrap().sessions.insert(
+        let mut state = rp.state.lock().unwrap();
+        state.sessions.insert(
             sha256_hex(token.as_bytes()),
             Session {
                 credential_id: id.to_string(),
-                expires: now + SESSION_SECONDS,
+                grant: grant.to_string(),
+                issued: now,
+                expires: now + rp.lifetime(&scopes),
                 last_seen: now,
+                stored_seen: now,
             },
         );
+        state.dirty = true;
+        rp.save(&mut state);
         token
+    }
+
+    /// A NEW relying party over the same state directory: what a restarted gonk builds.
+    fn restart(rp: &Passkeys, now: u64) -> Passkeys {
+        Passkeys::new_at(rp.layout.clone(), 1060, now)
+            .with_idle_seconds(rp.idle_seconds)
+            .with_max_seconds(rp.max_seconds)
+    }
+
+    /// ★ A session survives a restart (ledger #3229): a new door over the same directory
+    /// accepts it, with its idle clock and its end carried over; one already expired is
+    /// dropped at load, and one that idled out while the server was down is refused.
+    #[test]
+    fn a_session_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000);
+        let token = session_for(&rp, "Y3JlZA", 1_000);
+        let idle = session_for(&rp, "aWRsZQ", 1_000);
+        assert!(rp.identity(&token, 2_000).is_some());
+        drop(rp);
+
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 3_000);
+        let who = rp
+            .identity(&token, 3_000)
+            .expect("accepted after the restart");
+        assert_eq!(who.enrolled.credential_id, "Y3JlZA");
+        assert_eq!(
+            who.expires,
+            1_000 + SESSION_SECONDS,
+            "its end is carried over"
+        );
+        assert!(
+            rp.identity(&idle, 4_601).is_none(),
+            "the idle bound counts from its last request before the restart"
+        );
+        drop(rp);
+
+        // Past its end: dropped at load, and gone from the file.
+        let rp = Passkeys::new_at(
+            Layout::in_config_home(dir.path()),
+            1060,
+            1_000 + SESSION_SECONDS,
+        );
+        assert!(rp.state.lock().unwrap().sessions.is_empty());
+        let file = std::fs::read_to_string(rp.layout.sessions_json()).unwrap();
+        assert!(!file.contains(&sha256_hex(token.as_bytes())), "{file}");
+    }
+
+    /// ★ The file holds each token's hash, its principal, grant and times, and NEVER the token;
+    /// it is readable by this user only.
+    #[test]
+    fn the_stored_file_holds_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000);
+        let token = session_for(&rp, "Y3JlZA", 1_000);
+        let path = rp.layout.sessions_json();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&token), "{text}");
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        let entry = &doc["sessions"][sha256_hex(token.as_bytes())];
+        assert_eq!(entry["principal"], passkey_iri("Y3JlZA"));
+        assert_eq!(entry["grant"], "brian");
+        assert_eq!(entry["issued"], 1_000);
+        assert_eq!(entry["last_seen"], 1_000);
+        assert_eq!(entry["expires"], 1_000 + SESSION_SECONDS);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+    }
+
+    /// ★ Every way a session ends holds across a restart: a sign-out, sign out everywhere (from
+    /// the page or from `passkey logout --all`, run while the server is up or down), and a
+    /// revoked passkey, whose sessions do not come back even if it is enrolled again.
+    #[test]
+    fn an_ended_session_stays_ended_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let rp = Passkeys::new_at(layout.clone(), 1060, 1_000);
+        let out = session_for(&rp, "b3V0", 1_000);
+        let page_all = session_for(&rp, "YWxs", 1_000);
+        let cli_up = session_for(&rp, "dXA", 1_000);
+        let cli_down = session_for(&rp, "ZG93bg", 1_000);
+        let revoked_up = session_for(&rp, "cmV2dXA", 1_000);
+        let revoked_down = session_for(&rp, "cmV2ZG93bg", 1_000);
+        let kept = session_for(&rp, "a2VwdA", 1_000);
+
+        rp.logout(&out);
+        assert_eq!(rp.logout_all(&page_all, 1_001), Some(1));
+        end_sessions(&layout, Which::Credential("dXA"), 0).unwrap();
+        revoke(&layout, Which::Credential("cmV2dXA"), 0).unwrap();
+        // The running server reads the log at its next request.
+        assert!(rp.identity(&kept, 1_002).is_some());
+        drop(rp);
+
+        // While no server runs.
+        end_sessions(&layout, Which::Credential("ZG93bg"), 0).unwrap();
+        revoke(&layout, Which::Credential("cmV2ZG93bg"), 0).unwrap();
+
+        let rp = Passkeys::new_at(layout.clone(), 1060, 1_003);
+        // The revoked passkeys enrolled again under the same id: their old sessions stay ended.
+        for id in ["cmV2dXA", "cmV2ZG93bg"] {
+            write_passkey(
+                &layout,
+                &layout.lock_clients().unwrap(),
+                &Enrolled {
+                    credential_id: id.to_string(),
+                    grant: "brian".to_string(),
+                    label: id.to_string(),
+                    public_key: "AAAA".to_string(),
+                    sign_count: 0,
+                },
+            )
+            .unwrap();
+        }
+        for (what, token) in [
+            ("signed out", &out),
+            ("signed out everywhere from the page", &page_all),
+            ("logout --all while up", &cli_up),
+            ("logout --all while down", &cli_down),
+            ("revoked while up", &revoked_up),
+            ("revoked while down", &revoked_down),
+        ] {
+            assert!(rp.identity(token, 1_004).is_none(), "{what}");
+        }
+        assert!(
+            rp.identity(&kept, 1_004).is_some(),
+            "the others' session is kept"
+        );
+
+        // A sign-in after a logout --all is not ended by reading that line again at a restart.
+        let fresh = session_for(&rp, "dXA", 1_005);
+        drop(rp);
+        let rp = Passkeys::new_at(layout.clone(), 1060, 1_006);
+        assert!(rp.identity(&fresh, 1_006).is_some());
+    }
+
+    /// ★ `gonk.http.session_max_hours = 240` (ledger #3229): a read-only grant's session runs
+    /// past 12 h, to 240 h, across a restart; a write grant's session under the same setting
+    /// ends at 12 h; and a read-only grant widened to write ends its session at 12 h too.
+    #[test]
+    fn only_a_read_only_session_outlives_twelve_hours() {
+        let dir = tempfile::tempdir().unwrap();
+        let hours = crate::config::session_max_seconds(Some("240")).unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000)
+            .with_idle_seconds(hours)
+            .with_max_seconds(hours);
+        let reader = session_as(&rp, "cmVhZA", "reader", Authority::Read, 1_000);
+        let writer = session_as(&rp, "d3JpdGU", "writer", Authority::Write, 1_000);
+        let widened = session_as(&rp, "d2lkZQ", "widened", Authority::Read, 1_000);
+
+        let twelve = 1_000 + SESSION_SECONDS;
+        assert!(rp.identity(&writer, twelve - 1).is_some());
+        assert!(
+            rp.identity(&writer, twelve).is_none(),
+            "a write grant ends at 12 h"
+        );
+        let who = rp
+            .identity(&reader, twelve + 3_600)
+            .expect("read-only past 12 h");
+        assert_eq!(who.expires, 1_000 + 240 * 3_600);
+
+        quic::put_grant(
+            &rp.layout,
+            "widened",
+            &grants_for("default", Authority::Write).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(
+            rp.identity(&widened, twelve + 3_600).is_none(),
+            "a grant that can write now ends at 12 h after the sign-in"
+        );
+
+        let rp = restart(&rp, twelve + 7_200);
+        assert!(rp.identity(&reader, 1_000 + 239 * 3_600).is_some());
+        assert!(rp.identity(&reader, 1_000 + 240 * 3_600).is_none());
     }
 
     /// ★ The idle bound ends a session no request has carried for that long, and a request

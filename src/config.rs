@@ -17,8 +17,11 @@
 //!                                       # UDP at the HTTP port once a certificate is enrolled
 //! # ledgers the HTTP door's anonymous loopback caller may READ; repeatable
 //! gonk.http.ledger = "default"
+//! # gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in
+//!                                       # (this IS the default; 1 to 720), but one whose grant
+//!                                       # can write ends after 12 h whatever this says
 //! # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long
-//!                                       # ends (this IS the default; 1 to 720, the 12 h bound)
+//!                                       # ends (this IS the default; 1 to 60 × the line above)
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! # the GitHub repository a root's "On GitHub" links name, when its origin does not; repeatable
@@ -124,7 +127,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 45] = [
+const KEYS: [&str; 46] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -143,6 +146,7 @@ const KEYS: [&str; 45] = [
     "gonk.ledger.lifecycle",
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.http.session_idle_minutes",
+    "gonk.http.session_max_hours",
     "gonk.browse.root",
     "gonk.browse.github",
     "gonk.mount",
@@ -683,6 +687,10 @@ pub struct Settings {
     /// (`gonk.http.session_idle_minutes`, default [`crate::identity::DEFAULT_IDLE_SECONDS`]):
     /// see [`session_idle_seconds`].
     pub session_idle_seconds: u64,
+    /// How long a passkey session lasts after its sign-in at most, in seconds
+    /// (`gonk.http.session_max_hours`, default [`crate::identity::SESSION_SECONDS`]): see
+    /// [`session_max_seconds`]. A session whose grant can write is held to 12 h whatever this is.
+    pub session_max_seconds: u64,
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
     pub browse_roots: Vec<(String, PathBuf)>,
@@ -1982,6 +1990,8 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     let anonymous_sparql_budget_ms = crate::budget::anonymous_budget(
         value_for(text, "gonk.http.anonymous_sparql_budget_ms").as_deref(),
     )?;
+    let session_max_seconds =
+        session_max_seconds(value_for(text, "gonk.http.session_max_hours").as_deref())?;
     Ok(Settings {
         max_scoped_copy_quads: max_scoped_copy_quads(text)?,
         http,
@@ -1992,7 +2002,9 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         anonymous_sparql_budget_ms,
         session_idle_seconds: session_idle_seconds(
             value_for(text, "gonk.http.session_idle_minutes").as_deref(),
+            session_max_seconds,
         )?,
+        session_max_seconds,
         browse_roots,
         browse_github,
         repositories,
@@ -2059,38 +2071,84 @@ fn toolbox(text: &str, homes: &Homes) -> Result<Option<crate::toolbox::Toolbox>,
     }
 }
 
-/// `gonk.http.session_idle_minutes`, checked and in seconds: a whole number of minutes from 1
-/// to 720, absent meaning [`crate::identity::DEFAULT_IDLE_SECONDS`] (an hour). Ledger
-/// [#1824](http://localhost:1062/l/default/item/1824).
+/// `gonk.http.session_max_hours`, checked and in seconds: a whole number of hours from 1 to
+/// 720 (30 days), absent meaning [`crate::identity::SESSION_SECONDS`] (12 h). Ledger
+/// [#3229](http://localhost:1062/l/default/item/3229).
 ///
-/// The bound is beside the 12 h absolute one ([`crate::identity::SESSION_SECONDS`]), never
-/// instead of it: past 720 it could never be reached, and `0` would end every session at its
-/// first request, so both are refused rather than read as "off".
+/// It is the absolute lifetime of a session whose grant only READS
+/// ([`crate::identity::read_only`]). A session whose grant can write ends after 12 h whatever
+/// this says. Never unbounded: a stolen cookie for a read-only session still reads everything
+/// its grant covers, so past 720 is refused, and so is `0`.
 ///
 /// ```
-/// use ikigai_gonk::config::session_idle_seconds;
-/// assert_eq!(session_idle_seconds(None), Ok(3600));
-/// assert_eq!(session_idle_seconds(Some("15")), Ok(900));
-/// assert_eq!(session_idle_seconds(Some("720")), Ok(43_200));
-/// for bad in ["0", "721", "-5", "1h", ""] {
-///     assert!(session_idle_seconds(Some(bad)).is_err(), "{bad}");
+/// use ikigai_gonk::config::session_max_seconds;
+/// assert_eq!(session_max_seconds(None), Ok(43_200));
+/// assert_eq!(session_max_seconds(Some("240")), Ok(864_000));
+/// assert_eq!(session_max_seconds(Some("720")), Ok(2_592_000));
+/// for bad in ["0", "721", "-5", "12h", ""] {
+///     let refusal = session_max_seconds(Some(bad)).unwrap_err();
+///     assert!(refusal.contains("gonk.http.session_max_hours"), "{refusal}");
+///     assert!(refusal.contains(&format!("`{bad}`")), "{refusal}");
+///     assert!(refusal.contains("from 1 to 720"), "{refusal}");
 /// }
 /// ```
 ///
 /// # Errors
 ///
-/// When the value is not a whole number of minutes from 1 to 720.
-pub fn session_idle_seconds(value: Option<&str>) -> Result<u64, String> {
+/// When the value is not a whole number of hours from 1 to 720.
+pub fn session_max_seconds(value: Option<&str>) -> Result<u64, String> {
     let Some(value) = value else {
-        return Ok(crate::identity::DEFAULT_IDLE_SECONDS);
+        return Ok(crate::identity::SESSION_SECONDS);
     };
-    let most = crate::identity::SESSION_SECONDS / 60;
+    let most = crate::identity::READ_ONLY_SESSION_SECONDS / 3600;
+    let write = crate::identity::SESSION_SECONDS / 3600;
+    match value.trim().parse::<u64>() {
+        Ok(hours) if (1..=most).contains(&hours) => Ok(hours * 3600),
+        _ => Err(format!(
+            "gonk.http.session_max_hours = `{value}` is not a whole number of hours from 1 to \
+             {most} (a passkey session ends that long after its sign-in; one whose grant can \
+             write ends after {write} hours whatever this says)"
+        )),
+    }
+}
+
+/// `gonk.http.session_idle_minutes`, checked and in seconds: a whole number of minutes from 1
+/// to the absolute lifetime `max_seconds` ([`session_max_seconds`]) in minutes, absent meaning
+/// [`crate::identity::DEFAULT_IDLE_SECONDS`] (an hour). Ledger
+/// [#1824](http://localhost:1062/l/default/item/1824).
+///
+/// The bound is beside the absolute one, never instead of it: past it, it could never be
+/// reached, and `0` would end every session at its first request, so both are refused rather
+/// than read as "off".
+///
+/// ```
+/// use ikigai_gonk::config::session_idle_seconds;
+/// let twelve_hours = 43_200;
+/// assert_eq!(session_idle_seconds(None, twelve_hours), Ok(3600));
+/// assert_eq!(session_idle_seconds(Some("15"), twelve_hours), Ok(900));
+/// assert_eq!(session_idle_seconds(Some("720"), twelve_hours), Ok(43_200));
+/// assert_eq!(session_idle_seconds(Some("1440"), 2 * twelve_hours), Ok(86_400));
+/// for bad in ["0", "721", "-5", "1h", ""] {
+///     let refusal = session_idle_seconds(Some(bad), twelve_hours).unwrap_err();
+///     assert!(refusal.contains("gonk.http.session_idle_minutes"), "{refusal}");
+///     assert!(refusal.contains("from 1 to 720"), "{refusal}");
+/// }
+/// ```
+///
+/// # Errors
+///
+/// When the value is not a whole number of minutes from 1 to the absolute lifetime.
+pub fn session_idle_seconds(value: Option<&str>, max_seconds: u64) -> Result<u64, String> {
+    let most = (max_seconds / 60).max(1);
+    let Some(value) = value else {
+        return Ok(crate::identity::DEFAULT_IDLE_SECONDS.min(most * 60));
+    };
     match value.trim().parse::<u64>() {
         Ok(minutes) if (1..=most).contains(&minutes) => Ok(minutes * 60),
         _ => Err(format!(
             "gonk.http.session_idle_minutes = `{value}` is not a whole number of minutes from 1 \
              to {most} (a passkey session with no request for that long ends; it always ends \
-             {most} minutes after its sign-in)"
+             {most} minutes after its sign-in, `gonk.http.session_max_hours`)"
         )),
     }
 }
