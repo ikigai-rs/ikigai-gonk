@@ -157,6 +157,12 @@ impl Layout {
         self.dir.join("grants.json")
     }
 
+    /// The live passkey sessions, so they survive a restart: SHA-256 of each token →
+    /// principal, grant, issued, last used and end (ledger #3229; see [`crate::identity`]).
+    pub fn sessions_json(&self) -> PathBuf {
+        self.dir.join("sessions.json")
+    }
+
     /// Outstanding passkey invites: SHA-256 of the code → grant and expiry.
     pub fn invites_json(&self) -> PathBuf {
         self.dir.join("invites.json")

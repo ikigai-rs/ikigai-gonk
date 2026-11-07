@@ -809,6 +809,7 @@ fn serve(flags: &config::Flags) -> ! {
         let passkeys = Arc::new(
             Passkeys::new(layout.clone(), port)
                 .with_idle_seconds(settings.session_idle_seconds)
+                .with_max_seconds(settings.session_max_seconds)
                 .auditing(ikigai_gonk::access::stderr_sink()),
         );
         let face = Arc::new(web::Web {
@@ -856,12 +857,20 @@ fn serve(flags: &config::Flags) -> ! {
         let bound = std::net::SocketAddr::new(settings.http.ip(), port);
         system.listening("HTTP", bound.to_string());
         eprintln!(
-            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s), sessions {} h or {} min idle; anonymous SPARQL budget {} ms",
+            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s), sessions {} or {} min idle; anonymous SPARQL budget {} ms",
             doors::http_url(bound),
             settings.http,
             settings.http_ledgers.join(", "),
             passkeys.enrolled_count(),
-            identity::SESSION_SECONDS / 3600,
+            if passkeys.max_seconds() > identity::SESSION_SECONDS {
+                format!(
+                    "{} h when read-only, {} h when the grant can write,",
+                    passkeys.max_seconds() / 3600,
+                    identity::SESSION_SECONDS / 3600
+                )
+            } else {
+                format!("{} h", passkeys.max_seconds() / 3600)
+            },
             passkeys.idle_seconds() / 60,
             settings.anonymous_sparql_budget_ms
         );
