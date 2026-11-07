@@ -67,6 +67,7 @@ fn post(headers: &[(&str, &str)]) -> HttpRequest {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         path: "/act".to_string(),
+        raw_target: "/act".to_string(),
         query: Vec::new(),
         body: Vec::new(),
         peer: None,
