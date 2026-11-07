@@ -4038,3 +4038,317 @@ fn a_blocks_cycle_answers_the_ledgers_refusal_in_the_panel() {
         assert!(!links.contains("in landing order"), "{links}");
     }
 }
+
+/// `title` appended to `ledger` with `labels` under the ROOT capability, as no door may for a
+/// ledger the test's viewer cannot write; answers the item's id.
+fn append_as_root(server: &Server, ledger: &str, title: &str, labels: &str) -> String {
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        ikigai_core::Request::new(
+            ikigai_core::Verb::Sink,
+            ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:append")).unwrap(),
+        )
+        .with_arg(
+            "content",
+            ikigai_core::ArgRef::Inline(title.as_bytes().to_vec()),
+        )
+        .with_arg(
+            "labels",
+            ikigai_core::ArgRef::Inline(labels.as_bytes().to_vec()),
+        ),
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("appending to {ledger}: {e}"));
+    let text = String::from_utf8_lossy(&answer.bytes).into_owned();
+    let prefix = format!("urn:iki:ledger:{ledger}:item:");
+    let at = text.find(&prefix).unwrap_or_else(|| panic!("{text}"));
+    text[at + prefix.len()..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+/// The rows' titles on a listing page, in page order.
+fn row_titles(body: &str) -> Vec<String> {
+    body.split("class='title' href='")
+        .skip(1)
+        .map(|row| {
+            let start = row.find('>').unwrap() + 1;
+            row[start..].split('<').next().unwrap().to_string()
+        })
+        .collect()
+}
+
+/// Ledger #3216: the ledger page and fragment carry `ledgers=` to the ledger's own union
+/// (ikigai-ledger 0.20), read under the viewer's capability: a ledger the viewer cannot read
+/// is left out (and said so), each row says `ledger#N` and links into its own ledger, the
+/// count is the ledger's count of the same union, and every link the page builds (paging,
+/// status, search, label filters, the facet) keeps the union, as does a form's re-render.
+#[test]
+fn a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Write).unwrap());
+    // Half a grant is no grant: the ledger read without the graph read.
+    grants.push("urn:cap:ledger:read:ghost".to_string());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private", "ghost"],
+    );
+    append_as_root(&server, "default", "Default team one", "team");
+    append_as_root(&server, "crew", "Crew team one", "team,shared");
+    append_as_root(&server, "default", "Default other", "other");
+    let crew_two = append_as_root(&server, "crew", "Crew team two", "team");
+    append_as_root(&server, "private", "Private team secret", "team,secret");
+    append_as_root(&server, "ghost", "Ghost team secret", "team,secret");
+    let union = "ledgers=default,crew,private,ghost";
+    let union_link = "ledgers=default%2Ccrew%2Cprivate%2Cghost";
+    let readable = [
+        "Crew team two",
+        "Default other",
+        "Crew team one",
+        "Default team one",
+    ];
+
+    // The ledger's own count of the union, under the same viewer: the page must agree.
+    let count = |filter: &str| -> u64 {
+        let response = server.raw(
+            "GET",
+            &format!("/iki/ledger/count?as=application%2Fjson&{union}&{filter}"),
+            &[("Accept", "application/json".into())],
+            "",
+        );
+        assert_eq!(response.status, 200, "{response:?}");
+        let doc: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(doc["ledgers"], serde_json::json!(["crew", "default"]));
+        doc["total"].as_u64().unwrap()
+    };
+    assert_eq!(count("status=open"), 4);
+
+    for path in ["/l/default", "/l/default/items"] {
+        let page = server.page(&format!("{path}?{union}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let mut titles = row_titles(&page.body);
+        titles.sort();
+        let mut want: Vec<String> = readable.iter().map(|t| t.to_string()).collect();
+        want.sort();
+        assert_eq!(titles, want, "{page:?}");
+        assert!(!page.body.contains("secret"), "{page:?}");
+        assert!(page.body.contains("4 open items"), "{page:?}");
+        assert!(
+            page.body.contains(
+                "Items from 2 ledgers: crew, default. Left out, because this grant cannot \
+                 read them: private, ghost."
+            ),
+            "{page:?}"
+        );
+        // A default row's action is named with its ledger too.
+        assert!(
+            page.body.contains("aria-label='Close default#1 with"),
+            "{page:?}"
+        );
+        // Rows from several ledgers say which: `ledger#N`, the default ledger's too.
+        for number in ["crew#1", "crew#2", "default#1", "default#2"] {
+            assert!(
+                page.body
+                    .contains(&format!("<span class='num'>{number}</span>")),
+                "{number}: {page:?}"
+            );
+        }
+        assert!(
+            !page.body.contains("<span class='num'>#1</span>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains(&format!("class='title' href='/l/crew/item/{crew_two}'")),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains("Crew team two<span class='sr-only'> (in crew)</span>"),
+            "{page:?}"
+        );
+        // Status tabs, the search form and the facet keep the union.
+        for status in ["open", "closed", "all"] {
+            assert!(
+                page.body.contains(&format!(
+                    "href='/l/default?status={status}&amp;{union_link}&amp;limit=50'"
+                )),
+                "{status}: {page:?}"
+            );
+        }
+        assert!(
+            page.body
+                .contains("name='ledgers' type='hidden' value='default,crew,private,ghost'"),
+            "{page:?}"
+        );
+        assert!(
+            page.body.contains(&format!(
+                "/l/default/facet?status=open&amp;limit=50&amp;{union_link}"
+            )),
+            "{page:?}"
+        );
+        // A row's label links keep it too.
+        assert!(
+            page.body.contains(&format!(
+                "href='/l/default?status=open&amp;limit=50&amp;labels=shared&amp;{union_link}'"
+            )),
+            "{page:?}"
+        );
+        // One ledger's chart is not the union's, so a union page draws none.
+        assert!(!page.body.contains("class='chart"), "{page:?}");
+    }
+    assert_eq!(
+        server.page("/l/default?status=all", None).status,
+        200,
+        "the single-ledger page is unchanged"
+    );
+
+    // Filters run in the ledger over the whole union, and the count agrees.
+    for (filter, titles) in [
+        (
+            "labels=team",
+            vec!["Crew team one", "Crew team two", "Default team one"],
+        ),
+        (
+            "labels=team&without=shared",
+            vec!["Crew team two", "Default team one"],
+        ),
+        ("text=crew", vec!["Crew team one", "Crew team two"]),
+        ("labels=secret", vec![]),
+    ] {
+        let page = server.page(&format!("/l/default?{union}&{filter}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let mut got = row_titles(&page.body);
+        got.sort();
+        assert_eq!(got, titles, "{filter}: {page:?}");
+        assert_eq!(count(filter), titles.len() as u64, "{filter}");
+        if !titles.is_empty() {
+            assert!(
+                page.body.contains(&format!("{} open items", titles.len())),
+                "{filter}: {page:?}"
+            );
+        }
+        // The facet counts the same union, never the left-out ledgers.
+        let facet = server.page(&format!("/l/default/facet?{union}&{filter}"), None);
+        assert_eq!(facet.status, 200, "{facet:?}");
+        if titles.is_empty() {
+            assert!(
+                facet.body.contains("No labels or priorities match."),
+                "{facet:?}"
+            );
+        } else {
+            assert!(
+                facet
+                    .body
+                    .contains(&format!("Priority unset ({})", titles.len())),
+                "{filter}: {facet:?}"
+            );
+            assert!(!facet.body.contains("secret"), "{facet:?}");
+            assert!(facet.body.contains(union_link), "{facet:?}");
+        }
+    }
+    // With no chart the label-filter note says nothing of one, and keeps its words apart.
+    let filtered = server.page(&format!("/l/default?{union}&labels=team"), None);
+    assert!(
+        filtered
+            .body
+            .contains("<p>Label filters in force. <a href="),
+        "{filtered:?}"
+    );
+    let facet = server.page(&format!("/l/default/facet?{union}"), None);
+    assert!(facet.body.contains("Label team (3)"), "{facet:?}");
+    assert!(facet.body.contains("Label shared (1)"), "{facet:?}");
+
+    // Paging walks the union a row at a time: every readable row once, and the links keep it.
+    let mut seen = Vec::new();
+    for offset in 0..4 {
+        let page = server.page(&format!("/l/default?{union}&limit=1&offset={offset}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let rows = row_titles(&page.body);
+        assert_eq!(rows.len(), 1, "{offset}: {page:?}");
+        seen.extend(rows);
+        // "Show N more" (the same start, more rows) keeps the union.
+        let more = format!(
+            "class='more' href='/l/default?status=open&amp;limit={}{}&amp;{union_link}'",
+            4 - offset,
+            if offset > 0 {
+                format!("&amp;offset={offset}")
+            } else {
+                String::new()
+            }
+        );
+        assert_eq!(page.body.contains(&more), offset < 3, "{more}: {page:?}");
+    }
+    seen.sort();
+    let mut want: Vec<String> = readable.iter().map(|t| t.to_string()).collect();
+    want.sort();
+    assert_eq!(seen, want);
+    assert_eq!(
+        server
+            .page(&format!("/l/default?{union}&limit=1&offset=4"), None)
+            .status,
+        400,
+        "an offset past the union's total is refused"
+    );
+
+    // A row's close names its own ledger and re-renders the union page it was on.
+    let closed = server.form(
+        &[
+            ("_ledger", "crew"),
+            ("_listLedger", "default"),
+            ("_ledgers", "default,crew,private,ghost"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &format!("urn:iki:ledger:crew:item:{crew_two}")),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(closed.body.contains("3 open items"), "{closed:?}");
+    assert!(
+        closed.body.contains("Items from 2 ledgers: crew, default."),
+        "{closed:?}"
+    );
+    assert!(
+        closed.body.contains("<h1>Ledgers crew, default</h1>"),
+        "{closed:?}"
+    );
+    assert!(
+        closed
+            .body
+            .contains("name='_listLedger' type='hidden' value='default'"),
+        "{closed:?}"
+    );
+    let closed_page = server.page(&format!("/l/default?{union}&status=closed"), None);
+    assert_eq!(row_titles(&closed_page.body), vec!["Crew team two"]);
+    assert_eq!(count("status=closed"), 1);
+
+    // Nothing the viewer can read: an empty page that says so, never another ledger's rows.
+    let none = server.page("/l/default?ledgers=private,ghost", None);
+    assert_eq!(none.status, 200, "{none:?}");
+    assert!(none.body.contains("No items match."), "{none:?}");
+    assert!(
+        none.body
+            .contains("None of the ledgers asked for can be read with this grant."),
+        "{none:?}"
+    );
+    assert!(!none.body.contains("secret"), "{none:?}");
+    // The page is still its own ledger's: a union never opens a ledger page the viewer cannot
+    // read, and a name the ledger refuses is refused.
+    for path in [
+        "/l/private?ledgers=default",
+        "/l/private/items?ledgers=default,crew",
+        "/l/private/facet?ledgers=default",
+    ] {
+        assert_eq!(server.page(path, None).status, 403, "{path}");
+    }
+    assert_eq!(
+        server
+            .page("/l/default?ledgers=default,Not%20A%20Name", None)
+            .status,
+        400
+    );
+}

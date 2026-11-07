@@ -3,6 +3,11 @@
 //! One grouped SELECT, scoped to one ledger graph and the viewer's capability. No item
 //! documents or other ledgers are read. `pattern` mirrors the ledger's listing pattern;
 //! HTTP tests compare the two over status, text, intersecting labels and exclusions.
+//!
+//! Under `ledgers=` (ledger #3216) the same SELECT runs once per ledger of the union, and
+//! the ledger itself says which those are: its `count` face lists the ledgers it read under
+//! the viewer's grants, so the counts cover exactly the listing's rows. An item is in one
+//! graph only, so the per-graph counts add up.
 use super::*;
 use ikigai_ledger::sparql::literal;
 
@@ -62,6 +67,37 @@ fn pattern(listing: &Listing<'_>) -> Result<String> {
     Ok(body)
 }
 
+/// The ledgers whose graphs the counts read: the page's own, or under `ledgers=` the ones
+/// the ledger's union read for this viewer, from its own `count` face (never chosen here).
+async fn union(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    listing: &Listing<'_>,
+) -> Result<Vec<Ledger>> {
+    let Some(names) = listing.ledgers else {
+        return Ok(vec![ledger.clone()]);
+    };
+    let read = with(
+        with(
+            with(
+                request(Verb::Source, &format!("{}count", ledger.prefix()))?,
+                "as",
+                TOTAL_FACE,
+            ),
+            "status",
+            listing.status,
+        ),
+        "ledgers",
+        names,
+    );
+    ledger_count_document(&fetch(inv, read).await?)?
+        .ledgers
+        .unwrap_or_default()
+        .iter()
+        .map(|name| Ledger::parse(name))
+        .collect()
+}
+
 async fn query(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> Result<Vec<u8>> {
     fetch(
         inv,
@@ -98,6 +134,7 @@ impl Endpoint for Facet {
         let labels = optional(inv, "labels");
         let without = optional(inv, "without");
         let limit = optional(inv, "limit");
+        let ledgers = optional(inv, "ledgers");
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
@@ -105,6 +142,7 @@ impl Endpoint for Facet {
             without: without.as_deref(),
             limit: limit.as_deref(),
             offset: None,
+            ledgers: ledgers.as_deref(),
         };
         // Expand each match into label/priority buckets, including an absent priority.
         // The OPTIONALs join the matched items before expansion: an OPTIONAL standing
@@ -120,22 +158,34 @@ impl Endpoint for Facet {
              }} GROUP BY ?kind ?value ORDER BY ?kind ?value",
             pattern(&listing)?
         );
-        let rows = bindings(&query(inv, &ledger, &q).await?)?;
+        let mut counted: BTreeMap<(String, String), u64> = BTreeMap::new();
+        for graph in union(inv, &ledger, &listing).await? {
+            for row in bindings(&query(inv, &graph, &q).await?)? {
+                let kind = row["kind"]["value"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let term = row["value"]["value"]
+                    .as_str()
+                    .ok_or_else(|| Error::Endpoint("facet has no value".into()))?
+                    .to_string();
+                let count = row["count"]["value"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or_else(|| Error::Endpoint("facet count is not an integer".into()))?;
+                *counted.entry((kind, term)).or_default() += count;
+            }
+        }
         let filters = LabelFilters {
             labels: listing.labels,
             without: listing.without,
+            ledgers: listing.ledgers,
         };
         let page = ledger_href(&ledger);
         let mut terms = Vec::new();
-        for row in rows {
-            let term = row["value"]["value"]
-                .as_str()
-                .ok_or_else(|| Error::Endpoint("facet has no value".into()))?;
-            let count = row["count"]["value"]
-                .as_str()
-                .and_then(|v| v.parse::<u64>().ok())
-                .ok_or_else(|| Error::Endpoint("facet count is not an integer".into()))?;
-            let (name, include, exclude) = if row["kind"]["value"] == "priority" {
+        for ((kind, term), count) in &counted {
+            let term = term.as_str();
+            let (name, include, exclude) = if kind == "priority" {
                 (format!("Priority {term}"), String::new(), String::new())
             } else {
                 (
@@ -201,7 +251,7 @@ impl Endpoint for Facet {
     }
     fn describe(&self) -> Description {
         Description::new(self.name()).title("Labels and priorities in the whole match")
-            .summary("One grouped count over one ledger's filtered items, under the viewer's grant; independent of the list's page.")
+            .summary("One grouped count over one ledger's filtered items, or a ledgers= union's, under the viewer's grant; independent of the list's page.")
             .verb(Verb::Source).verb(Verb::Meta)
             .requires(ikigai_ledger::CAP_READ).requires(ikigai_store::CAP_READ_GRAPH)
             .input(arg("ledger", "Which ledger.").binding())
@@ -209,6 +259,7 @@ impl Endpoint for Facet {
             .input(arg("labels", "Comma-separated required labels.").optional())
             .input(arg("without", "Comma-separated excluded labels.").optional())
             .input(arg("text", "Case-insensitive title substring.").optional())
+            .input(arg("ledgers", "Comma-separated ledger names: count over the ledger's own union of them, as the list does.").optional())
             .input(arg("limit", "Preserve this list page size in filter links; counts are unbounded.").optional())
             .input(arg("page", "A whole page for a browser without scripts.").one_of(["true", "false"]).optional())
             .input(as_html_arg()).output(HTML)
