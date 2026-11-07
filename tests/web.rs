@@ -49,6 +49,7 @@ struct Server {
     layout: quic::Layout,
     /// The hub behind the door, for a test that must seed what no door may write.
     hub: Arc<ikigai_core::Kernel>,
+    http: Arc<ikigai_core::Kernel>,
     _config: tempfile::TempDir,
 }
 
@@ -134,6 +135,7 @@ impl Server {
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
+        let http_for_test = Arc::clone(&http);
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
                 http,
@@ -146,6 +148,7 @@ impl Server {
             addr,
             layout,
             hub,
+            http: http_for_test,
             _config: config,
         }
     }
@@ -364,6 +367,23 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
         assert_eq!(count.status, 200, "{count:?}");
         let count: serde_json::Value = serde_json::from_str(&count.body).unwrap();
         assert_eq!(count["total"], titles.len(), "{filter}");
+        // Facets mirror the ledger's filter even though they run as one grouped query.
+        // These items all have unset priority, so that bucket equals the ledger total.
+        let facets = server.page(&format!("/l/default/facet?{filter}"), None);
+        assert_eq!(facets.status, 200, "{facets:?}");
+        if titles.is_empty() {
+            assert!(
+                facets.body.contains("No labels or priorities match."),
+                "{facets:?}"
+            );
+        } else {
+            assert!(
+                facets
+                    .body
+                    .contains(&format!("Priority unset ({})", titles.len())),
+                "{facets:?}"
+            );
+        }
         for path in ["/l/default", "/l/default/items"] {
             let page = server.page(&format!("{path}?{filter}"), None);
             assert_eq!(page.status, 200, "{page:?}");
@@ -474,9 +494,284 @@ fn ledger_label_filters_do_not_widen_the_viewers_capability() {
         for path in [
             "/l/default?labels=private",
             "/l/default/items?without=private",
+            "/l/default/facet?labels=private",
         ] {
             let response = server.page(path, None);
             assert_eq!(response.status, 403, "{response:?}");
+        }
+    }
+}
+
+#[test]
+fn listing_facets_count_the_whole_match_without_blocking_the_list() {
+    let server = Server::start();
+    for (title, labels, priority) in [
+        ("Matching first", "team,shared", "1"),
+        ("Matching second", "team,shared,extra", "2"),
+        ("Matching blocked", "team,blocked", "1"),
+        ("Other", "other", "0"),
+    ] {
+        assert_eq!(
+            server
+                .form(
+                    &[
+                        ("_ledger", "default"),
+                        ("_action", "append"),
+                        ("_then", "items"),
+                        ("content", title),
+                        ("labels", labels),
+                        ("priority", priority),
+                    ],
+                    None
+                )
+                .status,
+            200
+        );
+    }
+    let filter = "status=open&labels=team&without=blocked&text=Matching&limit=1";
+    let page = server.page(&format!("/l/default?{filter}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(
+        page.body.contains("id='listing-facet'"),
+        "missing independent facet load: {page:?}"
+    );
+    assert!(
+        !page.body.contains("shared (2)"),
+        "counts must load separately"
+    );
+    let start = Instant::now();
+    let facets = server.page(&format!("/l/default/facet?{filter}"), None);
+    eprintln!("facet HTTP request: {:?}", start.elapsed());
+    assert_eq!(facets.status, 200, "{facets:?}");
+    assert!(facets.body.contains("shared (2)"), "{facets:?}");
+    assert!(facets.body.contains("extra (1)"), "{facets:?}");
+    assert!(facets.body.contains("Priority 1 (1)"), "{facets:?}");
+    assert!(facets.body.contains("Priority 2 (1)"), "{facets:?}");
+    assert!(!facets.body.contains("other ("), "{facets:?}");
+    assert!(!facets.body.contains("blocked ("), "{facets:?}");
+    assert!(facets.body.contains("labels=team%2Cshared"), "{facets:?}");
+    assert!(
+        facets.body.contains("without=blocked%2Cshared"),
+        "{facets:?}"
+    );
+}
+
+#[test]
+fn priority_counts_are_text_and_list_uses_ledger_resources() {
+    use ikigai_core::{Capability, Iri, Request, Verb};
+    let server = Server::start();
+    seed(&server);
+    let trace = Arc::new(FacetTrace::default());
+    server.hub.set_tracer(trace.clone());
+    for resource in [
+        "urn:iki:gonk:page:ledger:default",
+        "urn:iki:gonk:fragment:items:default",
+    ] {
+        let mut request = Request::new(Verb::Source, Iri::parse(resource).unwrap());
+        for (name, value) in [
+            ("status", "open"),
+            ("labels", "repo:ikigai-gonk"),
+            ("without", "absent"),
+            ("text", "Refuse"),
+            ("priority", "1"),
+        ] {
+            request =
+                request.with_arg(name, ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()));
+        }
+        let response = futures::executor::block_on(server.http.issue_traced(
+            request,
+            &Capability::scoped(grants_for("default", Authority::Read).unwrap()),
+            Arc::new(FacetTrace::default()),
+        ))
+        .unwrap();
+        let body = String::from_utf8_lossy(&response.bytes);
+        assert!(!body.contains("search-priority"), "priority form remains");
+        let events = std::mem::take(&mut *trace.0.lock().unwrap());
+        for suffix in ["count", "items"] {
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.target == format!("urn:iki:ledger:default:{suffix}")),
+                "missing ledger {suffix}: {events:?}"
+            );
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.target == "urn:iki:store:graph-construct"),
+            "list bypassed ledger: {events:?}"
+        );
+    }
+    server.hub.clear_tracer();
+    let facets = server.page("/l/default/facet?labels=repo:ikigai-gonk", None);
+    assert!(facets.body.contains("Priority 1 (2)"), "{facets:?}");
+    assert!(
+        !facets.body.contains("priority="),
+        "priority link remains: {facets:?}"
+    );
+    assert!(!facets.body.contains("Exclude Priority"), "{facets:?}");
+}
+
+#[test]
+fn facets_respect_grants_named_ledgers_empty_matches_and_escaped_terms() {
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("default", Authority::Read).unwrap(),
+        Vec::new(),
+        &["default", "private"],
+    );
+    let ttl = r#"@prefix l: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix d: <http://purl.org/dc/terms/> .
+        <urn:facet:one> a l:Item; l:number 1; d:title "Café <script>"; l:status l:open;
+          l:label "team", "c++ & café/?#%=yes" .
+        <urn:facet:two> a l:Item; l:number 2; d:title "Closed"; l:status l:closed;
+          l:label "team", "closed-only"; l:priority 0 .
+        <urn:facet:three> a l:Item; l:number 3; d:title "Unlabeled priority";
+          l:status l:open; l:priority 2 .
+        <urn:facet:four> a l:Item; l:number 4; d:title "Unlabeled unset";
+          l:status l:open ."#;
+    load(&server, "urn:iki:ledger:graph:default", ttl);
+    load(
+        &server,
+        "urn:iki:ledger:graph:private",
+        &ttl.replace("team", "private-label"),
+    );
+    let response = server.page(
+        "/l/default/facet?labels=team&without=closed-only&text=caf%C3%A9",
+        None,
+    );
+    assert_eq!(response.status, 200, "{response:?}");
+    assert!(
+        response.body.contains("c++ &amp; café/?#%=yes (1)"),
+        "{response:?}"
+    );
+    assert!(response.body.contains("Priority unset (1)"), "{response:?}");
+    assert!(
+        response
+            .body
+            .contains("team%2Cc%2B%2B%20%26%20caf%C3%A9%2F%3F%23%25%3Dyes"),
+        "{response:?}"
+    );
+    assert!(!response.body.contains("private-label"));
+    for path in ["/l/private/facet", "/l/missing/facet"] {
+        assert_eq!(server.page(path, None).status, 403, "{path}");
+    }
+    let unlabeled = server.page("/l/default/facet?text=Unlabeled", None);
+    assert_eq!(unlabeled.status, 200, "{unlabeled:?}");
+    assert!(
+        unlabeled.body.contains("Priority unset (1)"),
+        "{unlabeled:?}"
+    );
+    assert!(unlabeled.body.contains("Priority 2 (1)"), "{unlabeled:?}");
+    let closed = server.page("/l/default/facet?status=closed&labels=team", None);
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(closed.body.contains("closed-only (1)"), "{closed:?}");
+    let all = server.page("/l/default/facet?status=all&labels=team", None);
+    assert!(all.body.contains("team (2)"), "{all:?}");
+    for filter in [
+        "labels=team&without=team",
+        "labels=missing",
+        "text=%22%7D%20UNION%20%7B%3Fs%20%3Fp%20%3Fo",
+    ] {
+        let empty = server.page(&format!("/l/default/facet?{filter}"), None);
+        assert_eq!(empty.status, 200, "{empty:?}");
+        assert!(
+            empty.body.contains("No labels or priorities match."),
+            "{empty:?}"
+        );
+    }
+    let page = server.page("/l/default/facet?page=true", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(
+        page.body.contains("<h1>Labels and priority counts</h1>"),
+        "{page:?}"
+    );
+}
+
+#[derive(Default)]
+struct FacetTrace(std::sync::Mutex<Vec<ikigai_core::TraceEvent>>);
+
+impl ikigai_core::Tracer for FacetTrace {
+    fn record(&self, event: ikigai_core::TraceEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn facets_issue_one_grouped_store_read_and_no_item_reads() {
+    use ikigai_core::{Capability, Iri, Request, Verb};
+    let server = Server::start();
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        r#"
+        @prefix l: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix d: <http://purl.org/dc/terms/> .
+        <urn:facet:one> a l:Item; l:number 1; d:title "One"; l:status l:open;
+          l:label "a", "b", "c"; l:priority 1 ."#,
+    );
+    let trace = Arc::new(FacetTrace::default());
+    server.hub.set_tracer(trace.clone());
+    let response = futures::executor::block_on(server.http.issue_traced(
+        Request::new(
+            Verb::Source,
+            Iri::parse("urn:iki:gonk:fragment:facet:ledger:default").unwrap(),
+        ),
+        &Capability::scoped(grants_for("default", Authority::Read).unwrap()),
+        Arc::new(FacetTrace::default()),
+    ))
+    .unwrap();
+    server.hub.clear_tracer();
+    assert!(String::from_utf8_lossy(&response.bytes).contains("Priority 1 (1)"));
+    let events = trace.0.lock().unwrap();
+    let reads: Vec<_> = events
+        .iter()
+        .filter(|e| e.target.starts_with("urn:iki:store:"))
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].target, "urn:iki:store:graph-select");
+    assert!(
+        events
+            .iter()
+            .all(|e| !e.target.starts_with("urn:iki:ledger:")),
+        "{events:?}"
+    );
+}
+
+/// Repeatable cost measurement, deliberately outside the ordinary test gate.
+#[test]
+#[ignore = "whole-match facet cost measurement: run with --ignored --nocapture"]
+fn measure_listing_facets_3193() {
+    for size in [100, 1000, 5000] {
+        let server = Server::start();
+        let mut ttl = String::from("@prefix l: <https://ikigai-rs.dev/ns/ledger#> . @prefix d: <http://purl.org/dc/terms/> .\n");
+        for n in 0..size {
+            ttl.push_str(&format!(
+                "<urn:facet-cost:{n}> a l:Item; l:number {n}; d:title \"Item {n}\"; \
+                 l:status l:open; l:priority {}; l:label \"team\", \"bucket:{}\"; \
+                 d:created \"2026-11-06T00:00:00Z\"; d:modified \"2026-11-06T00:00:00Z\" .\n",
+                n % 5,
+                n % 50
+            ));
+        }
+        load(&server, "urn:iki:ledger:graph:default", &ttl);
+        // This feature starts after a list was drawn: stylesheet initialization and the
+        // ordinary list's reads have already happened. Keep them outside the facet time.
+        assert_eq!(server.page("/l/default?limit=1", None).status, 200);
+        for (kind, query) in [
+            ("all", ""),
+            ("narrow", "?labels=team,bucket:1&without=absent&text=Item"),
+        ] {
+            for pass in 0..2 {
+                let start = Instant::now();
+                let response = server.page(&format!("/l/default/facet{query}"), None);
+                let elapsed = start.elapsed();
+                assert_eq!(response.status, 200, "{response:?}");
+                assert!(response.body.contains("team ("), "{response:?}");
+                eprintln!(
+                    "facet: items={size}, filter={kind}, pass={pass}, HTTP+render={elapsed:?}"
+                );
+            }
         }
     }
 }

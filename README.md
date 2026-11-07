@@ -77,6 +77,12 @@ name, and a browser refuses an IP address as one.
 - **Browse.** The front page is the first ledger you may read, open items first, with filters
   for closed and all and a title search. Each item has its own page: body, filing metadata,
   labels, links, `about` targets and comments.
+- **Labels and priorities beside a list.** Their counts cover every item the current
+  status, title and label filters match, including other pages. A label count
+  requires that label; Exclude leaves it out. Priority counts are plain text until
+  the ledger supports priority filtering. Counts load independently after the list appears,
+  with one grouped read of that ledger under your grant. Without JavaScript, the
+  counts link opens a separate page; the list's filters still work.
 - **A listing renders fifty rows and says so.** The line above the list is the count the
   filter matched, not the count the page drew — "showing the 50 most recently updated of 411
   open items", with a link for the rest. `?limit=<n>` or `?limit=all` asks for more, up to

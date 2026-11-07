@@ -320,6 +320,13 @@
   <xsl:template name="body">
     <xsl:choose>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
+      <xsl:when test="@view = 'facet'">
+        <xsl:if test="@full = 'true'">
+          <h1>Labels and priority counts</h1>
+          <p><a><xsl:attribute name="href"><xsl:value-of select="@back"/></xsl:attribute>Back to the filtered list</a></p>
+        </xsl:if>
+        <xsl:apply-templates select="view:facet"/>
+      </xsl:when>
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
       <xsl:when test="@view = 'lifecycle'"><xsl:apply-templates select="view:lifecycle"/></xsl:when>
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
@@ -347,6 +354,7 @@
       <xsl:when test="@view = 'chunk'">
         <xsl:apply-templates select="view:chart"/>
         <xsl:apply-templates select="view:agent-panel"/>
+        <xsl:apply-templates select="view:facet-term"/>
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
@@ -2250,6 +2258,8 @@
           <button type="submit">File</button>
         </form>
       </xsl:if>
+      <div class="listing-body">
+        <div class="listing-results">
       <!-- ⚠ `@has-rows`, not `count(rdf:RDF/ledger:Item)`: the rows are rendered in chunks
            apart from this shell (ledger #519), so the shell holds none of them and the
            count is the Rust side's (`web::Count`), evaluated once. -->
@@ -2289,12 +2299,44 @@
           <xsl:apply-templates select="view:slot[@name = 'items']"/>
         </ol>
       </xsl:if>
+        </div>
+        <aside class="listing-facet-panel" aria-labelledby="listing-facet-title">
+          <h2 id="listing-facet-title">Labels and priorities</h2>
+          <p><a><xsl:attribute name="href"><xsl:value-of select="@facet-url"/>&amp;page=true</xsl:attribute>Open labels and priority counts</a></p>
+          <div id="listing-facet" hx-trigger="load" hx-target="this" hx-swap="outerHTML" data-ui-quiet="true">
+            <xsl:attribute name="hx-get"><xsl:value-of select="@facet-url"/></xsl:attribute>
+            <p>Counts load separately from the list. With scripts off, open the counts link.</p>
+          </div>
+        </aside>
+      </div>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:facet">
+    <div id="listing-facet" data-loaded="true">
+      <p>Counts cover the whole filtered list, including items on other pages. Choose a label count to require its label, or choose Exclude. Priority counts are informational.</p>
+      <xsl:choose>
+        <xsl:when test="@empty = 'true'"><p>No labels or priorities match.</p></xsl:when>
+        <xsl:otherwise><ul class="facet-terms"><xsl:apply-templates select="view:facet-term"/><xsl:apply-templates select="view:slot"/></ul></xsl:otherwise>
+      </xsl:choose>
+    </div>
+  </xsl:template>
+
+  <xsl:template match="view:facet-term">
+    <li>
+      <xsl:choose>
+        <xsl:when test="@include != ''">
+          <a><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</a><xsl:text> · </xsl:text>
+          <a><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@name"/></a>
+        </xsl:when>
+        <xsl:otherwise><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</xsl:otherwise>
+      </xsl:choose>
+    </li>
   </xsl:template>
 
   <xsl:template match="view:label-filters">
     <div class="active-filters">
-      <p>Label filters in force. The chart counts this status across all labels. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
+      <p>Label filters in force. The chart counts this status across all labels and priorities. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
       <ul><xsl:apply-templates select="view:filter-term"/></ul>
     </div>
   </xsl:template>

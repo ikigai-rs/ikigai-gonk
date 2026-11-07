@@ -254,6 +254,19 @@ fn main() {
         assert_eq!(status, 200, "{path}");
         bodies.push((name.to_string(), "text/html; charset=utf-8", body));
     }
+    // Independently loaded whole-match counts. The route is also exported so CI's
+    // static server can answer the pages' lazy request (queries do not change a11y).
+    for (name, path) in [
+        ("l/default/facet", "/l/default/facet"),
+        ("l/crew/facet", "/l/crew/facet"),
+        ("facet.fragment", "/l/default/facet"),
+        ("facet-empty.fragment", "/l/default/facet?labels=missing"),
+        ("facet-page.html", "/l/default/facet?page=true"),
+    ] {
+        let (status, body) = get(addr, path);
+        assert_eq!(status, 200, "{path}");
+        bodies.push((name.to_string(), "text/html; charset=utf-8", body));
+    }
     for (name, media) in FILES {
         let (status, body) = get(addr, &format!("/{name}"));
         assert_eq!(status, 200, "/{name}");
