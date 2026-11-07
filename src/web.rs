@@ -2646,8 +2646,12 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedIte
         let mut fallback = graph.windows(std::slice::from_ref(&link), 1).remove(0);
         let href = format!("{}href", render::VIEW_NS);
         let text = format!("{}text", render::VIEW_NS);
-        fallback.retain(|t| t.predicate.as_str() != href && t.predicate.as_str() != text);
-        fallback.view(&link, "text", target);
+        if crate::git_object::git_iri(&target).is_none() {
+            fallback.retain(|t| t.predicate.as_str() != href && t.predicate.as_str() != text);
+        }
+        if fallback.value(&link, &text).is_none() {
+            fallback.view(&link, "text", target);
+        }
         unavailable.push_str(&render::wrap(
             "unavailable-link",
             &[],
@@ -2699,6 +2703,67 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedIte
     Ok(LinkedItems { xml: output, slots })
 }
 
+/// Resolve only recognized Git IRIs, through the viewer's own invocation.
+async fn enrich_git_links(graph: &mut Graph, inv: &Invocation<'_>) {
+    // The ordinary item face omits events. History is the ledger's own read boundary.
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let Ok(read) = request(Verb::Source, &format!("{item}:history")) else {
+            continue;
+        };
+        let Ok(bytes) = fetch(inv, with(read, "as", "application/json")).await else {
+            continue;
+        };
+        let Ok(history) = serde_json::from_slice::<ikigai_ledger::json::HistoryDocument>(&bytes)
+        else {
+            continue;
+        };
+        for event in history.events {
+            for (index, target) in event.evidence.into_iter().enumerate() {
+                let node = format!(
+                    "urn:iki:gonk:view:close-evidence:event:{}:target:{index}",
+                    ikigai_fn::html::url_segment(&event.iri)
+                );
+                graph.typed(&node, &format!("{}Link", render::VIEW_NS));
+                graph.view(&node, "rel", "close evidence");
+                graph.view(&node, "target", target.clone());
+                graph.view(&node, "text", target);
+            }
+        }
+    }
+    let mut resolved = BTreeMap::new();
+    for link in graph.subjects_of_type(&format!("{}Link", render::VIEW_NS)) {
+        let Some(target) = graph.value(&link, &format!("{}target", render::VIEW_NS)) else {
+            continue;
+        };
+        let Some((kind, sha)) = crate::git_object::git_iri(&target) else {
+            continue;
+        };
+        if !resolved.contains_key(&target) {
+            let mut href = None;
+            for map in ["configured", "browse"] {
+                let Ok(read) = request(Verb::Source, &crate::git_object::link_iri(map, kind, &sha))
+                else {
+                    continue;
+                };
+                if let Ok(bytes) = fetch(inv, read).await {
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        if let Some(safe) =
+                            ikigai_fn::html::safe_href(text).filter(|s| !s.is_empty())
+                        {
+                            href = Some(safe.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            resolved.insert(target.clone(), href);
+        }
+        if let Some(Some(href)) = resolved.get(&target) {
+            graph.view(&link, "href", href.clone());
+        }
+    }
+}
+
 async fn item_card(
     web: &Web,
     inv: &Invocation<'_>,
@@ -2717,6 +2782,7 @@ async fn item_card(
     enrich_items(&mut graph, ledger, inv, "open");
     enrich_states(&mut graph, inv).await;
     enrich_close_reasons(&mut graph, &web.hub, ledger);
+    enrich_git_links(&mut graph, inv).await;
     enrich_children(&mut graph);
     enrich_repo_labels(&mut graph, web, inv.capability);
     enrich_authors(&mut graph, &web.passkeys);
