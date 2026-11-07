@@ -2351,7 +2351,7 @@
 
   <xsl:template match="view:label-filters">
     <div class="active-filters">
-      <p>Label filters in force.<xsl:if test="@chart = 'true'"> The chart counts this status across all labels and priorities.</xsl:if><xsl:text> </xsl:text><a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
+      <p>Label filters in force.<xsl:if test="@chart = 'true'"> The chart counts this status across all labels and priorities.</xsl:if><xsl:value-of select="' '"/><a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
       <ul><xsl:apply-templates select="view:filter-term"/></ul>
     </div>
   </xsl:template>

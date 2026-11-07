@@ -4037,6 +4037,8 @@ fn a_blocks_cycle_answers_the_ledgers_refusal_in_the_panel() {
         );
         assert!(!links.contains("in landing order"), "{links}");
     }
+}
+
 /// `title` appended to `ledger` with `labels` under the ROOT capability, as no door may for a
 /// ledger the test's viewer cannot write; answers the item's id.
 fn append_as_root(server: &Server, ledger: &str, title: &str, labels: &str) -> String {
@@ -4248,6 +4250,14 @@ fn a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read() {
             assert!(facet.body.contains(union_link), "{facet:?}");
         }
     }
+    // With no chart the label-filter note says nothing of one, and keeps its words apart.
+    let filtered = server.page(&format!("/l/default?{union}&labels=team"), None);
+    assert!(
+        filtered
+            .body
+            .contains("<p>Label filters in force. <a href="),
+        "{filtered:?}"
+    );
     let facet = server.page(&format!("/l/default/facet?{union}"), None);
     assert!(facet.body.contains("Label team (3)"), "{facet:?}");
     assert!(facet.body.contains("Label shared (1)"), "{facet:?}");
