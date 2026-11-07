@@ -2323,23 +2323,44 @@
 
   <xsl:template match="view:facet">
     <div id="listing-facet" data-loaded="true">
-      <p>Counts cover the whole filtered list, including items on other pages. Choose a label count to require its label, or choose Exclude. Priority counts are informational.</p>
+      <p>Counts cover the whole filtered list, including items on other pages. Include keeps only items with that label; Exclude leaves them out. Priority counts are informational.</p>
       <xsl:choose>
         <xsl:when test="@empty = 'true'"><p>No labels or priorities match.</p></xsl:when>
-        <xsl:otherwise><ul class="facet-terms"><xsl:apply-templates select="view:facet-term"/><xsl:apply-templates select="view:slot"/></ul></xsl:otherwise>
+        <xsl:otherwise>
+          <!-- The whole page (page=true) has an h1 above this; the panel on the ledger page an h2. -->
+          <xsl:if test="@labels = 'true'">
+            <xsl:choose>
+              <xsl:when test="../@full = 'true'"><h2>Labels</h2></xsl:when>
+              <xsl:otherwise><h3>Labels</h3></xsl:otherwise>
+            </xsl:choose>
+            <ul class="facet-terms"><xsl:apply-templates select="view:slot[@name = 'facet-label']"/></ul>
+          </xsl:if>
+          <xsl:if test="@priorities = 'true'">
+            <xsl:choose>
+              <xsl:when test="../@full = 'true'"><h2>Priorities</h2></xsl:when>
+              <xsl:otherwise><h3>Priorities</h3></xsl:otherwise>
+            </xsl:choose>
+            <ul class="facet-terms"><xsl:apply-templates select="view:slot[@name = 'facet-priority']"/></ul>
+          </xsl:if>
+        </xsl:otherwise>
       </xsl:choose>
     </div>
   </xsl:template>
 
+  <!-- One row: the term and its count first, then Include and Exclude. The term is not
+       repeated on screen; each link's hidden words name it ("Include label http"), and its
+       name begins with the visible word (WCAG 2.5.3). -->
   <xsl:template match="view:facet-term">
     <li>
-      <xsl:choose>
-        <xsl:when test="@include != ''">
-          <a><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</a><xsl:text> · </xsl:text>
-          <a><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@name"/></a>
-        </xsl:when>
-        <xsl:otherwise><xsl:value-of select="@name"/> (<xsl:value-of select="@count"/>)</xsl:otherwise>
-      </xsl:choose>
+      <span class="facet-term"><xsl:value-of select="@term"/></span><xsl:value-of select="' '"/><span class="facet-count">(<xsl:value-of select="@count"/>)</span>
+      <xsl:if test="@include != ''">
+        <xsl:value-of select="' '"/>
+        <span class="facet-actions">
+          <a class="facet-action"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute>Include<span class="sr-only"><xsl:value-of select="concat(' label ', @term)"/></span></a>
+          <xsl:value-of select="' '"/>
+          <a class="facet-action"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude<span class="sr-only"><xsl:value-of select="concat(' label ', @term)"/></span></a>
+        </span>
+      </xsl:if>
     </li>
   </xsl:template>
 
