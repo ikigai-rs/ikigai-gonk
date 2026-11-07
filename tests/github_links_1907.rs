@@ -764,7 +764,7 @@ fn close_evidence_git_iris_link_and_survive_reopening() {
     for action in ["close", "reopen"] {
         let mut req = Request::new(
             Verb::Sink,
-            Iri::parse(&format!("urn:iki:ledger:{action}")).unwrap(),
+            Iri::parse(format!("urn:iki:ledger:{action}")).unwrap(),
         )
         .with_arg("item", ArgRef::Inline(item.as_bytes().to_vec()));
         if action == "close" {
@@ -779,7 +779,9 @@ fn close_evidence_git_iris_link_and_survive_reopening() {
         assert!(html.contains("close evidence"), "{html}");
         assert!(html.contains(&format!(">{target}</a>")), "{html}");
     }
-    let denied = Capability::scoped(["urn:cap:ledger:read:default"]);
+    let denied = Capability::scoped(
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Read).unwrap(),
+    );
     let html = page(
         &hub,
         &format!("urn:iki:gonk:page:item:default:{id}"),

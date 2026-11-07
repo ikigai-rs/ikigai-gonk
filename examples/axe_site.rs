@@ -157,7 +157,7 @@ fn main() {
         &hub,
         Request::new(
             Verb::Source,
-            Iri::parse(&git_object::object_iri("configured", "fixture", &blob)).unwrap(),
+            Iri::parse(git_object::object_iri("configured", "fixture", &blob)).unwrap(),
         )
         .with_arg("as", ArgRef::Inline(b"text/html".to_vec())),
         &Capability::root(),
