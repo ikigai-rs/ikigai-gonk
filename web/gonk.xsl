@@ -2618,7 +2618,7 @@
       <span class="rel"><xsl:value-of select="view:rel"/></span>
       <xsl:choose>
         <xsl:when test="view:href">
-          <a><xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute><xsl:value-of select="view:text"/></a>
+          <a class="iri"><xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute><xsl:value-of select="view:text"/></a>
         </xsl:when>
         <xsl:otherwise><code class="iri"><xsl:value-of select="view:text"/></code></xsl:otherwise>
       </xsl:choose>
