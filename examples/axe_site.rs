@@ -152,6 +152,7 @@ fn main() {
         dir: repository,
         commit: Some("https://code.example/commit/{sha}".into()),
         blob: Some("https://code.example/blob/{commit}/{path}".into()),
+        file: None,
         browse: true,
     }];
     let hub = Arc::new(compose_with(

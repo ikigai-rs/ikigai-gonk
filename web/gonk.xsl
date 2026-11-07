@@ -55,6 +55,11 @@
                  swap never takes. includeIndicatorStyles:false: htmx would inject a <style>
                  element, which the CSP refuses; gonk styles no indicator. -->
             <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}</xsl:attribute></meta>
+            <!-- Ledger #3238: a resolved name's interim page refreshes at once to its target
+                 (WCAG H76), with a visible link in the body for a browser that does not. -->
+            <xsl:if test="@refresh">
+              <meta http-equiv="refresh"><xsl:attribute name="content">0; url=<xsl:value-of select="@refresh"/></xsl:attribute></meta>
+            </xsl:if>
             <title><xsl:value-of select="@title"/> · gonk</title>
             <!-- The shared tokens first (urn:iki:ui:tokens.css), so gonk's layout wins a tie. -->
             <link rel="stylesheet" href="/static/tokens.css"/>
@@ -331,6 +336,7 @@
       <xsl:when test="@view = 'lifecycle'"><xsl:apply-templates select="view:lifecycle"/></xsl:when>
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
+      <xsl:when test="@view = 'resolution'"><xsl:apply-templates select="view:resolution"/></xsl:when>
       <xsl:when test="@view = 'refusal'"><xsl:apply-templates select="view:refusal"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
@@ -2871,6 +2877,14 @@
     <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
     <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:id"/></xsl:attribute></input>
     <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
+  </xsl:template>
+
+  <!-- Ledger #3238: where one name resolves. The name is text; the target is a link. -->
+  <xsl:template match="view:resolution">
+    <section class="panel">
+      <h1>Name resolved</h1>
+      <p>This name, <code class="iri"><xsl:value-of select="@iri"/></code>, resolves to <a><xsl:attribute name="href"><xsl:value-of select="@target"/></xsl:attribute><xsl:value-of select="@target"/></a>.</p>
+    </section>
   </xsl:template>
 
   <xsl:template name="gone">

@@ -4900,11 +4900,14 @@ Configure local clones and optional web URL templates in `config.toml`:
 gonk.repository = "core=~/git/ikigai-core"
 gonk.repository.commit = "core=https://github.com/ikigai-rs/ikigai-core/commit/{sha}"
 gonk.repository.blob = "core=https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}"
+gonk.repository.file = "core=https://github.com/ikigai-rs/ikigai-core/blob/HEAD/{path}"
 ```
 
 Each key is repeatable, keyed by repository name. `{sha}` is the object's full SHA;
 for blobs, `{commit}` and `{path}` name its first appearance in retained reachable
-history. Each path segment is URL encoded. Templates must use HTTP or HTTPS, without
+history. `gonk.repository.file` takes `{path}` only: it is where a working-tree file IRI,
+`urn:repo:file:{name}/{path}`, resolves when the viewer may not read the browse root of that
+name (or there is none). Each path segment is URL encoded. Templates must use HTTP or HTTPS, without
 credentials. Unknown names, duplicate names/templates, missing directories and unknown
 placeholders stop startup. Repository map changes take a restart.
 
@@ -4913,6 +4916,23 @@ A `gonk.browse.root` also supplies a local fallback: the link opens gonk's objec
 which identifies the commit or shows the blob's historical file contents. Its separate
 "current working tree" link explicitly names that destination; the commit view does not
 show a diff. A blob without a path in retained history is identified without file contents.
+
+### Resolving a name: `/resolution/iri/{iri}`
+
+Stored text keeps the NAME, never a URL. A full IRI in an item's body or comments
+(`urn:git:commit:<sha>`, `urn:git:blob:<sha>`, `urn:repo:file:{root}/{path}`,
+`urn:iki:ledger:{ledger}:item:{id}`, `urn:layer:{layer}:entry:{id}`, any other `urn:` or
+`tag:` IRI) and a `gh:{owner}/{repo}#{n}` alias link to `/resolution/iri/{iri}`, the IRI
+percent-encoded as one segment. Rendering does no lookup. When the link is followed, gonk
+resolves the name under the viewer's own grants: a Git object as `about` links do; a file to
+browse when the viewer may read the root, else to the root's `gonk.repository.file` template;
+a ledger item when the viewer may read the ledger; a layer entry when the viewer may read the
+layer on the Layers page; a `gh:` alias to its GitHub issue. Any other name is unknown.
+
+For now the answer is a `200` page with an instant refresh to the target and a visible link
+(ikigai-web lets only a write's answer redirect); the target is always a gonk path or a
+configured template, never a URL taken from the name. An unknown name and a name the viewer
+may not read get the same `404`.
 An external blob template using only `{sha}` can link such an object directly.
 
 Resolution requires the viewer's `urn:cap:browse:read:<name>` (or the all-roots grant)
