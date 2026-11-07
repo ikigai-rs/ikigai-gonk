@@ -473,6 +473,7 @@ fn the_door_marks_exactly_the_anonymous_capability() {
         ikigai_web::HttpRequest {
             method: "GET".to_string(),
             path: "/".to_string(),
+            raw_target: "/".to_string(),
             query: Vec::new(),
             headers,
             body: Vec::new(),

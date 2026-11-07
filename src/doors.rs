@@ -718,6 +718,7 @@ pub enum Page {
 ///     method: "GET".to_string(),
 ///     headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
 ///     path: "/".to_string(),
+///     raw_target: "/".to_string(),
 ///     query: Vec::new(),
 ///     body: Vec::new(),
 ///     peer: None,
