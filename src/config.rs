@@ -127,7 +127,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 46] = [
+const KEYS: [&str; 49] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -149,6 +149,9 @@ const KEYS: [&str; 46] = [
     "gonk.http.session_max_hours",
     "gonk.browse.root",
     "gonk.browse.github",
+    "gonk.repository",
+    "gonk.repository.commit",
+    "gonk.repository.blob",
     "gonk.mount",
     "gonk.mount.calls_per_hour",
     "gonk.explain.file.provider",
@@ -2764,6 +2767,53 @@ mod tests {
         }
     }
 
+    /// Ledger #3232: the README's "Linking Git evidence to code" example, exactly as written,
+    /// starts the server through `settings` (the path taken at start, where `check_keys` runs
+    /// before the repository map is read) and reaches `repositories`.
+    #[test]
+    fn the_documented_repository_map_is_accepted_at_start() {
+        let readme = include_str!("../README.md");
+        let section = readme
+            .split("Configure local clones and optional web URL templates in `config.toml`:")
+            .nth(1)
+            .expect("the README's repository-map section");
+        let block = section
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the section's toml block");
+        for key in [
+            "gonk.repository =",
+            "gonk.repository.commit =",
+            "gonk.repository.blob =",
+        ] {
+            assert!(block.contains(key), "the example sets {key}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("git/ikigai-core")).unwrap();
+        let homes = Homes {
+            home: home.path().to_path_buf(),
+            ..homes()
+        };
+        let settings = settings(&Flags::default(), block, &homes).unwrap();
+        let [repository] = settings.repositories.as_slice() else {
+            panic!("one repository, got {:?}", settings.repositories.len());
+        };
+        assert_eq!(repository.name, "core");
+        assert_eq!(
+            repository.dir,
+            home.path().join("git/ikigai-core").canonicalize().unwrap()
+        );
+        assert_eq!(
+            repository.commit.as_deref(),
+            Some("https://github.com/ikigai-rs/ikigai-core/commit/{sha}")
+        );
+        assert_eq!(
+            repository.blob.as_deref(),
+            Some("https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}")
+        );
+    }
+
     /// Ledger #3034: a bad rule stops the server at start, naming the line.
     #[test]
     fn a_holder_alias_line_is_read_or_stops_the_start_naming_it() {
@@ -3703,6 +3753,11 @@ mod tests {
                 None => spelled.split_whitespace().next().unwrap_or(""),
             };
             checked += 1;
+            if name.starts_with("gonk.") && !KEYS.contains(&name) {
+                wrong.push(format!(
+                    "{name}: documented, but not in KEYS, so it stops the start"
+                ));
+            }
             if read != meant {
                 wrong.push(format!(
                     "{name}: the reader takes `{read}`, the line means `{meant}`"
