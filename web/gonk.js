@@ -292,9 +292,9 @@
   // page says so ONCE, in words, in its `#layers-reconnect` status (a polite live region, so
   // nothing moves focus and a retry is not re-announced). The first answer after that says
   // "Reconnected", and the next one empties the status.
-  // ⚠ A 403 or a 404 is not retried: no retry can fix it. gonk keeps sign-ins in memory, so
-  // after a restart this page's session is gone and every ask is refused; the status says to
-  // sign in again and reload, and nothing asks again.
+  // ⚠ A 403 or a 404 is not retried: no retry can fix it. A session survives a gonk restart
+  // (ledger #3229), so a 403 means it ended (signed out, revoked, or past its lifetime) and
+  // every ask is refused; the status says to sign in again and reload, and nothing asks again.
   const WATCH_RETRY_FIRST = 5;
   const WATCH_RETRY_MAX = 60;
   const WATCH_PATH = "/layers/~/wait";
@@ -312,7 +312,7 @@
     if (status === 403) {
       reconnectSay(
         "Live updates stopped: gonk no longer accepts this page's sign-in (the session " +
-          "ended, or gonk restarted). Sign in again, then reload the page.",
+          "ended or was signed out). Sign in again, then reload the page.",
         "stopped"
       );
       return;
