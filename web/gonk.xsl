@@ -2463,6 +2463,9 @@
       </span>
     </xsl:if>
     <xsl:if test="view:awaiting"><span class="badge awaiting">awaiting <xsl:value-of select="view:awaiting"/></span></xsl:if>
+    <!-- Ledger #3217: the open items that block this one, named (src/web.rs::enrich_blocked):
+         a number in this ledger, `ledger id` in another, an IRI where the viewer cannot read. -->
+    <xsl:if test="view:blockedBy"><span class="badge blocked">blocked by <xsl:value-of select="view:blockedBy"/></span></xsl:if>
     <xsl:choose>
       <xsl:when test="view:label-chip"><xsl:apply-templates select="view:label-chip"/></xsl:when>
       <xsl:otherwise><xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each></xsl:otherwise>
@@ -2552,6 +2555,18 @@
           <xsl:apply-templates select="view:link-group"/>
           <xsl:if test="view:unavailable-link">
             <ul class="plain"><xsl:apply-templates select="view:unavailable-link/rdf:RDF/view:Link"/></ul>
+          </xsl:if>
+        </section>
+      </xsl:if>
+      <!-- Ledger #3217: what links TO this item, in any ledger (src/web.rs::inbound_links),
+           grouped as the Links panel is; a linker the viewer cannot read is its IRI alone. -->
+      <xsl:if test="view:inbound">
+        <section class="panel links inbound" aria-labelledby="inbound-title">
+          <h2 id="inbound-title">Linked to this</h2>
+          <p class="note">Items that link to this one, from any ledger. One you cannot read is shown only as its IRI.</p>
+          <xsl:apply-templates select="view:inbound/view:link-group"/>
+          <xsl:if test="view:inbound/view:unavailable-link">
+            <ul class="plain"><xsl:apply-templates select="view:inbound/view:unavailable-link/rdf:RDF/view:Link"/></ul>
           </xsl:if>
         </section>
       </xsl:if>

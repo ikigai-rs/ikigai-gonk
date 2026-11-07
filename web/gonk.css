@@ -168,7 +168,9 @@ summary { cursor: pointer; color: var(--accent); }
 .badge { font-size: 0.8rem; color: var(--muted); border: 1px solid var(--rule); border-radius: 999px; padding: 0 0.5rem; }
 .badge.open { color: var(--ok); border-color: var(--ok); }
 /* Ledger #3195: emphasis only; each badge says its fact in words. */
-.badge.state.in-flight, .badge.awaiting { color: var(--accent); border-color: var(--accent); }
+.badge.state.in-flight, .badge.awaiting, .badge.blocked { color: var(--accent); border-color: var(--accent); }
+/* Ledger #3217: a blocker the viewer cannot read is named by its IRI, which must wrap at 320 px. */
+.badge.blocked { overflow-wrap: anywhere; }
 .badge.claimed.expired { color: var(--danger); border-color: var(--danger); border-style: dashed; }
 .inline { display: inline; }
 
