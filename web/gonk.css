@@ -83,6 +83,7 @@ summary { cursor: pointer; color: var(--accent); }
 
 .ledger-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem; margin-bottom: var(--gap); }
 .ledger-head h1 { margin: 0; }
+.ledger-head > .union { flex-basis: 100%; margin: 0; }
 .filters { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
 .filters a[aria-current] { font-weight: 700; color: var(--fg); text-decoration: none; }
 .search { display: flex; gap: 0.5rem; width: 100%; flex-wrap: wrap; align-items: end; }

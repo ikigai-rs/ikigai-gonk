@@ -2190,6 +2190,7 @@
     <section id="ledger" class="ledger">
       <header class="ledger-head">
         <h1><xsl:value-of select="@title"/></h1>
+        <xsl:apply-templates select="view:union"/>
         <nav class="filters" aria-label="Status">
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'open'"/></xsl:call-template>
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'closed'"/></xsl:call-template>
@@ -2203,6 +2204,10 @@
           <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/></xsl:attribute>
           <input type="hidden" name="status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
           <input type="hidden" name="limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
+          <!-- A union page (ledger #3216): a search keeps the ledgers it lists. -->
+          <xsl:if test="@ledgers != ''">
+            <input type="hidden" name="ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
+          </xsl:if>
           <div class="search-field">
             <label for="search-text">Search titles</label>
             <input id="search-text" type="search" name="text" placeholder="Search titles">
@@ -2238,7 +2243,8 @@
           <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute></input>
           <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
           <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
-          <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
+          <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
+          <label for="file-content">File an item<xsl:if test="@ledgers != ''"> in <xsl:value-of select="@ledger"/></xsl:if> — first line is the title, then a blank line, then the body</label>
           <textarea id="file-content" name="content" rows="3" required="required"></textarea>
           <details>
             <summary>More fields</summary>
@@ -2337,9 +2343,15 @@
     </li>
   </xsl:template>
 
+  <!-- A union page (ledger #3216) says in words which ledgers its rows are from, and which
+       asked-for ledgers this grant left out; each row's number then carries its ledger. -->
+  <xsl:template match="view:union">
+    <p class="note union"><xsl:value-of select="."/></p>
+  </xsl:template>
+
   <xsl:template match="view:label-filters">
     <div class="active-filters">
-      <p>Label filters in force. The chart counts this status across all labels and priorities. <a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
+      <p>Label filters in force.<xsl:if test="@chart = 'true'"> The chart counts this status across all labels and priorities.</xsl:if><xsl:text> </xsl:text><a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
       <ul><xsl:apply-templates select="view:filter-term"/></ul>
     </div>
   </xsl:template>
@@ -2392,6 +2404,8 @@
             <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="view:listWithout"/></xsl:attribute></input>
             <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="view:listText"/></xsl:attribute></input>
             <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
+            <input type="hidden" name="_listLedger"><xsl:attribute name="value"><xsl:value-of select="view:listLedger"/></xsl:attribute></input>
+            <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="view:listLedgers"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
             <button type="submit" class="quiet small">
               <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> with the ledger's default reason</xsl:attribute>

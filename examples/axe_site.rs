@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 16] = [
+const PAGES: [(&str, &str); 18] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -39,6 +39,16 @@ const PAGES: [(&str, &str); 16] = [
     ("item.html", "/l/default/item/1"),
     ("linked-item.html", "/l/default/item/4"),
     ("named-ledger.html", "/l/crew"),
+    // A union of ledgers (ledger #3216): `ledger#N` rows, the sentence naming the ledgers
+    // read and one left out (`private` is not in the anonymous grant), and a filtered union.
+    (
+        "union-ledger.html",
+        "/l/default?ledgers=default,crew,private",
+    ),
+    (
+        "union-filter.html",
+        "/l/default?ledgers=default,crew&labels=needs-person",
+    ),
     ("named-item.html", "/l/crew/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
     ("doctor.html", "/l/default/doctor"),
@@ -339,6 +349,10 @@ fn main() {
     for (name, path) in [
         ("l/default/facet", "/l/default/facet"),
         ("l/crew/facet", "/l/crew/facet"),
+        (
+            "union-facet.fragment",
+            "/l/default/facet?ledgers=default,crew",
+        ),
         ("facet.fragment", "/l/default/facet"),
         ("facet-empty.fragment", "/l/default/facet?labels=missing"),
         ("facet-page.html", "/l/default/facet?page=true"),

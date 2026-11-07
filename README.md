@@ -83,6 +83,14 @@ name, and a browser refuses an IP address as one.
   the ledger supports priority filtering. Counts load independently after the list appears,
   with one grouped read of that ledger under your grant. Without JavaScript, the
   counts link opens a separate page; the list's filters still work.
+- **Several ledgers on one page.** `/l/default?ledgers=default,crew` lists the union of
+  those ledgers, through the ledger's own `ledgers=` listing (ikigai-ledger 0.20): the ledger
+  reads each under your grant and leaves out one you cannot read, and the page says which
+  ledgers its rows are from and which it left out. Each row shows `ledger#N` and links into
+  its own ledger. Paging, the status tabs, search, the label filter's links and the counts
+  beside the list keep `ledgers=`, so a bookmark per project (a union plus a label filter)
+  is a saved view. The page is still its own ledger's: you must be able to read it, filing
+  files there, and it draws no chart, since a chart is one ledger's.
 - **A listing renders fifty rows and says so.** The line above the list is the count the
   filter matched, not the count the page drew — "showing the 50 most recently updated of 411
   open items", with a link for the rest. `?limit=<n>` or `?limit=all` asks for more, up to
