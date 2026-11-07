@@ -2797,7 +2797,7 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Resu
         let mut fallback = graph.windows(std::slice::from_ref(&link), 1).remove(0);
         let href = format!("{}href", render::VIEW_NS);
         let text = format!("{}text", render::VIEW_NS);
-        if crate::git_object::git_iri(&target).is_none() {
+        if crate::git_object::git_iri(&target).is_none() && repo_file(&target).is_none() {
             fallback.retain(|t| t.predicate.as_str() != href && t.predicate.as_str() != text);
         }
         if fallback.value(&link, &text).is_none() {
@@ -2986,7 +2986,40 @@ async fn inbound_links(
     outgoing_links(&links, inv, "inbound").await
 }
 
-/// Resolve only recognized Git IRIs, through the viewer's own invocation.
+/// The root and path of a working-tree file IRI, `urn:repo:file:{root}/{path}` (ledger #3238):
+/// a valid root name and a non-empty relative path with no empty, `.` or `..` segment.
+fn repo_file(target: &str) -> Option<(&str, &str)> {
+    let (root, path) = target.strip_prefix("urn:repo:file:")?.split_once('/')?;
+    (crate::browse::check_root_name(root).is_ok()
+        && !path.is_empty()
+        && path.split('/').all(|s| !matches!(s, "" | "." | ".."))
+        && !path.chars().any(|c| c.is_whitespace() || c.is_control()))
+    .then_some((root, path))
+}
+
+/// Browse's page for a working-tree file, when the caller may read its root (ledger #3238).
+/// A capability check only: whether the file exists is browse's to answer when it is followed.
+fn repo_file_href(target: &str, capability: &Capability) -> Option<String> {
+    let (root, path) = repo_file(target)?;
+    if !(capability.allows(&format!("{}{root}", ikigai_browse::CAP_PREFIX))
+        || capability.allows(ikigai_browse::CAP_WILDCARD))
+    {
+        return None;
+    }
+    let path = path
+        .split('/')
+        .map(ikigai_fn::html::url_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    let href = format!(
+        "/browse/urn:repo:{}:file:{path}",
+        ikigai_fn::html::url_segment(root)
+    );
+    ikigai_fn::html::safe_href(&href).map(str::to_string)
+}
+
+/// Resolve only recognized Git IRIs and working-tree file IRIs, through the viewer's own
+/// invocation.
 async fn enrich_git_links(graph: &mut Graph, inv: &Invocation<'_>) {
     // The ordinary item face omits events. History is the ledger's own read boundary.
     for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
@@ -3018,6 +3051,10 @@ async fn enrich_git_links(graph: &mut Graph, inv: &Invocation<'_>) {
         let Some(target) = graph.value(&link, &format!("{}target", render::VIEW_NS)) else {
             continue;
         };
+        if let Some(href) = repo_file_href(&target, inv.capability) {
+            graph.view(&link, "href", href);
+            continue;
+        }
         let Some((kind, sha)) = crate::git_object::git_iri(&target) else {
             continue;
         };

@@ -581,6 +581,62 @@ fn an_about_blob_in_a_browse_root_links_to_code() {
     git_about_link("blob");
 }
 
+/// Ledger #3238: an `about` target naming a file at the working tree,
+/// `urn:repo:file:{root}/{path}`, links to browse's page for that file when the viewer may
+/// read the root, the way a Git object's about target already links. Before the change the
+/// IRI rendered as plain text.
+fn file_about_page(cap: &Capability) -> (String, String) {
+    let (dir, _head) = scratch(None);
+    let target = "urn:repo:file:demo/src/lib.rs".to_string();
+    let (hub, _watch) = served(dir.path(), &[]);
+    let filed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg(
+                "content",
+                ArgRef::Inline(b"File link reproduction".to_vec()),
+            )
+            .with_arg("about", ArgRef::Inline(target.as_bytes().to_vec())),
+        &Capability::root(),
+    ))
+    .expect("file an item about a working-tree file");
+    let filed = String::from_utf8(filed.bytes).unwrap();
+    let id: String = filed
+        .split_once("urn:iki:ledger:default:item:")
+        .unwrap()
+        .1
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let html = page(&hub, &format!("urn:iki:gonk:page:item:default:{id}"), cap);
+    (target, html)
+}
+
+#[test]
+fn an_about_working_tree_file_links_to_browse() {
+    let (target, html) = file_about_page(&Capability::root());
+    let linked = html.split("<a ").any(|anchor| {
+        anchor.split_once('>').is_some_and(|(attributes, body)| {
+            attributes.contains("href='/browse/urn:repo:demo:file:src/lib.rs'")
+                && body.starts_with(&format!("{target}</a>"))
+        })
+    });
+    assert!(
+        linked,
+        "a readable root's file should link to browse: {html}"
+    );
+}
+
+#[test]
+fn an_about_file_in_an_unreadable_root_stays_text() {
+    let cap = Capability::scoped(
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Read).unwrap(),
+    );
+    let (target, html) = file_about_page(&cap);
+    assert!(html.contains(&target), "the about IRI is visible: {html}");
+    assert!(!html.contains("/browse/urn:repo:demo:file:"), "{html}");
+}
+
 // Git object map (#3198). All subprocesses below only construct fixtures.
 fn object_hub(repositories: &[ikigai_gonk::git_object::Repository]) -> Arc<Kernel> {
     Arc::new(compose_with(
