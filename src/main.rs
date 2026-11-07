@@ -524,6 +524,10 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    trigger_spaces.push(Arc::new(ikigai_gonk::git_object::space(
+        "configured",
+        &settings.repositories,
+    )));
     // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();

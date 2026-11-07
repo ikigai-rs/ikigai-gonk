@@ -19,7 +19,7 @@ use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::grants::anonymous_http_grants;
 use ikigai_gonk::identity::Passkeys;
-use ikigai_gonk::{compose, doors, quic, web};
+use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
 const PAGES: [(&str, &str); 16] = [
@@ -100,7 +100,70 @@ fn main() {
     let addr = listener.local_addr().expect("its address");
     let config = tempfile::tempdir().expect("a scratch config home");
     let layout = quic::Layout::in_config_home(config.path());
-    let hub = Arc::new(compose(DurableStore::in_memory().expect("a store")));
+    // Git evidence (#3198): a local clone, never a network read, and the real map resources.
+    let repository = config.path().join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(
+        repository.join("example.rs"),
+        "// <code> & evidence\nfn main() {}\n",
+    )
+    .unwrap();
+    git(&["add", "example.rs"]);
+    git(&["commit", "-qm", "Accessibility fixture"]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    let blob = git(&["rev-parse", "HEAD:example.rs"]);
+    let repositories = vec![git_object::Repository {
+        name: "fixture".into(),
+        dir: repository,
+        commit: Some("https://code.example/commit/{sha}".into()),
+        blob: Some("https://code.example/blob/{commit}/{path}".into()),
+        browse: true,
+    }];
+    let hub = Arc::new(compose_with(
+        DurableStore::in_memory().expect("a store"),
+        None,
+        Vec::new(),
+        vec![Arc::new(git_object::space("configured", &repositories))],
+        None,
+        None,
+        None,
+    ));
+    let object_html = block_on(Kernel::issue(
+        &hub,
+        Request::new(
+            Verb::Source,
+            Iri::parse(&git_object::object_iri("configured", "fixture", &blob)).unwrap(),
+        )
+        .with_arg("as", ArgRef::Inline(b"text/html".to_vec())),
+        &Capability::root(),
+    ))
+    .unwrap()
+    .bytes;
     block_on(Kernel::issue(
         &hub,
         Request::new(
@@ -196,7 +259,7 @@ fn main() {
         "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
          <{record}> ledger:related <{flying}>, <{waiting}>, <{crew}> ; \
          ledger:parent <{record}> ; ledger:blocks <urn:iki:ledger:private:item:01unreadable> ; \
-         ledger:about <urn:external:record:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz> .",
+         ledger:about <urn:external:record:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz>, <urn:git:commit:{commit}>, <urn:git:blob:{blob}> .",
         flying = seeded[0], waiting = seeded[1],
     );
     block_on(Kernel::issue(
@@ -232,7 +295,13 @@ fn main() {
     ));
     let door = doors::HttpDoor {
         anonymous: anonymous_http_grants(&["default".to_string(), "crew".to_string()])
-            .expect("the anonymous grant"),
+            .expect("the anonymous grant")
+            .into_iter()
+            .chain([
+                "urn:cap:exec:git".to_string(),
+                "urn:cap:browse:read:fixture".to_string(),
+            ])
+            .collect(),
         bind: addr,
         passkeys: Some(passkeys),
         public: Vec::new(),
@@ -254,6 +323,17 @@ fn main() {
         assert_eq!(status, 200, "{path}");
         bodies.push((name.to_string(), "text/html; charset=utf-8", body));
     }
+    // The local object fragment in the same page shell and shared tokens as the item.
+    let (_, shell) = get(addr, "/l/default/item/1");
+    let object_page = String::from_utf8(shell).unwrap().replace(
+        "</main>",
+        &format!("{}</main>", String::from_utf8(object_html).unwrap()),
+    );
+    bodies.push((
+        "git-object.html".into(),
+        "text/html; charset=utf-8",
+        object_page.into_bytes(),
+    ));
     // Independently loaded whole-match counts. The route is also exported so CI's
     // static server can answer the pages' lazy request (queries do not change a11y).
     for (name, path) in [
