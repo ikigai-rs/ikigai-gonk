@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 18] = [
+const PAGES: [(&str, &str); 19] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -38,6 +38,8 @@ const PAGES: [(&str, &str); 18] = [
     ("closed.html", "/l/default?status=closed"),
     ("item.html", "/l/default/item/1"),
     ("linked-item.html", "/l/default/item/4"),
+    // Ledger #3217: an item blocked from three ledgers, with its inbound links panel.
+    ("inbound-item.html", "/l/default/item/3"),
     ("named-ledger.html", "/l/crew"),
     // A union of ledgers (ledger #3216): `ledger#N` rows, the sentence naming the ledgers
     // read and one left out (`private` is not in the anonymous grant), and a filtered union.
@@ -255,7 +257,9 @@ fn main() {
     ))
     .expect("the badge facts");
     // #3197: an outgoing flight plan with live badges, another readable ledger,
-    // a self-link and unavailable/external IRIs. No inbound links are introduced.
+    // a self-link and unavailable/external IRIs. #3217: it also blocks the handed-back item
+    // (#3), which mirrors of a crew blocker and an unreadable private one block as well, so
+    // #3's row carries a blocked badge naming all three and its page an inbound panel.
     let record = block_on(Kernel::issue(
         &hub,
         Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
@@ -268,8 +272,14 @@ fn main() {
     let links = format!(
         "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
          <{record}> ledger:related <{flying}>, <{waiting}>, <{crew}> ; \
-         ledger:parent <{record}> ; ledger:blocks <urn:iki:ledger:private:item:01unreadable> ; \
-         ledger:about <urn:external:record:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz>, <urn:git:commit:{commit}>, <urn:git:blob:{blob}> .",
+         ledger:parent <{record}> ; ledger:blocks <urn:iki:ledger:private:item:01unreadable>, <{waiting}> ; \
+         ledger:about <urn:external:record:abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz>, <urn:git:commit:{commit}>, <urn:git:blob:{blob}> .\n\
+         <{waiting}:mirror:blocks:crew> a ledger:Mirror ; ledger:onItem <{waiting}> ; \
+         ledger:linkType ledger:blocks ; ledger:mirrorOf <{crew}> ; ledger:linkPresent true ; \
+         ledger:subjectOpen true .\n\
+         <{waiting}:mirror:blocks:private> a ledger:Mirror ; ledger:onItem <{waiting}> ; \
+         ledger:linkType ledger:blocks ; ledger:mirrorOf <urn:iki:ledger:private:item:01unreadable> ; \
+         ledger:linkPresent true ; ledger:subjectOpen true .",
         flying = seeded[0], waiting = seeded[1],
     );
     block_on(Kernel::issue(
