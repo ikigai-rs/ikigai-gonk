@@ -362,7 +362,10 @@
         <xsl:apply-templates select="view:entry"/>
         <xsl:apply-templates select="view:tuple"/>
         <xsl:apply-templates select="view:receipt"/>
+        <!-- An outgoing-link group's rows carry their ledger's landing rank (#3226), zero
+             padded so a text sort is a numeric one; listing rows carry none and tie on it. -->
         <xsl:apply-templates select="rdf:RDF/ledger:Item">
+          <xsl:sort select="view:landing"/>
           <xsl:sort select="dcterms:modified" order="descending"/>
         </xsl:apply-templates>
       </xsl:when>
