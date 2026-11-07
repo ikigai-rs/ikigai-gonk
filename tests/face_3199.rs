@@ -291,7 +291,7 @@ fn media(response: &Response) -> String {
 #[test]
 fn a_face_serves_under_the_doors_default_csp() {
     let gonk = Server::start(true);
-    let page = gonk.open("/face/name/demo");
+    let page = gonk.open("/face/name/demo/");
     assert_eq!(page.status, 200, "{page:?}");
     assert!(media(&page).starts_with("text/html"), "{page:?}");
     assert_eq!(page.text(), INDEX);
@@ -317,14 +317,14 @@ fn a_face_serves_under_the_doors_default_csp() {
 }
 
 /// The slash form is the base for relative stylesheet, module and module-import URLs.
-/// The bare form remains an index response until the redirect is available upstream.
 #[test]
-fn slash_front_page_loads_relative_assets_and_bare_front_page_still_serves() {
+fn slash_front_page_loads_relative_assets() {
     let gonk = Server::start(true);
     let base = "/face/name/demo/";
     let page = gonk.open(base);
     assert_eq!(page.status, 200, "{page:?}");
     assert_eq!(page.text(), INDEX);
+    assert_eq!(page.header("location"), None);
 
     // ./kit.js in js/app.js resolves beside that module, to js/kit.js.
     for (relative, content_type, content) in [
@@ -336,17 +336,56 @@ fn slash_front_page_loads_relative_assets_and_bare_front_page_still_serves() {
         assert_eq!(asset.status, 200, "{relative}: {asset:?}");
         assert!(media(&asset).starts_with(content_type), "{asset:?}");
         assert_eq!(asset.text(), content);
+        assert_eq!(asset.header("location"), None, "{relative}: {asset:?}");
     }
-    for path in ["/face/name/demo", "/face/name/demo?view=compact"] {
-        let bare = gonk.open(path);
-        assert_eq!(bare.status, 200, "{bare:?}");
-        assert_eq!(bare.text(), INDEX);
-        assert_eq!(bare.header("location"), None);
-    }
-    for path in ["/face/name/unknown", "/face/name/unknown/"] {
+    for path in ["/face/name/unknown/", "/face/name/unknown/app.js"] {
         let missing = gonk.open(path);
         assert_eq!(missing.status, 404, "{missing:?}");
         assert_eq!(missing.header("location"), None);
+    }
+}
+
+/// ★ Ledger [#3231](http://localhost:1062/l/default/item/3231): the bare front page, as a
+/// person types it, answers `308` to the slash form with its query kept, so the face's relative
+/// assets resolve inside its directory. A file below a face is never redirected.
+#[test]
+fn the_bare_front_page_redirects_to_the_slash_form() {
+    let gonk = Server::start(true);
+    for (path, location) in [
+        ("/face/name/demo", "/face/name/demo/"),
+        (
+            "/face/name/demo?view=compact",
+            "/face/name/demo/?view=compact",
+        ),
+        ("/face/name/demo?a=1&b=%2F", "/face/name/demo/?a=1&b=%2F"),
+    ] {
+        let bare = gonk.open(path);
+        assert_eq!(bare.status, 308, "{path}: {bare:?}");
+        assert_eq!(
+            bare.header("location").as_deref(),
+            Some(location),
+            "{bare:?}"
+        );
+        assert!(!bare.text().contains("Demo face"), "{path}: {bare:?}");
+        let followed = gonk.open(location);
+        assert_eq!(followed.status, 200, "{location}: {followed:?}");
+        assert_eq!(followed.text(), INDEX);
+    }
+    for (path, content) in [
+        ("/face/name/demo/app.css", APP_CSS),
+        ("/face/name/demo/js/app.js", APP_JS),
+        ("/face/name/demo/index.html", INDEX),
+    ] {
+        let file = gonk.get(path, "*/*");
+        assert_eq!(file.status, 200, "{path}: {file:?}");
+        assert_eq!(file.header("location"), None, "{path}: {file:?}");
+        assert_eq!(file.text(), content);
+    }
+    // A file below a face is never redirected, even when it does not exist.
+    for path in ["/face/name/demo/js", "/face/name/demo/js/x.js"] {
+        let file = gonk.get(path, "*/*");
+        assert_ne!(file.status, 308, "{path}: {file:?}");
+        assert_eq!(file.header("location"), None, "{path}: {file:?}");
     }
 }
 
@@ -423,7 +462,7 @@ fn a_face_is_read_only() {
     stream.read_to_end(&mut response).unwrap();
     let response = Response::parse(&response);
     assert_ne!(response.status / 100, 2, "{response:?}");
-    assert_eq!(gonk.open("/face/name/demo").text(), INDEX);
+    assert_eq!(gonk.open("/face/name/demo/").text(), INDEX);
 }
 
 /// ★ What a face's page fetches runs under the VIEWER's grant: a viewer who reads the ledger
@@ -435,7 +474,7 @@ fn a_faces_fetch_is_judged_under_the_viewers_grant() {
 
     let reader = Server::start(true);
     reader.file("An item the face reads");
-    assert_eq!(reader.open("/face/name/demo").status, 200);
+    assert_eq!(reader.open("/face/name/demo/").status, 200);
     let read = reader.fetch("/iki/ledger/items", "text/turtle", script);
     assert_eq!(read.status, 200, "{read:?}");
     assert!(read.text().contains("An item the face reads"), "{read:?}");
@@ -445,7 +484,7 @@ fn a_faces_fetch_is_judged_under_the_viewers_grant() {
 
     let stranger = Server::start_reading(true, &[]);
     stranger.file("An item the stranger may not read");
-    assert_eq!(stranger.open("/face/name/demo").status, 200);
+    assert_eq!(stranger.open("/face/name/demo/").status, 200);
     let refused = stranger.fetch("/iki/ledger/items", "text/turtle", script);
     assert_eq!(refused.status, 403, "{refused:?}");
     assert!(!refused.text().contains("may not read"), "{refused:?}");
@@ -463,7 +502,7 @@ fn a_face_loads_for_a_viewer_signed_in_from_another_machine() {
     gonk.file("An item the signed-in viewer reads");
 
     // No session: a caller from another machine is refused the face and the ledger.
-    let page = gonk.open("/face/name/demo");
+    let page = gonk.open("/face/name/demo/");
     assert_eq!(page.status, 403, "{page:?}");
     assert!(!page.text().contains("Demo face"), "{page:?}");
     let script_file = gonk.get("/face/name/demo/js/app.js", "*/*");
@@ -477,7 +516,16 @@ fn a_face_loads_for_a_viewer_signed_in_from_another_machine() {
     let session = gonk.sign_in();
     let cookie = format!("Cookie: gonk_session={session}\r\n");
     let html = format!("Sec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: navigate\r\n{cookie}");
-    let page = gonk.fetch("/face/name/demo", "text/html", &html);
+    // The bare front page still redirects for them (ledger #3231), query kept, and the slash
+    // form it names serves the page under their session.
+    let bare = gonk.fetch("/face/name/demo?from=remote", "text/html", &html);
+    assert_eq!(bare.status, 308, "{bare:?}");
+    assert_eq!(
+        bare.header("location").as_deref(),
+        Some("/face/name/demo/?from=remote"),
+        "{bare:?}"
+    );
+    let page = gonk.fetch("/face/name/demo/?from=remote", "text/html", &html);
     assert_eq!(page.status, 200, "{page:?}");
     assert_eq!(page.text(), INDEX);
     let loaded = gonk.fetch(
@@ -504,8 +552,11 @@ fn a_face_loads_for_a_viewer_signed_in_from_another_machine() {
 #[test]
 fn no_line_no_face() {
     let gonk = Server::start(false);
-    let page = gonk.open("/face/name/demo");
-    assert_eq!(page.status, 404, "{page:?}");
+    for path in ["/face/name/demo", "/face/name/demo/"] {
+        let page = gonk.open(path);
+        assert_eq!(page.status, 404, "{path}: {page:?}");
+        assert_eq!(page.header("location"), None, "{path}: {page:?}");
+    }
     let home = gonk.open("/");
     assert!(!home.text().contains("/face/name/"), "{home:?}");
 }

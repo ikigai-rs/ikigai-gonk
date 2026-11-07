@@ -711,9 +711,9 @@ signed in from another machine loads the face with no token copied into their gr
 from another machine with no session gets nothing.
 
 Link and bookmark the slash form, `/face/name/ops/`, so relative stylesheet and module paths
-resolve inside the face's directory. The bare `/face/name/ops` still serves `index.html`; gonk
-does not redirect it yet. Until gonk redirects, a face may use absolute paths (for example,
-`/face/name/ops/app.css`) if it must also work at the bare form.
+resolve inside the face's directory. The bare `/face/name/ops`, as a person types it, answers
+`308 Permanent Redirect` to `/face/name/ops/` with its query kept (ledger #3231); a file below a
+face (`/face/name/ops/app.css`, `/face/name/ops/js/app.js`) is never redirected.
 
 ### The RDF Toolbox at `/toolbox` (ledger #1933)
 
