@@ -182,36 +182,59 @@ impl Endpoint for Facet {
             ledgers: listing.ledgers,
         };
         let page = ledger_href(&ledger);
-        let mut terms = Vec::new();
+        // Two lists under their own headings, so a row starts with its term and count and
+        // never repeats the kind ("Labels: http (3) Include Exclude").
+        let (mut labels, mut priorities) = (Vec::new(), Vec::new());
         for ((kind, term), count) in &counted {
             let term = term.as_str();
-            let (name, include, exclude) = if kind == "priority" {
-                (format!("Priority {term}"), String::new(), String::new())
+            if kind == "priority" {
+                // A ledger priority reads `p1` everywhere else on the page; `unset` stays a word.
+                let shown = if term.bytes().all(|b| b.is_ascii_digit()) {
+                    format!("p{term}")
+                } else {
+                    term.to_string()
+                };
+                priorities.push(element(
+                    "facet-term",
+                    &[
+                        ("kind", "priority"),
+                        ("term", &shown),
+                        ("count", &count.to_string()),
+                        ("include", ""),
+                        ("exclude", ""),
+                    ],
+                    "",
+                ));
             } else {
-                (
-                    format!("Label {term}"),
-                    filters.url(&listing, &page, LabelChange::Require(term)),
-                    filters.url(&listing, &page, LabelChange::Exclude(term)),
-                )
-            };
-            terms.push(element(
-                "facet-term",
-                &[
-                    ("name", &name),
-                    ("count", &count.to_string()),
-                    ("include", &include),
-                    ("exclude", &exclude),
-                ],
-                "",
-            ));
+                labels.push(element(
+                    "facet-term",
+                    &[
+                        ("kind", "label"),
+                        ("term", term),
+                        ("count", &count.to_string()),
+                        (
+                            "include",
+                            &filters.url(&listing, &page, LabelChange::Require(term)),
+                        ),
+                        (
+                            "exclude",
+                            &filters.url(&listing, &page, LabelChange::Exclude(term)),
+                        ),
+                    ],
+                    "",
+                ));
+            }
         }
-        let empty = terms.is_empty();
+        let empty = labels.is_empty() && priorities.is_empty();
         // As on the item list, bound each transform's input and cache by its bytes.
         // The number of labels is unbounded even when the item page has only one row.
-        let chunks: Vec<String> = terms
-            .chunks(render::CHUNK_ROWS)
-            .map(|window| render::chunk(&window.join("")))
-            .collect();
+        let chunked = |terms: &[String]| -> Vec<String> {
+            terms
+                .chunks(render::CHUNK_ROWS)
+                .map(|window| render::chunk(&window.join("")))
+                .collect()
+        };
+        let (label_chunks, priority_chunks) = (chunked(&labels), chunked(&priorities));
         let full = optional(inv, "page").as_deref() == Some("true");
         let mut content = if full {
             nav(
@@ -225,8 +248,16 @@ impl Endpoint for Facet {
         };
         content.push_str(&render::wrap(
             "facet",
-            &[("empty", flag(empty))],
-            &render::slot("facet-term"),
+            &[
+                ("empty", flag(empty)),
+                ("labels", flag(!labels.is_empty())),
+                ("priorities", flag(!priorities.is_empty())),
+            ],
+            &format!(
+                "{}{}",
+                render::slot("facet-label"),
+                render::slot("facet-priority")
+            ),
         ));
         let doc = envelope(
             "page",
@@ -240,9 +271,17 @@ impl Endpoint for Facet {
             &content,
         );
         let shell = render::render(&doc, full).map_err(render_err)?;
-        let terms = render::rendered_chunks(inv, &chunks).await?;
+        let label_rows = render::rendered_chunks(inv, &label_chunks).await?;
+        let priority_rows = render::rendered_chunks(inv, &priority_chunks).await?;
         Ok(html(
-            render::splice(shell, &[("facet-term".into(), terms)]).map_err(render_err)?,
+            render::splice(
+                shell,
+                &[
+                    ("facet-label".into(), label_rows),
+                    ("facet-priority".into(), priority_rows),
+                ],
+            )
+            .map_err(render_err)?,
         ))
     }
 

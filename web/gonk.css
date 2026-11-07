@@ -572,8 +572,13 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .listing-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(12rem, 18rem); gap: var(--gap); align-items: start; }
 .listing-results, .listing-facet-panel { min-width: 0; }
 .listing-facet-panel { overflow-wrap: anywhere; }
-.facet-terms { padding-left: 1.25rem; }
-.facet-terms li { margin-bottom: 0.5rem; }
+.facet-terms { list-style: none; padding-left: 0; margin: 0 0 0.75rem; }
+.facet-terms li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.5rem; margin-bottom: 0.25rem; }
+.facet-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.facet-actions { display: inline-flex; gap: 0.375rem; margin-left: auto; }
+/* At least 24 px tall with its padding (WCAG 2.5.8). A link, not a control: `--rule` (D12). */
+.facet-action { display: inline-block; font-size: 0.85rem; line-height: 1.5; padding: 0.15rem 0.5rem; min-height: 24px; border: 1px solid var(--rule); border-radius: 999px; }
+.listing-facet-panel h3 { font-size: 0.95rem; margin: 0.75rem 0 0.25rem; }
 @media (max-width: 50rem) {
   .listing-body { grid-template-columns: minmax(0, 1fr); }
 }

@@ -41,6 +41,12 @@ use ikigai_gonk::{doors, quic, web};
 use ikigai_store::DurableStore;
 use p256::ecdsa::SigningKey;
 
+/// One facet row as the stylesheet writes it (ledger #3193): the term, then its count, before
+/// any Include and Exclude links. The term is not repeated on screen.
+fn facet_row(term: &str, count: usize) -> String {
+    format!("<span class='facet-term'>{term}</span> <span class='facet-count'>({count})</span>")
+}
+
 const CHROME_ACCEPT: &str =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
@@ -378,9 +384,7 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
             );
         } else {
             assert!(
-                facets
-                    .body
-                    .contains(&format!("Priority unset ({})", titles.len())),
+                facets.body.contains(&facet_row("unset", titles.len())),
                 "{facets:?}"
             );
         }
@@ -536,19 +540,25 @@ fn listing_facets_count_the_whole_match_without_blocking_the_list() {
         "missing independent facet load: {page:?}"
     );
     assert!(
-        !page.body.contains("shared (2)"),
+        !page.body.contains(&facet_row("shared", 2)),
         "counts must load separately"
     );
     let start = Instant::now();
     let facets = server.page(&format!("/l/default/facet?{filter}"), None);
     eprintln!("facet HTTP request: {:?}", start.elapsed());
     assert_eq!(facets.status, 200, "{facets:?}");
-    assert!(facets.body.contains("shared (2)"), "{facets:?}");
-    assert!(facets.body.contains("extra (1)"), "{facets:?}");
-    assert!(facets.body.contains("Priority 1 (1)"), "{facets:?}");
-    assert!(facets.body.contains("Priority 2 (1)"), "{facets:?}");
-    assert!(!facets.body.contains("other ("), "{facets:?}");
-    assert!(!facets.body.contains("blocked ("), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("shared", 2)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("extra", 1)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("p1", 1)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("p2", 1)), "{facets:?}");
+    assert!(
+        !facets.body.contains("class='facet-term'>other<"),
+        "{facets:?}"
+    );
+    assert!(
+        !facets.body.contains("class='facet-term'>blocked<"),
+        "{facets:?}"
+    );
     assert!(facets.body.contains("labels=team%2Cshared"), "{facets:?}");
     assert!(
         facets.body.contains("without=blocked%2Cshared"),
@@ -604,12 +614,15 @@ fn priority_counts_are_text_and_list_uses_ledger_resources() {
     }
     server.hub.clear_tracer();
     let facets = server.page("/l/default/facet?labels=repo:ikigai-gonk", None);
-    assert!(facets.body.contains("Priority 1 (2)"), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("p1", 2)), "{facets:?}");
     assert!(
         !facets.body.contains("priority="),
         "priority link remains: {facets:?}"
     );
-    assert!(!facets.body.contains("Exclude Priority"), "{facets:?}");
+    assert!(
+        !facets.body.contains("<span class='sr-only'> label p"),
+        "{facets:?}"
+    );
 }
 
 #[test]
@@ -642,10 +655,15 @@ fn facets_respect_grants_named_ledgers_empty_matches_and_escaped_terms() {
     );
     assert_eq!(response.status, 200, "{response:?}");
     assert!(
-        response.body.contains("c++ &amp; café/?#%=yes (1)"),
+        response
+            .body
+            .contains(&facet_row("c++ &amp; café/?#%=yes", 1)),
         "{response:?}"
     );
-    assert!(response.body.contains("Priority unset (1)"), "{response:?}");
+    assert!(
+        response.body.contains(&facet_row("unset", 1)),
+        "{response:?}"
+    );
     assert!(
         response
             .body
@@ -659,15 +677,21 @@ fn facets_respect_grants_named_ledgers_empty_matches_and_escaped_terms() {
     let unlabeled = server.page("/l/default/facet?text=Unlabeled", None);
     assert_eq!(unlabeled.status, 200, "{unlabeled:?}");
     assert!(
-        unlabeled.body.contains("Priority unset (1)"),
+        unlabeled.body.contains(&facet_row("unset", 1)),
         "{unlabeled:?}"
     );
-    assert!(unlabeled.body.contains("Priority 2 (1)"), "{unlabeled:?}");
+    assert!(
+        unlabeled.body.contains(&facet_row("p2", 1)),
+        "{unlabeled:?}"
+    );
     let closed = server.page("/l/default/facet?status=closed&labels=team", None);
     assert_eq!(closed.status, 200, "{closed:?}");
-    assert!(closed.body.contains("closed-only (1)"), "{closed:?}");
+    assert!(
+        closed.body.contains(&facet_row("closed-only", 1)),
+        "{closed:?}"
+    );
     let all = server.page("/l/default/facet?status=all&labels=team", None);
-    assert!(all.body.contains("team (2)"), "{all:?}");
+    assert!(all.body.contains(&facet_row("team", 2)), "{all:?}");
     for filter in [
         "labels=team&without=team",
         "labels=missing",
@@ -722,7 +746,7 @@ fn facets_issue_one_grouped_store_read_and_no_item_reads() {
     ))
     .unwrap();
     server.hub.clear_tracer();
-    assert!(String::from_utf8_lossy(&response.bytes).contains("Priority 1 (1)"));
+    assert!(String::from_utf8_lossy(&response.bytes).contains(&facet_row("p1", 1)));
     let events = trace.0.lock().unwrap();
     let reads: Vec<_> = events
         .iter()
@@ -767,7 +791,10 @@ fn measure_listing_facets_3193() {
                 let response = server.page(&format!("/l/default/facet{query}"), None);
                 let elapsed = start.elapsed();
                 assert_eq!(response.status, 200, "{response:?}");
-                assert!(response.body.contains("team ("), "{response:?}");
+                assert!(
+                    response.body.contains("class='facet-term'>team<"),
+                    "{response:?}"
+                );
                 eprintln!(
                     "facet: items={size}, filter={kind}, pass={pass}, HTTP+render={elapsed:?}"
                 );
@@ -4241,9 +4268,7 @@ fn a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read() {
             );
         } else {
             assert!(
-                facet
-                    .body
-                    .contains(&format!("Priority unset ({})", titles.len())),
+                facet.body.contains(&facet_row("unset", titles.len())),
                 "{filter}: {facet:?}"
             );
             assert!(!facet.body.contains("secret"), "{facet:?}");
@@ -4259,8 +4284,8 @@ fn a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read() {
         "{filtered:?}"
     );
     let facet = server.page(&format!("/l/default/facet?{union}"), None);
-    assert!(facet.body.contains("Label team (3)"), "{facet:?}");
-    assert!(facet.body.contains("Label shared (1)"), "{facet:?}");
+    assert!(facet.body.contains(&facet_row("team", 3)), "{facet:?}");
+    assert!(facet.body.contains(&facet_row("shared", 1)), "{facet:?}");
 
     // Paging walks the union a row at a time: every readable row once, and the links keep it.
     let mut seen = Vec::new();
