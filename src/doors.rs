@@ -1325,6 +1325,13 @@ fn routes() -> Vec<Route> {
         // Ledger #2006: a named view, answered by the hub's views space under the caller's
         // capability (`crate::views`). It answers what its target answers, page or not.
         route("/view/{name}", "urn:iki:gonk:view:{name}"),
+        // Ledger #3238: one name's resolution, under the caller's capability. The name is ONE
+        // raw segment (`{+iri}`, percent-encoded by `render::linkify`), because an IRI carries
+        // `:` and `/`; the tail binding of `resolution::TEMPLATE` holds it whole.
+        route(
+            crate::resolution::PATH_TEMPLATE,
+            crate::resolution::TEMPLATE,
+        ),
         // Ledger #2099: the Views page and its one write, the form adapter. No per-route
         // `cap`, for the reason `/queue/decide` takes none.
         route(crate::views_page::PAGE_PATH, crate::views_page::PAGE_IRI),
@@ -1394,7 +1401,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 21] = [
+pub const GONK_PATHS: [&str; 22] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
@@ -1402,6 +1409,7 @@ pub const GONK_PATHS: [&str; 21] = [
     "/sparql",
     "/render-rules",
     "/view/",
+    "/resolution/",
     crate::views_page::PAGE_PATH,
     "/auth/",
     "/static/",

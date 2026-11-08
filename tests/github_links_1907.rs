@@ -581,6 +581,62 @@ fn an_about_blob_in_a_browse_root_links_to_code() {
     git_about_link("blob");
 }
 
+/// Ledger #3238: an `about` target naming a file at the working tree,
+/// `urn:repo:file:{root}/{path}`, links to browse's page for that file when the viewer may
+/// read the root, the way a Git object's about target already links. Before the change the
+/// IRI rendered as plain text.
+fn file_about_page(cap: &Capability) -> (String, String) {
+    let (dir, _head) = scratch(None);
+    let target = "urn:repo:file:demo/src/lib.rs".to_string();
+    let (hub, _watch) = served(dir.path(), &[]);
+    let filed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg(
+                "content",
+                ArgRef::Inline(b"File link reproduction".to_vec()),
+            )
+            .with_arg("about", ArgRef::Inline(target.as_bytes().to_vec())),
+        &Capability::root(),
+    ))
+    .expect("file an item about a working-tree file");
+    let filed = String::from_utf8(filed.bytes).unwrap();
+    let id: String = filed
+        .split_once("urn:iki:ledger:default:item:")
+        .unwrap()
+        .1
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let html = page(&hub, &format!("urn:iki:gonk:page:item:default:{id}"), cap);
+    (target, html)
+}
+
+#[test]
+fn an_about_working_tree_file_links_to_browse() {
+    let (target, html) = file_about_page(&Capability::root());
+    let linked = html.split("<a ").any(|anchor| {
+        anchor.split_once('>').is_some_and(|(attributes, body)| {
+            attributes.contains("href='/browse/urn:repo:demo:file:src/lib.rs'")
+                && body.starts_with(&format!("{target}</a>"))
+        })
+    });
+    assert!(
+        linked,
+        "a readable root's file should link to browse: {html}"
+    );
+}
+
+#[test]
+fn an_about_file_in_an_unreadable_root_stays_text() {
+    let cap = Capability::scoped(
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Read).unwrap(),
+    );
+    let (target, html) = file_about_page(&cap);
+    assert!(html.contains(&target), "the about IRI is visible: {html}");
+    assert!(!html.contains("/browse/urn:repo:demo:file:"), "{html}");
+}
+
 // Git object map (#3198). All subprocesses below only construct fixtures.
 fn object_hub(repositories: &[ikigai_gonk::git_object::Repository]) -> Arc<Kernel> {
     Arc::new(compose_with(
@@ -603,6 +659,7 @@ fn mapped(dir: &Path) -> ikigai_gonk::git_object::Repository {
         dir: dir.to_path_buf(),
         commit: Some("https://code.example/commit/{sha}".into()),
         blob: Some("https://code.example/blob/{commit}/{path}?object={sha}&view=code".into()),
+        file: Some("https://code.example/tree/{path}".into()),
         browse: false,
     }
 }
@@ -791,4 +848,182 @@ fn close_evidence_git_iris_link_and_survive_reopening() {
         html.contains(&format!("<code class='iri'>{target}</code>")),
         "{html}"
     );
+}
+
+// ---------------------------------------------------------------- the resolution route (#3238)
+
+/// `GET /resolution/iri/{name}` as the HTTP door's page space answers it, under `cap`.
+fn resolution(hub: &Arc<Kernel>, name: &str, cap: &Capability) -> Result<String, Error> {
+    let config = tempfile::tempdir().expect("a config home");
+    let layout = quic::Layout::in_config_home(config.path());
+    let face = Arc::new(web::Web {
+        hub: Arc::clone(hub),
+        ledgers: vec!["default".to_string()],
+        browse_roots: vec!["demo".to_string()].into(),
+        passkeys: Arc::new(Passkeys::new(layout, 1062)),
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        queue: ikigai_gonk::config::QueuePolicy::default(),
+        epochs: None,
+        holder_aliases: Default::default(),
+        toolbox: false,
+        faces: Vec::new(),
+    });
+    let http = doors::http_kernel(Arc::clone(hub), web::door_space(face, None));
+    read(
+        &http,
+        &format!("urn:iki:gonk:resolution:iri:{name}"),
+        &[("as", "text/html")],
+        cap,
+    )
+}
+
+/// The resolved page: the instant refresh and the visible link both name `target` (escaped).
+fn assert_resolves(page: &str, target: &str) {
+    assert!(
+        page.contains(&format!(
+            "<meta content='0; url={target}' http-equiv='refresh'/>"
+        )),
+        "the refresh names {target}: {page}"
+    );
+    assert!(
+        page.contains(&format!("<a href='{target}'>{target}</a>")),
+        "a visible link to {target}: {page}"
+    );
+}
+
+/// The 404's words with the name taken out, so two names' answers can be compared.
+fn refusal(answer: Result<String, Error>, name: &str) -> String {
+    match answer {
+        Err(Error::NotFound(words)) => words.replace(name, "NAME"),
+        other => panic!("{name}: expected the one 404, got {other:?}"),
+    }
+}
+
+const NOBODY: [&str; 1] = ["urn:cap:ledger:read:elsewhere"];
+
+#[test]
+fn a_commit_and_a_blob_under_a_readable_root_resolve_with_the_target_escaped() {
+    let (dir, head) = scratch(None);
+    let blob = git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]);
+    let hub = object_hub(&[mapped(dir.path())]);
+    let root = Capability::root();
+    let page = resolution(&hub, &format!("urn:git:commit:{head}"), &root).unwrap();
+    assert_resolves(&page, &format!("https://code.example/commit/{head}"));
+    assert!(page.contains("<h1>Name resolved</h1>"), "{page}");
+    let page = resolution(&hub, &format!("urn:git:blob:{blob}"), &root).unwrap();
+    // The template's `&` is escaped in both places, never raw.
+    assert_resolves(
+        &page,
+        &format!("https://code.example/blob/{head}/src/lib.rs?object={blob}&amp;view=code"),
+    );
+    assert!(!page.contains("&view=code"), "{page}");
+    // A reader without the root's grant gets the same 404 as a name nobody knows.
+    let stranger = Capability::scoped(NOBODY);
+    let name = format!("urn:git:commit:{head}");
+    assert_eq!(
+        refusal(resolution(&hub, &name, &stranger), &name),
+        refusal(
+            resolution(&hub, "urn:example:nothing", &root),
+            "urn:example:nothing"
+        )
+    );
+}
+
+#[test]
+fn a_file_resolves_to_browse_or_else_to_its_template() {
+    let (dir, _) = scratch(None);
+    let name = "urn:repo:file:demo/src/lib.rs";
+    let hub = object_hub(&[mapped(dir.path())]);
+    let browse = Capability::scoped(["urn:cap:browse:read:demo"]);
+    assert_resolves(
+        &resolution(&hub, name, &browse).unwrap(),
+        "/browse/urn:repo:demo:file:src/lib.rs",
+    );
+    // No browse grant: the root's `gonk.repository.file` template.
+    assert_resolves(
+        &resolution(&hub, name, &Capability::scoped(NOBODY)).unwrap(),
+        "https://code.example/tree/src/lib.rs",
+    );
+    // No browse grant and no template: the one 404, byte for byte the unknown name's.
+    let mut bare = mapped(dir.path());
+    bare.file = None;
+    let hub = object_hub(&[bare]);
+    let stranger = Capability::scoped(NOBODY);
+    assert_eq!(
+        refusal(resolution(&hub, name, &stranger), name),
+        refusal(
+            resolution(&hub, "tag:example.com,2026:none", &stranger),
+            "tag:example.com,2026:none"
+        )
+    );
+}
+
+#[test]
+fn a_ledger_item_resolves_only_when_its_ledger_is_readable() {
+    let hub = object_hub(&[]);
+    let name = "urn:iki:ledger:default:item:12";
+    assert_resolves(
+        &resolution(&hub, name, &Capability::root()).unwrap(),
+        "/l/default/item/12",
+    );
+    let stranger = Capability::scoped(NOBODY);
+    assert_eq!(
+        refusal(resolution(&hub, name, &stranger), name),
+        refusal(
+            resolution(&hub, "urn:example:nothing", &stranger),
+            "urn:example:nothing"
+        )
+    );
+}
+
+#[test]
+fn a_layer_entry_is_unknown_without_a_readable_layers_view() {
+    let hub = object_hub(&[]);
+    let name = "urn:layer:talk-chris:entry:01m6vcrdky000000000001y";
+    assert_eq!(
+        refusal(resolution(&hub, name, &Capability::root()), name),
+        refusal(
+            resolution(&hub, "urn:example:nothing", &Capability::root()),
+            "urn:example:nothing"
+        )
+    );
+}
+
+#[test]
+fn a_github_alias_resolves_to_its_issue() {
+    let hub = object_hub(&[]);
+    assert_resolves(
+        &resolution(&hub, "gh:ikigai-rs/ikigai-gonk%23319", &Capability::root())
+            .or_else(|_| resolution(&hub, "gh:ikigai-rs/ikigai-gonk#319", &Capability::root()))
+            .unwrap(),
+        "https://github.com/ikigai-rs/ikigai-gonk/issues/319",
+    );
+}
+
+/// No name becomes a URL it carries: the target is only ever built by gonk.
+#[test]
+fn a_name_that_smuggles_an_absolute_url_never_becomes_the_target() {
+    let (dir, _) = scratch(None);
+    let hub = object_hub(&[mapped(dir.path())]);
+    let root = Capability::root();
+    for name in [
+        "https://evil.example/x",
+        "urn:repo:file:https://evil.example/x",
+        "urn:repo:file:demo//evil.example/x",
+        "urn:repo:file:demo/../../etc/passwd",
+        "urn:iki:ledger:default:item:1//evil.example",
+        "urn:iki:ledger:https://evil.example:item:1",
+        "gh:evil.example/x#1",
+        "gh:o/r#1/../../evil",
+        "urn:layer:x:entry:1//evil.example",
+    ] {
+        match resolution(&hub, name, &root) {
+            Ok(page) => assert!(
+                !page.contains("evil.example'") && !page.contains("url=https://evil"),
+                "{name}: {page}"
+            ),
+            Err(Error::NotFound(_)) => {}
+            Err(other) => panic!("{name}: {other}"),
+        }
+    }
 }

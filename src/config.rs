@@ -127,7 +127,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 49] = [
+const KEYS: [&str; 50] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -152,6 +152,7 @@ const KEYS: [&str; 49] = [
     "gonk.repository",
     "gonk.repository.commit",
     "gonk.repository.blob",
+    "gonk.repository.file",
     "gonk.mount",
     "gonk.mount.calls_per_hour",
     "gonk.explain.file.provider",
@@ -2786,6 +2787,7 @@ mod tests {
             "gonk.repository =",
             "gonk.repository.commit =",
             "gonk.repository.blob =",
+            "gonk.repository.file =",
         ] {
             assert!(block.contains(key), "the example sets {key}");
         }
@@ -2811,6 +2813,11 @@ mod tests {
         assert_eq!(
             repository.blob.as_deref(),
             Some("https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}")
+        );
+        // Ledger #3238: the working-tree file template, read through `settings` the same way.
+        assert_eq!(
+            repository.file.as_deref(),
+            Some("https://github.com/ikigai-rs/ikigai-core/blob/HEAD/{path}")
         );
     }
 

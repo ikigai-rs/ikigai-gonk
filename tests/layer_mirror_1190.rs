@@ -1419,7 +1419,9 @@ fn mirror_refuses_commit_evidence_from_another_repository() {
         "{}",
         handed[0]
     );
-    assert_eq!(linked(&handed[0]).matches("href='").count(), 1);
+    // Ledger #3238: the report's own `urn:` IRI links to the resolution route; the one
+    // off-site link is the offered repository's commit.
+    assert_eq!(linked(&handed[0]).matches("href='http").count(), 1);
 }
 
 #[test]
@@ -2386,7 +2388,13 @@ fn hand_back_evidence_is_pull_requests_only_and_the_note_is_not_copied() {
         assert!(!comment.contains(copied), "{copied} was copied: {comment}");
     }
     let html = linked(comment);
-    let hrefs: Vec<&str> = html.split("href='").skip(1).collect();
+    // Ledger #3238: a `urn:` name (the report's IRI) links to gonk's own resolution route,
+    // never off-site; the only off-site link is the pull request.
+    let hrefs: Vec<&str> = html
+        .split("href='")
+        .skip(1)
+        .filter(|h| !h.starts_with("/resolution/iri/"))
+        .collect();
     assert_eq!(hrefs.len(), 1, "only the pull request is a link: {html}");
     assert!(
         hrefs[0].starts_with("https://github.com/ikigai-rs/ikigai-core/pull/41'"),

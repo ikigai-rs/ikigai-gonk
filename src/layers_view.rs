@@ -1892,6 +1892,20 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
 }
 
 /// Start the follower and wait (off the async thread) for the first read.
+/// Whether the viewer may read `layer` on the Layers page (ledger #3238): the page's own grant,
+/// and the layer among those this server reads. The name resolver's check, at follow time.
+pub(crate) async fn may_read_layer(
+    view: Option<&Arc<LayersView>>,
+    inv: &Invocation<'_>,
+    layer: &str,
+) -> bool {
+    let Some(view) = view else { return false };
+    inv.capability.allows(CAP_READ)
+        && ready(view)
+            .await
+            .is_ok_and(|snapshot| snapshot.layers.contains_key(layer))
+}
+
 async fn ready(view: &Arc<LayersView>) -> Result<Snapshot> {
     view.start();
     let waiting = Arc::clone(view);

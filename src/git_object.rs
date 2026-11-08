@@ -18,6 +18,7 @@ use serde_json::Value;
 
 const OBJECT: &str = "urn:iki:gonk:git-object:map:";
 const LINK: &str = "urn:iki:gonk:git-link:map:";
+const FILE: &str = "urn:iki:gonk:git-file:map:";
 const STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
 /// One configured clone, with optional external URL templates and local browse fallback.
@@ -27,6 +28,9 @@ pub struct Repository {
     pub dir: PathBuf,
     pub commit: Option<String>,
     pub blob: Option<String>,
+    /// `gonk.repository.file` (ledger #3238): where a working-tree file IRI resolves when the
+    /// viewer may not read the browse root. `{path}` is its only placeholder.
+    pub file: Option<String>,
     pub browse: bool,
 }
 
@@ -39,6 +43,7 @@ pub fn browse_repositories(roots: &[(String, PathBuf)]) -> Vec<Repository> {
             dir: dir.clone(),
             commit: None,
             blob: None,
+            file: None,
             browse: true,
         })
         .collect()
@@ -63,6 +68,41 @@ pub fn validate_template(template: &str, blob: bool) -> std::result::Result<(), 
         return Err("expected an http(s) URL without credentials; placeholders: {sha}, and for blobs {commit} and {path}".into());
     }
     Ok(())
+}
+
+/// A `gonk.repository.file` template (ledger #3238): an http(s) URL with a fixed host, no
+/// credentials, and `{path}` as its only placeholder.
+pub fn validate_file_template(template: &str) -> std::result::Result<(), String> {
+    let sample = template.replace("{path}", "src/file.rs");
+    if !template.contains("{path}")
+        || sample.contains(['{', '}'])
+        || sample.chars().any(char::is_control)
+        || !(sample.starts_with("https://") || sample.starts_with("http://"))
+        || safe_href(&sample).is_none()
+        || url::Url::parse(&sample).map_or(true, |u| {
+            u.host_str().is_none() || !u.username().is_empty() || u.password().is_some()
+        })
+    {
+        return Err(
+            "expected an http(s) URL without credentials, with the placeholder {path}".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The configured file template of `name`, `{path}` filled segment by segment.
+pub fn file_iri(map: &str, name: &str) -> String {
+    format!("{FILE}{map}:repository:{}", url_segment(name))
+}
+
+/// `template` with `{path}` filled, each segment URL encoded; `None` when unsafe.
+pub fn expand_file(template: &str, path: &str) -> Option<String> {
+    let path = path
+        .split('/')
+        .map(url_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    safe_href(&template.replace("{path}", &path)).map(str::to_string)
 }
 
 /// A recognized full Git IRI, normalized to a lowercase SHA. Abbreviations are not identities.
@@ -100,6 +140,16 @@ pub fn space(map: &str, repositories: &[Repository]) -> EndpointSpace {
                 kernel: Arc::clone(&kernel),
             },
         );
+    }
+    for repository in repositories {
+        if let Some(file) = &repository.file {
+            space = space.bind(
+                template(&file_iri(map, &repository.name)),
+                FileLink {
+                    template: file.clone(),
+                },
+            );
+        }
     }
     space.bind(
         template(&link_iri(map, "{kind}", "{sha}")),
@@ -311,6 +361,36 @@ impl Endpoint for Link {
     }
 }
 
+/// A configured `gonk.repository.file` template, filled with the `path` argument (ledger
+/// #3238). It reads nothing: the template is configuration, and whether the file exists is the
+/// target's to answer when it is followed. Answers the href, or empty.
+struct FileLink {
+    template: String,
+}
+#[async_trait]
+impl Endpoint for FileLink {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let path = inv.inline_str("path").unwrap_or("");
+        let ok = !path.is_empty() && path.split('/').all(|s| !matches!(s, "" | "." | ".."));
+        let href = ok
+            .then(|| expand_file(&self.template, path))
+            .flatten()
+            .unwrap_or_default();
+        Ok(Representation::new(ReprType::new("text/plain"), href))
+    }
+    fn name(&self) -> &str {
+        "gonk-git-file-link"
+    }
+    fn describe(&self) -> Description {
+        Description::new(self.name())
+            .title("A working-tree file's configured web link")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("path").class(STRING))
+            .output("text/plain")
+    }
+}
+
 /// Configured clones and URL templates. Unknown names and duplicate entries are errors.
 pub fn configured(
     text: &str,
@@ -348,6 +428,7 @@ pub fn configured(
             dir,
             commit: None,
             blob: None,
+            file: None,
             browse,
         });
     }
@@ -371,6 +452,20 @@ pub fn configured(
             if slot.replace(template.trim().into()).is_some() {
                 return Err(format!("{key}: duplicate template for `{}`", repo.name));
             }
+        }
+    }
+    for line in crate::config::values_for(text, "gonk.repository.file") {
+        let key = "gonk.repository.file";
+        let (name, template) = line
+            .split_once('=')
+            .ok_or_else(|| format!("{key}: expected name=URL-template"))?;
+        let repo = repositories
+            .iter_mut()
+            .find(|r| r.name == name.trim())
+            .ok_or_else(|| format!("{key}: unknown repository `{}`", name.trim()))?;
+        validate_file_template(template.trim()).map_err(|e| format!("{key}: {e}"))?;
+        if repo.file.replace(template.trim().into()).is_some() {
+            return Err(format!("{key}: duplicate template for `{}`", repo.name));
         }
     }
     Ok(repositories)
