@@ -1215,7 +1215,9 @@ quick-xml = "0.37.5"
 # here), async-trait and futures-util. `"0.5.0"` is `<0.6.0`.
 # ★ 0.7.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.7.0"` is `<0.8.0`.
-ikigai-fn = "0.10.0"
+# ★ 0.11.0 is the floor now, an API one (ledger #3281): `ikigai_fn::markdown`, the shared
+# renderer the layers page's entry bodies go through. `"0.11.0"` is `<0.12.0`.
+ikigai-fn = "0.11.0"
 # The passkey verifier: `verify`, `Policy`, `RegisteredCredential::from_spki_der`. ES256
 # only, no attestation parsing — the enrolment INVITE is the registration trust anchor, so
 # nothing here needs a CBOR decoder. Present from 0.1.14; the verifier has not changed since

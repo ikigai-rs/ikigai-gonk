@@ -2665,8 +2665,10 @@ this line.
   link's `download` attribute names the bare file name. ⚠ `Content-Disposition: attachment`
   is not sent yet: the HTTP transport (`ikigai-web` 0.1.63) cannot set a response header from a
   resource; ikigai-rs/ikigai-cli PR 516 adds it, unpublished.
-- Bodies are shown as written, the way gonk shows every body (escaped text, links made
-  clickable), not rendered as Markdown.
+- **An entry's body is rendered as Markdown** (ledger #3281), by `ikigai_fn::markdown`: raw HTML
+  and a `javascript:` link are text, references link outside code, and a body nested or sized
+  past what a page can render is shown as written. Each rendered body is cached with no expiry
+  (`urn:iki:gonk:render:markdown`).
 - **A ledger reference in an entry links by context** (ledger #1856). A qualified one
   (`bobby#2`, `bobby #2`, `bobby:#2`) links to `/l/bobby/item/2` when this gonk holds `bobby` and
   the viewer may read it, whoever wrote it; a ledger it does not hold stays text. A bare

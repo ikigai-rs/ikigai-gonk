@@ -517,6 +517,22 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .entry-title { font-weight: 600; margin: 0 0 0.35rem; }
 .entry-file { margin: 0 0 0.35rem; }
 .entry-actions { margin: 0; font-size: 0.9rem; }
+/* Ledger #3281: a layer entry's body rendered from Markdown. Text stays on the page's own pairs
+ * (`--text`, on the ground or on `--surface`), held to the floor in every palette. Code and table
+ * cells wrap rather than scroll, so no region needs a tab stop and the page holds at 320 px. */
+.body.markdown { white-space: normal; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown h4, .markdown h5, .markdown h6 { font-size: 1rem; margin: 0.75rem 0 0.25rem; }
+.markdown h5, .markdown h6 { font-size: 0.95rem; }
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: 0 0 0.5rem; }
+.markdown ul, .markdown ol { padding-left: 1.5rem; }
+.markdown blockquote { padding-left: 0.75rem; border-left: 3px solid var(--rule); }
+.markdown code { background: var(--surface); padding: 0 0.2em; border-radius: var(--radius); }
+.markdown pre { background: var(--surface); padding: 0.5rem 0.75rem; border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; }
+.markdown pre code { background: none; padding: 0; }
+.markdown table { width: auto; max-width: 100%; }
+.markdown th { white-space: normal; }
 .badge.new { color: var(--accent); border-color: var(--accent); font-weight: 600; margin-left: 0.4rem; }
 .config-line { display: block; margin-top: 0.35rem; overflow-wrap: anywhere; }
 .say { display: grid; gap: 0.5rem; }

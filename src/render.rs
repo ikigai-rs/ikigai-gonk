@@ -522,6 +522,7 @@ pub struct Render;
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new(RENDER_IRI), Render)
+        .bind(Exact::new(MARKDOWN_IRI), RenderMarkdown)
         .named(crate::spaces::iri(crate::spaces::RENDER))
 }
 
@@ -605,6 +606,119 @@ impl Endpoint for Render {
                     .class("http://www.w3.org/2001/XMLSchema#string"),
             )
             .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:render:markdown`: a layer entry's body as a linked XHTML fragment. See
+/// [`rendered_markdown`].
+pub const MARKDOWN_IRI: &str = "urn:iki:gonk:render:markdown";
+
+/// Added to a body's heading levels: an entry's own heading is `<h3>` (`web/gonk.xsl`), so a `#`
+/// in a body is an `<h4>`, under it in the page's outline.
+pub const MARKDOWN_HEADING_OFFSET: u8 = 3;
+
+/// The deepest a linked fragment may nest: the chunk's page, the row and `view:rendered` above
+/// it use three of [`MAX_CHUNK_DEPTH`]'s levels, and a deeper row would have the chunk refused,
+/// so one entry would take the whole page down with it (ledger #3281).
+pub const MAX_MARKDOWN_DEPTH: usize = MAX_CHUNK_DEPTH - 3;
+
+/// The most a linked fragment may be, in bytes: a chunk holds at most [`MAX_CHUNK_BYTES`].
+pub const MAX_MARKDOWN_BYTES: usize = 1 << 18;
+
+/// The most tags (`<`, opening and closing alike) a linked fragment may hold: xrust's cost is
+/// quadratic in the nodes one transform makes, so a list of a hundred thousand items posted by
+/// one participant must not cost every reader the render budget (ledger #519, #3281).
+pub const MAX_MARKDOWN_TAGS: usize = 4000;
+
+/// `text`, an entry's body, as an XHTML fragment with its references linked, or `None` when it
+/// is over a bound and the page shows it as written instead.
+///
+/// `ikigai_fn::markdown` makes the fragment, so nothing an author writes becomes markup but what
+/// its walker builds; [`linkify`]'s rules then link each text node by `refs`
+/// ([`layer_refs`]'s value), outside `<a>` and `<code>`. It is a pure function of its arguments.
+///
+/// ```
+/// use ikigai_gonk::render::{entry_markdown, layer_refs};
+/// let refs = layer_refs(Some("default"), &["default"]);
+/// assert_eq!(
+///     entry_markdown("# Hi ledger #7 and `ledger #8`", &refs).unwrap(),
+///     "<h4>Hi <a href='/l/default/item/7'>ledger #7</a> and <code>ledger #8</code></h4>"
+/// );
+/// // Nested past what a chunk may hold: shown as written, never a broken page.
+/// assert_eq!(entry_markdown(&"> ".repeat(14), &refs), None);
+/// ```
+pub fn entry_markdown(text: &str, refs: &str) -> Option<String> {
+    use ikigai_fn::markdown::{map_text_nodes, try_render_untrusted, Options};
+    let options = Options {
+        heading_offset: MARKDOWN_HEADING_OFFSET,
+    };
+    let fragment = try_render_untrusted(text, &options).ok()?;
+    let linked = map_text_nodes(&fragment, |node| linkify_text(node, refs));
+    (linked.len() <= MAX_MARKDOWN_BYTES
+        && linked.matches('<').count() <= MAX_MARKDOWN_TAGS
+        && nesting_depth(&linked) <= MAX_MARKDOWN_DEPTH)
+        .then_some(linked)
+}
+
+/// [`entry_markdown`] through the hub, so a rendered body is cached forever: an entry never
+/// changes, and the content-addressed request (the text and its linking context) is the key,
+/// the way [`rendered_chunks`] keys a chunk. `None` is the page's cue to show the text as
+/// written: a body over a bound, or a read that failed.
+pub async fn rendered_markdown(inv: &Invocation<'_>, text: &str, refs: &str) -> Option<String> {
+    let iri = ikigai_core::Iri::parse(MARKDOWN_IRI).ok()?;
+    let request = Request::new(Verb::Source, iri)
+        .with_arg("content", ArgRef::Inline(text.as_bytes().to_vec()))
+        .with_arg("refs", ArgRef::Inline(refs.as_bytes().to_vec()));
+    let answer = inv.issue(request).await.ok()?;
+    let fragment = String::from_utf8_lossy(&answer.bytes).into_owned();
+    (!fragment.is_empty()).then_some(fragment)
+}
+
+/// The endpoint behind [`MARKDOWN_IRI`]. Empty when [`entry_markdown`] answers `None`, so that
+/// answer is cached too.
+pub struct RenderMarkdown;
+
+#[async_trait]
+impl Endpoint for RenderMarkdown {
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(format!(
+                "`{MARKDOWN_IRI}` answers Source only"
+            )));
+        }
+        let fragment = entry_markdown(inv.inline_str("content")?, inv.inline_str("refs")?);
+        Ok(Representation::new(
+            ReprType::new("application/xhtml+xml"),
+            fragment.unwrap_or_default().into_bytes(),
+        )
+        .cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "gonk-render-markdown"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-render-markdown")
+            .title("Render one layer entry's body as Markdown")
+            .summary(
+                "An entry's text as a safe XHTML fragment with its references linked, or \
+                 nothing when the text is over a bound and is to be shown as written. A pure \
+                 function of its input and cacheable with no golden thread.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ArgSpec::new("content")
+                    .summary("the entry's text; a pipe fills it")
+                    .class("http://www.w3.org/2001/XMLSchema#string"),
+            )
+            .input(
+                ArgSpec::new("refs")
+                    .summary("the linking context, `render::layer_refs`'s value")
+                    .class("http://www.w3.org/2001/XMLSchema#string"),
+            )
+            .output("application/xhtml+xml")
     }
 }
 

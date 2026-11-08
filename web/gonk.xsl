@@ -760,6 +760,10 @@
              src/render.rs::layer_refs's value, built from who wrote it and the ledgers this gonk
              holds, never `default` by assumption and never a name from the layer. -->
         <xsl:if test="view:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:body/@linkify"/></xsl:attribute><xsl:value-of select="view:body"/></div></xsl:if>
+        <!-- Its body as Markdown (ledger #3281): `render::entry_markdown`'s fragment, references
+             already linked, so it carries no data-linkify. `view:body` above is the text as
+             written, for a body over that function's bounds. -->
+        <xsl:if test="view:rendered"><div class="body markdown"><xsl:copy-of select="view:rendered/node()"/></div></xsl:if>
         <xsl:if test="@answer-href">
           <p class="entry-actions"><a><xsl:attribute name="href"><xsl:value-of select="@answer-href"/></xsl:attribute>Reply<span class="sr-only"> to the <xsl:value-of select="@kind-label"/> from <xsl:value-of select="@who"/>, number <xsl:value-of select="@seq"/></span></a></p>
         </xsl:if>
@@ -802,7 +806,7 @@
           <a><xsl:attribute name="href"><xsl:value-of select="@cancel-href"/></xsl:attribute>Do not reply to it</a>
         </p>
       </xsl:if>
-      <label for="say-body">Text (Markdown is shown as written)</label>
+      <label for="say-body">Text (Markdown)</label>
       <textarea id="say-body" name="body" rows="4" required="required"></textarea>
       <p class="row"><button type="submit">Post</button></p>
     </form>

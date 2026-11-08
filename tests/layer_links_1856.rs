@@ -638,3 +638,175 @@ fn hostile_references_are_text() {
         "the bare one is their ledger's: {r}"
     );
 }
+
+// --- ledger #3281: an entry's body is Markdown ------------------------------------------------
+
+/// The entry holding `needle`, whole: a rendered body has `<li>` elements of its own, so this
+/// runs to the next entry and not to the first `</li>` as [`row`] does.
+fn entry<'a>(page: &'a str, needle: &str) -> &'a str {
+    let at = page
+        .find(needle)
+        .unwrap_or_else(|| panic!("no {needle} in {page}"));
+    let start = page[..at].rfind("<li class='entry'").expect("an entry");
+    let tail = &page[at..];
+    let end = tail
+        .find("<li class='entry'")
+        .or_else(|| tail.find("</ol>"))
+        .unwrap_or(tail.len());
+    &page[start..at + end]
+}
+
+/// A body with headings, a list, code, a table and a link renders as those elements, on the page
+/// and on the poll that adds an entry live; the heading sits under the entry's `<h3>`.
+#[test]
+fn an_entry_body_renders_as_markdown() {
+    let host = Host::open();
+    let body = "# Plan\n\n## Steps\n\n- *one* **two**\n- three\n\n\
+                ```rust\nfn main() {\n\n    let a = 1;\n}\n```\n\n\
+                | a | b |\n|---|---|\n| 1 |   |\n\n\
+                > quoted\n\n[site](https://example.org/x \"it's\") and `inline`";
+    host.offer("bobby", "21", "Markdown", body);
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let (poll_status, poll) = gonk.poll();
+    assert_eq!(poll_status, 200, "{poll}");
+    for html in [page.as_str(), poll.as_str()] {
+        let r = entry(html, "Markdown");
+        assert!(r.contains("<div class='body markdown'>"), "{r}");
+        assert!(r.contains("<h4>Plan</h4>"), "{r}");
+        assert!(r.contains("<h5>Steps</h5>"), "{r}");
+        assert!(
+            r.contains("<li><em>one</em> <strong>two</strong></li>"),
+            "a space between inline elements survives: {r}"
+        );
+        assert!(
+            r.contains(
+                "<pre><code class='language-rust'>fn main() {\n\n    let a = 1;\n}\n</code></pre>"
+            ),
+            "{r}"
+        );
+        assert!(r.contains("<th scope='col'>a</th>"), "{r}");
+        assert!(
+            r.contains("<td>1</td><td></td>"),
+            "an empty cell is not self-closed: {r}"
+        );
+        assert!(r.contains("<blockquote>"), "{r}");
+        assert!(r.contains("href='https://example.org/x'"), "{r}");
+        assert!(
+            r.contains("title='it&apos;s'") || r.contains("title=\"it's\""),
+            "{r}"
+        );
+        assert!(r.contains("<code>inline</code>"), "{r}");
+    }
+    assert!(ikigai_gonk::render::STYLESHEET.contains(">Text (Markdown)</label>"));
+}
+
+/// Raw HTML, a `javascript:` link and an `<img onerror>` are words on the page, and text that
+/// spells the linkify marker stays text.
+#[test]
+fn a_hostile_body_renders_as_text() {
+    let host = Host::open();
+    let body = "<script>alert(1)</script>\n\n[run](javascript:alert(2)) \
+                <img src=x onerror=alert(3)> ![pic](javascript:alert(4))\n\n\
+                [t](https://a.example \"data-linkify='default' x\") data-linkify='default' ledger #1";
+    host.offer("bobby", "22", "Hostile", body);
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let r = entry(&page, "Hostile");
+    assert!(r.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{r}");
+    assert!(r.contains("&lt;img src=x onerror=alert(3)&gt;"), "{r}");
+    assert!(!r.contains("<script"), "{r}");
+    assert!(!r.contains("<img"), "{r}");
+    assert!(!r.to_lowercase().contains("href='javascript:"), "{r}");
+    assert!(!r.to_lowercase().contains("href=\"javascript:"), "{r}");
+    assert!(
+        !r.contains("data-linkify='default'"),
+        "the marker stays text: {r}"
+    );
+    assert!(
+        r.contains("class='foreign-ref'"),
+        "the author's bare reference is still theirs: {r}"
+    );
+}
+
+/// An IRI in prose links to the resolution route and one in a code span or block does not.
+#[test]
+fn an_iri_links_in_text_and_never_in_code() {
+    let host = Host::open();
+    let iri = "urn:git:commit:0123456789abcdef0123456789abcdef01234567";
+    let body = format!("see {iri}.\n\n`{iri}`\n\n```\n{iri}\n```\n");
+    host.offer("bobby", "23", "Names", &body);
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let r = entry(&page, "Names");
+    let href = ikigai_gonk::resolution::href(iri);
+    assert!(r.contains(&format!("<a href='{href}'>{iri}</a>.")), "{r}");
+    assert!(r.contains(&format!("<code>{iri}</code>")), "{r}");
+    assert!(
+        r.contains(&format!("<pre><code>{iri}\n</code></pre>")),
+        "{r}"
+    );
+    assert_eq!(r.matches(&format!("<a href='{href}'>")).count(), 1, "{r}");
+}
+
+/// A body nested or sized past what a chunk can hold is shown as written, and the page and the
+/// entries around it are unharmed. Through the chunk bound this body would be a 500 for everyone.
+#[test]
+fn a_body_past_the_bounds_is_shown_as_written() {
+    let host = Host::open();
+    let deep = format!("{}deep end", "> ".repeat(14));
+    let wide = "- x\n".repeat(ikigai_gonk::render::MAX_MARKDOWN_TAGS / 2 + 1);
+    host.offer("bobby", "24", "Deep body", &deep);
+    host.offer("bobby", "25", "Wide body", &wide);
+    host.offer("bobby", "26", "Fine body", "*fine*");
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let (status, page) = gonk.page();
+    assert_eq!(status, 200, "{page}");
+    let r = entry(&page, "Deep body");
+    assert!(
+        r.contains("&gt; &gt; deep") || r.contains("> > deep"),
+        "as written: {r}"
+    );
+    assert!(!r.contains("<blockquote>"), "{r}");
+    assert!(!entry(&page, "Wide body").contains("<li>"));
+    assert!(
+        entry(&page, "Fine body").contains("<em>fine</em>"),
+        "{page}"
+    );
+}
+
+#[derive(Default)]
+struct MarkdownTrace(std::sync::Mutex<Vec<ikigai_core::TraceEvent>>);
+
+impl ikigai_core::Tracer for MarkdownTrace {
+    fn record(&self, event: ikigai_core::TraceEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+/// Each rendered entry is cached forever: a second page load renders no Markdown.
+#[test]
+fn a_rendered_entry_is_cached() {
+    let host = Host::open();
+    host.offer("bobby", "27", "Cached", "# once");
+    let gonk = Gonk::start(view_as(&host, "brian"));
+    let load = || {
+        let trace = Arc::new(MarkdownTrace::default());
+        gonk.hub.set_tracer(trace.clone());
+        let (status, page) = gonk.page();
+        assert_eq!(status, 200, "{page}");
+        gonk.hub.clear_tracer();
+        let events = std::mem::take(&mut *trace.0.lock().unwrap());
+        let markdown: Vec<bool> = events
+            .iter()
+            .filter(|e| e.target == ikigai_gonk::render::MARKDOWN_IRI)
+            .map(|e| e.cache_hit)
+            .collect();
+        markdown
+    };
+    assert_eq!(load(), vec![false], "the first load renders it");
+    assert_eq!(load(), vec![true], "the second load is a cache hit");
+}
