@@ -2,10 +2,18 @@
 //!
 //! `git-object:map:{map}:repository:{name}:sha:{sha}` is one immutable object;
 //! `git-link:map:{map}:kind:{kind}:sha:{sha}` searches readable repositories in order.
-//! No git subprocess or capability elevation lives here. Each map owns a confined repo
-//! kernel, issued under the viewer's unchanged capability. Presence is cached by SHA;
-//! misses retain ikigai-repo's five-second bound. The search itself is never cached.
+//! No capability elevation lives here. Each map owns a confined repo kernel, issued under
+//! the viewer's unchanged capability. Presence is cached by SHA; misses retain ikigai-repo's
+//! five-second bound. The search itself is never cached.
+//!
+//! One git subprocess does (#3233): a commit's page shows its message, author, date and
+//! changed files, which no `urn:repo:*` read answers by SHA (`object` answers its type,
+//! `log` walks only from HEAD, `show` needs a path). `commit_detail` runs two fixed reads,
+//! `git log -1` and `git diff-tree --raw`, in the configured clone, only after the object
+//! lookup has resolved the SHA there as a commit under the same grants.
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,13 +21,16 @@ use ikigai_core::{
     ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Invocation, Kernel, ReprType,
     Representation, Request, Result, UriTemplate, Verb,
 };
-use ikigai_fn::html::{html_text, safe_href, url_segment};
+use ikigai_fn::html::{attr, html_text, safe_href, url_segment};
 use serde_json::Value;
 
 const OBJECT: &str = "urn:iki:gonk:git-object:map:";
 const LINK: &str = "urn:iki:gonk:git-link:map:";
 const FILE: &str = "urn:iki:gonk:git-file:map:";
 const STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// How many of a commit's changed files its page lists (#3233); the rest are counted.
+pub const CHANGED_FILES_SHOWN: usize = 50;
 
 /// One configured clone, with optional external URL templates and local browse fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,11 +278,25 @@ impl Endpoint for Object {
                     html.push_str("<p>This blob has no path in retained reachable history.</p>");
                 }
             }
+            // A commit read that failed says so, and is not kept: a later read may succeed.
+            let mut keep = true;
+            if kind == "commit" {
+                match commit_detail(&dir, sha) {
+                    Ok(detail) => html.push_str(&commit_html(inv, &detail).await),
+                    Err(_) => {
+                        keep = false;
+                        html.push_str(
+                            "<p>This commit's message and changed files could not be read.</p>",
+                        );
+                    }
+                }
+            }
             if repo.browse {
                 html.push_str(&format!("<p><a href='/browse/urn:repo:{}:tree'>Browse {} (current working tree)</a></p>", url_segment(&repo.name), html_text(&repo.name)));
             }
             html.push_str("</section>");
-            return Ok(Representation::new(ReprType::new("text/html"), html).cacheable());
+            let page = Representation::new(ReprType::new("text/html"), html);
+            return Ok(if keep { page.cacheable() } else { page });
         }
         Ok(Representation::new(ReprType::new("application/json"), value.to_string()).cacheable())
     }
@@ -311,6 +336,234 @@ fn expand(template: &str, sha: &str, object: &Value) -> Option<String> {
         href = href.replace("{commit}", commit).replace("{path}", &path);
     }
     safe_href(&href).map(str::to_string)
+}
+
+/// The most bytes of a commit's `git log` record its page reads: the message past them is cut.
+const MESSAGE_READ: u64 = 64 * 1024;
+
+/// What a commit's page shows beside its identity (#3233).
+struct Commit {
+    author: String,
+    /// The author date, strict ISO 8601 (`%aI`), UTC as `Z`.
+    date: String,
+    message: String,
+    /// The message was cut at [`MESSAGE_READ`].
+    cut: bool,
+    /// The changed files are against the first parent; else against the empty tree.
+    parent: bool,
+    /// The first [`CHANGED_FILES_SHOWN`] changed files, in git's order.
+    files: Vec<Changed>,
+    total: usize,
+}
+
+struct Changed {
+    path: String,
+    /// The blob the path holds after the commit; `None` when deleted or a submodule.
+    blob: Option<String>,
+    status: u8,
+}
+
+/// A commit's author, date, message and changed files: two fixed `git` reads in the
+/// configured clone, after the object lookup has resolved `sha` there as a commit. No
+/// `urn:repo:*` read answers these by SHA, so they are read here (see the module doc).
+fn commit_detail(dir: &Path, sha: &str) -> Result<Commit> {
+    let mut fields = Vec::new();
+    let cut = git_records(
+        dir,
+        &[
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--format=%an%x00%aI%x00%P%x00%B",
+            sha,
+            "--",
+        ],
+        MESSAGE_READ,
+        |record| fields.push(String::from_utf8_lossy(record).into_owned()),
+    )?;
+    let field = |i: usize| fields.get(i).cloned().unwrap_or_default();
+    let parents = field(2);
+    let first = parents.split_whitespace().next();
+    let mut args = vec!["diff-tree", "-r", "-z", "--no-renames"];
+    match first {
+        Some(parent) => args.extend([parent, sha]),
+        None => args.extend(["--root", "--no-commit-id", sha]),
+    }
+    let (mut files, mut total, mut meta) = (Vec::new(), 0, None::<Vec<u8>>);
+    git_records(dir, &args, u64::MAX, |record| match meta.take() {
+        None => meta = Some(record.to_vec()),
+        Some(meta) => {
+            total += 1;
+            if files.len() < CHANGED_FILES_SHOWN {
+                files.push(changed(&meta, record));
+            }
+        }
+    })?;
+    Ok(Commit {
+        author: field(0),
+        // Older git writes UTC as `+00:00`, newer as `Z`: one form, whichever git runs.
+        date: match field(1).strip_suffix("+00:00") {
+            Some(utc) => format!("{utc}Z"),
+            None => field(1),
+        },
+        message: field(3).trim_end().to_string(),
+        cut,
+        parent: first.is_some(),
+        files,
+        total,
+    })
+}
+
+/// One `diff-tree --raw -z` entry: `:{old mode} {new mode} {old} {new} {status}`, then its path.
+fn changed(meta: &[u8], path: &[u8]) -> Changed {
+    let meta = String::from_utf8_lossy(meta);
+    let fields: Vec<&str> = meta.split(' ').collect();
+    let blob = match (fields.get(1), fields.get(3)) {
+        (Some(mode), Some(sha))
+            if *mode != "160000"
+                && sha.bytes().any(|b| b != b'0')
+                && git_iri(&format!("urn:git:blob:{sha}")).is_some() =>
+        {
+            Some(sha.to_ascii_lowercase())
+        }
+        _ => None,
+    };
+    Changed {
+        path: String::from_utf8_lossy(path).into_owned(),
+        blob,
+        status: fields.get(4).and_then(|s| s.bytes().next()).unwrap_or(b'M'),
+    }
+}
+
+/// Run one fixed `git` read in `dir`, handing `on_record` each NUL-ended record of the first
+/// `limit` bytes of its output. Answers whether the output was cut there.
+fn git_records(
+    dir: &Path,
+    args: &[&str],
+    limit: u64,
+    mut on_record: impl FnMut(&[u8]),
+) -> Result<bool> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("--no-replace-objects")
+        .args(args)
+        // A local read must not fetch a promisor's missing objects, or wait for a person.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| Error::Endpoint(format!("Git object: could not run git: {e}")))?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut reader = BufReader::new(stdout.take(limit));
+    let (mut record, mut read) = (Vec::new(), 0u64);
+    let failed = loop {
+        record.clear();
+        match reader.read_until(0, &mut record) {
+            Ok(0) => break None,
+            Ok(n) => {
+                read += n as u64;
+                if record.last() == Some(&0) {
+                    record.pop();
+                }
+                on_record(&record);
+            }
+            Err(e) => break Some(e),
+        }
+    };
+    let cut = read >= limit;
+    if cut || failed.is_some() {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|e| Error::Endpoint(format!("Git object: could not wait for git: {e}")))?;
+    if let Some(e) = failed {
+        return Err(Error::Endpoint(format!(
+            "Git object: could not read git: {e}"
+        )));
+    }
+    if !cut && !status.success() {
+        return Err(Error::Endpoint(format!(
+            "Git object: git exited {}",
+            status.code().unwrap_or(-1)
+        )));
+    }
+    Ok(cut)
+}
+
+/// A commit's message, author, date and changed files as the `text/html` face shows them.
+/// Each changed file links to its blob page through the git-link resource under the viewer's
+/// own capability, as an item's Git IRIs do; a file with no link to follow is its path as text.
+async fn commit_html(inv: &Invocation<'_>, commit: &Commit) -> String {
+    let (summary, body) = commit
+        .message
+        .split_once('\n')
+        .unwrap_or((&commit.message, ""));
+    let body = body.trim_matches('\n');
+    let mut html = if summary.trim().is_empty() {
+        "<p>This commit has no message.</p>".to_string()
+    } else {
+        format!("<h2>{}</h2>", html_text(summary))
+    };
+    if !body.is_empty() {
+        html.push_str(&format!("<pre class='graph' tabindex='0' role='region' aria-label='Commit message'><code>{}</code></pre>", html_text(body)));
+    }
+    if commit.cut {
+        html.push_str(&format!(
+            "<p>The message is cut here at {} KiB.</p>",
+            MESSAGE_READ / 1024
+        ));
+    }
+    html.push_str(&format!(
+        "<p>Author: {}, <time datetime='{}'>{}</time></p>",
+        html_text(&commit.author),
+        attr(&commit.date),
+        html_text(&commit.date)
+    ));
+    html.push_str("<h2>Changed files</h2>");
+    let against = if commit.parent {
+        "compared with its first parent"
+    } else {
+        "it has no parent"
+    };
+    match commit.total {
+        0 => html.push_str(&format!("<p>No files changed ({against}).</p>")),
+        1 => html.push_str(&format!("<p>1 file changed ({against}).</p>")),
+        n => html.push_str(&format!("<p>{n} files changed ({against}).</p>")),
+    }
+    if !commit.files.is_empty() {
+        html.push_str("<ul>");
+        for file in &commit.files {
+            let path = html_text(&file.path);
+            let word = match file.status {
+                b'A' => " (added)",
+                b'D' => " (deleted)",
+                b'T' => " (type changed)",
+                _ => "",
+            };
+            let href = match &file.blob {
+                Some(blob) => crate::web::git_href(inv, "blob", blob).await,
+                None => None,
+            };
+            match href {
+                Some(href) => html.push_str(&format!(
+                    "<li><a href='{}'>{path}</a>{word}</li>",
+                    attr(&href)
+                )),
+                None => html.push_str(&format!("<li><code class='iri'>{path}</code>{word}</li>")),
+            }
+        }
+        html.push_str("</ul>");
+    }
+    match commit.total.saturating_sub(commit.files.len()) {
+        0 => {}
+        1 => html.push_str("<p>1 more file is not listed here.</p>"),
+        n => html.push_str(&format!("<p>{n} more files are not listed here.</p>")),
+    }
+    html
 }
 
 struct Link {
