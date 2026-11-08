@@ -797,6 +797,109 @@ fn local_blob_view_reads_historical_bytes_and_escapes_code() {
     .is_err());
 }
 
+/// ★ A commit's page (#3233): its message, author, date and changed files, each changed file
+/// linked to its blob page, a deleted one shown as text, every value escaped.
+#[test]
+fn local_commit_view_shows_message_author_date_and_linked_files() {
+    let (dir, _) = scratch(None);
+    write(dir.path(), "src/lib.rs", "pub fn two() {}\n");
+    write(dir.path(), "docs/new <b>.md", "# New\n");
+    std::fs::remove_file(dir.path().join(ODD)).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(
+        dir.path(),
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Change <lib> & docs",
+            "-m",
+            "Why: the <b>body</b>.\nSecond line.",
+        ],
+    );
+    let head = git(dir.path(), &["rev-parse", "HEAD"]);
+    let lib = git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]);
+    let docs = git(dir.path(), &["rev-parse", "HEAD:docs/new <b>.md"]);
+    let (hub, _watch) = served(dir.path(), &[]);
+    let iri = ikigai_gonk::git_object::object_iri("browse", "demo", &head);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert!(
+        html.contains("<h2>Change &lt;lib&gt; &amp; docs</h2>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<code>Why: the &lt;b&gt;body&lt;/b&gt;.\nSecond line.</code></pre>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("Scratch") && html.contains("<time datetime='2026-10-18T12:00:00+00:00'>"),
+        "{html}"
+    );
+    let link = |sha: &str, label: &str| {
+        format!(
+            "<li><a href='/browse/{}'>{label}</a>",
+            ikigai_gonk::git_object::object_iri("browse", "demo", sha)
+        )
+    };
+    assert!(html.contains(&link(&lib, "src/lib.rs")), "{html}");
+    assert!(
+        html.contains(&link(&docs, "docs/new &lt;b&gt;.md")),
+        "{html}"
+    );
+    assert!(html.contains("<h2>Changed files</h2><p>3 files changed (compared with its first parent).</p><ul><li>"), "{html}");
+    assert!(
+        html.contains("<li><code class='iri'>sp ace/a b#c%d+e&amp;f=g é.rs</code> (deleted)</li>"),
+        "{html}"
+    );
+    // The page is behind the same grants as the object.
+    assert!(read(
+        &hub,
+        &iri,
+        &[("as", "text/html")],
+        &Capability::scoped(["urn:cap:exec:git"])
+    )
+    .is_err());
+}
+
+/// A changed file whose blob has no code link the viewer may follow stays its path, as text.
+#[test]
+fn a_commit_file_without_a_readable_blob_stays_text() {
+    let (dir, head) = scratch(None);
+    let mut repo = mapped(dir.path());
+    repo.blob = None;
+    let hub = object_hub(&[repo]);
+    let iri = ikigai_gonk::git_object::object_iri("configured", "demo", &head);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert!(html.contains("<h2>the first commit</h2>"), "{html}");
+    assert!(
+        html.contains("<li><code class='iri'>src/lib.rs</code> (added)</li>"),
+        "{html}"
+    );
+    assert!(!html.contains("<li><a "), "{html}");
+}
+
+/// A large commit lists a bounded number of files and says how many more it changed.
+#[test]
+fn a_large_commit_lists_a_bounded_number_of_files() {
+    let (dir, _) = scratch(None);
+    let shown = ikigai_gonk::git_object::CHANGED_FILES_SHOWN;
+    for n in 0..shown + 3 {
+        write(dir.path(), &format!("many/{n:03}.txt"), &format!("{n}\n"));
+    }
+    let head = commit(dir.path(), "Many files");
+    let mut repo = mapped(dir.path());
+    repo.blob = None;
+    let hub = object_hub(&[repo]);
+    let iri = ikigai_gonk::git_object::object_iri("configured", "demo", &head);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert_eq!(html.matches("<li>").count(), shown, "{html}");
+    assert!(
+        html.contains(&format!("{} files changed", shown + 3)),
+        "{html}"
+    );
+    assert!(html.contains("3 more files are not listed here."), "{html}");
+}
+
 #[test]
 fn close_evidence_git_iris_link_and_survive_reopening() {
     let (dir, head) = scratch(None);
