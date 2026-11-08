@@ -693,7 +693,9 @@ ikigai-nl = "0.6.0"
 # ★ 0.20.8 is the floor now, a SECURITY one (ledger #2894, #2960; ikigai-browse PR 142, 143): a
 # checkout read walks from a held root handle with a no-follow open on every component, so a
 # path component swapped for a symlink between the check and the open cannot escape a browse root.
-ikigai-browse = "0.21.0"
+# 0.21.1 (ledger #3268): Mount::pull_request_roots limits PR panels to configured
+# GitHub roots; browse also hides them from viewers without urn:cap:exec:gh.
+ikigai-browse = "0.21.1"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking

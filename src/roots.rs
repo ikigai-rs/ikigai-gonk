@@ -141,7 +141,7 @@ impl RootNames {
     }
 }
 
-/// What builds the family over a set of roots: [`crate::browse::wire`] with this process's
+/// What builds the family over a set of roots: [`crate::browse::wire_with_github`] with this process's
 /// writer, graph, tiers and config home, and "On GitHub" with the overrides that apply.
 /// `main` writes it once, from the same values it wired the first arrangement with.
 pub type Build =

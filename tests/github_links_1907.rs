@@ -114,17 +114,16 @@ fn served(dir: &Path, overrides: &[(String, String)]) -> (Arc<Kernel>, RootWatch
         .expect("a shared in-memory store");
     let (watch, refused) = RootWatch::start(&roots);
     assert!(refused.is_empty(), "{refused:?}");
-    let wired = browse::wire(
+    let wired = browse::wire_with_github(
         roots.clone(),
         store.shared_writer().expect("the store's writer"),
         Some(&watch),
         None,
         &graph,
         None,
+        overrides,
     );
-    let space = wired
-        .space
-        .with_github(Arc::new(github::space(&roots, overrides)));
+    let space = wired.space;
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(space)),
@@ -1128,6 +1127,34 @@ fn a_name_that_smuggles_an_absolute_url_never_becomes_the_target() {
             ),
             Err(Error::NotFound(_)) => {}
             Err(other) => panic!("{name}: {other}"),
+        }
+    }
+}
+
+/// Ledger #3268: an origin alone does not opt a root into the PR source.
+#[test]
+fn pull_request_panels_require_a_configured_github_repository() {
+    let (repo, _) = scratch(Some(ORIGIN));
+    for (overrides, enabled) in [
+        (vec![], false),
+        (
+            vec![("demo".to_string(), "ikigai-rs/demo".to_string())],
+            true,
+        ),
+    ] {
+        let (hub, _watch) = served(repo.path(), &overrides);
+        for iri in ["urn:repo:demo:tree", "urn:repo:demo:tree:src"] {
+            let html = text(&hub, iri, &[("as", "text/html")]);
+            assert_eq!(html.contains("browse-recent-prs"), enabled, "{iri}: {html}");
+            assert_eq!(html.contains("pull requests"), enabled, "{iri}: {html}");
+            assert_eq!(
+                html.contains("hx-trigger=\"load\""),
+                enabled,
+                "{iri}: {html}"
+            );
+            let reader = Capability::scoped(["urn:cap:browse:read:demo"]);
+            let html = read(&hub, iri, &[("as", "text/html")], &reader).expect("tree read");
+            assert!(!html.contains("pull requests"), "{iri}: {html}");
         }
     }
 }
