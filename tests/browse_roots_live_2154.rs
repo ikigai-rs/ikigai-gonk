@@ -561,7 +561,7 @@ fn pull_request_panels_follow_github_configuration_without_a_restart() {
         if stage != "startup" {
             std::fs::write(
                 &config,
-                enabled.map(&config_for).unwrap_or_else(|| roots.clone()),
+                enabled.map(config_for).unwrap_or_else(|| roots.clone()),
             )
             .unwrap();
         }
