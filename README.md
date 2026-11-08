@@ -4900,6 +4900,7 @@ Configure local clones and optional web URL templates in `config.toml`:
 gonk.repository = "core=~/git/ikigai-core"
 gonk.repository.commit = "core=https://github.com/ikigai-rs/ikigai-core/commit/{sha}"
 gonk.repository.blob = "core=https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}"
+gonk.repository.file = "core=https://github.com/ikigai-rs/ikigai-core/blob/main/{path}"
 ```
 
 Each key is repeatable, keyed by repository name. `{sha}` is the object's full SHA;
@@ -4921,6 +4922,30 @@ rendering a page. Clones are queried through ikigai-repo, with no network fetch.
 lookups are cached by full SHA; missing objects can be retried after they arrive. Wrong
 object types, unreadable clones, invalid IRIs and unresolved objects remain plain text.
 Only a configured clone that is also the same named browse root has a local fallback.
+
+### Names in item text resolve when followed
+
+A full IRI in an item's body or comments is a link, and its text is the IRI as written:
+`urn:git:commit:<sha>`, `urn:git:blob:<sha>`, `urn:repo:file:<root>/<path>`,
+`urn:iki:ledger:<ledger>:item:<id>`, `urn:layer:<layer>:entry:<id>`, `gh:<owner>/<repo>#<n>`,
+and any other `urn:` or `tag:` IRI. Every one links to the same route,
+`/resolution/iri/<iri>` (`urn:iki:gonk:resolution:iri:<iri>`), which decides where it goes
+when someone follows it, under that person's own grants. The stored text keeps the name and
+never a URL, so when resolution improves every old link improves with it. Rendering looks
+nothing up: a page never says whether a name exists.
+
+| name | resolves to |
+|---|---|
+| `urn:git:commit:` / `urn:git:blob:` | the object's code link, as for `about` targets above |
+| `urn:repo:file:<root>/<path>` | browse's current file, with `urn:cap:browse:read:<root>`; else the root's `gonk.repository.file` template (`{path}` is its one placeholder, each segment encoded); `about` targets link to browse the same way |
+| `urn:iki:ledger:<ledger>:item:<id>` | the item page, when the viewer may read that ledger |
+| `urn:layer:<layer>:entry:<id>` | the entry on the Layers page, when the viewer may read that layer there |
+| `gh:<owner>/<repo>#<n>` | `https://github.com/<owner>/<repo>/issues/<n>` (GitHub forwards a pull request's number) |
+
+A name that resolves answers `200` with a page that sends the browser on at once (a
+`<meta http-equiv="refresh">`) and says where, as a link. A target is only ever a gonk path
+or a configured template's fixed host, never a URL taken from the name. An unknown name and
+a name the viewer may not read get the same `404`.
 
 ## Accessibility
 

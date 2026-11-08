@@ -1357,6 +1357,9 @@ fn routes() -> Vec<Route> {
         // both match: this one has no segment after `/browse`) but because reading
         // the table top to bottom should meet the door before its depths.
         route("/browse", crate::k::ROOTS_IRI),
+        // Ledger #3238: where a name in item text goes when it is followed. RAW: the whole name
+        // is one encoded segment (`resolution::href`), colons, slashes and `#` included.
+        route(crate::resolution::ROUTE.0, crate::resolution::ROUTE.1),
         // The Layers page (ledger #1675). Its poll is a literal path listed first: `~` is
         // not a layer-name character, so it can never be a layer's page. No per-route `cap`,
         // for the reason the Queue's rows take none.
@@ -1394,7 +1397,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 21] = [
+pub const GONK_PATHS: [&str; 22] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
@@ -1409,6 +1412,7 @@ pub const GONK_PATHS: [&str; 21] = [
     "/queue",
     "/browse",
     "/layers",
+    crate::resolution::PATH,
     crate::onboard::PAGE_PATH,
     // The RDF Toolbox's rows ([`crate::toolbox::routes`]), when `gonk.toolbox.dist` adds them.
     crate::toolbox::PATH,

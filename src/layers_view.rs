@@ -1902,6 +1902,21 @@ async fn ready(view: &Arc<LayersView>) -> Result<Snapshot> {
     .await
 }
 
+/// Whether `layer` is one this page reads, as its own page would find it (ledger #3238): the
+/// caller holds [`CAP_READ`] and the identity this page reads as holds a read grant on it.
+/// What [`crate::resolution`] asks before it sends a layer entry's name here.
+pub(crate) async fn reads_layer(
+    view: &Arc<LayersView>,
+    capability: &ikigai_core::Capability,
+    layer: &str,
+) -> bool {
+    capability.allows(CAP_READ)
+        && crate::layer::is_layer_name(layer)
+        && ready(view)
+            .await
+            .is_ok_and(|snapshot| snapshot.layers.contains_key(layer))
+}
+
 fn layer_binding(inv: &Invocation<'_>) -> Result<String> {
     let layer = web::binding(inv, "layer")?;
     if !crate::layer::is_layer_name(&layer) {

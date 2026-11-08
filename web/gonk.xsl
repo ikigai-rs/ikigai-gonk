@@ -75,6 +75,9 @@
             <script src="/static/shell.js"></script>
             <script src="/static/htmx.min.js" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
+            <!-- A resolved name's instant refresh (src/resolution.rs, WCAG H76): built and
+                 escaped in Rust and spliced here, on that page alone. -->
+            <xsl:apply-templates select="view:slot[@name = 'refresh']"/>
           </head>
           <body>
             <a class="skip" href="#main">Skip to content</a>
@@ -332,6 +335,7 @@
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
       <xsl:when test="@view = 'refusal'"><xsl:apply-templates select="view:refusal"/></xsl:when>
+      <xsl:when test="@view = 'resolution'"><xsl:apply-templates select="view:resolution"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
@@ -448,6 +452,18 @@
       <xsl:if test="@grant">
         <p class="grant-needed">The grant it needs: <code><xsl:value-of select="@grant"/></code></p>
       </xsl:if>
+    </section>
+  </xsl:template>
+
+  <!--
+    A name that resolves (ledger #3238, src/resolution.rs): the browser follows the head's
+    instant refresh; this is the page for one that does not. The heading is the name as written,
+    and the one sentence links to where it goes, spliced in by Rust as the refresh is.
+  -->
+  <xsl:template match="view:resolution">
+    <section class="panel resolution" aria-labelledby="resolution-title">
+      <h1 id="resolution-title"><code class="iri"><xsl:value-of select="@name"/></code></h1>
+      <xsl:apply-templates select="view:slot[@name = 'resolved']"/>
     </section>
   </xsl:template>
 

@@ -736,6 +736,11 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 ///   request on to it), and `owner/repo PR N` or `owner/repo PR #N` to
 ///   `https://github.com/owner/repo/pull/N` ([`github_ref_at`]). A bare `#N` or `PR N` names
 ///   no repository, so it stays text.
+/// - **A full IRI is a NAME** (ledger [#3238](http://localhost:1062/l/default/item/3238)): a
+///   Git commit or blob, a working-tree file, a ledger item, a layer entry, `gh:owner/repo#N`
+///   and any other `urn:` or `tag:` IRI links to `/resolution/iri/…` ([`crate::resolution`]),
+///   which decides where it goes when it is followed. The link text is the IRI as written;
+///   nothing is looked up here ([`name_at`]).
 /// - Everything else is text: no markdown, no HTML.
 ///
 /// ```
@@ -768,6 +773,42 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 /// );
 /// // Text outside a marked element is never touched.
 /// assert_eq!(linkify("<p>https://a.example</p>"), "<p>https://a.example</p>");
+/// ```
+///
+/// A full IRI links to the resolution route, one encoded segment, its text as written; trailing
+/// punctuation stays outside the link, an abbreviated SHA stays text, and a name inside a URL
+/// is part of the URL:
+///
+/// ```
+/// use ikigai_gonk::render::linkify;
+/// let page = |text: &str| linkify(&format!("<p data-linkify='default'>{text}</p>"));
+/// let link = |name: &str| format!("<a href='{}'>{name}</a>", ikigai_gonk::resolution::href(name));
+/// let sha = "0123456789abcdef0123456789abcdef01234567";
+/// for name in [
+///     format!("urn:git:commit:{sha}"),
+///     format!("urn:git:blob:{sha}"),
+///     "urn:repo:file:core/src/lib.rs".to_string(),
+///     "urn:iki:ledger:default:item:3238".to_string(),
+///     "urn:layer:talk-chris:entry:01m6vcrdky000000000001y".to_string(),
+///     "gh:ikigai-rs/ikigai-gonk#319".to_string(),
+///     "urn:isbn:0451450523".to_string(),
+///     "tag:ikigai.example,2026-11-07:note".to_string(),
+/// ] {
+///     assert_eq!(page(&format!("see {name}.")), format!("<p data-linkify='default'>see {}.</p>", link(&name)));
+///     assert_eq!(page(&format!("({name}),")), format!("<p data-linkify='default'>({}),</p>", link(&name)));
+/// }
+/// assert_eq!(
+///     link("urn:repo:file:core/src/lib.rs"),
+///     "<a href='/resolution/iri/urn%3Arepo%3Afile%3Acore%2Fsrc%2Flib.rs'>urn:repo:file:core/src/lib.rs</a>"
+/// );
+/// // An abbreviated SHA names no object: the whole token is text.
+/// assert_eq!(page("urn:git:commit:0123abc"), "<p data-linkify='default'>urn:git:commit:0123abc</p>");
+/// // Inside a URL a name is part of the URL.
+/// let url = format!("https://a.example/x?about=urn:git:commit:{sha}");
+/// assert_eq!(page(&url), format!("<p data-linkify='default'><a href='{url}'>{url}</a></p>"));
+/// // Not names: no namespace, a word that ends in `urn:`, a backtick's quote stays outside.
+/// assert_eq!(page("urn:x and turn:a:b"), "<p data-linkify='default'>urn:x and turn:a:b</p>");
+/// assert_eq!(page("`urn:isbn:1`"), format!("<p data-linkify='default'>`{}`</p>", link("urn:isbn:1")));
 /// ```
 pub fn linkify(html: &str) -> String {
     let marker = format!("{LINKIFY_ATTR}='");
@@ -842,6 +883,17 @@ fn linkify_text(text: &str, value: &str) -> String {
                 .chars()
                 .next_back()
                 .is_some_and(|c| matches!(c, '/' | '.' | '-' | '_' | ':' | '@' | '#'));
+            if !joined {
+                if let Some(len) = name_at(here) {
+                    let name = &here[..len];
+                    out.push_str(&format!(
+                        "<a href='{}'>{name}</a>",
+                        crate::resolution::href(name)
+                    ));
+                    i += len;
+                    continue;
+                }
+            }
             if !joined {
                 if let Some((len, href)) = github_ref_at(here) {
                     out.push_str(&format!(
@@ -975,6 +1027,81 @@ fn url_at(text: &str) -> Option<usize> {
         url = trimmed;
     }
     (url.len() > scheme.len()).then_some(url.len())
+}
+
+/// The length of the full IRI that `text` starts with, when it is a NAME [`linkify`] links to
+/// the resolution route ([`crate::resolution`], ledger
+/// [#3238](http://localhost:1062/l/default/item/3238)); `None` when it starts with none.
+///
+/// A lexer and nothing more: it looks nothing up, so rendering stays one pass over the text
+/// and a page never says whether a name exists. A name is `urn:`, `tag:` or `gh:` and runs to
+/// whitespace or a character no name in prose carries (`<`, `>`, `&`, a quote, `[`, `]`, a
+/// backtick); a trailing `.` `,` `;` `:` `!` `?` `*` and an unbalanced `)` are the sentence's,
+/// as for a URL. Then it must be a name of its family, whole:
+///
+/// - `urn:git:` a commit or blob with a FULL SHA ([`crate::git_object::git_iri`]): an
+///   abbreviation names nothing, so the whole token stays text;
+/// - `urn:repo:file:` a root and a relative path ([`crate::web::repo_file`]);
+/// - `gh:owner/repo#N`, whole, by [`github_ref_at`]'s rules;
+/// - `tag:` an authority, a `,`, a date and a `:` (RFC 4151);
+/// - any other `urn:` a namespace of 2 to 32 letters, digits and hyphens, a `:` and the rest
+///   (RFC 8141);
+///
+/// and the route must be able to carry it ([`crate::resolution::routable`]).
+fn name_at(text: &str) -> Option<usize> {
+    if !["urn:", "tag:", "gh:"].iter().any(|p| text.starts_with(p)) {
+        return None;
+    }
+    let mut end = text.len();
+    for (i, c) in text.char_indices() {
+        let ok = if c.is_ascii() {
+            c.is_ascii_alphanumeric() || "-._~:/?#@!$()*+,;=%".contains(c)
+        } else {
+            c.is_alphanumeric()
+        };
+        if !ok {
+            // `&amp;` is a `&` inside the name: half of it is not the name.
+            if text[i..].starts_with("&amp;") {
+                return None;
+            }
+            end = i;
+            break;
+        }
+    }
+    let mut name = &text[..end];
+    loop {
+        let trimmed = match name.chars().next_back() {
+            Some('.' | ',' | ';' | ':' | '!' | '?' | '*') => &name[..name.len() - 1],
+            Some(')') if name.matches(')').count() > name.matches('(').count() => {
+                &name[..name.len() - 1]
+            }
+            _ => break,
+        };
+        name = trimmed;
+    }
+    let family = if name.starts_with("urn:git:") {
+        crate::git_object::git_iri(name).is_some()
+    } else if name.starts_with("urn:repo:file:") {
+        crate::web::repo_file(name).is_some()
+    } else if let Some(rest) = name.strip_prefix("gh:") {
+        github_ref_at(rest).is_some_and(|(len, _)| len == rest.len()) && rest.contains('#')
+    } else if let Some(rest) = name.strip_prefix("tag:") {
+        rest.split_once(',').is_some_and(|(authority, tail)| {
+            !authority.is_empty()
+                && tail
+                    .split_once(':')
+                    .is_some_and(|(date, specific)| !date.is_empty() && !specific.is_empty())
+        })
+    } else {
+        let rest = &name["urn:".len()..];
+        rest.split_once(':').is_some_and(|(nid, nss)| {
+            (2..=32).contains(&nid.len())
+                && !nid.starts_with('-')
+                && nid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !nss.is_empty()
+        })
+    };
+    (family && crate::resolution::routable(name)).then_some(name.len())
 }
 
 /// The length and the GitHub URL of the `owner/repo#N`, `owner/repo PR N` or `owner/repo PR #N`
