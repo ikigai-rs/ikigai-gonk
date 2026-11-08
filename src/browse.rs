@@ -387,6 +387,9 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 /// `--config-home X` styled its pages from, and watched, the operator's real `a11y.toml`.
 /// `None` states that this process has none — built-in themes, no watch — which is what a
 /// hermetic test wants.
+///
+/// No GitHub entries are configured here, so tree pages have no pull-request panel.
+/// Use [`wire_with_github`] when the operator configured `gonk.browse.github`.
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
     writer: SharedWriter,
@@ -394,6 +397,21 @@ pub fn wire(
     explain: Option<&ExplainTiers>,
     graph: &Graph,
     config_home: Option<PathBuf>,
+) -> Wired {
+    wire_with_github(roots, writer, watch, explain, graph, config_home, &[])
+}
+
+/// Wire browse with the operator's `gonk.browse.github` entries. Only these roots
+/// have a pull-request source; an origin used by "On GitHub" does not opt one in.
+/// Used for both startup and live configuration reloads.
+pub fn wire_with_github(
+    roots: Vec<(String, PathBuf)>,
+    writer: SharedWriter,
+    watch: Option<&RootWatch>,
+    explain: Option<&ExplainTiers>,
+    graph: &Graph,
+    config_home: Option<PathBuf>,
+    github_repositories: &[(String, String)],
 ) -> Wired {
     let roots_for_objects = roots.clone();
     let first = roots.first().map(|(name, _)| name.clone());
@@ -403,9 +421,8 @@ pub fn wire(
         .collect::<Vec<_>>();
     // The git-history series (ledger #1631) over the same roots, before the mount takes them.
     let history = crate::history::space(&roots);
-    // "On GitHub" over the same roots (ledger #1907), with no override: `main` replaces it
-    // with [`CachedReads::with_github`] when a `gonk.browse.github` line names one.
-    let github = crate::github::space(&roots, &[]);
+    // "On GitHub" and the PR panel use the same configuration (ledger #3268).
+    let github = crate::github::space(&roots, github_repositories);
     // The dev-tooling facades (`urn:repo:git:*`, `gh:*`, `cargo:*`) confined to the same roots
     // (ledger #1712): since ikigai-repo 0.3 a space built with no roots refuses every `dir=`,
     // so browse's repository views were refused until the roots came here too.
@@ -415,6 +432,7 @@ pub fn wire(
     // `ExplainConfig` on any other `Arc<Store>`, even one over the same dataset.
     let store = Arc::clone(writer.store());
     let mount = graph.on(Mount::new(roots)
+        .pull_request_roots(github_repositories.iter().map(|(name, _)| name.clone()))
         .annotations_through(writer)
         // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style`
         // reads its themes and its contrast floor from. Without it that file would sit

@@ -323,7 +323,7 @@ fn serve(flags: &config::Flags) -> ! {
         .shared_writer()
         .expect("a store opened shared hands out its writer");
     let browse = browses.then(|| {
-        browse::wire(
+        browse::wire_with_github(
             settings.browse_roots.clone(),
             writer.clone(),
             Some(&root_watch),
@@ -332,6 +332,7 @@ fn serve(flags: &config::Flags) -> ! {
             // `Graph::chosen()`, which would be a second decision.
             &browse_graph,
             Some(homes.config.clone()),
+            &settings.browse_github,
         )
     });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched(), &browse_graph);
@@ -342,14 +343,7 @@ fn serve(flags: &config::Flags) -> ! {
     let (browse_space, style) = match browse {
         Some(wired) => (
             Some(Arc::new(
-                wired
-                    .space
-                    .observing_reviews(Arc::clone(&activity))
-                    // "On GitHub" with the operator's `gonk.browse.github` lines (ledger #1907).
-                    .with_github(Arc::new(ikigai_gonk::github::space(
-                        &settings.browse_roots,
-                        &settings.browse_github,
-                    ))),
+                wired.space.observing_reviews(Arc::clone(&activity)),
             )),
             Some(wired.style),
         ),
@@ -367,16 +361,16 @@ fn serve(flags: &config::Flags) -> ! {
                 let (graph, config_home, writer) =
                     (browse_graph.clone(), homes.config.clone(), writer.clone());
                 let build: roots::Build = Box::new(move |roots, watch, github| {
-                    browse::wire(
+                    browse::wire_with_github(
                         roots.to_vec(),
                         writer.clone(),
                         Some(watch),
                         explain.as_ref(),
                         &graph,
                         Some(config_home.clone()),
+                        github,
                     )
                     .space
-                    .with_github(Arc::new(ikigai_gonk::github::space(roots, github)))
                 });
                 roots::Source::Config {
                     path: config_path.clone(),
