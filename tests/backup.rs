@@ -88,8 +88,9 @@ const LEDGER_IDS: [&str; 28] = [
 /// gonk's own hub resources: the page renderer's chunk transform and the four `urn:sparql:*`
 /// forms, in every composition (`tests/conformance.rs` walks and pins them; here they are
 /// only counted).
-const HUB_IDS: [&str; 5] = [
+const HUB_IDS: [&str; 6] = [
     "gonk-render",
+    "gonk-render-markdown",
     "sparql-select",
     "sparql-ask",
     "sparql-construct",

@@ -1601,6 +1601,9 @@ struct Rows<'a> {
     held: Vec<String>,
     /// The principals whose entries are this host's own side: the identity, and [`LOCAL_KEY`]'s.
     local: BTreeSet<String>,
+    /// Entry id to rendered body ([`Rows::render_bodies`]). An entry without one is shown as
+    /// written.
+    markdown: BTreeMap<String, String>,
 }
 
 impl<'a> Rows<'a> {
@@ -1618,6 +1621,24 @@ impl<'a> Rows<'a> {
                 .map(|l| l.name().to_string())
                 .collect(),
             local,
+            markdown: BTreeMap::new(),
+        }
+    }
+
+    /// Render `entries`' bodies as Markdown for [`entry_row`], each through the hub's cache.
+    async fn render_bodies<'e>(
+        &mut self,
+        inv: &Invocation<'_>,
+        entries: impl Iterator<Item = &'e Entry>,
+    ) {
+        for entry in entries {
+            let Some(body) = entry.body.as_deref() else {
+                continue;
+            };
+            let refs = self.refs(&entry.who);
+            if let Some(fragment) = render::rendered_markdown(inv, body, &refs).await {
+                self.markdown.insert(entry.id.clone(), fragment);
+            }
         }
     }
 
@@ -1721,11 +1742,12 @@ fn entry_row(
     }
     let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let refs = cx.refs(&entry.who);
-    let body = entry
-        .body
-        .as_deref()
-        .map(|b| element("body", &[("linkify", &refs)], b))
-        .unwrap_or_default();
+    // A fragment `render::entry_markdown` built is markup; anything else is text.
+    let body = match (cx.markdown.get(&entry.id), entry.body.as_deref()) {
+        (Some(fragment), _) => render::wrap("rendered", &[], fragment),
+        (None, Some(b)) => element("body", &[("linkify", &refs)], b),
+        (None, None) => String::new(),
+    };
     wrap(name, &attributes, &body)
 }
 
@@ -1753,14 +1775,23 @@ fn receipt_row(receipt: &Receipt, me: Option<&Me>, new: bool, item: Option<&Item
 /// [`render::MAX_CHUNK_BYTES`]: xrust's cost is superlinear in one document (ledger #519).
 fn chunks(rows: &[String]) -> Vec<String> {
     let budget = render::MAX_CHUNK_BYTES / 2;
+    let tag_budget = render::MAX_MARKDOWN_TAGS;
     let mut out = Vec::new();
     let mut current = String::new();
     let mut count = 0;
+    let mut tags = 0;
     for row in rows {
-        if count > 0 && (count >= render::CHUNK_ROWS || current.len() + row.len() > budget) {
+        let row_tags = row.matches('<').count();
+        if count > 0
+            && (count >= render::CHUNK_ROWS
+                || current.len() + row.len() > budget
+                || tags + row_tags > tag_budget)
+        {
             out.push(render::chunk(&std::mem::take(&mut current)));
             count = 0;
+            tags = 0;
         }
+        tags += row_tags;
         current.push_str(row);
         count += 1;
     }
@@ -2169,7 +2200,7 @@ impl Endpoint for LayerPage {
             let who_views = viewer(inv);
             let seen = view.cursors.get(&who_views, &layer).min(found.last);
             let me = snapshot.me.as_ref();
-            let cx = Rows::new(&self.web, inv, view, me);
+            let mut cx = Rows::new(&self.web, inv, view, me);
             attributes[2].1 = found.info.label.clone();
             attributes.push(("model", model_word(&found.info.model)));
             attributes.push(("verbs", verbs_sentence(&found.info)));
@@ -2213,6 +2244,7 @@ impl Endpoint for LayerPage {
                     slots.push(("entries".to_string(), rendered(inv, &[]).await?));
                 }
                 Model::Channel => {
+                    cx.render_bodies(inv, found.entries.iter()).await;
                     let rows: Vec<String> = found
                         .entries
                         .iter()
@@ -2238,6 +2270,7 @@ impl Endpoint for LayerPage {
                 Model::Tuplespace => {
                     attributes.push(("tuplespace", "true".to_string()));
                     let links = item_links(&self.web, inv, &layer).await;
+                    cx.render_bodies(inv, found.tuples.iter()).await;
                     let (tuples, receipts) = tuple_rows(found, &cx, seen, &links);
                     children.push_str(&render::slot("tuples"));
                     children.push_str(&render::slot("receipts"));
@@ -2495,11 +2528,13 @@ impl Endpoint for Wait {
                 let found = snapshot.layers.get(name);
                 let last = found.map_or(after, |l| l.last);
                 if let Some(found) = found.filter(|l| l.last > after) {
-                    let cx = Rows::new(&self.web, inv, view, snapshot.me.as_ref());
+                    let mut cx = Rows::new(&self.web, inv, view, snapshot.me.as_ref());
                     match found.info.model {
                         Model::Channel => {
                             let posts =
                                 may_post(&snapshot, &found.info) && inv.capability.allows(CAP_SAY);
+                            cx.render_bodies(inv, found.entries.iter().filter(|e| e.seq > after))
+                                .await;
                             let rows: Vec<String> = found
                                 .entries
                                 .iter()
@@ -2523,6 +2558,7 @@ impl Endpoint for Wait {
                         Model::Tuplespace => {
                             let seen = view.cursors.get(&who_views, name).min(found.last);
                             let links = item_links(&self.web, inv, name).await;
+                            cx.render_bodies(inv, found.tuples.iter()).await;
                             let (tuples, receipts) =
                                 tuple_rows(found, &cx, seen.min(after), &links);
                             attributes.push(("tuplespace", "true".to_string()));
