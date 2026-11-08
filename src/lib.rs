@@ -50,6 +50,7 @@ pub mod dashboard;
 pub mod doors;
 pub mod egress;
 pub mod face;
+pub mod face_frame;
 pub mod findings;
 pub mod findings_summary;
 pub mod git_object;
