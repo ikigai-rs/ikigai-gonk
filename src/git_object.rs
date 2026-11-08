@@ -344,7 +344,7 @@ const MESSAGE_READ: u64 = 64 * 1024;
 /// What a commit's page shows beside its identity (#3233).
 struct Commit {
     author: String,
-    /// The author date, strict ISO 8601 (`%aI`).
+    /// The author date, strict ISO 8601 (`%aI`), UTC as `Z`.
     date: String,
     message: String,
     /// The message was cut at [`MESSAGE_READ`].
@@ -401,7 +401,11 @@ fn commit_detail(dir: &Path, sha: &str) -> Result<Commit> {
     })?;
     Ok(Commit {
         author: field(0),
-        date: field(1),
+        // Older git writes UTC as `+00:00`, newer as `Z`: one form, whichever git runs.
+        date: match field(1).strip_suffix("+00:00") {
+            Some(utc) => format!("{utc}Z"),
+            None => field(1),
+        },
         message: field(3).trim_end().to_string(),
         cut,
         parent: first.is_some(),

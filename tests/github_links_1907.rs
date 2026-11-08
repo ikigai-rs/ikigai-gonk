@@ -832,7 +832,8 @@ fn local_commit_view_shows_message_author_date_and_linked_files() {
         "{html}"
     );
     assert!(
-        html.contains("Scratch") && html.contains("<time datetime='2026-10-18T12:00:00+00:00'>"),
+        html.contains("Scratch")
+            && html.contains("<time datetime='2026-10-18T12:00:00Z'>2026-10-18T12:00:00Z</time>"),
         "{html}"
     );
     let link = |sha: &str, label: &str| {
