@@ -1027,3 +1027,106 @@ fn a_name_that_smuggles_an_absolute_url_never_becomes_the_target() {
         }
     }
 }
+
+// ---------------------------------------------------------------- the commit page (#3233)
+
+/// The `text/html` face of commit `sha` in the browse map's `demo`.
+fn commit_page(hub: &Kernel, map: &str, sha: &str, cap: &Capability) -> String {
+    read(
+        hub,
+        &ikigai_gonk::git_object::object_iri(map, "demo", sha),
+        &[("as", "text/html")],
+        cap,
+    )
+    .unwrap_or_else(|e| panic!("the commit page: {e}"))
+}
+
+#[test]
+fn a_commit_page_shows_its_message_author_date_and_linked_files() {
+    let (dir, _) = scratch(None);
+    write(dir.path(), "src/lib.rs", "pub fn two() {}\n");
+    write(dir.path(), "docs/new <b>.md", "new\n");
+    std::fs::remove_file(dir.path().join(ODD)).unwrap();
+    let head = commit(
+        dir.path(),
+        "Change <lib> & add docs\n\nThe body, <i>escaped</i>.\nSecond line.",
+    );
+    let blob = git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]);
+    let (hub, _watch) = served(dir.path(), &[]);
+    let html = commit_page(&hub, "browse", &head, &Capability::root());
+    assert!(
+        html.contains("<h2>Change &lt;lib&gt; &amp; add docs</h2>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("aria-label='Commit message'><code>The body, &lt;i&gt;escaped&lt;/i&gt;.\nSecond line.</code></pre>"),
+        "{html}"
+    );
+    assert!(html.contains("Author: Scratch"), "{html}");
+    assert!(
+        html.contains(&format!("<time datetime='{WHEN}'>{WHEN}</time>")),
+        "{html}"
+    );
+    let blob_page = format!(
+        "/browse/{}",
+        ikigai_gonk::git_object::object_iri("browse", "demo", &blob)
+    );
+    assert!(
+        html.contains(&format!(
+            "<li><a href='{blob_page}'><code>src/lib.rs</code></a> (modified)</li>"
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains("<code>docs/new &lt;b&gt;.md</code></a> (added)</li>"),
+        "{html}"
+    );
+    // A deleted file has no blob in this commit: its path is text.
+    assert!(
+        html.contains("<li><code>sp ace/a b#c%d+e&amp;f=g é.rs</code> (deleted)</li>"),
+        "{html}"
+    );
+    assert!(html.contains("<ul class='changed-files'>"), "{html}");
+}
+
+#[test]
+fn a_file_whose_blob_is_not_linkable_stays_text() {
+    let (dir, head) = scratch(None);
+    let mut repo = mapped(dir.path());
+    repo.blob = None;
+    let hub = object_hub(&[repo]);
+    let html = commit_page(&hub, "configured", &head, &Capability::root());
+    assert!(html.contains("<h2>the first commit</h2>"), "{html}");
+    assert!(
+        html.contains("<li><code>src/lib.rs</code> (added)</li>"),
+        "{html}"
+    );
+    assert!(!html.contains("<a href"), "{html}");
+}
+
+#[test]
+fn a_large_commit_lists_a_bounded_number_of_files() {
+    let (dir, _) = scratch(None);
+    let extra = 3;
+    for n in 0..ikigai_gonk::git_object::COMMIT_FILES_SHOWN + extra {
+        write(dir.path(), &format!("many/{n:03}.txt"), &format!("{n}\n"));
+    }
+    let head = commit(dir.path(), "Many files");
+    let mut repo = mapped(dir.path());
+    repo.blob = Some("https://code.example/object/{sha}".into());
+    let hub = object_hub(&[repo]);
+    let html = commit_page(&hub, "configured", &head, &Capability::root());
+    assert_eq!(
+        html.matches("<li>").count(),
+        ikigai_gonk::git_object::COMMIT_FILES_SHOWN,
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!("And {extra} more changed files, not listed.")),
+        "{html}"
+    );
+    assert!(
+        html.contains("href='https://code.example/object/"),
+        "{html}"
+    );
+}
