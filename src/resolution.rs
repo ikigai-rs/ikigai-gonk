@@ -11,7 +11,7 @@
 //! goes when it is followed, under the CALLER's capability. When resolution improves (a
 //! mounted ikigai-name, urnid.org), every old link improves with no rewrite.
 //!
-//! | name | rule ([`resolve`]) |
+//! | name | rule ([`Resolver::resolve`]) |
 //! |---|---|
 //! | `urn:git:commit:{sha}`, `urn:git:blob:{sha}` | the `git-link` map ([`crate::git_object`]), configured clones then browse roots, under the caller's grants |
 //! | `urn:repo:file:{root}/{path}` | browse's page for the file when the caller holds `urn:cap:browse:read:{root}` and `root` is a browse root; else the root's `gonk.repository.file` template; else unknown |
@@ -34,7 +34,7 @@
 //! Every rule builds its target from a validated piece of the name: a same-origin gonk path, a
 //! configured template whose host is fixed at start, or GitHub's fixed origin. A URL is never
 //! taken from the name, so this route is not an open redirect: an `http(s):` IRI in text is
-//! linked directly by `linkify` and is unknown here. [`built_here`] holds every target to that.
+//! linked directly by `linkify` and is unknown here. `built_here` holds every target to that.
 //!
 //! # ★ One 404 for unknown and unreadable
 //!
@@ -85,7 +85,7 @@ pub fn href(iri: &str) -> String {
 }
 
 /// Whether `iri` is a name this route can be asked about: the resource IRI it makes parses, so
-/// the route reaches [`Resolution`] for it rather than the door refusing the path.
+/// the route reaches its resource for it rather than the door refusing the path.
 pub fn routable(iri: &str) -> bool {
     iri.len() <= MAX_NAME
         && !iri.chars().any(|c| c.is_whitespace() || c.is_control())

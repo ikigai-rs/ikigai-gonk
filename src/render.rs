@@ -740,7 +740,7 @@ pub const LINKIFY_ATTR: &str = "data-linkify";
 ///   Git commit or blob, a working-tree file, a ledger item, a layer entry, `gh:owner/repo#N`
 ///   and any other `urn:` or `tag:` IRI links to `/resolution/iri/…` ([`crate::resolution`]),
 ///   which decides where it goes when it is followed. The link text is the IRI as written;
-///   nothing is looked up here ([`name_at`]).
+///   nothing is looked up here (`name_at`).
 /// - Everything else is text: no markdown, no HTML.
 ///
 /// ```
