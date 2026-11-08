@@ -4377,3 +4377,205 @@ fn a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read() {
         400
     );
 }
+
+/// A link written as the ledger writes one, under the root capability: a link across
+/// ledgers also writes its mirror into the target's graph (ikigai-ledger #2829).
+fn link_fixture(server: &Server, ledger: &str, subject: &str, target: &str, kind: &str) {
+    let request = [("item", subject), ("content", target), ("type", kind)]
+        .iter()
+        .fold(
+            ikigai_core::Request::new(
+                ikigai_core::Verb::Sink,
+                ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:link")).unwrap(),
+            ),
+            |request, (name, value)| {
+                request.with_arg(
+                    *name,
+                    ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()),
+                )
+            },
+        );
+    futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("linking {subject} {kind} {target}: {e}"));
+}
+
+fn close_fixture(server: &Server, ledger: &str, item: &str) {
+    let request = ikigai_core::Request::new(
+        ikigai_core::Verb::Sink,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:close")).unwrap(),
+    )
+    .with_arg(
+        "item",
+        ikigai_core::ArgRef::Inline(item.as_bytes().to_vec()),
+    );
+    futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("closing {item}: {e}"));
+}
+
+/// The listing row whose title is `title`, from its `<li` to its `</li>`.
+fn row_of<'a>(html: &'a str, title: &str) -> &'a str {
+    let at = html
+        .find(&format!(">{title}<"))
+        .unwrap_or_else(|| panic!("no row titled {title}: {html}"));
+    let start = html[..at].rfind("<li").expect("a row's start");
+    let end = at + html[at..].find("</li>").expect("a row's end");
+    &html[start..end]
+}
+
+fn number_of(server: &Server, ledger: &str, iri: &str) -> String {
+    let id = iri.rsplit_once(":item:").unwrap().1;
+    let request = ikigai_core::Request::new(
+        ikigai_core::Verb::Source,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:item:{id}")).unwrap(),
+    )
+    .with_arg(
+        "as",
+        ikigai_core::ArgRef::Inline(b"application/json".to_vec()),
+    );
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&answer.bytes).unwrap();
+    doc["item"]["number"].to_string()
+}
+
+/// Ledger #3217: a row knows what it blocks, not what blocks it. The page reads the reverse
+/// from the ledger's own graph, so a blocked row names its open blocker, and a row whose only
+/// blocker is closed, or that nothing blocks, shows no blocked badge at all.
+#[test]
+fn a_blocked_row_names_its_open_blocker_and_an_unblocked_row_shows_nothing() {
+    let server = Server::start();
+    let (blocker, _) = linked_fixture(&server, "default", "The open blocker");
+    let (blocked, blocked_id) = linked_fixture(&server, "default", "Waits on the blocker");
+    let (done, _) = linked_fixture(&server, "default", "A finished blocker");
+    let (released, _) = linked_fixture(&server, "default", "Released by a close");
+    linked_fixture(&server, "default", "Nothing blocks this");
+    link_fixture(&server, "default", &blocker, &blocked, "blocks");
+    link_fixture(&server, "default", &done, &released, "blocks");
+    close_fixture(&server, "default", &done);
+    let number = number_of(&server, "default", &blocker);
+
+    let page = server.page("/l/default", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let row = row_of(&page.body, "Waits on the blocker");
+    assert!(
+        row.contains(&format!(
+            "<span class='badge blocked'>blocked by #{number}</span>"
+        )),
+        "the blocked row names its blocker: {row}"
+    );
+    for title in [
+        "Nothing blocks this",
+        "Released by a close",
+        "The open blocker",
+    ] {
+        let row = row_of(&page.body, title);
+        assert!(!row.contains("blocked"), "{title} is not blocked: {row}");
+    }
+    // The item's own badges say the same.
+    let card = server.page(&format!("/l/default/item/{blocked_id}"), None);
+    assert!(
+        card.body.contains(&format!(
+            "<span class='badge blocked'>blocked by #{number}</span>"
+        )),
+        "{card:?}"
+    );
+}
+
+/// Ledger #3217: an item page lists what links TO it, in any ledger, through the mirrors,
+/// grouped by relation and ledger and read under the viewer's own capability: a linker the
+/// viewer cannot read is its IRI and nothing more.
+#[test]
+fn an_item_page_lists_inbound_links_across_ledgers_and_an_unreadable_linker_as_its_iri() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let (target, id) = linked_fixture(&server, "default", "The linked-to item");
+    let (here, _) = linked_fixture(&server, "default", "A blocker in this ledger");
+    let (seealso, _) = linked_fixture(&server, "default", "Related in this ledger");
+    let (crew, crew_id) = linked_fixture(&server, "crew", "A crew blocker");
+    let (secret, _) = linked_fixture(&server, "private", "Never disclose this title");
+    link_fixture(&server, "default", &here, &target, "blocks");
+    link_fixture(&server, "default", &seealso, &target, "related");
+    link_fixture(&server, "crew", &crew, &target, "blocks");
+    link_fixture(&server, "private", &secret, &target, "blocks");
+
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert!(!page.body.contains("Never disclose this title"), "{page:?}");
+        let inbound = page
+            .body
+            .split("id='inbound-title'")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no inbound panel: {page:?}"))
+            .split("</section>")
+            .next()
+            .unwrap();
+        let group = |heading: &str| {
+            inbound
+                .split(&format!("<h3>{heading}</h3>"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("no group {heading}: {inbound}"))
+                .split("</div>")
+                .next()
+                .unwrap()
+        };
+        assert!(
+            group("blocks this · default").contains("A blocker in this ledger"),
+            "{inbound}"
+        );
+        assert!(
+            group("related to this · default").contains("Related in this ledger"),
+            "{inbound}"
+        );
+        let crew_group = group("blocks this · crew");
+        assert!(crew_group.contains("A crew blocker"), "{inbound}");
+        assert!(
+            crew_group.contains(&format!("/l/crew/item/{crew_id}")),
+            "{inbound}"
+        );
+        assert!(
+            inbound.contains(&format!("<code class='iri'>{secret}</code>")),
+            "the unreadable linker is its IRI: {inbound}"
+        );
+        assert!(!inbound.contains("href='/l/private/"), "{inbound}");
+        // The page's own badge names every open blocker, the unreadable one by its IRI.
+        let badge = page
+            .body
+            .split("<span class='badge blocked'>")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no blocked badge: {page:?}"))
+            .split("</span>")
+            .next()
+            .unwrap();
+        assert!(
+            badge.contains(&format!("#{}", number_of(&server, "default", &here)))
+                && badge.contains(&format!("crew {crew_id}"))
+                && badge.contains(&secret),
+            "{badge}"
+        );
+    }
+    // An item nothing links to has no inbound panel.
+    let page = server.page(
+        &format!("/l/default/item/{}", here.rsplit_once(":item:").unwrap().1),
+        None,
+    );
+    assert!(!page.body.contains("inbound-title"), "{page:?}");
+}

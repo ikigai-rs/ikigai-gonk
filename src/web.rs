@@ -1908,6 +1908,7 @@ async fn ledger_listing(
     };
     enrich_items(&mut graph, ledger, inv, status, union.is_some());
     enrich_states(&mut graph, inv).await;
+    enrich_blocked(vec![&mut graph], inv).await;
     for item in &order {
         for (name, value) in [
             ("listLedger", Some(ledger.name())),
@@ -2738,18 +2739,28 @@ struct LinkedItems {
     slots: Vec<(String, String)>,
 }
 
-async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedItems> {
+async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Result<LinkedItems> {
     let mut cache: BTreeMap<String, Option<Graph>> = BTreeMap::new();
-    let mut groups: BTreeMap<(String, String), Vec<LinkedRow>> = BTreeMap::new();
-    let mut unavailable = String::new();
-    for link in graph.subjects_of_type(&format!("{}Link", render::VIEW_NS)) {
+    let links = graph.subjects_of_type(&format!("{}Link", render::VIEW_NS));
+    for link in &links {
         let target = graph
-            .value(&link, &format!("{}target", render::VIEW_NS))
+            .value(link, &format!("{}target", render::VIEW_NS))
             .unwrap_or_default();
         if let Some((ledger, canonical)) = Ledger::item_iri(&target).as_ref() {
             if !cache.contains_key(canonical) {
                 cache.insert(canonical.clone(), linked_row(inv, ledger, canonical).await);
             }
+        }
+    }
+    // One reverse read per target ledger for the rows' blocked badges (#3217), never one per row.
+    enrich_blocked(cache.values_mut().flatten().collect(), inv).await;
+    let mut groups: BTreeMap<(String, String), Vec<LinkedRow>> = BTreeMap::new();
+    let mut unavailable = String::new();
+    for link in links {
+        let target = graph
+            .value(&link, &format!("{}target", render::VIEW_NS))
+            .unwrap_or_default();
+        if let Some((ledger, canonical)) = Ledger::item_iri(&target).as_ref() {
             if let Some(Some(cached)) = cache.get(canonical) {
                 let mut row = cached.windows(std::slice::from_ref(canonical), 1).remove(0);
                 row.view(canonical, "linked", "true");
@@ -2867,7 +2878,7 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>) -> Result<LinkedIte
             .chunks(render::CHUNK_ROWS)
             .map(|window| render::chunk(&window.concat()))
             .collect();
-        let key = format!("link-row:{rel}:{ledger}");
+        let key = format!("{kind}-row:{rel}:{ledger}");
         slots.push((key.clone(), render::rendered_chunks(inv, &chunks).await?));
         output.push_str(&render::wrap(
             "link-group",
@@ -2927,6 +2938,103 @@ pub(crate) async fn git_href(inv: &Invocation<'_>, kind: &str, sha: &str) -> Opt
         }
     }
     None
+}
+
+/// `view:blockedBy` for every open item an open item blocks, in place (ledger
+/// [#3217](http://localhost:1062/l/default/item/3217)): its open blockers, named, in one value,
+/// because the stylesheet cannot order a repeated property. A row knows what it blocks, not
+/// what blocks it, so [`crate::inbound`] reads the reverse from each item's own ledger graph,
+/// one read per ledger across all of `graphs`, under the viewer's capability. A closed
+/// blocker blocks nothing, and an item nothing open blocks carries nothing.
+async fn enrich_blocked(mut graphs: Vec<&mut Graph>, inv: &Invocation<'_>) {
+    let open = format!("{LEDGER_NS}open");
+    let mut by_ledger: BTreeMap<String, (Ledger, Vec<String>)> = BTreeMap::new();
+    for graph in &graphs {
+        for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+            if graph.value(&item, &format!("{LEDGER_NS}status")).as_deref() != Some(open.as_str()) {
+                continue;
+            }
+            if let Some((ledger, canonical)) = Ledger::item_iri(&item) {
+                if canonical == item {
+                    by_ledger
+                        .entry(ledger.name().to_string())
+                        .or_insert_with(|| (ledger, Vec::new()))
+                        .1
+                        .push(item);
+                }
+            }
+        }
+    }
+    let mut named = BTreeMap::new();
+    for (ledger, items) in by_ledger.values() {
+        named.extend(crate::inbound::blockers(inv, ledger, items).await);
+    }
+    for graph in graphs.iter_mut() {
+        for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+            if let Some(blockers) = named.get(&item) {
+                graph.view(&item, "blockedBy", blockers.join(", "));
+            }
+        }
+    }
+}
+
+/// The words a group of inbound links is headed with: the relation, read from the linker.
+fn inbound_phrase(rel: &str) -> &'static str {
+    match rel {
+        "blocks" => "blocks this",
+        "parent" => "part of this",
+        _ => "related to this",
+    }
+}
+
+/// What links TO the item (ledger [#3217](http://localhost:1062/l/default/item/3217)), in any
+/// ledger, as its ledger's graph and mirrors hold it ([`crate::inbound`]), rendered as
+/// [`outgoing_links`] renders what it links to: live rows grouped by relation and ledger, each
+/// read under the viewer's capability, and a linker the viewer cannot read shown only as its
+/// IRI. A `parent` edge from this ledger is left to the Children panel, which already lists it
+/// ([`enrich_children`]). Nothing here unlinks: an edge belongs to the item that holds it.
+async fn inbound_links(
+    graph: &Graph,
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+) -> Result<LinkedItems> {
+    let mut links = Graph::default();
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let id = item
+            .rsplit_once(":item:")
+            .map(|(_, id)| id.to_string())
+            .unwrap_or_default();
+        let edges = crate::inbound::read(
+            inv,
+            ledger,
+            std::slice::from_ref(&item),
+            &crate::inbound::RELATIONS,
+        )
+        .await;
+        for (order, edge) in edges.iter().enumerate() {
+            let here =
+                Ledger::item_iri(&edge.subject).is_some_and(|(of, _)| of.name() == ledger.name());
+            if edge.rel == "parent" && here {
+                continue;
+            }
+            let node = format!("urn:iki:gonk:view:inbound:{id}:{}", order + 1);
+            links.typed(&node, &format!("{}Link", render::VIEW_NS));
+            links.view(&node, "order", format!("{:04}", order + 1));
+            links.view(&node, "rel", inbound_phrase(&edge.rel));
+            links.view(&node, "ledger", ledger.name());
+            links.view(&node, "id", id.clone());
+            links.view(&node, "item", item.clone());
+            links.view(&node, "target", edge.subject.clone());
+            links.view(&node, "canUnlink", "false");
+        }
+    }
+    if links.triples().is_empty() {
+        return Ok(LinkedItems {
+            xml: String::new(),
+            slots: Vec::new(),
+        });
+    }
+    outgoing_links(&links, inv, "inbound").await
 }
 
 /// Resolve only recognized Git IRIs and working-tree file IRIs, through the viewer's own
@@ -2996,6 +3104,7 @@ async fn item_card(
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
     enrich_items(&mut graph, ledger, inv, "open", false);
     enrich_states(&mut graph, inv).await;
+    enrich_blocked(vec![&mut graph], inv).await;
     enrich_close_reasons(&mut graph, &web.hub, ledger);
     enrich_git_links(&mut graph, inv).await;
     enrich_children(&mut graph);
@@ -3020,8 +3129,13 @@ async fn item_card(
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
     children.push_str(&graph.view_xml().map_err(render_err)?);
-    let linked = outgoing_links(&graph, inv).await?;
+    let mut linked = outgoing_links(&graph, inv, "link").await?;
     children.push_str(&linked.xml);
+    let inbound = inbound_links(&graph, inv, ledger).await?;
+    if !inbound.xml.is_empty() {
+        children.push_str(&render::wrap("inbound", &[], &inbound.xml));
+    }
+    linked.slots.extend(inbound.slots);
     let doc = envelope(
         "page",
         &[
