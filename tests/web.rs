@@ -311,7 +311,7 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
         ("Excluded queue", "needs-person,book:ikigai,blocked"),
         ("Closed queue", "needs-person,book:ikigai"),
         ("Matching elsewhere", "needs-person"),
-        ("Encoded queue", "c++ & café/?#%=yes"),
+        ("Encoded queue", ""),
     ] {
         let response = server.form(
             &[
@@ -332,6 +332,18 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
         );
         filed.push(first_item(&response.body));
     }
+    // Seed a pre-0.21.0 label directly: the write grammar now refuses these characters,
+    // but stored labels must still survive URL and HTML escaping in filters and listings.
+    let term = "c++ & café/?#%=yes";
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "<{}> <https://ikigai-rs.dev/ns/ledger#label> {} .",
+            filed[5].0,
+            serde_json::to_string(term).unwrap()
+        ),
+    );
     let closed = server.form(
         &[
             ("_ledger", "default"),
@@ -444,7 +456,6 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
     ] {
         assert!(filtered.body.contains(url), "{filtered:?}");
     }
-    let term = "c++ & café/?#%=yes";
     let encoded = ikigai_fn::html::url_segment(term);
     let all = server.page("/l/default", None);
     assert!(
@@ -1969,7 +1980,8 @@ fn a_repo_label_asks_the_ledger_the_next_question() {
 /// ⚠ The label comes out of the store, and the store holds text other people wrote. A label
 /// carrying a quote and a closing brace must not be able to change the SHAPE of the query it
 /// runs — the whole value stays one string literal, so the query is well-formed and simply
-/// matches nothing.
+/// matches only the item carrying that literal. New writes refuse this label, but older
+/// stores may still hold it.
 #[test]
 fn a_label_that_looks_like_sparql_cannot_reshape_the_query_it_runs() {
     let server = Server::start();
@@ -1984,7 +1996,19 @@ fn a_label_that_looks_like_sparql_cannot_reshape_the_query_it_runs() {
         ],
         None,
     );
-    assert_eq!(filed.status, 200, "{filed:?}");
+    assert_eq!(filed.status, 400, "{filed:?}");
+    assert!(filed.body.contains("label may hold only"), "{filed:?}");
+
+    // Seed a pre-0.21.0 label directly: query rendering must still treat stored text as data.
+    let (iri, _) = file(&server, "A label that reads like a query\n\nbody");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "<{iri}> <https://ikigai-rs.dev/ns/ledger#label> {} .",
+            serde_json::to_string(hostile).unwrap()
+        ),
+    );
 
     let query = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>\n\
                  SELECT ?label WHERE { ?i a ledger:Item ; ledger:label ?label \

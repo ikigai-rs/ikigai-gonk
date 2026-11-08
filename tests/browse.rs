@@ -3056,7 +3056,20 @@ fn an_item_links_its_repo_labels_to_the_trees_this_viewer_may_read() {
     let door = HttpDoorHarness::start(Arc::clone(&hub));
     let served = file_labeled(&hub, "repo:demo,repo:not-served,demo");
     let unknown = file_labeled(&hub, "repo:not-served,repo:,repo:demo:tree,repo:Demo");
-    let hostile = file_labeled(&hub, "repo:demo' onmouseover='x");
+    // Since ikigai-ledger 0.21.0, invalid labels are refused at the write boundary.
+    let hostile = Request::new(
+        Verb::Sink,
+        Iri::parse("urn:iki:ledger:default:append").expect("the append's name"),
+    )
+    .with_arg("content", ArgRef::Inline(b"An invalid label".to_vec()))
+    .with_arg(
+        "labels",
+        ArgRef::Inline(b"repo:demo' onmouseover='x".to_vec()),
+    );
+    assert!(matches!(
+        ikigai_resolve::Resolver::issue(hub.as_ref(), hostile),
+        Err(ikigai_core::Error::InvalidArgument { name, .. }) if name == "labels"
+    ));
     let item = |number: i64| format!("/l/default/item/{number}");
 
     // A viewer who reads every root: one link, named for the repository, and every label still
@@ -3078,13 +3091,11 @@ fn an_item_links_its_repo_labels_to_the_trees_this_viewer_may_read() {
     assert_eq!(status, 200, "{card}");
     assert!(card.contains(LINK), "{card}");
 
-    // Labels naming no root stay text, whatever their shape, for the same viewer.
-    for number in [unknown, hostile] {
-        let (status, page) = door.get_html(&item(number), Some(&every));
-        assert_eq!(status, 200, "{page}");
-        assert!(!page.contains("Browse "), "no link: {page}");
-        assert!(!page.contains("/browse/urn:repo:"), "no link: {page}");
-    }
+    // Valid labels naming no root stay text for the same viewer.
+    let (status, page) = door.get_html(&item(unknown), Some(&every));
+    assert_eq!(status, 200, "{page}");
+    assert!(!page.contains("Browse "), "no link: {page}");
+    assert!(!page.contains("/browse/urn:repo:"), "no link: {page}");
 
     // A grant naming that one root is enough.
     let mut named = grants_for("default", Authority::Read).expect("the ledger's tokens");
