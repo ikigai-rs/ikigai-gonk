@@ -1419,7 +1419,11 @@ fn mirror_refuses_commit_evidence_from_another_repository() {
         "{}",
         handed[0]
     );
-    assert_eq!(linked(&handed[0]).matches("href='").count(), 1);
+    assert_eq!(
+        linked(&handed[0]).matches("href='").count()
+            - linked(&handed[0]).matches(ROUTE_HREF).count(),
+        1
+    );
 }
 
 #[test]
@@ -2343,6 +2347,9 @@ fn hand_backs_on_one_offer_are_bounded_after_rejections() {
 }
 
 /// `text` as the page escapes it into a marked element, then linked: what a reader can click.
+/// A link to the resolution route ([`ikigai_gonk::resolution`]): a name, never a URL.
+const ROUTE_HREF: &str = "href='/resolution/iri/";
+
 fn linked(text: &str) -> String {
     let escaped = text
         .replace('&', "&amp;")
@@ -2386,7 +2393,13 @@ fn hand_back_evidence_is_pull_requests_only_and_the_note_is_not_copied() {
         assert!(!comment.contains(copied), "{copied} was copied: {comment}");
     }
     let html = linked(comment);
-    let hrefs: Vec<&str> = html.split("href='").skip(1).collect();
+    // The names gonk writes (the participant, the report) link to the resolution route, which
+    // decides where a name goes (ledger #3238); no URL from the peer is a link.
+    let hrefs: Vec<&str> = html
+        .split("href='")
+        .skip(1)
+        .filter(|h| !h.starts_with(ikigai_gonk::resolution::PATH))
+        .collect();
     assert_eq!(hrefs.len(), 1, "only the pull request is a link: {html}");
     assert!(
         hrefs[0].starts_with("https://github.com/ikigai-rs/ikigai-core/pull/41'"),
