@@ -634,7 +634,7 @@ pub const MAX_MARKDOWN_TAGS: usize = 4000;
 /// is over a bound and the page shows it as written instead.
 ///
 /// `ikigai_fn::markdown` makes the fragment, so nothing an author writes becomes markup but what
-/// its walker builds; [`linkify_text`] then links each text node by `refs`
+/// its walker builds; [`linkify`]'s rules then link each text node by `refs`
 /// ([`layer_refs`]'s value), outside `<a>` and `<code>`. It is a pure function of its arguments.
 ///
 /// ```
