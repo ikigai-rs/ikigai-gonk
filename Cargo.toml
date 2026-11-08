@@ -290,7 +290,11 @@ ikigai-store = { version = "0.4.0", features = ["persistent"] }
 # ledger (about 2,900 items) answers in under a second on older Oxigraph planners instead of
 # timing out past a signed-in viewer's 5 s store budget, which left the Dashboard's chart for
 # `default` empty. `"0.18.1"` is `<0.19.0`.
-ikigai-ledger = "0.20.0"
+# ★ 0.21.0 (ledger #3276): enforce label grammar on every write (#2634), anchor close/reopen/
+# backfill on the item's own status events with bounded conflict retries (#3256), probe before
+# the listing's corpus check (#3255), load only readiness inputs for `next` (#3257), and mark
+# dated history as claimed. Answer shapes are unchanged. `"0.20.0"` was `<0.21.0`.
+ikigai-ledger = "0.21.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the
