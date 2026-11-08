@@ -256,7 +256,7 @@ pub fn parse_all(lines: &[String], home: &Path) -> Result<Vec<Face>, String> {
     Ok(faces)
 }
 
-/// Every face's spaces, for the HTTP door ([`Face::spaces`]).
+/// Every face's spaces, for the HTTP door, each framed with the whole roster.
 pub fn spaces(faces: &[Face]) -> Vec<Arc<dyn Space>> {
     let roster: Vec<String> = faces.iter().map(|face| face.name.clone()).collect();
     faces.iter().flat_map(|face| face.spaces(&roster)).collect()

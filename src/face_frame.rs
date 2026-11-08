@@ -13,7 +13,7 @@
 //!
 //! # ★ Never break a face
 //!
-//! [`seams`] is a small tokenizer over the bytes, not a substring search: a `<body>` in a comment
+//! The scan is a small tokenizer over the bytes, not a substring search: a `<body>` in a comment
 //! or a script's string is not the tag, and a `>` in a quoted attribute does not end it. It finds
 //! the seams only in the part of a page every HTML parser reads the same way (doctype, comments,
 //! `<html>`, `<head>` and head elements) up to an explicit `<body>`. Anything else, a page with no
@@ -101,7 +101,7 @@ impl Frame {
         }
     }
 
-    /// `page` with the frame written in, or `None` when it has no seams ([`seams`]) and must be
+    /// `page` with the frame written in, or `None` when it has no seams to write at and must be
     /// served as written.
     pub fn apply(&self, page: &[u8]) -> Option<Vec<u8>> {
         let seams = seams(page)?;
