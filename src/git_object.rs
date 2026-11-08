@@ -8,7 +8,7 @@
 //!
 //! One git subprocess does (#3233): a commit's page shows its message, author, date and
 //! changed files, which no `urn:repo:*` read answers by SHA (`object` answers its type,
-//! `log` walks only from HEAD, `show` needs a path). [`commit_detail`] runs two fixed reads,
+//! `log` walks only from HEAD, `show` needs a path). `commit_detail` runs two fixed reads,
 //! `git log -1` and `git diff-tree --raw`, in the configured clone, only after the object
 //! lookup has resolved the SHA there as a commit under the same grants.
 use std::io::{BufRead, BufReader, Read};
