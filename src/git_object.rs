@@ -5,7 +5,7 @@
 //! No capability elevation lives here. Each map owns a confined repo kernel, issued under the
 //! viewer's unchanged capability. The one git subprocess is the commit page's read of a
 //! commit's message and changed files (ledger #3233), which no `urn:repo:*` resource answers;
-//! it runs only after [`granted`] admits the viewer, reads a fixed argv, and is bounded. Presence is cached by SHA;
+//! it runs only after `granted` admits the viewer, reads a fixed argv, and is bounded. Presence is cached by SHA;
 //! misses retain ikigai-repo's five-second bound. The search itself is never cached.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
