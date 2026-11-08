@@ -2,8 +2,10 @@
 //!
 //! `git-object:map:{map}:repository:{name}:sha:{sha}` is one immutable object;
 //! `git-link:map:{map}:kind:{kind}:sha:{sha}` searches readable repositories in order.
-//! No git subprocess or capability elevation lives here. Each map owns a confined repo
-//! kernel, issued under the viewer's unchanged capability. Presence is cached by SHA;
+//! No capability elevation lives here. Each map owns a confined repo kernel, issued under the
+//! viewer's unchanged capability. The one git subprocess is the commit page's read of a
+//! commit's message and changed files (ledger #3233), which no `urn:repo:*` resource answers;
+//! it runs only after [`granted`] admits the viewer, reads a fixed argv, and is bounded. Presence is cached by SHA;
 //! misses retain ikigai-repo's five-second bound. The search itself is never cached.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use ikigai_core::{
     ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Invocation, Kernel, ReprType,
     Representation, Request, Result, UriTemplate, Verb,
 };
-use ikigai_fn::html::{html_text, safe_href, url_segment};
+use ikigai_fn::html::{attr, html_text, safe_href, url_segment};
 use serde_json::Value;
 
 const OBJECT: &str = "urn:iki:gonk:git-object:map:";
@@ -136,6 +138,7 @@ pub fn space(map: &str, repositories: &[Repository]) -> EndpointSpace {
         space = space.bind(
             template(&object_iri(map, &repository.name, "{sha}")),
             Object {
+                map: map.to_string(),
                 repository: repository.clone(),
                 kernel: Arc::clone(&kernel),
             },
@@ -186,6 +189,7 @@ fn arg(request: Request, name: &str, value: &str) -> Request {
 }
 
 struct Object {
+    map: String,
     repository: Repository,
     kernel: Arc<Kernel>,
 }
@@ -267,6 +271,9 @@ impl Endpoint for Object {
                     html.push_str("<p>This blob has no path in retained reachable history.</p>");
                 }
             }
+            if kind == "commit" {
+                html.push_str(&self.commit_html(inv, &dir, sha).await?);
+            }
             if repo.browse {
                 html.push_str(&format!("<p><a href='/browse/urn:repo:{}:tree'>Browse {} (current working tree)</a></p>", url_segment(&repo.name), html_text(&repo.name)));
             }
@@ -296,6 +303,200 @@ impl Endpoint for Object {
             .output("application/json")
             .output("text/html")
     }
+}
+
+/// The most changed files a commit page lists (ledger #3233); a line counts the rest.
+pub const COMMIT_FILES_SHOWN: usize = 50;
+/// The most bytes read from git for a commit's message, or for its list of changed files.
+const COMMIT_READ_LIMIT: usize = 1024 * 1024;
+
+impl Object {
+    /// The commit page's body: the message (first line as a heading, the rest preformatted),
+    /// the author and date, and the changed files against the first parent, each linked to its
+    /// blob page through this map's link resource under the viewer's capability.
+    async fn commit_html(&self, inv: &Invocation<'_>, dir: &Path, sha: &str) -> Result<String> {
+        let (head, _) = git_read(
+            dir,
+            &[
+                "-c",
+                "log.showSignature=false",
+                "show",
+                "-s",
+                "--no-color",
+                "--encoding=UTF-8",
+                "--format=%an%x00%aI%x00%B",
+                sha,
+            ],
+        )?;
+        let head = String::from_utf8_lossy(&head);
+        let mut fields = head.splitn(3, '\0');
+        let author = fields.next().unwrap_or("").trim();
+        let date = fields.next().unwrap_or("").trim();
+        let message = fields.next().unwrap_or("").trim_end();
+        let (summary, body) = message.split_once('\n').unwrap_or((message, ""));
+        let body = body.trim_matches('\n');
+        let mut html = format!(
+            "<h2>{}</h2><p>Author: {} · Date: <time datetime='{}'>{}</time></p>",
+            html_text(summary.trim()),
+            html_text(author),
+            attr(date),
+            html_text(date)
+        );
+        if !body.is_empty() {
+            html.push_str(&format!("<pre class='graph' tabindex='0' role='region' aria-label='Commit message'><code>{}</code></pre>", html_text(body)));
+        }
+        let (raw, cut) = git_read(
+            dir,
+            &[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--raw",
+                "--no-renames",
+                "--root",
+                "--diff-merges=first-parent",
+                "--no-commit-id",
+                sha,
+            ],
+        )?;
+        let changes = changed_files(&raw, cut);
+        html.push_str("<h2>Changed files</h2>");
+        if changes.is_empty() {
+            html.push_str("<p>No files changed against the first parent.</p>");
+            return Ok(html);
+        }
+        html.push_str("<ul class='changed-files'>");
+        for change in changes.iter().take(COMMIT_FILES_SHOWN) {
+            let href = match change.blob() {
+                Some(blob) => self.blob_href(inv, blob).await,
+                None => None,
+            };
+            let path = html_text(&change.path);
+            let name = match href {
+                Some(href) => format!("<a href='{}'><code>{path}</code></a>", attr(&href)),
+                None => format!("<code>{path}</code>"),
+            };
+            html.push_str(&format!("<li>{name} ({})</li>", change.status()));
+        }
+        html.push_str("</ul>");
+        let more = changes.len().saturating_sub(COMMIT_FILES_SHOWN);
+        if cut {
+            html.push_str(&format!(
+                "<p>And at least {more} more changed files, not listed.</p>"
+            ));
+        } else if more > 0 {
+            let files = if more == 1 { "file" } else { "files" };
+            html.push_str(&format!(
+                "<p>And {more} more changed {files}, not listed.</p>"
+            ));
+        }
+        Ok(html)
+    }
+
+    /// The blob page's href, through `git-link` in this map, or `None` when no repository the
+    /// viewer may read links it.
+    async fn blob_href(&self, inv: &Invocation<'_>, blob: &str) -> Option<String> {
+        let answer = inv
+            .issue(request(&link_iri(&self.map, "blob", blob)).ok()?)
+            .await
+            .ok()?;
+        let text = std::str::from_utf8(&answer.bytes).ok()?;
+        safe_href(text)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+}
+
+/// One entry of `git diff-tree --raw`: the status letter, the new mode and blob, and the path.
+#[derive(Debug, PartialEq, Eq)]
+struct Change {
+    status: char,
+    mode: String,
+    blob: String,
+    path: String,
+}
+
+impl Change {
+    /// The blob to link: the file as the commit leaves it. A deleted file, a submodule and a
+    /// symlink link nothing.
+    fn blob(&self) -> Option<&str> {
+        (self.status != 'D' && self.mode.starts_with("100") && self.blob.bytes().any(|b| b != b'0'))
+            .then_some(self.blob.as_str())
+    }
+    fn status(&self) -> &'static str {
+        match self.status {
+            'A' => "added",
+            'D' => "deleted",
+            'M' => "modified",
+            'T' => "type changed",
+            _ => "changed",
+        }
+    }
+}
+
+/// The entries of `git diff-tree -r -z --raw --no-renames` output. When the read was `cut` at
+/// its limit, the last entry may be partial, so it is dropped.
+fn changed_files(raw: &[u8], cut: bool) -> Vec<Change> {
+    let mut fields = raw.split(|b| *b == 0);
+    let mut changes = Vec::new();
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let meta = String::from_utf8_lossy(meta);
+        let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let [_, mode, _, blob, status] = parts[..] else {
+            continue;
+        };
+        changes.push(Change {
+            status: status.chars().next().unwrap_or('?'),
+            mode: mode.to_string(),
+            blob: blob.to_string(),
+            path: String::from_utf8_lossy(path).into_owned(),
+        });
+    }
+    if cut {
+        changes.pop();
+    }
+    changes
+}
+
+/// `git -C dir --no-replace-objects args…`, its stdout up to [`COMMIT_READ_LIMIT`] and whether
+/// it was cut there. Never fetches, never prompts, reads no stdin.
+fn git_read(dir: &Path, args: &[&str]) -> Result<(Vec<u8>, bool)> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("--no-replace-objects")
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| Error::Endpoint(format!("Git commit: could not run git: {e}")))?;
+    let mut out = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .expect("stdout is piped")
+        .take(COMMIT_READ_LIMIT as u64 + 1)
+        .read_to_end(&mut out);
+    let cut = out.len() > COMMIT_READ_LIMIT;
+    if cut {
+        out.truncate(COMMIT_READ_LIMIT);
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|e| Error::Endpoint(format!("Git commit: git did not finish: {e}")))?;
+    read.map_err(|e| Error::Endpoint(format!("Git commit: could not read git: {e}")))?;
+    if !cut && !status.success() {
+        return Err(Error::Endpoint(
+            "Git commit: git could not read the commit".into(),
+        ));
+    }
+    Ok((out, cut))
 }
 
 fn expand(template: &str, sha: &str, object: &Value) -> Option<String> {
