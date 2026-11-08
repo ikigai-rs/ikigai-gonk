@@ -211,7 +211,12 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
         .iter()
         .any(|p| p.starts_with("urn:iki:ledger:")));
     assert_eq!(layers[2], spaces::RENDER);
-    assert_eq!(g.strs(spaces::RENDER, &pattern), ["urn:iki:gonk:render"]);
+    let mut renderers = g.strs(spaces::RENDER, &pattern);
+    renderers.sort();
+    assert_eq!(
+        renderers,
+        ["urn:iki:gonk:render", "urn:iki:gonk:render:markdown"]
+    );
     assert_eq!(layers[3], spaces::SPARQL);
     let mut forms = g.strs(spaces::SPARQL, &pattern);
     forms.sort();

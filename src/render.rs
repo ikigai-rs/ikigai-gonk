@@ -639,10 +639,10 @@ pub const MAX_MARKDOWN_TAGS: usize = 4000;
 ///
 /// ```
 /// use ikigai_gonk::render::{entry_markdown, layer_refs};
-/// let refs = layer_refs(Some("default"), &[]);
+/// let refs = layer_refs(Some("default"), &["default"]);
 /// assert_eq!(
 ///     entry_markdown("# Hi ledger #7 and `ledger #8`", &refs).unwrap(),
-///     "<h4>Hi <a href='/l/default/item/7'>ledger #7</a> and <code>ledger #8</code></h4>\n"
+///     "<h4>Hi <a href='/l/default/item/7'>ledger #7</a> and <code>ledger #8</code></h4>"
 /// );
 /// // Nested past what a chunk may hold: shown as written, never a broken page.
 /// assert_eq!(entry_markdown(&"> ".repeat(14), &refs), None);
