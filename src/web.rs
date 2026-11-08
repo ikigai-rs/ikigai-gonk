@@ -164,7 +164,8 @@ pub struct Web {
     pub toolbox: bool,
     /// The names of the deployment's own pages this server serves (`gonk.face`,
     /// [`crate::face`], ledger [#3199](http://localhost:1062/l/default/item/3199)), each offered
-    /// in the header at `/face/name/{name}/`. Empty for none.
+    /// in the add-on row under the header at `/face/name/{name}/`, in config order (ledger
+    /// [#3279](http://localhost:1062/l/default/item/3279)). Empty for none, and no row.
     pub faces: Vec<String>,
     /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
     /// [#3034](http://localhost:1062/l/default/item/3034)).
@@ -716,7 +717,7 @@ fn nav_with(
         ));
     }
     // ★ A deployment's own pages (ledger [#3199](http://localhost:1062/l/default/item/3199)),
-    // beside Views and Layers. Ungated on the toolbox's rule: each face's read is one of the
+    // in the add-on row under the header (ledger #3279). Ungated on the toolbox's rule: each face's read is one of the
     // door's public reads (`main`, `Face::grants`, `HttpDoor::public`), and what the face's scripts then fetch is
     // judged under the viewer's own capability.
     for name in &web.faces {
@@ -4608,18 +4609,28 @@ const ASSETS: [(&str, &str, &str); 2] = [
     ("gonk.js", "text/javascript", include_str!("../web/gonk.js")),
 ];
 
+/// The file named `name`: one of [`ASSETS`], or the bar around a face, whose sheet is composed
+/// from ikigai-ui's palettes (ledger #3279, [`crate::face_frame::stylesheet`]).
+fn asset(name: &str) -> Option<(&'static str, &'static str)> {
+    if name == crate::face_frame::SHEET {
+        return Some(("text/css", crate::face_frame::stylesheet()));
+    }
+    ASSETS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, media, body)| (*media, *body))
+}
+
 struct Asset;
 
 #[async_trait]
 impl Endpoint for Asset {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let name = binding(inv, "name")?;
-        let (_, media, body) = ASSETS
-            .iter()
-            .find(|(n, _, _)| *n == name)
-            .ok_or_else(|| Error::NotFound(format!("no asset called `{name}`")))?;
+        let (media, body) =
+            asset(&name).ok_or_else(|| Error::NotFound(format!("no asset called `{name}`")))?;
         Ok(Representation::new(
-            ReprType::new(*media).with_param("charset", "utf-8"),
+            ReprType::new(media).with_param("charset", "utf-8"),
             body.as_bytes().to_vec(),
         ))
     }
@@ -4641,7 +4652,12 @@ impl Endpoint for Asset {
             .input(
                 arg("name", "Which file.")
                     .binding()
-                    .one_of(ASSETS.iter().map(|(n, _, _)| *n))
+                    .one_of(
+                        ASSETS
+                            .iter()
+                            .map(|(n, _, _)| *n)
+                            .chain([crate::face_frame::SHEET]),
+                    )
                     .default_value("gonk.css"),
             )
             .output("text/css")

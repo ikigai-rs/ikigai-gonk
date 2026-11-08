@@ -20,7 +20,7 @@ Adapted from the [ACCESSIBILITY.md template](https://github.com/mgifford/ACCESSI
 | Target | WCAG 2.2 Level AA |
 | Status | Evaluation in progress. No conformance claim. |
 | Last reviewed | 2026-11-08 |
-| Next review | when `web/gonk.css`, `web/gonk.xsl` or `web/gonk.js` changes in a way a person sees, when `ikigai-ui`, `ikigai-web` or `ikigai-browse` moves to a new minor version, or when a page is added |
+| Next review | when `web/gonk.css`, `web/gonk-frame.css`, `web/gonk.xsl` or `web/gonk.js` changes in a way a person sees, when `ikigai-ui`, `ikigai-web` or `ikigai-browse` moves to a new minor version, or when a page is added |
 
 ## Commitment
 
@@ -68,10 +68,15 @@ is fixed.
 - **`ikigai-ui`'s tokens, shell script and chooser.** Its own tests cover them; a barrier is
   reported here and fixed there.
 - **A deployment's own pages** (`gonk.face`, `/face/name/{name}/…`, ledger #3199). Their HTML,
-  scripts and styles are the deployment's, served as written; gonk does not render or check
-  them, and a barrier in them is the deployment's to fix. gonk's part is the header link to each
-  face, which is in scope: an ordinary link whose visible text and accessible name are the
-  face's configured name, beside the Toolbox.
+  scripts and styles are the deployment's; gonk does not check them, and a barrier in them is
+  the deployment's to fix. gonk's part is in scope (ledger #3279): the "Add-ons" row under the
+  header of every native page, and the slim bar gonk writes after a face page's `<body>` tag.
+  Each is a labeled `<nav>`; the bar links gonk's home, names the face and says "add-on" in
+  text, and marks the current face with `aria-current="page"` and weight, not color. Both are
+  quieter than the main navigation (smaller, `--muted`) and draw only tokens already held to the
+  contrast floor; the bar's links are 24 px high. A face that lays out `body` itself lays out the
+  bar with it, which is the deployment's to accommodate. The bar is gonk's own landmark, not a
+  second `banner`: a face's own `<header>` stays the page's.
 - The operating system's passkey dialog, GitHub's pages, and the browsers and assistive
   technologies people use.
 
@@ -93,6 +98,7 @@ conformance claim from a green build or from this file.
 
 | Check | Version | What it covers | What it does not cover |
 |---|---|---|---|
+| `tests/face_3199.rs` add-on row and bar tests and the `src/face_frame.rs` unit tests (`cargo test`, every pull request); `face-demo.html` and the add-on row on every page of `examples/axe_site.rs` (CI axe, ledger #3279) | the CI axe job's versions | The row lists the faces in config order directly below the header and is absent with none; a face page gets the bar, a link home, its name marked "add-on" and current; a page with no `<body>` tag and scripts and sheets are unchanged; the bar's sheet is scoped to one id, `!important` throughout, and names no color | No browser ran the bar's computed style against a face's CSS: the suite has no browser, so the cascade's inputs are what is pinned, not its result. No screen reader, and the bar over a real face's layout |
 | `tests/github_links_1907.rs` Git object tests and `tests/browser/git_object_3198.mjs` (#3198); Git link and local object fixtures in `examples/axe_site.rs` (CI axe) | playwright 1.64.0, Chromium 156.0.8078.4, axe-core 4.13.0 locally; CI workflow versions in CI | Full commit/blob IRIs remain the visible link names; unresolved or unauthorized targets remain text. HTTP checks cover historical blob bytes, escaping, retained close evidence, capability checks on cache hits, object types, path encoding and multiple clones. Local Chromium passes 64 page checks and 32 axe WCAG A/AA checks over the item and local blob fixtures: auto, light, dark and high contrast, light/dark system settings, 1280/320 px, with/without scripts; both Git links are keyboard stops, the code region is focusable, with no overflow or page/console errors. CI also checks the fixture in every theme | No manual keyboard, zoom or assistive-technology assessment; the local commit view identifies the object and links to the explicitly labeled current working tree, without a commit diff |
 | `tests/web.rs` outgoing-link tests and `tests/browser/linked_item_3197.mjs` (run locally, ledger #3197); `examples/axe_site.rs` linked-item fixture (CI axe) | playwright 1.64.0, Chromium 156.0.8078.4, axe-core 4.13.0 | The item's outgoing targets are ordinary ledger rows in relation/ledger groups, with lifecycle-state counts, current badges and titles, in the ledger's landing order (closed members first, then each blocker before what it blocks; since ledger #3226, a blocks cycle is the ledger's refusal said in the group's sentence, with rows in number order). HTTP tests cover full pages and card fragments, cross-ledger grants, unreadable/missing IRIs, escaping, self-links, repeated relations, unlink responses, refresh after edits/closure, one-hop reads, large member bodies and render-chunk boundaries. Automated Chromium checks cover keyboard access to each title, ledger context in link names, counts, bare unreadable IRIs, no page overflow, and no page/console errors in auto, light, dark and high contrast over light/dark system settings, at 1280 and 320 px, with and without JavaScript (32 checks); axe WCAG A/AA passes in the 16 scripted checks | Static anonymous fixtures; unlink forms have HTTP coverage, not browser submission/focus checks. Rows and counts update on load or a form response, without polling. No hand assessment, text zoom, assistive technology, Firefox or Safari |
 | `tests/web.rs::a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read` (`cargo test`, every pull request) and `tests/browser/union_3216.mjs` (browser run locally, ledger #3216); union and filtered-union fixtures in `examples/axe_site.rs` (CI axe) | playwright 1.64.0, Chromium 156.0.8078.4, axe-core 4.13.0 | A ledger page under `ledgers=`: the heading names the ledgers read, a sentence under it says which ledgers the rows are from and which asked-for ledgers the grant left out; every row's number is `ledger#N` (the default ledger's too), its title link names its ledger and goes to it, and its Close button is named with `ledger#N`. HTTP tests cover page and fragment, an unreadable ledger and a half-granted one left out, filters, paging and status over the union, the count agreeing with the ledger's, the facet counting the same union, a close re-rendering the union, and refusal of a page whose own ledger is unreadable. Browser checks over the union and filtered-union fixtures: heading and sentence text, row numbers, link names and destinations, tabs and search keeping the union, no page overflow, no page or console errors, in auto, light, dark and high contrast over light and dark system settings at 1280 and 320 px, with and without JavaScript (64 runs); axe WCAG A/AA passes in the 32 scripted runs | Static anonymous fixtures; with JavaScript off a static file cannot switch theme, so those 32 runs see the rendered (auto) theme only, and they do not run axe. No form swap in the browser, manual keyboard or zoom assessment, assistive technology, Firefox or Safari |

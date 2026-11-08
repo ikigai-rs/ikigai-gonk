@@ -43,6 +43,15 @@ h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 .auth { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .who, .note { color: var(--muted); font-size: 0.9rem; }
 
+/* The add-on row (ledger #3279): a deployment's own pages, under gonk's navigation and quieter
+ * than it, smaller and muted. "Add-ons" is a word, so the difference is not the color's. */
+.addons {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem;
+  padding: 0.15rem 1rem; border-bottom: 1px solid var(--rule); font-size: 0.85rem; color: var(--muted);
+}
+.addons-list { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; list-style: none; margin: 0; padding: 0; }
+.addons a { display: inline-flex; align-items: center; min-height: 24px; } /* WCAG 2.2 SC 2.5.8 */
+
 /* The theme chooser is ikigai-ui's; the header's own gap spaces it. */
 .top .ui-theme { margin: 0; }
 

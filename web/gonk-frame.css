@@ -1,0 +1,46 @@
+/* gonk's slim bar around a face (ledger #3279, src/face_frame.rs): the one sheet gonk adds to a
+ * deployment's own page. `gonk.css` and `tokens.css` style `body`, `a` and `h1` on gonk's pages;
+ * on a face those rules would restyle the deployment's page, so neither is linked there.
+ *
+ * ★ Everything is under the one id, and every declaration is `!important`, so no rule in a face
+ * reaches the bar, however it is written, unless it names `#gonk-frame` itself. It would otherwise
+ * lose only to the id's specificity, and a face's `a { color: red !important }` would beat that.
+ * The sizes are `small` and `em`, never `rem`: `html { font-size: 62.5% }` in a face must not
+ * shrink the bar, and `small` still follows the reader's own browser font size.
+ *
+ * No color is written here: the palette is ikigai-ui's, scoped to the bar when the sheet is
+ * served (`face_frame::stylesheet`), so a face's own `--fg` cannot repaint it either.
+ */
+
+#gonk-frame, #gonk-frame::before, #gonk-frame::after,
+#gonk-frame *, #gonk-frame *::before, #gonk-frame *::after { all: unset !important; }
+
+#gonk-frame {
+  display: flex !important; flex-wrap: wrap !important; align-items: center !important;
+  gap: 0.25em 0.75em !important; padding: 0.25em 0.75em !important;
+  box-sizing: border-box !important;
+  border-bottom: 1px solid var(--rule) !important;
+  background: var(--surface) !important; color: var(--muted) !important;
+  font: normal 400 small/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
+  text-align: start !important;
+}
+#gonk-frame nav, #gonk-frame ul {
+  display: flex !important; flex-wrap: wrap !important; align-items: center !important;
+  gap: 0.25em 0.75em !important;
+}
+#gonk-frame li { display: block !important; }
+#gonk-frame a {
+  display: inline-flex !important; align-items: center !important;
+  min-height: 24px !important; /* WCAG 2.2 SC 2.5.8 */
+  color: var(--accent) !important; text-decoration: underline !important;
+  text-underline-offset: 0.15em !important; cursor: pointer !important;
+}
+#gonk-frame a:focus-visible { outline: 3px solid var(--focus) !important; outline-offset: 2px !important; }
+#gonk-frame .gonk-frame-home { color: var(--fg) !important; font-weight: 700 !important; }
+#gonk-frame .gonk-frame-face { color: var(--fg) !important; font-weight: 600 !important; }
+/* The mark is a WORD: the border is decoration on it. */
+#gonk-frame .gonk-frame-mark {
+  padding: 0 0.4em !important; border: 1px solid var(--rule) !important; border-radius: 999px !important;
+}
+/* The current face: heavier and not underlined, so it does not rest on color. */
+#gonk-frame a[aria-current] { color: var(--fg) !important; font-weight: 700 !important; text-decoration: none !important; }

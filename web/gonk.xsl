@@ -94,7 +94,6 @@
               <xsl:apply-templates select="view:onboard-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
               <xsl:apply-templates select="view:toolbox-link"/>
-              <xsl:apply-templates select="view:face-link"/>
               <div id="auth" class="auth">
                 <xsl:apply-templates select="view:withheld"/>
                 <span id="auth-who" class="who" hidden="hidden"></span>
@@ -105,6 +104,15 @@
               <!-- ikigai-ui's theme chooser: src/render.rs::render puts its markup here. -->
               <xsl:comment>theme-chooser</xsl:comment>
             </header>
+            <!-- A deployment's own pages (ledger #3279), quieter than gonk's navigation and named
+                 as add-ons in words. A face's page shows the same row in gonk's bar
+                 (src/face_frame.rs). No gonk.face line, no row. -->
+            <xsl:if test="view:face-link">
+              <nav class="addons" aria-label="Add-ons">
+                <span class="addons-label">Add-ons</span>
+                <ul class="addons-list"><xsl:apply-templates select="view:face-link"/></ul>
+              </nav>
+            </xsl:if>
             <xsl:apply-templates select="view:first-passkey"/>
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>
@@ -495,9 +503,9 @@
        gonk.toolbox.dist line (src/web.rs::nav_with, Web::toolbox). The toolbox is its own page
        with its own script and CSP, so this is an ordinary link: a full navigation, never a swap. -->
   <!-- A deployment's own pages (ledger #3199, src/face.rs), one link per `gonk.face`, named by
-       the face's name: an ordinary link, beside the Toolbox. -->
+       the face's name: an item of the add-on row. -->
   <xsl:template match="view:face-link">
-    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a>
+    <li><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a></li>
   </xsl:template>
 
   <xsl:template match="view:toolbox-link">

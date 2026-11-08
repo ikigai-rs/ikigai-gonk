@@ -24,10 +24,14 @@ const APP_JS: &str = "import './kit.js';\nfetch('/iki/ledger/items');\n";
 const KIT_JS: &str = "export const ready = true;\n";
 const APP_CSS: &str = "body { color: inherit; }\n";
 const SECRET: &str = "outside the face, never served";
+/// A page with a `<body>` tag, which gonk frames (ledger #3279).
+const FRAMED: &str = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Framed</title>\
+    <link rel=\"stylesheet\" href=\"app.css\"></head><body class=\"page\"><header>The face's own</header></body></html>\n";
 
 /// A scratch face directory, and beside it (`outside`) a secret the face must never reach.
 fn build(dir: &Path, outside: &Path) {
     std::fs::write(dir.join("index.html"), INDEX).unwrap();
+    std::fs::write(dir.join("framed.html"), FRAMED).unwrap();
     std::fs::write(dir.join("app.css"), APP_CSS).unwrap();
     std::fs::create_dir(dir.join("js")).unwrap();
     std::fs::write(dir.join("js").join("app.js"), APP_JS).unwrap();
@@ -94,13 +98,16 @@ impl Server {
             holder_aliases: Default::default(),
             toolbox: false,
             faces: if with_face {
-                vec!["demo".to_string()]
+                vec!["demo".to_string(), "alpha".to_string()]
             } else {
                 Vec::new()
             },
         });
         let faces: Vec<Face> = if with_face {
-            vec![Face::at("demo", dist.path().to_path_buf()).unwrap()]
+            vec![
+                Face::at("demo", dist.path().to_path_buf()).unwrap(),
+                Face::at("alpha", dist.path().to_path_buf()).unwrap(),
+            ]
         } else {
             Vec::new()
         };
@@ -561,18 +568,170 @@ fn no_line_no_face() {
     assert!(!home.text().contains("/face/name/"), "{home:?}");
 }
 
-/// The header links each face by name, beside Views and Layers.
+/// Ledger [#3279](http://localhost:1062/l/default/item/3279): the faces are a row of their own
+/// directly below the header, in config order, marked as add-ons in words, and gone from the main
+/// navigation.
 #[test]
-fn the_header_links_each_face() {
+fn the_add_on_row_lists_each_face_in_config_order() {
     let gonk = Server::start(true);
-    let home = gonk.open("/");
-    assert_eq!(home.status, 200, "{home:?}");
-    let page = home.text();
-    let header = &page[..page.find("</header>").expect("a header")];
-    assert!(
-        header.contains("<a class='navlink' href='/face/name/demo/'>demo</a>"),
-        "{header}"
+    for path in ["/", "/sparql"] {
+        let home = gonk.open(path);
+        assert_eq!(home.status, 200, "{home:?}");
+        let page = home.text();
+        let (header, after) = page.split_once("</header>").expect("a header");
+        assert!(!header.contains("/face/name/"), "{header}");
+        let row = after.trim_start();
+        assert!(
+            row.starts_with(
+                "<nav aria-label='Add-ons' class='addons'>\
+                 <span class='addons-label'>Add-ons</span>\
+                 <ul class='addons-list'>\
+                 <li><a href='/face/name/demo/'>demo</a></li>\
+                 <li><a href='/face/name/alpha/'>alpha</a></li>\
+                 </ul></nav>"
+            ),
+            "{path}: {row}"
+        );
+    }
+}
+
+/// With no face there is no row, not an empty one.
+#[test]
+fn no_face_no_add_on_row() {
+    let page = Server::start(false).open("/").text();
+    assert!(!page.contains("Add-ons"), "{page}");
+    assert!(!page.contains("addons"), "{page}");
+}
+
+/// ★ Ledger #3279: a face's HTML arrives framed: gonk's sheet and theme script before the face's
+/// own sheet, the bar right after `<body …>`, with a link home and this face named as an add-on
+/// and marked current. The door's policy is unchanged and nothing inline is added.
+#[test]
+fn a_face_page_gets_the_bar() {
+    let gonk = Server::start(true);
+    let page = gonk.open("/face/name/demo/framed.html");
+    assert_eq!(page.status, 200, "{page:?}");
+    assert_eq!(
+        page.header("content-security-policy").as_deref(),
+        Some(ikigai_web::HTML_DOOR_CSP),
+        "{page:?}"
     );
+    let html = page.text();
+    let at = |needle: &str| {
+        html.find(needle)
+            .unwrap_or_else(|| panic!("no `{needle}` in {html}"))
+    };
+    assert!(
+        html.contains("<html data-theme='auto' lang=\"en\">"),
+        "{html}"
+    );
+    assert!(at("href=\"/static/gonk-frame.css\"") < at("src=\"/static/shell.js\""));
+    assert!(
+        at("src=\"/static/shell.js\"") < at("href=\"app.css\""),
+        "{html}"
+    );
+    let body = "<body class=\"page\">";
+    let bar = &html[at(body) + body.len()..at("<header>The face's own")];
+    assert!(
+        bar.starts_with("<nav id=\"gonk-frame\" aria-label=\"gonk\">"),
+        "{bar}"
+    );
+    assert!(
+        bar.contains("<a class=\"gonk-frame-home\" href=\"/\">gonk</a>"),
+        "{bar}"
+    );
+    assert!(
+        bar.contains(">demo</span> <span class=\"gonk-frame-mark\">add-on</span>"),
+        "{bar}"
+    );
+    assert!(
+        bar.contains("<nav aria-label=\"Add-ons\"><span>Add-ons</span>"),
+        "{bar}"
+    );
+    assert!(
+        bar.contains(
+            "<li><a href=\"/face/name/demo/\" aria-current=\"page\">demo</a></li>\
+             <li><a href=\"/face/name/alpha/\">alpha</a></li>"
+        ),
+        "{bar}"
+    );
+    assert!(!bar.contains("style="), "{bar}");
+    assert_eq!(html.matches("<script").count(), 1, "{html}");
+
+    // The other face marks itself, from the same directory.
+    let other = gonk.open("/face/name/alpha/framed.html").text();
+    assert!(
+        other.contains("<a href=\"/face/name/alpha/\" aria-current=\"page\">alpha</a>"),
+        "{other}"
+    );
+    assert!(
+        other.contains("<a href=\"/face/name/demo/\">demo</a>"),
+        "{other}"
+    );
+}
+
+/// Ledger #3279: the bar's sheet is served at the path the page links, and a page's framing is
+/// what `Content-Length` counts.
+#[test]
+fn the_bars_sheet_is_served() {
+    let gonk = Server::start(true);
+    let sheet = gonk.get("/static/gonk-frame.css", "text/css");
+    assert_eq!(sheet.status, 200, "{sheet:?}");
+    assert!(media(&sheet).starts_with("text/css"), "{sheet:?}");
+    assert!(sheet.text().contains("#gonk-frame"), "{sheet:?}");
+    let page = gonk.open("/face/name/demo/framed.html");
+    if let Some(length) = page.header("content-length") {
+        assert_eq!(length, page.body.len().to_string(), "{page:?}");
+    }
+}
+
+/// ★ Ledger #3279: never break a face. A page with no `<body>` tag is served byte for byte (the
+/// other tests hold `INDEX` to that too), and a script or a sheet is never touched.
+#[test]
+fn only_a_page_with_a_body_tag_is_framed() {
+    let gonk = Server::start(true);
+    assert_eq!(gonk.open("/face/name/demo/").text(), INDEX);
+    for (path, content) in [
+        ("/face/name/demo/app.css", APP_CSS),
+        ("/face/name/demo/js/app.js", APP_JS),
+    ] {
+        let file = gonk.get(path, "*/*");
+        assert_eq!(file.status, 200, "{path}: {file:?}");
+        assert_eq!(file.text(), content, "{path}");
+    }
+}
+
+/// ★ Ledger #3279: what keeps a face's CSS off the bar, as far as this suite can hold it. There
+/// is no browser here, so a computed style cannot be read; a browser's cascade decides on exactly
+/// these facts. Every rule's selector starts at the bar's id, which outranks any selector a face
+/// writes without naming the id, and every declaration is `!important`, which outranks a face's
+/// own `!important` on a lower selector. The reset comes first, and no color is written.
+#[test]
+fn no_rule_in_a_face_reaches_the_bar() {
+    let sheet = include_str!("../web/gonk-frame.css");
+    let bare = ikigai_ui::testkit::lint::blank_comments(sheet);
+    assert!(
+        ikigai_ui::testkit::lint::hex_colors(&bare).is_empty(),
+        "{bare}"
+    );
+    assert!(
+        ikigai_ui::testkit::lint::undefined_vars(&[bare.as_str()]).is_empty(),
+        "{bare}"
+    );
+    let first = bare.split('{').nth(1).unwrap_or_default();
+    assert!(first.contains("all: unset !important"), "{bare}");
+    let mut rules = 0;
+    for rule in bare.split('}').filter(|rule| !rule.trim().is_empty()) {
+        rules += 1;
+        let (selectors, declarations) = rule.split_once('{').expect("selector and block");
+        for selector in selectors.split(',') {
+            assert!(selector.trim().starts_with("#gonk-frame"), "{selector}");
+        }
+        for declaration in declarations.split(';').filter(|d| !d.trim().is_empty()) {
+            assert!(declaration.contains("!important"), "{declaration}");
+        }
+    }
+    assert!(rules > 5, "{bare}");
 }
 
 /// ★ The config: a missing directory fails loud at start, naming the key; so do a name given

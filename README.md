@@ -718,6 +718,23 @@ and every live passkey session hold it, from this machine or another (ledger #32
 signed in from another machine loads the face with no token copied into their grant. A caller
 from another machine with no session gets nothing.
 
+gonk owns the frame and a face stays plain static pages (ledger #3279). Every native page shows
+the configured faces, in config order, in an "Add-ons" row directly below the main header; with
+no face there is no row. When gonk serves a face's `text/html` file it writes three things into
+the copy it sends: `data-theme='auto'` on `<html>` when the face set none, gonk's
+`/static/gonk-frame.css` and ikigai-ui's `/static/shell.js` at the start of `<head>` (after any
+leading `<meta>`), and a slim bar right after the opening `<body>` tag. The bar links gonk's
+home, names the face and marks it "add-on" in text, and repeats the add-on row with this face
+marked current. So the bar and the page's `<html data-theme>` follow the theme chosen in gonk's
+header (`ikigai-ui:theme`); style a face for `[data-theme]` to follow it too, and a face that
+names its own `data-theme` keeps it.
+
+A page gonk cannot frame safely is served byte for byte: one with no `<body>` tag, or with
+content before that tag. Every other file type is never touched. Nothing inline is added, so the
+door's CSP is unchanged. The bar's rules are all under `#gonk-frame` and `!important`, so a face's
+CSS does not restyle it unless it names that id. The bar is an ordinary first child of `<body>`:
+a face that lays out `body` itself (`display: grid`, say) lays out the bar with it.
+
 Link and bookmark the slash form, `/face/name/ops/`, so relative stylesheet and module paths
 resolve inside the face's directory. The bare `/face/name/ops`, as a person types it, answers
 `308 Permanent Redirect` to `/face/name/ops/` with its query kept (ledger #3231); a file below a
