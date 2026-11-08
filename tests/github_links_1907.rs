@@ -659,6 +659,7 @@ fn mapped(dir: &Path) -> ikigai_gonk::git_object::Repository {
         dir: dir.to_path_buf(),
         commit: Some("https://code.example/commit/{sha}".into()),
         blob: Some("https://code.example/blob/{commit}/{path}?object={sha}&view=code".into()),
+        file: None,
         browse: false,
     }
 }

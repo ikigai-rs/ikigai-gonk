@@ -75,6 +75,7 @@ pub mod queue;
 pub mod quic;
 pub mod refusal;
 pub mod render;
+pub mod resolution;
 pub mod roborev;
 pub mod roots;
 pub mod rows;

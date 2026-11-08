@@ -29,6 +29,7 @@
 //! /static/{name}             urn:iki:gonk:asset:{name}              Source  gonk.css, gonk.js
 //! /k?c={command}             urn:iki:gonk:k                         Source/Sink  the browse faces' adapter
 //! /browse/{+iri}             urn:iki:gonk:page:browse:{+iri}        Source  the page they render inside (raw: colons and all)
+//! /resolution/iri/{+iri}     urn:iki:gonk:resolution:iri:{iri}      Source  where a name in item text goes ([`crate::resolution`])
 //! ```
 //!
 //! The last two are [`crate::k`] — the door `ikigai-browse`'s HTML faces are authored
@@ -436,7 +437,8 @@ pub fn door_space(
     web: Arc<Web>,
     layers_view: Option<Arc<crate::layers_view::LayersView>>,
 ) -> EndpointSpace {
-    let pages = crate::layers_view::bind(space(Arc::clone(&web)), &web, layers_view);
+    let pages = crate::layers_view::bind(space(Arc::clone(&web)), &web, layers_view.clone());
+    let pages = crate::resolution::bind(pages, &web, layers_view);
     crate::onboard::bind_page(pages, &web).named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
@@ -2988,7 +2990,7 @@ async fn inbound_links(
 
 /// The root and path of a working-tree file IRI, `urn:repo:file:{root}/{path}` (ledger #3238):
 /// a valid root name and a non-empty relative path with no empty, `.` or `..` segment.
-fn repo_file(target: &str) -> Option<(&str, &str)> {
+pub(crate) fn repo_file(target: &str) -> Option<(&str, &str)> {
     let (root, path) = target.strip_prefix("urn:repo:file:")?.split_once('/')?;
     (crate::browse::check_root_name(root).is_ok()
         && !path.is_empty()
@@ -2999,7 +3001,7 @@ fn repo_file(target: &str) -> Option<(&str, &str)> {
 
 /// Browse's page for a working-tree file, when the caller may read its root (ledger #3238).
 /// A capability check only: whether the file exists is browse's to answer when it is followed.
-fn repo_file_href(target: &str, capability: &Capability) -> Option<String> {
+pub(crate) fn repo_file_href(target: &str, capability: &Capability) -> Option<String> {
     let (root, path) = repo_file(target)?;
     if !(capability.allows(&format!("{}{root}", ikigai_browse::CAP_PREFIX))
         || capability.allows(ikigai_browse::CAP_WILDCARD))
@@ -3016,6 +3018,25 @@ fn repo_file_href(target: &str, capability: &Capability) -> Option<String> {
         ikigai_fn::html::url_segment(root)
     );
     ikigai_fn::html::safe_href(&href).map(str::to_string)
+}
+
+/// A full Git object's code link, through the viewer's own invocation: the configured clones'
+/// map, then the browse roots' (#3198). Each answers a configured template's URL or a
+/// `/browse/` path, never anything taken from the IRI.
+pub(crate) async fn git_href(inv: &Invocation<'_>, kind: &str, sha: &str) -> Option<String> {
+    for map in ["configured", "browse"] {
+        let Ok(read) = request(Verb::Source, &crate::git_object::link_iri(map, kind, sha)) else {
+            continue;
+        };
+        if let Ok(bytes) = fetch(inv, read).await {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                if let Some(safe) = ikigai_fn::html::safe_href(text).filter(|s| !s.is_empty()) {
+                    return Some(safe.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Resolve only recognized Git IRIs and working-tree file IRIs, through the viewer's own
@@ -3059,23 +3080,7 @@ async fn enrich_git_links(graph: &mut Graph, inv: &Invocation<'_>) {
             continue;
         };
         if !resolved.contains_key(&target) {
-            let mut href = None;
-            for map in ["configured", "browse"] {
-                let Ok(read) = request(Verb::Source, &crate::git_object::link_iri(map, kind, &sha))
-                else {
-                    continue;
-                };
-                if let Ok(bytes) = fetch(inv, read).await {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        if let Some(safe) =
-                            ikigai_fn::html::safe_href(text).filter(|s| !s.is_empty())
-                        {
-                            href = Some(safe.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
+            let href = git_href(inv, kind, &sha).await;
             resolved.insert(target.clone(), href);
         }
         if let Some(Some(href)) = resolved.get(&target) {

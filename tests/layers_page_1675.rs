@@ -21,6 +21,7 @@
 //! - [`the_long_poll_does_not_clear_the_flash`]
 //! - [`an_unreachable_door_is_one_banner`]
 //! - [`a_layer_not_yet_read_has_lists_for_what_arrives`] (ledger #1718)
+//! - [`a_layer_entry_name_resolves_only_for_a_reader_of_the_layer`] (ledger #3238)
 //!
 //! And the header's unread count (ledger [#1700](http://localhost:1062/l/default/item/1700)) and
 //! the access log's quiet polls (ledger [#1694](http://localhost:1062/l/default/item/1694)):
@@ -368,7 +369,9 @@ impl Gonk {
             toolbox: false,
             faces: Vec::new(),
         });
-        let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, view);
+        let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, view.clone());
+        // Ledger #3238: a layer entry's name resolves to its place on this page.
+        let pages = ikigai_gonk::resolution::bind(pages, &face, view);
         let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, access));
         let door = doors::HttpDoor {
             anonymous,
@@ -698,6 +701,66 @@ fn entries_render_newest_first_with_their_kinds() {
     );
     assert!(page.body.contains("id='say'"));
     assert!(page.body.contains("reads and posts as"));
+}
+
+/// Ledger #3238: `urn:layer:{layer}:entry:{id}` resolves to the entry on this page for a viewer
+/// who reads the layer here, through the HTTP door: `200`, private, an instant refresh and a
+/// visible link. A layer the viewer may not read and one that does not exist answer the same
+/// `404`, byte for byte but for the name.
+#[test]
+fn a_layer_entry_name_resolves_only_for_a_reader_of_the_layer() {
+    let host = Host::open();
+    let entry = host.message("bobby", "talk", "a word to link to");
+    let id = entry.rsplit(':').next().unwrap().to_string();
+    assert_eq!(entry, format!("urn:layer:talk:entry:{id}"));
+    let path = |iri: &str| ikigai_gonk::resolution::href(iri);
+
+    let reader = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    let resolved = reader.page(&path(&entry));
+    assert_eq!(resolved.status, 200, "{resolved:?}");
+    let cache = resolved.header("Cache-Control").unwrap_or_default();
+    assert!(cache.contains("private"), "{resolved:?}");
+    let target = format!("/layers/talk#entry-{id}");
+    assert!(
+        resolved.body.contains(&format!(
+            "<meta http-equiv='refresh' content='0; url={target}'>"
+        )),
+        "{resolved:?}"
+    );
+    assert!(
+        resolved.body.contains(&format!(
+            "This name resolves to <a href='{target}'>{target}</a>."
+        )),
+        "{resolved:?}"
+    );
+    // The page it goes to has the anchor.
+    let layer = reader.page("/layers/talk");
+    assert!(
+        layer.body.contains(&format!("id='entry-{id}'")),
+        "{layer:?}"
+    );
+
+    // A layer the identity holds no grant on is a name nobody here resolves.
+    let missing = format!("urn:layer:nope:entry:{id}");
+    let absent = reader.page(&path(&missing));
+    assert_eq!(absent.status, 404, "{absent:?}");
+
+    // A viewer without the layers' read token: the same answer for the readable-to-others layer
+    // and for the one that does not exist.
+    let stranger = Gonk::start(Some(view_as(&host, "brian", None)), Vec::new());
+    let unreadable = stranger.page(&path(&entry));
+    let nonexistent = stranger.page(&path(&missing));
+    assert_eq!(unreadable.status, 404, "{unreadable:?}");
+    assert_eq!(nonexistent.status, 404, "{nonexistent:?}");
+    assert_eq!(
+        unreadable.body.replace(&entry, "NAME"),
+        nonexistent.body.replace(&missing, "NAME"),
+    );
+    assert!(
+        unreadable.body.contains(&entry),
+        "the name is shown: {unreadable:?}"
+    );
+    assert!(!unreadable.body.contains("/layers/talk"), "{unreadable:?}");
 }
 
 #[test]
