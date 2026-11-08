@@ -50,6 +50,12 @@
 //! (`script-src 'self'`, no inline script or style, no framing), which is what lets its scripts
 //! run at all and nothing more.
 //!
+//! # gonk's frame
+//!
+//! Every `text/html` file a face serves gets gonk's slim bar and the theme script
+//! ([`crate::face_frame`], ledger #3279); a page with no `<body>` tag and every other type are
+//! served as written.
+//!
 //! Like the toolbox ([`crate::toolbox`]), a face is bound in the HTTP door's kernel only, never
 //! in the hub: the socket and QUIC doors serve exactly what they served before.
 
@@ -63,6 +69,8 @@ use ikigai_core::{
 };
 use ikigai_web::{EdgeConfig, ReadRedirect, Route};
 
+use crate::face_frame::Frame;
+
 /// The config key: one `<name> <directory>` line per face.
 pub const KEY: &str = "gonk.face";
 
@@ -74,6 +82,9 @@ pub const IRI: &str = "urn:face:name:";
 
 /// The file `/face/name/{name}/` answers.
 pub const INDEX: &str = "index.html";
+
+/// The media type gonk frames ([`crate::face_frame`]).
+const HTML: &str = "text/html";
 
 /// The extensions a face may serve, and the media type each one is served with. Anything else
 /// is `404`: a fixed allowlist, so a face never serves a file under a type nobody chose.
@@ -181,13 +192,15 @@ impl Face {
     }
 
     /// The spaces the HTTP door binds for this face: [`FaceFile`] at
-    /// `urn:face:name:{name}:{path}`, and the directory at `urn:iki:face:name:{name}:dir:{path}`.
-    pub fn spaces(&self) -> Vec<Arc<dyn Space>> {
+    /// `urn:face:name:{name}:{path}`, framed with `roster` (every face, in config order), and
+    /// the directory at `urn:iki:face:name:{name}:dir:{path}`.
+    fn spaces(&self, roster: &[String]) -> Vec<Arc<dyn Space>> {
         let files = EndpointSpace::new().bind(
             UriTemplate::parse(format!("{IRI}{}:{{path}}", self.name))
                 .expect("a checked face name makes a template"),
             FaceFile {
                 base: self.dir_base(),
+                frame: Frame::new(&self.name, roster),
             },
         );
         let dir = EndpointSpace::new().bind(
@@ -243,9 +256,10 @@ pub fn parse_all(lines: &[String], home: &Path) -> Result<Vec<Face>, String> {
     Ok(faces)
 }
 
-/// Every face's spaces, for the HTTP door ([`Face::spaces`]).
+/// Every face's spaces, for the HTTP door, each framed with the whole roster.
 pub fn spaces(faces: &[Face]) -> Vec<Arc<dyn Space>> {
-    faces.iter().flat_map(Face::spaces).collect()
+    let roster: Vec<String> = faces.iter().map(|face| face.name.clone()).collect();
+    faces.iter().flat_map(|face| face.spaces(&roster)).collect()
 }
 
 /// `urn:face:name:{name}:{path}`: Source the file at `{path}` (its `:`s read as `/`) from the
@@ -255,6 +269,7 @@ pub fn spaces(faces: &[Face]) -> Vec<Arc<dyn Space>> {
 /// granted) passes through as it came.
 pub struct FaceFile {
     base: String,
+    frame: Frame,
 }
 
 impl FaceFile {
@@ -303,7 +318,11 @@ impl Endpoint for FaceFile {
     async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
         let (media, request) = self.plan(inv)?;
         let rep = inv.issue(request).await.map_err(|e| as_asked(inv, e))?;
-        Ok(Representation::new(ReprType::new(media), rep.bytes))
+        let bytes = match media {
+            HTML => self.frame.apply(&rep.bytes).unwrap_or(rep.bytes),
+            _ => rep.bytes,
+        };
+        Ok(Representation::new(ReprType::new(media), bytes))
     }
 
     async fn invoke_body(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation<Body>> {
@@ -312,7 +331,23 @@ impl Endpoint for FaceFile {
             .issue_body(request)
             .await
             .map_err(|e| as_asked(inv, e))?;
-        Ok(Representation::from_body(ReprType::new(media), rep.bytes))
+        // ★ A page past what one read may hold is served as written, never refused: only the
+        // frame needs it in memory, and the frame is never worth breaking a face for.
+        let body = match (media, rep.bytes.len_hint()) {
+            (HTML, Some(len)) if len <= ikigai_fs::MAX_FILE_SOURCE_BYTES => {
+                let page = rep
+                    .bytes
+                    .collect(ikigai_fs::MAX_FILE_SOURCE_BYTES as usize)
+                    .await
+                    .map_err(|e| as_asked(inv, e))?;
+                Body::Bytes(match self.frame.apply(&page) {
+                    Some(framed) => framed.into(),
+                    None => page,
+                })
+            }
+            _ => rep.bytes,
+        };
+        Ok(Representation::from_body(ReprType::new(media), body))
     }
 
     fn name(&self) -> &str {

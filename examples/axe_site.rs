@@ -59,9 +59,10 @@ const PAGES: [(&str, &str); 19] = [
     ("queue.html", "/queue"),
 ];
 
-const FILES: [(&str, &str); 5] = [
+const FILES: [(&str, &str); 6] = [
     ("static/tokens.css", "text/css"),
     ("static/gonk.css", "text/css"),
+    ("static/gonk-frame.css", "text/css"),
     ("static/shell.js", "text/javascript"),
     ("static/htmx.min.js", "text/javascript"),
     ("static/gonk.js", "text/javascript"),
@@ -306,7 +307,8 @@ fn main() {
         epochs: None,
         holder_aliases: Default::default(),
         toolbox: false,
-        faces: Vec::new(),
+        // The add-on row (ledger #3279) on every page below.
+        faces: vec!["demo".to_string(), "intake".to_string()],
     });
     let http = Arc::new(doors::http_kernel_serving(
         hub,
@@ -377,6 +379,20 @@ fn main() {
         assert_eq!(status, 200, "/{name}");
         bodies.push((name.to_string(), media, body));
     }
+    // A face's page in gonk's bar (ledger #3279), framed by the code that frames a served one.
+    let roster = ["demo".to_string(), "intake".to_string()];
+    let framed = ikigai_gonk::face_frame::Frame::new("demo", &roster)
+        .apply(
+            b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+              <title>Demo add-on</title></head><body><main><h1>Demo add-on</h1>\
+              <p>A deployment's own page.</p></main></body></html>",
+        )
+        .expect("the fixture has a body tag");
+    bodies.push((
+        "face-demo.html".to_string(),
+        "text/html; charset=utf-8",
+        framed,
+    ));
     // A browser asks for one on every first load; the checker fails on a 404 in the console.
     bodies.push(("favicon.ico".to_string(), "image/x-icon", Vec::new()));
     let files: Vec<(&str, &str, &[u8])> = bodies
