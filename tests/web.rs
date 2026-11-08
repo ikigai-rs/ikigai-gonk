@@ -311,7 +311,7 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
         ("Excluded queue", "needs-person,book:ikigai,blocked"),
         ("Closed queue", "needs-person,book:ikigai"),
         ("Matching elsewhere", "needs-person"),
-        ("Encoded queue", "c++ & café/?#%=yes"),
+        ("Encoded queue", ""),
     ] {
         let response = server.form(
             &[
@@ -332,6 +332,18 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
         );
         filed.push(first_item(&response.body));
     }
+    // Seed a pre-0.21.0 label directly: the write grammar now refuses these characters,
+    // but stored labels must still survive URL and HTML escaping in filters and listings.
+    let term = "c++ & café/?#%=yes";
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "<{}> <https://ikigai-rs.dev/ns/ledger#label> {} .",
+            filed[5].0,
+            serde_json::to_string(term).unwrap()
+        ),
+    );
     let closed = server.form(
         &[
             ("_ledger", "default"),
@@ -444,7 +456,6 @@ fn ledger_label_filters_use_the_ledgers_count_and_listing() {
     ] {
         assert!(filtered.body.contains(url), "{filtered:?}");
     }
-    let term = "c++ & café/?#%=yes";
     let encoded = ikigai_fn::html::url_segment(term);
     let all = server.page("/l/default", None);
     assert!(
