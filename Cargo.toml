@@ -369,7 +369,8 @@ ikigai-throttle = "0.4.0"
 # 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below).
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
-ikigai-engine = { version = "0.3.0", features = ["plan-reader"] }
+# 0.4.0 (ledger #3319): share resolve 0.4 with gonk and its transports.
+ikigai-engine = { version = "0.4.0", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). It is linked for the plan
 # doors ALONE, and gonk never serves it to a caller: every door refuses `urn:shacl:*` as it
@@ -793,7 +794,8 @@ url = "2"
 # 0.1.67 (ledger #2021): the one-release reason (see `ikigai-web` below); the intray did not change.
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
-ikigai-intray = "0.3.0"
+# 0.4.0 (ledger #3319): SpaceReactor takes the same resolve 0.4 Resolver as the hub.
+ikigai-intray = "0.4.0"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -827,7 +829,10 @@ ikigai-intray = "0.3.0"
 # `ikigai-resolve ^0.1.67`.
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
-ikigai-resolve = "0.3.0"
+# 0.4.0 (ledger #3319): match ipc and quic 0.4.1+ (including 0.4.2), whose
+# resolvers implement the 0.4 trait. A fresh lock otherwise splits the trait across
+# resolve 0.3 and 0.4 and cannot compile the socket and QUIC mounts.
+ikigai-resolve = "0.4.0"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -1153,7 +1158,8 @@ flate2 = "1.1.10"
 # alone), so it fires exactly as it did on 0.4.1.
 # ★ 0.5.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.5.0"` is `<0.6.0`.
-ikigai-time = "0.6.0"
+# 0.7.0 (ledger #3319): set_resolver takes the same resolve 0.4 Resolver as the hub.
+ikigai-time = "0.7.0"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
 # `Stream`, the trait core's `ByteStream` is: the backup archive's download is a reader over the
@@ -1322,9 +1328,8 @@ ikigai-fs = "0.4.1"
 # ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
 # ★ 0.8.0 (ledger #3284, #3285): a BEHAVIOR floor. `feed = true` layers are typed `ik:Feed`, their
 # scheme is `urn:layer:{f}:scheme`, and `entries concept=` follows `skos:broader*`: the Feeds page
-# reads all three. A participant build still links no host: its intray 0.4 and resolve 0.4 are in
-# the dev-dependency host's tree only (`cargo tree -e no-dev -i ikigai-intray@0.4.0` prints
-# nothing). `"0.8.0"` is `<0.9.0`.
+# reads all three. A participant build still links no layer host; gonk now also uses intray 0.4
+# and resolve 0.4 directly (ledger #3319). `"0.8.0"` is `<0.9.0`.
 # ★ 0.9.0 (ledger #3291): a BEHAVIOR floor. The join lobby answers an `onb:JoinRequest` with the
 # grant, and `public` layers are what a descriptor lists: `crate::feeds_join` reads both, and a
 # participant build still links no host. `"0.9.0"` is `<0.10.0`.

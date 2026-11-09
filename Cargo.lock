@@ -2060,14 +2060,14 @@ dependencies = [
 
 [[package]]
 name = "ikigai-engine"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a5d58a66b5bd59fccf019ddb85e812370851bf5d1e8d8cf15ba1bcfcda7312f"
+checksum = "c45b91a7be5dec57a2a95344e8b769475697ac5af4d888a0c6e64b75abaa78dd"
 dependencies = [
  "chrono",
  "futures",
  "ikigai-core",
- "ikigai-resolve 0.3.0",
+ "ikigai-resolve",
  "ikigai-store",
  "ikigai-vocab",
  "oxigraph",
@@ -2142,7 +2142,7 @@ dependencies = [
  "ikigai-engine",
  "ikigai-fn 0.11.0",
  "ikigai-fs",
- "ikigai-intray 0.3.0",
+ "ikigai-intray",
  "ikigai-ipc",
  "ikigai-jsonld",
  "ikigai-layers",
@@ -2151,7 +2151,7 @@ dependencies = [
  "ikigai-passkey",
  "ikigai-quic",
  "ikigai-repo",
- "ikigai-resolve 0.3.0",
+ "ikigai-resolve",
  "ikigai-script",
  "ikigai-secret",
  "ikigai-shacl",
@@ -2200,24 +2200,6 @@ dependencies = [
 
 [[package]]
 name = "ikigai-intray"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "238dbff7b345935f6f733d70e1d7d4f56a6d37ab0bda40f544d4aed33e947fe0"
-dependencies = [
- "async-trait",
- "blake3",
- "ikigai-core",
- "ikigai-rdf",
- "ikigai-resolve 0.3.0",
- "ikigai-store",
- "notify",
- "oxigraph",
- "rustix",
- "spargebra",
-]
-
-[[package]]
-name = "ikigai-intray"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b26fdadf01e91a9c137c28286a1a07119ba3ff809fa6d658b458f3551fa3c380"
@@ -2226,7 +2208,7 @@ dependencies = [
  "blake3",
  "ikigai-core",
  "ikigai-rdf",
- "ikigai-resolve 0.4.0",
+ "ikigai-resolve",
  "ikigai-store",
  "notify",
  "oxigraph",
@@ -2236,13 +2218,13 @@ dependencies = [
 
 [[package]]
 name = "ikigai-ipc"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d5ddc14a5cc6db34aa6ab8d6e91398e342c551aa298ebc57495439ac89a6d26"
+checksum = "be4a48e03f7464013ce7ee50132b31af7f8e9be5dd580826f94c62473d89ee6a"
 dependencies = [
  "futures",
  "ikigai-core",
- "ikigai-resolve 0.3.0",
+ "ikigai-resolve",
  "ikigai-wire",
  "libc",
  "nix",
@@ -2274,7 +2256,7 @@ dependencies = [
  "futures-timer",
  "ikigai-core",
  "ikigai-encrypt",
- "ikigai-intray 0.4.0",
+ "ikigai-intray",
  "ikigai-jsonld",
  "ikigai-rdf",
  "ikigai-shacl",
@@ -2342,13 +2324,13 @@ dependencies = [
 
 [[package]]
 name = "ikigai-quic"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "522869e188ecac612c46dd361266dc2ab089190b377adf95d01dd18bdb85e411"
+checksum = "74d07bd0da74be88b920ebc860ad01c3ec12fc7466ba084ab21245ac32817ac1"
 dependencies = [
  "futures",
  "ikigai-core",
- "ikigai-resolve 0.3.0",
+ "ikigai-resolve",
  "ikigai-wire",
  "quinn",
  "quinn-proto",
@@ -2387,19 +2369,6 @@ dependencies = [
  "async-trait",
  "futures",
  "ikigai-core",
-]
-
-[[package]]
-name = "ikigai-resolve"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6edd5bf3371de53a10358504fde9f8743d7de608cd588f07513fbbe68823e357"
-dependencies = [
- "async-trait",
- "futures",
- "ikigai-core",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2537,12 +2506,12 @@ dependencies = [
 
 [[package]]
 name = "ikigai-time"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24cfc308a3586ad709c506286d53619ea964310cd7edd11cace30e5a6c381a4a"
+checksum = "b0fe56abe1e934e6ae4eaa3bd04129067909ac198ca739c097d75bed01032989"
 dependencies = [
  "ikigai-core",
- "ikigai-resolve 0.3.0",
+ "ikigai-resolve",
 ]
 
 [[package]]
@@ -2604,12 +2573,12 @@ dependencies = [
 
 [[package]]
 name = "ikigai-wire"
-version = "0.4.0"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b7ddcfaa08f3791e3e2042b836e7312c3e9c148be48818151c556c56723e230"
+checksum = "7ec85ac920ddaa2efd9602926a9cb3438cda57f3da4730c30b00d7f9cb574abf"
 dependencies = [
  "ikigai-core",
- "ikigai-resolve 0.3.0",
+ "ikigai-resolve",
  "postcard",
  "serde",
 ]

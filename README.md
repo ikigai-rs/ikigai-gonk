@@ -1471,8 +1471,12 @@ grant `client add` enrolled it under. That grant is narrow (`--ledger default=wr
 ledger, and a write to any other is `Denied`), revocable (`ikigai-gonk client remove roborev`),
 and the client's own: **every item is authored by the client**
 (`urn:iki:host:gonk:client:<fingerprint>`, shown as `roborev`), not by gonk's owner. A
-certificate gonk does not trust, or one enrolled under no grant, is refused at the door, and the
-command says so. Without `--quic`, the command files over the running gonk's owner-only socket
+certificate gonk does not trust, or one enrolled under no grant, is refused at the door.
+QUIC reports an unadmitted certificate as `Denied` (`the client certificate is not admitted`);
+a door that closes the connection instead appears as a transport error. In either case, the
+command includes the enrollment instruction:
+`ikigai-gonk client add <name> --ledger <ledger>=write`, then restart gonk. Without `--quic`,
+the command files over the running gonk's owner-only socket
 (`gonk.socket`, default `~/.ikigai/gonk.sock`; `--socket PATH` or `--config PATH` names
 another), whose caller is the user who runs gonk, `author roborev`: a convenience for a hook
 running as that user, on that machine, outside any sandbox, which carries the owner's whole
