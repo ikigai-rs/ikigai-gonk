@@ -90,6 +90,7 @@
               <xsl:apply-templates select="view:browse"/>
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
+              <xsl:apply-templates select="view:feeds-link"/>
               <xsl:apply-templates select="view:views-link"/>
               <xsl:apply-templates select="view:onboard-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
@@ -361,6 +362,8 @@
       <xsl:when test="@view = 'layers-wait'"><xsl:call-template name="layers-wait"/></xsl:when>
       <xsl:when test="@view = 'layers-count'"><xsl:call-template name="layers-count"/></xsl:when>
       <xsl:when test="@view = 'layers-say'"><xsl:call-template name="layers-say"/></xsl:when>
+      <xsl:when test="@view = 'layers-ask'"><xsl:call-template name="layers-ask"/></xsl:when>
+      <xsl:when test="@view = 'feed'"><xsl:call-template name="feed"/></xsl:when>
       <xsl:when test="@view = 'views'"><xsl:call-template name="views"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
@@ -518,6 +521,11 @@
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Dashboard</a>
   </xsl:template>
 
+  <!-- Feeds (ledger #3285, src/layers_view.rs), on the Layers link's rule (src/web.rs::nav_with). -->
+  <xsl:template match="view:feeds-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Feeds</a>
+  </xsl:template>
+
   <xsl:template match="view:views-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Views</a>
   </xsl:template>
@@ -668,6 +676,7 @@
         <p class="note">The door says this page reads and posts as <code class="iri"><xsl:value-of select="@me"/></code>, <xsl:value-of select="@me-kind"/>.</p>
       </xsl:if>
       <xsl:if test="@no-post"><p class="note"><xsl:value-of select="@no-post"/></p></xsl:if>
+      <xsl:if test="@feed-filter"><p class="note"><xsl:value-of select="@feed-filter"/><xsl:text> · </xsl:text><a href="/feed">Change the filter on Feeds</a></p></xsl:if>
       <xsl:if test="@reading"><p class="note"><xsl:value-of select="@reading"/></p></xsl:if>
       <xsl:apply-templates select="view:say"/>
       <p id="layers-live" class="note live"></p>
@@ -724,6 +733,13 @@
             <xsl:text> · replaces </xsl:text>
             <a><xsl:attribute name="href"><xsl:value-of select="@supersedes-href"/></xsl:attribute><xsl:value-of select="@supersedes-label"/></a>
           </xsl:if>
+          <xsl:if test="@about-label">
+            <xsl:text> · about </xsl:text>
+            <xsl:choose>
+              <xsl:when test="@about-href"><a class="entry-about"><xsl:attribute name="href"><xsl:value-of select="@about-href"/></xsl:attribute>an entry of <xsl:value-of select="@about-label"/></a></xsl:when>
+              <xsl:otherwise>an entry of <xsl:value-of select="@about-label"/></xsl:otherwise>
+            </xsl:choose>
+          </xsl:if>
           <xsl:if test="@addressed-to"><xsl:text> · addressed to </xsl:text><xsl:value-of select="@addressed-to"/></xsl:if>
           <xsl:if test="@offer"><xsl:text> · about the offer </xsl:text><code><xsl:value-of select="@offer"/></code></xsl:if>
           <xsl:if test="@item-href"><xsl:text> · tracked here as </xsl:text><a class="entry-item"><xsl:attribute name="href"><xsl:value-of select="@item-href"/></xsl:attribute><xsl:value-of select="@item-label"/></a></xsl:if>
@@ -767,6 +783,7 @@
         <xsl:if test="@answer-href">
           <p class="entry-actions"><a><xsl:attribute name="href"><xsl:value-of select="@answer-href"/></xsl:attribute>Reply<span class="sr-only"> to the <xsl:value-of select="@kind-label"/> from <xsl:value-of select="@who"/>, number <xsl:value-of select="@seq"/></span></a></p>
         </xsl:if>
+        <xsl:apply-templates select="view:ask"/>
       </article>
     </li>
   </xsl:template>
@@ -818,6 +835,122 @@
     <div id="status" hx-swap-oob="innerHTML">
       <p class="flash ok"><xsl:value-of select="@flash"/></p>
     </div>
+  </xsl:template>
+
+  <!-- A feed entry's question (ledger #3285): a native disclosure, so the form is out of the
+       way until it is wanted and opens with no script. It goes to the viewer's OWN channel: a
+       choice when the identity has several, named when it has one. Each form's fields carry the
+       entry's id, so a page of entries has no duplicate ids. -->
+  <xsl:template match="view:ask">
+    <details class="ask">
+      <summary>Ask a question about this<span class="sr-only">, entry <xsl:value-of select="@entry"/></span></summary>
+      <xsl:apply-templates select="." mode="form"/>
+    </details>
+  </xsl:template>
+
+  <xsl:template match="view:ask" mode="form">
+      <form class="say" method="post" hx-target="this" hx-swap="outerHTML">
+        <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+        <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+        <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@feed"/></xsl:attribute></input>
+        <input type="hidden" name="entry"><xsl:attribute name="value"><xsl:value-of select="@entry"/></xsl:attribute></input>
+        <xsl:choose>
+          <xsl:when test="@single = 'true'">
+            <input type="hidden" name="channel"><xsl:attribute name="value"><xsl:value-of select="view:ask-channel/@name"/></xsl:attribute></input>
+            <p class="note">The question goes to your own channel, <xsl:value-of select="view:ask-channel/@label"/>.</p>
+          </xsl:when>
+          <xsl:otherwise>
+            <label><xsl:attribute name="for">ask-<xsl:value-of select="@entry"/>-channel</xsl:attribute>Ask in</label>
+            <select name="channel"><xsl:attribute name="id">ask-<xsl:value-of select="@entry"/>-channel</xsl:attribute>
+              <xsl:for-each select="view:ask-channel">
+                <option><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute><xsl:value-of select="@label"/></option>
+              </xsl:for-each>
+            </select>
+          </xsl:otherwise>
+        </xsl:choose>
+        <label><xsl:attribute name="for">ask-<xsl:value-of select="@entry"/>-body</xsl:attribute>Your question (Markdown)</label>
+        <textarea name="body" rows="3" required="required"><xsl:attribute name="id">ask-<xsl:value-of select="@entry"/>-body</xsl:attribute></textarea>
+        <p class="row"><button type="submit">Ask</button></p>
+      </form>
+  </xsl:template>
+
+  <!-- A question's answer: a fresh form, and the flash in the page's one status region. -->
+  <xsl:template name="layers-ask">
+    <xsl:apply-templates select="view:ask" mode="form"/>
+    <div id="status" hx-swap-oob="innerHTML">
+      <p class="flash ok"><xsl:value-of select="@flash"/></p>
+    </div>
+  </xsl:template>
+
+  <!-- /feed (ledger #3285): every feed the identity reads. Plain forms, so Subscribe and a saved
+       filter work with no script, and the answer is the page with what changed said above it. -->
+  <xsl:template name="feed">
+    <section class="panel layers" aria-labelledby="feeds-title">
+      <h1 id="feeds-title"><xsl:value-of select="@title"/></h1>
+      <xsl:apply-templates select="view:signin"/>
+      <div id="layers-banner"><xsl:apply-templates select="view:notice"/></div>
+      <xsl:apply-templates select="view:flash" mode="announce"/>
+      <xsl:if test="@empty"><p class="empty"><xsl:value-of select="@empty"/></p></xsl:if>
+      <ul class="layer-list">
+        <xsl:apply-templates select="view:feed-row"/>
+      </ul>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:feed-row">
+    <li class="layer-row">
+      <h2 class="layer-name">
+        <xsl:choose>
+          <xsl:when test="@href"><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@label"/></a></xsl:when>
+          <xsl:otherwise><xsl:value-of select="@label"/></xsl:otherwise>
+        </xsl:choose>
+        <span class="note"> (<xsl:value-of select="@name"/>)</span>
+      </h2>
+      <p class="layer-facts">
+        <xsl:choose>
+          <xsl:when test="@newest-title">
+            <xsl:text>Newest: </xsl:text><xsl:value-of select="@newest-title"/>
+            <xsl:if test="@when != ''">
+              <xsl:text> · </xsl:text>
+              <time><xsl:attribute name="datetime"><xsl:value-of select="@datetime"/></xsl:attribute><xsl:value-of select="@when"/></time>
+            </xsl:if>
+          </xsl:when>
+          <xsl:otherwise>Nothing has been published yet.</xsl:otherwise>
+        </xsl:choose>
+      </p>
+      <form class="feed-toggle" method="post">
+        <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+        <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
+        <input type="hidden" name="action"><xsl:attribute name="value"><xsl:choose><xsl:when test="@subscribed = 'true'">unsubscribe</xsl:when><xsl:otherwise>subscribe</xsl:otherwise></xsl:choose></xsl:attribute></input>
+        <button type="submit"><xsl:choose><xsl:when test="@subscribed = 'true'">Unsubscribe<span class="sr-only"> from <xsl:value-of select="@label"/></span></xsl:when><xsl:otherwise>Subscribe<span class="sr-only"> to <xsl:value-of select="@label"/></span></xsl:otherwise></xsl:choose></button>
+      </form>
+      <xsl:if test="view:concept">
+        <form class="feed-filter" method="post">
+          <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+          <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
+          <input type="hidden" name="action" value="filter"/>
+          <fieldset>
+            <legend>Filter <xsl:value-of select="@label"/> by concept</legend>
+            <p class="note">A checked concept includes everything under it. With none checked you get the whole feed.</p>
+            <ul class="concepts"><xsl:apply-templates select="view:concept"/></ul>
+          </fieldset>
+          <p class="row"><button type="submit">Save the filter<span class="sr-only"> for <xsl:value-of select="@label"/></span></button></p>
+        </form>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:concept">
+    <li>
+      <label>
+        <input type="checkbox" name="concept">
+          <xsl:attribute name="value"><xsl:value-of select="@iri"/></xsl:attribute>
+          <xsl:if test="@checked = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if>
+        </input>
+        <xsl:value-of select="@label"/>
+      </label>
+      <xsl:if test="view:concept"><ul class="concepts"><xsl:apply-templates select="view:concept"/></ul></xsl:if>
+    </li>
   </xsl:template>
 
   <!-- The poll's answer: the next watcher in place of this one, and what changed, out of

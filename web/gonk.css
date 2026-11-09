@@ -535,6 +535,15 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .markdown th { white-space: normal; }
 .badge.new { color: var(--accent); border-color: var(--accent); font-weight: 600; margin-left: 0.4rem; }
 .config-line { display: block; margin-top: 0.35rem; overflow-wrap: anywhere; }
+.feed-toggle, .feed-filter { margin: 0.5rem 0 0; }
+.feed-filter fieldset { border: 1px solid var(--rule); padding: 0.5rem 0.75rem; margin: 0; min-width: 0; }
+.feed-filter legend { padding: 0 0.25rem; }
+.concepts { list-style: none; margin: 0; padding: 0; }
+.concepts .concepts { padding-left: 1.5rem; }
+.concepts label { display: inline-block; padding: 0.1rem 0; }
+.concepts input { margin-right: 0.35rem; }
+.ask { margin-top: 0.5rem; }
+.ask .say { margin-top: 0.5rem; }
 .say { display: grid; gap: 0.5rem; }
 .say h2 { margin: 0; }
 .say fieldset { border: 0; padding: 0; margin: 0; }

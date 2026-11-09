@@ -2685,6 +2685,40 @@ this line.
   the page over a scratch layer host in process (its anonymous caller is handed the two tokens,
   which the real server never does) and prints the URL; `bobby` posts every 30 seconds.
 
+
+### Feeds (ledger #3285)
+
+A **feed** is a layer whose definition is typed `ik:Feed` (`feed = true` in
+[ikigai-layers](https://github.com/ikigai-rs/ikigai-layers), which publishers only may write and
+whose membership is invisible). A caller holding `urn:cap:gonk:layers:read` sees **Feeds** in the
+header:
+
+- **`/feed`** lists every feed the `gonk.layers.view` identity reads, with its newest entry and
+  a Subscribe button. A feed starts unsubscribed. Subscribing needs only the read grant, since
+  subscribing is reading.
+- **A concept filter.** A subscribed feed shows its SKOS scheme as a tree of checkboxes. Checking a
+  concept includes everything under it, and none checked means the whole feed. A filtered page
+  reads `entries concept=` at the door.
+- **Subscriptions are per viewer** (the signed-in passkey), kept as `{feed, concepts}` in
+  `<data home>/layers-view/subscription.json` beside the read cursors, and never sent to the layer
+  host. The door hears only what the one configured identity reads.
+- **The Layers view.** A subscribed feed has a row in the overview and a page like any channel's,
+  filtered by the viewer's concepts and read-only for every identity, publishers included. An
+  unsubscribed feed is not shown, and the follower does not wait on it. Unread counts respect the
+  filter.
+- **Asking about an entry.** Each entry of a feed has "Ask a question about this": an `ik:Question`
+  posted to the viewer's own channel (a channel the identity may `say` on that is not a feed; a
+  choice when there are several, hidden when there are none, and needing
+  `urn:cap:gonk:layers:say`) with `dcterms:subject` naming the feed entry. In that channel the
+  question links back to the entry. **The channel's shape must allow `dcterms:subject` on
+  `ik:Question`**; a closed shape that does not refuses the question, and the door's refusal is
+  the answer.
+
+A filtered feed's unread count and live updates are worked out from gonk's copy of the newest 50
+entries, so a viewer more than 50 entries behind on a filtered feed is under-counted, while the
+page itself reads the door and shows the newest 50 that match. A first subscriber's feed joins the
+long poll when the one in flight returns (up to 50 seconds); what is already published shows at once.
+
 ## Onboarding a node (ledger #2009)
 
 A node enrolls itself: it makes its own certificate, posts one request on the layer host's
