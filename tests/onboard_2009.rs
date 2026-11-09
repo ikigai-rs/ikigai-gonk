@@ -253,6 +253,8 @@ impl Edge {
             "urn:cap:layer:feed:grants",
             "urn:cap:layer:say:grants",
             "urn:cap:collab:read:onboard",
+            // The controller's own grant: the manifests that name it, `crew` here.
+            "urn:cap:collab:read:crew",
         ];
         self.door(
             Capability::scoped(scopes)
@@ -309,6 +311,20 @@ impl Edge {
         )
     }
 
+    /// The owner edits the host's roster: `name` joins `participants.ttl` and the crew manifest.
+    fn put_on_the_roster(&self, name: &str) {
+        let append = |rel: &str, line: String| {
+            let path = self.config.path().join(rel);
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(path, format!("{text}{line}")).unwrap();
+        };
+        append(
+            "participants.ttl",
+            format!("<urn:collab:participant:{name}> a <http://xmlns.com/foaf/0.1/Person> .\n"),
+        );
+        append("collabs/crew.toml", format!("{name} = [\"read\"]\n"));
+    }
+
     fn trusted(&self, fingerprint: &str) -> bool {
         self.config
             .path()
@@ -348,6 +364,17 @@ impl Gonk {
         door: onboard::GonkDoor,
         kinds_ttl: &str,
     ) -> Gonk {
+        Gonk::through(edge.controller_door(), keys, public, door, kinds_ttl)
+    }
+
+    /// A gonk that reaches the layer host through `layer_door`.
+    fn through(
+        layer_door: Arc<dyn Door>,
+        keys: Arc<Memory>,
+        public: &str,
+        door: onboard::GonkDoor,
+        kinds_ttl: &str,
+    ) -> Gonk {
         let home = tempfile::tempdir().unwrap();
         let layout = Layout::in_config_home(home.path());
         let kinds = home.path().join("kinds.ttl");
@@ -355,7 +382,7 @@ impl Gonk {
         let clock = Arc::new(AtomicU64::new(NOW));
         let ticks = Arc::clone(&clock);
         let onboard = Onboard::new(Parts {
-            door: edge.controller_door(),
+            door: layer_door,
             door_authority: "edge.example:4434".to_string(),
             door_server_cert: ikigai_quic::generate().cert_pem,
             lobby: "enroll".to_string(),
@@ -1076,4 +1103,160 @@ fn the_door_is_the_gonk_setting_and_wins_over_a_kinds_door() {
     assert_eq!(advertised(none(), KINDS), None);
     // Locally: no door at all, whatever the kind says.
     assert_eq!(advertised(onboard::GonkDoor::Socket, &with_door), None);
+}
+
+// ---- ledger #3293: a name already in use is refused at invite and at approve ----
+
+/// The refusal's reason, for a call that must be a conflict.
+fn conflict<T: std::fmt::Debug>(answer: Result<T, Error>) -> String {
+    match answer {
+        Err(Error::Conflict(why)) => why,
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+}
+
+fn open_codes(keys: &Memory) -> usize {
+    keys.0
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|k| k.starts_with(onboard::INVITE_SECRET_PREFIX))
+        .count()
+}
+
+#[test]
+fn a_name_on_the_hosts_roster_is_refused_at_invite_and_a_fresh_one_passes() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::new(&edge, Arc::clone(&keys), &public);
+
+    let why = conflict(a.onboard.invite("brian-gonk", &kinds(&["worker"])));
+    assert!(why.contains("`brian-gonk`"), "names the name: {why}");
+    assert!(why.contains("participants.ttl"), "names the file: {why}");
+    assert!(why.contains("`crew`"), "names where it is used: {why}");
+    assert!(why.contains("`brian-gonk-2`"), "suggests another: {why}");
+    assert_eq!(open_codes(&keys), 0, "a refusal mints nothing");
+
+    let minted = a.onboard.invite("fresh", &kinds(&["worker"])).unwrap();
+    assert_eq!(minted.invite.name, "fresh");
+    assert_eq!(open_codes(&keys), 1);
+}
+
+#[test]
+fn a_pending_or_approved_invite_holds_its_name_until_it_expires_or_is_revoked() {
+    let (edge, a) = world("brian");
+    let first = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains(&first.invite.id), "names the invite: {why}");
+    assert!(why.contains("pending"), "{why}");
+    assert!(why.contains("`mini-2`"), "{why}");
+
+    // A suggestion is itself free.
+    a.onboard.invite("mini-2", &kinds(&["worker"])).unwrap();
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains("`mini-3`"), "{why}");
+
+    // An invite past its 24 hours holds nothing.
+    a.advance_hours(onboard::INVITE_HOURS + 1);
+    let second = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+
+    // Approved: its entitlement holds the name.
+    let mini = node();
+    let id = mini.request(&edge, &second.invite.id, &second.code);
+    a.onboard.approve(&id).unwrap();
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains("entitlement"), "{why}");
+    assert!(why.contains("urn:layer:grants:entry:"), "{why}");
+
+    // Revoked: the name is free again, the way a node gets a new certificate.
+    a.onboard.revoke("mini").unwrap();
+    let third = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    // And the new invite holds it like any other.
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains(&third.invite.id), "{why}");
+}
+
+#[test]
+fn approve_checks_the_roster_again() {
+    let (edge, a) = world("brian");
+    let minted = a.onboard.invite("late", &kinds(&["worker"])).unwrap();
+    let late = node();
+    let id = late.request(&edge, &minted.invite.id, &minted.code);
+
+    edge.put_on_the_roster("late");
+
+    let why = conflict(a.onboard.approve(&id));
+    assert!(why.contains("`late`"), "{why}");
+    assert!(why.contains("participants.ttl"), "{why}");
+    assert!(why.contains("`crew`"), "{why}");
+    assert!(why.contains("`late-2`"), "{why}");
+    // Nothing was said or spent: the request still waits, and nobody was enrolled.
+    assert_eq!(a.onboard.pending().unwrap().len(), 1);
+    assert!(a.onboard.status().records.is_empty());
+    assert_eq!(a.enrolled_grant(&late.fingerprint), None);
+    assert!(edge.enrolled_door(&late.fingerprint).is_none());
+}
+
+#[test]
+fn approve_refuses_a_name_another_certificate_took_meanwhile() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::new(&edge, Arc::clone(&keys), &public);
+    let b = Gonk::new(&edge, keys, &public);
+    // Each gonk's invites are its own, so neither saw the other's.
+    let from_a = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let from_b = b.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let first = node();
+    let second = node();
+    let first_id = first.request(&edge, &from_a.invite.id, &from_a.code);
+    let second_id = second.request(&edge, &from_b.invite.id, &from_b.code);
+
+    let (said, _) = a.onboard.approve(&first_id).unwrap();
+    let why = conflict(b.onboard.approve(&second_id));
+    assert!(why.contains(&said), "names the entitlement: {why}");
+    assert!(edge.enrolled_door(&second.fingerprint).is_none());
+}
+
+#[test]
+fn a_certificate_may_be_approved_again_under_the_name_it_holds() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::new(&edge, Arc::clone(&keys), &public);
+    let b = Gonk::new(&edge, keys, &public);
+    let from_a = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let from_b = b.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let mini = node();
+    let first = mini.request(&edge, &from_a.invite.id, &from_a.code);
+    let again = mini.request(&edge, &from_b.invite.id, &from_b.code);
+    a.onboard.approve(&first).unwrap();
+    b.onboard.approve(&again).unwrap();
+}
+
+/// A layer host nobody can reach.
+struct Down;
+
+impl Door for Down {
+    fn call(&self, _request: Request) -> Result<Representation, Error> {
+        Err(Error::Endpoint("the layer door is down".to_string()))
+    }
+}
+
+#[test]
+fn an_invite_that_cannot_check_its_name_mints_nothing() {
+    let (keys, public) = keystore();
+    let a = Gonk::through(
+        Arc::new(Down),
+        Arc::clone(&keys),
+        &public,
+        onboard::GonkDoor::Default { port: None },
+        KINDS,
+    );
+    match a.onboard.invite("mini", &kinds(&["worker"])) {
+        Err(Error::Endpoint(why)) => {
+            assert!(why.contains("`mini`"), "{why}");
+            assert!(why.contains("the layer door is down"), "{why}");
+        }
+        other => panic!("expected the door's failure, got {other:?}"),
+    }
+    assert_eq!(open_codes(&keys), 0);
 }

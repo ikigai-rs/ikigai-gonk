@@ -62,6 +62,15 @@
 //! entitlement carrying the union of the kinds' grants, with no `onb:kind` (an invite of one kind
 //! names it). Every entitlement this grants also carries `read` on the grants layer, so a node
 //! whose kinds grant no layer still reads its own entitlement (the node polls for it there).
+//!
+//! **A name already in use is refused before anything is minted or signed** (ledger
+//! [#3293](http://localhost:1062/l/default/item/3293)), at invite and again at approve, so the
+//! owner does not learn it from the layer host's refusal at apply time. What this door can see:
+//! the host's `participants.ttl`, as far as the controller's grant reaches (`urn:layers:me` lists
+//! its collaborations, `urn:collab:{name}:participants` each one's slice; the whole roster,
+//! `urn:layers:participants`, is the host operator's and no generated grant reads it), every
+//! entitlement on the grants layer, and this gonk's invites. A name only in a collaboration the
+//! controller is not in is invisible here, and stays the layer host's to refuse.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -170,6 +179,9 @@ const JSON: &str = "application/json";
 const TEXT: &str = "text/plain;charset=utf-8";
 const CONTROLLER_PRIVATE: &str = "urn:iki:onboard:signer:private";
 const CONTROLLER_PUBLIC: &str = "urn:iki:onboard:signer:public";
+const PARTICIPANT_PREFIX: &str = "urn:collab:participant:";
+const LAYERS_ME: &str = "urn:layers:me";
+const COLLAB_PREFIX: &str = "urn:collab:";
 
 /// The wall clock, in milliseconds since the epoch: what an invite expires by.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -447,6 +459,9 @@ pub struct Onboard {
     /// Serializes approve, revoke and apply, and caches what never changes.
     book: Mutex<Book>,
     status: Mutex<Status>,
+    /// Held from a name's check until the invite or approval is written, so two calls cannot
+    /// both find one name free.
+    naming: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -835,6 +850,23 @@ pub fn is_node_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Why `name` may not be used, naming where it is and suggesting another; `None` when it is free.
+fn in_use(name: &str, used: &BTreeMap<String, String>) -> Option<String> {
+    let place = used.get(name)?;
+    let free = (2u32..)
+        .map(|n| {
+            let tail = format!("-{n}");
+            let stem: String = name.chars().take(48 - tail.len()).collect();
+            format!("{}{tail}", stem.trim_end_matches('-'))
+        })
+        .find(|candidate| !used.contains_key(candidate))
+        .expect("the used names are finite");
+    Some(format!(
+        "node name `{name}` is already in use: {place}. Invite this node under another name, \
+         such as `{free}`"
+    ))
+}
+
 /// The proof a node posts: lowercase hex HMAC-SHA256 with the code's UTF-8 bytes as the key and
 /// the fingerprint's ASCII as the message (the contract arc C's `worker.py onboard` computes).
 ///
@@ -963,6 +995,7 @@ impl Onboard {
             signer: Kernel::new(Arc::new(Fallback::new(spaces))),
             book: Mutex::new(Book::default()),
             status: Mutex::new(Status::default()),
+            naming: Mutex::new(()),
         })
     }
 
@@ -1183,7 +1216,9 @@ impl Onboard {
     ///
     /// # Errors
     ///
-    /// A name or kind the contract refuses, a keystore or store that does not write.
+    /// A name or kind the contract refuses, a name already in use (a [`Error::Conflict`] naming
+    /// where, and suggesting another), a layer host that cannot be asked, a keystore or store
+    /// that does not write.
     pub fn invite(&self, name: &str, kinds: &[String]) -> std::result::Result<Minted, Error> {
         let bad = |name: &str, detail: String| Error::InvalidArgument {
             name: name.to_string(),
@@ -1216,6 +1251,8 @@ impl Onboard {
                 ));
             }
         }
+        let _naming = self.naming.lock().expect("naming lock");
+        self.refuse_a_name_in_use(name)?;
         let id = format!(
             "{name}-{}",
             random_from(b"abcdefghijkmnpqrstvwxyz23456789", 6).map_err(Error::Endpoint)?
@@ -1270,6 +1307,113 @@ impl Onboard {
             pin,
             server_cert: self.parts.door_server_cert.clone(),
         })
+    }
+
+    // ---- names in use ----
+
+    /// Refuse `name` at invite time, before anything is minted. A name that cannot be checked
+    /// is refused too: a node could not post its request to a host this cannot reach anyway.
+    fn refuse_a_name_in_use(&self, name: &str) -> std::result::Result<(), Error> {
+        let cannot = |e: String| {
+            Error::Endpoint(format!(
+                "cannot check whether `{name}` is in use, so no invite was minted: {e}"
+            ))
+        };
+        let invites = self.invites().map_err(cannot)?;
+        let fold = self.fold().map_err(cannot)?;
+        let used = self.names_in_use(&invites, &fold, None).map_err(cannot)?;
+        match in_use(name, &used) {
+            Some(why) => Err(conflict(why)),
+            None => Ok(()),
+        }
+    }
+
+    /// Every node name in use, with where. `approving` is the invite id and certificate of the
+    /// request being approved: its own invite and that certificate's own entitlement do not
+    /// count against it, and neither do other PENDING invites, which only an approval turns into
+    /// a holder (two left over from before this check must not block each other).
+    ///
+    /// A revoked name is free wherever it still shows: the host appends to `participants.ttl`
+    /// and never removes a node, and a new certificate for a name is a revocation, then a new
+    /// entitlement. An expired entitlement still holds its name until revoked, as on the host.
+    fn names_in_use(
+        &self,
+        invites: &BTreeMap<String, Invite>,
+        fold: &Fold,
+        approving: Option<(&str, &str)>,
+    ) -> std::result::Result<BTreeMap<String, String>, String> {
+        let mut used: BTreeMap<String, String> = BTreeMap::new();
+        let mut released: BTreeSet<&str> = BTreeSet::new();
+        for v in fold.current.values() {
+            if v.grants_nothing() || approving.is_some_and(|(_, fp)| fp == v.fingerprint) {
+                released.insert(v.name());
+            } else {
+                used.entry(v.name().to_string()).or_insert_with(|| {
+                    format!(
+                        "entitlement {} holds it for certificate {}",
+                        v.iri,
+                        short(&v.fingerprint)
+                    )
+                });
+            }
+        }
+        let now = (self.parts.clock)();
+        for invite in invites.values() {
+            if approving.is_some_and(|(id, _)| id == invite.id) {
+                continue;
+            }
+            let place = match &invite.used_by {
+                Some(_) if released.contains(invite.name.as_str()) => continue,
+                Some(_) => format!("invite `{}` was approved", invite.id),
+                None if approving.is_some()
+                    || matches!(expired(&invite.expires, now), Ok(true)) =>
+                {
+                    continue
+                }
+                None => format!("invite `{}` is pending until {}", invite.id, invite.expires),
+            };
+            used.entry(invite.name.clone()).or_insert(place);
+        }
+        for (collab, names) in self.rosters()? {
+            for name in names {
+                if !released.contains(name.as_str()) {
+                    used.entry(name).or_insert_with(|| {
+                        format!("the layer host's participants.ttl lists it, in collaboration `{collab}`")
+                    });
+                }
+            }
+        }
+        Ok(used)
+    }
+
+    /// `participants.ttl` as this door reaches it: each collaboration the controller takes part
+    /// in, with the names its manifest grants.
+    fn rosters(&self) -> std::result::Result<Vec<(String, Vec<String>)>, String> {
+        let me = self.call(
+            crate::layer::request(Verb::Source, LAYERS_ME)
+                .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec())),
+        )?;
+        let me: Value =
+            serde_json::from_slice(&me).map_err(|e| format!("{LAYERS_ME}: not JSON: {e}"))?;
+        let collabs = me["collaborations"]
+            .as_array()
+            .ok_or_else(|| format!("{LAYERS_ME}: no collaborations in the answer"))?;
+        let mut out = Vec::new();
+        for collab in collabs.iter().filter_map(Value::as_str) {
+            let Some(name) = collab.strip_prefix(COLLAB_PREFIX) else {
+                continue;
+            };
+            let bytes = self.call(
+                crate::layer::request(Verb::Source, &format!("{collab}:participants"))
+                    .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec())),
+            )?;
+            let names = subjects(&bytes, RdfFormat::Turtle)?
+                .into_keys()
+                .filter_map(|s| s.strip_prefix(PARTICIPANT_PREFIX).map(str::to_string))
+                .collect();
+            out.push((name.to_string(), names));
+        }
+        Ok(out)
     }
 
     // ---- the layers, through the door ----
@@ -1646,6 +1790,7 @@ impl Onboard {
     /// A check that does not pass (a [`Error::Conflict`] naming why), a key that is missing, a
     /// layer that refuses.
     pub fn approve(&self, id: &str) -> std::result::Result<(String, Status), Error> {
+        let naming = self.naming.lock().expect("naming lock");
         let (entry, request) = self.lobby_entry(id).map_err(Error::Endpoint)?;
         let invites = self.invites().map_err(Error::Endpoint)?;
         let checked = self.check_node(&entry, &request, &invites, (self.parts.clock)());
@@ -1658,6 +1803,14 @@ impl Onboard {
             return Err(conflict(format!("{entry} was approved already")));
         }
         let fingerprint = checked.fingerprint.clone().unwrap_or_default();
+        // Again: the roster may have changed since the invite was minted.
+        let fold = self.fold().map_err(Error::Endpoint)?;
+        let used = self
+            .names_in_use(&invites, &fold, Some((&invite.id, &fingerprint)))
+            .map_err(Error::Endpoint)?;
+        if let Some(why) = in_use(&invite.name, &used) {
+            return Err(conflict(format!("{entry} is not approved: {why}")));
+        }
         let kinds = self.kinds().map_err(Error::Endpoint)?;
         let mut layer_grants: BTreeSet<String> = BTreeSet::new();
         let mut gonk_grants: BTreeSet<String> = BTreeSet::new();
@@ -1694,7 +1847,6 @@ impl Onboard {
         } else if !gonk_grants.is_empty() && gonk_cert.is_none() {
             gonk_cert = std::fs::read_to_string(self.parts.layout.server_cert()).ok();
         }
-        let fold = self.fold().map_err(Error::Endpoint)?;
         let mut body = vec![
             format!("<{RDF_TYPE}> <{}>", onb::ENTITLEMENT),
             format!("<{}> {}", onb::FINGERPRINT, lit(&fingerprint)),
@@ -1754,6 +1906,7 @@ impl Onboard {
         self.parts
             .keystore
             .delete(&format!("{INVITE_SECRET_PREFIX}{}", invite.id))?;
+        drop(naming);
         Ok((said, self.apply()))
     }
 
@@ -2773,6 +2926,23 @@ impl Endpoint for Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suggested_name_is_free_and_a_node_name() {
+        let longest = "a".repeat(48);
+        let used = BTreeMap::from([(longest.clone(), "somewhere".to_string())]);
+        let why = in_use(&longest, &used).unwrap();
+        let suggested = format!("{}-2", "a".repeat(46));
+        assert!(is_node_name(&suggested));
+        assert!(why.contains(&format!("`{suggested}`")), "{why}");
+        assert_eq!(in_use("fresh", &used), None);
+
+        let used = BTreeMap::from([
+            ("mini".to_string(), "somewhere".to_string()),
+            ("mini-2".to_string(), "somewhere".to_string()),
+        ]);
+        assert!(in_use("mini", &used).unwrap().contains("`mini-3`"));
+    }
 
     #[test]
     fn a_code_is_ten_symbols_of_the_alphabet() {
