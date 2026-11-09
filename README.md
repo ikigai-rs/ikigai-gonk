@@ -2832,6 +2832,26 @@ certificate that does not hash to its fingerprint. The code is kept in the keyst
 controller key until its invite is used (the proof is keyed by the code itself, so a hash of it
 could not check one); the store holds only its SHA-256.
 
+**A name already in use is refused at `invite`, and checked again at `approve`** (ledger #3293),
+before anything is minted or signed, so the owner does not first hear of it from the layer host's
+refusal at apply time. The refusal says where the name is used and suggests a free one (`mini-2`):
+
+- on the layer host's roster. `participants.ttl` is read as far as the controller's grant reaches:
+  the collaborations `urn:layers:me` lists for it, each through `urn:collab:{name}:participants`.
+  The whole roster, `urn:layers:participants`, is the host operator's and no generated grant reads
+  it, so **a name listed only in a collaboration the controller is not in is not seen here**; the
+  layer host still refuses a name another certificate holds, when it applies the entitlement;
+- on the grants layer, an entitlement of another certificate, in force or expired (an expired one
+  holds its name until it is revoked, as on the host);
+- in this gonk's invites, one pending and unexpired (at `invite` only) or one already approved.
+
+A **revoked** name is free again, wherever it is still listed: the host never removes a node from
+`participants.ttl`, and giving a node a new certificate is a revocation, then a new invite under
+its name. At `approve`, the request's own invite and an entitlement its own certificate already
+holds do not count against it. `invite` needs the layer host: if it cannot be asked, nothing is
+minted and the error says so. `pending` does not run this check, so a request can list as pending
+and still be refused by `approve`.
+
 **Several kinds, one entitlement.** An invite for `worker,task-member` becomes ONE entitlement with
 the union of the kinds' grants (the grants layer keeps one per certificate). Every entitlement
 also grants `read` on the grants layer, so the node reads its own there.
