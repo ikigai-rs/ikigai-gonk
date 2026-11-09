@@ -205,11 +205,18 @@ impl Gonk {
 
     fn failed(&self, verb: &str, iri: &str, error: &Error) -> String {
         let hint = match (&self.client, error) {
-            // The QUIC door refuses a certificate it does not trust, or one enrolled under no
-            // grant, by closing the connection: all the client sees is a transport error.
+            // QUIC 0.4.2 reports an unadmitted certificate as Denied. A door can also
+            // close the connection (for example, for an untrusted certificate), leaving
+            // the client with only a transport error. Both need enrollment guidance.
+            (Client::Quic(_), Error::Denied(reason))
+                if reason.contains("the client certificate is not admitted") =>
+            {
+                " (enroll this client with \
+                 `ikigai-gonk client add <name> --ledger <ledger>=write` and restart gonk)"
+            }
             (Client::Quic(_), Error::Unavailable(_)) => {
-                " (the QUIC door refuses a certificate it does not trust, and one enrolled \
-                 under no grant, by closing the connection: enroll this client with \
+                " (the QUIC door may close the connection for an untrusted or unadmitted \
+                 certificate: enroll this client with \
                  `ikigai-gonk client add <name> --ledger <ledger>=write` and restart gonk)"
             }
             _ => "",

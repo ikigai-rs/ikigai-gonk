@@ -258,12 +258,16 @@ fn a_client_without_the_grant_files_nothing() {
         failed(&command.output().unwrap())
     };
 
-    // Never enrolled: trusted for the handshake, refused by the door, whatever it asks. The
+    // Never enrolled: trusted for the handshake, refused by the door, whatever it asks.
     // QUIC 0.4.2 reports the door's refusal as Denied with the certificate reason.
     for stderr in [review("stranger", "default"), import("stranger", "default")] {
         assert!(stderr.contains("denied"), "{stderr}");
         assert!(
             stderr.contains("client certificate is not admitted"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("ikigai-gonk client add <name> --ledger <ledger>=write"),
             "{stderr}"
         );
     }
