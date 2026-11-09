@@ -840,7 +840,7 @@
   <!-- A feed entry's question (ledger #3285): a native disclosure, so the form is out of the
        way until it is wanted and opens with no script. It goes to the viewer's OWN channel: a
        choice when the identity has several, named when it has one. Each form's fields carry the
-       entry's id, so a page of entries has no duplicate ids. -->
+       entry's id, so no two entries on a page share an id. -->
   <xsl:template match="view:ask">
     <details class="ask">
       <summary>Ask a question about this<span class="sr-only">, entry <xsl:value-of select="@entry"/></span></summary>
