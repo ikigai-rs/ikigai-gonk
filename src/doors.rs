@@ -240,7 +240,11 @@ impl Forward {
     fn request(&self, inv: &Invocation<'_>) -> Request {
         let mut request =
             crate::budget::stamp(inv.request.clone(), &self.description.id, inv.capability);
-        if self.nobody {
+        // ★ And `urn:plan:eval` binds every further argument to a parameter of the plan, and
+        // refuses one the plan does not declare, while no plan may declare `principal`
+        // ([`ikigai_script::plan::RESERVED_PARAMETERS`]): the QUIC door's stamp refused every plan
+        // (ledger #2896). A plan's steps run under the capability, which names who it is for.
+        if self.nobody || self.description.id == crate::script::PLAN_EVAL_ID {
             request.args.remove(crate::admit::PRINCIPAL_ARG);
         }
         // The transports' own arguments (`received`, `client`, `principal`, `content-type`) pass
