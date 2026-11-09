@@ -549,7 +549,7 @@ impl Endpoint for Guard {
 /// The `ikigai-script` endpoint a publish reaches (`urn:script:{name}`).
 const SCRIPT_ID: &str = "script";
 /// The plan door that runs a plan (`urn:plan:eval`).
-const PLAN_EVAL_ID: &str = "plan-eval";
+pub(crate) const PLAN_EVAL_ID: &str = "plan-eval";
 
 fn inline<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     match request.args.get(name) {

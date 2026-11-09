@@ -3233,7 +3233,9 @@ author rules below), and a script's steps never arrive anywhere. For the same re
 that writes runs only as root** at `urn:plan:eval`, at every depth: below root a plan step could
 write a ledger graph raw, or name another person as a comment's `author`, past both rules. A
 read-only plan runs for anyone, under their own capability, which is exactly the requests they
-could make one at a time.
+could make one at a time. That holds at every door: the `principal` the QUIC door stamps on a call
+never reaches `urn:plan:eval`, which would refuse it as a parameter the plan does not declare,
+and a plan still may not declare that name itself (ledger #2896).
 
 ### What else is decided here
 
