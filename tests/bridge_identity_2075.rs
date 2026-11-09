@@ -259,9 +259,13 @@ fn a_client_without_the_grant_files_nothing() {
     };
 
     // Never enrolled: trusted for the handshake, refused by the door, whatever it asks. The
-    // door closes the connection, so the bridge says what that means.
+    // QUIC 0.4.2 reports the door's refusal as Denied with the certificate reason.
     for stderr in [review("stranger", "default"), import("stranger", "default")] {
-        assert!(stderr.contains("enrolled under no grant"), "{stderr}");
+        assert!(stderr.contains("denied"), "{stderr}");
+        assert!(
+            stderr.contains("client certificate is not admitted"),
+            "{stderr}"
+        );
     }
     // Enrolled to read: Denied the append.
     for stderr in [review("reader", "default"), import("reader", "default")] {
