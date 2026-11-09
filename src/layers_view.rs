@@ -2654,7 +2654,14 @@ impl Endpoint for Overview {
                 if snapshot.discovered && nothing {
                     attributes.push((
                         "empty",
-                        "The door names no layer this identity may read.".to_string(),
+                        if snapshot.layers.is_empty() {
+                            "The door names no layer this identity may read.".to_string()
+                        } else {
+                            format!(
+                                "This identity reads only feeds, and you subscribe to none of \
+                                 them. Subscribe on {FEEDS_PATH}."
+                            )
+                        },
                     ));
                 }
                 children.push_str(&watch(
@@ -3620,7 +3627,8 @@ async fn feeds_page(
         let mut rows = String::new();
         for layer in snapshot.layers.values().filter(|l| l.info.is_feed()) {
             let newest = match layer.entries.last() {
-                Some(entry) if layer.synced => Some(entry.clone()),
+                // Gonk's copy, only while the follower keeps it current.
+                Some(entry) if layer.synced && view.followed(&layer.info) => Some(entry.clone()),
                 // A feed the follower is not reading: asked once, for this page.
                 _ if snapshot.down.is_none() => {
                     let reading = Arc::clone(view);
@@ -3737,6 +3745,7 @@ impl Endpoint for Subscribe {
         let label = found.info.label.clone();
         let flash = match field("action").as_str() {
             "subscribe" => {
+                let already = view.subscriptions.get(&who_views, &feed).is_some();
                 let name = feed.clone();
                 view.subscriptions.change(&who_views, move |feeds| {
                     feeds.entry(name).or_default();
@@ -3744,13 +3753,16 @@ impl Endpoint for Subscribe {
                 let reading = Arc::clone(view);
                 let name = feed.clone();
                 let read = off_thread(move || reading.catch_up_feed(&name)).await?;
-                // What was already published is not news to a new subscriber.
-                let last = view
-                    .snapshot()
-                    .layers
-                    .get(&feed)
-                    .map_or(found.last, |l| l.last);
-                view.cursors.set(&who_views, &feed, last);
+                // What was already published is not news to a new subscriber; a repeated
+                // Subscribe is no reading, so it leaves what is unread alone.
+                if !already {
+                    let last = view
+                        .snapshot()
+                        .layers
+                        .get(&feed)
+                        .map_or(found.last, |l| l.last);
+                    view.cursors.set(&who_views, &feed, last);
+                }
                 match read {
                     Ok(()) => format!("Subscribed to {label}. It is in your Layers view."),
                     Err(why) => format!(
@@ -3855,8 +3867,12 @@ impl Endpoint for Ask {
         let found = snapshot
             .layers
             .get(&feed)
-            .filter(|l| l.info.is_feed())
-            .ok_or_else(|| Error::NotFound(format!("no feed `{feed}` is read here")))?;
+            .filter(|l| l.info.is_feed() && view.shown(&viewer(inv), &l.info))
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "no feed `{feed}` is read here that you subscribe to"
+                ))
+            })?;
         if !is_entry_id(&id) {
             return Err(Error::InvalidArgument {
                 name: "entry".to_string(),
@@ -3927,9 +3943,14 @@ impl Endpoint for File {
             return Err(Error::NotFound(format!("`{id}` is not an entry id")));
         }
         let snapshot = ready(view).await?;
-        if !snapshot.layers.contains_key(&layer) {
+        let Some(found) = snapshot.layers.get(&layer) else {
             return Err(Error::NotFound(format!(
                 "the identity this page reads as reads no layer `{layer}`"
+            )));
+        };
+        if !view.shown(&viewer(inv), &found.info) {
+            return Err(Error::NotFound(format!(
+                "you do not subscribe to the feed `{layer}`; subscribe on {FEEDS_PATH}"
             )));
         }
         let reading = Arc::clone(view);

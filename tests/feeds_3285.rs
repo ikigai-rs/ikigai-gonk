@@ -85,6 +85,7 @@ const PARTICIPANTS: &str = r#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <urn:collab:participant:bobby> a foaf:Person .
 <urn:collab:participant:chris> a foaf:Person .
 <urn:collab:participant:dana> a foaf:Person .
+<urn:collab:participant:erin> a foaf:Person .
 "#;
 
 const CREW: &str = r#"[[mount]]
@@ -105,10 +106,19 @@ bobby = ["read", "feed", "say"]
 brian = ["read", "feed"]
 chris = ["read", "feed"]
 dana = ["read", "feed"]
+erin = ["read", "feed"]
 "#;
 
 fn scopes(slug: &str) -> Vec<String> {
     let mut held = vec!["urn:cap:collab:read:crew".to_string()];
+    if slug == "erin" {
+        held.extend(
+            ["read", "feed"]
+                .iter()
+                .map(|v| format!("urn:cap:layer:{v}:releases")),
+        );
+        return held;
+    }
     let talk: &[&str] = if slug == "chris" {
         &["read", "feed"]
     } else {
@@ -876,4 +886,95 @@ fn the_form_is_hidden_without_the_post_token() {
     let page = gonk.page("/layers/releases").body;
     assert!(page.contains("Version 6"), "{page}");
     assert!(!page.contains("Ask a question about this"), "{page}");
+}
+
+#[test]
+fn feed_shows_the_newest_entry_of_a_feed_nobody_follows_any_more() {
+    let host = Host::open();
+    host.publish("Version 7", &[RELEASE]);
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    subscribe(&gonk);
+    let answer = gonk.post(
+        "/feed/subscribe",
+        &[("feed", "releases"), ("action", "unsubscribe")],
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    host.publish("Version 8", &[RELEASE]);
+    let page = gonk.page("/feed").body;
+    assert!(page.contains("Version 8"), "the door's newest: {page}");
+    assert!(!page.contains("Version 7"), "gonk's stale copy: {page}");
+}
+
+#[test]
+fn a_repeated_subscribe_keeps_what_is_unread() {
+    let host = Host::open();
+    let view = view_as(&host, "brian", None);
+    let gonk = Gonk::start(Some(Arc::clone(&view)), tokens());
+    subscribe(&gonk);
+    host.publish("Version 9", &[RELEASE]);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            view.refresh().unwrap();
+            view.unread("anonymous", None) == Some(1)
+        }),
+        "{:?}",
+        view.unread("anonymous", None)
+    );
+    subscribe(&gonk);
+    assert_eq!(view.unread("anonymous", None), Some(1));
+}
+
+#[test]
+fn the_ask_post_is_refused_without_the_post_token() {
+    let host = Host::open();
+    let entry = host.publish("Version 10", &[RELEASE]);
+    let gonk = Gonk::start(
+        Some(view_as(&host, "brian", None)),
+        vec![CAP_READ.to_string()],
+    );
+    subscribe(&gonk);
+    let refused = gonk.post(
+        "/feed/ask",
+        &[
+            ("feed", "releases"),
+            ("entry", entry_id(&entry)),
+            ("channel", "talk"),
+            ("body", "x"),
+        ],
+    );
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert!(!host.entries("talk").contains("Question"));
+}
+
+#[test]
+fn an_unsubscribed_feed_takes_no_question_and_serves_no_file() {
+    let host = Host::open();
+    let entry = host.publish("Version 11", &[RELEASE]);
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    let refused = gonk.post(
+        "/feed/ask",
+        &[
+            ("feed", "releases"),
+            ("entry", entry_id(&entry)),
+            ("channel", "talk"),
+            ("body", "x"),
+        ],
+    );
+    assert_eq!(refused.status, 404, "{}", refused.body);
+    assert!(!host.entries("talk").contains("Question"));
+    let file = gonk.page(&format!("/layers/releases/file/{}", entry_id(&entry)));
+    assert_eq!(file.status, 404, "{}", file.body);
+    assert!(file.body.contains("do not subscribe"), "{}", file.body);
+}
+
+#[test]
+fn the_overview_points_at_feeds_when_only_unsubscribed_feeds_are_read() {
+    let host = Host::open();
+    // Erin is named on the feed alone, and on no channel.
+    let gonk = Gonk::start(Some(view_as(&host, "erin", None)), tokens());
+    let page = gonk.page("/layers").body;
+    assert!(!page.contains("names no layer"), "{page}");
+    assert!(page.contains("subscribe to none"), "{page}");
+    let feeds = gonk.page("/feed").body;
+    assert!(feeds.contains("(releases)"), "a feed-only reader: {feeds}");
 }
