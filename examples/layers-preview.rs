@@ -6,8 +6,9 @@
 //! The Layers page answers only a signed-in passkey holding `urn:cap:gonk:layers:read`, and its
 //! layers are a real layer host's. Neither is something a browser check should set up: a
 //! passkey enrollment raises a real Touch ID prompt, and the edge door is live. So this serves
-//! the same pages, through the same HTTP door, over a layer host in this process (three layers:
-//! a channel `talk`, a channel `notes` the identity only reads, a task layer `tasks`), with the
+//! the same pages, through the same HTTP door, over a layer host in this process (four layers:
+//! a channel `talk`, a channel `notes` the identity only reads, a task layer `tasks`, and a feed `releases` with a
+//! two-level SKOS scheme, which starts unsubscribed on `/feed`), with the
 //! identity `urn:collab:participant:brian` minted by an in-process door.
 //!
 //! ⚠ **It proves how the page looks and behaves, never who may use it.** The ANONYMOUS loopback
@@ -41,7 +42,7 @@ const SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix prov: <http://www.w3.org/ns/prov#> .
 @prefix ik: <https://ikigai-rs.dev/ns#> .
 <urn:p:message> a sh:NodeShape ; sh:targetClass ik:Message , ik:Question ; sh:closed true ;
-  sh:ignoredProperties ( rdf:type ik:inReplyTo prov:wasAttributedTo dcterms:created ik:seq ) ;
+  sh:ignoredProperties ( rdf:type ik:inReplyTo dcterms:subject prov:wasAttributedTo dcterms:created ik:seq ) ;
   sh:property [ sh:path ik:body ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] .
 <urn:p:brief> a sh:NodeShape ; sh:targetClass ik:Brief , ik:Issue ; sh:closed true ;
   sh:ignoredProperties ( rdf:type ik:inReplyTo ik:repository ik:severity prov:wasAttributedTo dcterms:created ik:seq ) ;
@@ -53,6 +54,33 @@ const SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 <urn:p:offer> a sh:NodeShape ; sh:targetClass ik:Offer ; sh:closed true ;
   sh:ignoredProperties ( rdf:type ik:brief prov:wasAttributedTo dcterms:created ik:seq ) ;
   sh:property [ sh:path dcterms:title ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] .
+"#;
+
+/// A feed's announcements: a title, a body, and the concepts they are about.
+const FEED_SHAPES: &str = r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+<urn:p:announcement> a sh:NodeShape ; sh:targetClass ik:Message ; sh:closed true ;
+  sh:ignoredProperties ( rdf:type dcterms:subject prov:wasAttributedTo dcterms:created ik:seq ) ;
+  sh:property [ sh:path dcterms:title ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ,
+              [ sh:path ik:body ; sh:maxCount 1 ; sh:datatype xsd:string ] .
+"#;
+
+/// A two-level SKOS scheme for the `releases` feed.
+const RELEASE_SCHEME: &str = r#"@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+<urn:preview:scheme:releases> a skos:ConceptScheme ; rdfs:label "Release types" .
+<urn:preview:concept:release> a skos:Concept ; skos:prefLabel "Release" ; skos:notation "1" .
+<urn:preview:concept:patch> a skos:Concept ; skos:prefLabel "Patch release" ; skos:notation "1.1" ;
+  skos:broader <urn:preview:concept:release> .
+<urn:preview:concept:major> a skos:Concept ; skos:prefLabel "Major release" ; skos:notation "1.2" ;
+  skos:broader <urn:preview:concept:release> .
+<urn:preview:concept:feature> a skos:Concept ; skos:prefLabel "Feature" ; skos:notation "2" .
+<urn:preview:concept:ui> a skos:Concept ; skos:prefLabel "Interface" ; skos:notation "2.1" ;
+  skos:broader <urn:preview:concept:feature> .
 "#;
 
 /// The prefixes every scratch entry is written with.
@@ -81,6 +109,11 @@ bobby = ["read", "feed", "say"]
 layer = "tasks"
 brian = ["read", "feed"]
 bobby = ["read", "feed", "out", "take"]
+
+[[mount]]
+layer = "releases"
+brian = ["read", "feed"]
+bobby = ["read", "feed", "say"]
 "#;
 
 struct As {
@@ -135,6 +168,12 @@ fn main() {
             ),
         );
     }
+    write("layers/feed.shapes.ttl", FEED_SHAPES);
+    write("layers/releases.scheme.ttl", RELEASE_SCHEME);
+    write(
+        "layers/releases.toml",
+        "model = \"channel\"\nlabel = \"Releases\"\nshapes = \"feed.shapes.ttl\"\ncontext = \"p.context.jsonld\"\nfeed = true\npublic = true\npublishers = [\"bobby\"]\nscheme = \"releases.scheme.ttl\"\n",
+    );
     write("participants.ttl", PARTICIPANTS);
     write("collabs/crew.toml", CREW);
     let state = tempfile::tempdir().unwrap();
@@ -156,6 +195,7 @@ fn main() {
                 ("talk", &["read", "feed", "say"]),
                 ("notes", &["read", "feed", "say"]),
                 ("tasks", &["read", "feed", "out", "take"]),
+                ("releases", &["read", "feed", "say"]),
             ],
         ),
     };
@@ -167,6 +207,7 @@ fn main() {
                 ("talk", &["read", "feed", "say"]),
                 ("notes", &["read", "feed"]),
                 ("tasks", &["read", "feed"]),
+                ("releases", &["read", "feed"]),
             ],
         ),
     };
@@ -198,6 +239,15 @@ fn main() {
         "notes",
         "<urn:layer:new> a ik:Message ; ik:body \"Notes are read-only for brian.\" .",
     );
+    for (title, concept) in [
+        ("Version 1.4.2", "patch"),
+        ("Version 2.0.0", "major"),
+        ("A new page for feeds", "ui"),
+    ] {
+        say(&bobby, "releases", &format!(
+            "<urn:layer:new> a ik:Message ; dcterms:title \"{title}\" ; ik:body \"About {title}.\" ; dcterms:subject <urn:preview:concept:{concept}> ."
+        ));
+    }
     call(&bobby, Verb::Sink, "urn:layer:tasks:tuples", &format!("{IK}<urn:layer:tasks:offer:1> a ik:Offer ; dcterms:title \"Wire the Layers page\" ; ik:brief \"The brief.\" ."));
 
     let view = LayersView::new(
