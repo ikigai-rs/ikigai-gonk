@@ -575,6 +575,7 @@
       <xsl:if test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
       <xsl:if test="@error"><p class="note" role="alert"><xsl:value-of select="@error"/></p></xsl:if>
       <xsl:if test="@restart"><p class="note" data-announce=""><xsl:value-of select="@restart"/></p></xsl:if>
+      <xsl:if test="@host-unread"><p class="note" data-announce=""><xsl:value-of select="@host-unread"/></p></xsl:if>
       <xsl:if test="not(@note)">
         <h2 id="onboard-pending-title">Waiting for approval</h2>
         <p class="note">Approve on this machine, from a terminal: the command is beside each request.</p>

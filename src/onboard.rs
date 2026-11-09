@@ -569,6 +569,9 @@ pub struct Status {
     pub restart_pending: bool,
     /// Why the last pass could not run, when it could not.
     pub error: Option<String>,
+    /// Why the layer host's own verdicts could not be read, when they could not: every verdict
+    /// here is then gonk's reading alone, and the host may have refused one shown in force.
+    pub host_unread: Option<String>,
 }
 
 impl Status {
@@ -594,6 +597,7 @@ impl Status {
             "removed": self.removed,
             "restart_pending": self.restart_pending,
             "error": self.error,
+            "host_unread": self.host_unread,
         })
     }
 
@@ -602,6 +606,12 @@ impl Status {
         let mut out = String::new();
         if let Some(e) = &self.error {
             out.push_str(&format!("error: {e}\n"));
+        }
+        if let Some(e) = &self.host_unread {
+            out.push_str(&format!(
+                "the layer host's verdicts did not read ({e}): these are gonk's alone, and the \
+                 host may have refused one shown in force\n"
+            ));
         }
         for r in &self.records {
             out.push_str(&format!(
@@ -964,6 +974,10 @@ struct Fold {
     records: Vec<Record>,
     /// fingerprint → the current verified entitlement (in force, revoking or expired).
     current: BTreeMap<String, Verified>,
+    /// fingerprint → an entitlement the layer host refused, which is not current there either.
+    host_refused: BTreeMap<String, Verified>,
+    /// Why the layer host's verdicts did not read, when they did not.
+    host_unread: Option<String>,
 }
 
 impl Fold {
@@ -1699,10 +1713,39 @@ impl Onboard {
         })
     }
 
+    /// The layer host's own refusals, entry → its reason, from its onboarding status. The host
+    /// has checks gonk cannot make (a participant enrolled by hand, or granted in a manifest the
+    /// controller is not in), and says an entry is stored whatever it decides about it.
+    fn host_refusals(&self) -> std::result::Result<BTreeMap<String, String>, String> {
+        let bytes = self.call(
+            crate::layer::request(Verb::Source, onb::STATUS)
+                .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec())),
+        )?;
+        let status: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("{}: not JSON: {e}", onb::STATUS))?;
+        let records = status["records"]
+            .as_array()
+            .ok_or_else(|| format!("{}: no records in the answer", onb::STATUS))?;
+        Ok(records
+            .iter()
+            .filter(|r| r["verdict"] == "refused")
+            .filter_map(|r| {
+                let reason = r["reason"].as_str().unwrap_or("no reason given");
+                Some((r["entry"].as_str()?.to_string(), reason.to_string()))
+            })
+            .collect())
+    }
+
     /// Read, verify and fold the grants layer, as the layer host rules: per fingerprint the
-    /// newest verified entitlement is current, and it must supersede the one before it.
+    /// newest verified entitlement is current, and it must supersede the one before it. An
+    /// entitlement the host refused is refused here, with the host's reason, and is not current
+    /// (ledger #3315). When the host's verdicts do not read, the fold is gonk's alone and says so.
     fn fold(&self) -> std::result::Result<Fold, String> {
         let entries = self.entries(&self.parts.grants, onb::ENTITLEMENT)?;
+        let (refused_there, host_unread) = match self.host_refusals() {
+            Ok(refused) => (refused, None),
+            Err(why) => (BTreeMap::new(), Some(why)),
+        };
         let mut book = self.book.lock().expect("book lock");
         for (iri, node) in &entries {
             if !book.verified.contains_key(iri) {
@@ -1713,6 +1756,7 @@ impl Onboard {
         let now = (self.parts.clock)();
         let mut records: Vec<Record> = Vec::new();
         let mut current: BTreeMap<String, Verified> = BTreeMap::new();
+        let mut host_refused: BTreeMap<String, Verified> = BTreeMap::new();
         for (iri, node) in &entries {
             let seq = node.seq();
             let v = match &book.verified[iri] {
@@ -1737,6 +1781,13 @@ impl Onboard {
                 principal: Some(v.principal.clone()),
                 verdict,
             };
+            if let Some(reason) = refused_there.get(iri) {
+                records.push(record(Verdict::Refused {
+                    reason: format!("the layer host: {reason}"),
+                }));
+                host_refused.insert(v.fingerprint.clone(), v.clone());
+                continue;
+            }
             let refusal = match (current.get(&v.fingerprint), &v.supersedes) {
                 (Some(cur), sup) if sup.as_deref() != Some(cur.iri.as_str()) => Some(format!(
                     "fingerprint {} is already entitled by {}, which this does not supersede (a \
@@ -1776,7 +1827,12 @@ impl Onboard {
             records.push(record(verdict));
             current.insert(v.fingerprint.clone(), v);
         }
-        Ok(Fold { records, current })
+        Ok(Fold {
+            records,
+            current,
+            host_refused,
+            host_unread,
+        })
     }
 
     // ---- approve and revoke ----
@@ -2006,7 +2062,8 @@ impl Onboard {
     // ---- apply: gonk's half ----
 
     /// Apply the grants layer to gonk's own QUIC enrollment: enroll each entitlement in force
-    /// that names a gonk grant, unenroll each one revoked or expired. Idempotent by fingerprint.
+    /// that names a gonk grant, unenroll each one revoked, expired or refused by the layer host.
+    /// Idempotent by fingerprint.
     /// Never fails: what went wrong is in the status.
     pub fn apply(&self) -> Status {
         let status = match self.fold() {
@@ -2029,13 +2086,19 @@ impl Onboard {
         let layout = &self.parts.layout;
         let mut status = Status {
             records: fold.records.clone(),
+            host_unread: fold.host_unread.clone(),
             ..Status::default()
         };
         let enrolment = crate::quic::read_enrolment(&layout.clients_json())
             .ok()
             .flatten()
             .unwrap_or_default();
-        for (fp, v) in &fold.current {
+        // A certificate the host has since refused is not in force, so it leaves gonk too.
+        let turned_away = fold
+            .host_refused
+            .iter()
+            .filter(|(fp, _)| !fold.current.contains_key(*fp));
+        for (fp, v) in fold.current.iter().chain(turned_away) {
             let bundle = format!("{BUNDLE_PREFIX}{}", v.name());
             let wanted = fold.in_force(fp).filter(|v| !v.gonk_grants.is_empty());
             match wanted {
@@ -2885,6 +2948,15 @@ impl Endpoint for Page {
                             ("reason", &s("reason")),
                         ],
                         "",
+                    ));
+                }
+                if !v["host_unread"].is_null() {
+                    attributes.push((
+                        "host-unread",
+                        "gonk could not read the layer host's own verdicts, so an entitlement \
+                         shown in force below may have been refused there. ikigai-gonk onboard \
+                         status says why."
+                            .to_string(),
                     ));
                 }
                 if v["restart_pending"].as_bool() == Some(true) {
