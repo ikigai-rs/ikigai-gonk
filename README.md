@@ -2840,7 +2840,8 @@ refusal at apply time. The refusal says where the name is used and suggests a fr
   the collaborations `urn:layers:me` lists for it, each through `urn:collab:{name}:participants`.
   The whole roster, `urn:layers:participants`, is the host operator's and no generated grant reads
   it, so **a name listed only in a collaboration the controller is not in is not seen here**; the
-  layer host still refuses a name another certificate holds, when it applies the entitlement;
+  layer host still refuses a name another certificate holds, when it applies the entitlement, and
+  `onboard status` then says so (below);
 - on the grants layer, an entitlement of another certificate, in force or expired (an expired one
   holds its name until it is revoked, as on the host);
 - in this gonk's invites, one pending and unexpired (at `invite` only) or one already approved.
@@ -2851,6 +2852,17 @@ its name. At `approve`, the request's own invite and an entitlement its own cert
 holds do not count against it. `invite` needs the layer host: if it cannot be asked, nothing is
 minted and the error says so. `pending` does not run this check, so a request can list as pending
 and still be refused by `approve`.
+
+**A verdict is the layer host's as well as gonk's** (ledger #3315). The host stores an entitlement
+whatever it decides about it, so gonk reads the host's own decision, `urn:layer:onboard:status`,
+each time it folds the grants layer. An entitlement the host refused (a participant another
+certificate holds, a participant a manifest grants) shows as `refused` in `onboard status` and on
+the Onboard page, with the host's reason after `the layer host:`. It is not in force: gonk's half
+is not enrolled, or is taken out if the host refused it later (a manifest line added for an entitled
+participant takes it out of force), and it is not current, so a new approval for that certificate
+supersedes nothing. If the host's status does not read, gonk keeps its own verdicts, leaves the
+enrollments as they are, and says so (`host_unread` in the JSON, a line in the text, a sentence on
+the page). The host decides when it applies: at each entitlement said and when it opens.
 
 **Several kinds, one entitlement.** An invite for `worker,task-member` becomes ONE entitlement with
 the union of the kinds' grants (the grants layer keeps one per certificate). Every entitlement
