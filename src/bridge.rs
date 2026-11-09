@@ -215,8 +215,8 @@ impl Gonk {
                  `ikigai-gonk client add <name> --ledger <ledger>=write` and restart gonk)"
             }
             (Client::Quic(_), Error::Unavailable(_)) => {
-                " (the QUIC door may close the connection for an untrusted or unadmitted \
-                 certificate: enroll this client with \
+                " (the QUIC door may close the connection for a certificate it does not trust, \
+                 or one not admitted: enroll this client with \
                  `ikigai-gonk client add <name> --ledger <ledger>=write` and restart gonk)"
             }
             _ => "",
