@@ -2030,9 +2030,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-core"
-version = "0.3.0"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76e62039fb8dd80f5176d2c990f1a34aeafbcda5495936daf84edb0019e19944"
+checksum = "946134588b75c8bbe2ad7ea7e5b2e6f82ba7a30750dae90f2994eee7e56962cf"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2045,6 +2045,7 @@ dependencies = [
  "oxrdf",
  "oxttl",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2175,6 +2176,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "spargebra",
  "tempfile",
  "tokio",
@@ -2324,9 +2326,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-quic"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74d07bd0da74be88b920ebc860ad01c3ec12fc7466ba084ab21245ac32817ac1"
+checksum = "81232678005338b8c2ac43fa44586e0cde8efc1dca0d8726eaba60032ba133a5"
 dependencies = [
  "futures",
  "ikigai-core",
@@ -2573,9 +2575,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-wire"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec85ac920ddaa2efd9602926a9cb3438cda57f3da4730c30b00d7f9cb574abf"
+checksum = "5e97c254c0f99c00c6e5c8625b6eb912b3d2ad7449e0982583f555b40376a5e2"
 dependencies = [
  "ikigai-core",
  "ikigai-resolve",
@@ -4751,6 +4753,26 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
 
 [[package]]
 name = "signature"

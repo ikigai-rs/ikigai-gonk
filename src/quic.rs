@@ -1320,6 +1320,16 @@ pub fn put_grant(
 /// reply and is not replayed), and nothing security-relevant is left behind it to hurry.
 pub const MAX_CONNECTION_AGE: Duration = Duration::from_secs(10 * 60);
 
+/// The most a stop waits for the QUIC door's calls to finish: two seconds (ledger
+/// [#3326](http://localhost:1062/l/default/item/3326)).
+///
+/// ★ **Short on purpose.** A call the drain turned away is sent again by its client on a new
+/// connection, and that dial gives up after the client's five-second `CONNECT_TIMEOUT`
+/// (`ikigai-quic`). The gap a restart leaves (this cap, then the next process opening its
+/// store) has to stay well under that, or a call that could have been answered by the next
+/// process fails instead. A call still running at this cap has its connection closed under it.
+pub const DRAIN_CAP: Duration = Duration::from_secs(2);
+
 /// The authority the client with `fingerprint` holds NOW, read from `clients.json` and
 /// `grants.json` as they are on disk: what [`minter`] mints a connection from, and what
 /// [`crate::admit`] re-reads on every call that arrives on one. Fail closed: a missing or

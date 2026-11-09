@@ -739,8 +739,8 @@ fn serve(flags: &config::Flags) -> ! {
         ))
     });
 
-    let quic_line = match quic_door {
-        quic::QuicDoor::Off(why) => why,
+    let (quic_line, quic_drain) = match quic_door {
+        quic::QuicDoor::Off(why) => (why, None),
         quic::QuicDoor::Open {
             addr,
             identity,
@@ -778,24 +778,40 @@ fn serve(flags: &config::Flags) -> ! {
             for client in &clients {
                 line.push_str(&format!("\n          {client}"));
             }
+            let drain = ikigai_quic::Drain::new();
+            let draining = drain.clone();
             std::thread::spawn(move || {
-                let error = ikigai_quic::serve_bounded_on(
-                    door,
+                let served = ikigai_quic::serve_draining_on(
+                    Arc::new(door),
                     socket,
                     &identity,
-                    &trusted,
+                    ikigai_quic::Admission::Pinned(&trusted),
                     minter,
                     ikigai_quic::DEFAULT_IDLE_TIMEOUT,
                     // A widened grant reaches a standing connection within this bound; a
                     // removed or narrowed one does not wait for it (ledger #1710).
                     Some(quic::MAX_CONNECTION_AGE),
-                )
-                .err();
-                fail(&format!("the QUIC door on {bound} stopped: {error:?}"))
+                    &draining,
+                );
+                match served {
+                    // Only a signal triggers the drain, so this is the process stopping as
+                    // asked. Every other return is still a door that died (ledger #3326).
+                    Ok(ikigai_quic::Served::Drained { cut_off }) => {
+                        if cut_off > 0 {
+                            eprintln!(
+                                "ikigai-gonk: the drain cut off {cut_off} connection(s) with \
+                                 calls still running at the cap"
+                            );
+                        }
+                        std::process::exit(0)
+                    }
+                    other => fail(&format!("the QUIC door on {bound} stopped: {other:?}")),
+                }
             });
-            line
+            (line, Some(drain))
         }
     };
+    stop_on_signal(quic_drain);
 
     // The HTTP door's workers and blocking pool, sized explicitly rather than through the
     // default `stack::enlarge_default` set: a request recurses on these threads (ledger #915).
@@ -2009,6 +2025,41 @@ fn passkey_invite(
         "  in a browser on this machine (localhost, not 127.0.0.1); the passkey is enrolled in {}",
         layout.clients_json().display()
     );
+}
+
+/// Stop on SIGTERM or SIGINT (ledger #3326): the first drains the QUIC door, whose thread exits
+/// 0 when the drain returns, within [`quic::DRAIN_CAP`]; with no QUIC door open it exits 0 at
+/// once. A second signal during the drain exits at once, as `128 + signal`.
+///
+/// The drain waits for calls, not work, and re-queues nothing: a claim stays as it is, its
+/// holder and lease intact. The other doors are not drained. Handlers are installed before this
+/// returns, so the banner printing means a signal is caught.
+fn stop_on_signal(drain: Option<ikigai_quic::Drain>) {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT])
+        .unwrap_or_else(|e| fail(&format!("cannot catch SIGTERM and SIGINT: {e}")));
+    std::thread::spawn(move || {
+        let mut signals = signals.forever();
+        let Some(first) = signals.next() else { return };
+        let name = if first == SIGTERM {
+            "SIGTERM"
+        } else {
+            "SIGINT"
+        };
+        let Some(drain) = drain else {
+            eprintln!("ikigai-gonk: {name}: no QUIC door to drain; exiting");
+            std::process::exit(0)
+        };
+        eprintln!(
+            "ikigai-gonk: {name}: draining the QUIC door (at most {:?}); another signal exits at once",
+            quic::DRAIN_CAP
+        );
+        drain.trigger(quic::DRAIN_CAP);
+        if let Some(second) = signals.next() {
+            eprintln!("ikigai-gonk: a second signal during the drain; exiting now");
+            std::process::exit(128 + second)
+        }
+    });
 }
 
 fn fail(message: &str) -> ! {
