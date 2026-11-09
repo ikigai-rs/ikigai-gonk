@@ -568,6 +568,11 @@ pub(crate) fn nav_on_views(web: &Web, capability: &Capability, ledgers: &[Ledger
     nav_with(web, capability, ledgers, Here::Views, None)
 }
 
+/// [`nav`] on the Feeds page, whose header link carries `aria-current`.
+pub(crate) fn nav_on_feeds(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
+    nav_with(web, capability, ledgers, Here::Feeds, None)
+}
+
 /// [`nav`] on the Dashboard, whose header link carries `aria-current`.
 pub(crate) fn nav_on_dashboard(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
     nav_with(web, capability, ledgers, Here::Dashboard, None)
@@ -583,6 +588,8 @@ enum Here<'a> {
     Views,
     /// The Dashboard: over the ledgers, and its header link is the current page's.
     Dashboard,
+    /// The Feeds page: its header link is the current page's.
+    Feeds,
     Elsewhere,
 }
 
@@ -684,6 +691,12 @@ fn nav_with(
             ],
             "",
         ));
+        // ★ Feeds (ledger #3285), on the Layers rule: they are layers a person subscribes to.
+        let mut feeds = vec![("href", crate::layers_view::FEEDS_PATH)];
+        if here == Here::Feeds {
+            feeds.push(("current", "true"));
+        }
+        out.push_str(&element("feeds-link", &feeds, ""));
     }
     // ★ The Views page (ledger [#2099](http://localhost:1062/l/default/item/2099)), beside
     // Layers, on the browse rule: offered only to a caller whose grant reads the views

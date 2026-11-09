@@ -1320,7 +1320,12 @@ ikigai-fs = "0.4.1"
 #   true floor; `"0.4.0"` is `<0.5.0`. The tests below take the host (the dev-dependency).
 # ★ 0.6.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
-ikigai-layers = { version = "0.7.0", default-features = false }
+# ★ 0.8.0 (ledger #3284, #3285): a BEHAVIOR floor. `feed = true` layers are typed `ik:Feed`, their
+# scheme is `urn:layer:{f}:scheme`, and `entries concept=` follows `skos:broader*`: the Feeds page
+# reads all three. A participant build still links no host: its intray 0.4 and resolve 0.4 are in
+# the dev-dependency host's tree only (`cargo tree -e no-dev -i ikigai-intray@0.4.0` prints
+# nothing). `"0.8.0"` is `<0.9.0`.
+ikigai-layers = { version = "0.8.0", default-features = false }
 # `urn:sign:sign` and `urn:sign:verify`: the controller signs an entitlement and gonk verifies one
 # with them, in a kernel of their own that no door binds (`onboard::Signer`). 0.3.2 is the release
 # ikigai-layers 0.4.0 verifies with, so both sides share one signature-graph format.
@@ -1401,7 +1406,8 @@ ikigai-ui = { version = "0.5.0", features = ["testkit"] }
 # participant there; the host here, so a test build unifies to the host). `"0.4.0"` is `<0.5.0`.
 # ★ 0.6.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
-ikigai-layers = "0.7.0"
+# ★ 0.8.0 (ledger #3285): the host side of the note on the normal dependency above.
+ikigai-layers = "0.8.0"
 # An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
 # own `age` floor).
 age = "0.11.1"

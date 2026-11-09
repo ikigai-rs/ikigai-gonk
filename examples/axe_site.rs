@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 19] = [
+const PAGES: [(&str, &str); 20] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -57,6 +57,9 @@ const PAGES: [(&str, &str); 19] = [
     ("sparql.html", "/sparql"),
     ("browse.html", "/browse"),
     ("queue.html", "/queue"),
+    // Ledger #3285: the sign-in state only, since a static site has no passkey and the door's
+    // feeds are live; the subscribed page with its checkbox tree is `tests/feeds_3285.rs`'s.
+    ("feed.html", "/feed"),
 ];
 
 const FILES: [(&str, &str); 6] = [
@@ -312,7 +315,7 @@ fn main() {
     });
     let http = Arc::new(doors::http_kernel_serving(
         hub,
-        web::space(face),
+        ikigai_gonk::layers_view::bind(web::space(Arc::clone(&face)), &face, None),
         Vec::new(),
         None,
     ));
