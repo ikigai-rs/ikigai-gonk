@@ -22,7 +22,7 @@ use ikigai_core::{
 use ikigai_fn::html::url_segment;
 use ikigai_ledger::Ledger;
 
-use crate::layers_view::LayersView;
+use crate::layers_view::{LayersView, Views};
 use crate::render::{self, element, envelope};
 use crate::web::{self, Web};
 
@@ -53,11 +53,7 @@ pub fn href(iri: &str) -> String {
 }
 
 /// Bind the route into the HTTP face's page space.
-pub fn bind(
-    space: EndpointSpace,
-    web: &Arc<Web>,
-    layers: Option<Arc<LayersView>>,
-) -> EndpointSpace {
+pub fn bind(space: EndpointSpace, web: &Arc<Web>, layers: Views) -> EndpointSpace {
     space.bind(
         UriTemplate::parse(BINDING).expect("a constant template"),
         Resolve {
@@ -172,7 +168,7 @@ pub fn answer(web: &Web, inv: &Invocation<'_>, iri: &str, target: &str) -> Resul
 
 struct Resolve {
     web: Arc<Web>,
-    layers: Option<Arc<LayersView>>,
+    layers: Views,
 }
 
 #[async_trait]
@@ -187,7 +183,7 @@ impl Endpoint for Resolve {
             .map(str::to_string)
             .or_else(|| inv.bindings.get("iri").map(str::to_string))
             .unwrap_or_default();
-        match resolve(self.layers.as_ref(), inv, &iri).await {
+        match resolve(self.layers.current().as_ref(), inv, &iri).await {
             Some(href) => answer(&self.web, inv, &iri, &href),
             None => Err(Error::NotFound(not_found(&iri))),
         }

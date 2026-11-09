@@ -1325,7 +1325,16 @@ ikigai-fs = "0.4.1"
 # reads all three. A participant build still links no host: its intray 0.4 and resolve 0.4 are in
 # the dev-dependency host's tree only (`cargo tree -e no-dev -i ikigai-intray@0.4.0` prints
 # nothing). `"0.8.0"` is `<0.9.0`.
-ikigai-layers = { version = "0.8.0", default-features = false }
+# ★ 0.9.0 (ledger #3291): a BEHAVIOR floor. The join lobby answers an `onb:JoinRequest` with the
+# grant, and `public` layers are what a descriptor lists: `crate::feeds_join` reads both, and a
+# participant build still links no host. `"0.9.0"` is `<0.10.0`.
+ikigai-layers = { version = "0.9.0", default-features = false }
+# ★ Ledger #3291: the one outbound HTTPS read this server makes, a host's
+# `/.well-known/ikigai/layers.json` and the certificate it names (`crate::feeds_join`), and only
+# when the owner presses Join or runs `ikigai-gonk feeds join`. `rustls` over the ring provider
+# this graph already links, with the Mozilla roots compiled in: web PKI, and no other trust. No
+# gzip, no cookies, no proxy, and redirects are off. `"3.4"` is `<4.0.0`.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 # `urn:sign:sign` and `urn:sign:verify`: the controller signs an entitlement and gonk verifies one
 # with them, in a kernel of their own that no door binds (`onboard::Signer`). 0.3.2 is the release
 # ikigai-layers 0.4.0 verifies with, so both sides share one signature-graph format.
@@ -1407,7 +1416,12 @@ ikigai-ui = { version = "0.5.0", features = ["testkit"] }
 # ★ 0.6.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
 # ★ 0.8.0 (ledger #3285): the host side of the note on the normal dependency above.
-ikigai-layers = "0.8.0"
+# ★ 0.9.0 (ledger #3291): the join lobby, which `tests/feeds_join_3291.rs` drives over real QUIC.
+ikigai-layers = "0.9.0"
+# A scratch HTTPS server with a certificate no web PKI root signed, for the test that such a host
+# is refused (`tests/feeds_join_3291.rs`). The version already in this graph, through the QUIC
+# stack. `"0.23"` is `<0.24.0`.
+rustls = "0.23"
 # An age X25519 identity for the layer host's state key in the tests above (ikigai-layers 0.3.0's
 # own `age` floor).
 age = "0.11.1"
