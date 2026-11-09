@@ -79,12 +79,21 @@
 //! holds none. The cost is up to ten seconds of latency, which a header indicator can afford;
 //! the open layer's own page polls every three seconds (above).
 //!
+//! # ★ Public feeds without a configured identity (ledger [#3291](http://localhost:1062/l/default/item/3291))
+//!
+//! [`crate::feeds_join`] adds a second identity beside this view's, or instead of it. It reads
+//! through a [`PublicReader`], which the view's door routes by layer name, so the one copy, the
+//! cursors, the subscriptions and the pages stay as they are and only discovery and the follower
+//! know that there are two doors. See that module for what the identity may do.
+//!
 //! # ★ Feeds (ledger [#3285](http://localhost:1062/l/default/item/3285))
 //!
 //! ```text
 //! /feed            urn:iki:gonk:page:feed          Source  every feed the identity reads, Subscribe, the concept filter
 //! /feed/subscribe  urn:iki:gonk:layers:subscribe   Sink    subscribe, unsubscribe or save a filter, for this viewer
 //! /feed/ask        urn:iki:gonk:layers:ask         Sink    an ik:Question about a feed entry, in the viewer's own channel
+//! /feed/join       urn:iki:gonk:feeds:join         Sink    join the host's public feeds ([`crate::feeds_join`])
+//! /feed/leave      urn:iki:gonk:feeds:leave        Sink    delete that identity
 //! ```
 //!
 //! A feed is a channel whose definition is typed `ik:Feed` (ikigai-layers 0.8, ledger #3284).
@@ -121,6 +130,7 @@ use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{Literal, NamedNode, Term, Triple};
 use sha2::{Digest, Sha256};
 
+use crate::feeds_join::{PublicFeeds, CAP_JOIN, JOIN_IRI, JOIN_PATH, LEAVE_IRI, LEAVE_PATH};
 use crate::layer::Door;
 use crate::mount::{LazyMount, Target};
 use crate::render::{self, element, envelope, wrap};
@@ -406,6 +416,99 @@ impl Door for Confined {
     }
 }
 
+/// The layer a name under `urn:layer:` is about.
+fn layer_of(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("urn:layer:")?;
+    Some(rest.split(':').next().unwrap_or(rest))
+}
+
+/// A door that only reads: the joined identity's (ledger #3291). Its grant holds nothing but
+/// `read` and `feed`, and this says so again here, so no post can reach the host under it.
+struct ReadOnly(Arc<dyn Door>);
+
+impl Door for ReadOnly {
+    fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+        if request.verb != Verb::Source {
+            return Err(Error::Denied(
+                "the identity that joined the public feeds only reads".to_string(),
+            ));
+        }
+        self.0.call(request)
+    }
+}
+
+/// The door behind a view with no identity of its own to read or post as.
+struct NoOwnDoor;
+
+impl Door for NoOwnDoor {
+    fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+        Err(Error::Denied(format!(
+            "this server has no {KEY} line, and the identity that joined the public feeds does              not read {}",
+            request.target.as_str()
+        )))
+    }
+}
+
+/// The joined identity as a view reads it: two read-only doors, like the view's own, and the
+/// layers it may add ([`crate::feeds_join`]).
+pub struct PublicReader {
+    door: Confined,
+    feed_door: Confined,
+    principal: String,
+    layers: BTreeSet<String>,
+    /// The layers actually read through this reader: public, and not already the view
+    /// identity's. Decided at discovery, read by [`Routed`].
+    routed: Mutex<BTreeSet<String>>,
+    /// Whether this reader's follower is running.
+    following: AtomicBool,
+}
+
+impl PublicReader {
+    /// A reader over two doors dialed with the joined identity's certificate.
+    pub fn new(
+        door: Arc<dyn Door>,
+        feed: Arc<dyn Door>,
+        principal: String,
+        layers: BTreeSet<String>,
+    ) -> Arc<PublicReader> {
+        Arc::new(PublicReader {
+            door: Confined(Arc::new(ReadOnly(door))),
+            feed_door: Confined(Arc::new(ReadOnly(feed))),
+            principal,
+            layers,
+            routed: Mutex::new(BTreeSet::new()),
+            following: AtomicBool::new(false),
+        })
+    }
+
+    fn routes(&self, layer: &str) -> bool {
+        lock(&self.routed).contains(layer)
+    }
+}
+
+/// The joined reader a view holds, shared with its door.
+type PublicSlot = Arc<Mutex<Option<Arc<PublicReader>>>>;
+
+/// The view's door: a layer the joined identity reads goes through it, and everything else
+/// through the view's own identity. One door, so the one copy, its cursors and the pages need
+/// not know which identity read what.
+struct Routed {
+    own: Arc<dyn Door>,
+    public: PublicSlot,
+}
+
+impl Door for Routed {
+    fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+        let reader = lock(&self.public).clone();
+        if let Some(reader) = reader {
+            if layer_of(request.target.as_str()).is_some_and(|l| reader.routes(l)) {
+                return reader.door.call(request);
+            }
+        }
+        self.own.call(request)
+    }
+}
+
 fn get(iri: &str, args: &[(&str, String)]) -> Request {
     let mut request = Request::new(
         Verb::Source,
@@ -421,7 +524,9 @@ fn text(representation: &Representation) -> String {
     String::from_utf8_lossy(&representation.bytes).into_owned()
 }
 
-fn json(representation: &Representation) -> std::result::Result<serde_json::Value, String> {
+pub(crate) fn json(
+    representation: &Representation,
+) -> std::result::Result<serde_json::Value, String> {
     serde_json::from_slice(&representation.bytes).map_err(|e| format!("not JSON: {e}"))
 }
 
@@ -451,6 +556,8 @@ pub struct LayerInfo {
     pub verbs: BTreeSet<String>,
     /// A feed layer's SKOS scheme; `None` for every other layer.
     pub feed: Option<Scheme>,
+    /// Whether the host's definition says this feed is public (`public = true`).
+    pub public: bool,
 }
 
 impl LayerInfo {
@@ -786,6 +893,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The Layers page's state: one door, one follower, one copy of what was read.
 pub struct LayersView {
+    /// Whether this view has an identity of its own ([`KEY`]); `false` is a view of the joined
+    /// identity alone ([`LayersView::public_only`]).
+    own: bool,
+    public: PublicSlot,
     door: Confined,
     /// The follower's long poll, on a door of its own: a QUIC door answers the calls on one
     /// connection ONE AT A TIME (ikigai-quic's `serve_bounded`), so a 50-second feed read on
@@ -849,11 +960,42 @@ impl LayersView {
         cursors: Option<PathBuf>,
         waits: Waits,
     ) -> Arc<LayersView> {
+        LayersView::assemble(true, door, feed, origin, cursors, waits)
+    }
+
+    /// A view of the joined identity alone: there is no [`KEY`] line, so every layer it shows
+    /// is one `reader` reads.
+    pub(crate) fn public_only(
+        reader: Arc<PublicReader>,
+        origin: String,
+        cursors: Option<PathBuf>,
+        waits: Waits,
+    ) -> Arc<LayersView> {
+        let none: Arc<dyn Door> = Arc::new(NoOwnDoor);
+        let view = LayersView::assemble(false, Arc::clone(&none), none, origin, cursors, waits);
+        view.attach_public(reader);
+        view
+    }
+
+    fn assemble(
+        own: bool,
+        door: Arc<dyn Door>,
+        feed: Arc<dyn Door>,
+        origin: String,
+        cursors: Option<PathBuf>,
+        waits: Waits,
+    ) -> Arc<LayersView> {
         let subscriptions = cursors
             .as_ref()
             .map(|path| path.with_file_name("subscription.json"));
+        let public = PublicSlot::default();
         Arc::new(LayersView {
-            door: Confined(door),
+            own,
+            door: Confined(Arc::new(Routed {
+                own: door,
+                public: Arc::clone(&public),
+            })),
+            public,
             feed_door: Confined(feed),
             origin,
             feed_wait: waits.feed_secs.min(60),
@@ -904,14 +1046,92 @@ impl LayersView {
 
     /// Start the follower, once. Called by the first page that needs the copy.
     pub fn start(self: &Arc<Self>) {
-        if self.started.swap(true, Ordering::SeqCst) {
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let view = Arc::clone(self);
+            std::thread::Builder::new()
+                .name("gonk-layers-view".to_string())
+                .spawn(move || view.follow())
+                .expect("a thread for the layers follower");
+        }
+        self.follow_public();
+    }
+
+    /// Read the public feeds this view's identity lacks through `reader` from now on.
+    pub(crate) fn attach_public(self: &Arc<Self>, reader: Arc<PublicReader>) {
+        *lock(&self.public) = Some(reader);
+        *lock(&self.discovered_at) = None;
+        if self.started.load(Ordering::SeqCst) {
+            self.follow_public();
+        }
+    }
+
+    /// Stop reading with the joined identity, and forget what only it read.
+    pub(crate) fn detach_public(&self) {
+        let Some(reader) = lock(&self.public).take() else {
+            return;
+        };
+        let routed = std::mem::take(&mut *lock(&reader.routed));
+        self.changed_with(|s| {
+            for name in &routed {
+                s.layers.remove(name);
+            }
+            !routed.is_empty()
+        });
+        *lock(&self.discovered_at) = None;
+    }
+
+    /// Whether the door has been read and the joined identity reads nothing there any more.
+    pub(crate) fn public_lapsed(&self) -> bool {
+        let reader = lock(&self.public).clone();
+        let reads = reader.is_none_or(|r| !lock(&r.routed).is_empty());
+        !reads && lock(&self.state).discovered
+    }
+
+    /// Whether this view's own identity is on `host` and reads a feed that host says is public:
+    /// then there is nothing a joined identity could add from there.
+    pub(crate) fn reads_public_at(&self, host: &str) -> bool {
+        self.own
+            && crate::feeds_join::host_of(&self.origin).as_deref() == Some(host)
+            && lock(&self.state)
+                .layers
+                .values()
+                .any(|l| l.info.is_feed() && l.info.public)
+    }
+
+    /// Start the joined reader's follower, once per reader.
+    fn follow_public(self: &Arc<Self>) {
+        let Some(reader) = lock(&self.public).clone() else {
+            return;
+        };
+        if reader.following.swap(true, Ordering::SeqCst) {
             return;
         }
         let view = Arc::clone(self);
         std::thread::Builder::new()
-            .name("gonk-layers-view".to_string())
-            .spawn(move || view.follow())
-            .expect("a thread for the layers follower");
+            .name("gonk-layers-public".to_string())
+            .spawn(move || view.follow_reader(reader))
+            .expect("a thread for the public feeds' follower");
+    }
+
+    /// The joined identity's long poll, for as long as it stays attached.
+    fn follow_reader(self: Arc<Self>, reader: Arc<PublicReader>) {
+        let mut backoff = Duration::from_secs(1);
+        while lock(&self.public)
+            .as_ref()
+            .is_some_and(|now| Arc::ptr_eq(now, &reader))
+        {
+            match self.long_poll(&reader.feed_door, |name| reader.routes(name)) {
+                Ok(()) => backoff = Duration::from_secs(1),
+                Err(why) => {
+                    // With an identity of its own the view is not down because of this one.
+                    if !self.own {
+                        self.set_down(Some(why));
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                }
+            }
+        }
     }
 
     /// A copy of what was read.
@@ -1180,6 +1400,43 @@ impl LayersView {
     /// `urn:layers:me`, then each collaboration's manifest, then each readable layer's
     /// definition.
     fn discover(&self) -> std::result::Result<(Me, Vec<LayerInfo>), String> {
+        let reader = lock(&self.public).clone();
+        let (principal, kind, mut verbs) = if self.own {
+            self.discover_own()?
+        } else if let Some(reader) = &reader {
+            (reader.principal.clone(), None, BTreeMap::new())
+        } else {
+            return Err("this view's identity has left the public feeds".to_string());
+        };
+        if let Some(reader) = &reader {
+            let mut routed = BTreeSet::new();
+            for name in &reader.layers {
+                if verbs.get(name).is_some_and(|held| held.contains("read")) {
+                    continue;
+                }
+                match Self::feed_reader_verbs(&reader.door, name) {
+                    Ok(Some(held)) if held.contains("read") => {
+                        routed.insert(name.clone());
+                        verbs.insert(name.clone(), held);
+                    }
+                    Ok(_) => {}
+                    // A view with its own identity keeps working while this door is away.
+                    Err(_) if self.own => {}
+                    Err(why) => return Err(why),
+                }
+            }
+            *lock(&reader.routed) = routed;
+        }
+        let infos = self.layer_infos(verbs)?;
+        Ok((Me { principal, kind }, infos))
+    }
+
+    /// What the view's own identity holds: `urn:layers:me`, then each collaboration's manifest.
+    #[allow(clippy::type_complexity)]
+    fn discover_own(
+        &self,
+    ) -> std::result::Result<(String, Option<String>, BTreeMap<String, BTreeSet<String>>), String>
+    {
         let me = self
             .door
             .call(get("urn:layers:me", &[("as", "application/json".into())]))
@@ -1221,11 +1478,19 @@ impl LayersView {
         }
         for name in unnamed {
             if let std::collections::btree_map::Entry::Vacant(slot) = verbs.entry(name) {
-                if let Some(held) = self.feed_reader_verbs(slot.key())? {
+                if let Some(held) = Self::feed_reader_verbs(&self.door, slot.key())? {
                     slot.insert(held);
                 }
             }
         }
+        Ok((principal, kind, verbs))
+    }
+
+    /// Each readable layer's definition.
+    fn layer_infos(
+        &self,
+        verbs: BTreeMap<String, BTreeSet<String>>,
+    ) -> std::result::Result<Vec<LayerInfo>, String> {
         let mut infos = Vec::new();
         for (name, held) in verbs {
             if !held.contains("read") {
@@ -1249,6 +1514,7 @@ impl LayersView {
             } else {
                 None
             };
+            let public = is_feed && self.says_public(&iri);
             infos.push(LayerInfo {
                 label: graph
                     .value(&iri, RDFS_LABEL)
@@ -1257,20 +1523,31 @@ impl LayersView {
                 model,
                 verbs: held,
                 feed,
+                public,
             });
         }
-        Ok((Me { principal, kind }, infos))
+        Ok(infos)
+    }
+
+    /// Whether the definition's JSON face says this feed is public; a door too old to say is
+    /// the same as `false`.
+    fn says_public(&self, iri: &str) -> bool {
+        self.door
+            .call(get(iri, &[("as", "application/json".into())]))
+            .ok()
+            .and_then(|answer| json(&answer).ok())
+            .is_some_and(|body| body["public"].as_bool() == Some(true))
     }
 
     /// What the identity holds on a layer whose manifest does not name it: `read`, and `feed`
     /// when the layer's feed answers, if the layer is a feed it may read. A feed's manifest names
     /// only its publishers, so reading it is the one way to learn this; `None` for anything else.
     fn feed_reader_verbs(
-        &self,
+        door: &Confined,
         name: &str,
     ) -> std::result::Result<Option<BTreeSet<String>>, String> {
         let iri = format!("urn:layer:{name}");
-        let definition = match self.door.call(get(&iri, &[])) {
+        let definition = match door.call(get(&iri, &[])) {
             Ok(definition) => definition,
             Err(Error::Denied(_) | Error::NotFound(_)) => return Ok(None),
             Err(e) => return Err(format!("reading {iri}: {e}")),
@@ -1284,7 +1561,7 @@ impl LayersView {
             &format!("{iri}:feed"),
             &[("after", "0".into()), ("as", "application/json".into())],
         );
-        if self.door.call(feed).is_ok() {
+        if door.call(feed).is_ok() {
             held.insert("feed".to_string());
         }
         Ok(Some(held))
@@ -1481,17 +1758,36 @@ impl LayersView {
 
     fn step(&self) -> std::result::Result<(), String> {
         self.refresh()?;
+        if !self.own {
+            // The joined reader's own follower holds the long poll.
+            std::thread::sleep(Duration::from_secs(self.feed_wait.max(1)));
+            return Ok(());
+        }
+        let reader = lock(&self.public).clone();
+        self.long_poll(&self.feed_door, |name| {
+            !reader.as_ref().is_some_and(|r| r.routes(name))
+        })
+    }
+
+    /// One long poll at `door`, over the layers `reads` says that door reads.
+    fn long_poll(
+        &self,
+        door: &Confined,
+        reads: impl Fn(&str) -> bool,
+    ) -> std::result::Result<(), String> {
         let cursor: Vec<String> = lock(&self.state)
             .layers
             .values()
-            .filter(|l| l.synced && l.info.holds("feed") && self.followed(&l.info))
+            .filter(|l| {
+                l.synced && l.info.holds("feed") && self.followed(&l.info) && reads(&l.info.name)
+            })
             .map(|l| format!("{}:{}", l.info.name, l.last))
             .collect();
         if cursor.is_empty() {
             std::thread::sleep(Duration::from_secs(self.feed_wait.max(1)));
             return Ok(());
         }
-        let answer = self.feed_door.call(get(
+        let answer = door.call(get(
             "urn:layers:feed",
             &[
                 ("after", cursor.join(",")),
@@ -2506,8 +2802,44 @@ fn layer_arg() -> ArgSpec {
 
 // ------------------------------------------------------------------------------ the pages
 
+/// Which view a page reads right now: the identity [`KEY`] configures, or the one that joined
+/// the public feeds ([`crate::feeds_join`]), which can appear and go while the server runs.
+#[derive(Clone, Default)]
+pub struct Views {
+    own: Option<Arc<LayersView>>,
+    feeds: Option<Arc<PublicFeeds>>,
+}
+
+impl Views {
+    /// The pages' views: the configured one, and the public feeds this server may join.
+    pub fn new(own: Option<Arc<LayersView>>, feeds: Option<Arc<PublicFeeds>>) -> Views {
+        Views { own, feeds }
+    }
+
+    /// The view that reads for a page now; `None` when nothing is configured or joined.
+    pub fn current(&self) -> Option<Arc<LayersView>> {
+        match (&self.own, &self.feeds) {
+            (Some(own), feeds) => {
+                if let Some(feeds) = feeds {
+                    feeds.sync();
+                }
+                Some(Arc::clone(own))
+            }
+            (None, Some(feeds)) => feeds.view_for_pages(),
+            (None, None) => None,
+        }
+    }
+}
+
+impl From<Option<Arc<LayersView>>> for Views {
+    fn from(own: Option<Arc<LayersView>>) -> Views {
+        Views { own, feeds: None }
+    }
+}
+
 /// Bind the page's resources into the HTTP face's page space.
-pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: Option<Arc<LayersView>>) -> EndpointSpace {
+pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: impl Into<Views>) -> EndpointSpace {
+    let view: Views = view.into();
     let template = |t: &str| UriTemplate::parse(t).expect("a constant template");
     space
         .bind(
@@ -2535,6 +2867,20 @@ pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: Option<Arc<LayersView>>)
         .bind(
             Exact::new(SUBSCRIBE_IRI),
             Subscribe {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
+        .bind(
+            Exact::new(JOIN_IRI),
+            JoinFeeds {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
+        .bind(
+            Exact::new(LEAVE_IRI),
+            LeaveFeeds {
                 web: Arc::clone(web),
                 view: view.clone(),
             },
@@ -2617,7 +2963,7 @@ fn me_attributes(snapshot: &Snapshot) -> Vec<(&'static str, String)> {
 /// `urn:iki:gonk:page:layers`: every layer the identity reads.
 struct Overview {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -2641,12 +2987,13 @@ impl Endpoint for Overview {
         if !inv.capability.allows(CAP_READ) {
             children.push_str(&lacking().element());
         } else {
-            let snapshot = match &self.view {
+            let current = self.view.current();
+            let snapshot = match &current {
                 Some(view) => ready(view).await?,
                 None => Snapshot::default(),
             };
-            children.push_str(&notices(self.view.as_deref(), &snapshot));
-            if let Some(view) = &self.view {
+            children.push_str(&notices(current.as_deref(), &snapshot));
+            if let Some(view) = &current {
                 let (rows, total) = overview_rows(&snapshot, view, &viewer(inv));
                 let nothing = rows.is_empty();
                 children.push_str(&rows);
@@ -2697,7 +3044,7 @@ impl Endpoint for Overview {
 /// `urn:iki:gonk:page:layer:{layer}`: one layer's entries, or its tuples and takes.
 struct LayerPage {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -2728,7 +3075,7 @@ impl Endpoint for LayerPage {
         let mut slots: Vec<(String, String)> = Vec::new();
         if !inv.capability.allows(CAP_READ) {
             children.push_str(&lacking().element());
-        } else if let Some(view) = &self.view {
+        } else if let Some(view) = &self.view.current() {
             let snapshot = ready(view).await?;
             children.push_str(&notices(Some(view), &snapshot));
             let who_views = viewer(inv);
@@ -3049,14 +3396,14 @@ fn say_form(layer: &str, label: &str, reply: Option<&str>) -> String {
 /// the next watcher. The name is from when it was a long poll (ledger #1705 says why it is not).
 struct Wait {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
 impl Endpoint for Wait {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
         let after: u64 =
@@ -3239,7 +3586,7 @@ impl Endpoint for Wait {
 /// badge and the URL of the next poll; a sentence for the header's live region only when the
 /// count ROSE past `seen`, so a poll that brings nothing new says nothing.
 struct Count {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 /// The URL the header's count polls: `seen` is the count the page shows (`None`: none known).
@@ -3285,7 +3632,7 @@ impl Endpoint for Count {
         let quiet = optional_arg(inv, "quiet").as_deref() == Some("1");
         let mut attributes: Vec<(&str, String)> = vec![("view", "layers-count".to_string())];
         // Not configured: an inert badge, and no next poll.
-        if let Some(view) = &self.view {
+        if let Some(view) = &self.view.current() {
             // The first count a reader of the layers asks for starts the follower; until it
             // has read the door once there is no count to show.
             view.start();
@@ -3360,7 +3707,7 @@ impl Endpoint for Count {
 /// `urn:iki:gonk:layers:say:{layer}`: a say form → one entry at the door, as the configured
 /// identity.
 struct Say {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -3369,10 +3716,16 @@ impl Endpoint for Say {
         if inv.request.verb != Verb::Sink {
             return Err(Error::Endpoint("a post answers Sink only".to_string()));
         }
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
+        if !view.own {
+            return Err(Error::Denied(
+                "this server reads the public feeds with a joined identity, which never posts"
+                    .to_string(),
+            ));
+        }
         let layer = layer_binding(inv)?;
         let fields = web::form(inv.inline_str("content")?);
         let snapshot = ready(view).await?;
@@ -3596,10 +3949,11 @@ fn feed_row(
 /// `/feed` itself, with `flash` above the list after a change.
 async fn feeds_page(
     web: &Arc<Web>,
-    view: Option<&Arc<LayersView>>,
+    views: &Views,
     inv: &Invocation<'_>,
-    flash: Option<&str>,
+    flash: Option<(&str, &str)>,
 ) -> Result<String> {
+    let view = views.current();
     let ledgers = web::readable_ledgers(web, inv.capability);
     let mut children = web::nav_on_feeds(web, inv.capability, &ledgers);
     let mut attributes = vec![
@@ -3610,11 +3964,11 @@ async fn feeds_page(
     ];
     if !inv.capability.allows(CAP_READ) {
         children.push_str(&lacking().element());
-    } else if let Some(view) = view {
+    } else if let Some(view) = &view {
         let snapshot = ready(view).await?;
         children.push_str(&notices(Some(view), &snapshot));
-        if let Some(flash) = flash {
-            children.push_str(&element("flash", &[("kind", "ok")], flash));
+        if let Some((kind, flash)) = flash {
+            children.push_str(&element("flash", &[("kind", kind)], flash));
         }
         let who_views = viewer(inv);
         let mut rows = String::new();
@@ -3642,19 +3996,95 @@ async fn feeds_page(
             ));
         }
         children.push_str(&rows);
+    } else if let Some(feeds) = &views.feeds {
+        if let Some((kind, flash)) = flash {
+            children.push_str(&element("flash", &[("kind", kind)], flash));
+        }
+        if !inv.capability.allows(CAP_JOIN) {
+            attributes.push((
+                "empty",
+                format!(
+                    "This server reads no feeds yet. Joining the public feeds of {} needs \
+                     {CAP_JOIN} in your passkey's grant.",
+                    feeds.door()
+                ),
+            ));
+        }
     } else {
         children.push_str(&notices(None, &Snapshot::default()));
     }
+    children.push_str(&join_controls(views, inv));
     let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let doc = envelope("page", &attributes, &children);
     render::render(&doc, true).map_err(web::render_err)
+}
+
+/// The Join or Leave button: only for a holder of [`CAP_JOIN`], and Join only when this server
+/// holds no identity that reads this door's public feeds.
+fn join_controls(views: &Views, inv: &Invocation<'_>) -> String {
+    let Some(feeds) = &views.feeds else {
+        return String::new();
+    };
+    if !inv.capability.allows(CAP_JOIN) {
+        return String::new();
+    }
+    let host = feeds.door();
+    if feeds.joined().is_some() {
+        let lapsed = views.current().is_some_and(|view| view.public_lapsed());
+        let note = if lapsed {
+            format!(
+                "The identity this server joined {host} with no longer reads any of its public \
+                 feeds: the host lets an identity expire when it stops being read. Join again \
+                 to read them, or leave to delete it here."
+            )
+        } else {
+            format!(
+                "This server reads the public feeds of {host} with an identity of its own, \
+                 which only reads. Leaving deletes that identity here; the host lets it expire."
+            )
+        };
+        let mut controls = element(
+            "feeds-join",
+            &[("state", "joined"), ("action", LEAVE_PATH), ("note", &note)],
+            "",
+        );
+        if lapsed {
+            controls.push_str(&element(
+                "feeds-join",
+                &[("state", "offer"), ("action", JOIN_PATH), ("note", "")],
+                "",
+            ));
+        }
+        return controls;
+    }
+    let covered = crate::feeds_join::host_of(host)
+        .is_some_and(|name| views.own.as_ref().is_some_and(|o| o.reads_public_at(&name)));
+    if covered {
+        return String::new();
+    }
+    element(
+        "feeds-join",
+        &[
+            ("state", "offer"),
+            ("action", JOIN_PATH),
+            (
+                "note",
+                &format!(
+                    "Joining makes this server a certificate of its own and asks {host} to let \
+                     it read its public feeds and nothing else. No person approves it, and it \
+                     can never post."
+                ),
+            ),
+        ],
+        "",
+    )
 }
 
 /// `urn:iki:gonk:page:feed`: every feed the identity reads, and the viewer's Subscribe buttons
 /// and concept filters.
 struct FeedsPage {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -3667,7 +4097,7 @@ impl Endpoint for FeedsPage {
         }
         web::html_only(inv)?;
         Ok(web::html(
-            feeds_page(&self.web, self.view.as_ref(), inv, None).await?,
+            feeds_page(&self.web, &self.view, inv, None).await?,
         ))
     }
 
@@ -3695,7 +4125,7 @@ impl Endpoint for FeedsPage {
 /// Subscribing is reading, so it needs [`CAP_READ`] and nothing about posting.
 struct Subscribe {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -3709,8 +4139,8 @@ impl Endpoint for Subscribe {
         if !inv.capability.allows(CAP_READ) {
             return Err(Error::Denied(format!("a subscription needs {CAP_READ}")));
         }
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
         let pairs = web::form_pairs(inv.inline_str("content")?);
@@ -3801,7 +4231,7 @@ impl Endpoint for Subscribe {
             }
         };
         Ok(web::html(
-            feeds_page(&self.web, self.view.as_ref(), inv, Some(&flash)).await?,
+            feeds_page(&self.web, &self.view, inv, Some(("ok", &flash))).await?,
         ))
     }
 
@@ -3828,9 +4258,125 @@ impl Endpoint for Subscribe {
     }
 }
 
+/// `urn:iki:gonk:feeds:join`: join the door's public feeds ([`crate::feeds_join`]). Answers the
+/// Feeds page, with the host's reason on it when the host refused.
+struct JoinFeeds {
+    web: Arc<Web>,
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for JoinFeeds {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint("a join answers Sink only".to_string()));
+        }
+        if !inv.capability.allows(CAP_JOIN) {
+            return Err(Error::Denied(format!("joining needs {CAP_JOIN}")));
+        }
+        let feeds =
+            self.view.feeds.clone().ok_or_else(|| {
+                Error::NotFound("this server does not join public feeds".to_string())
+            })?;
+        let joining = Arc::clone(&feeds);
+        let flash = match off_thread(move || joining.join()).await? {
+            Ok(joined) => {
+                if let Some(view) = self.view.current() {
+                    let _ = off_thread(move || view.refresh()).await?;
+                }
+                (
+                    "ok",
+                    format!(
+                        "Joined the public feeds of {}. Subscribe to one below to read it in \
+                         your Layers view.",
+                        joined.host
+                    ),
+                )
+            }
+            Err(why) => ("error", why),
+        };
+        Ok(web::html(
+            feeds_page(&self.web, &self.view, inv, Some((flash.0, &flash.1))).await?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds-join"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds-join")
+            .title("Join the public feeds")
+            .summary(
+                "Reads the host's descriptor over web PKI, checks its door's certificate against \
+                 the sha256 it states, makes a certificate for this server if it has none, and \
+                 asks the door's join lobby for read and feed on every public feed it lists. \
+                 Answers the Feeds page, with the host's reason when it refused.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_JOIN)
+            .input(arg("content", "the form, url-encoded (empty)").optional())
+            .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:feeds:leave`: delete the joined identity.
+struct LeaveFeeds {
+    web: Arc<Web>,
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for LeaveFeeds {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint("leaving answers Sink only".to_string()));
+        }
+        if !inv.capability.allows(CAP_JOIN) {
+            return Err(Error::Denied(format!("leaving needs {CAP_JOIN}")));
+        }
+        let feeds =
+            self.view.feeds.clone().ok_or_else(|| {
+                Error::NotFound("this server does not join public feeds".to_string())
+            })?;
+        let leaving = Arc::clone(&feeds);
+        let flash = match off_thread(move || leaving.leave()).await? {
+            Ok(()) => (
+                "ok",
+                "You left the public feeds. This server no longer holds that identity; the \
+                 host lets it expire."
+                    .to_string(),
+            ),
+            Err(why) => ("error", why),
+        };
+        Ok(web::html(
+            feeds_page(&self.web, &self.view, inv, Some((flash.0, &flash.1))).await?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds-leave"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds-leave")
+            .title("Leave the public feeds")
+            .summary(
+                "Deletes the identity this server joined the public feeds with and stops \
+                 reading with it. The host is not told: it lets the identity expire.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_JOIN)
+            .input(arg("content", "the form, url-encoded (empty)").optional())
+            .output("text/html")
+    }
+}
+
 /// `urn:iki:gonk:layers:ask`: an `ik:Question` about a feed entry, in the viewer's own channel.
 struct Ask {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -3839,8 +4385,8 @@ impl Endpoint for Ask {
         if inv.request.verb != Verb::Sink {
             return Err(Error::Endpoint("a question answers Sink only".to_string()));
         }
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
         let fields = web::form(inv.inline_str("content")?);
@@ -3911,14 +4457,14 @@ impl Endpoint for Ask {
 
 /// `urn:iki:gonk:layers:file:{layer}:{id}`: a file entry's bytes, after the check.
 struct File {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
 impl Endpoint for File {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
         let layer = layer_binding(inv)?;
@@ -3967,6 +4513,49 @@ impl Endpoint for File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A door that refuses like a host that no longer knows this certificate.
+    struct Expired;
+
+    impl Door for Expired {
+        fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+            Err(Error::Denied(format!(
+                "no grant on {}",
+                request.target.as_str()
+            )))
+        }
+    }
+
+    #[test]
+    fn a_joined_identity_the_host_let_expire_is_noticed() {
+        let reader = PublicReader::new(
+            Arc::new(Expired),
+            Arc::new(Expired),
+            "urn:iki:host:edge:client:ab".to_string(),
+            BTreeSet::from(["releases".to_string()]),
+        );
+        let view = LayersView::public_only(reader, "door".to_string(), None, Waits::default());
+        assert!(!view.public_lapsed(), "nothing has been read yet");
+        view.refresh().expect("a refusal is an answer");
+        assert!(view.public_lapsed());
+        assert!(view.snapshot().layers.is_empty());
+    }
+
+    #[test]
+    fn the_joined_door_refuses_everything_but_reading() {
+        struct Passes;
+        impl Door for Passes {
+            fn call(&self, _: Request) -> std::result::Result<Representation, Error> {
+                panic!("a write never reaches the host under the joined identity")
+            }
+        }
+        let door = ReadOnly(Arc::new(Passes));
+        let say = Request::new(
+            Verb::Sink,
+            Iri::parse("urn:layer:releases:say").expect("an IRI"),
+        );
+        assert!(matches!(door.call(say), Err(Error::Denied(_))));
+    }
 
     #[test]
     fn a_bare_name_is_never_a_path() {

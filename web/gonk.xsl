@@ -890,11 +890,22 @@
       <xsl:apply-templates select="view:signin"/>
       <div id="layers-banner"><xsl:apply-templates select="view:notice"/></div>
       <xsl:apply-templates select="view:flash" mode="announce"/>
+      <xsl:apply-templates select="view:feeds-join"/>
       <xsl:if test="@empty"><p class="empty"><xsl:value-of select="@empty"/></p></xsl:if>
       <ul class="layer-list">
         <xsl:apply-templates select="view:feed-row"/>
       </ul>
     </section>
+  </xsl:template>
+
+  <!-- Join or leave a host's public feeds (ledger #3291): a plain POST, one sentence saying what
+       it does, the button's name its visible words. -->
+  <xsl:template match="view:feeds-join">
+    <form class="feed-toggle" method="post">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:if test="@note != ''"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
+      <button type="submit"><xsl:choose><xsl:when test="@state = 'joined'">Leave the public feeds</xsl:when><xsl:otherwise>Join the public feeds</xsl:otherwise></xsl:choose></button>
+    </form>
   </xsl:template>
 
   <xsl:template match="view:feed-row">

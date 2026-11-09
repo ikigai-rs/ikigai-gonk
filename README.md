@@ -2719,6 +2719,41 @@ entries, so a viewer more than 50 entries behind on a filtered feed is under-cou
 page itself reads the door and shows the newest 50 that match. A first subscriber's feed joins the
 long poll when the one in flight returns (up to 50 seconds); what is already published shows at once.
 
+### Joining the public feeds (ledger #3291)
+
+A gonk with no layer identity can read a host's public feeds. No person approves it, and no config
+line is needed:
+
+```toml
+gonk.feeds.door = "https://ikigai-rs.dev"   # the default; any https://host[:port]
+```
+
+**Join** is a button on `/feed`, for a passkey whose grant holds `urn:cap:gonk:feeds:join` (the
+owner puts it there), or `ikigai-gonk feeds join` from the owner's shell. A running server notices
+either way. gonk then:
+
+1. reads `https://<host>/.well-known/ikigai/layers.json` over HTTPS with the Mozilla roots and no
+   redirects: the door's address, its `server.crt` and that certificate's sha256, the join lobby
+   and the public layers (`ikigai-layers descriptor` writes it);
+2. reads `server.crt` beside it, and **refuses** if its sha256 is not the one stated, before
+   anything is made or dialed;
+3. makes a certificate in `<data home>/feeds/identity/` if there is none (`client.crt`,
+   `client.key`, the pinned `server.crt`, owner-only);
+4. posts one `onb:JoinRequest` naming every public feed the descriptor lists. The host's answer is
+   the grant; a refusal is shown with the host's reason, and only a granted join is recorded
+   (`joined.json`).
+
+**What it reads with.** With no `gonk.layers.view`, the joined identity reads for `/feed` and the
+Layers view. With one, the view identity's own grants are used and the joined identity only adds
+the public feeds it lacks. The joined identity **never says anything**: its door refuses every verb
+but reading, so a post or a question cannot go out under it, and "Ask a question about this" is
+offered only through the view identity's own channel.
+
+**Leave** is the "Leave the public feeds" button, or `ikigai-gonk feeds leave`. It deletes the
+identity directory. The host is not told: it lets the identity expire when it stops being read, and
+an expired identity may join again. Your subscriptions are this server's own and stay. If the host
+has expired the identity, `/feed` says so and offers Join again beside Leave.
+
 ## Onboarding a node (ledger #2009)
 
 A node enrolls itself: it makes its own certificate, posts one request on the layer host's

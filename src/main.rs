@@ -142,6 +142,7 @@ fn main() {
             &flags,
         ),
         Command::Onboard(args) => onboard_command(&args),
+        Command::Feeds { op, flags } => feeds_command(op, &flags),
         Command::RoborevFile(args) => {
             let door = bridge_door(args.quic.clone(), &args.flags);
             ikigai_gonk::roborev::run(&args, &door, &mut std::io::stdout())
@@ -588,6 +589,15 @@ fn serve(flags: &config::Flags) -> ! {
             Some(homes.data.join("layers-view").join("cursors.json")),
         )
     });
+    // ★ The public feeds (ledger #3291): nothing is fetched or dialed until the owner joins.
+    let public_feeds = ikigai_gonk::feeds_join::PublicFeeds::open(
+        settings.feeds_door.clone(),
+        &homes.data,
+        Arc::new(ikigai_gonk::feeds_join::WebPki),
+        layers_view.clone(),
+        Some(homes.data.join("layers-view").join("cursors.json")),
+        ikigai_gonk::layers_view::Waits::default(),
+    );
     let layers_line = match (&settings.layers_view, &layers_view) {
         (Some(_), Some(view)) => format!(
             "/layers reads and posts at {} as the identity its certificates name (asked of the              door on first use); a passkey grant needs {} (and {} to post)",
@@ -827,7 +837,10 @@ fn serve(flags: &config::Flags) -> ! {
             // The header offers each `gonk.face` by name (ledger #3199).
             faces: settings.faces.iter().map(|f| f.name().to_string()).collect(),
         });
-        let pages = web::door_space(Arc::clone(&face), layers_view);
+        let pages = web::door_space(
+            Arc::clone(&face),
+            ikigai_gonk::layers_view::Views::new(layers_view, Some(public_feeds)),
+        );
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
         let mut faces = settings
             .toolbox
@@ -1501,6 +1514,41 @@ fn browse_command(op: &config::BrowseOp, flags: &config::Flags) {
 }
 
 /// `ikigai-gonk onboard …` (ledger #2009): `init` here, everything else over the socket.
+/// `ikigai-gonk feeds join|leave` (ledger #3291): what `/feed`'s buttons do, from the owner's
+/// shell. A running server notices the identity directory change.
+fn feeds_command(op: config::FeedsOp, flags: &config::Flags) {
+    use ikigai_gonk::feeds_join::{PublicFeeds, WebPki};
+    let settings = read_settings(flags);
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let feeds = PublicFeeds::open(
+        settings.feeds_door.clone(),
+        &homes.data,
+        std::sync::Arc::new(WebPki),
+        None,
+        None,
+        ikigai_gonk::layers_view::Waits::default(),
+    );
+    match op {
+        config::FeedsOp::Join => {
+            let joined = feeds.join().unwrap_or_else(|e| fail(&e));
+            println!(
+                "joined the public feeds of {} as {}\nfeeds: {}\nidentity: {}",
+                joined.host,
+                joined.principal,
+                joined.layers.join(", "),
+                feeds.identity_dir().display()
+            );
+        }
+        config::FeedsOp::Leave => {
+            feeds.leave().unwrap_or_else(|e| fail(&e));
+            println!(
+                "left the public feeds of {}; the identity is deleted and the host lets it expire",
+                feeds.door()
+            );
+        }
+    }
+}
+
 fn onboard_command(args: &ikigai_gonk::onboard::Args) {
     use ikigai_gonk::onboard::{self as onb, CliOp};
     let settings = read_settings(&args.flags);

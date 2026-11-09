@@ -1386,6 +1386,10 @@ fn routes() -> Vec<Route> {
             crate::layers_view::SUBSCRIBE_IRI,
         ),
         route(crate::layers_view::ASK_PATH, crate::layers_view::ASK_IRI),
+        // Ledger #3291: joining and leaving a host's public feeds; a passkey's grant needs
+        // `urn:cap:gonk:feeds:join` for either.
+        route(crate::feeds_join::JOIN_PATH, crate::feeds_join::JOIN_IRI),
+        route(crate::feeds_join::LEAVE_PATH, crate::feeds_join::LEAVE_IRI),
         route("/layers/{layer}", crate::layers_view::LAYER_PAGE_TEMPLATE),
         route("/layers/{layer}/say", crate::layers_view::SAY_TEMPLATE),
         // ★ A layer file is someone else's bytes: served as `application/octet-stream`, and

@@ -435,8 +435,9 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
 /// a skolem IRI in `urn:kernel:topology`, and a trace credits their hits to the door around them.
 pub fn door_space(
     web: Arc<Web>,
-    layers_view: Option<Arc<crate::layers_view::LayersView>>,
+    layers_view: impl Into<crate::layers_view::Views>,
 ) -> EndpointSpace {
+    let layers_view = layers_view.into();
     let pages = crate::resolution::bind(space(Arc::clone(&web)), &web, layers_view.clone());
     let pages = crate::layers_view::bind(pages, &web, layers_view);
     crate::onboard::bind_page(pages, &web).named(crate::spaces::iri(crate::spaces::PAGES))

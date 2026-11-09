@@ -127,7 +127,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 50] = [
+const KEYS: [&str; 51] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -137,6 +137,7 @@ const KEYS: [&str; 50] = [
     "gonk.layer.deny",
     "gonk.layers.view",
     "gonk.layers.local",
+    "gonk.feeds.door",
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -199,6 +200,11 @@ usage:
                                    key pair (or, with --cert, its certificate) and unenrolls the
                                    old fingerprint. --port / --quic-bind name the server's, so
                                    the printed --connect line names the right port
+  ikigai-gonk feeds join|leave [--config PATH] [--config-home DIR] [--data-home DIR]
+                                   join the public feeds of gonk.feeds.door (https://ikigai-rs.dev
+                                   by default) with a certificate of this server's own, in
+                                   <data home>/feeds/identity, or delete that identity. A
+                                   running server notices. The same as the buttons on /feed
   ikigai-gonk client list [--config PATH]
                                    every QUIC client: each bundle and each enrolled
                                    fingerprint, its grant, and whether a connection from it is
@@ -584,6 +590,11 @@ pub enum Command {
     /// File one roborev review's findings into a ledger over the owner-only socket.
     RoborevFile(crate::roborev::FileArgs),
     /// The onboarding controller's commands (ledger #2009, [`crate::onboard`]).
+    Feeds {
+        /// `join` or `leave`.
+        op: FeedsOp,
+        flags: Flags,
+    },
     Onboard(crate::onboard::Args),
     /// Clone or fast-forward the repositories gonk browses, and print their root lines.
     Checkout(crate::checkout::Args),
@@ -712,6 +723,8 @@ pub struct Settings {
     /// The Layers page's door and identity (`gonk.layers.view`, [`crate::layers_view`]), or
     /// `None`: the page says it is not configured.
     pub layers_view: Option<crate::layers_view::ViewConfig>,
+    /// The host whose public feeds this server may join (`gonk.feeds.door`, ledger #3291).
+    pub feeds_door: String,
     /// The per-kind providers and spend ceilings the explanation families derive under.
     pub explain: ExplainTiers,
     /// Where backups land, how many are kept, and how often one is taken.
@@ -1114,6 +1127,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return crate::onboard::parse_args(args).map(Command::Onboard);
         }
+        Some("feeds") => {
+            args.next();
+            return parse_feeds(args);
+        }
         Some("roborev") => {
             args.next();
             return crate::roborev::parse_args(args).map(Command::RoborevFile);
@@ -1307,6 +1324,34 @@ fn parse_layer(mut args: impl Iterator<Item = String>) -> Result<Command, String
         }
     }
     Ok(Command::LayerTake { offer, flags })
+}
+
+/// What `ikigai-gonk feeds` does (ledger #3291).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedsOp {
+    /// `feeds join`.
+    Join,
+    /// `feeds leave`.
+    Leave,
+}
+
+fn parse_feeds(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let op = match args.next().as_deref() {
+        Some("join") => FeedsOp::Join,
+        Some("leave") => FeedsOp::Leave,
+        Some(other) => return Err(format!("feeds: `{other}` is not join or leave")),
+        None => return Err("feeds: expected `join` or `leave`".to_string()),
+    };
+    let mut flags = Flags::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other => return Err(format!("feeds: unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::Feeds { op, flags })
 }
 
 /// What `ikigai-gonk browse` does (ledger #2154).
@@ -1942,6 +1987,17 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             Some(view)
         }
     };
+    let feeds_door = match values_for(text, crate::feeds_join::DOOR_KEY).as_slice() {
+        [] => crate::feeds_join::DEFAULT_DOOR.to_string(),
+        [line] => crate::feeds_join::parse_door(line)?,
+        lines => {
+            return Err(format!(
+                "{} is given {} times: a server joins one host's public feeds",
+                crate::feeds_join::DOOR_KEY,
+                lines.len()
+            ))
+        }
+    };
     let onboard = match values_for(text, crate::onboard::KEY).as_slice() {
         [] => None,
         [line] => Some(crate::onboard::parse(
@@ -2015,6 +2071,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         mounts,
         layers,
         layers_view,
+        feeds_door,
         explain,
         backup,
         review,
@@ -3844,6 +3901,25 @@ mod tests {
     /// Ledger #1856: `gonk.layers.local` names who else writes on this host's side of a layer.
     /// It reaches the Layers page's config, is refused without a Layers page, given twice, or
     /// naming nobody, and its absence means only the page's own identity.
+    #[test]
+    fn feeds_join_and_leave_parse_and_nothing_else_does() {
+        let parse = |words: &[&str]| parse_feeds(words.iter().map(|w| w.to_string()));
+        assert!(matches!(
+            parse(&["join", "--data-home", "/d"]),
+            Ok(Command::Feeds { op: FeedsOp::Join, flags }) if flags.data_home.is_some()
+        ));
+        assert!(matches!(
+            parse(&["leave"]),
+            Ok(Command::Feeds {
+                op: FeedsOp::Leave,
+                ..
+            })
+        ));
+        assert!(parse(&["subscribe"]).is_err());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["join", "--force"]).is_err());
+    }
+
     #[test]
     fn the_local_participants_reach_the_layers_view() {
         let dir = tempfile::tempdir().unwrap();
