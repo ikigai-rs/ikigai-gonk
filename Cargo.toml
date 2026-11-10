@@ -981,7 +981,9 @@ ikigai-ipc = "0.4.0"
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. Moves with `ikigai-ipc`, `ikigai-web` and the lock's
 # `ikigai-wire` at 0.2.1 (wire v10). `"0.2.1"` is `<0.3.0`.
-ikigai-quic = "0.4.0"
+# ★ 0.4.3 (ledger #3326): the floor. `Drain` and `serve_draining_on` are what a stop drains the
+# door through, and 0.4.2 has neither.
+ikigai-quic = "0.4.3"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -1363,6 +1365,11 @@ hmac = "0.12.1"
 # safe `statvfs`, as this crate forbids `unsafe`. Already in this graph, so an edge, not a package.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
+
+# SIGTERM and SIGINT, caught on a thread of their own (ledger #3326, `stop_on_signal` in
+# `main`): the safe API over `sigaction`, as this crate forbids `unsafe`. A handler it installs
+# resets at `exec`, so the git and `gh` this process spawns still stop on a signal.
+signal-hook = "0.4"
 
 [dev-dependencies]
 # The authz benchmark reads the Linux thread CPU clock outside latency samples.

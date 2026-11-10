@@ -2232,6 +2232,21 @@ worker holding the same six lines cannot release it, whatever holder name it spe
 grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
 this through the QUIC door of a real gonk.
 
+#### Stopping gonk: the QUIC door drains (ledger #3326)
+
+SIGTERM or SIGINT drains the QUIC door and exits 0. Calls in progress finish and their clients
+get their replies. A call opened after the signal is turned away unread, so its client sends it
+again on a new connection, and a handshake is left for the next process on the port. The wait is
+capped at two seconds so a restart stays well under the client's five-second connect timeout: a
+call still running at the cap has its connection closed, the log says how many, and the process
+still exits 0. A second signal during the drain exits at once, with status 128 + the
+signal.
+
+The drain waits for calls, not work, and re-queues nothing: a claim keeps its holder and its lease
+across the restart. Only the QUIC door drains; the HTTP door and the socket stop with the process.
+⚠ `kill -9` and a crash are not covered: they end every call in flight, and a client cannot tell
+whether a write it had in progress applied.
+
 #### Who wrote it: a committer and a verified or claimed author
 
 Since `ikigai-ledger` 0.15 (ledger #2836) every entry records `ledger:committer`, the principal the
