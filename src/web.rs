@@ -3125,21 +3125,23 @@ async fn item_card(
     enrich_children(&mut graph);
     enrich_repo_labels(&mut graph, web, inv.capability);
     enrich_authors(&mut graph, &web.passkeys);
-    // The ledger a comment's `ledger #N` references resolve in (`render::linkify`, ledger #989).
-    for comment in graph.subjects_of_type(&format!("{LEDGER_NS}Comment")) {
-        graph.view(&comment, "ledger", ledger.name());
+    // How the body's and the comments' references link (`render::linkify`, ledgers #989 and
+    // #3344): a bare `ledger #N` into this ledger, a qualified `crew#3` into a ledger this gonk holds that the viewer may read.
+    // The held set is the header's own list, computed once here for both: no store read.
+    let readable = readable_ledgers(web, inv.capability);
+    let held: Vec<&str> = readable.iter().map(Ledger::name).collect();
+    let refs = render::ledger_refs(ledger.name(), &held);
+    for kind in ["Item", "Comment"] {
+        for subject in graph.subjects_of_type(&format!("{LEDGER_NS}{kind}")) {
+            graph.view(&subject, "linkify", refs.clone());
+        }
     }
     let title = graph
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
         .first()
         .and_then(|item| graph.value(item, &format!("{DCTERMS}title")))
         .unwrap_or_else(|| id.to_string());
-    let mut children = nav(
-        web,
-        inv.capability,
-        &readable_ledgers(web, inv.capability),
-        Some(ledger.name()),
-    );
+    let mut children = nav(web, inv.capability, &readable, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }

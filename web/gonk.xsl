@@ -2800,8 +2800,10 @@
       </xsl:if>
     </header>
     <!-- data-linkify: src/render.rs::linkify links this text's http(s) URLs and `ledger #N`
-         references after the transform (ledger #989); the value is the ledger they resolve in. -->
-    <xsl:if test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:if>
+         references after the transform (ledger #989); the value (view:linkify,
+         render::ledger_refs) names the ledger they resolve in and the held ledgers a qualified
+         `crew#3` may link into (ledger #3344). -->
+    <xsl:if test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:if>
     <dl class="meta">
       <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/><xsl:call-template name="author-claim"/></xsl:if></dd>
       <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
@@ -2868,7 +2870,7 @@
           <xsl:otherwise>unattributed</xsl:otherwise>
         </xsl:choose>
       </p>
-      <div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div>
+      <div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div>
     </li>
   </xsl:template>
 

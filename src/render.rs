@@ -1368,6 +1368,35 @@ pub fn layer_refs(bare: Option<&str>, held: &[&str]) -> String {
     format!("{LAYER_CONTEXT}{bare}:{}", held.join(","))
 }
 
+/// The [`LINKIFY_ATTR`] value for an item's or a comment's text on `ledger`'s page (ledger
+/// [#3344](http://localhost:1062/l/default/item/3344)): a bare `ledger #N` is `ledger`'s, and a
+/// QUALIFIED reference (`crew#3`, `crew #3`, `crew:#3`) links into one of `held`, the ledgers
+/// this gonk holds that the viewer may read, exactly as a layer entry's does ([`layer_refs`]).
+/// A ledger not in `held` stays text.
+///
+/// The value is `<ledger>;<held,...>`: a ledger name has neither `;` nor `:`, so it can be
+/// confused with neither a plain ledger's name nor a layer context. A name that is not a ledger
+/// name is dropped, as [`layer_refs`] drops it.
+///
+/// ```
+/// use ikigai_gonk::render::{ledger_refs, linkify};
+/// let refs = ledger_refs("default", &["default", "crew", "../x"]);
+/// assert_eq!(refs, "default;default,crew");
+/// assert_eq!(
+///     linkify(&format!("<p data-linkify='{refs}'>crew:#3, nosuch#4, ledger #5</p>")),
+///     "<p data-linkify='default;default,crew'><a href='/l/crew/item/3'>crew:#3</a>, nosuch#4, \
+///      <a href='/l/default/item/5'>ledger #5</a></p>"
+/// );
+/// ```
+pub fn ledger_refs(ledger: &str, held: &[&str]) -> String {
+    let held: Vec<&str> = held
+        .iter()
+        .copied()
+        .filter(|name| is_ledger_word(name))
+        .collect();
+    format!("{ledger};{}", held.join(","))
+}
+
 /// Whether `name` has a ledger name's shape: lowercase ASCII letters, digits, `-` and `_`
 /// (`ikigai_ledger::Ledger::parse` is the full rule; this is the part an `href` relies on).
 fn is_ledger_word(name: &str) -> bool {
@@ -1382,7 +1411,8 @@ fn is_ledger_word(name: &str) -> bool {
 struct Refs<'a> {
     /// The ledger a bare `ledger #N` links to.
     bare: Option<&'a str>,
-    /// The ledgers a qualified `name#N` may link to: none outside a layer context.
+    /// The ledgers a qualified `name#N` may link to: none unless the marker names them
+    /// ([`layer_refs`], [`ledger_refs`]).
     held: Vec<&'a str>,
     /// Whether the text is a layer entry's ([`layer_refs`]).
     layer: bool,
@@ -1391,11 +1421,15 @@ struct Refs<'a> {
 impl<'a> Refs<'a> {
     fn parse(value: &'a str) -> Refs<'a> {
         match value.strip_prefix(LAYER_CONTEXT) {
-            None => Refs {
-                bare: Some(value).filter(|v| is_ledger_word(v)),
-                held: Vec::new(),
-                layer: false,
-            },
+            None => {
+                // `<ledger>` alone, or `<ledger>;<held,...>` ([`ledger_refs`]).
+                let (bare, held) = value.split_once(';').unwrap_or((value, ""));
+                Refs {
+                    bare: Some(bare).filter(|b| is_ledger_word(b)),
+                    held: held.split(',').filter(|n| is_ledger_word(n)).collect(),
+                    layer: false,
+                }
+            }
             Some(rest) => {
                 let (bare, held) = rest.split_once(':').unwrap_or(("", ""));
                 let held: Vec<&str> = held.split(',').filter(|n| is_ledger_word(n)).collect();
