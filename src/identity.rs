@@ -516,6 +516,34 @@ fn redeem(layout: &Layout, code: &str, now: u64) -> Result<String, String> {
     Ok(grant)
 }
 
+/// The grant the invite `code` names, read WITHOUT redeeming it: what an enrollment with no
+/// label is labeled, checked before the invite is spent. Unknown codes are refused as
+/// [`redeem`] refuses them; expiry is left to [`redeem`].
+fn invite_grant(layout: &Layout, code: &str) -> Result<String, String> {
+    let _lock = layout.lock_invites()?;
+    let doc = quic::read_object(&layout.invites_json())?;
+    doc.get(&sha256_hex(code.as_bytes()))
+        .ok_or("this invite is not valid — it was never issued, or it has been used")?
+        .get("grant")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "the invite names no grant".to_string())
+}
+
+/// Refuse `label` if an enrolled passkey already has it (ledger
+/// [#3384](http://localhost:1062/l/default/item/3384)): `passkey revoke <label>` refuses a
+/// label two passkeys share, and the system's passkey picker cannot tell them apart, so
+/// enrollment must not create the ambiguity. Labels compare exactly, as [`revoke`] compares them.
+fn refuse_taken_label(enrolled: &BTreeMap<String, Enrolled>, label: &str) -> Result<(), String> {
+    match enrolled.values().find(|e| e.label == label) {
+        Some(_) => Err(format!(
+            "another passkey is already labeled `{label}` — choose a different label; \
+             the invite is still good"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The scopes a grant name holds, fail-closed: unknown, empty, or naming any token
 /// [`quic::grant_refusal`] refuses is an error. The same rule the QUIC door applies.
 pub fn scopes_of(layout: &Layout, grant: &str) -> Result<Vec<String>, String> {
@@ -977,6 +1005,18 @@ impl Passkeys {
         state.dirty = true;
     }
 
+    /// Refuse `label` if an enrolled passkey already has it — what `register-options` asks
+    /// when the page names its label, so a taken one is refused BEFORE the authenticator
+    /// mints a credential that could then never be enrolled. [`Passkeys::register`] checks
+    /// again under the clients lock; this early answer is only a courtesy.
+    pub fn check_label(&self, label: &str) -> Result<(), String> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Ok(());
+        }
+        refuse_taken_label(&read_passkeys(&self.layout)?, label)
+    }
+
     /// The only origin a ceremony is accepted from.
     pub fn origin(&self) -> &str {
         &self.origin
@@ -1101,23 +1141,31 @@ impl Passkeys {
         // Parsing is the check that this is an ES256 key this server can verify against.
         RegisteredCredential::from_spki_der(b64(&id, "id")?, &key, 0)
             .map_err(|e| format!("{e} — this server verifies ES256 (P-256) passkeys only"))?;
+        let invite = text("invite")?;
         let lock = self.layout.lock_clients()?;
-        if read_passkeys(&self.layout)?.contains_key(&id) {
+        let enrolled = read_passkeys(&self.layout)?;
+        if enrolled.contains_key(&id) {
             return Err("this credential is already enrolled".to_string());
         }
-        // The invite is redeemed LAST, after everything that could refuse the credential:
-        // a malformed key must not burn a single-use code.
-        let grant = redeem(&self.layout, &text("invite")?, now)?;
-        scopes_of(&self.layout, &grant)?;
-        // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
-        self.answer_challenge(&challenge, expires, now)?;
-        let label = v
+        // No label falls back to the invite's grant, so that is the label checked; reading the
+        // invite here spends nothing.
+        let label = match v
             .get("label")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| grant.clone());
+        {
+            Some(label) => label.to_string(),
+            None => invite_grant(&self.layout, &invite)?,
+        };
+        // Under the clients lock, so two enrollments racing for one label cannot both pass.
+        refuse_taken_label(&enrolled, &label)?;
+        // The invite is redeemed LAST, after everything that could refuse the credential:
+        // a malformed key or a taken label must not burn a single-use code.
+        let grant = redeem(&self.layout, &invite, now)?;
+        scopes_of(&self.layout, &grant)?;
+        // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
+        self.answer_challenge(&challenge, expires, now)?;
         let entry = Enrolled {
             credential_id: id,
             grant,

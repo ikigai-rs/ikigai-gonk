@@ -1219,10 +1219,12 @@
 
   async function enrol(invite, label) {
     try {
-      const { challenge } = await post("/auth/register-options");
+      const name = label || "gonk passkey";
+      // The label goes first, so one another passkey already has is refused before the system
+      // sheet mints a credential that could never be enrolled (ledger #3384).
+      const { challenge } = await post("/auth/register-options", { label: name });
       const user = new Uint8Array(16);
       crypto.getRandomValues(user);
-      const name = label || "gonk passkey";
       const cred = await navigator.credentials.create({
         publicKey: {
           challenge: fromB64(challenge),
@@ -1252,20 +1254,39 @@
       // ("The document is not focused") — found by the first real Touch ID enrollment. A click
       // on the sign-in button is a fresh user gesture on a page that has focus back.
       const created = "Passkey created for " + done.label + " (grant " + done.grant + "). ";
-      const login = $("auth-login");
-      if ($("auth-logout").hidden) {
-        login.hidden = false;
-        flash(created + "Now click Sign in with passkey to use it.", "ok");
-        login.focus();
-      } else {
-        flash(created + "Sign out, then sign in with the new passkey to use its grant.", "ok");
+      // ★ SIGNED IN, THE OLD SESSION ENDS HERE (ledger #3384). Kept, every later request ran as
+      // the OLD passkey and its grant, which reads as a permission bug. Ended in place, with no
+      // reload, so the sentence and the focus below survive: the same one click on Sign in as
+      // the signed-out case.
+      let ended = "";
+      if (!$("auth-logout").hidden) {
+        const t = token();
+        setToken("", 0);
+        try {
+          if (t) await post("/auth/logout", t);
+        } catch (_) {
+          // Signed out locally either way; the server session expires on its own.
+        }
+        ended = $("auth-who").textContent.replace(/^Signed in as /, "") + " is signed out. ";
+        $("auth-who").textContent = "";
+        $("auth-who").hidden = true;
+        $("auth-logout").hidden = true;
+        signedIn = false;
+        drawNotices(document);
       }
+      const login = $("auth-login");
+      login.hidden = false;
+      flash(created + ended + "Now click Sign in with passkey to use it.", "ok");
+      login.focus();
     } catch (err) {
       flash(
         "Could not create the passkey: " +
           ceremonyError(err, "The invite is still good until it expires — click Create passkey to try again."),
         "error"
       );
+      // A refused label is changed in the field; a retry is its form's own button.
+      const field = $("enrol-label");
+      if (field && !$("enrol").hidden) field.focus();
     }
   }
 
