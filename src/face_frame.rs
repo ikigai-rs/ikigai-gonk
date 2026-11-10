@@ -9,6 +9,10 @@
 //! - right after `<body …>`: the bar, a link home, the face's name marked "add-on", and the
 //!   add-on row with this face `aria-current="page"`.
 //!
+//! A deployment's own stylesheets and scripts (`gonk.page.style`, `gonk.page.script`, ledger
+//! #3379, [`crate::page_assets`]) follow gonk's two, ahead of the face's own, so the face still
+//! has the last word on its own page; `?safe=1` leaves them out, and the bar says so.
+//!
 //! No inline script or style, so the door's CSP is unchanged.
 //!
 //! # ★ Never break a face
@@ -24,6 +28,7 @@ use std::sync::LazyLock;
 use ikigai_ui::palette::{Palette, DARK, HIGH_CONTRAST, LIGHT};
 
 use crate::face::PATH;
+use crate::page_assets::PageAssets;
 
 /// The bar's stylesheet's name under `/static/`.
 pub const SHEET: &str = "gonk-frame.css";
@@ -69,6 +74,11 @@ pub fn stylesheet() -> &'static str {
 pub struct Frame {
     head: String,
     bar: String,
+    /// The deployment's own assets after gonk's head, and the bar's safe-mode note: what a
+    /// page gets outside safe mode, and what it gets in it. Empty with no assets.
+    assets: String,
+    safe_link: String,
+    safe_note: String,
 }
 
 impl Frame {
@@ -98,19 +108,74 @@ impl Frame {
                  <nav aria-label=\"Add-ons\"><span>Add-ons</span> <ul>{links}</ul></nav>\
                  </nav>"
             ),
+            assets: String::new(),
+            safe_link: String::new(),
+            safe_note: String::new(),
         }
+    }
+
+    /// This frame with the deployment's own stylesheets and scripts written after gonk's head
+    /// (ledger #3379), and the bar's way into and out of safe mode.
+    pub fn with_page_assets(mut self, page_assets: &PageAssets) -> Frame {
+        if page_assets.is_empty() {
+            return self;
+        }
+        let mut assets = format!(
+            "<script src=\"/static/{}\"></script>\
+             <!-- This deployment's own stylesheets and scripts (its gonk.page.style and \
+             gonk.page.script lines), not gonk's. Load the page with ?safe=1 to see it without \
+             them. -->",
+            crate::page_assets::GATE
+        );
+        for href in page_assets.styles() {
+            assets += &format!(
+                "<link rel=\"stylesheet\" href=\"{href}\" data-gonk-deployment=\"style\">"
+            );
+        }
+        for src in page_assets.scripts() {
+            assets +=
+                &format!("<script defer src=\"{src}\" data-gonk-deployment=\"script\"></script>");
+        }
+        self.assets = assets;
+        self.safe_link = " <a class=\"gonk-frame-safe\" href=\"?safe=1\">Safe mode</a>".to_string();
+        self.safe_note = format!(
+            " <span class=\"gonk-frame-safe\">Safe mode: without this deployment's {}</span>",
+            page_assets.adds().trim_start_matches("its ")
+        );
+        self
     }
 
     /// `page` with the frame written in, or `None` when it has no seams to write at and must be
     /// served as written.
     pub fn apply(&self, page: &[u8]) -> Option<Vec<u8>> {
+        self.apply_in(page, false)
+    }
+
+    /// [`Frame::apply`], in safe mode (`?safe=1`) when `safe`: without the deployment's own
+    /// stylesheets and scripts.
+    pub fn apply_in(&self, page: &[u8], safe: bool) -> Option<Vec<u8>> {
         let seams = seams(page)?;
+        let head = if safe {
+            self.head.clone()
+        } else {
+            format!("{}{}", self.head, self.assets)
+        };
+        let note = if safe {
+            &self.safe_note
+        } else {
+            &self.safe_link
+        };
+        // The note goes inside the bar, before its closing tag.
+        let bar = match self.bar.strip_suffix("</nav>") {
+            Some(open) if !note.is_empty() => format!("{open}{note}</nav>"),
+            _ => self.bar.clone(),
+        };
         let theme = match seams.theme {
             Theme::Attribute(_) => " data-theme='auto'",
             Theme::Element(_) => "<html data-theme='auto'>",
             Theme::Named => "",
         };
-        let extra = theme.len() + self.head.len() + self.bar.len();
+        let extra = theme.len() + head.len() + bar.len();
         let mut out = Vec::with_capacity(page.len() + extra);
         let mut from = 0;
         let mut write = |at: usize, text: &str| {
@@ -121,8 +186,8 @@ impl Frame {
         if let Theme::Attribute(at) | Theme::Element(at) = seams.theme {
             write(at, theme);
         }
-        write(seams.head, &self.head);
-        write(seams.body, &self.bar);
+        write(seams.head, &head);
+        write(seams.body, &bar);
         out.extend_from_slice(&page[from..]);
         Some(out)
     }
@@ -408,6 +473,44 @@ mod tests {
         assert!(framed.starts_with(b"\xef\xbb\xbf<html data-theme='auto'><head>"));
         assert!(framed.windows(5).any(|w| w == b"caf\xe9<"));
         assert!(framed.ends_with(b"</nav></nav>\xff"));
+    }
+
+    #[test]
+    fn a_deployments_assets_follow_gonks_head_outside_safe_mode() {
+        let assets = PageAssets::parse(&["/s.css".to_string()], &["/s.js".to_string()]).unwrap();
+        let framed = frame().with_page_assets(&assets);
+        let page = "<html><head><link rel=\"stylesheet\" href=\"own.css\"></head><body>x";
+        let out = text(&framed.apply_in(page.as_bytes(), false).unwrap());
+        let style = out.find("href=\"/s.css\"").unwrap();
+        assert!(out.find("shell.js").unwrap() < out.find("gonk-safe.js").unwrap());
+        assert!(out.find("gonk-safe.js").unwrap() < style, "{out}");
+        assert!(style < out.find("own.css").unwrap(), "{out}");
+        assert!(out.contains("<script defer src=\"/s.js\""), "{out}");
+        assert!(
+            out.contains("href=\"?safe=1\">Safe mode</a></nav>x"),
+            "{out}"
+        );
+
+        let safe = text(&framed.apply_in(page.as_bytes(), true).unwrap());
+        assert!(
+            !safe.contains("/s.css") && !safe.contains("/s.js"),
+            "{safe}"
+        );
+        assert!(!safe.contains("gonk-safe.js"), "{safe}");
+        assert!(
+            safe.contains(
+                "Safe mode: without this deployment's own style and script</span></nav>x"
+            ),
+            "{safe}"
+        );
+
+        // No assets: the frame is exactly what it was.
+        assert_eq!(
+            frame()
+                .with_page_assets(&PageAssets::default())
+                .apply(page.as_bytes()),
+            frame().apply(page.as_bytes())
+        );
     }
 
     #[test]

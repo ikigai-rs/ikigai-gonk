@@ -326,6 +326,10 @@ impl ViewsPage {
             ("view", "views".to_string()),
             ("full", "true".to_string()),
             ("ui-theme", crate::render::theme_of(inv).to_string()),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+            ),
             ("title", "Views".to_string()),
             (
                 "intro",

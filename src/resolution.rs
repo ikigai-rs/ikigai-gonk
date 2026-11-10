@@ -158,6 +158,10 @@ pub fn answer(web: &Web, inv: &Invocation<'_>, iri: &str, target: &str) -> Resul
             ("title", "Name resolved"),
             ("refresh", target),
             ("ui-theme", render::theme_of(inv)),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+            ),
         ],
         &children,
     );

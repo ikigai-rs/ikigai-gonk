@@ -144,6 +144,7 @@ fn door_and_hub(
         queue: QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });
@@ -2187,6 +2188,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
         queue: QueuePolicy::default(),
         epochs: Some(watch.epochs()),
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });

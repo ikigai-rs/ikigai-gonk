@@ -52,6 +52,20 @@ h2 { font-size: 1.1rem; margin: 0 0 var(--gap); }
 .addons-list { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; list-style: none; margin: 0; padding: 0; }
 .addons a { display: inline-flex; align-items: center; min-height: 24px; } /* WCAG 2.2 SC 2.5.8 */
 
+/* Ledger #3379: the footer that names a deployment's own style and script, and safe mode. As quiet
+   as the add-on row, and in words, never color alone. */
+.deployment-note {
+  max-width: 60rem; margin: 0 auto; padding: 0.5rem 1rem 1rem;
+  border-top: 1px solid var(--rule); font-size: 0.85rem; color: var(--muted);
+}
+.deployment-note p { margin: 0.25rem 0; }
+.deployment-note a { display: inline-flex; align-items: center; min-height: 24px; }
+
+/* An item's comment order: two links, the current one by weight and aria-current. */
+.comment-order { margin: 0 0 0.5rem; font-size: 0.9rem; }
+.comment-order a { display: inline-flex; align-items: center; min-height: 24px; }
+.comment-order a[aria-current] { font-weight: 700; }
+
 /* The theme chooser is ikigai-ui's; the header's own gap spaces it. */
 .top .ui-theme { margin: 0; }
 

@@ -300,6 +300,7 @@ impl Gonk {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
             faces: Vec::new(),
         });

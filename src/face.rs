@@ -70,6 +70,7 @@ use ikigai_core::{
 use ikigai_web::{EdgeConfig, ReadRedirect, Route};
 
 use crate::face_frame::Frame;
+use crate::page_assets::PageAssets;
 
 /// The config key: one `<name> <directory>` line per face.
 pub const KEY: &str = "gonk.face";
@@ -194,13 +195,13 @@ impl Face {
     /// The spaces the HTTP door binds for this face: [`FaceFile`] at
     /// `urn:face:name:{name}:{path}`, framed with `roster` (every face, in config order), and
     /// the directory at `urn:iki:face:name:{name}:dir:{path}`.
-    fn spaces(&self, roster: &[String]) -> Vec<Arc<dyn Space>> {
+    fn spaces(&self, roster: &[String], page_assets: &PageAssets) -> Vec<Arc<dyn Space>> {
         let files = EndpointSpace::new().bind(
             UriTemplate::parse(format!("{IRI}{}:{{path}}", self.name))
                 .expect("a checked face name makes a template"),
             FaceFile {
                 base: self.dir_base(),
-                frame: Frame::new(&self.name, roster),
+                frame: Frame::new(&self.name, roster).with_page_assets(page_assets),
             },
         );
         let dir = EndpointSpace::new().bind(
@@ -258,8 +259,16 @@ pub fn parse_all(lines: &[String], home: &Path) -> Result<Vec<Face>, String> {
 
 /// Every face's spaces, for the HTTP door, each framed with the whole roster.
 pub fn spaces(faces: &[Face]) -> Vec<Arc<dyn Space>> {
+    spaces_with(faces, &PageAssets::default())
+}
+
+/// [`spaces`], with the deployment's own stylesheets and scripts in every frame (ledger #3379).
+pub fn spaces_with(faces: &[Face], page_assets: &PageAssets) -> Vec<Arc<dyn Space>> {
     let roster: Vec<String> = faces.iter().map(|face| face.name.clone()).collect();
-    faces.iter().flat_map(|face| face.spaces(&roster)).collect()
+    faces
+        .iter()
+        .flat_map(|face| face.spaces(&roster, page_assets))
+        .collect()
 }
 
 /// `urn:face:name:{name}:{path}`: Source the file at `{path}` (its `:`s read as `/`) from the
@@ -319,7 +328,10 @@ impl Endpoint for FaceFile {
         let (media, request) = self.plan(inv)?;
         let rep = inv.issue(request).await.map_err(|e| as_asked(inv, e))?;
         let bytes = match media {
-            HTML => self.frame.apply(&rep.bytes).unwrap_or(rep.bytes),
+            HTML => self
+                .frame
+                .apply_in(&rep.bytes, crate::page_assets::safe_of(inv))
+                .unwrap_or(rep.bytes),
             _ => rep.bytes,
         };
         Ok(Representation::new(ReprType::new(media), bytes))
@@ -340,10 +352,12 @@ impl Endpoint for FaceFile {
                     .collect(ikigai_fs::MAX_FILE_SOURCE_BYTES as usize)
                     .await
                     .map_err(|e| as_asked(inv, e))?;
-                Body::Bytes(match self.frame.apply(&page) {
-                    Some(framed) => framed.into(),
-                    None => page,
-                })
+                Body::Bytes(
+                    match self.frame.apply_in(&page, crate::page_assets::safe_of(inv)) {
+                        Some(framed) => framed.into(),
+                        None => page,
+                    },
+                )
             }
             _ => rep.bytes,
         };

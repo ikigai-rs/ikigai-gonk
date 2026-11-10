@@ -320,6 +320,7 @@ fn main() {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
         // The add-on row (ledger #3279) on every page below.
         faces: vec!["demo".to_string(), "intake".to_string()],

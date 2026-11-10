@@ -170,6 +170,11 @@ pub struct Web {
     /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
     /// [#3034](http://localhost:1062/l/default/item/3034)).
     pub holder_aliases: crate::holders::HolderAliases,
+    /// A deployment's own stylesheets and scripts (`gonk.page.style`, `gonk.page.script`,
+    /// [`crate::page_assets`], ledger [#3379](http://localhost:1062/l/default/item/3379)), linked
+    /// from every page drawn through the shared head unless the page is asked for in safe mode.
+    /// Empty for none, and every page is as it was.
+    pub page_assets: crate::page_assets::PageAssets,
 }
 
 /// Bind the face.
@@ -742,6 +747,9 @@ fn nav_with(
             "",
         ));
     }
+    // ★ A deployment's own stylesheets and scripts (ledger #3379): the shell links them last in
+    // its head and says so in its footer, unless the page was asked for with `safe=1`.
+    out.push_str(&web.page_assets.view());
     if withholds(web, capability, reads_a_root, offers_queue) {
         out.push_str(&element(
             "withheld",
@@ -941,6 +949,10 @@ impl Endpoint for LedgersIndex {
                     ("view", "empty"),
                     ("full", "true"),
                     ("ui-theme", crate::render::theme_of(inv)),
+                    (
+                        "safe",
+                        crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                    ),
                     ("title", "No ledger to show"),
                 ],
                 &children,
@@ -975,6 +987,10 @@ impl Endpoint for LedgersIndex {
                 ("view", "ledgers"),
                 ("full", "true"),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", "Ledgers"),
                 ("count", &count),
             ],
@@ -2008,6 +2024,10 @@ async fn ledger_listing(
             ("view", "ledger"),
             ("full", flag(full)),
             ("ui-theme", crate::render::theme_of(inv)),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+            ),
             ("title", &title),
             ("ledger", ledger.name()),
             ("status", status),
@@ -2269,6 +2289,10 @@ impl Endpoint for LedgerView {
                             ("view", "empty"),
                             ("full", "true"),
                             ("ui-theme", crate::render::theme_of(inv)),
+                            (
+                                "safe",
+                                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                            ),
                             ("title", "No ledger to show"),
                         ],
                         &format!(
@@ -2508,6 +2532,10 @@ impl Endpoint for LifecycleView {
                 ("view", "lifecycle"),
                 ("full", flag(true)),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", &format!("lifecycle · {}", ledger.name())),
                 ("ledger", ledger.name()),
                 ("page-url", &format!("{}/lifecycle", ledger_href(&ledger))),
@@ -2616,6 +2644,10 @@ impl Endpoint for DoctorView {
                 ("view", "doctor"),
                 ("full", flag(true)),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", &format!("doctor · {}", ledger.name())),
                 ("ledger", ledger.name()),
                 ("page-url", &format!("{}/doctor", ledger_href(&ledger))),
@@ -3186,7 +3218,12 @@ async fn item_card(
         &[
             ("view", "item"),
             ("full", flag(full)),
+            ("comments", comment_order(inv)),
             ("ui-theme", crate::render::theme_of(inv)),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+            ),
             ("title", &title),
             ("ledger", ledger.name()),
             ("page-url", &ledger_href(ledger)),
@@ -4316,6 +4353,10 @@ impl Endpoint for Sparql {
                 ("view", "sparql"),
                 ("full", "true"),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", "SPARQL"),
             ],
             &children,
@@ -4648,10 +4689,26 @@ impl Endpoint for RenderRules {
 
 // ------------------------------------------------------------------------------ assets
 
-const ASSETS: [(&str, &str, &str); 2] = [
+const ASSETS: [(&str, &str, &str); 3] = [
     ("gonk.css", "text/css", include_str!("../web/gonk.css")),
     ("gonk.js", "text/javascript", include_str!("../web/gonk.js")),
+    // The per-browser safe-mode gate (ledger #3379, [`crate::page_assets::GATE`]).
+    (
+        crate::page_assets::GATE,
+        "text/javascript",
+        include_str!("../web/gonk-safe.js"),
+    ),
 ];
+
+/// The order an item page lists its comments in (`comments=newest`, ledger
+/// [#3379](http://localhost:1062/l/default/item/3379)): `newest` first when asked, else `oldest`
+/// first, the order they were written in. gonk's own control, so it needs no deployment script.
+fn comment_order(inv: &Invocation<'_>) -> &'static str {
+    match inv.inline_str("comments") {
+        Ok("newest") => "newest",
+        _ => "oldest",
+    }
+}
 
 /// The file named `name`: one of [`ASSETS`], or the bar around a face, whose sheet is composed
 /// from ikigai-ui's palettes (ledger #3279, [`crate::face_frame::stylesheet`]).
@@ -4731,6 +4788,7 @@ mod tests {
             queue: crate::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
             faces: Vec::new(),
         };

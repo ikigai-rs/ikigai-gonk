@@ -207,6 +207,7 @@ fn gonk() -> Gonk {
         queue: QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });

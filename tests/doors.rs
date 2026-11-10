@@ -327,6 +327,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });
@@ -487,6 +488,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });
