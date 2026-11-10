@@ -860,19 +860,29 @@ async fn read_through(
 ) -> Answer {
     let request = request?;
     let root = slot.0.clone();
-    let parse = |answer: Result<Representation>| -> Answer {
-        let answer = answer.map_err(|e| format!("{e}"))?;
-        serde_json::from_slice::<Value>(&answer.bytes)
-            .map(Arc::new)
-            .map_err(|_| {
-                format!(
-                    "`{}` answered something that is not JSON",
-                    findings_iri(&root)
-                )
-            })
+    // Group and walk summaries have their own envelopes and cannot be paged.
+    let read = || async {
+        if request.args.contains_key("state") {
+            let mut rows = crate::findings_pages::read(&hub, &capability, request.clone()).await?;
+            crate::findings_pages::triage(&hub, &mut rows)?;
+            Ok(Arc::new(Value::Array(rows)))
+        } else {
+            let answer = hub
+                .issue(request.clone(), &capability)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::from_slice::<Value>(&answer.bytes)
+                .map(Arc::new)
+                .map_err(|_| {
+                    format!(
+                        "`{}` answered something that is not JSON",
+                        findings_iri(&root)
+                    )
+                })
+        }
     };
     let Some(epochs) = epochs.filter(|e| e.stamp(&root).is_some()) else {
-        return parse(hub.issue(request, &capability).await);
+        return read().await;
     };
     let flight = epochs.reads.flight(&slot);
     let _reading = flight.lock().await;
@@ -880,7 +890,7 @@ async fn read_through(
     if let Some(answer) = epochs.reads.hit(&slot, stamp) {
         return Ok(answer);
     }
-    let answer = parse(hub.issue(request, &capability).await)?;
+    let answer = read().await?;
     // A listing teaches the epochs which root a finding id belongs to, so a decision that
     // names only the id moves only its root.
     if let Value::Array(rows) = answer.as_ref() {
@@ -2850,6 +2860,59 @@ impl Endpoint for Decide {
 #[cfg(test)]
 mod tests {
     use super::{count_sentence, meaning, split_decision_words, SCOPE_ALL};
+
+    #[test]
+    fn paged_reads_keep_only_complete_answers_and_restore_triage_order() {
+        use crate::findings_pages::tests::{hub, FIRST, LAST};
+        use std::sync::Arc;
+        let (hub, cap, calls) = hub(false);
+        let epochs = Arc::new(crate::watch::Epochs::new(["demo".to_string()]));
+        let slot = (
+            "demo".to_string(),
+            "scoped".to_string(),
+            "state=pending".to_string(),
+        );
+        let read = || {
+            super::read_through(
+                Arc::clone(&hub),
+                cap.clone(),
+                Some(Arc::clone(&epochs)),
+                slot.clone(),
+                super::findings_request("demo", ("state", "pending")),
+            )
+        };
+        let answer = futures::executor::block_on(read()).unwrap();
+        assert_eq!(answer[0]["id"], LAST);
+        assert_eq!(answer[1]["id"], FIRST);
+        assert_eq!(*calls.lock().unwrap(), [None, Some(FIRST.to_string())]);
+        assert!(Arc::ptr_eq(
+            &answer,
+            &futures::executor::block_on(read()).unwrap()
+        ));
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            2,
+            "all pages are memoized together"
+        );
+
+        let (hub, cap, calls) = crate::findings_pages::tests::hub(true);
+        let epochs = Arc::new(crate::watch::Epochs::new(["demo".to_string()]));
+        for _ in 0..2 {
+            let answer = futures::executor::block_on(super::read_through(
+                Arc::clone(&hub),
+                cap.clone(),
+                Some(Arc::clone(&epochs)),
+                slot.clone(),
+                super::findings_request("demo", ("state", "pending")),
+            ));
+            assert!(answer.unwrap_err().contains("later page failed"));
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [None, Some(FIRST.to_string()), None, Some(FIRST.to_string())],
+            "a failed read never memoizes its first page"
+        );
+    }
 
     /// ★ Ledger #480: the queue's count sentence names the cap when the cap is what stopped it.
     #[test]
