@@ -189,7 +189,13 @@ fn main() {
         )
         .with_arg(
             "content",
-            ArgRef::Inline(b"An item for the checker to read".to_vec()),
+            // Ledger #3344: the body's qualified references link into `crew`, which the site
+            // holds, and `nosuch#2` stays text, so axe reads both in every theme.
+            ArgRef::Inline(
+                b"An item for the checker to read\n\nSee crew#1, crew #1 and crew:#1, not \
+                  nosuch#2; and ledger #2."
+                    .to_vec(),
+            ),
         )
         .with_arg(
             "labels",

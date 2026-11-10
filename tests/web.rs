@@ -2987,6 +2987,57 @@ fn urls_and_ledger_references_in_bodies_are_links_and_nothing_else_is() {
     );
 }
 
+/// Ledger [#3344](http://localhost:1062/l/default/item/3344): an item's and a comment's body
+/// link a QUALIFIED reference (`crew#3`, `crew #3`, `crew:#3`) to that ledger's item when this
+/// gonk holds it and the viewer may read it, as a layer entry's do (`render::qualified_ref_at`).
+/// A ledger it does not hold (`nosuch`) or the viewer may not read (`private`) stays text, and
+/// the page's own `ledger #N` still links into the page's ledger.
+#[test]
+fn qualified_ledger_references_in_bodies_link_only_into_held_readable_ledgers() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let body = "See crew#3, crew #3 and crew:#3; not private#4, nosuch#5 or a.example/crew#6; \
+                and ledger #12.";
+    let (iri, id) = file(&server, &format!("Qualified references\n\n{body}"));
+    let commented = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &iri),
+            ("content", "Comment: crew #7 and private #8."),
+        ],
+        None,
+    );
+    assert_eq!(commented.status, 200, "{commented:?}");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let html = &page.body;
+        assert!(
+            html.contains(
+                "See <a href='/l/crew/item/3'>crew#3</a>, <a href='/l/crew/item/3'>crew #3</a> \
+                 and <a href='/l/crew/item/3'>crew:#3</a>; not private#4, nosuch#5 or \
+                 a.example/crew#6; and <a href='/l/default/item/12'>ledger #12</a>."
+            ),
+            "the body's references: {html}"
+        );
+        assert!(
+            html.contains("Comment: <a href='/l/crew/item/7'>crew #7</a> and private #8."),
+            "the comment's references: {html}"
+        );
+        assert!(!html.contains("/l/private/"), "{html}");
+        assert!(!html.contains("/l/nosuch/"), "{html}");
+    }
+}
+
 /// Ledger [#1376](http://localhost:1062/l/default/item/1376): the linker compared a body's
 /// first eight BYTES at each word boundary, so `http:/` followed by a wide character, or any
 /// word whose eighth byte fell inside one, panicked the render and the item's page failed for
