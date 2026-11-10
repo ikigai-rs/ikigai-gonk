@@ -37,6 +37,31 @@ impl Authenticator {
         }
     }
 
+    /// The label [`Authenticator::register_body`] enrolls it under: `software` for
+    /// [`Authenticator::new`], `software-<name>` for [`Authenticator::named`]. Each its own,
+    /// because enrollment refuses a label another passkey already has (ledger #3384).
+    pub fn label(&self) -> String {
+        let id = String::from_utf8_lossy(&self.id);
+        match id.strip_prefix("software-credential-") {
+            Some("1") | None => "software".to_string(),
+            Some(name) => format!("software-{name}"),
+        }
+    }
+
+    /// [`Authenticator::register_body`] under the label `label`.
+    pub fn register_body_labeled(
+        &self,
+        challenge: &str,
+        invite: &str,
+        origin: &str,
+        label: &str,
+    ) -> String {
+        let mut body: serde_json::Value =
+            serde_json::from_str(&self.register_body(challenge, invite, origin)).unwrap();
+        body["label"] = label.into();
+        body.to_string()
+    }
+
     fn client_data(kind: &str, challenge: &str, origin: &str) -> Vec<u8> {
         format!(r#"{{"type":"{kind}","challenge":"{challenge}","origin":"{origin}","crossOrigin":false}}"#)
             .into_bytes()
@@ -49,7 +74,7 @@ impl Authenticator {
         serde_json::json!({
             "challenge": challenge,
             "invite": invite,
-            "label": "software",
+            "label": self.label(),
             "id": URL_SAFE_NO_PAD.encode(&self.id),
             "publicKey": URL_SAFE_NO_PAD.encode(spki.as_bytes()),
             "clientDataJSON": URL_SAFE_NO_PAD.encode(Self::client_data("webauthn.create", challenge, origin)),

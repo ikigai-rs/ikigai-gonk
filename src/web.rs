@@ -4536,6 +4536,16 @@ impl Endpoint for PasskeyDoor {
                 } else {
                     Purpose::Register
                 };
+                // A registration may name its label first, so a taken one is refused before
+                // the authenticator is asked to create anything (ledger #3384).
+                if purpose == Purpose::Register {
+                    let label = serde_json::from_str::<serde_json::Value>(content)
+                        .ok()
+                        .and_then(|v| v.get("label")?.as_str().map(str::to_string));
+                    if let Some(label) = label {
+                        self.passkeys.check_label(&label).map_err(refused)?;
+                    }
+                }
                 let challenge = self
                     .passkeys
                     .challenge(purpose, now)
