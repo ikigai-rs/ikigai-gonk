@@ -2982,6 +2982,10 @@ impl Endpoint for Overview {
             ("view", "layers".to_string()),
             ("full", "true".to_string()),
             ("ui-theme", crate::render::theme_of(inv).to_string()),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+            ),
             ("title", "Layers".to_string()),
         ];
         if !inv.capability.allows(CAP_READ) {
@@ -3071,6 +3075,10 @@ impl Endpoint for LayerPage {
             ("title", layer.clone()),
             ("name", layer.clone()),
             ("ui-theme", crate::render::theme_of(inv).to_string()),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+            ),
         ];
         let mut slots: Vec<(String, String)> = Vec::new();
         if !inv.capability.allows(CAP_READ) {
@@ -3960,6 +3968,10 @@ async fn feeds_page(
         ("view", "feed".to_string()),
         ("full", "true".to_string()),
         ("ui-theme", crate::render::theme_of(inv).to_string()),
+        (
+            "safe",
+            crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+        ),
         ("title", "Feeds".to_string()),
     ];
     if !inv.capability.allows(CAP_READ) {

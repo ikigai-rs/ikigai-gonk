@@ -740,6 +740,75 @@ resolve inside the face's directory. The bare `/face/name/ops`, as a person type
 `308 Permanent Redirect` to `/face/name/ops/` with its query kept (ledger #3231); a file below a
 face (`/face/name/ops/app.css`, `/face/name/ops/js/app.js`) is never redirected.
 
+### A deployment's own stylesheet and script on gonk's pages (ledger #3379)
+
+A deployment can skin gonk's pages together with its own faces, and add page controls of its
+own, with a stylesheet and a script served from this origin (usually from a face's directory):
+
+```toml
+gonk.page.style  = "/face/name/ops/site.css"
+gonk.page.script = "/face/name/ops/site.js"
+```
+
+Both keys repeat, in config order. Each value is a path on this server: it starts with one `/`
+and holds no space, quote, angle bracket, backslash or `--`; anything else (`https://…`,
+`//cdn…`, a relative path) stops the server at start, naming the key. The door's content
+security policy is unchanged, so nothing from another origin and nothing inline can be added
+this way.
+
+**Where they go.** Every page drawn through gonk's shared head: the home page, the ledgers index,
+a ledger's list, an item, the Dashboard, SPARQL, Browse, the Queue, Layers, Feeds, Views,
+Onboard, and every refusal and error page a browser navigates to (sign-in included). The
+stylesheets are the LAST thing in `<head>`, so a rule of the deployment's wins a tie with
+gonk's; the scripts are `defer`red and come after `gonk.js`, so they run once gonk's own
+behavior is wired and the page has parsed. On a face's page they follow gonk's frame and
+precede the face's own sheets, so the face keeps the last word on its own page. `/toolbox`
+keeps its own page and policy and is not covered. An htmx swap carries no `<head>`, so a script
+that decorates swapped content listens for `htmx:afterSwap` itself.
+
+**Telling gonk from the deployment.** Each page says which part is whose:
+
+- a comment in `<head>` names the `gonk.page.style` or `gonk.page.script` lines before their
+  links, and each link carries `data-gonk-deployment="style"` or `"script"`;
+- a footer (`#deployment-note`) on every covered page says "This deployment adds its own style
+  and script to gonk's pages", and a face's bar has a "Safe mode" link.
+
+**Safe mode.** Add `?safe=1` to any covered page and gonk draws it without the deployment's
+stylesheets and scripts, as gonk alone draws it. The footer links to it, with no script needed,
+and says "Safe mode" while it is on. With scripts on, the footer's "Use safe mode on every page
+in this browser" keeps it on for this browser (in `localStorage`, `gonk:safe`): a small blocking
+script, `/static/gonk-safe.js`, linked just before the deployment's assets, stops such a page and
+loads it again with `?safe=1`, before any of the deployment's assets load. "Stop using safe mode
+in this browser" ends it. Safe mode changes nothing on the server and nothing for anybody else.
+
+**Failures stay the deployment's.** A deployment script that throws stops only itself: gonk's
+script ran first, and nothing of gonk's waits on a deployment script.
+`tests/page_assets_3379.rs` checks this in a real browser (with a headless Chromium in
+`GONK_CHROMIUM`, run with `--ignored`): a deployment script that throws, followed by one that
+presses gonk's own comment-order control, leaves gonk's footer, toggle and comment order
+working.
+
+**What a deployment may rely on.** `ikigai-ui`'s tokens (`--bg`, `--fg`, `--muted`, `--accent`,
+`--surface`, `--rule`, `--line`, `--focus` and the rest of `tokens.css`), `[data-theme]` on
+`<html>`, and these ids and classes, which gonk keeps stable across releases
+(`page_assets::STABLE_HOOKS`, pinned by the tests): `#main`, `header.top`, `#status`, `#item`,
+`.item-title`, `.comment-list`, `.comment`, `.comment-meta`, `#comment-order` and
+`#deployment-note`. Everything else in gonk's markup, its classes and `gonk.js` may change at
+any pin move. A stylesheet that hides or restyles gonk's text is held to the same accessibility
+floor gonk is, and that is the deployment's to keep (see [ACCESSIBILITY.md](ACCESSIBILITY.md)).
+
+**Reporting a problem.** Load the page with `?safe=1` first. If the problem stays in safe mode it
+is gonk's: report it here (a security problem through
+[private vulnerability reporting](https://github.com/ikigai-rs/ikigai-gonk/security/advisories/new),
+never a public issue), say that you checked in safe mode, and give the page's address and gonk's
+version. If it goes away in safe mode it is the deployment's stylesheet or script, and its
+owner's to fix.
+
+**An item's comment order** is gonk's own and needs no deployment script: an item with more
+than one comment offers "oldest first" and "newest first" (`#comment-order`). They are plain
+links (`?comments=newest`) with no script; with one they reorder the list in place and the
+choice is remembered in this browser (`gonk:comments`) for every item.
+
 ### The RDF Toolbox at `/toolbox` (ledger #1933)
 
 The [RDF Toolbox](https://github.com/ikigai-rs/ikigai-toolbox) is turtle-lsp's Validate, Format,

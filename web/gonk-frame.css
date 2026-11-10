@@ -44,3 +44,5 @@
 }
 /* The current face: heavier and not underlined, so it does not rest on color. */
 #gonk-frame a[aria-current] { color: var(--fg) !important; font-weight: 700 !important; text-decoration: none !important; }
+/* A deployment's own style or script on this page (ledger #3379): safe mode, in words. */
+#gonk-frame .gonk-frame-safe { margin-inline-start: auto !important; }

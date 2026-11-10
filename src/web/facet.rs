@@ -265,6 +265,10 @@ impl Endpoint for Facet {
                 ("view", "facet"),
                 ("full", flag(full)),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", "Labels and priority counts"),
                 ("back", &filters.url(&listing, &page, LabelChange::Keep)),
             ],

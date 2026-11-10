@@ -97,7 +97,8 @@ pub fn error_page(door: HttpDoor, web: Arc<Web>) -> ErrorPageFn {
         }
         // An edge refusal was written before any authority was computed: no header to draw.
         let capability = view.refusal.is_none().then(|| cap(request));
-        page(&web, capability.as_ref(), passkeys, view).ok()
+        let safe = crate::page_assets::safe_in_target(&request.raw_target);
+        page(&web, capability.as_ref(), passkeys, safe, view).ok()
     })
 }
 
@@ -117,11 +118,15 @@ pub fn kind(capability: Option<&Capability>, passkeys: bool, view: &ErrorView<'_
     }
 }
 
-/// The whole page, through the one stylesheet every gonk page is drawn with.
+/// The whole page, through the one stylesheet every gonk page is drawn with: in safe mode
+/// (`safe`, `?safe=1`, ledger #3379) without the deployment's own stylesheets and scripts. Its
+/// footer says safe mode exists whenever the deployment adds any, so a refusal that looks broken
+/// has a one-click way to tell gonk's part from the deployment's.
 pub fn page(
     web: &Web,
     capability: Option<&Capability>,
     passkeys: bool,
+    safe: bool,
     view: &ErrorView<'_>,
 ) -> Result<String, String> {
     let kind = kind(capability, passkeys, view);
@@ -145,13 +150,19 @@ pub fn page(
     if let Some(grant) = grant.as_deref() {
         attributes.push(("grant", grant));
     }
+    // An edge refusal draws no navigation, and still the deployment's assets and the footer.
     let mut children = capability
         .map(|capability| web::nav_for(web, capability))
-        .unwrap_or_default();
+        .unwrap_or_else(|| web.page_assets.view());
     children.push_str(&element("refusal", &attributes, ""));
     let document = envelope(
         "page",
-        &[("view", "refusal"), ("full", "true"), ("title", &heading)],
+        &[
+            ("view", "refusal"),
+            ("full", "true"),
+            ("title", &heading),
+            ("safe", crate::page_assets::flag(safe)),
+        ],
         &children,
     );
     render::render(&document, true)

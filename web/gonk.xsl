@@ -80,6 +80,21 @@
             <script src="/static/shell.js"></script>
             <script src="/static/htmx.min.js" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
+            <!-- Ledger #3379: the deployment's own stylesheets and scripts (src/page_assets.rs),
+                 LAST in the head, so a stylesheet wins a tie and a script, deferred after gonk.js,
+                 runs once gonk's own behavior is wired. Left out in safe mode (?safe=1). The gate
+                 before them is the per-browser toggle: it reloads with ?safe=1 before they load. -->
+            <xsl:if test="view:page-assets and not(@safe = 'true')">
+              <script src="/static/gonk-safe.js"></script>
+              <xsl:if test="view:page-assets/view:page-style">
+                <xsl:comment> This deployment's own stylesheets (its gonk.page.style lines), not gonk's. Load the page with ?safe=1 to see it without them. </xsl:comment>
+                <xsl:apply-templates select="view:page-assets/view:page-style"/>
+              </xsl:if>
+              <xsl:if test="view:page-assets/view:page-script">
+                <xsl:comment> This deployment's own scripts (its gonk.page.script lines), not gonk's. Load the page with ?safe=1 to see it without them. </xsl:comment>
+                <xsl:apply-templates select="view:page-assets/view:page-script"/>
+              </xsl:if>
+            </xsl:if>
           </head>
           <body>
             <a class="skip" href="#main">Skip to content</a>
@@ -128,6 +143,7 @@
             <main id="main">
               <xsl:call-template name="body"/>
             </main>
+            <xsl:apply-templates select="view:page-assets"/>
           </body>
         </html>
       </xsl:when>
@@ -505,6 +521,30 @@
   <!-- The RDF Toolbox (ledger #2021), present only when this server serves one: a
        gonk.toolbox.dist line (src/web.rs::nav_with, Web::toolbox). The toolbox is its own page
        with its own script and CSP, so this is an ordinary link: a full navigation, never a swap. -->
+  <!-- Ledger #3379: a deployment's own stylesheet and script, linked by the head above. -->
+  <xsl:template match="view:page-style">
+    <link rel="stylesheet" data-gonk-deployment="style"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute></link>
+  </xsl:template>
+  <xsl:template match="view:page-script">
+    <script defer="defer" data-gonk-deployment="script"><xsl:attribute name="src"><xsl:value-of select="@src"/></xsl:attribute></script>
+  </xsl:template>
+  <!-- …and the footer that says so, on every page that has them, with safe mode one link away
+       (a query flag, which works with no script) and, with a script, a per-browser toggle
+       (web/gonk.js wires #safe-toggle; web/gonk-safe.js honors it). -->
+  <xsl:template match="view:page-assets">
+    <footer id="deployment-note" class="deployment-note">
+      <xsl:choose>
+        <xsl:when test="../@safe = 'true'">
+          <p><strong>Safe mode</strong>: this page is shown without this deployment's <xsl:value-of select="substring-after(@adds, 'its ')"/>, as gonk draws it alone. <a class="safe-leave" href="?">Show it with them</a></p>
+        </xsl:when>
+        <xsl:otherwise>
+          <p>This deployment adds <xsl:value-of select="@adds"/> to gonk's pages. If something looks or works wrong, <a class="safe-enter" href="?safe=1">load this page in safe mode</a>, without them, to see whether it is gonk or the deployment.</p>
+        </xsl:otherwise>
+      </xsl:choose>
+      <p><button id="safe-toggle" type="button" class="quiet" hidden="hidden">Use safe mode on every page in this browser</button></p>
+    </footer>
+  </xsl:template>
+
   <!-- A deployment's own pages (ledger #3199, src/face.rs), one link per `gonk.face`, named by
        the face's name: an item of the add-on row. -->
   <xsl:template match="view:face-link">
@@ -2768,11 +2808,39 @@
       <section class="panel comments" aria-labelledby="comments-title">
         <h2 id="comments-title">Comments</h2>
         <xsl:if test="count(rdf:RDF/ledger:Comment) = 0"><p class="empty">No comments yet.</p></xsl:if>
+        <!-- Ledger #3379: oldest or newest first, gonk's own control. Plain links work with no
+             script (`comments=newest`, src/web.rs::comment_order); web/gonk.js turns them into an
+             in-place switch and remembers the choice in this browser. -->
+        <xsl:if test="count(rdf:RDF/ledger:Comment) &gt; 1">
+          <nav id="comment-order" class="comment-order" aria-label="Comment order">
+            <span class="comment-order-label">Show</span>
+            <xsl:value-of select="' '"/>
+            <a href="?comments=oldest" data-order="oldest">
+              <xsl:if test="not(@comments = 'newest')"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+              <xsl:text>oldest first</xsl:text>
+            </a>
+            <xsl:text> · </xsl:text>
+            <a href="?comments=newest" data-order="newest">
+              <xsl:if test="@comments = 'newest'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+              <xsl:text>newest first</xsl:text>
+            </a>
+          </nav>
+        </xsl:if>
         <xsl:if test="count(rdf:RDF/ledger:Comment) &gt; 0">
           <ol class="plain comment-list">
-            <xsl:apply-templates select="rdf:RDF/ledger:Comment">
-              <xsl:sort select="dcterms:created"/>
-            </xsl:apply-templates>
+            <xsl:attribute name="data-order"><xsl:choose><xsl:when test="@comments = 'newest'">newest</xsl:when><xsl:otherwise>oldest</xsl:otherwise></xsl:choose></xsl:attribute>
+            <xsl:choose>
+              <xsl:when test="@comments = 'newest'">
+                <xsl:apply-templates select="rdf:RDF/ledger:Comment">
+                  <xsl:sort select="dcterms:created" order="descending"/>
+                </xsl:apply-templates>
+              </xsl:when>
+              <xsl:otherwise>
+                <xsl:apply-templates select="rdf:RDF/ledger:Comment">
+                  <xsl:sort select="dcterms:created"/>
+                </xsl:apply-templates>
+              </xsl:otherwise>
+            </xsl:choose>
           </ol>
         </xsl:if>
       </section>

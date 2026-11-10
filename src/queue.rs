@@ -1422,6 +1422,10 @@ impl QueuePage {
             ("view", "queue".to_string()),
             ("full", flag(!self.fragment).to_string()),
             ("ui-theme", crate::render::theme_of(inv).to_string()),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+            ),
             ("title", "Queue".to_string()),
             ("state", state.clone()),
             ("scope", scope.to_string()),

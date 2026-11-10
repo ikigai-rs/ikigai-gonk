@@ -127,7 +127,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 51] = [
+const KEYS: [&str; 53] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -179,6 +179,8 @@ const KEYS: [&str; 51] = [
     "gonk.review.judge_max_tokens",
     crate::toolbox::KEY,
     crate::face::KEY,
+    crate::page_assets::STYLE_KEY,
+    crate::page_assets::SCRIPT_KEY,
 ];
 
 /// How to invoke the binary.
@@ -761,6 +763,9 @@ pub struct Settings {
     /// A deployment's own pages (`gonk.face`, [`crate::face`], ledger #3199), one per line;
     /// empty for none: no `/face/name/…`, and nothing else changes.
     pub faces: Vec<crate::face::Face>,
+    /// A deployment's own stylesheets and scripts on gonk's pages (`gonk.page.style`,
+    /// `gonk.page.script`, [`crate::page_assets`], ledger #3379); empty for none.
+    pub page_assets: crate::page_assets::PageAssets,
     /// The onboarding controller's door and files (`gonk.onboard`, [`crate::onboard`]), or
     /// `None`: no `urn:iki:onboard:*`, and nothing else changes.
     pub onboard: Option<crate::onboard::Config>,
@@ -2093,6 +2098,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         )?,
         toolbox: toolbox(text, homes)?,
         faces: crate::face::parse_all(&values_for(text, crate::face::KEY), &homes.home)?,
+        page_assets: crate::page_assets::PageAssets::parse(
+            &values_for(text, crate::page_assets::STYLE_KEY),
+            &values_for(text, crate::page_assets::SCRIPT_KEY),
+        )?,
         onboard,
     })
 }

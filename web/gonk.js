@@ -1404,7 +1404,99 @@
     if (meta) announce(meta.textContent);
   });
 
+  // Safe mode (ledger #3379): the footer's links keep the page's own query, and with a script
+  // the per-browser toggle is offered. web/gonk-safe.js, linked ahead of a deployment's assets,
+  // is what honors the toggle on the next page.
+  const SAFE = "gonk:safe";
+  // This browser's storage, or null where it is refused (a private window, a blocked origin).
+  function storage() {
+    try {
+      return window.localStorage;
+    } catch (_) {
+      return null;
+    }
+  }
+  function safeUrl(on) {
+    const url = new URL(location.href);
+    if (on) url.searchParams.set("safe", "1");
+    else url.searchParams.delete("safe");
+    return url.href;
+  }
+  function wireSafeMode() {
+    const note = $("deployment-note");
+    if (!note) return;
+    const enter = note.querySelector("a.safe-enter");
+    if (enter) enter.href = safeUrl(true);
+    const leave = note.querySelector("a.safe-leave");
+    if (leave) leave.href = safeUrl(false);
+    const store = storage();
+    const toggle = $("safe-toggle");
+    if (!store || !toggle) return; // No storage: the query flag is the whole of safe mode here.
+    // Leaving safe mode in a browser that asked for it on every page stops that too, or the
+    // gate would bring the page straight back.
+    if (leave) leave.addEventListener("click", () => store.removeItem(SAFE));
+    let stored = store.getItem(SAFE) === "1";
+    const draw = () => {
+      toggle.textContent = stored
+        ? "Stop using safe mode in this browser"
+        : "Use safe mode on every page in this browser";
+    };
+    draw();
+    toggle.hidden = false;
+    toggle.addEventListener("click", () => {
+      stored = !stored;
+      if (stored) store.setItem(SAFE, "1");
+      else store.removeItem(SAFE);
+      draw();
+      location.replace(safeUrl(stored));
+    });
+  }
+
+  // An item's comments, oldest or newest first (ledger #3379): the links work with no script;
+  // here they reorder the list in place, and the choice is remembered in this browser and kept
+  // across the item's swaps (a comment posted re-renders it in written order).
+  const COMMENTS = "gonk:comments";
+  function commentOrderAsked() {
+    const asked = new URL(location.href).searchParams.get("comments");
+    if (asked === "newest" || asked === "oldest") return asked;
+    const store = storage();
+    return store && store.getItem(COMMENTS) === "newest" ? "newest" : "oldest";
+  }
+  function commentOrder(order, say) {
+    const control = $("comment-order");
+    const list = document.querySelector("#item .comment-list");
+    if (!control || !list) return;
+    if (list.getAttribute("data-order") !== order) {
+      for (const comment of Array.from(list.children).reverse()) list.appendChild(comment);
+      list.setAttribute("data-order", order);
+    }
+    for (const link of control.querySelectorAll("a[data-order]")) {
+      if (link.getAttribute("data-order") === order) link.setAttribute("aria-current", "true");
+      else link.removeAttribute("aria-current");
+    }
+    if (say) announce(order === "newest" ? "Comments, newest first." : "Comments, oldest first.");
+  }
+  function wireCommentOrder() {
+    commentOrder(commentOrderAsked(), false);
+  }
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest && e.target.closest("#comment-order a[data-order]");
+    if (!link) return;
+    e.preventDefault();
+    const order = link.getAttribute("data-order");
+    const store = storage();
+    if (store) store.setItem(COMMENTS, order); // With none, this page still reorders.
+    const url = new URL(location.href);
+    url.searchParams.set("comments", order);
+    history.replaceState(history.state, "", url.href);
+    commentOrder(order, true);
+  });
+  // A swap that re-renders the item (a comment posted, an edit) draws it in written order.
+  document.addEventListener("htmx:afterSwap", wireCommentOrder);
+
   async function init() {
+    wireSafeMode();
+    wireCommentOrder();
     wireSamples();
     wireLedgerMenu();
     wireDashboard();

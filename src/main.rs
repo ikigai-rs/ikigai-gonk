@@ -847,6 +847,7 @@ fn serve(flags: &config::Flags) -> ! {
             queue: settings.queue.clone(),
             epochs: Some(Arc::clone(&epochs)),
             holder_aliases: settings.holder_aliases.clone(),
+            page_assets: settings.page_assets.clone(),
             // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
             // (ledger #2021).
             toolbox: settings.toolbox.is_some(),
@@ -864,7 +865,10 @@ fn serve(flags: &config::Flags) -> ! {
             .map(|toolbox| toolbox.spaces())
             .unwrap_or_default();
         // A deployment's own pages (ledger #3199), in this door alone, jailed and read-only.
-        faces.extend(ikigai_gonk::face::spaces(&settings.faces));
+        faces.extend(ikigai_gonk::face::spaces_with(
+            &settings.faces,
+            &settings.page_assets,
+        ));
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
             pages,
