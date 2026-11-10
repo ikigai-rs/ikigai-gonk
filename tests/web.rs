@@ -2987,6 +2987,111 @@ fn urls_and_ledger_references_in_bodies_are_links_and_nothing_else_is() {
     );
 }
 
+/// Ledger [#3345](http://localhost:1062/l/default/item/3345): an item's body and a comment's
+/// render as Markdown, as a layer entry's do (`render::item_markdown`): strikethrough, a table,
+/// a task list and a code block become their elements, a raw HTML tag stays text, and every
+/// link `linkify` makes survives inside the rendered markup (a URL, `ledger #N`, a qualified
+/// `crew#3`, a GitHub reference). A body with no Markdown in it shows as written, as before.
+#[test]
+fn item_bodies_and_comments_render_as_markdown_with_their_links() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew"],
+    );
+    let body = "~~Superseded plan~~ see crew#3 and ledger #12.\n\
+                \n\
+                | Step | Where |\n\
+                |---|---|\n\
+                | one | https://example.com/a |\n\
+                \n\
+                - [x] done in o/r#7\n\
+                - [ ] next, <b>bold?</b>\n\
+                \n\
+                ```\n\
+                let x = 1 < 2; // ledger #13\n\
+                ```";
+    let (iri, id) = file(&server, &format!("Markdown body\n\n{body}"));
+    let comment = |content: &str| {
+        let commented = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "comment"),
+                ("_id", &id),
+                ("_then", "card"),
+                ("item", &iri),
+                ("content", content),
+            ],
+            None,
+        );
+        assert_eq!(commented.status, 200, "{commented:?}");
+    };
+    comment("# Update\n\n~~crew #4~~ is <i>replaced</i> by https://example.org/c.");
+    comment("A plain comment,\nwith two   lines and ledger #5.");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let html = &page.body;
+        for (what, want) in [
+            (
+                "strikethrough, with its links",
+                "<p><del>Superseded plan</del> see <a href='/l/crew/item/3'>crew#3</a> and \
+                 <a href='/l/default/item/12'>ledger #12</a>.</p>",
+            ),
+            ("a table's head", "<th scope='col'>Step</th>"),
+            (
+                "a URL in a table cell",
+                "<td><a href='https://example.com/a'>https://example.com/a</a></td>",
+            ),
+            (
+                "a checked task",
+                "<input aria-label='task' checked='checked'",
+            ),
+            (
+                "a GitHub reference in a task",
+                "<a href='https://github.com/o/r/issues/7'",
+            ),
+            (
+                "a raw tag in a task, as text",
+                "next, &lt;b&gt;bold?&lt;/b&gt;",
+            ),
+            (
+                "a code block, unlinked",
+                "<pre><code>let x = 1 &lt; 2; // ledger #13\n</code></pre>",
+            ),
+            ("the comment's heading, under Comments", "<h3>Update</h3>"),
+            (
+                "the comment's strikethrough and links",
+                "<del><a href='/l/crew/item/4'>crew #4</a></del> is &lt;i&gt;replaced&lt;/i&gt; \
+                 by <a href='https://example.org/c'>https://example.org/c</a>.",
+            ),
+            (
+                "a plain comment, as written",
+                "data-linkify='default;default,crew'>A plain comment,\nwith two   lines and \
+                 <a href='/l/default/item/5'>ledger #5</a>.</div>",
+            ),
+        ] {
+            assert!(html.contains(want), "{what}: want {want:?} in {html}");
+        }
+        assert_eq!(
+            html.matches("class='body markdown as-written'").count(),
+            2,
+            "{html}"
+        );
+        // The edit form's textarea holds the text as written; the rendered page above it, none.
+        let shown = html.split("id='act-title'").next().unwrap_or_default();
+        for raw in ["<b>", "<i>", "~~", "| Step", "- [x]", "```", "# Update"] {
+            assert!(
+                !shown.contains(raw),
+                "{raw:?} is not shown as written: {shown}"
+            );
+        }
+    }
+}
+
 /// Ledger [#3344](http://localhost:1062/l/default/item/3344): an item's and a comment's body
 /// link a QUALIFIED reference (`crew#3`, `crew #3`, `crew:#3`) to that ledger's item when this
 /// gonk holds it and the viewer may read it, as a layer entry's do (`render::qualified_ref_at`).
@@ -3109,11 +3214,10 @@ fn a_stored_link_to_gonk_at_port_1060_renders_onto_this_server() {
     let page = server.page(&format!("/l/default/item/{id}"), None);
     assert_eq!(page.status, 200, "{page:?}");
     let html = &page.body;
+    // The body is Markdown (ledger #3345), so `[#739](…)` is a link with the author's words;
+    // its href is rehomed as a bare URL's is.
     for (href, text) in [
-        (
-            "/l/default/item/739",
-            "http://localhost:1060/l/default/item/739",
-        ),
+        ("/l/default/item/739", "#739"),
         (
             "/browse/urn:repo:x:tree",
             "http://127.0.0.1:1060/browse/urn:repo:x:tree",

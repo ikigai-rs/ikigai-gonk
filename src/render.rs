@@ -660,6 +660,95 @@ pub fn entry_markdown(text: &str, refs: &str) -> Option<String> {
         .then_some(linked)
 }
 
+/// An item's body or a comment's as a linked XHTML fragment (ledger
+/// [#3345](http://localhost:1062/l/default/item/3345)), or `None` when the page is to show it
+/// as written: text with no Markdown in it, or text over [`entry_markdown`]'s bounds.
+///
+/// The fragment is [`entry_markdown`]'s, made the same way (`ikigai_fn::markdown`, so nothing an
+/// author writes becomes markup but what its walker builds) and linked by the same rules, with
+/// `refs` a [`ledger_refs`] value. Two things differ, both for the item's page:
+///
+/// - **`heading_offset`** places a `#` under the heading the text sits under: the item's body
+///   sits under the page's `<h1>` (offset 1, `#` is an `<h2>`), a comment under "Comments"'s
+///   `<h2>` (offset 2, `#` is an `<h3>`).
+/// - **Text with no Markdown in it reads as it does today.** When the fragment would be nothing
+///   but paragraphs, the answer is `None` and the page shows the text as written, every line
+///   break and space kept, so a plain comment is unchanged byte for byte.
+///
+/// ```
+/// use ikigai_gonk::render::{item_markdown, ledger_refs};
+/// let refs = ledger_refs("default", &["default", "crew"]);
+/// assert_eq!(
+///     item_markdown("~~old~~ new, see crew#3", &refs, 1).unwrap(),
+///     "<p><del>old</del> new, see <a href='/l/crew/item/3'>crew#3</a></p>"
+/// );
+/// // Plain prose, a raw tag included: shown as written, as before.
+/// assert_eq!(item_markdown("Two lines\nand <b>a tag</b>, ledger #4.", &refs, 1), None);
+/// assert_eq!(item_markdown("# Plan", &refs, 2).unwrap(), "<h3>Plan</h3>");
+/// // A Markdown link to gonk at its old port is pointed at this server, as a bare URL is.
+/// assert_eq!(
+///     item_markdown("- [#739](http://localhost:1060/l/default/item/739)", &refs, 1).unwrap(),
+///     "<ul>\n<li><a href=\"/l/default/item/739\">#739</a></li>\n</ul>"
+/// );
+/// ```
+pub fn item_markdown(text: &str, refs: &str, heading_offset: u8) -> Option<String> {
+    use ikigai_fn::markdown::{map_text_nodes, try_render_untrusted, Options};
+    let fragment = try_render_untrusted(text, &Options { heading_offset }).ok()?;
+    if only_paragraphs(&fragment) {
+        return None;
+    }
+    let linked = rehome_links(&map_text_nodes(&fragment, |node| linkify_text(node, refs)));
+    (linked.len() <= MAX_MARKDOWN_BYTES
+        && linked.matches('<').count() <= MAX_MARKDOWN_TAGS
+        && nesting_depth(&linked) <= MAX_MARKDOWN_DEPTH)
+        .then_some(linked)
+}
+
+/// `fragment`, an `ikigai_fn::markdown` fragment, with each Markdown link to gonk at its OLD
+/// port pointed at this server by [`rehome`], as [`linkify`] points a bare URL: an author's
+/// `[#739](http://localhost:1060/l/default/item/739)` links `/l/default/item/739`. The walker
+/// writes such a link `<a href="…" rel="noopener noreferrer">`; a rehomed href is on this
+/// origin, so it loses the `rel` the walker gives only links that leave it. The link text and
+/// the stored body stay as written. Links linkify made carry `'` quotes and are already rehomed.
+fn rehome_links(fragment: &str) -> String {
+    const OPEN: &str = "<a href=\"";
+    const REL: &str = " rel=\"noopener noreferrer\"";
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(at) = rest.find(OPEN) {
+        let (head, tail) = rest.split_at(at + OPEN.len());
+        out.push_str(head);
+        let Some(end) = tail.find('"') else {
+            rest = tail;
+            break;
+        };
+        let href = &tail[..end];
+        match rehome(href) {
+            Some(local) => {
+                out.push_str(&local);
+                out.push('"');
+                let after = &tail[end + 1..];
+                rest = after.strip_prefix(REL).unwrap_or(after);
+            }
+            None => {
+                out.push_str(href);
+                rest = &tail[end..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether every tag in `fragment`, an `ikigai_fn::markdown` fragment, is `<p>` or `</p>`.
+fn only_paragraphs(fragment: &str) -> bool {
+    fragment.match_indices('<').all(|(at, _)| {
+        ["<p>", "</p>"]
+            .iter()
+            .any(|tag| fragment[at..].starts_with(tag))
+    })
+}
+
 /// [`entry_markdown`] through the hub, so a rendered body is cached forever: an entry never
 /// changes, and the content-addressed request (the text and its linking context) is the key,
 /// the way [`rendered_chunks`] keys a chunk. `None` is the page's cue to show the text as
@@ -1540,6 +1629,32 @@ pub fn html(xml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger [#3345](http://localhost:1062/l/default/item/3345): an item's body is Markdown
+    /// now, so a stored `[#739](http://localhost:1060/…)` is the walker's `<a>`, not text
+    /// linkify sees. Its href is rehomed all the same; a 1060 link that is not gonk's, and any
+    /// other link, keeps its href and its `rel`; a title survives the rewrite.
+    #[test]
+    fn a_markdown_link_to_gonk_at_its_old_port_is_rehomed() {
+        let refs = ledger_refs("default", &["default"]);
+        let html = item_markdown(
+            "- [#739](http://localhost:1060/l/default/item/739 \"old\")\n\
+             - [queue](http://127.0.0.1:1060/queue?state=published&group=file)\n\
+             - [other](http://localhost:1060/other/service/page)\n\
+             - [away](https://example.org/x)",
+            &refs,
+            1,
+        )
+        .unwrap();
+        for link in [
+            "<a href=\"/l/default/item/739\" title=\"old\">#739</a>",
+            "<a href=\"/queue?state=published&amp;group=file\">queue</a>",
+            "<a href=\"http://localhost:1060/other/service/page\" rel=\"noopener noreferrer\">other</a>",
+            "<a href=\"https://example.org/x\" rel=\"noopener noreferrer\">away</a>",
+        ] {
+            assert!(html.contains(link), "{link}: {html}");
+        }
+    }
 
     /// ★ Ledger [#1867](http://localhost:1062/l/default/item/1867): a GitHub reference's
     /// repository is never a dot segment. `bobby/..#2` in a collaborator's layer text used to

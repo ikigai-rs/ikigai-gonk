@@ -3131,9 +3131,21 @@ async fn item_card(
     let readable = readable_ledgers(web, inv.capability);
     let held: Vec<&str> = readable.iter().map(Ledger::name).collect();
     let refs = render::ledger_refs(ledger.name(), &held);
-    for kind in ["Item", "Comment"] {
+    // The body and each comment as Markdown (ledger #3345), as a layer entry's body is: the
+    // fragment goes in as a `view:rendered` holding a placeholder, swapped for the fragment in
+    // the XML below. A body with no Markdown in it has none and shows as written.
+    let mut rendered: Vec<(String, String)> = Vec::new();
+    for (kind, heading_offset) in [("Item", 1), ("Comment", 2)] {
         for subject in graph.subjects_of_type(&format!("{LEDGER_NS}{kind}")) {
             graph.view(&subject, "linkify", refs.clone());
+            let fragment = graph
+                .value(&subject, &format!("{LEDGER_NS}body"))
+                .and_then(|body| render::item_markdown(&body, &refs, heading_offset));
+            if let Some(fragment) = fragment {
+                let placeholder = format!("gonk-markdown-{}", rendered.len());
+                graph.view(&subject, "rendered", placeholder.clone());
+                rendered.push((placeholder, fragment));
+            }
         }
     }
     let title = graph
@@ -3145,7 +3157,23 @@ async fn item_card(
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
-    children.push_str(&graph.view_xml().map_err(render_err)?);
+    let mut xml = graph.view_xml().map_err(render_err)?;
+    for (placeholder, fragment) in &rendered {
+        // A literal's text is escaped in the XML, so this element can only be the one the
+        // graph wrote: a body that spells it out arrives as `&lt;view:rendered&gt;`.
+        let element = format!("<view:rendered>{placeholder}</view:rendered>");
+        if !xml.contains(&element) {
+            return Err(render_err(format!(
+                "the item's XML holds no `{element}` for its rendered body"
+            )));
+        }
+        xml = xml.replacen(
+            &element,
+            &format!("<view:rendered>{fragment}</view:rendered>"),
+            1,
+        );
+    }
+    children.push_str(&xml);
     let mut linked = outgoing_links(&graph, inv, "link").await?;
     children.push_str(&linked.xml);
     let inbound = inbound_links(&graph, inv, ledger).await?;
