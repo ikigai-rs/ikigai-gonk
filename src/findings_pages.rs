@@ -203,7 +203,7 @@ pub(crate) mod tests {
                 },
             )
             .bind(
-                Exact::new(&crate::queue::finding_iri(crate::queue::PROBE_ID)),
+                Exact::new(crate::queue::finding_iri(crate::queue::PROBE_ID)),
                 Listing {
                     calls: Arc::clone(&calls),
                     fail_last,
