@@ -3214,11 +3214,10 @@ fn a_stored_link_to_gonk_at_port_1060_renders_onto_this_server() {
     let page = server.page(&format!("/l/default/item/{id}"), None);
     assert_eq!(page.status, 200, "{page:?}");
     let html = &page.body;
+    // The body is Markdown (ledger #3345), so `[#739](…)` is a link with the author's words;
+    // its href is rehomed as a bare URL's is.
     for (href, text) in [
-        (
-            "/l/default/item/739",
-            "http://localhost:1060/l/default/item/739",
-        ),
+        ("/l/default/item/739", "#739"),
         (
             "/browse/urn:repo:x:tree",
             "http://127.0.0.1:1060/browse/urn:repo:x:tree",
