@@ -685,6 +685,11 @@ pub fn entry_markdown(text: &str, refs: &str) -> Option<String> {
 /// // Plain prose, a raw tag included: shown as written, as before.
 /// assert_eq!(item_markdown("Two lines\nand <b>a tag</b>, ledger #4.", &refs, 1), None);
 /// assert_eq!(item_markdown("# Plan", &refs, 2).unwrap(), "<h3>Plan</h3>");
+/// // A link to gonk at its old port points at this server, as a bare one does.
+/// assert_eq!(
+///     item_markdown("~~was~~ [#739](http://localhost:1060/l/default/item/739)", &refs, 1).unwrap(),
+///     "<p><del>was</del> <a href=\"/l/default/item/739\">#739</a></p>"
+/// );
 /// ```
 pub fn item_markdown(text: &str, refs: &str, heading_offset: u8) -> Option<String> {
     use ikigai_fn::markdown::{map_text_nodes, try_render_untrusted, Options};
@@ -692,11 +697,47 @@ pub fn item_markdown(text: &str, refs: &str, heading_offset: u8) -> Option<Strin
     if only_paragraphs(&fragment) {
         return None;
     }
+    let fragment = rehome_hrefs(&fragment);
     let linked = map_text_nodes(&fragment, |node| linkify_text(node, refs));
     (linked.len() <= MAX_MARKDOWN_BYTES
         && linked.matches('<').count() <= MAX_MARKDOWN_TAGS
         && nesting_depth(&linked) <= MAX_MARKDOWN_DEPTH)
         .then_some(linked)
+}
+
+/// `fragment`, an `ikigai_fn::markdown` fragment, with every link to gonk at its OLD port
+/// pointed at this server, as [`linkify`] points a bare one ([`rehome`]): a Markdown link
+/// `[#739](http://localhost:1060/l/default/item/739)` gets the href `/l/default/item/739`, its
+/// text kept. The walker writes every link as `<a href="…"`, with ` rel="noopener noreferrer"`
+/// right after for one that leaves the page's origin; a rehomed href is root-relative, so it
+/// drops that `rel`, as the walker does for a link that starts on this origin.
+fn rehome_hrefs(fragment: &str) -> String {
+    const OPEN: &str = "<a href=\"";
+    const REL: &str = " rel=\"noopener noreferrer\"";
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(at) = rest.find(OPEN) {
+        let (head, tail) = rest.split_at(at + OPEN.len());
+        out.push_str(head);
+        let Some(end) = tail.find('"') else {
+            rest = tail;
+            break;
+        };
+        let (href, after) = tail.split_at(end);
+        match rehome(href) {
+            Some(home) => {
+                out.push_str(&home);
+                out.push('"');
+                rest = after[1..].strip_prefix(REL).unwrap_or(&after[1..]);
+            }
+            None => {
+                out.push_str(href);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Whether every tag in `fragment`, an `ikigai_fn::markdown` fragment, is `<p>` or `</p>`.
