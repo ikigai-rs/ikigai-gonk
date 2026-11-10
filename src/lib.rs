@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 mod file_cache;
+mod findings_pages;
 
 pub mod access;
 pub mod admit;
