@@ -14,7 +14,7 @@ use ikigai_gonk::access::{AccessLog, Door};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_store::DurableStore;
 
 /// A sink that keeps every line.

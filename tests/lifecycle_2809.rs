@@ -33,7 +33,7 @@ fn a_named_ledger_can_load_a_lifecycle() {
 
 mod scratch_gonk;
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 
 fn issue(
     gonk: &scratch_gonk::Gonk,

@@ -21,7 +21,7 @@ mod scratch_gonk;
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::quic;
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use scratch_gonk::Gonk;
 
 const LEDGER_GRAPH: &str = "urn:iki:ledger:graph:default";

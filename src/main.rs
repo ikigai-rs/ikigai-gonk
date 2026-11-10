@@ -1034,7 +1034,7 @@ fn start_backups(
     if let Err(e) = backup::start(
         jobs,
         every,
-        Arc::clone(hub) as Arc<dyn ikigai_resolve::Resolver>,
+        Arc::clone(hub) as Arc<dyn ikigai_resolve_transport::Resolver>,
     ) {
         // Not fatal: the ledger is served either way, and refusing to start would take the
         // system of record offline over its backup. Loud, because a server that says it is
@@ -1434,7 +1434,7 @@ fn layer_take(offer: &str, flags: &config::Flags) {
                 "no `gonk.layer` line binds layer `{layer_name}` in the take role here"
             ))
         });
-    let client: Arc<dyn ikigai_resolve::Resolver> =
+    let client: Arc<dyn ikigai_resolve_transport::Resolver> =
         Arc::new(ikigai_ipc::connect(&settings.socket).unwrap_or_else(|e| {
             fail(&format!(
                 "cannot reach gonk's socket at {}: {e} (is gonk running? `--socket` names another)",
@@ -1496,7 +1496,7 @@ fn browse_command(op: &config::BrowseOp, flags: &config::Flags) {
     };
     match ikigai_ipc::connect(&socket) {
         Ok(client) => {
-            let (answer, _) = ikigai_resolve::Resolver::issue(&client, request)
+            let (answer, _) = ikigai_resolve_transport::Resolver::issue(&client, request)
                 .unwrap_or_else(|e| fail(&e.to_string()));
             print!("{}", String::from_utf8_lossy(&answer.bytes));
         }
@@ -1617,8 +1617,8 @@ fn onboard_command(args: &ikigai_gonk::onboard::Args) {
             onb::KEY
         ))
     });
-    let (answer, _) =
-        ikigai_resolve::Resolver::issue(&client, request).unwrap_or_else(|e| fail(&e.to_string()));
+    let (answer, _) = ikigai_resolve_transport::Resolver::issue(&client, request)
+        .unwrap_or_else(|e| fail(&e.to_string()));
     match &args.op {
         CliOp::Invite { name, out, .. } => {
             let minted: serde_json::Value = serde_json::from_slice(&answer.bytes)

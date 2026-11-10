@@ -13,7 +13,7 @@
 //! socket; nothing touches a live gonk.
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 
 mod scratch_gonk;
 

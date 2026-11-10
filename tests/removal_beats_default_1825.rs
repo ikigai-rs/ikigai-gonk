@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use ikigai_core::{ArgRef, Error, Iri, Kernel, Representation, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::{compose, doors, quic};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_store::DurableStore;
 use serde_json::{json, Value};
 

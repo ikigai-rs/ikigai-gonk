@@ -384,7 +384,7 @@ fn a_class_query_runs_end_to_end_through_a_mounted_socket() {
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
     let resolver = ready::socket(&socket);
     let client = Kernel::with_meta_renderer(
-        Arc::new(ikigai_resolve::MountedRemote::overriding(
+        Arc::new(ikigai_resolve_transport::MountedRemote::overriding(
             Arc::new(resolver),
             "urn:sparql:",
             socket.display().to_string(),

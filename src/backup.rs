@@ -953,7 +953,7 @@ pub fn registry(settings: &Settings, every: Duration, next: &NextRun) -> (JobReg
 pub fn start(
     jobs: &JobRegistry,
     every: Duration,
-    resolver: Arc<dyn ikigai_resolve::Resolver>,
+    resolver: Arc<dyn ikigai_resolve_transport::Resolver>,
 ) -> std::result::Result<u64, String> {
     jobs.set_resolver(resolver);
     jobs.schedule_persistent(

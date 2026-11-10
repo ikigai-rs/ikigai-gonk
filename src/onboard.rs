@@ -1122,9 +1122,10 @@ impl Onboard {
             .with_arg("graph", ArgRef::Inline(INVITES_GRAPH.as_bytes().to_vec()))
             .with_arg("query", ArgRef::Inline(query.into_bytes()))
             .with_arg("as", ArgRef::Inline(N_TRIPLES.as_bytes().to_vec()));
-        let answer = ikigai_resolve::Resolver::issue_as(&*self.hub()?, read, &Self::store_cap())
-            .map(|(r, _)| r)
-            .map_err(|e| format!("the invites graph does not read: {e}"))?;
+        let answer =
+            ikigai_resolve_transport::Resolver::issue_as(&*self.hub()?, read, &Self::store_cap())
+                .map(|(r, _)| r)
+                .map_err(|e| format!("the invites graph does not read: {e}"))?;
         let mut out = BTreeMap::new();
         for (subject, node) in subjects(&answer.bytes, RdfFormat::NTriples)? {
             let Some(id) = subject.strip_prefix(INVITE_PREFIX) else {
@@ -1159,7 +1160,7 @@ impl Onboard {
         let write = Request::new(Verb::Sink, iri(GRAPH_UPDATE))
             .with_arg("graph", ArgRef::Inline(INVITES_GRAPH.as_bytes().to_vec()))
             .with_arg("content", ArgRef::Inline(update.into_bytes()));
-        ikigai_resolve::Resolver::issue_as(&*self.hub()?, write, &Self::store_cap())
+        ikigai_resolve_transport::Resolver::issue_as(&*self.hub()?, write, &Self::store_cap())
             .map(|_| ())
             .map_err(|e| format!("the invites graph does not write: {e}"))
     }
@@ -1630,7 +1631,7 @@ impl Onboard {
             .with_arg("in", ArgRef::Inline(bytes))
             .with_arg("sig", ArgRef::Inline(sig.as_bytes().to_vec()))
             .with_arg("key", ArgRef::Inline(CONTROLLER_PUBLIC.as_bytes().to_vec()));
-        let answer = ikigai_resolve::Resolver::issue_as(
+        let answer = ikigai_resolve_transport::Resolver::issue_as(
             &self.signer,
             request,
             &Capability::scoped(Vec::<String>::new()),
@@ -1655,7 +1656,7 @@ impl Onboard {
                 "key",
                 ArgRef::Inline(CONTROLLER_PRIVATE.as_bytes().to_vec()),
             );
-        let graph = ikigai_resolve::Resolver::issue_as(
+        let graph = ikigai_resolve_transport::Resolver::issue_as(
             &self.signer,
             request,
             &Capability::scoped([ikigai_sign::CAP_SIGN]),
@@ -2850,7 +2851,7 @@ pub fn generate_key(
         format!("urn:cap:secret:write:{key}"),
         format!("urn:cap:secret:write:{key}.pub"),
     ]);
-    ikigai_resolve::Resolver::issue_as(&kernel, request, &cap)
+    ikigai_resolve_transport::Resolver::issue_as(&kernel, request, &cap)
         .map(|(r, _)| String::from_utf8_lossy(&r.bytes).into_owned())
         .map_err(|e| format!("minting the controller key `{key}`: {e}"))
 }

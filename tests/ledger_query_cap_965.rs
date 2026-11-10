@@ -20,7 +20,7 @@ use std::net::TcpStream;
 mod scratch_gonk;
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use scratch_gonk::Gonk;
 
 /// More open items than fit one 32 KiB `VALUES` at ~51 bytes an IRI (642 do).

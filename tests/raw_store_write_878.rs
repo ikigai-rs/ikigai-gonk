@@ -33,7 +33,7 @@ use ikigai_gonk::grants::{browse_graph_grants, grants_for, ledger_graph_grants, 
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{admit, compose, doors, quic, web};
 use ikigai_ledger::vocabulary as v;
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_store::DurableStore;
 
 /// A colleague's passkey, as `clients.json` holds it — the identity the forgery names.

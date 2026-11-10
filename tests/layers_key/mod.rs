@@ -1,6 +1,8 @@
 //! The state key a scripted layer host's tests open it with (ikigai-layers 0.3.0 seals a host's
 //! state at rest, so `Host::open` takes a `StateKey`; ledger #2021).
 
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use age::secrecy::ExposeSecret;
@@ -11,12 +13,18 @@ use ikigai_layers::StateKey;
 pub fn state_key(dir: &Path) -> StateKey {
     let identity = age::x25519::Identity::generate();
     let path = dir.join("state.key");
-    std::fs::write(
-        &path,
-        format!(
-            "# created by a test\n{}\n",
-            identity.to_string().expose_secret()
-        ),
+    // Layers 0.10 refuses an identity another account can read or replace. Create it
+    // owner-only from the start, regardless of the worker's umask.
+    let mut key = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .expect("create the test state key");
+    writeln!(
+        key,
+        "# created by a test\n{}",
+        identity.to_string().expose_secret()
     )
     .expect("write the test state key");
     StateKey::load(&path).expect("load the test state key")

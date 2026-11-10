@@ -23,7 +23,7 @@ mod scratch_gonk;
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
 use ikigai_fn::html::url_segment as encoded;
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use scratch_gonk::Gonk;
 
 /// The scratch gonk's `config.toml`.

@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use ikigai_core::{ArgRef, Error, Iri, Request, Verb};
 use ikigai_ledger::json::{MEDIA_TYPE as JSON, SCHEMA};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use serde::de::DeserializeOwned;
 
 /// Which door a bridge files through: the QUIC door as an enrolled client, or the owner's

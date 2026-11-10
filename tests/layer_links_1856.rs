@@ -34,7 +34,7 @@ use ikigai_gonk::layer::Door;
 use ikigai_gonk::layers_view::{self, LayersView, Waits, CAP_READ};
 use ikigai_gonk::{compose, doors, identity::Passkeys, quic, web};
 use ikigai_ledger::Ledger;
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_store::DurableStore;
 
 const LAYER: &str = "tasks";

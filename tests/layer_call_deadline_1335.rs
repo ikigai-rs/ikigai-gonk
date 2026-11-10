@@ -23,7 +23,7 @@ use ikigai_core::{
 use ikigai_gonk::layer::{self, Door};
 use ikigai_gonk::mirror::Mirror;
 use ikigai_gonk::mount::{LazyMount, Target};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_store::DurableStore;
 use ikigai_vocab::TurtleRenderer;
 

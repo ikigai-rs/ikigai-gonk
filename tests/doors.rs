@@ -22,7 +22,7 @@ use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::{compose, doors, quic};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_store::DurableStore;
 
 fn hub() -> Arc<Kernel> {
@@ -52,7 +52,7 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 
 /// Resolve under root through the kernel's own async `issue`.
 ///
-/// ⚠ Named in full on purpose: with `ikigai_resolve::Resolver` in scope, `hub.issue(…)` on an
+/// ⚠ Named in full on purpose: with `ikigai_resolve_transport::Resolver` in scope, `hub.issue(…)` on an
 /// `Arc<Kernel>` resolves to the SYNCHRONOUS `Resolver::issue` (through `impl Resolver for
 /// Arc<R>`) before auto-deref reaches the inherent method.
 fn root_issue(kernel: &Kernel, request: Request) -> String {
@@ -156,7 +156,7 @@ fn a_mounting_client_never_caches_what_only_the_hub_can_cut() {
     // way the cli composes an `override`/`prefer` line.
     let resolver = ready::socket(&socket);
     let client = Kernel::with_meta_renderer(
-        Arc::new(ikigai_resolve::MountedRemote::overriding(
+        Arc::new(ikigai_resolve_transport::MountedRemote::overriding(
             Arc::new(resolver),
             "urn:iki:ledger:",
             socket.display().to_string(),

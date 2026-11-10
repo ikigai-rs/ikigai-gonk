@@ -36,7 +36,8 @@ const STOPGAP: &str = "gonk-store-2026-09-16T172813Z.nq";
 
 // ikigai-store 0.2.24 adds `store-graph-info` (needs the graph's read token) and `store-dump`
 // (needs the broad `urn:cap:store:read`, which gonk grants no client: only the owner holds it).
-const STORE_IDS: [&str; 15] = [
+// Store 0.5 adds the per-graph freshness marker, writable with that graph's token.
+const STORE_IDS: [&str; 16] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -51,6 +52,7 @@ const STORE_IDS: [&str; 15] = [
     "store-dump",
     "store-update",
     "store-graph-update",
+    "store-graph-written",
     "store-load",
 ];
 
@@ -1025,7 +1027,7 @@ fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_du
     backup::start(
         &jobs,
         day,
-        Arc::clone(&restarted) as Arc<dyn ikigai_resolve::Resolver>,
+        Arc::clone(&restarted) as Arc<dyn ikigai_resolve_transport::Resolver>,
     )
     .expect("scheduled");
 

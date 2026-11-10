@@ -186,7 +186,8 @@ impl Server {
         .with_arg("as", ArgRef::Inline(b"application/json".to_vec()))
         .with_arg("state", ArgRef::Inline(b"pending".to_vec()));
         let started = Instant::now();
-        let (answer, _) = ikigai_resolve::Resolver::issue(&client, request).expect("findings");
+        let (answer, _) =
+            ikigai_resolve_transport::Resolver::issue(&client, request).expect("findings");
         let took = started.elapsed();
         let rows = serde_json::from_slice::<serde_json::Value>(&answer.bytes)
             .ok()

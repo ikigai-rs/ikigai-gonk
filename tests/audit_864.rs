@@ -266,7 +266,7 @@ fn client_add_refuses_before_it_writes_a_bundle() {
 // ------------------------------------------------------------------------------------------
 #[test]
 fn a_net_grant_for_another_host_is_refused_at_the_mount() {
-    use ikigai_resolve::Resolver;
+    use ikigai_resolve_transport::Resolver;
     let home = std::path::Path::new("/nonexistent-home");
     let mount = ikigai_gonk::mount::parse("prefer urn:llm:=/nonexistent/llm.sock", home).unwrap();
     let lazy = ikigai_gonk::mount::LazyMount::new(mount.target.clone());

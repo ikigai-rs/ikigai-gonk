@@ -20,7 +20,7 @@ use ikigai_core::{
 };
 use ikigai_gonk::grants::{grants_for, nl_draft_grants, script_grants, Authority, ScriptAuthority};
 use ikigai_gonk::quic::{self, DRAIN_CAP};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use ikigai_vocab::TurtleRenderer;
 use tempfile::TempDir;
 

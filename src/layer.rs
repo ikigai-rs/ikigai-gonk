@@ -57,7 +57,7 @@ use std::time::Duration;
 use ikigai_core::{Error, Iri, Representation, Request, Resolution, Scope, Space, SpaceEntry};
 use ikigai_ledger::claim::ClaimKind;
 use ikigai_ledger::Ledger;
-use ikigai_resolve::{MountedRemote, Resolver};
+use ikigai_resolve_transport::{MountedRemote, Resolver};
 
 use crate::mount::{LazyMount, Target};
 

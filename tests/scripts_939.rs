@@ -436,7 +436,7 @@ use std::net::TcpStream;
 
 use common::Authenticator;
 use ikigai_gonk::{identity, quic};
-use ikigai_resolve::Resolver;
+use ikigai_resolve_transport::Resolver;
 use scratch_gonk::Gonk;
 
 impl Gonk {

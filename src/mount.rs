@@ -88,7 +88,7 @@ use ikigai_core::{
     ArgRef, Capability, Description, Endpoint, Error, Invocation, Iri, Representation, Request,
     Resolution, Scope, Space, SpaceEntry, Topology, Verb,
 };
-use ikigai_resolve::{CacheStatus, MountedRemote, Resolver};
+use ikigai_resolve_transport::{CacheStatus, MountedRemote, Resolver};
 
 use crate::budget::Window;
 
