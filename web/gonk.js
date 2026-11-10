@@ -1178,6 +1178,50 @@
     return (err && err.message) || String(err);
   }
 
+  // ★ WHAT THE SYSTEM PASSKEY PICKER SHOWS (ledger #3387). Every gonk is the one `localhost`
+  // relying party, so the picker lists every gonk's passkeys together, by the WebAuthn
+  // `user.name` and `user.displayName` the passkey was created with. The name is the label and
+  // the host ("laptop @ localhost:1062"), the display name the label and the grant ("laptop ·
+  // owner-viewer"): both are shown to anyone who opens the device's passkey manager, so neither
+  // carries anything secret (no invite, no token, no credential id). An authenticator need keep
+  // only 64 bytes of each, so a long label is shortened there, the host and the grant kept whole.
+  const NAME_BYTES = 64;
+  const utf8 = new TextEncoder();
+
+  function fitBytes(text, max) {
+    if (utf8.encode(text).length <= max) return text;
+    const chars = Array.from(text);
+    while (chars.length && utf8.encode(chars.join("") + "…").length > max) chars.pop();
+    return chars.join("") + "…";
+  }
+
+  function passkeyNames(label, grant) {
+    const named = (tail) => fitBytes(fitBytes(label, NAME_BYTES - utf8.encode(tail).length) + tail, NAME_BYTES);
+    return { name: named(" @ " + location.host), displayName: named(" · " + grant) };
+  }
+
+  // The names are frozen at creation, and a passkey's grant (or label) can change after it.
+  // Where the browser has the WebAuthn Level 3 signal, each sign-in tells the passkey manager
+  // the current ones; where it has not, nothing is said and nothing fails.
+  async function signalNames(cred, done) {
+    const signal = window.PublicKeyCredential && PublicKeyCredential.signalCurrentUserDetails;
+    const handle = cred.response && cred.response.userHandle;
+    if (typeof signal !== "function" || !handle || !done.label || !done.grant) return;
+    try {
+      // Bounded: a signal that never settles must not hold the signed-in page's reload.
+      await Promise.race([
+        signal.call(PublicKeyCredential, {
+          rpId: "localhost",
+          userId: toB64(handle),
+          ...passkeyNames(done.label, done.grant),
+        }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    } catch (_) {
+      // Only the picker's words are at stake; the sign-in itself is done.
+    }
+  }
+
   async function signIn() {
     try {
       const { challenge } = await post("/auth/login-options");
@@ -1198,6 +1242,7 @@
         signature: toB64(r.signature),
       });
       setToken(done.session, done.seconds);
+      await signalNames(cred, done);
       location.reload();
     } catch (err) {
       flash("Sign-in did not complete: " + ceremonyError(err, "Click Sign in with passkey to try again."), "error");
@@ -1221,15 +1266,16 @@
     try {
       const name = label || "gonk passkey";
       // The label goes first, so one another passkey already has is refused before the system
-      // sheet mints a credential that could never be enrolled (ledger #3384).
-      const { challenge } = await post("/auth/register-options", { label: name });
+      // sheet mints a credential that could never be enrolled (ledger #3384); the invite, so
+      // the answer names the grant the passkey's display name carries (#3387).
+      const { challenge, grant } = await post("/auth/register-options", { label: name, invite });
       const user = new Uint8Array(16);
       crypto.getRandomValues(user);
       const cred = await navigator.credentials.create({
         publicKey: {
           challenge: fromB64(challenge),
           rp: { id: "localhost", name: "gonk" },
-          user: { id: user, name, displayName: name },
+          user: { id: user, ...passkeyNames(name, grant) },
           pubKeyCredParams: [{ type: "public-key", alg: -7 }],
           authenticatorSelection: { residentKey: "required", userVerification: "required" },
           attestation: "none",

@@ -4537,22 +4537,32 @@ impl Endpoint for PasskeyDoor {
                     Purpose::Register
                 };
                 // A registration may name its label first, so a taken one is refused before
-                // the authenticator is asked to create anything (ledger #3384).
+                // the authenticator is asked to create anything (ledger #3384), and its invite,
+                // so the answer carries the grant the passkey's display name shows (#3387).
+                let mut grant = None;
                 if purpose == Purpose::Register {
-                    let label = serde_json::from_str::<serde_json::Value>(content)
-                        .ok()
-                        .and_then(|v| v.get("label")?.as_str().map(str::to_string));
-                    if let Some(label) = label {
+                    let asked = serde_json::from_str::<serde_json::Value>(content).ok();
+                    let field = |name: &str| {
+                        asked
+                            .as_ref()
+                            .and_then(|v| v.get(name)?.as_str().map(str::to_string))
+                    };
+                    if let Some(label) = field("label") {
                         self.passkeys.check_label(&label).map_err(refused)?;
+                    }
+                    if let Some(invite) = field("invite") {
+                        grant = Some(self.passkeys.invite_grant(&invite).map_err(refused)?);
                     }
                 }
                 let challenge = self
                     .passkeys
                     .challenge(purpose, now)
                     .map_err(Error::Unavailable)?;
-                Ok(json_repr(
-                    json!({ "challenge": challenge, "rpId": identity::RP_ID }),
-                ))
+                let mut answer = json!({ "challenge": challenge, "rpId": identity::RP_ID });
+                if let Some(grant) = grant {
+                    answer["grant"] = json!(grant);
+                }
+                Ok(json_repr(answer))
             }
             "register" => {
                 let enrolled = self

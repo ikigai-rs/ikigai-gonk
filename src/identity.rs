@@ -1017,6 +1017,15 @@ impl Passkeys {
         refuse_taken_label(&read_passkeys(&self.layout)?, label)
     }
 
+    /// The grant `invite` would enroll a passkey under, spending nothing — what
+    /// `register-options` answers when the page names its invite, so the passkey's WebAuthn
+    /// `user.displayName` can carry it (ledger [#3387](http://localhost:1062/l/default/item/3387)).
+    /// An invite never issued or already used is refused here, before the authenticator mints
+    /// a credential [`Passkeys::register`] would refuse.
+    pub fn invite_grant(&self, invite: &str) -> Result<String, String> {
+        invite_grant(&self.layout, invite)
+    }
+
     /// The only origin a ceremony is accepted from.
     pub fn origin(&self) -> &str {
         &self.origin
