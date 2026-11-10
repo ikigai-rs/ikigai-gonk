@@ -2803,7 +2803,13 @@
          references after the transform (ledger #989); the value (view:linkify,
          render::ledger_refs) names the ledger they resolve in and the held ledgers a qualified
          `crew#3` may link into (ledger #3344). -->
-    <xsl:if test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:if>
+    <!-- Or the body as Markdown (ledger #3345): src/render.rs::item_markdown's fragment,
+         references already linked, so it carries no data-linkify. A body with no Markdown in it
+         has no view:rendered and shows as written. -->
+    <xsl:choose>
+      <xsl:when test="view:rendered"><div class="body markdown as-written"><xsl:copy-of select="view:rendered/node()"/></div></xsl:when>
+      <xsl:when test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:when>
+    </xsl:choose>
     <dl class="meta">
       <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/><xsl:call-template name="author-claim"/></xsl:if></dd>
       <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
@@ -2870,7 +2876,10 @@
           <xsl:otherwise>unattributed</xsl:otherwise>
         </xsl:choose>
       </p>
-      <div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div>
+      <xsl:choose>
+        <xsl:when test="view:rendered"><div class="body markdown as-written"><xsl:copy-of select="view:rendered/node()"/></div></xsl:when>
+        <xsl:otherwise><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:otherwise>
+      </xsl:choose>
     </li>
   </xsl:template>
 

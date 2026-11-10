@@ -190,10 +190,15 @@ fn main() {
         .with_arg(
             "content",
             // Ledger #3344: the body's qualified references link into `crew`, which the site
-            // holds, and `nosuch#2` stays text, so axe reads both in every theme.
+            // holds, and `nosuch#2` stays text, so axe reads both in every theme. Ledger
+            // #3345: the body is Markdown, so axe reads its rendered heading, strikethrough,
+            // table, task list and code block, and the links inside them, in every theme too.
             ArgRef::Inline(
-                b"An item for the checker to read\n\nSee crew#1, crew #1 and crew:#1, not \
-                  nosuch#2; and ledger #2."
+                b"An item for the checker to read\n\n# Plan\n\n~~See nothing.~~ See crew#1, \
+                  crew #1 and crew:#1, not nosuch#2; and ledger #2.\n\n\
+                  | Step | Where |\n|---|---|\n| one | https://example.com/a |\n\n\
+                  - [x] done in ledger #2\n- [ ] next, <b>not bold</b>\n\n\
+                  ```\nlet x = 1 < 2;\n```"
                     .to_vec(),
             ),
         )

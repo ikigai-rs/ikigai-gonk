@@ -660,6 +660,95 @@ pub fn entry_markdown(text: &str, refs: &str) -> Option<String> {
         .then_some(linked)
 }
 
+/// An item's body or a comment's as a linked XHTML fragment (ledger
+/// [#3345](http://localhost:1062/l/default/item/3345)), or `None` when the page is to show it
+/// as written: text with no Markdown in it, or text over [`entry_markdown`]'s bounds.
+///
+/// The fragment is [`entry_markdown`]'s, made the same way (`ikigai_fn::markdown`, so nothing an
+/// author writes becomes markup but what its walker builds) and linked by the same rules, with
+/// `refs` a [`ledger_refs`] value. Two things differ, both for the item's page:
+///
+/// - **`heading_offset`** places a `#` under the heading the text sits under: the item's body
+///   sits under the page's `<h1>` (offset 1, `#` is an `<h2>`), a comment under "Comments"'s
+///   `<h2>` (offset 2, `#` is an `<h3>`).
+/// - **Text with no Markdown in it reads as it does today.** When the fragment would be nothing
+///   but paragraphs, the answer is `None` and the page shows the text as written, every line
+///   break and space kept, so a plain comment is unchanged byte for byte.
+///
+/// ```
+/// use ikigai_gonk::render::{item_markdown, ledger_refs};
+/// let refs = ledger_refs("default", &["default", "crew"]);
+/// assert_eq!(
+///     item_markdown("~~old~~ new, see crew#3", &refs, 1).unwrap(),
+///     "<p><del>old</del> new, see <a href='/l/crew/item/3'>crew#3</a></p>"
+/// );
+/// // Plain prose, a raw tag included: shown as written, as before.
+/// assert_eq!(item_markdown("Two lines\nand <b>a tag</b>, ledger #4.", &refs, 1), None);
+/// assert_eq!(item_markdown("# Plan", &refs, 2).unwrap(), "<h3>Plan</h3>");
+/// // A link to gonk at its old port points at this server, as a bare one does.
+/// assert_eq!(
+///     item_markdown("~~was~~ [#739](http://localhost:1060/l/default/item/739)", &refs, 1).unwrap(),
+///     "<p><del>was</del> <a href=\"/l/default/item/739\">#739</a></p>"
+/// );
+/// ```
+pub fn item_markdown(text: &str, refs: &str, heading_offset: u8) -> Option<String> {
+    use ikigai_fn::markdown::{map_text_nodes, try_render_untrusted, Options};
+    let fragment = try_render_untrusted(text, &Options { heading_offset }).ok()?;
+    if only_paragraphs(&fragment) {
+        return None;
+    }
+    let fragment = rehome_hrefs(&fragment);
+    let linked = map_text_nodes(&fragment, |node| linkify_text(node, refs));
+    (linked.len() <= MAX_MARKDOWN_BYTES
+        && linked.matches('<').count() <= MAX_MARKDOWN_TAGS
+        && nesting_depth(&linked) <= MAX_MARKDOWN_DEPTH)
+        .then_some(linked)
+}
+
+/// `fragment`, an `ikigai_fn::markdown` fragment, with every link to gonk at its OLD port
+/// pointed at this server, as [`linkify`] points a bare one ([`rehome`]): a Markdown link
+/// `[#739](http://localhost:1060/l/default/item/739)` gets the href `/l/default/item/739`, its
+/// text kept. The walker writes every link as `<a href="…"`, with ` rel="noopener noreferrer"`
+/// right after for one that leaves the page's origin; a rehomed href is root-relative, so it
+/// drops that `rel`, as the walker does for a link that starts on this origin.
+fn rehome_hrefs(fragment: &str) -> String {
+    const OPEN: &str = "<a href=\"";
+    const REL: &str = " rel=\"noopener noreferrer\"";
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(at) = rest.find(OPEN) {
+        let (head, tail) = rest.split_at(at + OPEN.len());
+        out.push_str(head);
+        let Some(end) = tail.find('"') else {
+            rest = tail;
+            break;
+        };
+        let (href, after) = tail.split_at(end);
+        match rehome(href) {
+            Some(home) => {
+                out.push_str(&home);
+                out.push('"');
+                rest = after[1..].strip_prefix(REL).unwrap_or(&after[1..]);
+            }
+            None => {
+                out.push_str(href);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether every tag in `fragment`, an `ikigai_fn::markdown` fragment, is `<p>` or `</p>`.
+fn only_paragraphs(fragment: &str) -> bool {
+    fragment.match_indices('<').all(|(at, _)| {
+        ["<p>", "</p>"]
+            .iter()
+            .any(|tag| fragment[at..].starts_with(tag))
+    })
+}
+
 /// [`entry_markdown`] through the hub, so a rendered body is cached forever: an entry never
 /// changes, and the content-addressed request (the text and its linking context) is the key,
 /// the way [`rendered_chunks`] keys a chunk. `None` is the page's cue to show the text as

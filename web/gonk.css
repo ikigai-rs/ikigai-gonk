@@ -521,10 +521,13 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * (`--text`, on the ground or on `--surface`), held to the floor in every palette. Code and table
  * cells wrap rather than scroll, so no region needs a tab stop and the page holds at 320 px. */
 .body.markdown { white-space: normal; }
+/* An item's or a comment's Markdown keeps its line breaks, as its text did (ledger #3345). */
+.markdown.as-written p, .markdown.as-written li { white-space: pre-line; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
-.markdown h4, .markdown h5, .markdown h6 { font-size: 1rem; margin: 0.75rem 0 0.25rem; }
+.markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { font-size: 1rem; margin: 0.75rem 0 0.25rem; }
 .markdown h5, .markdown h6 { font-size: 0.95rem; }
+.markdown h2 { font-size: 1.1rem; }
 .markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: 0 0 0.5rem; }
 .markdown ul, .markdown ol { padding-left: 1.5rem; }
 .markdown blockquote { padding-left: 0.75rem; border-left: 3px solid var(--rule); }
