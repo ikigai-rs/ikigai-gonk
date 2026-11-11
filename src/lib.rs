@@ -55,6 +55,7 @@ pub mod face_frame;
 pub mod feeds_join;
 pub mod findings;
 pub mod findings_summary;
+pub mod git_env;
 pub mod git_object;
 pub mod github;
 pub mod grants;

@@ -443,7 +443,7 @@ fn git_records(
     limit: u64,
     mut on_record: impl FnMut(&[u8]),
 ) -> Result<bool> {
-    let mut child = Command::new("git")
+    let mut child = crate::git_env::harden_local(&mut Command::new("git"))
         .arg("-C")
         .arg(dir)
         .arg("--no-replace-objects")
@@ -788,5 +788,17 @@ mod tests {
             git_iri(&format!("urn:git:blob:{}", "A".repeat(64))),
             Some(("blob", "a".repeat(64)))
         );
+    }
+
+    /// Ledger #3489: a configured clone's subdirectory whose tracked `commondir` names another
+    /// repository does not read that repository's commits.
+    #[test]
+    fn a_planted_commondir_reads_no_commit_outside_the_root() {
+        let p = crate::git_env::fixture::planted();
+        assert!(commit_detail(&p.secret, &p.secret_sha).is_ok());
+        match commit_detail(&p.escape(), &p.secret_sha) {
+            Err(_) => {}
+            Ok(commit) => panic!("read {:?} through the planted commondir", commit.message),
+        }
     }
 }
