@@ -5,11 +5,11 @@
 //! A credential id is the authenticator's choice, up to 1023 bytes by WebAuthn. Two lengths
 //! went wrong:
 //!
-//! - [`a_long_credential_id_signs_in_and_out_under_the_principal_its_requests_carry`]: past
+//! - `a_long_credential_id_signs_in_and_out_under_the_principal_its_requests_carry`: past
 //!   256 base64url characters the `gonk:Login` / `gonk:Logout` entry's `principal=` was built
 //!   from the CUT `passkey=` column, so it named an IRI that is no passkey's, while the door
 //!   lines of the same session named the whole one.
-//! - [`a_credential_id_too_long_to_be_a_principal_is_refused_at_enrollment`]: past core's
+//! - `a_credential_id_too_long_to_be_a_principal_is_refused_at_enrollment`: past core's
 //!   principal bound (`MAX_PRINCIPAL_LEN`, 512 bytes, for the whole `urn:iki:gonk:passkey:…`)
 //!   the HTTP door cannot mint the name into the capability, so every request of that signed-in
 //!   passkey was logged `principal=anon`. Such a passkey is refused now, and its invite is not

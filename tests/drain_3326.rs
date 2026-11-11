@@ -229,14 +229,14 @@ fn ends_with_a_stop(gonk: &Gonk) -> bool {
     let segments = gonk.segments();
     let last = segments
         .lines()
+        .rev()
         // An entry starts with its time; `segments()` also reads the instance's `.lock`,
         // which holds a pid, and the `#seal` lines come after the last entry.
-        .filter(|l| {
+        .find(|l| {
             l.split(' ')
                 .next()
                 .is_some_and(|t| t.contains('T') && t.ends_with('Z'))
         })
-        .last()
         .unwrap_or("");
     let class = last.split(' ').nth(1).unwrap_or("");
     class == "log:ProcessStop" || class == ikigai_log::PROCESS_STOP_CLASS
