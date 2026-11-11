@@ -909,6 +909,7 @@ impl Git {
     /// Run git, answering its trimmed stdout, or its stderr as the error.
     fn run(&self, dir: Option<&Path>, args: &[&str]) -> Result<String, String> {
         let mut command = Command::new("git");
+        crate::git_env::harden(&mut command);
         if let Some(dir) = dir {
             command.arg("-C").arg(dir);
         }
@@ -1060,5 +1061,18 @@ mod tests {
             same_remote("https://h/o/r/")
         );
         assert_ne!(same_remote("https://h/o/r"), same_remote("https://h/o/s"));
+    }
+
+    /// Ledger #3489: checkout's git refuses a discovered bare repository, so a committed
+    /// `core.fsmonitor` in one never runs on `git status`.
+    #[test]
+    fn checkout_git_runs_no_planted_fsmonitor() {
+        let p = crate::git_env::fixture::planted();
+        let git = Git { ssh: None };
+        assert!(git.run(Some(&p.clone), &["status", "--porcelain"]).is_ok());
+        assert!(git
+            .run(Some(&p.adopt()), &["status", "--porcelain"])
+            .is_err());
+        assert!(!p.marker.exists(), "the committed fsmonitor ran");
     }
 }
