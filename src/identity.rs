@@ -575,7 +575,8 @@ pub fn remove_grant(
     }
     if target.grants.len() == 1 {
         return Err(format!(
-            "`{grant}` is the only grant passkey `{}` holds, and a passkey with none cannot sign              in: `ikigai-gonk passkey revoke` removes the passkey. Nothing was written",
+            "`{grant}` is the only grant passkey `{}` holds, and a passkey with none cannot sign \
+             in: `ikigai-gonk passkey revoke` removes the passkey. Nothing was written",
             target.label
         ));
     }
@@ -591,7 +592,8 @@ pub fn remove_grant(
     )
     .map_err(|e| {
         format!(
-            "grant `{grant}` WAS removed from passkey `{}`, but its audit line could not be              written to {}: {e}",
+            "grant `{grant}` WAS removed from passkey `{}`, but its audit line could not be \
+             written to {}: {e}",
             target.label,
             audit_log(layout).display()
         )
@@ -1732,7 +1734,9 @@ impl Passkeys {
     /// ★ **The session is ended and re-established**, not refreshed: every session of the
     /// passkey (in this browser and any other) is DELETED, and one new session is opened from
     /// the fresh assertion, so the only session carrying the wider grant is the one whose holder
-    /// just proved the passkey. Its lifetime is decided anew by the wider scopes.
+    /// just proved the passkey. Its lifetime is decided anew by the wider scopes. They are
+    /// deleted BEFORE the wider grant is written (ledger #3413), so none reads it in the
+    /// meantime; a widening refused after that point leaves the passkey signed out.
     ///
     /// Every widening appends a [`GRANT_ADDED`] line to [`audit_log`] naming the passkey, the
     /// grant and the invite (by its hash), under the clients lock with the change: if the line
@@ -1792,26 +1796,10 @@ impl Passkeys {
         // signed-in passkey's own verified answer gets here ([`MAX_PENDING`]).
         self.answer_challenge(&verified.challenge, verified.expires, now)?;
         let redeemed = redeem(&self.layout, &invite, now)?;
-        let before = current.clone();
-        current.grants.push(redeemed.clone());
-        current.sign_count = current.sign_count.max(verified.count);
-        write_passkey(&self.layout, &lock, &current)?;
-        let now_ms = now.saturating_mul(1000);
-        let extra = format!(
-            " added={} invite=sha256:{}",
-            encoded(&redeemed),
-            sha256_hex(invite.as_bytes())
-        );
-        if let Err(e) = record_with(&self.layout, GRANT_ADDED, &current, now_ms, &extra) {
-            // ★ No widening goes unrecorded: undone, under the same lock. The invite is spent.
-            write_passkey(&self.layout, &lock, &before)?;
-            return Err(format!(
-                "grant `{redeemed}` was NOT added: its line could not be written to {}: {e}. \
-                 The invite was spent; ask for a new one",
-                audit_log(&self.layout).display()
-            ));
-        }
-        drop(lock);
+        // ★ Every old session ends BEFORE the wider grant is written: a request re-reads
+        // `clients.json` and then finds its session gone, so no session but the fresh one below
+        // ever reads the wider grant, even while the line is written or the change undone
+        // (ledger #3413).
         let ended = {
             let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
             let ended = state.end_sessions(&current.credential_id);
@@ -1830,6 +1818,26 @@ impl Passkeys {
                 why: Some("widened"),
             },
         );
+        let before = current.clone();
+        current.grants.push(redeemed.clone());
+        current.sign_count = current.sign_count.max(verified.count);
+        write_passkey(&self.layout, &lock, &current)?;
+        let now_ms = now.saturating_mul(1000);
+        let extra = format!(
+            " added={} invite=sha256:{}",
+            encoded(&redeemed),
+            sha256_hex(invite.as_bytes())
+        );
+        if let Err(e) = record_with(&self.layout, GRANT_ADDED, &current, now_ms, &extra) {
+            // ★ No widening goes unrecorded: undone, under the same lock. The invite is spent.
+            write_passkey(&self.layout, &lock, &before)?;
+            return Err(format!(
+                "grant `{redeemed}` was NOT added: its line could not be written to {}: {e}. \
+                 The invite was spent; ask for a new one, and sign in again",
+                audit_log(&self.layout).display()
+            ));
+        }
+        drop(lock);
         let (token, identity) = self.open_session(current, now)?;
         Ok((token, identity, redeemed))
     }
