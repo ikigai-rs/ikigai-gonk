@@ -2387,9 +2387,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-repo"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef4600df7a6af3060ee89f97339ed0067936e9145a1fa827dac5e03b3aa9da93"
+checksum = "a90932901f833bd4c5fb228865b713c9f7a7bf18da385737de93dc21da348f69"
 dependencies = [
  "async-trait",
  "futures",
