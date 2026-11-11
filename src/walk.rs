@@ -361,11 +361,13 @@ pub(crate) async fn section(
         many => format!("{} repositories", many.len()),
     };
     let q = query(only);
-    let mut attributes: Vec<(&str, String)> = vec![
+    let mut attributes: Vec<(&str, String)> =
+        vec![
         ("view", "queue".to_string()),
         ("mode", "walk".to_string()),
         ("full", flag(!page.fragment).to_string()),
         ("ui-theme", crate::render::theme_of(inv).to_string()),
+        ("safe", crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string()),
         ("title", "Queue".to_string()),
         ("state", "pending".to_string()),
         ("scope", scope.to_string()),

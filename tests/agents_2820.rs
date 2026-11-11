@@ -70,13 +70,16 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         let serving = Arc::clone(&http);
@@ -825,12 +828,12 @@ fn a_load_between_writes_asks_the_store_nothing() {
     let names: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
     let reader = Capability::scoped(grants_for_all(&names, Authority::Read).unwrap());
 
-    // A write to `ledger`, then a load and the load after it. A window turns over with the minute,
-    // so a pair across one is taken again, after a write of its own: the retry's first load has to
-    // be cold as well.
+    // Warm every ledger, then write to `ledger` and measure two loads. A window turns over
+    // with the minute, so retry the whole sequence if it crossed one.
     let after_a_write = |page: &str, ledger: &str| loop {
+        let (_, began, _) = one_load(&server, page, &reader);
         server.file(ledger, "sample item");
-        let (cold, began, _) = one_load(&server, page, &reader);
+        let (cold, _, _) = one_load(&server, page, &reader);
         let (warm, _, ended) = one_load(&server, page, &reader);
         if began == ended {
             return (cold, warm);
@@ -839,18 +842,15 @@ fn a_load_between_writes_asks_the_store_nothing() {
     // ★ Each tab asks its own questions and none of the other's (ledger #2971). Per ledger, the
     // Ledgers tab: the chart's counts. The Agents tab: its agents, and seven questions per agent.
     let tabs = [
-        ("urn:iki:gonk:page:dashboard:ledgers", NAMES.len()),
-        (
-            "urn:iki:gonk:page:dashboard:agents",
-            NAMES.len() * (1 + 7 * AGENTS),
-        ),
+        ("urn:iki:gonk:page:dashboard:ledgers", 1),
+        ("urn:iki:gonk:page:dashboard:agents", 1 + 7 * AGENTS),
     ];
-    // ⚠ A write to one ledger: every ledger's answers are asked again, and then not until the next.
-    for (page, every) in tabs {
+    // Per-graph freshness keeps other ledgers warm: only this ledger's answers are read.
+    for (page, own) in tabs {
         for ledger in NAMES {
             assert_eq!(
                 after_a_write(page, ledger),
-                (every, 0),
+                (own, 0),
                 "{page}, after a write to {ledger}"
             );
         }

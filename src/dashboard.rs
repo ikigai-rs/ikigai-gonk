@@ -831,6 +831,10 @@ impl Endpoint for DashboardPage {
                     ("view", "empty"),
                     ("full", "true"),
                     ("ui-theme", render::theme_of(inv)),
+                    (
+                        "safe",
+                        crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                    ),
                     ("title", "No ledger to show"),
                 ],
                 &children,
@@ -848,6 +852,10 @@ impl Endpoint for DashboardPage {
                 ("view", "dashboard"),
                 ("full", "true"),
                 ("ui-theme", render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", &title),
                 ("heading", "Dashboard"),
                 (

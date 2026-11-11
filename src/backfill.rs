@@ -538,16 +538,12 @@ async fn pending_serious(
     policy: &QueuePolicy,
 ) -> std::result::Result<Vec<String>, String> {
     let iri = crate::queue::findings_iri(root);
-    let bytes = issue(
-        hub,
-        cap,
-        Verb::Source,
-        &iri,
-        &[("as", JSON), ("state", "pending")],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let rows: Vec<Value> = serde_json::from_slice(&bytes).map_err(|e| format!("{iri}: {e}"))?;
+    let target = Iri::parse(&iri).map_err(|e| e.to_string())?;
+    let request = Request::new(Verb::Source, target)
+        .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec()))
+        .with_arg("state", ArgRef::Inline(b"pending".to_vec()));
+    let mut rows = crate::findings_pages::read(hub, cap, request).await?;
+    crate::findings_pages::triage(hub, &mut rows)?;
     Ok(rows
         .iter()
         .filter(|row| crate::queue::rated(row).is_some_and(|word| policy.is_serious(word)))
@@ -708,5 +704,34 @@ impl Endpoint for BackfillEndpoint {
                     .output(JSON),
             )
             .verb(Verb::Meta)
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+    use crate::findings_pages::tests::{hub, FIRST, LAST};
+
+    #[test]
+    fn serious_pending_reads_every_page_in_triage_order_and_propagates_later_failure() {
+        let (hub, cap, calls) = hub(false);
+        let ids = futures::executor::block_on(pending_serious(
+            &hub,
+            &cap,
+            "demo",
+            &QueuePolicy::default(),
+        ))
+        .unwrap();
+        assert_eq!(ids, [LAST, FIRST]);
+        assert_eq!(*calls.lock().unwrap(), [None, Some(FIRST.to_string())]);
+        let (hub, cap, _) = crate::findings_pages::tests::hub(true);
+        assert!(futures::executor::block_on(pending_serious(
+            &hub,
+            &cap,
+            "demo",
+            &QueuePolicy::default()
+        ))
+        .unwrap_err()
+        .contains("later page failed"));
     }
 }

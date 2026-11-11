@@ -70,13 +70,16 @@ fn gonk(anonymous: Vec<String>) -> Gonk {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
     let door = doors::HttpDoor {
         anonymous,
         bind: addr,
         passkeys: Some(passkeys),
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     std::thread::spawn(move || {

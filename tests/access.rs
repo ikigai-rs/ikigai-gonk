@@ -17,13 +17,18 @@ use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_resolve::Resolver;
 use ikigai_store::DurableStore;
 
-/// A sink that keeps every line.
+/// A sink that keeps every door line.
 fn collector() -> (Arc<Mutex<Vec<String>>>, ikigai_gonk::access::Sink) {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let keep = Arc::clone(&lines);
     (
         lines,
-        Arc::new(move |line: &str| keep.lock().unwrap().push(line.to_string())),
+        // Door lines only: the segment's own `log:ProcessStart` is not a request.
+        Arc::new(move |line: &str| {
+            if line.contains(" log:Access ") {
+                keep.lock().unwrap().push(line.to_string())
+            }
+        }),
     )
 }
 
@@ -46,7 +51,9 @@ fn web_face(hub: &Arc<Kernel>, config: &tempfile::TempDir, port: u16) -> Arc<web
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     })
 }
 
@@ -70,6 +77,7 @@ fn serve_http(sink: ikigai_gonk::access::Sink) -> (SocketAddr, tempfile::TempDir
         anonymous: grants_for("default", Authority::Write).unwrap(),
         bind: addr,
         passkeys: None,
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     std::thread::spawn(move || {
@@ -136,11 +144,14 @@ fn columns(line: &str) -> Vec<(String, String)> {
 }
 
 fn value(line: &str, key: &str) -> String {
+    column(line, key).unwrap_or_else(|| panic!("no {key} in {line}"))
+}
+
+fn column(line: &str, key: &str) -> Option<String> {
     columns(line)
         .into_iter()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v)
-        .unwrap_or_else(|| panic!("no {key} in {line}"))
 }
 
 /// ★ One line per HTTP request, in `ikigai-log`'s grammar, carrying what the door can see —
@@ -179,12 +190,26 @@ fn the_http_door_writes_one_line_per_request() {
             parts[0].len() == 24 && parts[0].ends_with('Z') && parts[0].as_bytes()[19] == b'.',
             "RFC 3339 with milliseconds first: {line}"
         );
-        assert_eq!(parts[1], "gonk:Access", "{line}");
-        let keys: Vec<String> = columns(line).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(parts[1], "log:Access", "{line}");
+        // `bytes` only on an answer and `q` only with arguments; the rest on every line, in
+        // the helper's order.
+        let keys: Vec<String> = columns(line)
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k != "bytes" && k != "q")
+            .collect();
         assert_eq!(
             keys,
-            ["door", "verb", "outcome", "bytes", "dur", "principal", "q"],
-            "every line, every key, this order: {line}"
+            [
+                "seq",
+                "door",
+                "verb",
+                "outcome",
+                "dur",
+                "principal",
+                "credential"
+            ],
+            "every line, these keys, this order: {line}"
         );
         assert!(
             !line.contains("not-a-real-session") && !line.contains("stays out"),
@@ -204,8 +229,13 @@ fn the_http_door_writes_one_line_per_request() {
     );
     assert_eq!(
         value(&page, "principal"),
-        "-",
-        "a read is never told: {page}"
+        "anon",
+        "an anonymous read is named anon, never left blank (ledger #383): {page}"
+    );
+    assert_eq!(
+        value(&page, "credential"),
+        "https://ikigai-rs.dev/ns/log#anonymous",
+        "{page}"
     );
     // The face the door negotiated is an argument too, so it is in `q` beside the query — and
     // so are the page's declared defaults (`limit`, `offset`), which the kernel fills in before
@@ -230,7 +260,7 @@ fn the_http_door_writes_one_line_per_request() {
     );
 
     assert_eq!(value(&refused, "outcome"), "denied", "{refused}");
-    assert_eq!(value(&refused, "bytes"), "-", "{refused}");
+    assert_eq!(column(&refused, "bytes"), None, "{refused}");
 }
 
 /// The socket door: `owner`, no `q`, and the IRI the client asked for.
@@ -260,8 +290,17 @@ fn the_socket_door_writes_one_line_per_call() {
     for line in [&listed, &filed] {
         assert_eq!(value(line, "door"), "socket", "{line}");
         assert_eq!(value(line, "outcome"), "ok", "{line}");
-        assert_eq!(value(line, "principal"), "owner", "{line}");
-        assert_eq!(value(line, "q"), "-", "{line}");
+        assert_eq!(
+            value(line, "principal"),
+            ikigai_gonk::access::OWNER_PRINCIPAL,
+            "{line}"
+        );
+        assert_eq!(
+            value(line, "credential"),
+            "https://ikigai-rs.dev/ns/log#socketOwner",
+            "{line}"
+        );
+        assert_eq!(column(line, "q"), None, "{line}");
         assert!(!line.contains("over the socket"), "{line}");
     }
     assert_eq!(value(&filed, "verb"), "sink");
@@ -374,13 +413,13 @@ fn an_edge_refusal_writes_a_denied_line() {
     for line in [&foreign, &cross, &load] {
         assert_eq!(value(line, "door"), "http", "{line}");
         assert_eq!(value(line, "outcome"), "denied", "{line}");
-        assert_eq!(value(line, "bytes"), "-", "{line}");
+        assert_eq!(column(line, "bytes"), None, "{line}");
         assert!(!line.contains("not-a-real-session"), "no cookie: {line}");
     }
     assert_eq!(value(&foreign, "verb"), "source");
     assert_eq!(value(&foreign, "q"), "status=all", "{foreign}");
     assert_eq!(value(&cross, "verb"), "sink");
     assert_eq!(value(&cross, "principal"), "anon", "{cross}");
-    assert_eq!(value(&load, "principal"), "-", "{load}");
+    assert_eq!(value(&load, "principal"), "anon", "{load}");
     assert_eq!(lines.lock().unwrap().len(), 3, "one line per refusal");
 }

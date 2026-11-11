@@ -364,3 +364,51 @@ fn severity_all_and_reproduced_change_what_is_filed() {
         assert!(keyed(&hub, &format!("urn:iki:finding:{never}")).is_none());
     }
 }
+
+/// Individually readable rows cross browse's unpaged 32 MiB ceiling. The filing
+/// reader must follow the byte-trimmed page even when it contains fewer than `limit` rows.
+#[test]
+fn published_findings_over_the_unpaged_byte_ceiling_are_all_read() {
+    let (hub, dir) = hub();
+    let body = "x".repeat(900 * 1024);
+    let ids: Vec<String> = (1..=40).map(|n| format!("{n:024x}")).collect();
+    for id in &ids {
+        plant(&hub, id, Some("major"), &body);
+    }
+    // The newer summary reader also needs every byte-trimmed page to count the set.
+    let summary: serde_json::Value = serde_json::from_str(&issue(
+        &hub,
+        Verb::Source,
+        "urn:repo:demo:findings-summary",
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(summary["total"], 40);
+    assert_eq!(summary["files"][0]["severities"]["major"], 40);
+    for id in &ids {
+        issue(
+            &hub,
+            Verb::Sink,
+            &format!("urn:iki:finding:{id}"),
+            &[("decision", "publish")],
+        );
+    }
+    let request =
+        ikigai_core::Request::new(Verb::Source, Iri::parse("urn:repo:demo:findings").unwrap())
+            .with_arg("state", ArgRef::Inline(b"published".to_vec()))
+            .with_arg("as", ArgRef::Inline(b"application/json".to_vec()));
+    let error = block_on(hub.issue(request, &Capability::root())).unwrap_err();
+    assert!(matches!(error, ikigai_core::Error::Conflict(_)), "{error}");
+    assert!(error.to_string().contains("32 MiB"), "{error}");
+
+    let socket = serve(&hub, dir.path());
+    let homes = tempfile::tempdir().unwrap();
+    let output = stdout(&file(
+        &socket,
+        homes.path(),
+        &["--dry-run", "--severity", "all"],
+    ));
+    assert!(output.contains(&ids[0]), "first finding missing");
+    assert!(output.contains(&ids[39]), "last finding missing");
+    assert_eq!(output.matches("would file").count(), 40);
+}

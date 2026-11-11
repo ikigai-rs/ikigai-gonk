@@ -91,6 +91,17 @@ impl Layout {
         self.grants_cache.get(&self.grants_json(), parse_grants)
     }
 
+    /// gonk's own directory in the config home, `gonk/`: what everything else here is under.
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Where the log's segments land unless `log.toml` or `gonk.log.toml` says otherwise:
+    /// `gonk/log/` (ledger #383).
+    pub fn log_dir(&self) -> PathBuf {
+        self.dir.join("log")
+    }
+
     /// `gonk/quic`.
     pub fn quic_dir(&self) -> PathBuf {
         self.dir.join("quic")
@@ -155,6 +166,12 @@ impl Layout {
     /// Grant name → scopes.
     pub fn grants_json(&self) -> PathBuf {
         self.dir.join("grants.json")
+    }
+
+    /// The live passkey sessions, so they survive a restart: SHA-256 of each token →
+    /// principal, grant, issued, last used and end (ledger #3229; see [`crate::identity`]).
+    pub fn sessions_json(&self) -> PathBuf {
+        self.dir.join("sessions.json")
     }
 
     /// Outstanding passkey invites: SHA-256 of the code → grant and expiry.
@@ -1313,6 +1330,16 @@ pub fn put_grant(
 /// race the library documents (a write opened in the instant the door closes fails as a lost
 /// reply and is not replayed), and nothing security-relevant is left behind it to hurry.
 pub const MAX_CONNECTION_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// The most a stop waits for the QUIC door's calls to finish: two seconds (ledger
+/// [#3326](http://localhost:1062/l/default/item/3326)).
+///
+/// ★ **Short on purpose.** A call the drain turned away is sent again by its client on a new
+/// connection, and that dial gives up after the client's five-second `CONNECT_TIMEOUT`
+/// (`ikigai-quic`). The gap a restart leaves (this cap, then the next process opening its
+/// store) has to stay well under that, or a call that could have been answered by the next
+/// process fails instead. A call still running at this cap has its connection closed under it.
+pub const DRAIN_CAP: Duration = Duration::from_secs(2);
 
 /// The authority the client with `fingerprint` holds NOW, read from `clients.json` and
 /// `grants.json` as they are on disk: what [`minter`] mints a connection from, and what

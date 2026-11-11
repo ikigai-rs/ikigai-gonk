@@ -160,7 +160,9 @@ fn shell(hub: &Arc<Kernel>, start: &str, cap: &Capability) -> String {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = doors::http_kernel(Arc::clone(hub), web::space(face));
     read(

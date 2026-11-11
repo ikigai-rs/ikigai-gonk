@@ -9,12 +9,17 @@
 //!
 //! ```text
 //! gonk/clients.json   { "clients":  { "<cert sha256>":     { "grant": "brian" } },
-//!                       "passkeys": { "<credential id>":   { "grant": "brian", "label": "brian",
+//!                       "passkeys": { "<credential id>":   { "grants": ["brian"], "label": "brian",
 //!                                                             "public_key": "<SPKI, base64url>",
 //!                                                             "sign_count": 0 } } }
 //! gonk/grants.json    { "brian": ["urn:cap:ledger:read:default", …] }
 //! gonk/invites.json   { "<sha256 of an invite code>": { "grant": "brian", "expires": 1757… } }
 //! ```
+//!
+//! A passkey holds a LIST of grant names (ledger [#3388](http://localhost:1062/l/default/item/3388);
+//! the single-name `"grant": "brian"` earlier servers wrote is still read) and its scopes are
+//! their union. A grant is shared, so one person is widened by adding a grant to their passkey
+//! ([`Passkeys::add_grant`], an invite redeemed while signed in), never by editing a grant.
 //!
 //! So a person with a laptop certificate and a passkey who are enrolled under one grant
 //! cannot hold read over QUIC and write over HTTP by accident: there is one list to be
@@ -37,10 +42,28 @@
 //! A login answers a single-use challenge; the assertion is verified against the stored
 //! key for the exact origin `http://localhost:<port>` and RP ID `localhost`, with user
 //! verification REQUIRED (an identity that grants authority is a biometric or a PIN, not a
-//! tap). Success mints a 256-bit session token, kept only as its SHA-256, for
-//! [`SESSION_SECONDS`] at most, and for [`DEFAULT_IDLE_SECONDS`] (`gonk.http.session_idle_minutes`)
-//! after the last request that carried it. Sessions live in memory: a restart signs everyone
-//! out, which is the safe direction to be wrong in.
+//! tap). Success mints a 256-bit session token, kept only as its SHA-256, for the session's
+//! absolute lifetime at most (`gonk.http.session_max_hours`, see [`Passkeys::lifetime`]), and for
+//! [`DEFAULT_IDLE_SECONDS`] (`gonk.http.session_idle_minutes`) after the last request that
+//! carried it.
+//!
+//! # Sessions survive a restart (ledger [#3229](http://localhost:1062/l/default/item/3229))
+//!
+//! Every live session is written to `gonk/sessions.json` beside the enrolled passkeys: the
+//! SHA-256 of its token (never the token), its principal, its grant, when it was issued, when
+//! it was last used and when it ends, and how far this server has read `gonk/passkeys.log`.
+//! The file is written whole, to a temporary file renamed over it, readable by this user only.
+//! A server starting over the same directory loads the sessions that have not expired and
+//! drops the rest, and reads the log from where the last one stopped, so a `passkey logout
+//! --all` or `passkey revoke` run while it was down still ends their sessions. An ending
+//! (sign-out, sign out everywhere, a revoke, an expired lifetime) is written before the
+//! request that caused it answers, so nothing ended comes back after a restart.
+//!
+//! A session whose grant can only READ may run up to [`READ_ONLY_SESSION_SECONDS`] (30 days)
+//! when the setting says so; one whose grant can do anything else ends after
+//! [`SESSION_SECONDS`] (12 h) whatever the setting says. The grant is re-read on every
+//! request, so a read-only grant widened to write ends its long sessions 12 h after their
+//! sign-in.
 //!
 //! # Ending a session (ledger [#1824](http://localhost:1062/l/default/item/1824))
 //!
@@ -59,17 +82,33 @@
 //! no longer enrolled deletes its session there and then, so a revoke whose log line could not
 //! be written still ends it at the next request.
 //!
-//! Every sign-in, sign-out and session ending writes one line in the access log's grammar
-//! ([`crate::access`]): `gonk:Login` or `gonk:Logout`, the passkey resource, then `door`,
-//! `outcome`, `principal`, `credential`, `sessions` and (on a logout) `why`. Never a token.
+//! Every sign-in, sign-out and session ending writes one entry into the log segment the door
+//! lines go to ([`crate::access::Record`], ledger #383): [`LOGIN_CLASS`] or [`LOGOUT_CLASS`],
+//! the passkey resource, then `door`, `outcome`, `principal`, `credential` (`log:passkey`),
+//! `passkey` (the credential id), `sessions` and (on a logout) `why`. Never a token.
+//!
+//! ★ **What each of these records is, and why there is one of each** (ledger #383):
+//!
+//! - **The segment's sign-in entries** are HISTORY: who held a session, from when. They were
+//!   stderr lines until ledger #383, which made them segment entries, hash-chained with the
+//!   door lines.
+//! - **`gonk/passkeys.log` stays**, because it is a COMMAND CHANNEL, not history: `passkey
+//!   revoke` and `passkey logout --all` run in another process and tell this server, through it,
+//!   to end sessions, and `sessions.json` holds how far it was read. The server's entry for
+//!   acting on one (`door=cli`, `why=revoked`) records what the SERVER did, sessions ended, and
+//!   the file line records what the operator asked, so neither repeats the other. Moving the
+//!   channel onto the segment would put a second process's writes into this process's chain,
+//!   which `ikigai-log` keeps to one writer per segment.
+//! - **`gonk/sessions.json` stays**: it is STATE, the live session table a restart reloads,
+//!   rewritten whole; a session that ended is gone from it, and its ending is in the segment.
 //!
 //! ⚠ **The cookie is set by the page's script, not by the server, so it is not HttpOnly**
 //! ([#1591](http://localhost:1062/l/default/item/1591)). The `ikigai-web` release this server
 //! builds on (0.1.63) builds every response from a kernel representation and has no way to
 //! add a `Set-Cookie` header; `ikigai_web::with_headers` (ikigai-rs/ikigai-cli PR 516) is the
 //! seam, and it is not in a published release yet. The mitigations are the ones that remain:
-//! `SameSite=Strict`, a strict same-origin CSP with no inline script, and a token that dies
-//! with the process.
+//! `SameSite=Strict`, a strict same-origin CSP with no inline script, and a token whose
+//! lifetime is bounded (12 h for any grant that can write).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -91,8 +130,39 @@ pub const RP_ID: &str = "localhost";
 /// The cookie the page stores its session token in.
 pub const SESSION_COOKIE: &str = "gonk_session";
 
-/// How long a session lasts at most, however busy it is (the absolute bound).
+/// How long a session whose grant can WRITE (anything beyond read) lasts at most, however
+/// busy it is and whatever `gonk.http.session_max_hours` says; also that setting's default.
 pub const SESSION_SECONDS: u64 = 12 * 60 * 60;
+
+/// The longest `gonk.http.session_max_hours` may make a session, which only a READ-ONLY grant
+/// gets: 30 days. Never unbounded: a stolen cookie still reads everything its grant covers.
+pub const READ_ONLY_SESSION_SECONDS: u64 = 720 * 60 * 60;
+
+/// Whether every scope in `scopes` only reads (`urn:cap:<family>:read:…`). Anything else —
+/// write, claim, comment, an alias scheme, a token this rule does not know — can write, and
+/// so is held to [`SESSION_SECONDS`]. An empty list is not read-only: it grants nothing, and
+/// gains nothing from a longer session.
+///
+/// ```
+/// use ikigai_gonk::identity::read_only;
+/// let read = ["urn:cap:ledger:read:acme".to_string(),
+///             "urn:cap:store:read:graph:urn:iki:ledger:graph:acme".to_string()];
+/// assert!(read_only(&read));
+/// let mut write = read.to_vec();
+/// write.push("urn:cap:ledger:comment:acme".to_string());
+/// assert!(!read_only(&write));
+/// assert!(!read_only(&[]));
+/// ```
+pub fn read_only(scopes: &[String]) -> bool {
+    !scopes.is_empty()
+        && scopes.iter().all(|s| {
+            let mut parts = s.split(':');
+            parts.next() == Some("urn")
+                && parts.next() == Some("cap")
+                && parts.next().is_some()
+                && parts.next() == Some("read")
+        })
+}
 
 /// How long a session lasts with no request carrying it (the idle bound), when no
 /// `gonk.http.session_idle_minutes` line says otherwise: one hour.
@@ -140,6 +210,28 @@ pub fn passkey_iri(credential_id: &str) -> String {
     format!("{PASSKEY_IRI_PREFIX}{credential_id}")
 }
 
+/// Why a passkey with the credential id `id` cannot be enrolled because no door could name
+/// it, or `None` when one can.
+///
+/// The HTTP door mints [`passkey_iri`] into each signed-in request's capability, and the log
+/// writes it as the `principal=` of every line (ledger #383). Core refuses a principal past
+/// [`ikigai_core::MAX_PRINCIPAL_LEN`] bytes, and WebAuthn lets an authenticator choose an id of
+/// up to 1023 bytes, so through ledger #3414 a long one enrolled and every request it signed
+/// was attributed to `anon`. A credential id of up to 368 bytes fits.
+pub fn principal_refusal(id: &str) -> Option<String> {
+    let iri = passkey_iri(id);
+    ikigai_core::Capability::scoped(Vec::<String>::new())
+        .with_principal(&iri)
+        .err()
+        .map(|e| {
+            format!(
+                "this passkey's credential id ({} characters) is too long to name its holder \
+                 ({e}); use another authenticator",
+                id.len()
+            )
+        })
+}
+
 /// The credential id a [`passkey_iri`] names, or `None` for any other text — a plain-name
 /// author written by hand, or by the cli.
 pub fn passkey_credential(author: &str) -> Option<&str> {
@@ -151,14 +243,25 @@ pub fn passkey_credential(author: &str) -> Option<&str> {
 pub struct Enrolled {
     /// base64url of the credential id.
     pub credential_id: String,
-    /// The grant name — a key of `grants.json`.
-    pub grant: String,
+    /// The grant names — keys of `grants.json` — this passkey holds, in the order they were
+    /// added, never empty. Its scopes are the union of theirs ([`scopes_of_all`]). A grant is
+    /// shared by every passkey that holds it, so a passkey is WIDENED by adding a grant to its
+    /// own list ([`Passkeys::add_grant`]), never by editing a shared grant (ledger
+    /// [#3388](http://localhost:1062/l/default/item/3388)).
+    pub grants: Vec<String>,
     /// A human label.
     pub label: String,
     /// base64url of the SPKI DER public key.
     pub public_key: String,
     /// The highest signature counter seen.
     pub sign_count: u32,
+}
+
+impl Enrolled {
+    /// The grant names as one line for a person: `brian`, or `brian, reviewer`.
+    pub fn grant_names(&self) -> String {
+        self.grants.join(", ")
+    }
 }
 
 /// Every enrolled passkey, by credential id. Absent file or key: none.
@@ -185,12 +288,13 @@ pub(crate) fn parse_passkeys(
                 .map(str::to_string)
                 .ok_or_else(|| format!("passkey `{id}` has no `{name}`"))
         };
+        let grants = entry_grants(id, entry)?;
         out.insert(
             id.clone(),
             Enrolled {
                 credential_id: id.clone(),
-                grant: field("grant")?,
-                label: field("label").unwrap_or_else(|_| field("grant").unwrap_or_default()),
+                label: field("label").unwrap_or_else(|_| grants[0].clone()),
+                grants,
                 public_key: field("public_key")?,
                 sign_count: entry
                     .get("sign_count")
@@ -201,6 +305,46 @@ pub(crate) fn parse_passkeys(
         );
     }
     Ok(out)
+}
+
+/// A passkey entry's grant names: the list form `"grants": ["a", "b"]` this server writes, or
+/// the single-name form `"grant": "a"` every earlier one wrote (still read, never written).
+/// Refused when it names none, when a name is not a string, or when both forms disagree.
+fn entry_grants(id: &str, entry: &Value) -> Result<Vec<String>, String> {
+    let single = match entry.get("grant") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) => Some(name.clone()),
+        Some(_) => return Err(format!("passkey `{id}`'s `grant` must be a name")),
+    };
+    let listed = match entry.get("grants") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(names)) => Some(
+            names
+                .iter()
+                .map(|name| name.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()
+                .ok_or_else(|| format!("passkey `{id}`'s `grants` must be a list of names"))?,
+        ),
+        Some(_) => return Err(format!("passkey `{id}`'s `grants` must be a list of names")),
+    };
+    let grants = match (listed, single) {
+        (Some(listed), Some(single)) if listed != [single.clone()] => {
+            return Err(format!(
+                "passkey `{id}` has both `grant` and `grants`, and they disagree"
+            ))
+        }
+        (Some(listed), _) => listed,
+        (None, Some(single)) => vec![single],
+        (None, None) => return Err(format!("passkey `{id}` has no `grants`")),
+    };
+    if grants.is_empty() || grants.iter().any(String::is_empty) {
+        return Err(format!("passkey `{id}` names no grant"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(twice) = grants.iter().find(|name| !seen.insert(name.as_str())) {
+        return Err(format!("passkey `{id}` names grant `{twice}` twice"));
+    }
+    Ok(grants)
 }
 
 /// Write one passkey entry into `clients.json`, keeping every other key (the QUIC clients,
@@ -216,7 +360,7 @@ fn write_passkey(layout: &Layout, _lock: &quic::FileLock, entry: &Enrolled) -> R
     passkeys.insert(
         entry.credential_id.clone(),
         json!({
-            "grant": entry.grant,
+            "grants": entry.grants,
             "label": entry.label,
             "public_key": entry.public_key,
             "sign_count": entry.sign_count,
@@ -300,6 +444,12 @@ pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled
     Ok(target)
 }
 
+/// The class of a sign-in's entry in the log segment ([`Passkeys::auditing`]).
+pub const LOGIN_CLASS: &str = "urn:iki:gonk:class:Login";
+
+/// The class of a sign-out's, or a session ending's, entry in the log segment.
+pub const LOGOUT_CLASS: &str = "urn:iki:gonk:class:Logout";
+
 /// The class of the [`audit_log`] line [`revoke`] writes.
 pub const REVOKED: &str = "gonk:PasskeyRevoked";
 
@@ -328,14 +478,214 @@ pub fn end_sessions(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<En
 
 /// Append one `class` line naming `target` to [`audit_log`].
 fn record(layout: &Layout, class: &str, target: &Enrolled, now_ms: u64) -> std::io::Result<()> {
+    record_with(layout, class, target, now_ms, "")
+}
+
+/// [`record`], with `extra` (` name=value` fields, each already [`encoded`]) at the end.
+/// `grant=` lists every grant the passkey holds, each encoded, joined by `,` (which
+/// [`encoded`] never leaves bare, so the list splits back unambiguously).
+fn record_with(
+    layout: &Layout,
+    class: &str,
+    target: &Enrolled,
+    now_ms: u64,
+    extra: &str,
+) -> std::io::Result<()> {
+    let grants: Vec<String> = target.grants.iter().map(|g| encoded(g)).collect();
     let line = format!(
-        "{} {class} {} label={} grant={}\n",
+        "{} {class} {} label={} grant={}{extra}\n",
         crate::backup::stamp_iso_ms(now_ms),
         passkey_iri(&target.credential_id),
         encoded(&target.label),
-        encoded(&target.grant),
+        grants.join(","),
     );
     append_line(&audit_log(layout), &line)
+}
+
+/// The class of the [`audit_log`] line [`Passkeys::add_grant`] writes: one passkey was
+/// WIDENED by an invite's grant. Its fields: `label`, `grant` (every grant it holds now),
+/// `added` (the one added) and `invite` (`sha256:<hex>` of the code, as `invites.json` keys
+/// it — never the code).
+pub const GRANT_ADDED: &str = "gonk:PasskeyGrantAdded";
+
+/// The class of the [`audit_log`] line [`remove_grant`] writes; `removed` names the grant.
+pub const GRANT_REMOVED: &str = "gonk:PasskeyGrantRemoved";
+
+/// One grant change [`audit_log`] holds for a passkey: what `passkey list` prints under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantChange {
+    /// The line's timestamp, as written.
+    pub at: String,
+    /// The passkey's credential id.
+    pub credential_id: String,
+    /// `true` for a [`GRANT_ADDED`] line, `false` for a [`GRANT_REMOVED`] one.
+    pub added: bool,
+    /// The grant added or removed, decoded.
+    pub grant: String,
+    /// The invite an addition redeemed (`sha256:<hex>`); `None` for a removal, or for an
+    /// addition the owner made at the command line ([`add_grant`]).
+    pub invite: Option<String>,
+    /// Who made the change, when the line says (`by=`): [`BY_OWNER`] for [`add_grant`].
+    pub by: Option<String>,
+}
+
+/// Every [`GRANT_ADDED`] and [`GRANT_REMOVED`] line in [`audit_log`], in the order written. No
+/// log: none. A line that does not parse is skipped: the log is a record, not a source of
+/// authority (that is `clients.json`).
+pub fn grant_changes(layout: &Layout) -> Result<Vec<GrantChange>, String> {
+    let path = audit_log(layout);
+    let text = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split(' ');
+        let (Some(at), Some(class), Some(iri)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (added, key) = match class {
+            GRANT_ADDED => (true, "added="),
+            GRANT_REMOVED => (false, "removed="),
+            _ => continue,
+        };
+        let Some(credential) = passkey_credential(iri) else {
+            continue;
+        };
+        let rest: Vec<&str> = fields.collect();
+        let field = |prefix: &str| rest.iter().find_map(|f| f.strip_prefix(prefix));
+        let Some(grant) = field(key).map(decoded) else {
+            continue;
+        };
+        out.push(GrantChange {
+            at: at.to_string(),
+            credential_id: credential.to_string(),
+            added,
+            grant,
+            invite: field("invite=").map(str::to_string),
+            by: field("by=").map(decoded),
+        });
+    }
+    Ok(out)
+}
+
+/// Take ONE grant off ONE passkey in `clients.json` and append a [`GRANT_REMOVED`] line to
+/// [`audit_log`] — what `ikigai-gonk passkey remove-grant` runs (ledger
+/// [#3388](http://localhost:1062/l/default/item/3388)). Returns the passkey as it is now.
+///
+/// Only that passkey's list changes: every other passkey, the grant itself in `grants.json`
+/// (which others may hold) and the passkey's other grants are left exactly as they were. The
+/// LAST grant is refused — a passkey with none could never sign in; `passkey revoke` is the
+/// command for that. Checked before and after, as [`revoke`] is. Takes effect at the passkey's
+/// next request, which re-reads `clients.json`.
+pub fn remove_grant(
+    layout: &Layout,
+    which: Which<'_>,
+    grant: &str,
+    now_ms: u64,
+) -> Result<Enrolled, String> {
+    let lock = layout.lock_clients()?;
+    let mut target = pick(layout, which)?;
+    if !target.grants.iter().any(|g| g == grant) {
+        return Err(format!(
+            "passkey `{}` does not hold grant `{grant}` (it holds {}); nothing was written",
+            target.label,
+            target.grant_names()
+        ));
+    }
+    if target.grants.len() == 1 {
+        return Err(format!(
+            "`{grant}` is the only grant passkey `{}` holds, and a passkey with none cannot sign \
+             in: `ikigai-gonk passkey revoke` removes the passkey. Nothing was written",
+            target.label
+        ));
+    }
+    target.grants.retain(|g| g != grant);
+    write_passkey(layout, &lock, &target)?;
+    drop(lock);
+    record_with(
+        layout,
+        GRANT_REMOVED,
+        &target,
+        now_ms,
+        &format!(" removed={}", encoded(grant)),
+    )
+    .map_err(|e| {
+        format!(
+            "grant `{grant}` WAS removed from passkey `{}`, but its audit line could not be \
+             written to {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        )
+    })?;
+    Ok(target)
+}
+
+/// The `by=` value of a [`GRANT_ADDED`] line [`add_grant`] writes: the box's owner, at the
+/// command line, widened the passkey; no invite was redeemed.
+pub const BY_OWNER: &str = "owner";
+
+/// Add ONE grant to ONE passkey in `clients.json` and append a [`GRANT_ADDED`] line to
+/// [`audit_log`] — what `ikigai-gonk passkey grant add` runs (ledger
+/// [#3400](http://localhost:1062/l/default/item/3400)). Returns the passkey as it is now.
+///
+/// The owner's half of [`Passkeys::add_grant`]: the passkey is named as [`revoke`] and
+/// [`remove_grant`] name one, and only its list grows. A grant `grants.json` does not define
+/// (or that resolves to no scopes, or to a refused token) is refused, and so is one the passkey
+/// already holds; nothing is written then. `grants.json` and every other passkey are unchanged.
+///
+/// The line is the one an invite's widening writes, with `by=owner` where that one has
+/// `invite=sha256:…`, so a passkey's grant history stays in one place. As there, it is written
+/// under the clients lock with the change, and if it cannot be written the change is undone.
+///
+/// ★ **No session is ended.** Takes effect at the passkey's next request, which re-reads
+/// `clients.json` ([`Passkeys::identity`]), so a live session simply holds the wider grant.
+/// The invite path ends and re-establishes sessions because the one asking for the wider grant
+/// is whoever holds a session cookie and an invite link, so it demands a fresh assertion; here
+/// the one deciding is the owner of the box, who could as well have widened the grant itself,
+/// and signing the person out would prove nothing more. `passkey logout --all` is there for an
+/// owner who wants it.
+pub fn add_grant(
+    layout: &Layout,
+    which: Which<'_>,
+    grant: &str,
+    now_ms: u64,
+) -> Result<Enrolled, String> {
+    let lock = layout.lock_clients()?;
+    let mut target = pick(layout, which)?;
+    if target.grants.iter().any(|g| g == grant) {
+        return Err(format!(
+            "passkey `{}` already holds grant `{grant}` (it holds {}); nothing was written",
+            target.label,
+            target.grant_names()
+        ));
+    }
+    let grants = quic::read_grants(&layout.grants_json())?;
+    quic::scopes_for_grant(&grants, grant).map_err(|e| {
+        format!(
+            "{e} — `ikigai-gonk passkey invite {grant} …` defines a grant in {}; nothing was \
+             written",
+            layout.grants_json().display()
+        )
+    })?;
+    let before = target.clone();
+    target.grants.push(grant.to_string());
+    write_passkey(layout, &lock, &target)?;
+    let extra = format!(" added={} by={BY_OWNER}", encoded(grant));
+    if let Err(e) = record_with(layout, GRANT_ADDED, &target, now_ms, &extra) {
+        // ★ No widening goes unrecorded: undone, under the same lock.
+        write_passkey(layout, &lock, &before)?;
+        return Err(format!(
+            "grant `{grant}` was NOT added to passkey `{}`: its line could not be written to \
+             {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        ));
+    }
+    drop(lock);
+    Ok(target)
 }
 
 /// The ONE enrolled passkey `which` names, from a file that is whole ([`checked_passkeys`]).
@@ -395,6 +745,33 @@ fn encoded(text: &str) -> String {
     } else {
         out
     }
+}
+
+/// The inverse of [`encoded`]: `%XX` back to its byte, `-` back to empty.
+fn decoded(text: &str) -> String {
+    if text == "-" {
+        return String::new();
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Append `line` to `path`, creating it readable by this user only.
@@ -467,11 +844,73 @@ fn redeem(layout: &Layout, code: &str, now: u64) -> Result<String, String> {
     Ok(grant)
 }
 
+/// The grant the invite `code` names, read WITHOUT redeeming it: what an enrollment with no
+/// label is labeled, checked before the invite is spent. Unknown codes are refused as
+/// [`redeem`] refuses them; expiry is left to [`redeem`].
+fn invite_grant(layout: &Layout, code: &str) -> Result<String, String> {
+    let _lock = layout.lock_invites()?;
+    let doc = quic::read_object(&layout.invites_json())?;
+    doc.get(&sha256_hex(code.as_bytes()))
+        .ok_or("this invite is not valid — it was never issued, or it has been used")?
+        .get("grant")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "the invite names no grant".to_string())
+}
+
+/// Refuse adding `grant` to a passkey that already holds it: nothing would change, and the
+/// invite is better kept for someone it would widen.
+fn refuse_held(enrolled: &Enrolled, grant: &str) -> Result<(), String> {
+    if enrolled.grants.iter().any(|g| g == grant) {
+        return Err(format!(
+            "the passkey you are signed in with (`{}`) already holds grant `{grant}`; the invite \
+             is still good",
+            enrolled.label
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse `label` if an enrolled passkey already has it (ledger
+/// [#3384](http://localhost:1062/l/default/item/3384)): `passkey revoke <label>` refuses a
+/// label two passkeys share, and the system's passkey picker cannot tell them apart, so
+/// enrollment must not create the ambiguity. Labels compare exactly, as [`revoke`] compares them.
+fn refuse_taken_label(enrolled: &BTreeMap<String, Enrolled>, label: &str) -> Result<(), String> {
+    match enrolled.values().find(|e| e.label == label) {
+        Some(_) => Err(format!(
+            "another passkey is already labeled `{label}` — choose a different label; \
+             the invite is still good"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The scopes a grant name holds, fail-closed: unknown, empty, or naming any token
 /// [`quic::grant_refusal`] refuses is an error. The same rule the QUIC door applies.
 pub fn scopes_of(layout: &Layout, grant: &str) -> Result<Vec<String>, String> {
     let grants = layout.current_grants()?;
     quic::scopes_for_grant(&grants, grant)
+}
+
+/// The scopes a passkey holding `names` holds: the union of each grant's [`scopes_of`], in
+/// first-seen order, through the same resolution, read once. Fail-closed as each is: one grant
+/// that does not resolve refuses the whole identity, never serves it the rest, so a grant
+/// deleted from `grants.json` is noticed rather than silently narrowed around.
+pub fn scopes_of_all(layout: &Layout, names: &[String]) -> Result<Vec<String>, String> {
+    if names.is_empty() {
+        return Err("this passkey holds no grant".to_string());
+    }
+    let grants = layout.current_grants()?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for name in names {
+        for scope in quic::scopes_for_grant(&grants, name)? {
+            if seen.insert(scope.clone()) {
+                out.push(scope);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// What a challenge is for.
@@ -481,6 +920,10 @@ pub enum Purpose {
     Register,
     /// `navigator.credentials.get`.
     Login,
+    /// `navigator.credentials.get`, answered to add an invite's grant to the signed-in
+    /// passkey ([`Passkeys::add_grant`]): a sign-in challenge cannot be spent on it, nor it on
+    /// a sign-in.
+    AddGrant,
 }
 
 impl Purpose {
@@ -489,6 +932,7 @@ impl Purpose {
         match self {
             Purpose::Register => b'r',
             Purpose::Login => b'l',
+            Purpose::AddGrant => b'g',
         }
     }
 }
@@ -500,11 +944,26 @@ const SEALED_BYTES: usize = NONCE_BYTES + 1 + 8 + 32;
 
 struct Session {
     credential_id: String,
-    /// The absolute end, [`SESSION_SECONDS`] after the sign-in.
+    /// The grants the passkey held at the sign-in (what the file records; the passkey's grants
+    /// and their scopes are re-read on every request).
+    grants: Vec<String>,
+    /// When the sign-in opened it.
+    issued: u64,
+    /// The absolute end: [`Passkeys::lifetime`] after the sign-in.
     expires: u64,
     /// The last request that carried this session, for the idle bound.
     last_seen: u64,
+    /// The `last_seen` the file holds: a request writes the file only once this is
+    /// [`SEEN_WRITE_SECONDS`] behind, so a polling page does not write it every few seconds.
+    stored_seen: u64,
 }
+
+/// How stale the file's `last_seen` may be before a request writes it again. A restart can
+/// only make the idle bound end a session this much SOONER, never later.
+const SEEN_WRITE_SECONDS: u64 = 60;
+
+/// The `gonk/sessions.json` format version this server writes and reads.
+const SESSIONS_FORMAT: u64 = 1;
 
 impl Session {
     /// Why this session is over at `now`, or `None` while it is live.
@@ -530,6 +989,8 @@ struct State {
     sessions: HashMap<String, Session>,
     /// How many bytes of [`audit_log`] this server has read: the lines past it are news.
     log_seen: u64,
+    /// The sessions or `log_seen` changed since `gonk/sessions.json` was last written.
+    dirty: bool,
 }
 
 impl State {
@@ -538,8 +999,127 @@ impl State {
         let before = self.sessions.len();
         self.sessions
             .retain(|_, s| s.credential_id != credential_id);
-        before - self.sessions.len()
+        let ended = before - self.sessions.len();
+        self.dirty |= ended > 0;
+        ended
     }
+
+    /// The file's contents: every session, keyed by its token's hash, and the log offset.
+    fn stored(&self) -> Value {
+        let sessions: Map<String, Value> = self
+            .sessions
+            .iter()
+            .map(|(hash, s)| {
+                (
+                    hash.clone(),
+                    json!({
+                        "principal": passkey_iri(&s.credential_id),
+                        "grants": s.grants,
+                        "issued": s.issued,
+                        "last_seen": s.last_seen,
+                        "expires": s.expires,
+                    }),
+                )
+            })
+            .collect();
+        json!({
+            "format": SESSIONS_FORMAT,
+            "log_seen": self.log_seen,
+            "sessions": sessions,
+        })
+    }
+}
+
+/// Read `gonk/sessions.json`: its sessions not yet expired at `now`, and how far the server
+/// that wrote it had read the log. `None` when there is no file (a first start) or it cannot
+/// be read as one this server wrote — then no session is restored, the safe direction.
+fn load_sessions(layout: &Layout, now: u64) -> Option<(HashMap<String, Session>, u64, bool)> {
+    let path = layout.sessions_json();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!(
+                "ikigai-gonk: reading {}: {e}; no session restored",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let doc: Value = match serde_json::from_str(&text) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!(
+                "ikigai-gonk: {} is not JSON ({e}); no session restored",
+                path.display()
+            );
+            return None;
+        }
+    };
+    if doc.get("format").and_then(Value::as_u64) != Some(SESSIONS_FORMAT) {
+        eprintln!(
+            "ikigai-gonk: {} is not format {SESSIONS_FORMAT}; no session restored",
+            path.display()
+        );
+        return None;
+    }
+    let log_seen = doc.get("log_seen").and_then(Value::as_u64).unwrap_or(0);
+    let mut sessions = HashMap::new();
+    let mut dropped = false;
+    for (hash, entry) in doc
+        .get("sessions")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let field = |name: &str| entry.get(name).and_then(Value::as_u64);
+        let credential = entry
+            .get("principal")
+            .and_then(Value::as_str)
+            .and_then(passkey_credential);
+        // `grants` as this server writes it; `grant`, one name, as servers before #3388 did.
+        let grants = match (entry.get("grants"), entry.get("grant")) {
+            (Some(Value::Array(names)), _) => names
+                .iter()
+                .map(|n| n.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()
+                .filter(|names| !names.is_empty()),
+            (None, Some(Value::String(name))) => Some(vec![name.clone()]),
+            _ => None,
+        };
+        let well_formed = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        match (
+            well_formed,
+            credential,
+            grants,
+            field("issued"),
+            field("last_seen"),
+            field("expires"),
+        ) {
+            (
+                true,
+                Some(credential),
+                Some(grants),
+                Some(issued),
+                Some(last_seen),
+                Some(expires),
+            ) if expires > now && expires.saturating_sub(issued) <= READ_ONLY_SESSION_SECONDS => {
+                sessions.insert(
+                    hash.clone(),
+                    Session {
+                        credential_id: credential.to_string(),
+                        grants,
+                        issued,
+                        expires,
+                        last_seen,
+                        stored_seen: last_seen,
+                    },
+                );
+            }
+            _ => dropped = true,
+        }
+    }
+    Some((sessions, log_seen, dropped))
 }
 
 /// The most of [`audit_log`] one read takes, in bytes. A larger backlog is read over the next
@@ -564,12 +1144,26 @@ struct AuditLine<'a> {
     why: Option<&'a str>,
 }
 
+/// A `navigator.credentials.get` answer that verified ([`Passkeys::verify_assertion`]).
+struct Verified {
+    /// The passkey that signed, as the file held it when it was checked.
+    enrolled: Enrolled,
+    /// The authenticator's signature counter.
+    count: u32,
+    /// The challenge it answered, not yet marked answered.
+    challenge: String,
+    /// When that challenge expires.
+    expires: u64,
+}
+
 /// The HTTP door's passkey relying party and session table.
 pub struct Passkeys {
     layout: Layout,
     origin: String,
     idle_seconds: u64,
-    audit: Option<crate::access::Sink>,
+    /// `gonk.http.session_max_hours`, in seconds: see [`Passkeys::lifetime`].
+    max_seconds: u64,
+    audit: Option<std::sync::Arc<crate::access::Record>>,
     state: Mutex<State>,
 }
 
@@ -587,23 +1181,93 @@ pub struct Identity {
 
 impl Passkeys {
     /// A relying party for the page served at `http://localhost:{port}`, with the
-    /// [`DEFAULT_IDLE_SECONDS`] idle bound and no audit lines.
-    ///
-    /// Lines already in [`audit_log`] are history: no session existed when they were written,
-    /// so this server reads only what is appended after it starts.
+    /// [`DEFAULT_IDLE_SECONDS`] idle bound, a [`SESSION_SECONDS`] lifetime and no audit lines,
+    /// holding the sessions `gonk/sessions.json` keeps that have not expired by the wall clock.
     pub fn new(layout: Layout, port: u16) -> Passkeys {
-        let log_seen = std::fs::metadata(audit_log(&layout))
+        Passkeys::new_at(layout, port, now_seconds())
+    }
+
+    /// [`Passkeys::new`], with the clock reading `now`.
+    ///
+    /// With no `gonk/sessions.json`, lines already in [`audit_log`] are history: no session
+    /// existed when they were written, so this server reads only what is appended after it
+    /// starts. With one, it reads from where the server that wrote it stopped, so a sign-out
+    /// written while no server ran still ends what it names. (A log now shorter than that was
+    /// replaced, and is read from its start, which can only end sessions.)
+    pub fn new_at(layout: Layout, port: u16, now: u64) -> Passkeys {
+        let log_len = std::fs::metadata(audit_log(&layout))
             .map(|m| m.len())
             .unwrap_or(0);
-        Passkeys {
+        let state = match load_sessions(&layout, now) {
+            Some((sessions, log_seen, dropped)) => State {
+                sessions,
+                log_seen: if log_seen > log_len { 0 } else { log_seen },
+                dirty: dropped,
+                ..State::default()
+            },
+            None => State {
+                log_seen: log_len,
+                ..State::default()
+            },
+        };
+        let passkeys = Passkeys {
             layout,
             origin: format!("http://localhost:{port}"),
             idle_seconds: DEFAULT_IDLE_SECONDS,
+            max_seconds: SESSION_SECONDS,
             audit: None,
-            state: Mutex::new(State {
-                log_seen,
-                ..State::default()
-            }),
+            state: Mutex::new(state),
+        };
+        if let Ok(mut state) = passkeys.state.lock() {
+            passkeys.read_log(&mut state);
+            passkeys.save(&mut state);
+        }
+        passkeys
+    }
+
+    /// The same relying party with `gonk.http.session_max_hours` at `seconds`: the absolute
+    /// lifetime of a session whose grant is read-only, capped at [`SESSION_SECONDS`] for any
+    /// other. Clamped to [`READ_ONLY_SESSION_SECONDS`]; the setting refuses more at load.
+    pub fn with_max_seconds(mut self, seconds: u64) -> Passkeys {
+        self.max_seconds = seconds.clamp(1, READ_ONLY_SESSION_SECONDS);
+        self
+    }
+
+    /// `gonk.http.session_max_hours`, in seconds.
+    pub fn max_seconds(&self) -> u64 {
+        self.max_seconds
+    }
+
+    /// How long a session whose grant holds `scopes` lasts at most: the setting if every scope
+    /// only reads ([`read_only`]), and never more than [`SESSION_SECONDS`] otherwise.
+    pub fn lifetime(&self, scopes: &[String]) -> u64 {
+        if read_only(scopes) {
+            self.max_seconds
+        } else {
+            self.max_seconds.min(SESSION_SECONDS)
+        }
+    }
+
+    /// Write `gonk/sessions.json` if anything in it changed. A failure is said on stderr and
+    /// the session table in memory stands: refusing a sign-out because the disk is full would
+    /// keep the session open, the wrong direction.
+    fn save(&self, state: &mut State) {
+        if !state.dirty {
+            return;
+        }
+        let path = self.layout.sessions_json();
+        let written =
+            quic::pretty(&state.stored()).and_then(|text| quic::write_private(&path, &text));
+        match written {
+            Ok(()) => {
+                state.dirty = false;
+                for session in state.sessions.values_mut() {
+                    session.stored_seen = session.last_seen;
+                }
+            }
+            // No `gonk/` directory: nothing is enrolled, so no session can be open to keep.
+            Err(_) if state.sessions.is_empty() && !path.parent().is_some_and(|d| d.is_dir()) => {}
+            Err(e) => eprintln!("ikigai-gonk: sessions not saved: {e}"),
         }
     }
 
@@ -613,10 +1277,10 @@ impl Passkeys {
         self
     }
 
-    /// The same relying party, writing its sign-in and sign-out lines to `sink` (one call per
-    /// line, no newline): what `main` points at stderr, beside the access log.
-    pub fn auditing(mut self, sink: crate::access::Sink) -> Passkeys {
-        self.audit = Some(sink);
+    /// The same relying party, writing its sign-in and sign-out entries into `record`'s segment,
+    /// beside the door lines: what `main` gives it.
+    pub fn auditing(mut self, record: std::sync::Arc<crate::access::Record>) -> Passkeys {
+        self.audit = Some(record);
         self
     }
 
@@ -625,43 +1289,41 @@ impl Passkeys {
         self.idle_seconds
     }
 
-    /// Write one `gonk:Login` / `gonk:Logout` line, in the access log's grammar: the passkey
-    /// resource `op` names, then `door`, `outcome`, `principal`, `credential`, `sessions`, and
-    /// for a logout `why`. `credential` is base64url when it came from an enrollment and is
-    /// encoded and cut when a caller sent it. Never a token.
+    /// Write one [`LOGIN_CLASS`] / [`LOGOUT_CLASS`] entry: the passkey resource `op` names,
+    /// then `door`, `outcome`, `principal`, `credential` (`log:passkey`, the KIND), `passkey`
+    /// (the credential id), `sessions`, and for a logout `why`. `passkey` is base64url when it
+    /// came from an enrollment and is encoded and cut when a caller sent it. Never a token.
     fn audit(&self, class: &str, line: AuditLine<'_>) {
-        let Some(sink) = &self.audit else {
+        let Some(record) = &self.audit else {
             return;
         };
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let credential: String = match line.credential {
+        let passkey: String = match line.credential {
             Some(id) => encoded(id).chars().take(crate::access::MAX_FIELD).collect(),
             None => "-".to_string(),
         };
         // The principal is named only once the credential is authenticated: a refused sign-in
-        // names the credential it CLAIMED, and nobody.
-        let principal = if line.authenticated && line.credential.is_some() {
-            passkey_iri(&credential)
-        } else {
-            "-".to_string()
+        // names the credential it CLAIMED, and nobody. It is built from the whole id, never
+        // the cut `passkey` column, so it is the IRI the door lines of the same session carry
+        // (ledger #3414); an enrolled id always fits one ([`principal_refusal`]).
+        let principal = match line.credential {
+            Some(id) if line.authenticated => passkey_iri(id),
+            _ => ikigai_log::ANONYMOUS_PRINCIPAL.to_string(),
         };
-        let mut text = format!(
-            "{} {class} urn:iki:gonk:passkey:{} door={} outcome={} principal={principal} \
-             credential={credential} sessions={}",
-            crate::backup::stamp_iso_ms(now_ms),
-            line.op,
-            line.door,
-            line.outcome,
-            line.sessions,
-        );
+        let mut entry = ikigai_log::Entry::new(
+            crate::access::now(),
+            class,
+            format!("urn:iki:gonk:passkey:{}", line.op),
+        )
+        .with("door", line.door)
+        .with("outcome", line.outcome)
+        .with(ikigai_log::PRINCIPAL_KEY, principal)
+        .with("credential", ikigai_log::PASSKEY_CREDENTIAL)
+        .with("passkey", passkey)
+        .with("sessions", line.sessions.to_string());
         if let Some(why) = line.why {
-            text.push_str(" why=");
-            text.push_str(why);
+            entry = entry.with("why", why);
         }
-        sink(&text);
+        record.entry(entry);
     }
 
     /// Read what was appended to [`audit_log`] since the last read, and end every session of a
@@ -676,6 +1338,7 @@ impl Passkeys {
         };
         if len < state.log_seen {
             state.log_seen = 0;
+            state.dirty = true;
         }
         if len == state.log_seen {
             return;
@@ -697,6 +1360,7 @@ impl Passkeys {
         let Some(end) = bytes.iter().rposition(|&b| b == b'\n') else {
             if bytes.len() as u64 == LOG_READ_MAX {
                 state.log_seen += LOG_READ_MAX;
+                state.dirty = true;
             }
             return;
         };
@@ -715,7 +1379,7 @@ impl Passkeys {
             if let Some(credential) = passkey_credential(iri) {
                 let ended = state.end_sessions(credential);
                 self.audit(
-                    "gonk:Logout",
+                    LOGOUT_CLASS,
                     AuditLine {
                         op: "session",
                         door: "cli",
@@ -729,6 +1393,28 @@ impl Passkeys {
             }
         }
         state.log_seen += whole.len() as u64;
+        state.dirty = true;
+    }
+
+    /// Refuse `label` if an enrolled passkey already has it — what `register-options` asks
+    /// when the page names its label, so a taken one is refused BEFORE the authenticator
+    /// mints a credential that could then never be enrolled. [`Passkeys::register`] checks
+    /// again under the clients lock; this early answer is only a courtesy.
+    pub fn check_label(&self, label: &str) -> Result<(), String> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Ok(());
+        }
+        refuse_taken_label(&read_passkeys(&self.layout)?, label)
+    }
+
+    /// The grant `invite` would enroll a passkey under, spending nothing — what
+    /// `register-options` answers when the page names its invite, so the passkey's WebAuthn
+    /// `user.displayName` can carry it (ledger [#3387](http://localhost:1062/l/default/item/3387)).
+    /// An invite never issued or already used is refused here, before the authenticator mints
+    /// a credential [`Passkeys::register`] would refuse.
+    pub fn invite_grant(&self, invite: &str) -> Result<String, String> {
+        invite_grant(&self.layout, invite)
     }
 
     /// The only origin a ceremony is accepted from.
@@ -851,30 +1537,41 @@ impl Passkeys {
         let client_data = b64(&text("clientDataJSON")?, "clientDataJSON")?;
         self.check_client_data(&client_data, "webauthn.create", &challenge)?;
         let id = text("id")?;
+        if let Some(why) = principal_refusal(&id) {
+            return Err(why);
+        }
         let key = b64(&text("publicKey")?, "publicKey")?;
         // Parsing is the check that this is an ES256 key this server can verify against.
         RegisteredCredential::from_spki_der(b64(&id, "id")?, &key, 0)
             .map_err(|e| format!("{e} — this server verifies ES256 (P-256) passkeys only"))?;
+        let invite = text("invite")?;
         let lock = self.layout.lock_clients()?;
-        if read_passkeys(&self.layout)?.contains_key(&id) {
+        let enrolled = read_passkeys(&self.layout)?;
+        if enrolled.contains_key(&id) {
             return Err("this credential is already enrolled".to_string());
         }
-        // The invite is redeemed LAST, after everything that could refuse the credential:
-        // a malformed key must not burn a single-use code.
-        let grant = redeem(&self.layout, &text("invite")?, now)?;
-        scopes_of(&self.layout, &grant)?;
-        // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
-        self.answer_challenge(&challenge, expires, now)?;
-        let label = v
+        // No label falls back to the invite's grant, so that is the label checked; reading the
+        // invite here spends nothing.
+        let label = match v
             .get("label")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| grant.clone());
+        {
+            Some(label) => label.to_string(),
+            None => invite_grant(&self.layout, &invite)?,
+        };
+        // Under the clients lock, so two enrollments racing for one label cannot both pass.
+        refuse_taken_label(&enrolled, &label)?;
+        // The invite is redeemed LAST, after everything that could refuse the credential:
+        // a malformed key or a taken label must not burn a single-use code.
+        let grant = redeem(&self.layout, &invite, now)?;
+        scopes_of(&self.layout, &grant)?;
+        // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
+        self.answer_challenge(&challenge, expires, now)?;
         let entry = Enrolled {
             credential_id: id,
-            grant,
+            grants: vec![grant],
             label,
             public_key: URL_SAFE_NO_PAD.encode(&key),
             sign_count: 0,
@@ -894,7 +1591,7 @@ impl Passkeys {
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
         self.audit(
-            "gonk:Login",
+            LOGIN_CLASS,
             AuditLine {
                 op: "login",
                 door: "http",
@@ -910,6 +1607,32 @@ impl Passkeys {
 
     fn sign_in(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
+        let verified = self.verify_assertion(&v, Purpose::Login, now)?;
+        // Answered only now that a passkey signed it ([`MAX_PENDING`]).
+        self.answer_challenge(&verified.challenge, verified.expires, now)?;
+        // ★ Decided again under the lock, against the file as it is NOW: a `passkey revoke`
+        // (or a re-enrolment under another key) may have landed while this was verifying, and
+        // writing the entry read before it back would undo it (ledger #2776). So the entry
+        // written is the one read now, under the same key: a grant added or removed meanwhile
+        // (#3388) stands, and this session opens with it.
+        let lock = self.layout.lock_clients()?;
+        let mut enrolled = read_passkeys(&self.layout)?
+            .remove(&verified.enrolled.credential_id)
+            .filter(|now| now.public_key == verified.enrolled.public_key)
+            .ok_or("this passkey is not enrolled on this server")?;
+        if verified.count > enrolled.sign_count {
+            enrolled.sign_count = verified.count;
+            write_passkey(&self.layout, &lock, &enrolled)?;
+        }
+        drop(lock);
+        self.open_session(enrolled, now)
+    }
+
+    /// Check a `navigator.credentials.get` answer in `v` (`{challenge, id, authenticatorData,
+    /// clientDataJSON, signature}`) against the enrolled key: the challenge sealed here for
+    /// `purpose`, this origin and RP ID, user verification REQUIRED. Answers nothing and writes
+    /// nothing: the caller marks the challenge answered once it acts on it.
+    fn verify_assertion(&self, v: &Value, purpose: Purpose, now: u64) -> Result<Verified, String> {
         let text = |name: &str| {
             v.get(name)
                 .and_then(Value::as_str)
@@ -917,9 +1640,9 @@ impl Passkeys {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         let challenge = text("challenge")?;
-        let expires = self.check_challenge(&challenge, Purpose::Login, now)?;
+        let expires = self.check_challenge(&challenge, purpose, now)?;
         let id = text("id")?;
-        let mut enrolled = read_passkeys(&self.layout)?
+        let enrolled = read_passkeys(&self.layout)?
             .remove(&id)
             .ok_or("this passkey is not enrolled on this server")?;
         let credential = RegisteredCredential::from_spki_der(
@@ -950,43 +1673,45 @@ impl Passkeys {
         )
         // One refusal on the wire; the precise reason is in the error the caller logs.
         .map_err(|e| format!("the passkey assertion was refused ({e})"))?;
-        // Answered only now that a passkey signed it ([`MAX_PENDING`]).
-        self.answer_challenge(&challenge, expires, now)?;
-        // ★ Decided again under the lock, against the file as it is NOW: a `passkey revoke`
-        // (or a re-enrolment under another key) may have landed while this was verifying, and
-        // writing the entry read before it back would undo it (ledger #2776).
-        let lock = self.layout.lock_clients()?;
-        let unchanged = read_passkeys(&self.layout)?.remove(&id).is_some_and(|now| {
-            now.public_key == enrolled.public_key && now.grant == enrolled.grant
-        });
-        if !unchanged {
-            return Err("this passkey is not enrolled on this server".to_string());
-        }
-        if count != enrolled.sign_count {
-            enrolled.sign_count = count;
-            write_passkey(&self.layout, &lock, &enrolled)?;
-        }
-        drop(lock);
-        let scopes = scopes_of(&self.layout, &enrolled.grant)?;
+        Ok(Verified {
+            enrolled,
+            count,
+            challenge,
+            expires,
+        })
+    }
+
+    /// Open a session for `enrolled`, as its grants resolve now: the token (the only copy) and
+    /// the identity.
+    fn open_session(&self, enrolled: Enrolled, now: u64) -> Result<(String, Identity), String> {
+        let scopes = scopes_of_all(&self.layout, &enrolled.grants)?;
         let token = random_b64(32)?;
-        let expires = now + SESSION_SECONDS;
+        let expires = now + self.lifetime(&scopes);
         let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
         // ★ Before the new session exists: a revocation already in the log ends the OLD
         // sessions of this credential, never the one this sign-in opens.
         self.read_log(&mut state);
         let idle = self.idle_seconds;
+        let before = state.sessions.len();
         state.sessions.retain(|_, s| s.over(now, idle).is_none());
+        state.dirty |= state.sessions.len() != before;
         if state.sessions.len() >= MAX_PENDING {
+            self.save(&mut state);
             return Err(format!("{MAX_PENDING} sessions are already open"));
         }
         state.sessions.insert(
             sha256_hex(token.as_bytes()),
             Session {
-                credential_id: id,
+                credential_id: enrolled.credential_id.clone(),
+                grants: enrolled.grants.clone(),
+                issued: now,
                 expires,
                 last_seen: now,
+                stored_seen: now,
             },
         );
+        state.dirty = true;
+        self.save(&mut state);
         Ok((
             token,
             Identity {
@@ -997,16 +1722,163 @@ impl Passkeys {
         ))
     }
 
+    /// What redeeming `invite` while signed in with the session `token` would add, spending
+    /// nothing: the grant, and the credential id of the passkey it would be added to (so the
+    /// page can ask the authenticator for that passkey only). Refused, before any ceremony,
+    /// when `token` is no live session, the invite is not valid, or the passkey already holds
+    /// the grant.
+    pub fn add_grant_preview(
+        &self,
+        token: &str,
+        invite: &str,
+        now: u64,
+    ) -> Result<(String, String), String> {
+        let who = self.identity(token, now).ok_or(
+            "you are not signed in — sign in first, or create a new passkey with the invite",
+        )?;
+        let grant = invite_grant(&self.layout, invite)?;
+        refuse_held(&who.enrolled, &grant)?;
+        Ok((grant, who.enrolled.credential_id))
+    }
+
+    /// Redeem an invite while signed in by ADDING its grant to the signed-in passkey (ledger
+    /// [#3388](http://localhost:1062/l/default/item/3388)), instead of enrolling a new one. The
+    /// body: `{session, invite, challenge, id, authenticatorData, clientDataJSON, signature}`,
+    /// the last five a FRESH `navigator.credentials.get` answer to an [`Purpose::AddGrant`]
+    /// challenge. Returns a new session token (the only copy), the identity as it is now, and
+    /// the grant added.
+    ///
+    /// ★ **A session alone is not enough.** The assertion must be signed, with user
+    /// verification, by the very passkey `session` signs in as, so a stolen cookie plus an
+    /// invite link cannot raise its own access: it would need the authenticator and the person's
+    /// biometric or PIN too.
+    ///
+    /// ★ **Only this passkey widens.** The grant is appended to THIS passkey's list in
+    /// `clients.json`; no grant in `grants.json` is edited, so every other passkey keeps exactly
+    /// what it had, including one enrolled under a grant this one also holds.
+    ///
+    /// ★ **The session is ended and re-established**, not refreshed: every session of the
+    /// passkey (in this browser and any other) is DELETED, and one new session is opened from
+    /// the fresh assertion, so the only session carrying the wider grant is the one whose holder
+    /// just proved the passkey. Its lifetime is decided anew by the wider scopes. They are
+    /// deleted BEFORE the wider grant is written (ledger #3413), so none reads it in the
+    /// meantime; a widening refused after that point leaves the passkey signed out.
+    ///
+    /// Every widening appends a [`GRANT_ADDED`] line to [`audit_log`] naming the passkey, the
+    /// grant and the invite (by its hash), under the clients lock with the change: if the line
+    /// cannot be written the change is undone and refused, so no widening is unrecorded.
+    pub fn add_grant(&self, body: &[u8], now: u64) -> Result<(String, Identity, String), String> {
+        let answer = self.widen(body, now);
+        let claimed = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
+        self.audit(
+            LOGIN_CLASS,
+            AuditLine {
+                op: "add-grant",
+                door: "http",
+                outcome: if answer.is_ok() { "ok" } else { "denied" },
+                credential: claimed.as_deref(),
+                authenticated: answer.is_ok(),
+                sessions: usize::from(answer.is_ok()),
+                why: None,
+            },
+        );
+        answer
+    }
+
+    fn widen(&self, body: &[u8], now: u64) -> Result<(String, Identity, String), String> {
+        let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
+        let text = |name: &str| {
+            v.get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| format!("`{name}` is missing"))
+        };
+        let token = text("session")?;
+        let invite = text("invite")?;
+        let who = self.identity(token.trim(), now).ok_or(
+            "you are not signed in — sign in first, or create a new passkey with the invite",
+        )?;
+        let verified = self.verify_assertion(&v, Purpose::AddGrant, now)?;
+        if verified.enrolled.credential_id != who.enrolled.credential_id {
+            return Err(format!(
+                "the passkey that answered is not the one you are signed in with (`{}`); the \
+                 invite is still good",
+                who.enrolled.label
+            ));
+        }
+        let lock = self.layout.lock_clients()?;
+        let mut current = read_passkeys(&self.layout)?
+            .remove(&verified.enrolled.credential_id)
+            .filter(|now| now.public_key == verified.enrolled.public_key)
+            .ok_or("this passkey is not enrolled on this server")?;
+        // Everything that could refuse comes before the invite is spent: a grant already held
+        // or one that does not resolve must not burn a single-use code.
+        let grant = invite_grant(&self.layout, &invite)?;
+        refuse_held(&current, &grant)?;
+        scopes_of(&self.layout, &grant)?;
+        // Answered before the invite is spent, so a replayed answer cannot burn it; only the
+        // signed-in passkey's own verified answer gets here ([`MAX_PENDING`]).
+        self.answer_challenge(&verified.challenge, verified.expires, now)?;
+        let redeemed = redeem(&self.layout, &invite, now)?;
+        // ★ Every old session ends BEFORE the wider grant is written: a request re-reads
+        // `clients.json` and then finds its session gone, so no session but the fresh one below
+        // ever reads the wider grant, even while the line is written or the change undone
+        // (ledger #3413).
+        let ended = {
+            let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+            let ended = state.end_sessions(&current.credential_id);
+            self.save(&mut state);
+            ended
+        };
+        self.audit(
+            LOGOUT_CLASS,
+            AuditLine {
+                op: "session",
+                door: "http",
+                outcome: "ok",
+                credential: Some(&current.credential_id),
+                authenticated: true,
+                sessions: ended,
+                why: Some("widened"),
+            },
+        );
+        let before = current.clone();
+        current.grants.push(redeemed.clone());
+        current.sign_count = current.sign_count.max(verified.count);
+        write_passkey(&self.layout, &lock, &current)?;
+        let now_ms = now.saturating_mul(1000);
+        let extra = format!(
+            " added={} invite=sha256:{}",
+            encoded(&redeemed),
+            sha256_hex(invite.as_bytes())
+        );
+        if let Err(e) = record_with(&self.layout, GRANT_ADDED, &current, now_ms, &extra) {
+            // ★ No widening goes unrecorded: undone, under the same lock. The invite is spent.
+            write_passkey(&self.layout, &lock, &before)?;
+            return Err(format!(
+                "grant `{redeemed}` was NOT added: its line could not be written to {}: {e}. \
+                 The invite was spent; ask for a new one, and sign in again",
+                audit_log(&self.layout).display()
+            ));
+        }
+        drop(lock);
+        let (token, identity) = self.open_session(current, now)?;
+        Ok((token, identity, redeemed))
+    }
+
     /// End a session. Unknown tokens are not an error: signing out twice is still signed out.
     /// Writes one `gonk:Logout` line, `sessions=0` for a token that named none.
     pub fn logout(&self, token: &str) {
-        let ended = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.sessions.remove(&sha256_hex(token.as_bytes())));
+        let ended = self.state.lock().ok().and_then(|mut state| {
+            let ended = state.sessions.remove(&sha256_hex(token.as_bytes()));
+            state.dirty |= ended.is_some();
+            self.save(&mut state);
+            ended
+        });
         self.audit(
-            "gonk:Logout",
+            LOGOUT_CLASS,
             AuditLine {
                 op: "logout",
                 door: "http",
@@ -1025,9 +1897,14 @@ impl Passkeys {
     pub fn logout_all(&self, token: &str, now: u64) -> Option<usize> {
         let who = self.identity(token, now)?;
         let credential = who.enrolled.credential_id;
-        let ended = self.state.lock().ok()?.end_sessions(&credential);
+        let ended = {
+            let mut state = self.state.lock().ok()?;
+            let ended = state.end_sessions(&credential);
+            self.save(&mut state);
+            ended
+        };
         self.audit(
-            "gonk:Logout",
+            LOGOUT_CLASS,
             AuditLine {
                 op: "logout-all",
                 door: "http",
@@ -1051,15 +1928,20 @@ impl Passkeys {
     /// holds authentication only.) A live session's idle clock restarts.
     pub fn identity(&self, token: &str, now: u64) -> Option<Identity> {
         let key = sha256_hex(token.as_bytes());
-        let (credential_id, expires) = {
+        let (credential_id, issued, expires) = {
             let mut state = self.state.lock().ok()?;
             self.read_log(&mut state);
-            let session = state.sessions.get(&key)?;
+            let Some(session) = state.sessions.get(&key) else {
+                self.save(&mut state);
+                return None;
+            };
             if let Some(why) = session.over(now, self.idle_seconds) {
                 let ended = state.sessions.remove(&key);
+                state.dirty = true;
+                self.save(&mut state);
                 drop(state);
                 self.audit(
-                    "gonk:Logout",
+                    LOGOUT_CLASS,
                     AuditLine {
                         op: "session",
                         door: "http",
@@ -1072,7 +1954,13 @@ impl Passkeys {
                 );
                 return None;
             }
-            (session.credential_id.clone(), session.expires)
+            let found = (
+                session.credential_id.clone(),
+                session.issued,
+                session.expires,
+            );
+            self.save(&mut state);
+            found
         };
         let Some(enrolled) = self
             .layout
@@ -1081,9 +1969,14 @@ impl Passkeys {
             .get(&credential_id)
             .cloned()
         else {
-            let ended = self.state.lock().ok()?.end_sessions(&credential_id);
+            let ended = {
+                let mut state = self.state.lock().ok()?;
+                let ended = state.end_sessions(&credential_id);
+                self.save(&mut state);
+                ended
+            };
             self.audit(
-                "gonk:Logout",
+                LOGOUT_CLASS,
                 AuditLine {
                     op: "session",
                     door: "http",
@@ -1096,12 +1989,40 @@ impl Passkeys {
             );
             return None;
         };
-        let scopes = scopes_of(&self.layout, &enrolled.grant).ok()?;
+        let scopes = scopes_of_all(&self.layout, &enrolled.grants).ok()?;
+        // ★ The grant is re-read NOW: a session opened read-only whose grant has since been
+        // widened to write ends where a write session would have, 12 h after its sign-in.
+        let expires = expires.min(issued.saturating_add(self.lifetime(&scopes)));
         {
             let mut state = self.state.lock().ok()?;
+            if expires <= now {
+                let ended = state.sessions.remove(&key);
+                state.dirty |= ended.is_some();
+                self.save(&mut state);
+                drop(state);
+                if ended.is_some() {
+                    self.audit(
+                        LOGOUT_CLASS,
+                        AuditLine {
+                            op: "session",
+                            door: "http",
+                            outcome: "ok",
+                            credential: Some(&credential_id),
+                            authenticated: true,
+                            sessions: 1,
+                            why: Some("expired"),
+                        },
+                    );
+                }
+                return None;
+            }
             // Gone if it ended while this request was reading the files: no identity then.
             let session = state.sessions.get_mut(&key)?;
             session.last_seen = session.last_seen.max(now);
+            if session.last_seen >= session.stored_seen.saturating_add(SEEN_WRITE_SECONDS) {
+                state.dirty = true;
+                self.save(&mut state);
+            }
         }
         Some(Identity {
             enrolled,
@@ -1223,35 +2144,227 @@ mod tests {
     /// Enroll a passkey `id` under a fresh `brian` grant and open a session for it at `now`,
     /// straight into the table (no assertion: these tests are about what a session does after).
     fn session_for(rp: &Passkeys, id: &str, now: u64) -> String {
+        session_as(rp, id, "brian", Authority::Write, now)
+    }
+
+    /// [`session_for`] under the grant `grant` holding `authority` over `default`, written to
+    /// `gonk/sessions.json` as a sign-in writes it.
+    fn session_as(rp: &Passkeys, id: &str, grant: &str, authority: Authority, now: u64) -> String {
         if quic::read_grants(&rp.layout.grants_json())
-            .map(|g| !g.contains_key("brian"))
+            .map(|g| !g.contains_key(grant))
             .unwrap_or(true)
         {
-            let scopes = grants_for("default", Authority::Write).unwrap();
-            quic::put_grant(&rp.layout, "brian", &scopes, false).unwrap();
+            let scopes = grants_for("default", authority).unwrap();
+            quic::put_grant(&rp.layout, grant, &scopes, false).unwrap();
         }
         write_passkey(
             &rp.layout,
             &rp.layout.lock_clients().unwrap(),
             &Enrolled {
                 credential_id: id.to_string(),
-                grant: "brian".to_string(),
+                grants: vec![grant.to_string()],
                 label: id.to_string(),
                 public_key: "AAAA".to_string(),
                 sign_count: 0,
             },
         )
         .unwrap();
+        let scopes = scopes_of(&rp.layout, grant).unwrap();
         let token = random_b64(32).unwrap();
-        rp.state.lock().unwrap().sessions.insert(
+        let mut state = rp.state.lock().unwrap();
+        state.sessions.insert(
             sha256_hex(token.as_bytes()),
             Session {
                 credential_id: id.to_string(),
-                expires: now + SESSION_SECONDS,
+                grants: vec![grant.to_string()],
+                issued: now,
+                expires: now + rp.lifetime(&scopes),
                 last_seen: now,
+                stored_seen: now,
             },
         );
+        state.dirty = true;
+        rp.save(&mut state);
         token
+    }
+
+    /// A NEW relying party over the same state directory: what a restarted gonk builds.
+    fn restart(rp: &Passkeys, now: u64) -> Passkeys {
+        Passkeys::new_at(rp.layout.clone(), 1060, now)
+            .with_idle_seconds(rp.idle_seconds)
+            .with_max_seconds(rp.max_seconds)
+    }
+
+    /// ★ A session survives a restart (ledger #3229): a new door over the same directory
+    /// accepts it, with its idle clock and its end carried over; one already expired is
+    /// dropped at load, and one that idled out while the server was down is refused.
+    #[test]
+    fn a_session_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000);
+        let token = session_for(&rp, "Y3JlZA", 1_000);
+        let idle = session_for(&rp, "aWRsZQ", 1_000);
+        assert!(rp.identity(&token, 2_000).is_some());
+        drop(rp);
+
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 3_000);
+        let who = rp
+            .identity(&token, 3_000)
+            .expect("accepted after the restart");
+        assert_eq!(who.enrolled.credential_id, "Y3JlZA");
+        assert_eq!(
+            who.expires,
+            1_000 + SESSION_SECONDS,
+            "its end is carried over"
+        );
+        assert!(
+            rp.identity(&idle, 4_601).is_none(),
+            "the idle bound counts from its last request before the restart"
+        );
+        drop(rp);
+
+        // Past its end: dropped at load, and gone from the file.
+        let rp = Passkeys::new_at(
+            Layout::in_config_home(dir.path()),
+            1060,
+            1_000 + SESSION_SECONDS,
+        );
+        assert!(rp.state.lock().unwrap().sessions.is_empty());
+        let file = std::fs::read_to_string(rp.layout.sessions_json()).unwrap();
+        assert!(!file.contains(&sha256_hex(token.as_bytes())), "{file}");
+    }
+
+    /// ★ The file holds each token's hash, its principal, grant and times, and NEVER the token;
+    /// it is readable by this user only.
+    #[test]
+    fn the_stored_file_holds_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000);
+        let token = session_for(&rp, "Y3JlZA", 1_000);
+        let path = rp.layout.sessions_json();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&token), "{text}");
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        let entry = &doc["sessions"][sha256_hex(token.as_bytes())];
+        assert_eq!(entry["principal"], passkey_iri("Y3JlZA"));
+        assert_eq!(entry["grants"], json!(["brian"]));
+        assert_eq!(entry["issued"], 1_000);
+        assert_eq!(entry["last_seen"], 1_000);
+        assert_eq!(entry["expires"], 1_000 + SESSION_SECONDS);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        }
+    }
+
+    /// ★ Every way a session ends holds across a restart: a sign-out, sign out everywhere (from
+    /// the page or from `passkey logout --all`, run while the server is up or down), and a
+    /// revoked passkey, whose sessions do not come back even if it is enrolled again.
+    #[test]
+    fn an_ended_session_stays_ended_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let rp = Passkeys::new_at(layout.clone(), 1060, 1_000);
+        let out = session_for(&rp, "b3V0", 1_000);
+        let page_all = session_for(&rp, "YWxs", 1_000);
+        let cli_up = session_for(&rp, "dXA", 1_000);
+        let cli_down = session_for(&rp, "ZG93bg", 1_000);
+        let revoked_up = session_for(&rp, "cmV2dXA", 1_000);
+        let revoked_down = session_for(&rp, "cmV2ZG93bg", 1_000);
+        let kept = session_for(&rp, "a2VwdA", 1_000);
+
+        rp.logout(&out);
+        assert_eq!(rp.logout_all(&page_all, 1_001), Some(1));
+        end_sessions(&layout, Which::Credential("dXA"), 0).unwrap();
+        revoke(&layout, Which::Credential("cmV2dXA"), 0).unwrap();
+        // The running server reads the log at its next request.
+        assert!(rp.identity(&kept, 1_002).is_some());
+        drop(rp);
+
+        // While no server runs.
+        end_sessions(&layout, Which::Credential("ZG93bg"), 0).unwrap();
+        revoke(&layout, Which::Credential("cmV2ZG93bg"), 0).unwrap();
+
+        let rp = Passkeys::new_at(layout.clone(), 1060, 1_003);
+        // The revoked passkeys enrolled again under the same id: their old sessions stay ended.
+        for id in ["cmV2dXA", "cmV2ZG93bg"] {
+            write_passkey(
+                &layout,
+                &layout.lock_clients().unwrap(),
+                &Enrolled {
+                    credential_id: id.to_string(),
+                    grants: vec!["brian".to_string()],
+                    label: id.to_string(),
+                    public_key: "AAAA".to_string(),
+                    sign_count: 0,
+                },
+            )
+            .unwrap();
+        }
+        for (what, token) in [
+            ("signed out", &out),
+            ("signed out everywhere from the page", &page_all),
+            ("logout --all while up", &cli_up),
+            ("logout --all while down", &cli_down),
+            ("revoked while up", &revoked_up),
+            ("revoked while down", &revoked_down),
+        ] {
+            assert!(rp.identity(token, 1_004).is_none(), "{what}");
+        }
+        assert!(
+            rp.identity(&kept, 1_004).is_some(),
+            "the others' session is kept"
+        );
+
+        // A sign-in after a logout --all is not ended by reading that line again at a restart.
+        let fresh = session_for(&rp, "dXA", 1_005);
+        drop(rp);
+        let rp = Passkeys::new_at(layout.clone(), 1060, 1_006);
+        assert!(rp.identity(&fresh, 1_006).is_some());
+    }
+
+    /// ★ `gonk.http.session_max_hours = 240` (ledger #3229): a read-only grant's session runs
+    /// past 12 h, to 240 h, across a restart; a write grant's session under the same setting
+    /// ends at 12 h; and a read-only grant widened to write ends its session at 12 h too.
+    #[test]
+    fn only_a_read_only_session_outlives_twelve_hours() {
+        let dir = tempfile::tempdir().unwrap();
+        let hours = crate::config::session_max_seconds(Some("240")).unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000)
+            .with_idle_seconds(hours)
+            .with_max_seconds(hours);
+        let reader = session_as(&rp, "cmVhZA", "reader", Authority::Read, 1_000);
+        let writer = session_as(&rp, "d3JpdGU", "writer", Authority::Write, 1_000);
+        let widened = session_as(&rp, "d2lkZQ", "widened", Authority::Read, 1_000);
+
+        let twelve = 1_000 + SESSION_SECONDS;
+        assert!(rp.identity(&writer, twelve - 1).is_some());
+        assert!(
+            rp.identity(&writer, twelve).is_none(),
+            "a write grant ends at 12 h"
+        );
+        let who = rp
+            .identity(&reader, twelve + 3_600)
+            .expect("read-only past 12 h");
+        assert_eq!(who.expires, 1_000 + 240 * 3_600);
+
+        quic::put_grant(
+            &rp.layout,
+            "widened",
+            &grants_for("default", Authority::Write).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(
+            rp.identity(&widened, twelve + 3_600).is_none(),
+            "a grant that can write now ends at 12 h after the sign-in"
+        );
+
+        let rp = restart(&rp, twelve + 7_200);
+        assert!(rp.identity(&reader, 1_000 + 239 * 3_600).is_some());
+        assert!(rp.identity(&reader, 1_000 + 240 * 3_600).is_none());
     }
 
     /// ★ The idle bound ends a session no request has carried for that long, and a request
@@ -1298,7 +2411,7 @@ mod tests {
         std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
         let old = Enrolled {
             credential_id: "b2xk".to_string(),
-            grant: "brian".to_string(),
+            grants: vec!["brian".to_string()],
             label: "old".to_string(),
             public_key: "AAAA".to_string(),
             sign_count: 0,

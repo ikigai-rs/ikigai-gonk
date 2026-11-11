@@ -529,3 +529,66 @@ fn sign_in_to_browse(gonk: &Gonk) -> String {
     .unwrap();
     session["session"].as_str().unwrap().to_string()
 }
+
+/// #3268: startup and live reload use exactly the configured GitHub root set.
+#[test]
+fn pull_request_panels_follow_github_configuration_without_a_restart() {
+    let repos = tempfile::tempdir().unwrap();
+    let a = repo(repos.path(), "a");
+    let b = repo(repos.path(), "b");
+    for dir in [&a, &b] {
+        std::fs::create_dir(dir.join("src")).unwrap();
+    }
+    let roots = format!(
+        "gonk.browse.root = \"a={}\"\ngonk.browse.root = \"b={}\"\n",
+        a.display(),
+        b.display()
+    );
+    let config_for = |name| format!("{roots}gonk.browse.github = \"{name}=ikigai-rs/demo\"\n");
+    let gonk = Gonk::start(&config_for("a"));
+    let owner = ikigai_ipc::connect(&gonk.socket).expect("socket");
+    let status = text(
+        owner
+            .issue(request(Verb::Source, "urn:iki:gonk:browse:roots", None))
+            .map(|(r, _)| r),
+    );
+    let config = config_path(&status);
+    for (stage, enabled) in [
+        ("startup", Some("a")),
+        ("reload", Some("b")),
+        ("remove", None),
+    ] {
+        if stage != "startup" {
+            std::fs::write(
+                &config,
+                enabled.map(config_for).unwrap_or_else(|| roots.clone()),
+            )
+            .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut failures = Vec::new();
+            for name in ["a", "b"] {
+                for suffix in ["tree", "tree:src"] {
+                    let iri = format!("urn:repo:{name}:{suffix}");
+                    let html = text(
+                        owner
+                            .issue(
+                                request(Verb::Source, &iri, None)
+                                    .with_arg("as", ArgRef::Inline(b"text/html".to_vec())),
+                            )
+                            .map(|(r, _)| r),
+                    );
+                    if html.contains("browse-recent-prs") != (enabled == Some(name)) {
+                        failures.push(format!("{stage} {iri}: {html}"));
+                    }
+                }
+            }
+            if failures.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{}", failures.join("\n"));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}

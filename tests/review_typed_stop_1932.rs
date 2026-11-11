@@ -231,7 +231,9 @@ fn gonk(fails: Fails, calls: Window) -> Gonk {
         queue: QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let access = Arc::new(Mutex::new(Vec::<String>::new()));
     let into = Arc::clone(&access);
@@ -248,6 +250,7 @@ fn gonk(fails: Fails, calls: Window) -> Gonk {
         anonymous: grants_for("default", Authority::Write).expect("the ledger's tokens"),
         bind: addr,
         passkeys: Some(passkeys),
+        public: Vec::new(),
         anonymous_sparql_budget_ms: budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     };
     std::thread::spawn(move || {

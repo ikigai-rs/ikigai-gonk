@@ -1,22 +1,24 @@
-//! The access log: one line per request a door is asked, on stderr (ledger
-//! [#739](http://localhost:1060/l/default/item/739)).
+//! The access log: one `log:Access` entry per request a door is asked, in gonk's `ikigai-log`
+//! segment (ledger [#739](http://localhost:1060/l/default/item/739),
+//! [#383](http://localhost:1062/l/default/item/383)).
 //!
 //! Brian's demo on 2026-10-03 slowed down for the better part of two hours and
 //! `/tmp/ikigai-gonk.log` had no line after startup, so how slow, and which pages, was
-//! unknowable afterwards. Each door now writes one line per request it serves:
+//! unknowable afterwards. Each door has written one line per request since. Until ledger #383
+//! they went to stderr, in `ikigai-log`'s grammar but in no segment; now they are written by
+//! `ikigai-log`'s own door-line helper ([`ikigai_log::AccessLog`], ledger #3390) into ONE
+//! hash-chained segment in gonk's data home ([`crate::quic::Layout::log_dir`], `gonk/log/`),
+//! beside the passkey sign-ins ([`crate::identity::Passkeys::auditing`]). stderr keeps the
+//! startup banner and fatal errors only, so each request has one record:
 //!
 //! ```text
-//! 2026-10-05T14:03:12.345Z gonk:Access urn:iki:gonk:page:queue door=http verb=source outcome=ok bytes=48213 dur=231 principal=- q=-
-//! 2026-10-05T14:03:12.410Z gonk:Access urn:iki:ledger:items door=socket verb=source outcome=ok bytes=5120 dur=3 principal=owner q=-
+//! 2026-11-10T14:03:12.345Z log:Access urn:iki:gonk:page:queue seq=12 door=http verb=source outcome=ok bytes=48213 dur=231 principal=anon credential=https://ikigai-rs.dev/ns/log#anonymous
+//! 2026-11-10T14:03:12.410Z log:Access urn:iki:ledger:items seq=13 door=socket verb=source outcome=ok bytes=5120 dur=3 principal=urn:iki:host:gonk:owner credential=https://ikigai-rs.dev/ns/log#socketOwner
 //! ```
 //!
-//! ★ **The grammar is `ikigai-log`'s**: `<RFC 3339 ms Z> <class CURIE> <subject IRI>
-//! key=value…`, so a later arc can turn this stream into a segment (ledger
-//! [#383](http://localhost:1060/l/default/item/383)) by declaring `gonk:Access` and the keys,
-//! not by parsing something else. `dur` and `principal` are the key names `ikigai-log`'s term
-//! table already binds (`log:durationMs`, `log:onBehalfOf`). Every line carries every key in
-//! this order; a value the door does not have is `-`. The time is when the request STARTED,
-//! so a slow request's line, written when it ends, still says when it began.
+//! The columns are the helper's and are declared in `ikigai-log`'s vocabulary, so a segment
+//! transrepts to Turtle (`urn:log:<segment>`) with nothing gonk-specific to parse. gonk decides
+//! only what the DOOR knows:
 //!
 //! | key | what |
 //! |---|---|
@@ -24,18 +26,49 @@
 //! | `door` | `http`, `socket` or `quic` |
 //! | `verb` | `source`, `sink`, `exists`, `delete`, `meta` |
 //! | `outcome` | `ok`, or the kernel's error kind (`denied`, `not-found`, `invalid-argument`, …) |
-//! | `bytes` | the representation's body length; `-` on an error |
+//! | `bytes` | the representation's body length; absent on an error |
 //! | `dur` | milliseconds, from the door's issue to its answer |
-//! | `principal` | `owner` on the socket; a signed-in passkey's IRI on any HTTP request, `anon` on an anonymous write; the client's `urn:iki:host:gonk:client:<fingerprint>` on QUIC (`urn:iki:gonk:client:<fingerprint>` in lines written before 2026-10-10, which are never rewritten); `-` where the door names nobody |
-//! | `q` | HTTP only: the request's arguments AS SERVED, percent-encoded; `-` when none. The caller's query, plus every declared default the kernel filled in before dispatch (core 0.1.104+, ledger #19: a default arrives as the inline argument a caller spelling it out would send, so a ledger page's `limit=50&offset=0` is in the line whether or not the caller typed it; only the trace's `defaulted` note tells the two apart) |
+//! | `principal` | who, as THIS door authenticated them: [`OWNER_PRINCIPAL`] on the socket; the client's `urn:iki:host:gonk:client:<fingerprint>` on QUIC; a signed-in passkey's IRI on HTTP; `anon` for anyone the door did not authenticate, on a read as on a write — explicit, so "nobody said who" is in the record |
+//! | `credential` | how the door knew: `log:socketOwner`, `log:clientCertificate`, `log:passkey`, `log:anonymous` |
+//! | `q` | HTTP only: the request's arguments AS SERVED, percent-encoded; absent when none. The caller's query, plus every declared default the kernel filled in before dispatch (core 0.1.104+, ledger #19) |
 //!
-//! Past [`MAX_FIELD`] characters the subject and `q` are cut and end in `…` — a character
-//! the encoding never writes, so a cut is unambiguous.
+//! Past [`MAX_FIELD`] bytes the subject and `q` are cut and end in `…`, a character the
+//! encoding never writes, so a cut is unambiguous.
 //!
 //! **Never written:** a cookie, an `Authorization` header, a session or wire token, or a form
 //! body. This layer never sees a header at all; the body of a write is the argument
 //! `content`, which is skipped, as are the transport's provenance stamps (`received`,
-//! `client`) — `principal` gets its own column.
+//! `client`, `principal`) — `principal` gets its own column, from the capability.
+//!
+//! ⚠ **No `grant=` yet.** The helper has the column; what a door has in hand per request is
+//! the capability's scopes, not the NAME of the grant they came from (that is in
+//! `clients.json` / the passkey enrollment, read by the admission). Threading it to this
+//! overlay is a change of its own.
+//!
+//! # ★ Per request, never the global tracer
+//!
+//! The principal comes from the capability the door MINTED ([`crate::admit::principal`]),
+//! request by request, so three doors and every passkey and client are attributed separately.
+//! gonk installs no tracer at all — not with `set_tracer`, which would build a trace event for
+//! every resolution, cached reads included, on the ledger's microsecond read path, and not per
+//! call either: none of the three transport crates offers a seam to issue a request through
+//! `Kernel::issue_traced`, so the kernel's own resolutions are not in the segment. The door
+//! line is. And a write to the log goes through `FileSink` with `std::fs`, never by resolving,
+//! so it can never be a trace event of its own (the recursion hazard the log's T5 brief named).
+//!
+//! # The segments: where, who reads them, and the backup
+//!
+//! - **Where:** `gonk/log/` beside `clients.json`, unless `log.toml` or `gonk.log.toml` in the
+//!   ikigai config home says otherwise (`directory`, `level`, `destination = "off"`, `[seal]`,
+//!   `[rotation]`). `ikigai-log` layers the two, so `gonk.log.toml` is gonk's own file.
+//! - **Who:** `urn:log:segments`, `urn:log:verify`, `urn:log:<segment>`, `urn:log:config` and
+//!   `urn:log:write` are bound in the hub and need `urn:cap:log:{read,write,config}`, which
+//!   are the owner's alone ([`crate::grants::CAP_GONK_ADMIN`]): a segment holds every request,
+//!   every principal and every item IRI. The socket's root reaches them; the HTTP door answers
+//!   `403` and the QUIC door refuses, as for the backup.
+//! - **The backup does not hold them.** They live outside the RocksDB store. They carry their
+//!   own tamper evidence (the hash chain spans segments and restarts), but a lost disk loses
+//!   them: copy `gonk/log/` beside the archives if the record must outlive the machine.
 //!
 //! # ⚠ What this sees, and what it cannot
 //!
@@ -48,20 +81,13 @@
 //!   and adds headers after the kernel returns; `outcome` is the input to that mapping. A
 //!   `304`, a `405`, a `406`, a `413` or a strict-route `400` is decided before or after the
 //!   kernel and is not logged at all.
-//! - **who an anonymous request is from.** The column is the principal the DOOR minted into
-//!   the request's capability ([`crate::admit::principal`]; core 0.1.93, ledger #1077): a
-//!   signed-in passkey on every HTTP verb, reads included, and the client the QUIC door
-//!   authenticated (`urn:iki:host:gonk:client:<fingerprint>`, ledger #816, #1183) whatever capability it
-//!   carries — core's clamp keeps the session's name (ledger #879). An anonymous HTTP read is
-//!   `-`, and a `?principal=` a reader typed is never taken for one (ledger #864, R6): nothing
-//!   a caller sends reaches the capability.
+//! - **who an anonymous request is from.** `anon`, and nothing that identifies the caller: no
+//!   address. A `?principal=` a reader typed is never taken for one (ledger #864, R6).
 //! - **a refusal the door kernel makes before dispatch** (a refusal the HTTP EDGE makes is
-//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — a capability floor's denial, a name
-//!   nothing binds (`404`), a nesting refusal — and the kernel's own `urn:kernel:*`
-//!   operations and Meta answers, which no endpoint of this server's spaces handles.
-//!
-//! The seam that closes the first two for HTTP is an `ikigai-web` hook called once per request
-//! after the response is written; the report for ledger #739 states its shape.
+//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — a capability
+//!   floor's denial, a name nothing binds (`404`), a nesting refusal — and the kernel's own
+//!   `urn:kernel:*` operations and Meta answers, which no endpoint of this server's spaces
+//!   handles.
 //!
 //! # ★ A poll is sampled, not logged every time (ledger [#767](http://localhost:1060/l/default/item/767))
 //!
@@ -100,12 +126,11 @@
 //!
 //! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
 //! what an access log is for, and a server that is slow for a long time logs every slow poll
-//! for as long as it is slow — on purpose: that is the incident. The FILE is owner-only and
-//! rotated daily, fourteen kept, by [`crate::logfile`] (ledger #3159).
+//! for as long as it is slow — on purpose: that is the incident. Rotation is the segment's
+//! (`[rotation]` in `gonk.log.toml`), verified and sealed by `ikigai-log`.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
-use std::io::Write as _;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -114,12 +139,27 @@ use ikigai_core::{
     ArgRef, Body, Capability, Description, Endpoint, Error, Invocation, Iri, Representation,
     Request, Resolution, Result, Scope, Space, SpaceEntry, Topology, Verb,
 };
+use ikigai_log::{
+    Access, Caller, ClosureSink, Credential, Destination, Entry, LogConfig, LogHandle, Principal,
+    Timestamp, Vocabulary,
+};
 
-/// The line's class, in `ikigai-log`'s CURIE column.
-pub const CLASS: &str = "gonk:Access";
+/// The door line's class: `log:Access`, `ikigai-log`'s own (ledger #3390). gonk declares no
+/// class of its own for it.
+pub const CLASS: &str = ikigai_log::ACCESS_CLASS;
 
-/// The longest subject or `q` written whole, in characters.
-pub const MAX_FIELD: usize = 200;
+/// The longest subject or `q` written whole, in bytes: `ikigai-log`'s bound, which cuts and
+/// marks with `…` ([`ikigai_log::CUT_MARKER`]).
+pub const MAX_FIELD: usize = ikigai_log::MAX_FIELD;
+
+/// The principal the socket door writes: the owner, whose peer UID the door checked against
+/// its own. An IRI because a `principal=` column is one (`log:onBehalfOf`); minted by this
+/// process and by no caller.
+pub const OWNER_PRINCIPAL: &str = "urn:iki:host:gonk:owner";
+
+/// The app name `ikigai-log` layers its config under: `log.toml`, then `gonk.log.toml`, in the
+/// ikigai config home. The segment's instance name too.
+pub const APP: &str = "gonk";
 
 /// A polled subject ([`AccessLog::sampling_polls`]) writes at most one QUIET line per this long,
 /// whatever its poll's interval and however many pages ask it (ledger #1718).
@@ -129,6 +169,8 @@ pub const POLL_SAMPLE_EVERY: Duration = Duration::from_secs(600);
 pub const POLL_SLOW_MS: u128 = 1000;
 
 /// The arguments a line never carries: the body of a write and the transport's own stamps.
+/// (`ikigai-log` withholds `content` and every secret-named argument on its own; the stamps are
+/// gonk's to name.)
 const UNLOGGED: [&str; 5] = ["content", "content-type", "received", "client", "principal"];
 
 /// Which door a line is about.
@@ -153,27 +195,124 @@ impl Door {
     }
 }
 
-/// Where a line goes: one call per line, the line without its newline.
+/// Where a test's lines go: one call per entry line, without its newline.
 pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Lines to this process's stderr, one `write_all` per line, newline included — what
-/// [`AccessLog::stderr`] writes through, and the passkey sign-in lines beside it
-/// ([`crate::identity::Passkeys::auditing`]).
-pub fn stderr_sink() -> Sink {
-    Arc::new(|line: &str| {
-        let mut out = String::with_capacity(line.len() + 1);
-        out.push_str(line);
-        out.push('\n');
-        // A full or closed stderr must not fail the request it is describing.
-        let _ = std::io::stderr().lock().write_all(out.as_bytes());
-    })
+/// gonk's one record of who did what: an `ikigai-log` handle with its segment open, and the
+/// shared door-line helper over it ([`ikigai_log::AccessLog`]). Every door's [`AccessLog`] and
+/// the passkey sign-in lines ([`crate::identity::Passkeys::auditing`]) write through ONE of
+/// these, so they share one hash chain.
+pub struct Record {
+    handle: Arc<LogHandle>,
+    doors: ikigai_log::AccessLog,
+}
+
+impl Record {
+    /// The server's record: segments in `dir` (gonk's data home's `log/`, unless `log.toml` or
+    /// `gonk.log.toml` in `config_home` says otherwise), opened now. `Ok(None)` when those files
+    /// turn the destination `off`.
+    ///
+    /// `config_home` is gonk's own (`--config-home` included), not the environment's, so the
+    /// layers read are the ones beside the `config.toml` this server read.
+    pub fn open(
+        config_home: &Path,
+        dir: &Path,
+    ) -> std::result::Result<Option<Arc<Record>>, String> {
+        let base = LogConfig::default()
+            .with_destination(Destination::File)
+            .with_instance(APP)
+            .with_directory(dir);
+        let config = ikigai_log::load::complete_in(config_home, Some(APP), base)
+            .map_err(|e| format!("the log config (log.toml, gonk.log.toml): {e}"))?;
+        let handle = LogHandle::new(
+            Some(config_home.to_path_buf()),
+            Some(APP.to_string()),
+            config,
+        );
+        let opened = handle
+            .open(Vocabulary::shared_builtin(), now())
+            .map_err(|e| format!("opening a log segment: {e}"))?;
+        Ok(opened.then(|| Record::over(Arc::new(handle))))
+    }
+
+    /// A record whose lines go to `sink` — a test's collector. Only the lines gonk wrote are
+    /// passed on: the door lines and the sign-ins, not the segment's header, seals or
+    /// `log:ProcessStart`.
+    pub fn to(sink: Sink) -> Arc<Record> {
+        let handle = Arc::new(LogHandle::new(
+            None,
+            Some(APP.to_string()),
+            LogConfig::default(),
+        ));
+        handle
+            .open_with_sink(
+                Vocabulary::shared_builtin(),
+                now(),
+                Box::new(ClosureSink(move |line: &str| {
+                    if is_written_by_gonk(line) {
+                        sink(line);
+                    }
+                })),
+            )
+            .expect("a closure sink opens");
+        Record::over(handle)
+    }
+
+    fn over(handle: Arc<LogHandle>) -> Arc<Record> {
+        let doors =
+            ikigai_log::AccessLog::new(Arc::clone(&handle), Arc::new(ikigai_core::SystemClock));
+        Arc::new(Record { handle, doors })
+    }
+
+    /// The handle `urn:log:*` is served over ([`ikigai_log::endpoints::space`]).
+    pub fn handle(&self) -> Arc<LogHandle> {
+        Arc::clone(&self.handle)
+    }
+
+    /// Write one door line. A line that does not land is said on stderr, and the request
+    /// it describes is not failed.
+    pub fn access(&self, access: &Access) {
+        if let Err(e) = self.doors.record(access) {
+            eprintln!("ikigai-gonk: {e}");
+        }
+    }
+
+    /// Write one entry of gonk's own (a passkey sign-in or sign-out).
+    pub fn entry(&self, entry: Entry) {
+        if let Err(e) = self.handle.write(entry) {
+            eprintln!("ikigai-gonk: a log entry was not written: {e}");
+        }
+    }
+
+    /// Write `log:ProcessStop` and close the segment, so the next start chains from a sealed
+    /// head.
+    pub fn close(&self) {
+        let _ = self.handle.close(now());
+    }
+}
+
+/// Whether a segment line is one gonk wrote: an entry (it starts with its time) whose class is
+/// the door line or one of gonk's own, and not `ikigai-log`'s bookkeeping (the header, a seal,
+/// `log:ProcessStart`).
+fn is_written_by_gonk(line: &str) -> bool {
+    let mut columns = line.split(' ');
+    let entry = columns
+        .next()
+        .is_some_and(|time| time.starts_with(|c: char| c.is_ascii_digit()));
+    let class = columns.next().unwrap_or("");
+    entry && (class == "log:Access" || !class.starts_with("log:"))
+}
+
+/// Now, as the log's timestamp.
+pub fn now() -> Timestamp {
+    Timestamp::from_millis(millis(SystemTime::now()))
 }
 
 /// One door's access log.
 #[derive(Clone)]
 pub struct AccessLog {
     door: Door,
-    sink: Sink,
+    record: Arc<Record>,
     polls: Arc<Polls>,
 }
 
@@ -190,25 +329,19 @@ struct Polls {
 }
 
 impl AccessLog {
-    /// Lines to this process's stderr — which launchd sends to `~/Library/Logs/ikigai-gonk/gonk.log`,
-    /// owner-only and rotated daily by [`crate::logfile`] (ledger #3159).
-    ///
-    /// ★ ONE `write_all` per line, newline included, on the locked handle. `eprintln!` formats
-    /// straight into unbuffered stderr and can issue a write per piece, which lets two doors'
-    /// lines interleave mid-line; a whole line in one write cannot.
-    pub fn stderr(door: Door) -> AccessLog {
-        AccessLog::to(door, stderr_sink())
-    }
-
-    /// Lines to `sink` — a test's collector, or anything else.
-    pub fn to(door: Door, sink: Sink) -> AccessLog {
+    /// `door`'s lines, into `record`'s segment — what `main` builds for each door.
+    pub fn on(door: Door, record: Arc<Record>) -> AccessLog {
         AccessLog {
             door,
-            sink,
+            record,
             polls: Arc::default(),
         }
     }
 
+    /// Lines to `sink` — a test's collector ([`Record::to`]).
+    pub fn to(door: Door, sink: Sink) -> AccessLog {
+        AccessLog::on(door, Record::to(sink))
+    }
     /// Sample the lines of `subjects` — resources a page polls on a timer — instead of writing
     /// one per request: a polled request writes its line when it fails, when it took
     /// [`POLL_SLOW_MS`] or more, or when its subject has written no quiet line for
@@ -307,10 +440,9 @@ impl AccessLog {
     }
 
     /// Write the line for a request the door's EDGE refused before any kernel saw it (ledger
-    /// [#894](http://localhost:1062/l/default/item/894)): `outcome=denied`, `bytes=-`, `dur=0`,
-    /// and no principal beyond what [`line()`] writes for an empty capability (`anon` on a write,
-    /// `-` on a read), because a refused request's cookie is not believed. Always written:
-    /// a refusal is never sampled.
+    /// [#894](http://localhost:1062/l/default/item/894)): `outcome=denied`, no `bytes`, `dur=0`,
+    /// and the anonymous caller, because a refused request's cookie is not believed. Always
+    /// written: a refusal is never sampled.
     ///
     /// ```
     /// use std::sync::{Arc, Mutex};
@@ -322,13 +454,14 @@ impl AccessLog {
     /// let log = AccessLog::to(Door::Http, Arc::new(move |l: &str| into.lock().unwrap().push(l.to_string())));
     /// let write = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap());
     /// log.refused_at_edge(&write, "a cross-site write");
-    /// let line = kept.lock().unwrap()[0].clone();
-    /// assert!(line.ends_with(
-    ///     " gonk:Access urn:iki:ledger:append door=http verb=sink outcome=denied bytes=- dur=0 principal=anon q=-"
+    /// let line = kept.lock().unwrap().iter().find(|l| l.contains(" log:Access ")).cloned().unwrap();
+    /// assert!(line.contains(
+    ///     " log:Access urn:iki:ledger:append seq=2 door=http verb=sink outcome=denied dur=0 principal=anon \
+    ///      credential=https://ikigai-rs.dev/ns/log#anonymous"
     /// ), "{line}");
     /// ```
     pub fn refused_at_edge(&self, request: &Request, why: &str) {
-        let line = line(
+        let access = access(
             millis(SystemTime::now()),
             self.door,
             request,
@@ -336,7 +469,7 @@ impl AccessLog {
             Err(&Error::Denied(why.to_string())),
             0,
         );
-        (self.sink)(&line);
+        self.record.access(&access);
     }
 
     /// Wrap `space` so every host-issued request resolved through it writes a line.
@@ -411,7 +544,7 @@ impl Timed {
             .log
             .writes(inv.request.target.as_str(), answer.is_ok(), dur_ms)
         {
-            let line = line(
+            let access = access(
                 millis(started),
                 self.log.door,
                 inv.request,
@@ -419,7 +552,7 @@ impl Timed {
                 answer,
                 dur_ms,
             );
-            (self.log.sink)(&line);
+            self.log.record.access(&access);
         }
     }
 }
@@ -479,20 +612,32 @@ fn millis(at: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-/// One access line, without its newline.
+/// One request as its door knew it: the door line `ikigai-log` writes.
 ///
 /// ```
 /// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
-/// use ikigai_gonk::access::{line, Door};
+/// use ikigai_gonk::access::{access, Door};
 ///
 /// let request = Request::new(Verb::Source, Iri::parse("urn:iki:gonk:k").unwrap())
 ///     .with_arg("c", ArgRef::Inline(b"source urn:repo:x:tree as=text/html".to_vec()));
 /// let anonymous = Capability::scoped(["urn:cap:ledger:read:default"]);
-/// assert_eq!(
-///     line(1_791_201_792_345, Door::Http, &request, &anonymous, Ok(4096), 17),
-///     "2026-10-05T12:03:12.345Z gonk:Access urn:iki:gonk:k door=http verb=source \
-///      outcome=ok bytes=4096 dur=17 principal=- q=c=source%20urn:repo:x:tree%20as%3Dtext/html"
-/// );
+/// let entry = access(1_791_201_792_345, Door::Http, &request, &anonymous, Ok(4096), 17)
+///     .entry()
+///     .unwrap();
+/// assert_eq!(entry.class, ikigai_log::ACCESS_CLASS);
+/// assert_eq!(entry.subject, "urn:iki:gonk:k");
+/// for (key, value) in [
+///     ("door", "http"),
+///     ("verb", "source"),
+///     ("outcome", "ok"),
+///     ("bytes", "4096"),
+///     ("dur", "17"),
+///     ("principal", "anon"),
+///     ("credential", ikigai_log::ANONYMOUS_CREDENTIAL),
+///     ("q", "c=source%20urn:repo:x:tree%20as%3Dtext/html"),
+/// ] {
+///     assert_eq!(entry.get(key), Some(value), "{key}");
+/// }
 /// ```
 ///
 /// A QUIC request names the client its connection authenticated, from the principal the door
@@ -500,40 +645,59 @@ fn millis(at: SystemTime) -> u64 {
 ///
 /// ```
 /// use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
-/// use ikigai_gonk::access::{line, Door};
+/// use ikigai_gonk::access::{access, Door};
 ///
 /// let laptop = ikigai_gonk::quic::client_iri("ab12");
 /// let session = Capability::scoped(["urn:cap:ledger:write:default"]).with_principal(&laptop).unwrap();
 /// let request = Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
 ///     .with_arg("principal", ArgRef::Inline(b"urn:iki:host:gonk:client:forged".to_vec()));
-/// assert!(line(0, Door::Quic, &request, &session, Ok(1), 1)
-///     .contains(" principal=urn:iki:host:gonk:client:ab12 "));
+/// let entry = access(0, Door::Quic, &request, &session, Ok(1), 1).entry().unwrap();
+/// assert_eq!(entry.get("principal"), Some("urn:iki:host:gonk:client:ab12"));
+/// assert_eq!(entry.get("credential"), Some(ikigai_log::CLIENT_CERTIFICATE_CREDENTIAL));
 /// ```
-pub fn line(
+pub fn access(
     at_ms: u64,
     door: Door,
     request: &Request,
     capability: &Capability,
     answer: std::result::Result<usize, &Error>,
     dur_ms: u128,
-) -> String {
-    let (outcome, bytes) = match answer {
-        Ok(bytes) => ("ok", bytes.to_string()),
-        // The kind's word is core's (`Error::kind()`: `denied`, `retry-after`, …), never a
-        // table of this crate's: a copy here read every variant core added later as `error`,
-        // so a rate-limited run was attributed `endpoint` and would have been attributed
-        // nothing useful once it became `RetryAfter` (ledger #1546, #1923).
-        Err(e) => (e.kind(), "-".to_string()),
+) -> Access {
+    // The kind's word is core's (`Error::kind()`: `denied`, `retry-after`, …), never a table of
+    // this crate's: a copy here read every variant core added later as `error` (ledger #1546,
+    // #1923).
+    let outcome = match answer {
+        Ok(_) => "ok",
+        Err(e) => e.kind(),
     };
-    format!(
-        "{} {CLASS} {} door={} verb={} outcome={outcome} bytes={bytes} dur={dur_ms} principal={} q={}",
-        crate::backup::stamp_iso_ms(at_ms),
-        cut(request.target.as_str().to_string()),
+    let mut line = Access::new(
+        Timestamp::from_millis(at_ms),
+        request.target.as_str(),
         door.as_str(),
         verb(request.verb),
-        principal(door, request, capability),
-        query(door, request),
+        outcome,
+        caller(door, capability),
     )
+    .duration_ms(u64::try_from(dur_ms).unwrap_or(u64::MAX));
+    if let Ok(bytes) = answer {
+        line = line.bytes(bytes as u64);
+    }
+    // `q` is the HTTP door's: the other two doors' arguments are a client's protocol, not a
+    // reader's query.
+    if door == Door::Http {
+        for (name, value) in &request.args {
+            if UNLOGGED.contains(&name.as_str()) {
+                continue;
+            }
+            let value = match value {
+                ArgRef::Inline(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                ArgRef::Reference(iri) => iri.as_str().to_string(),
+                ArgRef::Content(id) => id.to_string(),
+            };
+            line = line.argument(name.as_str(), value);
+        }
+    }
+    line
 }
 
 fn verb(verb: Verb) -> &'static str {
@@ -546,108 +710,41 @@ fn verb(verb: Verb) -> &'static str {
     }
 }
 
-/// Who asked, as far as this door is told — never a token, and never a value the caller
+/// Who asked, as THIS door authenticated them — never a token, and never a value the caller
 /// typed.
 ///
-/// ⚠ Audit round 4 (ledger #864, R6): this used to read the `principal` argument on every
-/// HTTP verb, and on a READ that argument is whatever the caller put in the query string —
-/// `ikigai-web` reserves the provenance names on mutating verbs only (its half is
-/// ikigai-cli's, filed separately). So an anonymous `GET /l/default?principal=urn:…` was
-/// logged as that person. The column now comes from [`crate::admit::principal`], which takes
-/// the door's own stamp and nothing else.
-fn principal(door: Door, request: &Request, capability: &Capability) -> String {
-    match door {
-        // The socket's peer UID is checked against this process's own: it is the owner.
-        Door::Socket => "owner".to_string(),
-        // The client the door authenticated, minted into the session capability; `-` only on
-        // a session the minter named nobody for, which this server's minter never mints.
-        Door::Quic => crate::admit::principal(door, capability)
-            .map(cut)
-            .unwrap_or_else(|| "-".to_string()),
-        Door::Http => match crate::admit::principal(door, capability) {
-            // Written only when it is bare — an IRI is — so a value cannot break the line.
-            Some(value) => cut(value),
-            // An anonymous write; an anonymous read names nobody.
-            None if request.verb.is_mutating() => "anon".to_string(),
-            None => "-".to_string(),
-        },
-    }
-}
-
-/// The query arguments of an HTTP request, as one percent-encoded `k=v&k=v` value.
-fn query(door: Door, request: &Request) -> String {
-    if door != Door::Http {
-        return "-".to_string();
-    }
-    let mut out = String::new();
-    for (name, value) in &request.args {
-        if UNLOGGED.contains(&name.as_str()) {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('&');
-        }
-        encode_into(&mut out, name);
-        out.push('=');
-        match value {
-            ArgRef::Inline(bytes) => encode_into(&mut out, &String::from_utf8_lossy(bytes)),
-            ArgRef::Reference(iri) => encode_into(&mut out, iri.as_str()),
-            ArgRef::Content(id) => encode_into(&mut out, &id.to_string()),
-        }
-    }
-    if out.is_empty() {
-        "-".to_string()
-    } else {
-        cut(out)
-    }
-}
-
-/// Percent-encode everything but what reads plainly in an IRI-ish value.
+/// - **socket**: the owner ([`OWNER_PRINCIPAL`], `log:socketOwner`): the door checked the peer's
+///   UID. A principal in a capability the owner carried is the caller's own choice and is not
+///   read ([`crate::admit::principal`]).
+/// - **QUIC**: the client the connection's certificate authenticated
+///   (`urn:iki:host:gonk:client:<fingerprint>`, `log:clientCertificate`), minted into the
+///   session capability by the door.
+/// - **HTTP**: the signed-in passkey's IRI (`log:passkey`), minted from the session cookie.
+///   Anyone else is [`Caller::Anonymous`] — on a read as on a write, so "nobody said who" is
+///   in the record rather than absent from it.
 ///
-/// ⚠ **Deliberately NOT `ikigai_fn::html::url_segment`** (field guide, module design: a private
-/// copy states why the shared one cannot serve). This is a LOG-LINE rule, not a URL rule: the
-/// `q` column is read by a person grepping the access log, and an IRI argument
-/// (`urn:repo:x:file:src/lib.rs`) has to stay legible there, so `:` `/` `@` `,` `*` `+` `!` `(`
-/// `)` are kept. What the column needs is only that a value cannot split the line (space, tab,
-/// newline) or fake another field (`=`, `&`, `%`), and every one of those is encoded. The
-/// shared rule encodes the IRI's punctuation too, which would make every line read as
-/// `urn%3Arepo%3Ax%3Afile%3Asrc%2Flib.rs`; and `ikigai_browse::iri_encode` keeps `&`, `=` and
-/// `'`, which would let a value fake a `k=v` pair. Neither is a log format, so this one stays,
-/// and the module docs' `q=c=source%20urn:repo:x:tree%20as%3Dtext/html` example pins it.
-fn encode_into(out: &mut String, text: &str) {
-    for b in text.bytes() {
-        match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b':'
-            | b'/'
-            | b'@'
-            | b','
-            | b'*'
-            | b'+'
-            | b'!'
-            | b'('
-            | b')' => out.push(b as char),
-            other => {
-                let _ = write!(out, "%{other:02X}");
-            }
-        }
+/// ⚠ Audit round 4 (ledger #864, R6): this once read the `principal` ARGUMENT, which on a read
+/// is whatever the caller put in the query string. It reads the capability, which nothing a
+/// caller sends reaches.
+fn caller(door: Door, capability: &Capability) -> Caller {
+    let (iri, credential) = match door {
+        Door::Socket => (Some(OWNER_PRINCIPAL.to_string()), Credential::SocketOwner),
+        Door::Quic => (
+            crate::admit::principal(door, capability),
+            Credential::ClientCertificate,
+        ),
+        Door::Http => (
+            crate::admit::principal(door, capability),
+            Credential::Passkey,
+        ),
+    };
+    // A principal the log cannot write as a column is written as nobody rather than not at all:
+    // the request still happened. Every principal a door mints is an IRI core bounded already.
+    match iri.and_then(|iri| Principal::new(iri).ok()) {
+        Some(principal) => Caller::authenticated(principal, credential),
+        None => Caller::Anonymous,
     }
 }
-
-/// Keep [`MAX_FIELD`] characters and mark the cut with `…`.
-fn cut(value: String) -> String {
-    match value.char_indices().nth(MAX_FIELD) {
-        Some((at, _)) => format!("{}…", &value[..at]),
-        None => value,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,6 +899,19 @@ mod tests {
         }
     }
 
+    /// The door line for one answered request, as the helper builds it.
+    fn entry(
+        door: Door,
+        request: &Request,
+        capability: &Capability,
+        answer: std::result::Result<usize, &Error>,
+        dur_ms: u128,
+    ) -> Entry {
+        access(0, door, request, capability, answer, dur_ms)
+            .entry()
+            .expect("a writable door line")
+    }
+
     #[test]
     fn a_write_never_logs_its_body_or_the_transports_stamps() {
         let r = request(
@@ -814,9 +924,10 @@ mod tests {
                 ("client", "127.0.0.1"),
             ],
         );
-        let l = line(0, Door::Http, &r, &nobody(), Ok(2), 1);
-        assert!(l.ends_with("principal=anon q=-"), "{l}");
-        assert!(!l.contains("secret") && !l.contains("127.0.0.1"), "{l}");
+        let e = entry(Door::Http, &r, &nobody(), Ok(2), 1);
+        assert_eq!(e.get("principal"), Some("anon"));
+        assert_eq!(e.get("q"), None, "{e:?}");
+        assert!(!format!("{e:?}").contains("secret") && !format!("{e:?}").contains("127.0.0.1"));
     }
 
     /// A capability with no principal: an anonymous HTTP caller's.
@@ -824,60 +935,95 @@ mod tests {
         Capability::scoped(["urn:cap:ledger:read:default"])
     }
 
+    /// ★ Ledger #383: every door names who its request was from, as THAT door authenticated
+    /// them, and how; an anonymous caller is named `anon`, on a read as on a write — never
+    /// absent — and a principal argument a caller sent is never read.
     #[test]
-    fn a_signed_in_request_names_the_passkey_and_an_anonymous_read_names_nobody() {
+    fn each_door_names_the_caller_it_authenticated() {
         let brian = nobody().with_principal("urn:iki:gonk:passkey:abc").unwrap();
-        // The capability's principal is the door's word; a stamped argument is not read.
+        let laptop = nobody()
+            .with_principal(crate::quic::client_iri("ab12").as_str())
+            .unwrap();
         let w = request(
             Verb::Sink,
             "urn:iki:ledger:append",
             &[("principal", "urn:iki:gonk:passkey:forged")],
         );
-        assert!(line(0, Door::Http, &w, &brian, Ok(0), 0)
-            .contains(" principal=urn:iki:gonk:passkey:abc "));
-        assert!(line(0, Door::Http, &w, &nobody(), Ok(0), 0).contains(" principal=anon "));
         let r = request(Verb::Source, "urn:iki:ledger:items", &[]);
-        // Since ledger #1077 a signed-in READ is named too: the principal is in the capability
-        // on every verb, not stamped on writes only.
-        assert!(line(0, Door::Http, &r, &brian, Ok(0), 0)
-            .contains(" principal=urn:iki:gonk:passkey:abc "));
-        assert!(line(0, Door::Http, &r, &nobody(), Ok(0), 0).contains(" principal=- "));
-        assert!(line(0, Door::Socket, &r, &brian, Ok(0), 0).contains(" principal=owner "));
-        assert!(line(0, Door::Quic, &r, &nobody(), Ok(0), 0).contains(" principal=- "));
+        let who = |door, cap: &Capability, req: &Request| {
+            let e = entry(door, req, cap, Ok(0), 0);
+            (
+                e.get("principal").unwrap().to_string(),
+                e.get("credential").unwrap().to_string(),
+            )
+        };
+        let passkey = (
+            "urn:iki:gonk:passkey:abc".to_string(),
+            ikigai_log::PASSKEY_CREDENTIAL.to_string(),
+        );
+        let anon = (
+            "anon".to_string(),
+            ikigai_log::ANONYMOUS_CREDENTIAL.to_string(),
+        );
+        assert_eq!(who(Door::Http, &brian, &w), passkey);
+        assert_eq!(who(Door::Http, &brian, &r), passkey);
+        assert_eq!(who(Door::Http, &nobody(), &w), anon);
+        assert_eq!(
+            who(Door::Http, &nobody(), &r),
+            anon,
+            "an anonymous READ is named too"
+        );
+        assert_eq!(
+            who(Door::Quic, &laptop, &r),
+            (
+                "urn:iki:host:gonk:client:ab12".to_string(),
+                ikigai_log::CLIENT_CERTIFICATE_CREDENTIAL.to_string()
+            )
+        );
+        assert_eq!(who(Door::Quic, &nobody(), &r), anon);
+        // The socket's caller is the owner, whatever its capability names.
+        assert_eq!(
+            who(Door::Socket, &brian, &r),
+            (
+                OWNER_PRINCIPAL.to_string(),
+                ikigai_log::SOCKET_OWNER_CREDENTIAL.to_string()
+            )
+        );
     }
 
     #[test]
     fn a_long_field_is_cut_and_marked() {
         let long = "x".repeat(MAX_FIELD * 2);
         let r = request(Verb::Source, "urn:iki:gonk:sparql", &[("query", &long)]);
-        let l = line(0, Door::Http, &r, &nobody(), Ok(0), 0);
-        let q = l.split(" q=").nth(1).expect("a q column");
-        assert_eq!(q.chars().count(), MAX_FIELD + 1, "{q}");
-        assert!(q.ends_with('…'), "{q}");
+        let e = entry(Door::Http, &r, &nobody(), Ok(0), 0);
+        let q = e.get("q").expect("a q column");
+        assert!(q.ends_with(ikigai_log::CUT_MARKER), "{q}");
+        assert!(q.len() <= MAX_FIELD + ikigai_log::CUT_MARKER.len(), "{q}");
     }
 
     #[test]
     fn an_error_is_its_kind_and_carries_no_bytes() {
         let r = request(Verb::Source, "urn:iki:ledger:default:item:9", &[]);
-        let e = Error::Denied("no".to_string());
-        let l = line(0, Door::Socket, &r, &nobody(), Err(&e), 4);
-        assert!(l.contains(" outcome=denied bytes=- dur=4 "), "{l}");
+        let denied = Error::Denied("no".to_string());
+        let e = entry(Door::Socket, &r, &nobody(), Err(&denied), 4);
+        assert_eq!(e.get("outcome"), Some("denied"));
+        assert_eq!(e.get("bytes"), None);
+        assert_eq!(e.get("dur"), Some("4"));
     }
 
-    /// ★ A rate-limited run is attributed as what it is (ledger #1216 part 1, #1923): the
-    /// window's refusal is `RetryAfter` since ikigai-throttle 0.2.0, and the line says
-    /// `outcome=retry-after`, core's word for the kind — not `endpoint` (what the 0.1.11
-    /// refusal was) and not the `error` a local table fell to for a kind it did not know.
+    /// ★ A rate-limited run is attributed as what it is (ledger #1216 part 1, #1923):
+    /// `outcome=retry-after`, core's word for the kind.
     #[test]
     fn a_rate_limited_run_is_attributed_retry_after() {
         let r = request(Verb::Source, "urn:plan:eval", &[]);
-        let e = Error::RetryAfter {
-            delay: Some(std::time::Duration::from_secs(42)),
-            detail: "rate-limited: `urn:iki:gonk:anonymous:runs` is capped at 30 per 60s".into(),
-        };
-        let l = line(0, Door::Http, &r, &nobody(), Err(&e), 1);
-        assert!(l.contains(" outcome=retry-after bytes=- dur=1 "), "{l}");
         for (e, word) in [
+            (
+                Error::RetryAfter {
+                    delay: Some(std::time::Duration::from_secs(42)),
+                    detail: "rate-limited".into(),
+                },
+                "retry-after",
+            ),
             (Error::OverBudget { detail: "x".into() }, "over-budget"),
             (Error::Refused("x".into()), "refused"),
             (
@@ -888,13 +1034,23 @@ mod tests {
                 "unsupported",
             ),
         ] {
-            let l = line(0, Door::Http, &r, &nobody(), Err(&e), 1);
-            assert!(l.contains(&format!(" outcome={word} ")), "{l}");
+            assert_eq!(
+                entry(Door::Http, &r, &nobody(), Err(&e), 1).get("outcome"),
+                Some(word)
+            );
         }
     }
 
+    /// The line lands in the segment as one line of bare columns, in the helper's order.
     #[test]
     fn every_line_is_one_line_of_bare_columns() {
+        let (lines, sink) = {
+            let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+            let keep = Arc::clone(&lines);
+            let sink: Sink = Arc::new(move |l: &str| keep.lock().unwrap().push(l.to_string()));
+            (lines, sink)
+        };
+        let log = AccessLog::to(Door::Http, sink);
         let r = request(
             Verb::Source,
             "urn:iki:gonk:k",
@@ -903,17 +1059,31 @@ mod tests {
                 ("text", "q=\"x\"&y"),
             ],
         );
-        let l = line(0, Door::Http, &r, &nobody(), Ok(1), 1);
+        let e = access(0, Door::Http, &r, &nobody(), Ok(1), 1);
+        log.record.access(&e);
+        let lines = lines.lock().unwrap();
+        let l = lines
+            .iter()
+            .find(|l| l.contains(" log:Access "))
+            .expect("a door line");
         assert!(!l.contains('\n') && !l.contains('"'), "{l}");
-        let columns: Vec<&str> = l.split(' ').collect();
-        assert_eq!(columns.len(), 10, "{l}");
-        let keys: Vec<&str> = columns[3..]
+        let keys: Vec<&str> = l.split(' ').collect::<Vec<_>>()[3..]
             .iter()
             .map(|c| c.split_once('=').expect("key=value").0)
             .collect();
         assert_eq!(
             keys,
-            ["door", "verb", "outcome", "bytes", "dur", "principal", "q"]
+            [
+                "seq",
+                "door",
+                "verb",
+                "outcome",
+                "bytes",
+                "dur",
+                "principal",
+                "credential",
+                "q"
+            ]
         );
     }
 }

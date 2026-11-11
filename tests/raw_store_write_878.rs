@@ -136,7 +136,9 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel_with(
             Arc::clone(&hub),
@@ -147,6 +149,7 @@ impl Server {
             anonymous: grants_for("default", Authority::Write).unwrap(),
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         std::thread::spawn(move || {
@@ -692,7 +695,7 @@ fn a_narrowed_owner_process_cannot_forge_an_author_over_the_socket() {
     assert!(
         refused.contains(" door=socket ")
             && refused.contains(" outcome=denied")
-            && refused.contains(" principal=owner "),
+            && refused.contains(" principal=urn:iki:host:gonk:owner "),
         "{refused}"
     );
 }

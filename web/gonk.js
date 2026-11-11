@@ -64,6 +64,22 @@
     return p;
   }
 
+  // Whole-match counts arrive independently. The fallback link lives outside the swap,
+  // so arrival cannot remove a focused control. Failures leave the list and link usable.
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    if (target && target.id === "listing-facet") announce("Labels and priority counts loaded.");
+  });
+  function facetFailure(e) {
+    const elt = e.detail && e.detail.elt;
+    if (!elt || !elt.isConnected || elt.id !== "listing-facet") return;
+    const sentence = "Counts could not load. Open the counts link or reload to try again.";
+    elt.textContent = sentence;
+    announce(sentence);
+  }
+  document.addEventListener("htmx:responseError", facetFailure);
+  document.addEventListener("htmx:sendError", facetFailure);
+
   // The Layers page's watcher (ledger #1705): its failures are its own, said once in
   // `#layers-reconnect` (section 9 below). `data-ui-quiet` keeps the shell script out of them.
   function isWatch(elt) {
@@ -276,9 +292,9 @@
   // page says so ONCE, in words, in its `#layers-reconnect` status (a polite live region, so
   // nothing moves focus and a retry is not re-announced). The first answer after that says
   // "Reconnected", and the next one empties the status.
-  // ⚠ A 403 or a 404 is not retried: no retry can fix it. gonk keeps sign-ins in memory, so
-  // after a restart this page's session is gone and every ask is refused; the status says to
-  // sign in again and reload, and nothing asks again.
+  // ⚠ A 403 or a 404 is not retried: no retry can fix it. A session survives a gonk restart
+  // (ledger #3229), so a 403 means it ended (signed out, revoked, or past its lifetime) and
+  // every ask is refused; the status says to sign in again and reload, and nothing asks again.
   const WATCH_RETRY_FIRST = 5;
   const WATCH_RETRY_MAX = 60;
   const WATCH_PATH = "/layers/~/wait";
@@ -296,7 +312,7 @@
     if (status === 403) {
       reconnectSay(
         "Live updates stopped: gonk no longer accepts this page's sign-in (the session " +
-          "ended, or gonk restarted). Sign in again, then reload the page.",
+          "ended or was signed out). Sign in again, then reload the page.",
         "stopped"
       );
       return;
@@ -1162,6 +1178,50 @@
     return (err && err.message) || String(err);
   }
 
+  // ★ WHAT THE SYSTEM PASSKEY PICKER SHOWS (ledger #3387). Every gonk is the one `localhost`
+  // relying party, so the picker lists every gonk's passkeys together, by the WebAuthn
+  // `user.name` and `user.displayName` the passkey was created with. The name is the label and
+  // the host ("laptop @ localhost:1062"), the display name the label and the grant ("laptop ·
+  // owner-viewer"): both are shown to anyone who opens the device's passkey manager, so neither
+  // carries anything secret (no invite, no token, no credential id). An authenticator need keep
+  // only 64 bytes of each, so a long label is shortened there, the host and the grant kept whole.
+  const NAME_BYTES = 64;
+  const utf8 = new TextEncoder();
+
+  function fitBytes(text, max) {
+    if (utf8.encode(text).length <= max) return text;
+    const chars = Array.from(text);
+    while (chars.length && utf8.encode(chars.join("") + "…").length > max) chars.pop();
+    return chars.join("") + "…";
+  }
+
+  function passkeyNames(label, grant) {
+    const named = (tail) => fitBytes(fitBytes(label, NAME_BYTES - utf8.encode(tail).length) + tail, NAME_BYTES);
+    return { name: named(" @ " + location.host), displayName: named(" · " + grant) };
+  }
+
+  // The names are frozen at creation, and a passkey's grant (or label) can change after it.
+  // Where the browser has the WebAuthn Level 3 signal, each sign-in tells the passkey manager
+  // the current ones; where it has not, nothing is said and nothing fails.
+  async function signalNames(cred, done) {
+    const signal = window.PublicKeyCredential && PublicKeyCredential.signalCurrentUserDetails;
+    const handle = cred.response && cred.response.userHandle;
+    if (typeof signal !== "function" || !handle || !done.label || !done.grant) return;
+    try {
+      // Bounded: a signal that never settles must not hold the signed-in page's reload.
+      await Promise.race([
+        signal.call(PublicKeyCredential, {
+          rpId: "localhost",
+          userId: toB64(handle),
+          ...passkeyNames(done.label, done.grant),
+        }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    } catch (_) {
+      // Only the picker's words are at stake; the sign-in itself is done.
+    }
+  }
+
   async function signIn() {
     try {
       const { challenge } = await post("/auth/login-options");
@@ -1182,6 +1242,7 @@
         signature: toB64(r.signature),
       });
       setToken(done.session, done.seconds);
+      await signalNames(cred, done);
       location.reload();
     } catch (err) {
       flash("Sign-in did not complete: " + ceremonyError(err, "Click Sign in with passkey to try again."), "error");
@@ -1203,15 +1264,18 @@
 
   async function enrol(invite, label) {
     try {
-      const { challenge } = await post("/auth/register-options");
+      const name = label || "gonk passkey";
+      // The label goes first, so one another passkey already has is refused before the system
+      // sheet mints a credential that could never be enrolled (ledger #3384); the invite, so
+      // the answer names the grant the passkey's display name carries (#3387).
+      const { challenge, grant } = await post("/auth/register-options", { label: name, invite });
       const user = new Uint8Array(16);
       crypto.getRandomValues(user);
-      const name = label || "gonk passkey";
       const cred = await navigator.credentials.create({
         publicKey: {
           challenge: fromB64(challenge),
           rp: { id: "localhost", name: "gonk" },
-          user: { id: user, name, displayName: name },
+          user: { id: user, ...passkeyNames(name, grant) },
           pubKeyCredParams: [{ type: "public-key", alg: -7 }],
           authenticatorSelection: { residentKey: "required", userVerification: "required" },
           attestation: "none",
@@ -1236,21 +1300,122 @@
       // ("The document is not focused") — found by the first real Touch ID enrollment. A click
       // on the sign-in button is a fresh user gesture on a page that has focus back.
       const created = "Passkey created for " + done.label + " (grant " + done.grant + "). ";
-      const login = $("auth-login");
-      if ($("auth-logout").hidden) {
-        login.hidden = false;
-        flash(created + "Now click Sign in with passkey to use it.", "ok");
-        login.focus();
-      } else {
-        flash(created + "Sign out, then sign in with the new passkey to use its grant.", "ok");
+      // ★ SIGNED IN, THE OLD SESSION ENDS HERE (ledger #3384). Kept, every later request ran as
+      // the OLD passkey and its grant, which reads as a permission bug. Ended in place, with no
+      // reload, so the sentence and the focus below survive: the same one click on Sign in as
+      // the signed-out case.
+      let ended = "";
+      if (!$("auth-logout").hidden) {
+        const t = token();
+        setToken("", 0);
+        try {
+          if (t) await post("/auth/logout", t);
+        } catch (_) {
+          // Signed out locally either way; the server session expires on its own.
+        }
+        ended = $("auth-who").textContent.replace(/^Signed in as /, "") + " is signed out. ";
+        $("auth-who").textContent = "";
+        $("auth-who").hidden = true;
+        $("auth-logout").hidden = true;
+        signedIn = false;
+        drawNotices(document);
       }
+      const login = $("auth-login");
+      login.hidden = false;
+      flash(created + ended + "Now click Sign in with passkey to use it.", "ok");
+      login.focus();
     } catch (err) {
       flash(
         "Could not create the passkey: " +
           ceremonyError(err, "The invite is still good until it expires — click Create passkey to try again."),
         "error"
       );
+      // A refused label is changed in the field; a retry is its form's own button.
+      const field = $("enrol-label");
+      if (field && !$("enrol").hidden) field.focus();
     }
+  }
+
+  // ★ SIGNED IN, AN INVITE WIDENS THE PASSKEY SIGNED IN WITH (ledger #3388). A grant is shared by
+  // every passkey that holds it, so one person's access is widened by adding the invite's grant
+  // to their own passkey, never by editing the grant. The session cookie alone is not enough:
+  // the passkey it signs in as must answer a fresh challenge (user verification required), so a
+  // stolen cookie plus the link raises nothing. The server ends every session of the passkey and
+  // answers a new one, which replaces the cookie; the page reloads to draw what the wider grant
+  // opens, and the sentence is said after the reload.
+  async function addGrant(invite) {
+    try {
+      const t = token();
+      const { challenge, credential } = await post("/auth/add-grant-options", { session: t, invite });
+      const cred = await navigator.credentials.get({
+        publicKey: {
+          challenge: fromB64(challenge),
+          rpId: "localhost",
+          allowCredentials: [{ type: "public-key", id: fromB64(credential) }],
+          userVerification: "required",
+          timeout: 120000,
+        },
+      });
+      const r = cred.response;
+      const done = await post("/auth/add-grant", {
+        session: t,
+        invite,
+        challenge,
+        id: cred.id,
+        authenticatorData: toB64(r.authenticatorData),
+        clientDataJSON: toB64(r.clientDataJSON),
+        signature: toB64(r.signature),
+      });
+      setToken(done.session, done.seconds);
+      await signalNames(cred, done);
+      later("Grant " + done.added + " added to the passkey " + done.label + ", which now holds " + done.grant + ". You are signed in again with it.");
+      history.replaceState(null, "", location.pathname + location.search);
+      location.reload();
+    } catch (err) {
+      flash(
+        "Could not add the grant: " +
+          ceremonyError(err, "The invite is still good until it expires — click Add grant to try again."),
+        "error"
+      );
+      const submit = $("enrol-submit");
+      if (submit && !$("enrol").hidden) submit.focus();
+    }
+  }
+
+  // A sentence for the page a reload is about to draw, said once by it (and only in this tab).
+  const LATER = "gonk_flash";
+  function later(text) {
+    try {
+      window.sessionStorage.setItem(LATER, text);
+    } catch (_) {
+      // Storage refused: the reloaded page is the evidence, without the sentence.
+    }
+  }
+  function sayLater() {
+    try {
+      const text = window.sessionStorage.getItem(LATER);
+      window.sessionStorage.removeItem(LATER);
+      if (text) flash(text, "ok");
+    } catch (_) {
+      // Nothing was kept.
+    }
+  }
+
+  // The invite panel's choice, signed in: add (the default) shows no Label field, create does.
+  function wireEnrolChoice() {
+    const add = $("enrol-add");
+    const choice = $("enrol-choice");
+    if (!add || !choice) return () => false;
+    choice.hidden = false;
+    const note = $("enrol-signed-in");
+    if (note) note.hidden = false;
+    const draw = () => {
+      $("enrol-new").hidden = add.checked;
+      $("enrol-submit").textContent = add.checked ? "Add grant to this passkey" : "Create passkey";
+    };
+    choice.addEventListener("change", draw);
+    draw();
+    return () => add.checked;
   }
 
   // ------------------------------------------------------------------ samples
@@ -1388,7 +1553,99 @@
     if (meta) announce(meta.textContent);
   });
 
+  // Safe mode (ledger #3379): the footer's links keep the page's own query, and with a script
+  // the per-browser toggle is offered. web/gonk-safe.js, linked ahead of a deployment's assets,
+  // is what honors the toggle on the next page.
+  const SAFE = "gonk:safe";
+  // This browser's storage, or null where it is refused (a private window, a blocked origin).
+  function storage() {
+    try {
+      return window.localStorage;
+    } catch (_) {
+      return null;
+    }
+  }
+  function safeUrl(on) {
+    const url = new URL(location.href);
+    if (on) url.searchParams.set("safe", "1");
+    else url.searchParams.delete("safe");
+    return url.href;
+  }
+  function wireSafeMode() {
+    const note = $("deployment-note");
+    if (!note) return;
+    const enter = note.querySelector("a.safe-enter");
+    if (enter) enter.href = safeUrl(true);
+    const leave = note.querySelector("a.safe-leave");
+    if (leave) leave.href = safeUrl(false);
+    const store = storage();
+    const toggle = $("safe-toggle");
+    if (!store || !toggle) return; // No storage: the query flag is the whole of safe mode here.
+    // Leaving safe mode in a browser that asked for it on every page stops that too, or the
+    // gate would bring the page straight back.
+    if (leave) leave.addEventListener("click", () => store.removeItem(SAFE));
+    let stored = store.getItem(SAFE) === "1";
+    const draw = () => {
+      toggle.textContent = stored
+        ? "Stop using safe mode in this browser"
+        : "Use safe mode on every page in this browser";
+    };
+    draw();
+    toggle.hidden = false;
+    toggle.addEventListener("click", () => {
+      stored = !stored;
+      if (stored) store.setItem(SAFE, "1");
+      else store.removeItem(SAFE);
+      draw();
+      location.replace(safeUrl(stored));
+    });
+  }
+
+  // An item's comments, oldest or newest first (ledger #3379): the links work with no script;
+  // here they reorder the list in place, and the choice is remembered in this browser and kept
+  // across the item's swaps (a comment posted re-renders it in written order).
+  const COMMENTS = "gonk:comments";
+  function commentOrderAsked() {
+    const asked = new URL(location.href).searchParams.get("comments");
+    if (asked === "newest" || asked === "oldest") return asked;
+    const store = storage();
+    return store && store.getItem(COMMENTS) === "newest" ? "newest" : "oldest";
+  }
+  function commentOrder(order, say) {
+    const control = $("comment-order");
+    const list = document.querySelector("#item .comment-list");
+    if (!control || !list) return;
+    if (list.getAttribute("data-order") !== order) {
+      for (const comment of Array.from(list.children).reverse()) list.appendChild(comment);
+      list.setAttribute("data-order", order);
+    }
+    for (const link of control.querySelectorAll("a[data-order]")) {
+      if (link.getAttribute("data-order") === order) link.setAttribute("aria-current", "true");
+      else link.removeAttribute("aria-current");
+    }
+    if (say) announce(order === "newest" ? "Comments, newest first." : "Comments, oldest first.");
+  }
+  function wireCommentOrder() {
+    commentOrder(commentOrderAsked(), false);
+  }
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest && e.target.closest("#comment-order a[data-order]");
+    if (!link) return;
+    e.preventDefault();
+    const order = link.getAttribute("data-order");
+    const store = storage();
+    if (store) store.setItem(COMMENTS, order); // With none, this page still reorders.
+    const url = new URL(location.href);
+    url.searchParams.set("comments", order);
+    history.replaceState(history.state, "", url.href);
+    commentOrder(order, true);
+  });
+  // A swap that re-renders the item (a comment posted, an edit) draws it in written order.
+  document.addEventListener("htmx:afterSwap", wireCommentOrder);
+
   async function init() {
+    wireSafeMode();
+    wireCommentOrder();
     wireSamples();
     wireLedgerMenu();
     wireDashboard();
@@ -1433,13 +1690,16 @@
     drawNotices(document);
     focusRefusal();
 
+    sayLater();
     const m = location.hash.match(/^#invite=([A-Za-z0-9_-]+)$/);
     if (m) {
       hideFirstPasskey();
       $("enrol").hidden = false;
+      const adding = signedIn ? wireEnrolChoice() : () => false;
       $("enrol-form").addEventListener("submit", (e) => {
         e.preventDefault();
-        enrol(m[1], $("enrol-label").value.trim());
+        if (adding()) addGrant(m[1]);
+        else enrol(m[1], $("enrol-label").value.trim());
       });
     }
   }

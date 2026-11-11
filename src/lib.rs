@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 mod file_cache;
+mod findings_pages;
 
 pub mod access;
 pub mod admit;
@@ -49,13 +50,18 @@ pub mod config;
 pub mod dashboard;
 pub mod doors;
 pub mod egress;
+pub mod face;
+pub mod face_frame;
+pub mod feeds_join;
 pub mod findings;
 pub mod findings_summary;
+pub mod git_object;
 pub mod github;
 pub mod grants;
 pub mod history;
 pub mod holders;
 pub mod identity;
+mod inbound;
 pub mod k;
 pub mod kata;
 pub mod keys;
@@ -68,11 +74,13 @@ pub mod nl;
 pub mod onboard;
 pub mod onboard_init;
 pub mod operator;
+pub mod page_assets;
 pub mod participants;
 pub mod queue;
 pub mod quic;
 pub mod refusal;
 pub mod render;
+pub mod resolution;
 pub mod roborev;
 pub mod roots;
 pub mod rows;
@@ -432,6 +440,9 @@ pub fn compose_serving_with_lifecycles(
         }
         // ★ And "On GitHub" (ledger #1907, [`crate::github`]), which composes over the same
         // `state` probe under the same authority.
+        if let Some(objects) = browse.git_objects() {
+            spaces.push(objects);
+        }
         if let Some(github) = browse.github() {
             spaces.push(github);
         }
