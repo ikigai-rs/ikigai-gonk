@@ -295,6 +295,18 @@ ikigai-store = { version = "0.4.0", features = ["persistent"] }
 # the listing's corpus check (#3255), load only readiness inputs for `next` (#3257), and mark
 # dated history as claimed. Answer shapes are unchanged. `"0.20.0"` was `<0.21.0`.
 ikigai-ledger = "0.21.0"
+
+# The door line and its hash-chained segments (ledger #383): every request a door serves is one
+# `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under
+# gonk's data home — the one record of who did what, replacing the stderr lines of ledger #739.
+# Its writer appends through `FileSink` with `std::fs`, never by resolving, so a write is never a
+# trace event of its own (the log's T5 recursion hazard), and gonk installs no tracer at all.
+#
+# ⚠ PINNED BY GIT REV, NOT BY VERSION: `AccessLog` shipped in ikigai-log 0.11.0 (release commit
+# d1783d51, 2026-11-11), which is tagged in its repository and NOT yet on crates.io (publishing is
+# Brian's). Swap this line for `ikigai-log = "0.11.0"` when it is published — `cargo publish` of
+# gonk refuses a git dependency, and nothing else here is one. `"0.11.0"` will read as `<0.12.0`.
+ikigai-log = { git = "https://github.com/ikigai-rs/ikigai-log", rev = "d1783d51737331bb7ebd2130518dfcb28bd6adec" }
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the

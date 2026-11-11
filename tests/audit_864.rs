@@ -552,7 +552,7 @@ fn r6_a_read_cannot_name_its_own_principal_in_the_access_log() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        page.contains(" principal=- "),
+        page.contains(" principal=anon ") && !page.contains("Q1JFRC1CUklBTg"),
         "an anonymous GET named its own principal in the access log: {page}"
     );
 }

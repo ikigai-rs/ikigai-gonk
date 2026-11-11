@@ -234,6 +234,20 @@ impl Gonk {
         std::fs::read_to_string(&self.stderr).unwrap_or_default()
     }
 
+    /// Every line of every log segment this gonk wrote in its data home (`gonk/log/`, ledger
+    /// #383), oldest segment first: where the door lines and the sign-in lines are.
+    #[allow(dead_code)]
+    pub fn segments(&self) -> String {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(self.layout.log_dir())
+            .map(|dir| dir.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        paths.sort();
+        paths
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect()
+    }
+
     /// One QUIC connection as this test's enrolled client. Only for a child with the door open.
     pub fn dial_quic(&self) -> std::io::Result<ikigai_quic::QuicResolver> {
         self.dial_quic_as(&self.client.dir)

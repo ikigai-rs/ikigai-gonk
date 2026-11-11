@@ -2148,6 +2148,7 @@ dependencies = [
  "ikigai-jsonld",
  "ikigai-layers",
  "ikigai-ledger",
+ "ikigai-log",
  "ikigai-nl",
  "ikigai-passkey",
  "ikigai-quic",
@@ -2292,6 +2293,23 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "ikigai-log"
+version = "0.11.0"
+source = "git+https://github.com/ikigai-rs/ikigai-log?rev=d1783d51737331bb7ebd2130518dfcb28bd6adec#d1783d51737331bb7ebd2130518dfcb28bd6adec"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "getrandom 0.3.4",
+ "ikigai-core",
+ "ikigai-sign",
+ "oxrdf",
+ "oxrdfio",
+ "serde",
+ "sha2 0.10.9",
+ "toml 0.8.23",
 ]
 
 [[package]]

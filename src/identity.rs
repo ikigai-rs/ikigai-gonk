@@ -77,9 +77,25 @@
 //! no longer enrolled deletes its session there and then, so a revoke whose log line could not
 //! be written still ends it at the next request.
 //!
-//! Every sign-in, sign-out and session ending writes one line in the access log's grammar
-//! ([`crate::access`]): `gonk:Login` or `gonk:Logout`, the passkey resource, then `door`,
-//! `outcome`, `principal`, `credential`, `sessions` and (on a logout) `why`. Never a token.
+//! Every sign-in, sign-out and session ending writes one entry into the log segment the door
+//! lines go to ([`crate::access::Record`], ledger #383): [`LOGIN_CLASS`] or [`LOGOUT_CLASS`],
+//! the passkey resource, then `door`, `outcome`, `principal`, `credential` (`log:passkey`),
+//! `passkey` (the credential id), `sessions` and (on a logout) `why`. Never a token.
+//!
+//! ★ **What each of these records is, and why there is one of each** (ledger #383):
+//!
+//! - **The segment's sign-in entries** are HISTORY: who held a session, from when. They were
+//!   stderr lines until ledger #383, which made them segment entries, hash-chained with the
+//!   door lines.
+//! - **`gonk/passkeys.log` stays**, because it is a COMMAND CHANNEL, not history: `passkey
+//!   revoke` and `passkey logout --all` run in another process and tell this server, through it,
+//!   to end sessions, and `sessions.json` holds how far it was read. The server's entry for
+//!   acting on one (`door=cli`, `why=revoked`) records what the SERVER did, sessions ended, and
+//!   the file line records what the operator asked, so neither repeats the other. Moving the
+//!   channel onto the segment would put a second process's writes into this process's chain,
+//!   which `ikigai-log` keeps to one writer per segment.
+//! - **`gonk/sessions.json` stays**: it is STATE, the live session table a restart reloads,
+//!   rewritten whole; a session that ended is gone from it, and its ending is in the segment.
 //!
 //! ⚠ **The cookie is set by the page's script, not by the server, so it is not HttpOnly**
 //! ([#1591](http://localhost:1062/l/default/item/1591)). The `ikigai-web` release this server
@@ -348,6 +364,12 @@ pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled
     })?;
     Ok(target)
 }
+
+/// The class of a sign-in's entry in the log segment ([`Passkeys::auditing`]).
+pub const LOGIN_CLASS: &str = "urn:iki:gonk:class:Login";
+
+/// The class of a sign-out's, or a session ending's, entry in the log segment.
+pub const LOGOUT_CLASS: &str = "urn:iki:gonk:class:Logout";
 
 /// The class of the [`audit_log`] line [`revoke`] writes.
 pub const REVOKED: &str = "gonk:PasskeyRevoked";
@@ -770,7 +792,7 @@ pub struct Passkeys {
     idle_seconds: u64,
     /// `gonk.http.session_max_hours`, in seconds: see [`Passkeys::lifetime`].
     max_seconds: u64,
-    audit: Option<crate::access::Sink>,
+    audit: Option<std::sync::Arc<crate::access::Record>>,
     state: Mutex<State>,
 }
 
@@ -884,10 +906,10 @@ impl Passkeys {
         self
     }
 
-    /// The same relying party, writing its sign-in and sign-out lines to `sink` (one call per
-    /// line, no newline): what `main` points at stderr, beside the access log.
-    pub fn auditing(mut self, sink: crate::access::Sink) -> Passkeys {
-        self.audit = Some(sink);
+    /// The same relying party, writing its sign-in and sign-out entries into `record`'s segment,
+    /// beside the door lines: what `main` gives it.
+    pub fn auditing(mut self, record: std::sync::Arc<crate::access::Record>) -> Passkeys {
+        self.audit = Some(record);
         self
     }
 
@@ -896,43 +918,40 @@ impl Passkeys {
         self.idle_seconds
     }
 
-    /// Write one `gonk:Login` / `gonk:Logout` line, in the access log's grammar: the passkey
-    /// resource `op` names, then `door`, `outcome`, `principal`, `credential`, `sessions`, and
-    /// for a logout `why`. `credential` is base64url when it came from an enrollment and is
-    /// encoded and cut when a caller sent it. Never a token.
+    /// Write one [`LOGIN_CLASS`] / [`LOGOUT_CLASS`] entry: the passkey resource `op` names,
+    /// then `door`, `outcome`, `principal`, `credential` (`log:passkey`, the KIND), `passkey`
+    /// (the credential id), `sessions`, and for a logout `why`. `passkey` is base64url when it
+    /// came from an enrollment and is encoded and cut when a caller sent it. Never a token.
     fn audit(&self, class: &str, line: AuditLine<'_>) {
-        let Some(sink) = &self.audit else {
+        let Some(record) = &self.audit else {
             return;
         };
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let credential: String = match line.credential {
+        let passkey: String = match line.credential {
             Some(id) => encoded(id).chars().take(crate::access::MAX_FIELD).collect(),
             None => "-".to_string(),
         };
         // The principal is named only once the credential is authenticated: a refused sign-in
         // names the credential it CLAIMED, and nobody.
         let principal = if line.authenticated && line.credential.is_some() {
-            passkey_iri(&credential)
+            passkey_iri(&passkey)
         } else {
-            "-".to_string()
+            ikigai_log::ANONYMOUS_PRINCIPAL.to_string()
         };
-        let mut text = format!(
-            "{} {class} urn:iki:gonk:passkey:{} door={} outcome={} principal={principal} \
-             credential={credential} sessions={}",
-            crate::backup::stamp_iso_ms(now_ms),
-            line.op,
-            line.door,
-            line.outcome,
-            line.sessions,
-        );
+        let mut entry = ikigai_log::Entry::new(
+            crate::access::now(),
+            class,
+            format!("urn:iki:gonk:passkey:{}", line.op),
+        )
+        .with("door", line.door)
+        .with("outcome", line.outcome)
+        .with(ikigai_log::PRINCIPAL_KEY, principal)
+        .with("credential", ikigai_log::PASSKEY_CREDENTIAL)
+        .with("passkey", passkey)
+        .with("sessions", line.sessions.to_string());
         if let Some(why) = line.why {
-            text.push_str(" why=");
-            text.push_str(why);
+            entry = entry.with("why", why);
         }
-        sink(&text);
+        record.entry(entry);
     }
 
     /// Read what was appended to [`audit_log`] since the last read, and end every session of a
@@ -988,7 +1007,7 @@ impl Passkeys {
             if let Some(credential) = passkey_credential(iri) {
                 let ended = state.end_sessions(credential);
                 self.audit(
-                    "gonk:Logout",
+                    LOGOUT_CLASS,
                     AuditLine {
                         op: "session",
                         door: "cli",
@@ -1188,7 +1207,7 @@ impl Passkeys {
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
         self.audit(
-            "gonk:Login",
+            LOGIN_CLASS,
             AuditLine {
                 op: "login",
                 door: "http",
@@ -1309,7 +1328,7 @@ impl Passkeys {
             ended
         });
         self.audit(
-            "gonk:Logout",
+            LOGOUT_CLASS,
             AuditLine {
                 op: "logout",
                 door: "http",
@@ -1335,7 +1354,7 @@ impl Passkeys {
             ended
         };
         self.audit(
-            "gonk:Logout",
+            LOGOUT_CLASS,
             AuditLine {
                 op: "logout-all",
                 door: "http",
@@ -1372,7 +1391,7 @@ impl Passkeys {
                 self.save(&mut state);
                 drop(state);
                 self.audit(
-                    "gonk:Logout",
+                    LOGOUT_CLASS,
                     AuditLine {
                         op: "session",
                         door: "http",
@@ -1407,7 +1426,7 @@ impl Passkeys {
                 ended
             };
             self.audit(
-                "gonk:Logout",
+                LOGOUT_CLASS,
                 AuditLine {
                     op: "session",
                     door: "http",
@@ -1433,7 +1452,7 @@ impl Passkeys {
                 drop(state);
                 if ended.is_some() {
                     self.audit(
-                        "gonk:Logout",
+                        LOGOUT_CLASS,
                         AuditLine {
                             op: "session",
                             door: "http",
