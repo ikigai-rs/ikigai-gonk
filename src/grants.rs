@@ -944,16 +944,24 @@ pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
 /// Brian, 2026-10-22: the controller key lives on plasma only, so an approval never comes from
 /// the passkey door or a QUIC client — the same airlock.
 ///
+/// ★ And the log (ledger #383): `urn:cap:log:read` reads a segment, which holds every request
+/// any door served, every principal and every item IRI it touched; `urn:cap:log:write` appends
+/// to the record and `urn:cap:log:config` changes what it records. All three are the owner's,
+/// on the socket, the backup's posture.
+///
 /// Browse root administration ([`crate::roots::CAP_ROOTS`]) also belongs only to the owner:
 /// it can mount any existing directory for browsing, outside the roots an operator chose.
 ///
 /// ⚠ Refused as a GRANT, not as a requirement. The endpoints declare them and the root
 /// capability on the socket satisfies them, exactly as it satisfies everything else.
-pub const CAP_GONK_ADMIN: [&str; 4] = [
+pub const CAP_GONK_ADMIN: [&str; 7] = [
     crate::backup::CAP_BACKUP,
     crate::backup::CAP_RESTORE,
     crate::onboard::CAP_ADMIN,
     crate::roots::CAP_ROOTS,
+    ikigai_log::CAP_READ,
+    ikigai_log::CAP_WRITE,
+    ikigai_log::CAP_CONFIG,
 ];
 
 /// The scopes in `scopes` that are one of the owner's administrative tokens — asked by

@@ -298,6 +298,15 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # 0.21.1: Counts follow their own ledger graph thread on store 0.5 (ledger #3375).
 # `"0.21.1"` is `<0.22.0`.
 ikigai-ledger = "0.21.1"
+
+# The door line and its hash-chained segments (ledger #383): every request a door serves is one
+# `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under
+# gonk's data home — the one record of who did what, replacing the stderr lines of ledger #739.
+# Its writer appends through `FileSink` with `std::fs`, never by resolving, so a write is never a
+# trace event of its own (the log's T5 recursion hazard), and gonk installs no tracer at all.
+#
+# 0.11.0 is the true floor: `AccessLog` first ships in it (ledger #3390). `"0.11.0"` is `<0.12.0`.
+ikigai-log = "0.11.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the

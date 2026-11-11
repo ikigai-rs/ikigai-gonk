@@ -695,7 +695,7 @@ fn a_narrowed_owner_process_cannot_forge_an_author_over_the_socket() {
     assert!(
         refused.contains(" door=socket ")
             && refused.contains(" outcome=denied")
-            && refused.contains(" principal=owner "),
+            && refused.contains(" principal=urn:iki:host:gonk:owner "),
         "{refused}"
     );
 }

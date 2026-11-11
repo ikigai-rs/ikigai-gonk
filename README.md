@@ -239,11 +239,14 @@ the passkey was created with until it is re-created.
   `gonk:PasskeySessionsEnded` line to `gonk/passkeys.log`, and the server ends the sessions at
   its next signed-in request or sign-in, with no restart. A signed-in page can do the same for
   its own passkey with `POST /auth/logout-all` and its session token as the body.
-- **Sign-ins and sign-outs are logged** (ledger #1824), on stderr beside the access log and
-  in its grammar, whatever `gonk.log.access` says: `gonk:Login` or `gonk:Logout`, the passkey
-  resource, then `door`, `outcome`, `principal` (the passkey IRI, `-` for a refused sign-in),
-  `credential`, `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`,
-  `unenrolled`, `expired`, `idle`). A session token is never written.
+- **Sign-ins and sign-outs are logged** (ledger #1824), in the log segment beside the door
+  lines (ledger #383), whatever `gonk.log.access` says: `urn:iki:gonk:class:Login` or
+  `…:Logout`, the passkey resource, then `door`, `outcome`, `principal` (the passkey IRI,
+  `anon` for a refused sign-in), `credential=https://ikigai-rs.dev/ns/log#passkey`, `passkey` (the credential id),
+  `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`, `unenrolled`,
+  `expired`, `idle`). A session token is never written. `gonk/passkeys.log` is not a second
+  copy: it is the channel `passkey revoke` and `passkey logout --all` use to tell a running
+  server, and `gonk/sessions.json` is the live session table, state rather than history.
 - **A ledger page your grant does not reach is a `403`, in one of two sentences** (ledger
   #2021). Signed out: *Sign in to read the ledger "ventures".*, followed by where the sign-in is
   (the header of every gonk page). Signed in: *Your passkey's grant doesn't include the ledger
@@ -4246,7 +4249,7 @@ gonk.backup.every = "24h"
 # gonk.review.root = "~/.ikigai/spaces"
 # gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
 # gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
-# gonk.log.access = false             # no access lines (they are ON by default)
+# gonk.log.access = false             # no door lines in the log segment (ON by default)
 # gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
 # gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in, 1..720;
                                       # one whose grant can write ends after 12 h whatever this says
@@ -4938,33 +4941,53 @@ A `launchd` agent needs only the binary; everything else comes from the config h
 
 ### The access log
 
-Every door writes one line per request to stderr, so under that agent a slow page can be read
-back from `/tmp/ikigai-gonk.log` after the fact (ledger #739). The grammar is `ikigai-log`'s —
-time, class, subject IRI, then `key=value` columns, every key on every line in this order:
+Every door writes one `log:Access` entry per request into gonk's **log segment**, a
+hash-chained `ikigai-log` file in `gonk/log/` beside `clients.json` (ledger #739, #383). It is
+the one record of who did what: the lines went to stderr until ledger #383, and stderr now
+carries only the startup banner and fatal errors. The entry is written by `ikigai-log`'s own
+door-line helper, so every column is declared in its vocabulary and a segment transrepts to
+Turtle as it stands:
 
 ```text
-2026-10-06T04:57:53.855Z gonk:Access urn:iki:gonk:page:ledger:default door=http verb=source outcome=ok bytes=3943 dur=1468 principal=- q=as=text/html&status=all
-2026-10-06T04:57:55.323Z gonk:Access urn:iki:ledger:append door=http verb=sink outcome=ok bytes=48 dur=2 principal=anon q=-
-2026-10-06T04:57:53.886Z gonk:Access urn:iki:ledger:items door=socket verb=source outcome=ok bytes=46 dur=2 principal=owner q=-
+2026-11-10T04:57:53.855Z log:Access urn:iki:gonk:page:ledger:default seq=7 door=http verb=source outcome=ok bytes=3943 dur=1468 principal=anon credential=https://ikigai-rs.dev/ns/log#anonymous q=as=text/html&status=all
+2026-11-10T04:57:55.323Z log:Access urn:iki:ledger:append seq=8 door=http verb=sink outcome=ok bytes=48 dur=2 principal=urn:iki:gonk:passkey:… credential=https://ikigai-rs.dev/ns/log#passkey
+2026-11-10T04:57:53.886Z log:Access urn:iki:ledger:items seq=9 door=socket verb=source outcome=ok bytes=46 dur=2 principal=urn:iki:host:gonk:owner credential=https://ikigai-rs.dev/ns/log#socketOwner
 ```
 
-`dur` is milliseconds and the time is when the request started; `grep ' dur=[0-9]\{4,\} '` is
-every request that took a second or more. `outcome` is `ok` or the kernel's error kind — **not
-the HTTP status**, which `ikigai-web` decides after the kernel returns and does not report
-back. An HTTP request's `principal` is the signed-in passkey the door minted into its
-capability, on reads as well as writes (ledger #1077); an anonymous read is `-`, and a
-`?principal=` a reader types is never written as one (ledger #864, R6). A QUIC line names the client the connection authenticated,
-`urn:iki:host:gonk:client:<fingerprint>` (ledger #816, #1183), on every verb and whatever
-capability the client carries (ledger #879); a line written before 2026-10-10 says
-`urn:iki:gonk:client:<fingerprint>`, and stays as written. A refusal the door kernel makes before dispatch (a capability
-floor, a name nothing binds) writes no line. A foreign `Host`, a cross-site write and (ledger
-#880) a GET another page loads are refused at the EDGE, before the kernel (which is what keeps
-`OPTIONS` and `?description` from answering them), and the edge writes their line itself
-(ledger #894): `outcome=denied bytes=- dur=0`, under the IRI the route table would have mapped
-the path to, with the query in `q` and the principal of an anonymous request whatever cookie it
-carried (a refused request's session is not believed). Between ledger #879 and #894 they wrote
-none, so probing was invisible. No line ever carries a cookie, a token or a form
-body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
+`dur` is milliseconds and the time is when the request started; `grep ' dur=[0-9]\{4,\} '
+gonk/log/*` is every request that took a second or more. `outcome` is `ok` or the kernel's
+error kind — **not the HTTP status**, which `ikigai-web` decides after the kernel returns and
+does not report back.
+
+**Who is the door's, per request** (ledger #383). Each door names the caller IT authenticated,
+and how (`credential`): the socket's is the owner (`urn:iki:host:gonk:owner`,
+`log:socketOwner`); the QUIC door's is the client its certificate named,
+`urn:iki:host:gonk:client:<fingerprint>` (`log:clientCertificate`); an HTTP request's is the
+signed-in passkey the door minted into its capability (`log:passkey`), on reads as well as
+writes. Anyone else is `principal=anon credential=https://ikigai-rs.dev/ns/log#anonymous` — explicitly, so "nobody said
+who" is in the record, and with nothing that identifies the caller. A `?principal=` a reader
+types, or a `principal` argument any client sends, is never written as one (ledger #864, R6).
+gonk installs no kernel tracer: the principal comes from the capability each door minted, not
+from a process-wide setting.
+
+A refusal the door kernel makes before dispatch (a capability floor, a name nothing binds)
+writes no line. A foreign `Host`, a cross-site write and (ledger #880) a GET another page loads
+are refused at the EDGE, before the kernel, and the edge writes their line itself (ledger
+#894): `outcome=denied dur=0`, under the IRI the route table would have mapped the path to,
+with the query in `q` and the anonymous caller whatever cookie it carried (a refused request's
+session is not believed). No entry ever carries a cookie, a token or a form body.
+`gonk.log.access = false` turns the door lines off; [`src/access.rs`](src/access.rs) has the
+rest.
+
+**The segments.** `log.toml`, then `gonk.log.toml`, in the ikigai config home configure them
+(`directory`, `level`, `destination = "off"`, `[seal]`, `[rotation]`); with neither, they are
+in `gonk/log/` at the default level. Reading them is the owner's: `urn:log:segments`,
+`urn:log:verify` (the hash chain, across rotations and restarts), `urn:log:<segment>` and
+`urn:log:config` answer the socket, and need `urn:cap:log:*`, which no grant may carry — the
+HTTP door answers `403` and the QUIC door refuses, as for the backup. ⚠ **The backup does not
+include them**: they live outside the store. Their chain is their own tamper evidence, but a
+lost disk loses them, so copy `gonk/log/` beside the archives if the record must outlive the
+machine.
 
 ★ **The Queue badge's poll is sampled** (ledger #767). Every open page fetches
 `/queue/depth` every ten seconds, so one forgotten tab wrote 360 lines an hour into a file
@@ -4973,8 +4996,8 @@ only when it fails, when it takes a second or more (so the `dur=[0-9]\{4,\}` gre
 finds every slow one), or when that poll has written no quiet line for ten minutes, to show it
 is alive. The sample is per polled resource and by time (ledger #1718): the Queue badge, the
 header's Layers count and an open Layers page's three-second poll each write one quiet line per
-ten minutes, however many pages ask. Every other request is still one line. The file itself is still unrotated:
-that is the launchd install's to do (`newsyslog`), not gonk's.
+ten minutes, however many pages ask. Every other request is still one line. Rotation is the
+segment's (`[rotation]` in `gonk.log.toml`), sealed and verified by `ikigai-log`.
 
 ## Upgrading past audit round 4 (ledger #864)
 

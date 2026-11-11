@@ -47,11 +47,11 @@ impl Server {
         let hub = Arc::new(compose(DurableStore::in_memory().unwrap()));
         let audit = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&audit);
-        let passkeys = Arc::new(
-            Passkeys::new(layout.clone(), addr.port()).auditing(Arc::new(move |line: &str| {
+        let passkeys = Arc::new(Passkeys::new(layout.clone(), addr.port()).auditing(
+            ikigai_gonk::access::Record::to(Arc::new(move |line: &str| {
                 into.lock().unwrap().push(line.to_string())
             })),
-        );
+        ));
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: vec!["default".to_string(), "acme".to_string()],
@@ -451,30 +451,38 @@ fn sign_ins_and_sign_outs_are_logged_and_a_token_never_is() {
     assert_eq!(server.session_status(&again), 404);
 
     let lines = server.audit.lock().unwrap().clone();
-    let tail = |line: &str| line.split_once(' ').map(|(_, t)| t.to_string()).unwrap();
+    // After the time, and without the segment's own `seq=` (ledger #383: these are entries in
+    // the log segment beside the door lines).
+    let tail = |line: &str| {
+        let (_, t) = line.split_once(' ').unwrap();
+        t.split(' ')
+            .filter(|c| !c.starts_with("seq="))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     let tails: Vec<String> = lines.iter().map(|l| tail(l)).collect();
     assert_eq!(
         tails,
         vec![
             format!(
-                "gonk:Login urn:iki:gonk:passkey:login door=http outcome=denied principal=- \
-                 credential={id} sessions=0"
+                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=denied principal=anon \
+                 credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=0"
             ),
             format!(
-                "gonk:Login urn:iki:gonk:passkey:login door=http outcome=ok principal={iri} \
-                 credential={id} sessions=1"
+                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=ok principal={iri} \
+                 credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1"
             ),
             format!(
-                "gonk:Logout urn:iki:gonk:passkey:logout door=http outcome=ok principal={iri} \
-                 credential={id} sessions=1 why=logout"
+                "<urn:iki:gonk:class:Logout> urn:iki:gonk:passkey:logout door=http outcome=ok principal={iri} \
+                 credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1 why=logout"
             ),
             format!(
-                "gonk:Login urn:iki:gonk:passkey:login door=http outcome=ok principal={iri} \
-                 credential={id} sessions=1"
+                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=ok principal={iri} \
+                 credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1"
             ),
             format!(
-                "gonk:Logout urn:iki:gonk:passkey:session door=cli outcome=ok principal={iri} \
-                 credential={id} sessions=1 why=revoked"
+                "<urn:iki:gonk:class:Logout> urn:iki:gonk:passkey:session door=cli outcome=ok principal={iri} \
+                 credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1 why=revoked"
             ),
         ],
         "{lines:#?}"

@@ -335,9 +335,10 @@ impl Gonk {
 /// ★ Ledger [#1077](http://localhost:1060/l/default/item/1077): the HTTP door mints the
 /// signed-in passkey into the request's CAPABILITY (`urn:cap:principal:<passkey iri>`), so who
 /// a request is from reaches every reader on every verb — a READ included, which the stamped
-/// `principal` argument (writes only) never named. A real gonk, its access log on stderr.
+/// `principal` argument (writes only) never named. A real gonk, its door lines in its log
+/// segment (ledger #383): an anonymous read is named `anon`, explicitly, never left blank.
 #[test]
-fn a_signed_in_read_is_logged_as_its_passkey_and_an_anonymous_one_as_nobody() {
+fn a_signed_in_read_is_logged_as_its_passkey_and_an_anonymous_one_as_anon() {
     let gonk = Gonk::start("");
     let (status, _) = gonk.page(
         "/l/default?principal=urn%3Aiki%3Agonk%3Apasskey%3AUk9HVUU",
@@ -348,15 +349,15 @@ fn a_signed_in_read_is_logged_as_its_passkey_and_an_anonymous_one_as_nobody() {
     let (status, _) = gonk.page("/l/default?status=all", Some(&token));
     assert_eq!(status, 200);
     let lines: Vec<String> = gonk
-        .log()
+        .segments()
         .lines()
-        .filter(|l| l.contains(" gonk:Access urn:iki:gonk:page:ledger:default "))
+        .filter(|l| l.contains(" log:Access urn:iki:gonk:page:ledger:default "))
         .map(str::to_string)
         .collect();
     assert_eq!(lines.len(), 2, "{lines:#?}");
     assert!(
-        lines[0].contains(" principal=- "),
-        "an anonymous read names nobody, whatever it typed: {lines:#?}"
+        lines[0].contains(" principal=anon ") && !lines[0].contains("Uk9HVUU"),
+        "an anonymous read is anon, whatever it typed: {lines:#?}"
     );
     assert!(
         lines[1].contains(&format!(" principal={}", identity::PASSKEY_IRI_PREFIX))

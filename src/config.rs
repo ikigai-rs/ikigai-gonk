@@ -64,7 +64,7 @@
 //!                                       # default; 0 for none): scripts, plans, draft dry runs
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
-//! # one access line per request on stderr (this IS the default; `false` for none)
+//! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
 //! # gonk.log.access = true
 //! ```
 //!
@@ -739,8 +739,8 @@ pub struct Settings {
     pub queue: QueuePolicy,
     /// Which name each holder counts under on the Dashboard's Agents tab (`gonk.holder.alias`).
     pub holder_aliases: crate::holders::HolderAliases,
-    /// Whether every door writes one access line per request to stderr (`gonk.log.access`,
-    /// on unless a line says `false`) — see [`crate::access`].
+    /// Whether every door writes one `log:Access` entry per request into the log segment
+    /// (`gonk.log.access`, on unless a line says `false`) — see [`crate::access`].
     pub access_log: bool,
     /// Where the scripts live (`gonk.script.dir`, default [`crate::script::DIR_NAME`] under the
     /// data home): one directory of plain files, this server's alone — see [`crate::script`].

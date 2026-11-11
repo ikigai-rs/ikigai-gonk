@@ -91,6 +91,17 @@ impl Layout {
         self.grants_cache.get(&self.grants_json(), parse_grants)
     }
 
+    /// gonk's own directory in the config home, `gonk/`: what everything else here is under.
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Where the log's segments land unless `log.toml` or `gonk.log.toml` says otherwise:
+    /// `gonk/log/` (ledger #383).
+    pub fn log_dir(&self) -> PathBuf {
+        self.dir.join("log")
+    }
+
     /// `gonk/quic`.
     pub fn quic_dir(&self) -> PathBuf {
         self.dir.join("quic")
