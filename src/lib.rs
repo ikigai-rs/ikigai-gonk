@@ -67,6 +67,7 @@ pub mod kata;
 pub mod keys;
 pub mod layer;
 pub mod layers_view;
+pub mod logfile;
 pub mod mirror;
 pub mod mount;
 pub mod nl;

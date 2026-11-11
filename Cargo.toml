@@ -1396,7 +1396,7 @@ hmac = "0.12.1"
 # The free space on a volume, for the Dashboard's System tab (ledger #2972, `crate::system`): the
 # safe `statvfs`, as this crate forbids `unsafe`. Already in this graph, so an edge, not a package.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "stdio"] }
 
 # SIGTERM and SIGINT, caught on a thread of their own (ledger #3326, `stop_on_signal` in
 # `main`): the safe API over `sigaction`, as this crate forbids `unsafe`. A handler it installs
