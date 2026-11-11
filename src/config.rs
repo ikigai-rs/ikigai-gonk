@@ -217,8 +217,14 @@ usage:
                                    grant name may be shared. Effective at its next call;
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey list [--config PATH]
-                                   every enrolled passkey: its label, grant, credential id
-                                   and IRI
+                                   every enrolled passkey: its label, grants, credential id
+                                   and IRI, and each grant an invite added to it (or that
+                                   was removed), with the invite's hash
+  ikigai-gonk passkey remove-grant <label> | --credential <id> --grant <name> [--config PATH]
+                                   take one grant off one passkey, leaving its other grants,
+                                   every other passkey and grants.json alone, and append a
+                                   gonk:PasskeyGrantRemoved line to gonk/passkeys.log. Its
+                                   last grant is refused (revoke the passkey instead)
   ikigai-gonk passkey revoke <label> | --credential <id> [--config PATH]
                                    remove one passkey from clients.json and append a
                                    gonk:PasskeyRevoked line to gonk/passkeys.log. A label two
@@ -531,6 +537,17 @@ pub enum Command {
         key: String,
         /// Whether `key` is a label (`true`) or a credential id.
         by_label: bool,
+        /// `--config`.
+        flags: Flags,
+    },
+    /// Take one grant off one enrolled passkey and record it (ledger #3388).
+    PasskeyRemoveGrant {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// `--grant`: the grant name to take off.
+        grant: String,
         /// `--config`.
         flags: Flags,
     },
@@ -1631,12 +1648,15 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             }
             return Ok(Command::PasskeyList { flags });
         }
-        Some(sub @ ("revoke" | "logout")) => {
+        Some(sub @ ("revoke" | "logout" | "remove-grant")) => {
             let mut flags = Flags::default();
-            let (mut label, mut credential, mut all) = (None, None, false);
+            let (mut label, mut credential, mut all, mut grant) = (None, None, false, None);
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    "--grant" if sub == "remove-grant" => {
+                        grant = Some(value(&mut args, "--grant")?)
+                    }
                     "--all" if sub == "logout" => all = true,
                     flag @ ("--config" | "--config-home" | "--data-home") => {
                         home_flag(flag, &mut args, &mut flags)?
@@ -1667,6 +1687,17 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                     ))
                 }
             };
+            if sub == "remove-grant" {
+                let grant = grant.ok_or(
+                    "passkey remove-grant: expected --grant <name> (as `passkey list` prints it)",
+                )?;
+                return Ok(Command::PasskeyRemoveGrant {
+                    key,
+                    by_label,
+                    grant,
+                    flags,
+                });
+            }
             return Ok(if sub == "logout" {
                 Command::PasskeyLogoutAll {
                     key,
@@ -1683,14 +1714,14 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         }
         Some(other) => {
             return Err(format!(
-                "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke` or \
-                 `logout --all`)"
+                "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke`, \
+                 `remove-grant` or `logout --all`)"
             ))
         }
         None => {
             return Err(
-                "passkey: expected `invite <name>`, `list`, `revoke <label>` or \
-                        `logout --all <label>`"
+                "passkey: expected `invite <name>`, `list`, `revoke <label>`, \
+                        `remove-grant <label> --grant <name>` or `logout --all <label>`"
                     .to_string(),
             )
         }

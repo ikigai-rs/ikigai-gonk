@@ -114,6 +114,12 @@ fn main() {
             by_label,
             flags,
         } => passkey_logout_all(&key, by_label, &flags),
+        Command::PasskeyRemoveGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        } => passkey_remove_grant(&key, by_label, &grant, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -1918,15 +1924,67 @@ fn passkey_list(flags: &config::Flags) {
             layout.clients_json().display()
         );
     }
+    // Each widening (and narrowing) under the passkey it changed (ledger #3388). The log is a
+    // record: an unreadable one is said, and the list from clients.json still printed.
+    let changes = identity::grant_changes(&layout).unwrap_or_else(|e| {
+        eprintln!("ikigai-gonk: grant changes not shown: {e}");
+        Vec::new()
+    });
     for entry in enrolled.values() {
+        let word = if entry.grants.len() == 1 {
+            "grant "
+        } else {
+            "grants"
+        };
         println!(
-            "{:<16} grant {:<12} credential {}  {}",
+            "{:<16} {word} {:<12} credential {}  {}",
             entry.label,
-            entry.grant,
+            entry.grant_names(),
             entry.credential_id,
             identity::passkey_iri(&entry.credential_id)
         );
+        for change in changes
+            .iter()
+            .filter(|c| c.credential_id == entry.credential_id)
+        {
+            match (change.added, &change.invite) {
+                (true, Some(invite)) => println!(
+                    "  {}  added grant `{}` by invite {invite}",
+                    change.at, change.grant
+                ),
+                (true, None) => println!("  {}  added grant `{}`", change.at, change.grant),
+                (false, _) => println!("  {}  removed grant `{}`", change.at, change.grant),
+            }
+        }
     }
+}
+
+/// `ikigai-gonk passkey remove-grant <label> | --credential <id> --grant <name>` (ledger
+/// #3388): take one grant off one passkey.
+fn passkey_remove_grant(key: &str, by_label: bool, grant: &str, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let now = identity::remove_grant(&layout, which, grant, now_ms).unwrap_or_else(|e| fail(&e));
+    println!(
+        "removed grant `{grant}` from passkey `{}` ({}); it holds {} — effective at its next \
+         request",
+        now.label,
+        identity::passkey_iri(&now.credential_id),
+        now.grant_names(),
+    );
+    println!(
+        "  recorded in {}. grants.json and every other passkey are unchanged",
+        identity::audit_log(&layout).display()
+    );
 }
 
 /// `ikigai-gonk passkey revoke <label> | --credential <id>` (ledger #313).
@@ -1944,11 +2002,11 @@ fn passkey_revoke(key: &str, by_label: bool, flags: &config::Flags) {
         .unwrap_or(0);
     let revoked = identity::revoke(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
     println!(
-        "revoked passkey `{}` ({}, grant `{}`) from {} — refused from its next request, and its \
+        "revoked passkey `{}` ({}, grants `{}`) from {} — refused from its next request, and its \
          live sessions are deleted",
         revoked.label,
         identity::passkey_iri(&revoked.credential_id),
-        revoked.grant,
+        revoked.grant_names(),
         layout.clients_json().display()
     );
     println!(
@@ -1974,11 +2032,11 @@ fn passkey_logout_all(key: &str, by_label: bool, flags: &config::Flags) {
         .unwrap_or(0);
     let ended = identity::end_sessions(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
     println!(
-        "every session of passkey `{}` ({}, grant `{}`) ends at the server's next signed-in \
+        "every session of passkey `{}` ({}, grants `{}`) ends at the server's next signed-in \
          request or sign-in; the passkey stays enrolled and can sign in again",
         ended.label,
         identity::passkey_iri(&ended.credential_id),
-        ended.grant,
+        ended.grant_names(),
     );
     println!(
         "  recorded in {}, which the running server reads",

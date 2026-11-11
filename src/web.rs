@@ -4493,11 +4493,13 @@ fn require_graph(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
 
 // ----------------------------------------------------------------------------- passkeys
 
-const PASSKEY_OPS: [&str; 7] = [
+const PASSKEY_OPS: [&str; 9] = [
     "register-options",
     "register",
     "login-options",
     "login",
+    "add-grant-options",
+    "add-grant",
     "logout",
     "logout-all",
     "session",
@@ -4570,8 +4572,51 @@ impl Endpoint for PasskeyDoor {
                     .register(content.as_bytes(), now)
                     .map_err(refused)?;
                 Ok(json_repr(
-                    json!({ "label": enrolled.label, "grant": enrolled.grant }),
+                    json!({ "label": enrolled.label, "grant": enrolled.grant_names() }),
                 ))
+            }
+            // Redeeming an invite while signed in adds its grant to THAT passkey (ledger #3388).
+            // The options answer what would be added, spending nothing, and a challenge only a
+            // fresh assertion by the signed-in passkey can answer; the session alone is never
+            // enough.
+            "add-grant-options" => {
+                let asked = serde_json::from_str::<serde_json::Value>(content)
+                    .map_err(|e| refused(format!("not JSON: {e}")))?;
+                let field = |name: &str| {
+                    asked
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .ok_or_else(|| refused(format!("`{name}` is missing")))
+                };
+                let (grant, credential) = self
+                    .passkeys
+                    .add_grant_preview(field("session")?.trim(), &field("invite")?, now)
+                    .map_err(refused)?;
+                let challenge = self
+                    .passkeys
+                    .challenge(Purpose::AddGrant, now)
+                    .map_err(Error::Unavailable)?;
+                Ok(json_repr(json!({
+                    "challenge": challenge,
+                    "rpId": identity::RP_ID,
+                    "grant": grant,
+                    "credential": credential,
+                })))
+            }
+            "add-grant" => {
+                let (token, who, added) = self
+                    .passkeys
+                    .add_grant(content.as_bytes(), now)
+                    .map_err(Error::Denied)?;
+                Ok(json_repr(json!({
+                    "session": token,
+                    "seconds": who.expires.saturating_sub(now),
+                    "label": who.enrolled.label,
+                    "grant": who.enrolled.grant_names(),
+                    "grants": who.enrolled.grants,
+                    "added": added,
+                })))
             }
             "login" => {
                 let (token, who) = self
@@ -4582,7 +4627,8 @@ impl Endpoint for PasskeyDoor {
                     "session": token,
                     "seconds": who.expires.saturating_sub(now),
                     "label": who.enrolled.label,
-                    "grant": who.enrolled.grant,
+                    "grant": who.enrolled.grant_names(),
+                    "grants": who.enrolled.grants,
                 })))
             }
             "logout" => {
@@ -4600,7 +4646,8 @@ impl Endpoint for PasskeyDoor {
             "session" => match self.passkeys.identity(content.trim(), now) {
                 Some(who) => Ok(json_repr(json!({
                     "label": who.enrolled.label,
-                    "grant": who.enrolled.grant,
+                    "grant": who.enrolled.grant_names(),
+                    "grants": who.enrolled.grants,
                     "scopes": who.scopes,
                     "seconds": who.expires.saturating_sub(now),
                 }))),
@@ -4626,7 +4673,10 @@ impl Endpoint for PasskeyDoor {
                 "The WebAuthn ceremonies and the session they open. `register-options` and \
                  `login-options` mint a single-use challenge; `register` enrolls a credential \
                  against a one-time invite; `login` verifies an assertion and opens a session \
-                 whose capability is its grant in gonk/grants.json; `session`, `logout` and \
+                 whose capability is the union of its passkey's grants in gonk/grants.json; \
+                 `add-grant-options` and `add-grant` redeem an invite while signed in by adding \
+                 its grant to that passkey, against a fresh assertion by it, and re-open the \
+                 session; `session`, `logout` and \
                  `logout-all` (every session of that token's passkey) take the session token as \
                  the body. Public by design — this is how a caller with no \
                  grant gets one — so it declares no capability. The HTTP door refuses a foreign \

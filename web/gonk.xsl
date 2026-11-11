@@ -133,10 +133,21 @@
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>
               <p>This link carries a one-time invite. Creating the passkey enrolls it under the grant the invite names; after that, signing in with it gives this browser that grant.</p>
+              <!-- Signed in, the invite's grant is added to the passkey signed in with by default
+                   (ledger #3388), confirmed by that passkey; creating a new one is the other
+                   choice. web/gonk.js shows this, and the Label field only for a new passkey. -->
+              <p id="enrol-signed-in" hidden="hidden">You are signed in. Adding the invite's grant to the passkey you are signed in with keeps its other grants and asks that passkey to confirm (its fingerprint, face or PIN), then signs you in again with the wider grant. No other passkey changes.</p>
               <form id="enrol-form" class="row">
-                <label for="enrol-label">Label</label>
-                <input id="enrol-label" name="label" type="text" autocomplete="off" placeholder="e.g. laptop Touch ID"/>
-                <button type="submit">Create passkey</button>
+                <fieldset id="enrol-choice" hidden="hidden">
+                  <legend>What should this invite do?</legend>
+                  <label><input type="radio" name="enrol-mode" id="enrol-add" value="add" checked="checked"/> Add its grant to the passkey you are signed in with</label>
+                  <label><input type="radio" name="enrol-mode" id="enrol-create" value="create"/> Create a new passkey</label>
+                </fieldset>
+                <span id="enrol-new" class="row">
+                  <label for="enrol-label">Label</label>
+                  <input id="enrol-label" name="label" type="text" autocomplete="off" placeholder="e.g. laptop Touch ID"/>
+                </span>
+                <button type="submit" id="enrol-submit">Create passkey</button>
               </form>
             </section>
             <div id="status" class="flash-area" role="status" aria-live="polite"></div>

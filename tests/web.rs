@@ -2152,7 +2152,8 @@ fn a_passkey_identity_adds_its_grant_and_only_its_grant() {
     // that file still parses as the QUIC door's enrollment.
     let clients = std::fs::read_to_string(server.layout.clients_json()).unwrap();
     assert!(
-        clients.contains("\"passkeys\"") && clients.contains("\"grant\": \"brian\""),
+        clients.contains("\"passkeys\"")
+            && clients.contains("\"grants\": [\n        \"brian\"\n      ]"),
         "{clients}"
     );
     quic::parse_enrolment(&clients).unwrap();
