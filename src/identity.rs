@@ -210,6 +210,28 @@ pub fn passkey_iri(credential_id: &str) -> String {
     format!("{PASSKEY_IRI_PREFIX}{credential_id}")
 }
 
+/// Why a passkey with the credential id `id` cannot be enrolled because no door could name
+/// it, or `None` when one can.
+///
+/// The HTTP door mints [`passkey_iri`] into each signed-in request's capability, and the log
+/// writes it as the `principal=` of every line (ledger #383). Core refuses a principal past
+/// [`ikigai_core::MAX_PRINCIPAL_LEN`] bytes, and WebAuthn lets an authenticator choose an id of
+/// up to 1023 bytes, so through ledger #3414 a long one enrolled and every request it signed
+/// was attributed to `anon`. A credential id of up to 368 bytes fits.
+pub fn principal_refusal(id: &str) -> Option<String> {
+    let iri = passkey_iri(id);
+    ikigai_core::Capability::scoped(Vec::<String>::new())
+        .with_principal(&iri)
+        .err()
+        .map(|e| {
+            format!(
+                "this passkey's credential id ({} characters) is too long to name its holder \
+                 ({e}); use another authenticator",
+                id.len()
+            )
+        })
+}
+
 /// The credential id a [`passkey_iri`] names, or `None` for any other text — a plain-name
 /// author written by hand, or by the cli.
 pub fn passkey_credential(author: &str) -> Option<&str> {
@@ -1278,11 +1300,12 @@ impl Passkeys {
             None => "-".to_string(),
         };
         // The principal is named only once the credential is authenticated: a refused sign-in
-        // names the credential it CLAIMED, and nobody.
-        let principal = if line.authenticated && line.credential.is_some() {
-            passkey_iri(&passkey)
-        } else {
-            ikigai_log::ANONYMOUS_PRINCIPAL.to_string()
+        // names the credential it CLAIMED, and nobody. It is built from the whole id, never
+        // the cut `passkey` column, so it is the IRI the door lines of the same session carry
+        // (ledger #3414); an enrolled id always fits one ([`principal_refusal`]).
+        let principal = match line.credential {
+            Some(id) if line.authenticated => passkey_iri(id),
+            _ => ikigai_log::ANONYMOUS_PRINCIPAL.to_string(),
         };
         let mut entry = ikigai_log::Entry::new(
             crate::access::now(),
@@ -1512,6 +1535,9 @@ impl Passkeys {
         let client_data = b64(&text("clientDataJSON")?, "clientDataJSON")?;
         self.check_client_data(&client_data, "webauthn.create", &challenge)?;
         let id = text("id")?;
+        if let Some(why) = principal_refusal(&id) {
+            return Err(why);
+        }
         let key = b64(&text("publicKey")?, "publicKey")?;
         // Parsing is the check that this is an ES256 key this server can verify against.
         RegisteredCredential::from_spki_der(b64(&id, "id")?, &key, 0)

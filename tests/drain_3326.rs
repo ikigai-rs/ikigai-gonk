@@ -222,6 +222,26 @@ fn exit_of(gonk: &mut Gonk, since: Instant) -> (ExitStatus, Duration) {
     }
 }
 
+/// Whether the newest log segment ends as an orderly stop: its last entry is `log:ProcessStop`
+/// (ledger #383), written by `access::Record::close`. A process that exits without closing
+/// the segment leaves it reading as a crash (ledger #3414).
+fn ends_with_a_stop(gonk: &Gonk) -> bool {
+    let segments = gonk.segments();
+    let last = segments
+        .lines()
+        // An entry starts with its time; `segments()` also reads the instance's `.lock`,
+        // which holds a pid, and the `#seal` lines come after the last entry.
+        .filter(|l| {
+            l.split(' ')
+                .next()
+                .is_some_and(|t| t.contains('T') && t.ends_with('Z'))
+        })
+        .last()
+        .unwrap_or("");
+    let class = last.split(' ').nth(1).unwrap_or("");
+    class == "log:ProcessStop" || class == ikigai_log::PROCESS_STOP_CLASS
+}
+
 /// ★ The item's first requirement: the write in progress at SIGTERM finishes, its client sees
 /// the reply, the write is there after a restart, and the process exits 0 within the cap.
 #[test]
@@ -245,6 +265,7 @@ fn a_quic_write_in_progress_at_sigterm_completes_and_gonk_exits_zero() {
     let (status, took) = exit_of(&mut gonk, stopped);
     assert_eq!(status.code(), Some(0), "{status}:\n{}", gonk.log());
     assert!(took < DRAIN_CAP + EXIT_SLACK, "took {took:?}");
+    assert!(ends_with_a_stop(&gonk), "{}", gonk.segments());
 
     gonk.restart();
     let saved = gonk.dial_quic().expect("QUIC connect").issue(request(
@@ -304,6 +325,9 @@ fn a_second_signal_during_the_drain_exits_at_once() {
         took < DRAIN_CAP,
         "the second signal waited for the drain: {took:?}"
     );
+    // Stopped as asked, so the segment says so (ledger #3414): through a2af1ec this exit
+    // skipped `log:ProcessStop` and the segment read as a crash.
+    assert!(ends_with_a_stop(&gonk), "{}", gonk.segments());
 }
 
 /// SIGINT drains exactly as SIGTERM does.
@@ -320,6 +344,7 @@ fn sigint_drains_an_idle_door_and_exits_zero() {
         "{}",
         gonk.log()
     );
+    assert!(ends_with_a_stop(&gonk), "{}", gonk.segments());
 }
 
 /// With no QUIC door there is nothing to drain, and a stop is still a clean one.
@@ -331,6 +356,7 @@ fn a_gonk_with_no_quic_door_exits_zero_on_sigterm() {
     let (status, took) = exit_of(&mut gonk, stopped);
     assert_eq!(status.code(), Some(0), "{status}:\n{}", gonk.log());
     assert!(took < DRAIN_CAP, "took {took:?}");
+    assert!(ends_with_a_stop(&gonk), "{}", gonk.segments());
 }
 
 /// The drain waits for calls, not work: a claim stands through the stop exactly as it was, with
@@ -385,6 +411,7 @@ fn a_claim_keeps_its_holder_and_lease_across_a_drain_and_restart() {
     let (status, took) = exit_of(&mut gonk, stopped);
     assert_eq!(status.code(), Some(0), "{status}:\n{}", gonk.log());
     assert!(took < DRAIN_CAP + EXIT_SLACK, "took {took:?}");
+    assert!(ends_with_a_stop(&gonk), "{}", gonk.segments());
 
     gonk.restart();
     assert_eq!(claim(&gonk), before, "the claim moved across the restart");

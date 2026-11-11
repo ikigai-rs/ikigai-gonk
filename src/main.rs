@@ -2219,6 +2219,11 @@ fn stop_on_signal(drain: Option<ikigai_quic::Drain>, record: Option<Arc<access::
         drain.trigger(quic::DRAIN_CAP);
         if let Some(second) = signals.next() {
             eprintln!("ikigai-gonk: a second signal during the drain; exiting now");
+            // Still a stop someone asked for, not a crash: the segment ends with
+            // `log:ProcessStop` (ledger #3414).
+            if let Some(record) = &record {
+                record.close();
+            }
             std::process::exit(128 + second)
         }
     });
