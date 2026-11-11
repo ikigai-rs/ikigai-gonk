@@ -872,7 +872,7 @@ fn ledger_menu(ledgers: &[Ledger], here: Here<'_>) -> String {
         })
         .collect();
     let label = match here {
-        Here::Ledger(name) => format!("Ledger: {name}"),
+        Here::Ledger(name) | Here::Sparql(name) => format!("Ledger: {name}"),
         _ => "Ledgers".to_string(),
     };
     render::wrap(

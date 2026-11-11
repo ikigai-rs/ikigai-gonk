@@ -3523,10 +3523,10 @@ fn the_doctor_says_what_it_judged_against_on_one_line() {
     }
 }
 
-/// A signed-in caller's editor and header must agree on the ledger in force,
-/// regardless of configuration order or whether default is readable.
+/// A signed-in caller's editor keeps its query ledger selection, regardless of configuration
+/// order or whether default is readable. The header links are not the current page (#1894).
 #[test]
-fn a_multi_ledger_passkey_defaults_to_default_in_both_pickers() {
+fn a_multi_ledger_passkey_selects_its_query_ledger_without_a_current_header_link() {
     for (readable, expected_default) in [
         (vec!["alpha", "default", "zeta"], "default"),
         (vec!["alpha", "zeta"], "zeta"),
@@ -3566,12 +3566,7 @@ fn a_multi_ledger_passkey_defaults_to_default_in_both_pickers() {
                 "{path}: header ledger"
             );
             let header = body.split("</header>").next().unwrap();
-            assert!(
-                header.contains(&format!(
-                    "aria-current=\"page\" class=\"ledger-link\" href=\"/l/{expected}\""
-                )),
-                "{path}: {header}"
-            );
+            assert!(!header.contains("aria-current"), "{path}: {header}");
             if expected_default != "default" {
                 assert!(!select.contains("value=\"default\""), "{select}");
             }
