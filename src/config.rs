@@ -219,13 +219,20 @@ usage:
   ikigai-gonk passkey list [--config PATH]
                                    every enrolled passkey: its label, grants, credential id
                                    and IRI, each grant's scopes as grants.json stores them,
-                                   and each grant an invite added to it (or that was
-                                   removed), with the invite's hash
-  ikigai-gonk passkey remove-grant <label> | --credential <id> --grant <name> [--config PATH]
+                                   and each grant added to it (by an invite, with its hash,
+                                   or by the owner) or removed
+  ikigai-gonk passkey grant add <label> | --credential <id> <grant> [--config PATH]
+                                   add one grant grants.json defines to one passkey, leaving
+                                   every other passkey and grants.json alone, and append a
+                                   gonk:PasskeyGrantAdded … by=owner line to
+                                   gonk/passkeys.log. A grant it already holds is refused.
+                                   Its live sessions hold the grant from their next request
+  ikigai-gonk passkey grant remove <label> | --credential <id> <grant> [--config PATH]
                                    take one grant off one passkey, leaving its other grants,
                                    every other passkey and grants.json alone, and append a
                                    gonk:PasskeyGrantRemoved line to gonk/passkeys.log. Its
-                                   last grant is refused (revoke the passkey instead)
+                                   last grant is refused (revoke the passkey instead). Also
+                                   spelled `passkey remove-grant <label> --grant <name>`
   ikigai-gonk passkey revoke <label> | --credential <id> [--config PATH]
                                    remove one passkey from clients.json and append a
                                    gonk:PasskeyRevoked line to gonk/passkeys.log. A label two
@@ -554,6 +561,17 @@ pub enum Command {
         /// Whether `key` is a label (`true`) or a credential id.
         by_label: bool,
         /// `--grant`: the grant name to take off.
+        grant: String,
+        /// `--config`.
+        flags: Flags,
+    },
+    /// Add one grant to one enrolled passkey and record it (ledger #3400).
+    PasskeyAddGrant {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// The grant name to add: a key of `grants.json`.
         grant: String,
         /// `--config`.
         flags: Flags,
@@ -1658,6 +1676,81 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             }
             return Ok(Command::PasskeyList { flags });
         }
+        // ★ Ledger #3400: `grant add` and `grant remove` are the pair; `remove-grant` (#3388)
+        // stays as an alias of `grant remove`, so scripts written against it keep working.
+        Some("grant") => {
+            let sub = match args.next().as_deref() {
+                Some("add") => "grant add",
+                Some("remove") => "grant remove",
+                _ => {
+                    return Err(
+                        "passkey grant: expected `add <label> <grant>` or `remove <label> \
+                                <grant>` (or --credential <id> for the label)"
+                            .to_string(),
+                    )
+                }
+            };
+            let mut flags = Flags::default();
+            let (mut credential, mut grant, mut positional) = (None, None, Vec::new());
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    "--grant" => grant = Some(value(&mut args, "--grant")?),
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(format!("passkey {sub}: unknown argument `{other}`"))
+                    }
+                    other => positional.push(other.to_string()),
+                }
+            }
+            // The passkey (a label, unless --credential names it) then the grant, each given
+            // once: positionally, or by its flag.
+            let mut positional = positional.into_iter();
+            let label = if credential.is_none() {
+                positional.next()
+            } else {
+                None
+            };
+            let grant = match (grant, positional.next()) {
+                (Some(grant), None) | (None, Some(grant)) => grant,
+                _ => {
+                    return Err(format!(
+                        "passkey {sub}: expected <label> <grant>, or --credential <id> <grant> \
+                         (as `passkey list` prints them)"
+                    ))
+                }
+            };
+            if let Some(extra) = positional.next() {
+                return Err(format!("passkey {sub}: unexpected argument `{extra}`"));
+            }
+            let (key, by_label) = match (label, credential) {
+                (Some(label), None) => (label, true),
+                (None, Some(credential)) => (credential, false),
+                _ => {
+                    return Err(format!(
+                        "passkey {sub}: expected <label> or --credential <id> (as `passkey \
+                         list` prints them)"
+                    ))
+                }
+            };
+            return Ok(if sub == "grant add" {
+                Command::PasskeyAddGrant {
+                    key,
+                    by_label,
+                    grant,
+                    flags,
+                }
+            } else {
+                Command::PasskeyRemoveGrant {
+                    key,
+                    by_label,
+                    grant,
+                    flags,
+                }
+            });
+        }
         Some(sub @ ("revoke" | "logout" | "remove-grant")) => {
             let mut flags = Flags::default();
             let (mut label, mut credential, mut all, mut grant) = (None, None, false, None);
@@ -1725,13 +1818,13 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some(other) => {
             return Err(format!(
                 "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke`, \
-                 `remove-grant` or `logout --all`)"
+                 `grant add`, `grant remove` or `logout --all`)"
             ))
         }
         None => {
             return Err(
                 "passkey: expected `invite <name>`, `list`, `revoke <label>`, \
-                        `remove-grant <label> --grant <name>` or `logout --all <label>`"
+                        `grant add|remove <label> <grant>` or `logout --all <label>`"
                     .to_string(),
             )
         }
@@ -4061,5 +4154,61 @@ mod tests {
         assert!(settings(&Flags::default(), &nobody, &homes())
             .unwrap_err()
             .contains("names nobody"));
+    }
+
+    /// `passkey grant add|remove` name the passkey then the grant, each by position or flag;
+    /// `remove-grant --grant` is `grant remove` (ledger #3400).
+    #[test]
+    fn passkey_grant_add_and_remove_parse() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        let parsed = |line: &str| match parse_args(args(line)).unwrap() {
+            Command::PasskeyAddGrant {
+                key,
+                by_label,
+                grant,
+                ..
+            } => ("add", key, by_label, grant),
+            Command::PasskeyRemoveGrant {
+                key,
+                by_label,
+                grant,
+                ..
+            } => ("remove", key, by_label, grant),
+            other => panic!("{other:?}"),
+        };
+        let both = |verb: &'static str, key: &str, by_label, grant: &str| {
+            (verb, key.to_string(), by_label, grant.to_string())
+        };
+        assert_eq!(
+            parsed("passkey grant add laptop writer"),
+            both("add", "laptop", true, "writer")
+        );
+        assert_eq!(
+            parsed("passkey grant add --credential AbC writer"),
+            both("add", "AbC", false, "writer")
+        );
+        assert_eq!(
+            parsed("passkey grant add laptop --grant writer"),
+            both("add", "laptop", true, "writer")
+        );
+        assert_eq!(
+            parsed("passkey grant remove laptop viewer"),
+            both("remove", "laptop", true, "viewer")
+        );
+        assert_eq!(
+            parsed("passkey remove-grant laptop --grant viewer"),
+            parsed("passkey grant remove laptop viewer"),
+            "the alias"
+        );
+        for refused in [
+            "passkey grant add laptop",
+            "passkey grant add laptop writer extra",
+            "passkey grant add --credential AbC",
+            "passkey grant add laptop writer --grant writer",
+            "passkey grant",
+            "passkey grant edit laptop writer",
+        ] {
+            assert!(parse_args(args(refused)).is_err(), "{refused}");
+        }
     }
 }
