@@ -1,0 +1,43 @@
+# released.rq asked of every holder at once, for the totals row (ledger #3178): the same items, each
+# release still measured against its own holder's latest claim of the item before it. The claim and
+# the hand-back are joined to the release on the item and matched to its holder in a filter: with
+# ?holder free, the planner joins on it first, every release to every claim of that holder, which
+# grows with the square of the busiest holder's claims and ran past the store's budget.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?number ?title WHERE {
+  {
+    SELECT ?item ?holder ?released (MAX(?at) AS ?claimed) WHERE {
+      ?release a ledger:ReleaseEvent ;
+               ledger:claimedBy ?holder ;
+               ledger:releaseReason ?reason ;
+               ledger:onItem ?item ;
+               dcterms:created ?released .
+      FILTER(?reason != "closed")
+      ?claim a ledger:ClaimEvent ;
+             ledger:onItem ?item ;
+             ledger:claimedBy ?claimer ;
+             dcterms:created ?at .
+      FILTER(sameTerm(?claimer, ?holder) && ?at <= ?released)
+    }
+    GROUP BY ?item ?holder ?released
+  }
+  ?item ledger:number ?number ;
+        dcterms:title ?title .
+  OPTIONAL {
+    SELECT ?item ?holder ?released (MAX(?at) AS ?back) WHERE {
+      ?release a ledger:ReleaseEvent ;
+               ledger:claimedBy ?holder ;
+               ledger:onItem ?item ;
+               dcterms:created ?released .
+      ?handback ledger:onItem ?item ;
+                ledger:handedBackBy ?giver ;
+                dcterms:created ?at .
+      FILTER(sameTerm(?giver, ?holder) && ?at <= ?released)
+    }
+    GROUP BY ?item ?holder ?released
+  }
+  FILTER(!BOUND(?back) || ?back <= ?claimed)
+}
+ORDER BY ?number

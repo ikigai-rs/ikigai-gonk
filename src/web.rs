@@ -266,6 +266,10 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             },
         )
         .bind(
+            template(crate::agents::TOTAL_TEMPLATE),
+            crate::agents::Total,
+        )
+        .bind(
             template(crate::agents::AGENT_TEMPLATE),
             crate::agents::Agent {
                 web: Arc::clone(&web),

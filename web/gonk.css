@@ -174,6 +174,9 @@ summary { cursor: pointer; color: var(--accent); }
 .agent-table th[scope="col"] { min-width: 5.5rem; }
 .agent-table th[scope="row"] { min-width: 9rem; overflow-wrap: anywhere; }
 .agent-table td { white-space: nowrap; }
+/* The totals row (ledger #3178): set off by a rule in the text color, so it holds in every theme and
+   in forced colors, and by weight, never by color alone. */
+.agent-table tfoot th, .agent-table tfoot td { border-top: 2px solid currentColor; font-weight: 600; }
 @media (forced-colors: active) {
   .chart-rule, .chart-axis, .chart-line.chart-open, .chart-line.chart-closed { stroke: CanvasText; }
   .chart-dot.chart-open, .chart-dot.chart-closed { fill: CanvasText; }

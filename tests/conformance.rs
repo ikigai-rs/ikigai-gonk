@@ -349,7 +349,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 42] = [
+const WEB_IDS: [&str; 43] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -378,6 +378,8 @@ const WEB_IDS: [&str; 42] = [
     "gonk-agents",
     "gonk-agent",
     "gonk-agent-answer",
+    // The same question asked once of every holder, the totals row (ledger #3178).
+    "gonk-agents-answer",
     "gonk-view-agent",
     "gonk-page-ledger",
     "gonk-fragment-items",
