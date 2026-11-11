@@ -1674,7 +1674,7 @@ impl Passkeys {
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
         self.audit(
-            "gonk:Login",
+            LOGIN_CLASS,
             AuditLine {
                 op: "add-grant",
                 door: "http",
@@ -1750,7 +1750,7 @@ impl Passkeys {
             ended
         };
         self.audit(
-            "gonk:Logout",
+            LOGOUT_CLASS,
             AuditLine {
                 op: "session",
                 door: "http",
