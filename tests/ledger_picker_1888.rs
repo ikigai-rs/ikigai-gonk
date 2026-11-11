@@ -268,6 +268,42 @@ fn the_menu_lists_exactly_the_readable_ledgers_with_the_current_one_marked() {
     assert!(!nav.contains("<select"), "{nav}");
 }
 
+/// The SPARQL ledger is a query input, not the current navigation page (#1894).
+#[test]
+fn sparql_keeps_its_selected_ledger_without_marking_a_ledger_link_current() {
+    for names in [&["default"][..], &["default", "alpha"][..]] {
+        let server = Server::start(names, names);
+        for (path, selected) in [
+            ("/sparql", "default"),
+            ("/sparql?ledger=default", "default"),
+        ]
+        .into_iter()
+        .chain(
+            names
+                .contains(&"alpha")
+                .then_some(("/sparql?ledger=alpha", "alpha")),
+        ) {
+            let page = server.ok(path);
+            let nav = header_nav(&page).expect("the SPARQL header's ledger links");
+            assert!(!nav.contains("aria-current"), "{path}: {nav}");
+            let select = page
+                .split("<select id=\"q-ledger\" name=\"ledger\">")
+                .nth(1)
+                .unwrap()
+                .split("</select>")
+                .next()
+                .unwrap();
+            assert!(
+                select.contains(&format!(
+                    "<option selected=\"selected\" value=\"{selected}\">"
+                )),
+                "{path}: {select}"
+            );
+            assert_eq!(select.matches("selected=").count(), 1, "{path}: {select}");
+        }
+    }
+}
+
 /// ★ With no script it is a `<details>`: the summary opens it, every link is inside it and
 /// none is hidden, so a browser with scripting off follows them like any other link. The
 /// script's own pieces (the filter) are the only thing hidden, until the script shows them.

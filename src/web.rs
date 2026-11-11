@@ -589,6 +589,8 @@ pub(crate) fn nav_on_dashboard(web: &Web, capability: &Capability, ledgers: &[Le
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Here<'a> {
     Ledger(&'a str),
+    /// The SPARQL editor selects a query ledger without navigating to its page.
+    Sparql(&'a str),
     Index,
     /// The Views page: not in the ledgers, but its header link is the current page's.
     Views,
@@ -613,7 +615,7 @@ fn nav_with(
     count_query: Option<&str>,
 ) -> String {
     let current = match here {
-        Here::Ledger(name) => Some(name),
+        Here::Ledger(name) | Here::Sparql(name) => Some(name),
         _ => None,
     };
     // ★ The header's picker (ledger #1888), FIRST: the stylesheet draws it where the one link
@@ -4341,7 +4343,13 @@ impl Endpoint for Sparql {
         };
         let children = format!(
             "{}{}{}{}{}",
-            nav(&self.web, inv.capability, &ledgers, Some(ledger.name())),
+            nav_with(
+                &self.web,
+                inv.capability,
+                &ledgers,
+                Here::Sparql(ledger.name()),
+                None,
+            ),
             samples(),
             cross_graph(),
             element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),
