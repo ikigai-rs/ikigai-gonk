@@ -25,7 +25,7 @@ use ikigai_core::{
     Representation, Request, Verb,
 };
 use ikigai_gonk::doors;
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_vocab::TurtleRenderer;
 
 /// How long the endpoint behind the door stays silent: three times the liveness bound.

@@ -32,7 +32,7 @@ use ikigai_core::{
 };
 use ikigai_gonk::layer::{self, Binding, Door};
 use ikigai_gonk::taker;
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_store::DurableStore;
 
 const LAYER: &str = "tasks";

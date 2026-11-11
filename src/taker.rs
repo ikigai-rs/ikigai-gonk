@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use ikigai_core::{ArgRef, Capability, Error, Kernel, Request, Verb};
 use ikigai_ledger::json::{Item, ItemDocument};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 
 use crate::layer::{self, Binding, Door, Role};
 use crate::mirror::{self, LayerClient, Tuple};

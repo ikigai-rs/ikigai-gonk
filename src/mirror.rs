@@ -86,7 +86,7 @@ use ikigai_ledger::claim::ClaimKind;
 use ikigai_ledger::json::{Item, ItemsDocument};
 use ikigai_ledger::vocabulary as v;
 use ikigai_ledger::Ledger;
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::Term;
 

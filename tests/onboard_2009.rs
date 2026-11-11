@@ -26,7 +26,7 @@ use ikigai_gonk::mirror::{self, Mirror};
 use ikigai_gonk::onboard::{self, Onboard, Parts, Verdict};
 use ikigai_gonk::quic::{self, Layout};
 use ikigai_gonk::taker::{self, Taker, Took};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_store::DurableStore;
 
 const ONB: &str = "https://ikigai-rs.dev/ns/onboard#";

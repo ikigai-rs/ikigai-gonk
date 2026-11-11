@@ -19,7 +19,7 @@ use common::Authenticator;
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity;
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use scratch_gonk::Gonk;
 
 impl Gonk {

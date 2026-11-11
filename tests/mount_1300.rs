@@ -28,7 +28,7 @@ use ikigai_core::{
     ReprType, Representation, Request, Verb,
 };
 use ikigai_gonk::mount::{self, LazyMount, Target};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_vocab::TurtleRenderer;
 
 mod ready;

@@ -1027,7 +1027,7 @@ fn a_restart_does_not_postpone_the_next_backup_and_the_status_says_when_it_is_du
     backup::start(
         &jobs,
         day,
-        Arc::clone(&restarted) as Arc<dyn ikigai_resolve_transport::Resolver>,
+        Arc::clone(&restarted) as Arc<dyn ikigai_resolve::Resolver>,
     )
     .expect("scheduled");
 

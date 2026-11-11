@@ -22,7 +22,7 @@ use ikigai_core::{
 };
 use ikigai_gonk::layer::{self, Binding, Door, Role};
 use ikigai_gonk::mirror::{self, Mirror};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_store::DurableStore;
 
 const IK: &str = "https://ikigai-rs.dev/ns#";

@@ -63,7 +63,7 @@ use ikigai_core::{
     Description, Endpoint, EndpointSpace, Exact, FnEndpoint, Invocation, Iri, Kernel, ReprType,
     Representation, Request, Result as KResult, Verb,
 };
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_vocab::TurtleRenderer;
 
 /// The client's I/O deadline at scale 1. Generous enough that an instant round trip on an idle

@@ -1,6 +1,6 @@
 //! The config-home scoped-copy bound reaches the store behind the running server.
 use ikigai_core::{ArgRef, Iri, Request, Verb};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 
 mod scratch_gonk;
 

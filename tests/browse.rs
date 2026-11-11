@@ -2002,7 +2002,7 @@ fn the_retirement_mount_lines_reach_gonk_fresh_and_mint() {
     std::thread::spawn(move || ikigai_ipc::serve(door, &path));
     ready::socket(&socket);
     let mounted = |prefix: &str| {
-        Arc::new(ikigai_resolve_transport::MountedRemote::overriding(
+        Arc::new(ikigai_resolve::MountedRemote::overriding(
             Arc::new(ikigai_ipc::connect(&socket).expect("connect")),
             prefix,
             socket.display().to_string(),
@@ -3031,7 +3031,7 @@ fn the_header_offers_browse_only_where_a_root_is_readable() {
 
 /// File an item carrying `labels` (comma-separated) straight at the ledger; its number.
 fn file_labeled(hub: &Kernel, labels: &str) -> i64 {
-    use ikigai_resolve_transport::Resolver;
+    use ikigai_resolve::Resolver;
     let request = Request::new(
         Verb::Sink,
         Iri::parse("urn:iki:ledger:default:append").expect("the append's name"),
@@ -3067,7 +3067,7 @@ fn an_item_links_its_repo_labels_to_the_trees_this_viewer_may_read() {
         ArgRef::Inline(b"repo:demo' onmouseover='x".to_vec()),
     );
     assert!(matches!(
-        ikigai_resolve_transport::Resolver::issue(hub.as_ref(), hostile),
+        ikigai_resolve::Resolver::issue(hub.as_ref(), hostile),
         Err(ikigai_core::Error::InvalidArgument { name, .. }) if name == "labels"
     ));
     let item = |number: i64| format!("/l/default/item/{number}");

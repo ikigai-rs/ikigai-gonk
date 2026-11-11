@@ -18,7 +18,7 @@ use common::Authenticator;
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
 use ikigai_gonk::grants::{alias_grants, grants_for, link_in_grants, mirror_grants, Authority};
 use ikigai_gonk::{identity, participants, quic};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use scratch_gonk::Gonk;
 
 const CLAUDE: &str = "urn:collab:participant:lawnboy-claude";

@@ -15,7 +15,7 @@ mod common;
 mod scratch_gonk;
 
 use ikigai_core::{ArgRef, Error, Iri, Representation, Request, Verb};
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use scratch_gonk::Gonk;
 
 fn request(verb: Verb, iri: &str, content: Option<&str>) -> Request {

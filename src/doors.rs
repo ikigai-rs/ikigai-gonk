@@ -24,11 +24,11 @@
 //! render and a cached page is exactly the second cache this design exists to avoid — and
 //! every ledger read a page makes is a hub read.
 //!
-//! ⚠ **Why not `ikigai_resolve_transport::RemoteSpace` over the hub**, which is the mount machinery
+//! ⚠ **Why not `ikigai_resolve::RemoteSpace` over the hub**, which is the mount machinery
 //! and would have been the obvious reuse: its forwarding endpoint calls the synchronous
 //! `Resolver::issue_as`, and `impl Resolver for Kernel` implements that with
 //! `futures::executor::block_on`. The socket door already runs each call inside
-//! `ikigai_resolve_transport::issue_traced_as`'s own `block_on`, and futures' executor panics when
+//! `ikigai_resolve::issue_traced_as`'s own `block_on`, and futures' executor panics when
 //! entered twice on one thread. [`HubSpace`] awaits the hub instead.
 
 use std::net::{IpAddr, SocketAddr};

@@ -41,7 +41,7 @@ use ikigai_core::{
     ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
     Iri, Kernel, ReprType, Representation, Request, Verb,
 };
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 use ikigai_vocab::TurtleRenderer;
 
 mod scratch_gonk;

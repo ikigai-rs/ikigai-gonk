@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use ikigai_core::{ArgRef, Iri, Request, Verb};
 use ikigai_ledger::vocabulary as v;
 use ikigai_ledger::Ledger;
-use ikigai_resolve_transport::Resolver;
+use ikigai_resolve::Resolver;
 
 /// The `about` IRIs the bridges file under, which are also their keys: roborev's, kata's, and
 /// gonk's own published findings (`ikigai-gonk findings file`, `urn:iki:finding:{id}`; ledger
