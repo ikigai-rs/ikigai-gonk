@@ -218,8 +218,9 @@ usage:
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey list [--config PATH]
                                    every enrolled passkey: its label, grants, credential id
-                                   and IRI, and each grant an invite added to it (or that
-                                   was removed), with the invite's hash
+                                   and IRI, each grant's scopes as grants.json stores them,
+                                   and each grant an invite added to it (or that was
+                                   removed), with the invite's hash
   ikigai-gonk passkey grant add <label> | --credential <id> <grant> [--config PATH]
                                    add one grant grants.json defines to one passkey, leaving
                                    every other passkey and grants.json alone, and append a
@@ -248,14 +249,20 @@ usage:
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--alias <ledger>=<scheme>]... [--link-in <ledger>]... [--mirror-to <ledger>]...
-                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
+                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--scope <urn:cap:…>]...
+                     [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrolls a passkey under that grant. Refused on a
-                                   bind localhost cannot reach (127.0.0.2); warned on [::1]
+                                   bind localhost cannot reach (127.0.0.2); warned on [::1].
+                                   --scope adds a scope no other flag names (urn:cap:exec:git),
+                                   in the same write; a repeat, or one a flag already grants, is
+                                   stored once
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
-  remove and add; --force writes it and prints the same list. A grant name is shared by every
+  remove and add; --force writes it and prints the same list. --force writes the grant WHOLE
+  from the flags, narrowing included, by design: a scope no flag names stays only if a --scope
+  names it. A grant name is shared by every
   certificate and passkey enrolled under it, so the change reaches all of them.
 
   --browse is the repositories as a ROLE (each role holds the one before it):
@@ -598,6 +605,9 @@ pub enum Command {
         scripts: Vec<(String, ScriptAuthority)>,
         /// `--nl draft`: draft queries with `urn:nl:sparql` (ledger #1138).
         nl_draft: bool,
+        /// `--scope <urn>`: scopes no other flag names, written into the same grant in the
+        /// same write ([`scope_spec`], ledger #3401). Repeats are kept once.
+        scopes: Vec<String>,
         /// Replace an existing grant of that name with different scopes.
         force: bool,
         /// How long the invite is valid.
@@ -1834,11 +1844,17 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
     );
     let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
     let mut across = Vec::new();
-    let (mut scripts, mut nl_draft) = (Vec::new(), false);
+    let (mut scripts, mut nl_draft, mut scopes) = (Vec::new(), false, Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
             "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
+            "--scope" => {
+                let scope = scope_spec(&name, &value(&mut args, "--scope")?)?;
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
             "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--root" => roots.push(value(&mut args, "--root")?),
             "--ledger" => {
@@ -1894,10 +1910,62 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         browse: browse_grant(role, roots)?,
         scripts,
         nl_draft,
+        scopes,
         force,
         minutes,
         flags,
     })
+}
+
+/// One `passkey invite --scope <urn>` (ledger #3401): a scope no other flag names, such as
+/// `urn:cap:exec:git` for ikigai-repo's code links.
+///
+/// It must be a `urn:cap:` scope with no empty segment and nothing but visible ASCII, and
+/// it must pass [`crate::quic::grant_refusal`], the rule every grant in `grants.json` is
+/// held to at startup and per use, so a scope the doors would refuse (a whole-dataset
+/// token, an offering wildcard, a door's marker, an identity's name, the owner's tokens)
+/// is refused here, before anything is written. The refusal names the value.
+///
+/// A value that repeats another `--scope`, or one another flag already grants, is kept once,
+/// silently: the grant is a set, so a duplicate changes nothing and confuses nothing.
+///
+/// ```
+/// use ikigai_gonk::config::scope_spec;
+/// assert_eq!(scope_spec("chris", "urn:cap:exec:git").unwrap(), "urn:cap:exec:git");
+/// assert!(scope_spec("chris", "exec:git").unwrap_err().contains("`exec:git`"));
+/// assert!(scope_spec("chris", "urn:cap:exec:*").unwrap_err().contains("`urn:cap:exec:*`"));
+/// ```
+///
+/// # Errors
+///
+/// A sentence naming the value and what is wrong with it.
+pub fn scope_spec(grant: &str, spec: &str) -> Result<String, String> {
+    const PREFIX: &str = "urn:cap:";
+    let malformed = |why: &str| format!("--scope `{spec}`: {why}; nothing was written");
+    let Some(rest) = spec.strip_prefix(PREFIX) else {
+        return Err(malformed(
+            "a grant's scopes are capability URNs, so this must start with `urn:cap:` \
+             (for example `urn:cap:exec:git`)",
+        ));
+    };
+    if !spec.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(malformed(
+            "a scope is visible ASCII only, with no whitespace or control characters",
+        ));
+    }
+    if rest.is_empty() || rest.split(':').any(str::is_empty) {
+        return Err(malformed(
+            "a scope has no empty segment: nothing may follow `urn:cap:` empty, and no `::` \
+             or trailing `:`",
+        ));
+    }
+    if let Some(refusal) = crate::quic::grant_refusal(grant, &[spec.to_string()]) {
+        return Err(format!(
+            "--scope `{spec}` is refused, as grants.json would refuse it: {refusal}; nothing \
+             was written"
+        ));
+    }
+    Ok(spec.to_string())
 }
 
 /// `ikigai-gonk grants --browse <read|derive> [--root R]... [--config PATH]`.

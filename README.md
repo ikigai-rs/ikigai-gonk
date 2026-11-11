@@ -257,8 +257,9 @@ the passkey was created with until it is re-created.
   line, and takes effect at the passkey's next request. `passkey remove-grant <label> --grant
   <name>`, the name #3388 shipped, still works and is the same command.
 - **List and revoke** (ledger #313). `ikigai-gonk passkey list` prints every enrolled passkey:
-  its label, grants, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
-  `--credential <id>`, which a label two passkeys share requires) removes that one entry from
+  its label, grants, credential id and IRI, then each grant's scopes as stored (ledger #3401).
+  `ikigai-gonk passkey revoke <label>` (or `--credential <id>`, which a label two passkeys share
+  requires) removes that one entry from
   `clients.json`, with no restart, and the passkey's live sessions are DELETED, not just
   refused (ledger #1824): enrolling the same credential again, or restoring `clients.json`
   from a backup, never brings one back, and only a new sign-in opens a session. It appends one line to
@@ -1227,6 +1228,23 @@ Use --force to replace it, which changes every identity enrolled under it
 ```
 
 A reordering of the same scopes is no change, and is written without `--force`.
+
+**`--force` writes the grant whole, narrowing included, by design**: a ledger or root that
+leaves the flags leaves the grant, so a script can keep a grant in step with what it serves. A
+scope no flag names (`urn:cap:exec:git` for ikigai-repo's code links, say) is kept by naming it
+with `passkey invite --scope <urn>`, repeatable, which goes into the same grant in the same
+write as every other flag, so no session under the grant ever sees it missing (ledger
+[#3401](http://localhost:1060/l/default/item/3401)):
+
+```sh
+ikigai-gonk passkey invite chris --ledger default=write --scope urn:cap:exec:git --force
+```
+
+Each value must be a `urn:cap:` scope with no empty segment and no whitespace, and it is held to
+the rule `grants.json` is held to (no whole-dataset token, offering wildcard, door marker,
+identity name or owner token); a refused value is named and nothing is written. A repeated
+`--scope`, or one another flag already grants, is stored once, silently. `passkey list` prints
+each passkey's grant scopes as `grants.json` stores them.
 
 ⚠ **A click on Explain spends inference.** The per-face token ceilings
 (`gonk.explain.*.max_tokens`) bound ONE call; what bounds them over time is one window on the

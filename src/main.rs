@@ -90,6 +90,7 @@ fn main() {
                         ledger_graphs: &ledger_graphs,
                         across: &across,
                         scripts: &scripts,
+                        scopes: &[],
                     },
                     &browse_scopes,
                 ),
@@ -135,6 +136,7 @@ fn main() {
             browse,
             scripts,
             nl_draft,
+            scopes,
             force,
             minutes,
             flags,
@@ -146,6 +148,7 @@ fn main() {
                 ledger_graphs: &ledger_graphs,
                 across: &across,
                 scripts: &scripts,
+                scopes: &scopes,
             },
             browse.as_ref(),
             nl_draft,
@@ -1346,6 +1349,9 @@ struct Subjects<'a> {
     across: &'a [grants::Across],
     /// `--script <name>=<read|run|publish>` (ledger #939).
     scripts: &'a [(String, grants::ScriptAuthority)],
+    /// `passkey invite --scope <urn>`: scopes no other flag names, already checked by
+    /// [`config::scope_spec`] (ledger #3401).
+    scopes: &'a [String],
 }
 
 impl Subjects<'_> {
@@ -1355,6 +1361,7 @@ impl Subjects<'_> {
             && self.ledger_graphs.is_empty()
             && self.across.is_empty()
             && self.scripts.is_empty()
+            && self.scopes.is_empty()
     }
 }
 
@@ -1401,6 +1408,11 @@ fn scopes_for(subjects: &Subjects<'_>, browse: &[String]) -> Vec<String> {
         for token in grants::script_grants(script, *authority).unwrap_or_else(|e| fail(&e)) {
             add(token);
         }
+    }
+    // ★ Ledger #3401: in the same list, so the same write. A `--scope` another flag already
+    // grants is kept once, silently: the grant is a set.
+    for token in subjects.scopes {
+        add(token.clone());
     }
     scopes
 }
@@ -1936,6 +1948,9 @@ fn passkey_list(flags: &config::Flags) {
         eprintln!("ikigai-gonk: grant changes not shown: {e}");
         Vec::new()
     });
+    // ★ Ledger #3401: each passkey's grant scopes AS STORED, so a scope `--scope` wrote (or a
+    // `--force` dropped) is visible without opening grants.json.
+    let grants = quic::read_grants(&layout.grants_json());
     for entry in enrolled.values() {
         let word = if entry.grants.len() == 1 {
             "grant "
@@ -1949,6 +1964,20 @@ fn passkey_list(flags: &config::Flags) {
             entry.credential_id,
             identity::passkey_iri(&entry.credential_id)
         );
+        for grant in &entry.grants {
+            match grants.as_ref().map(|grants| grants.get(grant)) {
+                Ok(Some(scopes)) => {
+                    for scope in scopes {
+                        println!("  scope {scope}  (grant `{grant}`)");
+                    }
+                }
+                Ok(None) => println!(
+                    "  no grant `{grant}` in {}: this passkey is refused",
+                    layout.grants_json().display()
+                ),
+                Err(e) => println!("  the scopes of grant `{grant}` cannot be read: {e}"),
+            }
+        }
         for change in changes
             .iter()
             .filter(|c| c.credential_id == entry.credential_id)
