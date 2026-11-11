@@ -220,11 +220,18 @@ usage:
                                    every enrolled passkey: its label, grants, credential id
                                    and IRI, and each grant an invite added to it (or that
                                    was removed), with the invite's hash
-  ikigai-gonk passkey remove-grant <label> | --credential <id> --grant <name> [--config PATH]
+  ikigai-gonk passkey grant add <label> | --credential <id> <grant> [--config PATH]
+                                   add one grant grants.json defines to one passkey, leaving
+                                   every other passkey and grants.json alone, and append a
+                                   gonk:PasskeyGrantAdded line (by=owner) to gonk/passkeys.log.
+                                   A grant it already holds is refused. Effective at its next
+                                   request; its sessions stay signed in
+  ikigai-gonk passkey grant remove <label> | --credential <id> <grant> [--config PATH]
                                    take one grant off one passkey, leaving its other grants,
                                    every other passkey and grants.json alone, and append a
                                    gonk:PasskeyGrantRemoved line to gonk/passkeys.log. Its
-                                   last grant is refused (revoke the passkey instead)
+                                   last grant is refused (revoke the passkey instead).
+                                   `passkey remove-grant <label> --grant <name>` is the same
   ikigai-gonk passkey revoke <label> | --credential <id> [--config PATH]
                                    remove one passkey from clients.json and append a
                                    gonk:PasskeyRevoked line to gonk/passkeys.log. A label two
@@ -547,6 +554,17 @@ pub enum Command {
         /// Whether `key` is a label (`true`) or a credential id.
         by_label: bool,
         /// `--grant`: the grant name to take off.
+        grant: String,
+        /// `--config`.
+        flags: Flags,
+    },
+    /// Add one grant to one enrolled passkey and record it (ledger #3400).
+    PasskeyAddGrant {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// The grant name to add, as `grants.json` defines it.
         grant: String,
         /// `--config`.
         flags: Flags,
@@ -1633,6 +1651,81 @@ fn script_spec(spec: &str) -> Result<(String, ScriptAuthority), String> {
     Ok((name.to_string(), authority))
 }
 
+/// `passkey grant add|remove (<label> | --credential <id>) <grant>` (ledger #3400). `grant
+/// remove` is `remove-grant` spelled as the pair; the grant may also be given as `--grant`.
+fn parse_passkey_grant(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let add = match args.next().as_deref() {
+        Some("add") => true,
+        Some("remove") => false,
+        Some(other) => {
+            return Err(format!(
+                "passkey grant: unknown subcommand `{other}` (expected `add` or `remove`)"
+            ))
+        }
+        None => {
+            return Err(
+                "passkey grant: expected `add <label> <grant>` or `remove <label> \
+                        <grant>`"
+                    .to_string(),
+            )
+        }
+    };
+    let sub = if add { "grant add" } else { "grant remove" };
+    let mut flags = Flags::default();
+    let (mut positional, mut credential, mut grant) = (Vec::new(), None, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--credential" => credential = Some(value(&mut args, "--credential")?),
+            "--grant" => grant = Some(value(&mut args, "--grant")?),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("passkey {sub}: unknown argument `{other}`"))
+            }
+            other => positional.push(other.to_string()),
+        }
+    }
+    let mut positional = positional.into_iter();
+    let (key, by_label) = match credential {
+        Some(credential) => (credential, false),
+        None => (
+            positional.next().ok_or_else(|| {
+                format!(
+                    "passkey {sub}: expected <label> or --credential <id> (as `passkey list` \
+                     prints them)"
+                )
+            })?,
+            true,
+        ),
+    };
+    let grant = match (grant, positional.next()) {
+        (Some(grant), None) | (None, Some(grant)) => grant,
+        (None, None) => return Err(format!("passkey {sub}: expected the grant's name")),
+        (Some(_), Some(other)) => {
+            return Err(format!("passkey {sub}: unexpected argument `{other}`"))
+        }
+    };
+    if let Some(other) = positional.next() {
+        return Err(format!("passkey {sub}: unexpected argument `{other}`"));
+    }
+    Ok(if add {
+        Command::PasskeyAddGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        }
+    } else {
+        Command::PasskeyRemoveGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        }
+    })
+}
+
 fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     match args.next().as_deref() {
         Some("invite") => {}
@@ -1648,6 +1741,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             }
             return Ok(Command::PasskeyList { flags });
         }
+        Some("grant") => return parse_passkey_grant(args),
         Some(sub @ ("revoke" | "logout" | "remove-grant")) => {
             let mut flags = Flags::default();
             let (mut label, mut credential, mut all, mut grant) = (None, None, false, None);
@@ -1715,13 +1809,14 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some(other) => {
             return Err(format!(
                 "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke`, \
-                 `remove-grant` or `logout --all`)"
+                 `grant add`, `grant remove` or `logout --all`)"
             ))
         }
         None => {
             return Err(
                 "passkey: expected `invite <name>`, `list`, `revoke <label>`, \
-                        `remove-grant <label> --grant <name>` or `logout --all <label>`"
+                        `grant add <label> <grant>`, `grant remove <label> <grant>` or \
+                        `logout --all <label>`"
                     .to_string(),
             )
         }

@@ -500,8 +500,11 @@ pub struct GrantChange {
     pub added: bool,
     /// The grant added or removed, decoded.
     pub grant: String,
-    /// The invite an addition redeemed (`sha256:<hex>`); `None` for a removal.
+    /// The invite an addition redeemed (`sha256:<hex>`); `None` for a removal, or for an
+    /// addition the owner made at the command line ([`add_grant`]).
     pub invite: Option<String>,
+    /// Who made the change, when the line says (`by=`): [`BY_OWNER`] for [`add_grant`].
+    pub by: Option<String>,
 }
 
 /// Every [`GRANT_ADDED`] and [`GRANT_REMOVED`] line in [`audit_log`], in the order written. No
@@ -540,6 +543,7 @@ pub fn grant_changes(layout: &Layout) -> Result<Vec<GrantChange>, String> {
             added,
             grant,
             invite: field("invite=").map(str::to_string),
+            by: field("by=").map(decoded),
         });
     }
     Ok(out)
@@ -592,6 +596,71 @@ pub fn remove_grant(
             audit_log(layout).display()
         )
     })?;
+    Ok(target)
+}
+
+/// The `by=` value of a [`GRANT_ADDED`] line [`add_grant`] writes: the box's owner, at the
+/// command line, widened the passkey; no invite was redeemed.
+pub const BY_OWNER: &str = "owner";
+
+/// Add ONE grant to ONE passkey in `clients.json` and append a [`GRANT_ADDED`] line to
+/// [`audit_log`] — what `ikigai-gonk passkey grant add` runs (ledger
+/// [#3400](http://localhost:1062/l/default/item/3400)). Returns the passkey as it is now.
+///
+/// The owner's half of [`Passkeys::add_grant`]: the passkey is named as [`revoke`] and
+/// [`remove_grant`] name one, and only its list grows. A grant `grants.json` does not define
+/// (or that resolves to no scopes, or to a refused token) is refused, and so is one the passkey
+/// already holds; nothing is written then. `grants.json` and every other passkey are unchanged.
+///
+/// The line is the one an invite's widening writes, with `by=owner` where that one has
+/// `invite=sha256:…`, so a passkey's grant history stays in one place. As there, it is written
+/// under the clients lock with the change, and if it cannot be written the change is undone.
+///
+/// ★ **No session is ended.** Takes effect at the passkey's next request, which re-reads
+/// `clients.json` ([`Passkeys::identity`]), so a live session simply holds the wider grant.
+/// The invite path ends and re-establishes sessions because the one asking for the wider grant
+/// is whoever holds a session cookie and an invite link, so it demands a fresh assertion; here
+/// the one deciding is the owner of the box, who could as well have widened the grant itself,
+/// and signing the person out would prove nothing more. `passkey logout --all` is there for an
+/// owner who wants it.
+pub fn add_grant(
+    layout: &Layout,
+    which: Which<'_>,
+    grant: &str,
+    now_ms: u64,
+) -> Result<Enrolled, String> {
+    let lock = layout.lock_clients()?;
+    let mut target = pick(layout, which)?;
+    if target.grants.iter().any(|g| g == grant) {
+        return Err(format!(
+            "passkey `{}` already holds grant `{grant}` (it holds {}); nothing was written",
+            target.label,
+            target.grant_names()
+        ));
+    }
+    let grants = quic::read_grants(&layout.grants_json())?;
+    quic::scopes_for_grant(&grants, grant).map_err(|e| {
+        format!(
+            "{e} — `ikigai-gonk passkey invite {grant} …` defines a grant in {}; nothing was \
+             written",
+            layout.grants_json().display()
+        )
+    })?;
+    let before = target.clone();
+    target.grants.push(grant.to_string());
+    write_passkey(layout, &lock, &target)?;
+    let extra = format!(" added={} by={BY_OWNER}", encoded(grant));
+    if let Err(e) = record_with(layout, GRANT_ADDED, &target, now_ms, &extra) {
+        // ★ No widening goes unrecorded: undone, under the same lock.
+        write_passkey(layout, &lock, &before)?;
+        return Err(format!(
+            "grant `{grant}` was NOT added to passkey `{}`: its line could not be written to \
+             {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        ));
+    }
+    drop(lock);
     Ok(target)
 }
 

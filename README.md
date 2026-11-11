@@ -238,11 +238,24 @@ the passkey was created with until it is re-created.
   urn:iki:gonk:passkey:<credential id> label=… grant=<every grant, comma-separated> added=…
   invite=sha256:<hash of the code>` to `gonk/passkeys.log` (never the code), and if that line
   cannot be written the change is undone. `passkey list` prints each widening under its passkey.
-- **Remove one grant from one passkey** (ledger #3388). `ikigai-gonk passkey remove-grant
-  <label> --grant <name>` (or `--credential <id>`) takes that grant off that passkey and nothing
+- **Add one grant to one passkey from the command line** (ledger #3400). `ikigai-gonk passkey
+  grant add <label> <grant>` (or `--credential <id> <grant>`) appends a grant `grants.json`
+  already defines to that passkey's list, with no invite and no hand edit of `clients.json`.
+  A grant `grants.json` does not define (or gives no scopes) and a grant the passkey already
+  holds are refused, and nothing is written. Every other passkey and `grants.json` are
+  unchanged. It appends the line an invite's widening writes, with `by=owner` in place of
+  `invite=…`: `gonk:PasskeyGrantAdded urn:iki:gonk:passkey:<credential id> label=…
+  grant=<every grant> added=… by=owner`, and `passkey list` prints it under the passkey as
+  *added grant `…` by the owner (command line)*. It takes effect at the passkey's next request,
+  and its sessions stay signed in: the invite path ends them because whoever holds a session
+  cookie and an invite link could be asking, so it demands a fresh assertion; the box's owner
+  needs no such proof. `passkey logout --all` ends them if you want that.
+- **Remove one grant from one passkey** (ledger #3388). `ikigai-gonk passkey grant remove
+  <label> <grant>` (or `--credential <id> <grant>`) takes that grant off that passkey and nothing
   else: its other grants, every other passkey and `grants.json` are unchanged. Its last grant is
   refused (`passkey revoke` removes a passkey). It appends a `gonk:PasskeyGrantRemoved … removed=…`
-  line, and takes effect at the passkey's next request.
+  line, and takes effect at the passkey's next request. `passkey remove-grant <label> --grant
+  <name>`, the name #3388 shipped, still works and is the same command.
 - **List and revoke** (ledger #313). `ikigai-gonk passkey list` prints every enrolled passkey:
   its label, grants, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
   `--credential <id>`, which a label two passkeys share requires) removes that one entry from

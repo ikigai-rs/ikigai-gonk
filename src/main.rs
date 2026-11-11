@@ -120,6 +120,12 @@ fn main() {
             grant,
             flags,
         } => passkey_remove_grant(&key, by_label, &grant, &flags),
+        Command::PasskeyAddGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        } => passkey_add_grant(&key, by_label, &grant, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -1952,6 +1958,10 @@ fn passkey_list(flags: &config::Flags) {
                     "  {}  added grant `{}` by invite {invite}",
                     change.at, change.grant
                 ),
+                (true, None) if change.by.as_deref() == Some(identity::BY_OWNER) => println!(
+                    "  {}  added grant `{}` by the owner (command line)",
+                    change.at, change.grant
+                ),
                 (true, None) => println!("  {}  added grant `{}`", change.at, change.grant),
                 (false, _) => println!("  {}  removed grant `{}`", change.at, change.grant),
             }
@@ -1959,8 +1969,8 @@ fn passkey_list(flags: &config::Flags) {
     }
 }
 
-/// `ikigai-gonk passkey remove-grant <label> | --credential <id> --grant <name>` (ledger
-/// #3388): take one grant off one passkey.
+/// `ikigai-gonk passkey grant remove <label> | --credential <id> <grant>`, or its alias
+/// `passkey remove-grant … --grant <name>` (ledgers #3388, #3400): take one grant off one passkey.
 fn passkey_remove_grant(key: &str, by_label: bool, grant: &str, flags: &config::Flags) {
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
@@ -1977,6 +1987,34 @@ fn passkey_remove_grant(key: &str, by_label: bool, grant: &str, flags: &config::
     println!(
         "removed grant `{grant}` from passkey `{}` ({}); it holds {} — effective at its next \
          request",
+        now.label,
+        identity::passkey_iri(&now.credential_id),
+        now.grant_names(),
+    );
+    println!(
+        "  recorded in {}. grants.json and every other passkey are unchanged",
+        identity::audit_log(&layout).display()
+    );
+}
+
+/// `ikigai-gonk passkey grant add <label> | --credential <id> <grant>` (ledger #3400): add one
+/// grant to one passkey, as the box's owner.
+fn passkey_add_grant(key: &str, by_label: bool, grant: &str, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let now = identity::add_grant(&layout, which, grant, now_ms).unwrap_or_else(|e| fail(&e));
+    println!(
+        "added grant `{grant}` to passkey `{}` ({}); it holds {} — effective at its next \
+         request, and its sessions stay signed in (`passkey logout --all` ends them)",
         now.label,
         identity::passkey_iri(&now.credential_id),
         now.grant_names(),
