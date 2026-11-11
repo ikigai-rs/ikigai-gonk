@@ -521,7 +521,7 @@ fn read_facts(dir: &Path, head: Option<&str>) -> Facts {
 
 /// `git -C dir args…`'s output, trimmed, when it succeeded and said something.
 fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::git_env::harden_local(&mut Command::new("git"))
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -893,5 +893,18 @@ mod tests {
         ] {
             assert_eq!(link_iri(other), None, "{other}");
         }
+    }
+
+    /// Ledger #3489: a root at a subdirectory whose tracked content spells a bare repository
+    /// is not read as that repository: its committed `remote.origin.url` names no link.
+    #[test]
+    fn a_planted_bare_repository_is_not_the_root_s_repository() {
+        let p = crate::git_env::fixture::planted();
+        assert_eq!(
+            read_facts(&p.clone, None).origin.as_deref(),
+            Some("https://github.com/owner/repo")
+        );
+        assert_eq!(read_facts(&p.adopt(), None).origin, None);
+        assert!(!p.marker.exists());
     }
 }
