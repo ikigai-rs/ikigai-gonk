@@ -1336,6 +1336,88 @@
     }
   }
 
+  // ★ SIGNED IN, AN INVITE WIDENS THE PASSKEY SIGNED IN WITH (ledger #3388). A grant is shared by
+  // every passkey that holds it, so one person's access is widened by adding the invite's grant
+  // to their own passkey, never by editing the grant. The session cookie alone is not enough:
+  // the passkey it signs in as must answer a fresh challenge (user verification required), so a
+  // stolen cookie plus the link raises nothing. The server ends every session of the passkey and
+  // answers a new one, which replaces the cookie; the page reloads to draw what the wider grant
+  // opens, and the sentence is said after the reload.
+  async function addGrant(invite) {
+    try {
+      const t = token();
+      const { challenge, credential } = await post("/auth/add-grant-options", { session: t, invite });
+      const cred = await navigator.credentials.get({
+        publicKey: {
+          challenge: fromB64(challenge),
+          rpId: "localhost",
+          allowCredentials: [{ type: "public-key", id: fromB64(credential) }],
+          userVerification: "required",
+          timeout: 120000,
+        },
+      });
+      const r = cred.response;
+      const done = await post("/auth/add-grant", {
+        session: t,
+        invite,
+        challenge,
+        id: cred.id,
+        authenticatorData: toB64(r.authenticatorData),
+        clientDataJSON: toB64(r.clientDataJSON),
+        signature: toB64(r.signature),
+      });
+      setToken(done.session, done.seconds);
+      await signalNames(cred, done);
+      later("Grant " + done.added + " added to the passkey " + done.label + ", which now holds " + done.grant + ". You are signed in again with it.");
+      history.replaceState(null, "", location.pathname + location.search);
+      location.reload();
+    } catch (err) {
+      flash(
+        "Could not add the grant: " +
+          ceremonyError(err, "The invite is still good until it expires — click Add grant to try again."),
+        "error"
+      );
+      const submit = $("enrol-submit");
+      if (submit && !$("enrol").hidden) submit.focus();
+    }
+  }
+
+  // A sentence for the page a reload is about to draw, said once by it (and only in this tab).
+  const LATER = "gonk_flash";
+  function later(text) {
+    try {
+      window.sessionStorage.setItem(LATER, text);
+    } catch (_) {
+      // Storage refused: the reloaded page is the evidence, without the sentence.
+    }
+  }
+  function sayLater() {
+    try {
+      const text = window.sessionStorage.getItem(LATER);
+      window.sessionStorage.removeItem(LATER);
+      if (text) flash(text, "ok");
+    } catch (_) {
+      // Nothing was kept.
+    }
+  }
+
+  // The invite panel's choice, signed in: add (the default) shows no Label field, create does.
+  function wireEnrolChoice() {
+    const add = $("enrol-add");
+    const choice = $("enrol-choice");
+    if (!add || !choice) return () => false;
+    choice.hidden = false;
+    const note = $("enrol-signed-in");
+    if (note) note.hidden = false;
+    const draw = () => {
+      $("enrol-new").hidden = add.checked;
+      $("enrol-submit").textContent = add.checked ? "Add grant to this passkey" : "Create passkey";
+    };
+    choice.addEventListener("change", draw);
+    draw();
+    return () => add.checked;
+  }
+
   // ------------------------------------------------------------------ samples
 
   // A sample button puts its query in the editor and stops there. It never submits: the
@@ -1608,13 +1690,16 @@
     drawNotices(document);
     focusRefusal();
 
+    sayLater();
     const m = location.hash.match(/^#invite=([A-Za-z0-9_-]+)$/);
     if (m) {
       hideFirstPasskey();
       $("enrol").hidden = false;
+      const adding = signedIn ? wireEnrolChoice() : () => false;
       $("enrol-form").addEventListener("submit", (e) => {
         e.preventDefault();
-        enrol(m[1], $("enrol-label").value.trim());
+        if (adding()) addGrant(m[1]);
+        else enrol(m[1], $("enrol-label").value.trim());
       });
     }
   }

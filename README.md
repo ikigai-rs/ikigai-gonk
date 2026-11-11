@@ -221,8 +221,30 @@ the passkey was created with until it is re-created.
   `gonk/grants.json`, the one file where scope lists live. Enrol a laptop certificate and a
   passkey under the same name and they hold the same authority, and editing the grant changes
   both on the next request or connection.
+- **A passkey can hold several grants** (ledger #3388). Its entry in `clients.json` is
+  `"grants": ["brian", "reviewer"]`, and its scopes are the union of theirs (a grant that does
+  not resolve refuses the sign-in, as one always has). The single-name form `"grant": "brian"`
+  every earlier gonk wrote is still read; the next write of that entry is the list form. A
+  grant is shared by every passkey that holds it, so **one person is widened by adding a grant
+  to their passkey, never by editing a grant**, which would widen everyone under it.
+- **Redeeming an invite while signed in** (ledger #3388) offers two choices: *Add its grant to
+  the passkey you are signed in with* (the default) or *Create a new passkey*. Adding asks that
+  passkey for a FRESH assertion (the system sheet, user verification required) and is refused
+  without one, so a stolen session cookie plus an invite link raises nothing. The grant is
+  appended to that passkey's list only. Every session of the passkey is then ENDED and one new
+  session is opened from the fresh assertion (end and re-establish, not refresh), and the page
+  reloads signed in with the wider grant. A grant the passkey already holds is refused and the
+  invite stays good. Each widening appends `<RFC 3339 ms> gonk:PasskeyGrantAdded
+  urn:iki:gonk:passkey:<credential id> label=… grant=<every grant, comma-separated> added=…
+  invite=sha256:<hash of the code>` to `gonk/passkeys.log` (never the code), and if that line
+  cannot be written the change is undone. `passkey list` prints each widening under its passkey.
+- **Remove one grant from one passkey** (ledger #3388). `ikigai-gonk passkey remove-grant
+  <label> --grant <name>` (or `--credential <id>`) takes that grant off that passkey and nothing
+  else: its other grants, every other passkey and `grants.json` are unchanged. Its last grant is
+  refused (`passkey revoke` removes a passkey). It appends a `gonk:PasskeyGrantRemoved … removed=…`
+  line, and takes effect at the passkey's next request.
 - **List and revoke** (ledger #313). `ikigai-gonk passkey list` prints every enrolled passkey:
-  its label, grant, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
+  its label, grants, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
   `--credential <id>`, which a label two passkeys share requires) removes that one entry from
   `clients.json`, with no restart, and the passkey's live sessions are DELETED, not just
   refused (ledger #1824): enrolling the same credential again, or restoring `clients.json`
@@ -243,7 +265,8 @@ the passkey was created with until it is re-created.
   in its grammar, whatever `gonk.log.access` says: `gonk:Login` or `gonk:Logout`, the passkey
   resource, then `door`, `outcome`, `principal` (the passkey IRI, `-` for a refused sign-in),
   `credential`, `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`,
-  `unenrolled`, `expired`, `idle`). A session token is never written.
+  `unenrolled`, `expired`, `idle`, `widened`). Adding an invite's grant while signed in is a
+  `gonk:Login` line for the resource `add-grant`. A session token is never written.
 - **A ledger page your grant does not reach is a `403`, in one of two sentences** (ledger
   #2021). Signed out: *Sign in to read the ledger "ventures".*, followed by where the sign-in is
   (the header of every gonk page). Signed in: *Your passkey's grant doesn't include the ledger
