@@ -238,8 +238,20 @@ the passkey was created with until it is re-created.
   urn:iki:gonk:passkey:<credential id> label=… grant=<every grant, comma-separated> added=…
   invite=sha256:<hash of the code>` to `gonk/passkeys.log` (never the code), and if that line
   cannot be written the change is undone. `passkey list` prints each widening under its passkey.
-- **Remove one grant from one passkey** (ledger #3388). `ikigai-gonk passkey remove-grant
-  <label> --grant <name>` (or `--credential <id>`) takes that grant off that passkey and nothing
+- **Add one grant to one passkey** (ledger #3400), without an invite. `ikigai-gonk passkey
+  grant add <label> <grant>` (or `--credential <id> <grant>`) appends a grant `grants.json`
+  already defines to that passkey's list and nothing else: every other passkey and
+  `grants.json` are unchanged. A grant `grants.json` does not define (or gives no scopes) and a
+  grant the passkey already holds are refused with nothing written. It appends the same
+  `gonk:PasskeyGrantAdded … added=…` line an invite writes, with `by=owner` where that has
+  `invite=`, and undoes the change if the line cannot be written; `passkey list` prints it as
+  added by the owner. The passkey's live sessions are NOT ended: each re-reads `clients.json`
+  per request, so it holds the new grant from its next request (its lifetime re-bounded by the
+  wider scopes). The invite path ends them because only a fresh assertion may carry a widening
+  a session asked for; here the owner asked. `passkey logout --all` ends them if wanted.
+- **Remove one grant from one passkey** (ledger #3388). `ikigai-gonk passkey grant remove
+  <label> <grant>` (or `--credential <id> <grant>`; `passkey remove-grant <label> --grant
+  <name>` is the same command, kept for scripts) takes that grant off that passkey and nothing
   else: its other grants, every other passkey and `grants.json` are unchanged. Its last grant is
   refused (`passkey revoke` removes a passkey). It appends a `gonk:PasskeyGrantRemoved … removed=…`
   line, and takes effect at the passkey's next request.

@@ -481,9 +481,9 @@ fn record_with(
 }
 
 /// The class of the [`audit_log`] line [`Passkeys::add_grant`] writes: one passkey was
-/// WIDENED by an invite's grant. Its fields: `label`, `grant` (every grant it holds now),
-/// `added` (the one added) and `invite` (`sha256:<hex>` of the code, as `invites.json` keys
-/// it — never the code).
+/// WIDENED by an invite's grant, or by the owner's [`add_grant`]. Its fields: `label`, `grant`
+/// (every grant it holds now), `added` (the one added) and either `invite` (`sha256:<hex>` of
+/// the code, as `invites.json` keys it — never the code) or `by=owner`.
 pub const GRANT_ADDED: &str = "gonk:PasskeyGrantAdded";
 
 /// The class of the [`audit_log`] line [`remove_grant`] writes; `removed` names the grant.
@@ -500,8 +500,12 @@ pub struct GrantChange {
     pub added: bool,
     /// The grant added or removed, decoded.
     pub grant: String,
-    /// The invite an addition redeemed (`sha256:<hex>`); `None` for a removal.
+    /// The invite an addition redeemed (`sha256:<hex>`); `None` for a removal, or for an
+    /// addition the owner made.
     pub invite: Option<String>,
+    /// Whether the box's owner made the change at the command line ([`BY_OWNER`], ledger
+    /// #3400), rather than an invite.
+    pub by_owner: bool,
 }
 
 /// Every [`GRANT_ADDED`] and [`GRANT_REMOVED`] line in [`audit_log`], in the order written. No
@@ -540,14 +544,15 @@ pub fn grant_changes(layout: &Layout) -> Result<Vec<GrantChange>, String> {
             added,
             grant,
             invite: field("invite=").map(str::to_string),
+            by_owner: field("by=") == Some(BY_OWNER),
         });
     }
     Ok(out)
 }
 
 /// Take ONE grant off ONE passkey in `clients.json` and append a [`GRANT_REMOVED`] line to
-/// [`audit_log`] — what `ikigai-gonk passkey remove-grant` runs (ledger
-/// [#3388](http://localhost:1062/l/default/item/3388)). Returns the passkey as it is now.
+/// [`audit_log`] — what `ikigai-gonk passkey grant remove` (or its alias `remove-grant`) runs
+/// (ledger [#3388](http://localhost:1062/l/default/item/3388)). Returns the passkey as it is now.
 ///
 /// Only that passkey's list changes: every other passkey, the grant itself in `grants.json`
 /// (which others may hold) and the passkey's other grants are left exactly as they were. The
@@ -592,6 +597,63 @@ pub fn remove_grant(
             audit_log(layout).display()
         )
     })?;
+    Ok(target)
+}
+
+/// The `by=` value of a [`GRANT_ADDED`] line [`add_grant`] writes: the box's owner, at the
+/// command line, added the grant (an invite-driven line carries `invite=` instead).
+pub const BY_OWNER: &str = "owner";
+
+/// Add ONE grant to ONE passkey in `clients.json` and append a [`GRANT_ADDED`] line to
+/// [`audit_log`] — what `ikigai-gonk passkey grant add` runs (ledger
+/// [#3400](http://localhost:1062/l/default/item/3400)). Returns the passkey as it is now.
+///
+/// The command-line half of [`Passkeys::add_grant`]: the same widening, decided by the box's
+/// owner instead of redeemed from an invite. Only that passkey's list grows; every other
+/// passkey and `grants.json` are left exactly as they were. Refused, with nothing written, for
+/// a grant `grants.json` does not define or gives no scopes ([`scopes_of`], the resolution a
+/// sign-in uses) and for a grant the passkey already holds. Checked before and after, as
+/// [`revoke`] is.
+///
+/// The line is the one an invite writes, with `by=owner` where that has `invite=`, so a
+/// passkey's grant history stays in one place. It is written under the clients lock, and if it
+/// cannot be the change is undone: no widening goes unrecorded.
+///
+/// Its live sessions are NOT ended: a session re-reads `clients.json` and `grants.json` on
+/// every request ([`Passkeys::identity`]), so it holds the new grant from its next request,
+/// with its lifetime re-bounded by the wider scopes. (The invite path ends them because there
+/// only a fresh assertion may carry a widening a session cookie asked for; here the owner
+/// asked.) `passkey logout --all` ends them if that is wanted.
+pub fn add_grant(
+    layout: &Layout,
+    which: Which<'_>,
+    grant: &str,
+    now_ms: u64,
+) -> Result<Enrolled, String> {
+    let lock = layout.lock_clients()?;
+    let mut target = pick(layout, which)?;
+    if target.grants.iter().any(|g| g == grant) {
+        return Err(format!(
+            "passkey `{}` already holds grant `{grant}` (it holds {}); nothing was written",
+            target.label,
+            target.grant_names()
+        ));
+    }
+    scopes_of(layout, grant).map_err(|e| format!("{e}; nothing was written"))?;
+    let before = target.clone();
+    target.grants.push(grant.to_string());
+    write_passkey(layout, &lock, &target)?;
+    let extra = format!(" added={} by={BY_OWNER}", encoded(grant));
+    if let Err(e) = record_with(layout, GRANT_ADDED, &target, now_ms, &extra) {
+        write_passkey(layout, &lock, &before)?;
+        return Err(format!(
+            "grant `{grant}` was NOT added to passkey `{}`: its line could not be written to \
+             {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        ));
+    }
+    drop(lock);
     Ok(target)
 }
 
