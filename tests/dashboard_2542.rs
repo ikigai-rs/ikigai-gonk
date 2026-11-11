@@ -506,10 +506,9 @@ fn a_load_between_writes_asks_the_store_nothing_and_a_write_redraws_one_chart() 
     assert_eq!(one_load(&server, &reader), (4, 4, 4));
     // Between writes: four cached reads, and nothing below them.
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
-    // ⚠ A write to one ledger: every ledger's counts are read again (measured: a store
-    // read rests on the store's write thread, not on one ledger's), and only the chart whose
-    // numbers moved is drawn again, because a chart's render is keyed on its document.
+    // Store 0.5 and ledger 0.21.1 hang counts on each ledger's graph thread: a write
+    // rereads only that ledger. Only its chart is redrawn, keyed on its changed document.
     server.seed("beta", 1, 0);
-    assert_eq!(one_load(&server, &reader), (4, 1, 4));
+    assert_eq!(one_load(&server, &reader), (1, 1, 4));
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
 }

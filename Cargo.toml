@@ -208,7 +208,8 @@ ikigai-vocab = "0.3.0"
 # narrowed away, and the widest-join count is public. `"0.2.22"` is `<0.3.0`.
 # ★ 0.3.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.3.1"` is `<0.4.0`.
-ikigai-store = { version = "0.4.0", features = ["persistent"] }
+# 0.5.0: Per-graph freshness and `store-graph-written` (ledger #3375). `"0.5.0"` is `<0.6.0`.
+ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -294,7 +295,9 @@ ikigai-store = { version = "0.4.0", features = ["persistent"] }
 # backfill on the item's own status events with bounded conflict retries (#3256), probe before
 # the listing's corpus check (#3255), load only readiness inputs for `next` (#3257), and mark
 # dated history as claimed. Answer shapes are unchanged. `"0.20.0"` was `<0.21.0`.
-ikigai-ledger = "0.21.0"
+# 0.21.1: Counts follow their own ledger graph thread on store 0.5 (ledger #3375).
+# `"0.21.1"` is `<0.22.0`.
+ikigai-ledger = "0.21.1"
 
 # The door line and its hash-chained segments (ledger #383): every request a door serves is one
 # `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under
@@ -379,7 +382,9 @@ ikigai-throttle = "0.4.0"
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
 # 0.4.0 (ledger #3319): share resolve 0.4 with gonk and its transports.
-ikigai-engine = { version = "0.4.0", features = ["plan-reader"] }
+# 0.5.0: Refuse a relative or empty config home; share resolve/store 0.5 (ledger #3375).
+# `"0.5.0"` is `<0.6.0`.
+ikigai-engine = { version = "0.5.0", features = ["plan-reader"] }
 # `urn:shacl:validate`, which `urn:plan:validate` composes (a plan is validated against the
 # vocabulary's shapes before it is stored, and again before it runs). It is linked for the plan
 # doors ALONE, and gonk never serves it to a caller: every door refuses `urn:shacl:*` as it
@@ -423,7 +428,8 @@ ikigai-engine = { version = "0.4.0", features = ["plan-reader"] }
 # (`tests/anonymous_runs_1210.rs` went red). `sparql` brings back exactly that half (ikigai-store,
 # spargebra, oxigraph, all already in this graph) and NOT rudof: `cargo tree -i rudof_rdf` still
 # finds nothing. `"0.5.0"` is `<0.6.0`.
-ikigai-shacl = { version = "0.6.0", default-features = false, features = ["sparql"] }
+# 0.6.1: Share store 0.5 for SHACL-SPARQL (ledger #3375). `"0.6.1"` is `<0.7.0`.
+ikigai-shacl = { version = "0.6.1", default-features = false, features = ["sparql"] }
 # ★ Natural language to a DRAFT query (ledger #1138, `crate::nl`): `urn:nl:grounding` (what a
 # drafter may know, composed under the CALLER's capability), `urn:nl:sparql:check`, the prompt
 # templates, and `urn:nl:sparql`, which drafts through the mounted `urn:llm:` peer and saves a
@@ -709,7 +715,9 @@ ikigai-nl = "0.6.0"
 # path component swapped for a symlink between the check and the open cannot escape a browse root.
 # 0.21.1 (ledger #3268): Mount::pull_request_roots limits PR panels to configured
 # GitHub roots; browse also hides them from viewers without urn:cap:exec:gh.
-ikigai-browse = "0.21.1"
+# 0.22.0: `Mount::annotations_through` takes store 0.5's `SharedWriter` (ledger #3375).
+# `"0.22.0"` is `<0.23.0`.
+ikigai-browse = "0.22.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
@@ -804,7 +812,9 @@ url = "2"
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.2.1"` is `<0.3.0`.
 # 0.4.0 (ledger #3319): SpaceReactor takes the same resolve 0.4 Resolver as the hub.
-ikigai-intray = "0.4.0"
+# 0.5.0: Refuse a relative or empty config home; share resolve/store 0.5 (ledger #3375).
+# `"0.5.0"` is `<0.6.0`.
+ikigai-intray = "0.5.0"
 # The mount machinery: `MountedRemote` (override mode — the IRI forwarded unchanged, the
 # peer's catalog surfaced under its own names and tagged with its origin) and the `Resolver`
 # trait `crate::mount` implements to dial lazily. Was a dev-dependency until `gonk.mount`
@@ -841,7 +851,8 @@ ikigai-intray = "0.4.0"
 # 0.4.0 (ledger #3319): match ipc and quic 0.4.1+ (including 0.4.2), whose
 # resolvers implement the 0.4 trait. A fresh lock otherwise splits the trait across
 # resolve 0.3 and 0.4 and cannot compile the socket and QUIC mounts.
-ikigai-resolve = "0.4.0"
+# 0.5.0: Refuse a relative or empty config home (ledger #3375). `"0.5.0"` is `<0.6.0`.
+ikigai-resolve = "0.5.0"
 # The owner-only socket door. 0.1.18 is the first release whose `ikigai-resolve`
 # requirement admits only versions that compile against the core floor above (through
 # 0.1.17 it admits `ikigai-resolve` 0.1.14–0.1.16, which build `Resolved { .. }` without
@@ -895,7 +906,9 @@ ikigai-resolve = "0.4.0"
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. Moves with `ikigai-quic`, `ikigai-web` and the lock's
 # `ikigai-wire` at 0.2.1 (wire v10). `"0.2.1"` is `<0.3.0`.
-ikigai-ipc = "0.4.0"
+# 0.5.0 (ledger #3375): cli 0.5 uses resolve 0.5 throughout; "0.5.0" is
+# "<0.6.0". Keep the store 0.5 family on one resolver.
+ikigai-ipc = "0.5.0"
 # The authenticated remote door. 0.1.18 carries `Minter`, `PeerIdentity { fingerprint }`
 # and `fingerprint_of_pem` — per-connection authority minted from which certificate
 # authenticated, refused when it maps to none — with the same resolve floor as ipc.
@@ -992,7 +1005,9 @@ ikigai-ipc = "0.4.0"
 # `ikigai-wire` at 0.2.1 (wire v10). `"0.2.1"` is `<0.3.0`.
 # ★ 0.4.3 (ledger #3326): the floor. `Drain` and `serve_draining_on` are what a stop drains the
 # door through, and 0.4.2 has neither.
-ikigai-quic = "0.4.3"
+# 0.5.0 (ledger #3375): cli 0.5 uses resolve 0.5 throughout; "0.5.0" is
+# "<0.6.0". Keep the store 0.5 family on one resolver.
+ikigai-quic = "0.5.0"
 # The loopback HTTP door: `serve_with_listener`, the `CapFn` seam (a capability derived
 # per request), `HttpRequest::peer`, and the route table the browse face will extend.
 # ★ 0.1.27 is the floor for a reason this binary uses: `EdgeConfig::principal_fn`, the
@@ -1109,7 +1124,9 @@ ikigai-quic = "0.4.3"
 # with `hyper-util`'s tokio glue): new packages in the lock, and SERVER code only, so the
 # outbound surface argued above is unchanged (`cargo tree -e features -i hyper`). `"0.2.1"` is
 # `<0.3.0`.
-ikigai-web = "0.4.0"
+# 0.5.0 (ledger #3375): cli 0.5 uses resolve 0.5 throughout; "0.5.0" is
+# "<0.6.0". Keep the store 0.5 family on one resolver.
+ikigai-web = "0.5.0"
 # The shared UI path as resources (UX 4, ledger #2834): `urn:iki:ui:tokens.css`,
 # `urn:iki:ui:shell.js` and `urn:iki:ui:htmx`, bound in the HTTP door's kernel and served under
 # `/static/`, and `theme_chooser`, the markup of the header's theme chooser. It holds no state
@@ -1170,7 +1187,9 @@ flate2 = "1.1.10"
 # ★ 0.5.0 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
 # ^0.2, so the graph links ONE core. `"0.5.0"` is `<0.6.0`.
 # 0.7.0 (ledger #3319): set_resolver takes the same resolve 0.4 Resolver as the hub.
-ikigai-time = "0.7.0"
+# 0.8.0 (ledger #3375): cli 0.5 uses resolve 0.5 throughout; "0.8.0" is
+# "<0.9.0". Keep the store 0.5 family on one resolver.
+ikigai-time = "0.8.0"
 # `Endpoint::invoke` is async_trait; the hub-forwarding endpoint in `doors.rs` is one.
 async-trait = "0.1"
 # `Stream`, the trait core's `ByteStream` is: the backup archive's download is a reader over the
@@ -1254,7 +1273,9 @@ ikigai-fn = "0.11.0"
 # 0.1.67 (ledger #2021): the one-release reason; the verifier is unchanged.
 # ★ 0.2.1 (ledger #2364, the core 0.2.0 sweep): the published head. It links no ikigai crate at all
 # (p256, serde_json, sha2), so it cannot bring a second core. `"0.2.1"` is `<0.3.0`.
-ikigai-passkey = "0.4.0"
+# 0.5.0 (ledger #3375): cli 0.5 uses resolve 0.5 throughout; "0.5.0" is
+# "<0.6.0". Keep the store 0.5 family on one resolver.
+ikigai-passkey = "0.5.0"
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
@@ -1344,7 +1365,9 @@ ikigai-fs = "0.4.1"
 # ★ 0.9.0 (ledger #3291): a BEHAVIOR floor. The join lobby answers an `onb:JoinRequest` with the
 # grant, and `public` layers are what a descriptor lists: `crate::feeds_join` reads both, and a
 # participant build still links no host. `"0.9.0"` is `<0.10.0`.
-ikigai-layers = { version = "0.9.0", default-features = false }
+# 0.10.0: Refuse state keys another account can read or replace and missing or empty
+# grants config directories; share store/resolve 0.5 (ledger #3375). `"0.10.0"` is `<0.11.0`.
+ikigai-layers = { version = "0.10.0", default-features = false }
 # ★ Ledger #3291: the one outbound HTTPS read this server makes, a host's
 # `/.well-known/ikigai/layers.json` and the certificate it names (`crate::feeds_join`), and only
 # when the owner presses Join or runs `ikigai-gonk feeds join`. `rustls` over the ring provider
@@ -1438,7 +1461,9 @@ ikigai-ui = { version = "0.5.0", features = ["testkit"] }
 # ^0.2, so the graph links ONE core. `"0.6.0"` is `<0.7.0`.
 # ★ 0.8.0 (ledger #3285): the host side of the note on the normal dependency above.
 # ★ 0.9.0 (ledger #3291): the join lobby, which `tests/feeds_join_3291.rs` drives over real QUIC.
-ikigai-layers = "0.9.0"
+# 0.10.0: Refuse state keys another account can read or replace and missing or empty
+# grants config directories; share store/resolve 0.5 (ledger #3375). `"0.10.0"` is `<0.11.0`.
+ikigai-layers = "0.10.0"
 # A scratch HTTPS server with a certificate no web PKI root signed, for the test that such a host
 # is refused (`tests/feeds_join_3291.rs`). The version already in this graph, through the QUIC
 # stack. `"0.23"` is `<0.24.0`.

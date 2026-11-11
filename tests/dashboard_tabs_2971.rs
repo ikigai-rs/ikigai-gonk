@@ -354,6 +354,8 @@ fn the_hidden_panel_asks_the_store_nothing() {
     let is_counts = |target: &String| target.ends_with(":counts");
     // Each agent question goes through the query face, and nothing on the Ledgers tab does.
     let is_agents = |target: &String| target == "urn:sparql:select";
+    // Warm both ledgers. Store 0.5 preserves alpha's cached counts when default is written.
+    asked(&server, dashboard::LEDGERS_PAGE_IRI, &reader);
     for (iri, shows_counts) in [
         (dashboard::PAGE_IRI, true),
         (dashboard::LEDGERS_PAGE_IRI, true),
@@ -361,7 +363,7 @@ fn the_hidden_panel_asks_the_store_nothing() {
         (dashboard::AGENTS_PAGE_IRI, false),
         (dashboard::AGENTS_PANEL_IRI, false),
     ] {
-        // A write drops what is cached, so what is asked below is really asked.
+        // A write drops this ledger's cached answers, so the visible panel really runs.
         server.file("default", "another");
         let asked = asked(&server, iri, &reader);
         assert_eq!(
@@ -378,8 +380,8 @@ fn the_hidden_panel_asks_the_store_nothing() {
             let queries = asked.iter().filter(|t| t.starts_with("urn:iki:store:"));
             assert_eq!(
                 queries.count(),
-                names.len(),
-                "{iri}: one per ledger: {asked:?}"
+                1,
+                "{iri}: only the written ledger: {asked:?}"
             );
         }
     }

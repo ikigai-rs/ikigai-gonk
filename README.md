@@ -203,6 +203,18 @@ the click rather than chaining the two. If a sheet is canceled or times out, the
 and names the button to click again. A creation that did not finish leaves the invite unused,
 good until it expires.
 
+**What the system's passkey picker shows** (ledger #3387). Every gonk is the one `localhost`
+relying party, so the picker lists every gonk's passkeys together. Each is created with the
+label and the host as its name (*laptop Touch ID @ localhost:1062*) and the label and the grant
+as its display name (*laptop Touch ID · brian*), each kept within the 64 bytes an
+authenticator stores, a long label shortened with `…`. **The grant's name becomes visible in
+the device's passkey manager** (and in anything that syncs it), so name grants with that in
+mind; no invite, token or credential id is ever in either name. A grant or label can change
+after creation, so where the browser supports WebAuthn's
+`PublicKeyCredential.signalCurrentUserDetails` (Chrome does; others may not yet), each sign-in
+tells the passkey manager the current label and grant. Elsewhere the picker keeps the names
+the passkey was created with until it is re-created.
+
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under
   `clients`, passkeys under `passkeys`), and the grant name maps to scopes in
