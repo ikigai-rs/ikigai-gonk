@@ -463,6 +463,11 @@ fn serve(flags: &config::Flags) -> ! {
         Some(t) => resolve_reviewer(t, &layout),
         None => None,
     };
+    // ★ The one record of who did what (ledger #383): an `ikigai-log` segment in gonk's data
+    // home, hash-chained, that every door's line and every passkey sign-in lands in. Opened
+    // before the hub, which serves it as `urn:log:*` to the owner alone (`grants::CAP_GONK_ADMIN`).
+    let record =
+        access::Record::open(&homes.config, &layout.log_dir()).unwrap_or_else(|e| fail(&e));
     let mut trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
@@ -525,6 +530,9 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    if let Some(record) = &record {
+        trigger_spaces.push(Arc::new(ikigai_log::endpoints::space(record.handle())));
+    }
     trigger_spaces.push(Arc::new(ikigai_gonk::git_object::space(
         "configured",
         &settings.repositories,
@@ -730,7 +738,9 @@ fn serve(flags: &config::Flags) -> ! {
     let access = |door: access::Door| {
         settings
             .access_log
-            .then(|| access::AccessLog::stderr(door).gonk_polls())
+            .then_some(())
+            .and(record.as_ref())
+            .map(|record| access::AccessLog::on(door, Arc::clone(record)).gonk_polls())
     };
     let (socket, door) = (
         settings.socket.clone(),
@@ -786,6 +796,7 @@ fn serve(flags: &config::Flags) -> ! {
             }
             let drain = ikigai_quic::Drain::new();
             let draining = drain.clone();
+            let closing = record.clone();
             std::thread::spawn(move || {
                 let served = ikigai_quic::serve_draining_on(
                     Arc::new(door),
@@ -809,6 +820,9 @@ fn serve(flags: &config::Flags) -> ! {
                                  calls still running at the cap"
                             );
                         }
+                        if let Some(record) = &closing {
+                            record.close();
+                        }
                         std::process::exit(0)
                     }
                     other => fail(&format!("the QUIC door on {bound} stopped: {other:?}")),
@@ -817,7 +831,7 @@ fn serve(flags: &config::Flags) -> ! {
             (line, Some(drain))
         }
     };
-    stop_on_signal(quic_drain);
+    stop_on_signal(quic_drain, record.clone());
 
     // The HTTP door's workers and blocking pool, sized explicitly rather than through the
     // default `stack::enlarge_default` set: a request recurses on these threads (ledger #915).
@@ -836,12 +850,13 @@ fn serve(flags: &config::Flags) -> ! {
             .unwrap_or(settings.http.port());
         // Sign-ins and sign-outs are written whatever `gonk.log.access` says: they are rare,
         // and they are the audit of who held a session (ledger #1824).
-        let passkeys = Arc::new(
-            Passkeys::new(layout.clone(), port)
-                .with_idle_seconds(settings.session_idle_seconds)
-                .with_max_seconds(settings.session_max_seconds)
-                .auditing(ikigai_gonk::access::stderr_sink()),
-        );
+        let passkeys = Passkeys::new(layout.clone(), port)
+            .with_idle_seconds(settings.session_idle_seconds)
+            .with_max_seconds(settings.session_max_seconds);
+        let passkeys = Arc::new(match &record {
+            Some(record) => passkeys.auditing(Arc::clone(record)),
+            None => passkeys,
+        });
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: settings.http_ledgers.clone(),
@@ -959,12 +974,26 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  quic    {quic_line}");
         eprintln!(
             "  log     {}",
-            if settings.access_log {
-                "one `gonk:Access` line per request at each door, on stderr; the Queue \
-                 badge's poll only when it fails, takes a second, or is the 60th \
-                 (`gonk.log.access = false` turns it off)"
-            } else {
-                "no access lines (`gonk.log.access = false`)"
+            match (&record, settings.access_log) {
+                (None, _) => "off — log.toml or gonk.log.toml says `destination = \"off\"`; no \
+                              access entries and no sign-in entries are written"
+                    .to_string(),
+                (Some(record), access) => format!(
+                    "segments in {} (hash-chained; `urn:log:segments`, `urn:log:verify` over the \
+                     socket only), not in the backup; {}; passkey sign-ins and sign-outs",
+                    record
+                        .handle()
+                        .config()
+                        .directory
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default(),
+                    if access {
+                        "one `log:Access` entry per request at each door, polls sampled \
+                         (`gonk.log.access = false` turns them off)"
+                    } else {
+                        "no access entries (`gonk.log.access = false`)"
+                    }
+                ),
             }
         );
         eprintln!(
@@ -2096,7 +2125,7 @@ fn passkey_invite(
 /// The drain waits for calls, not work, and re-queues nothing: a claim stays as it is, its
 /// holder and lease intact. The other doors are not drained. Handlers are installed before this
 /// returns, so the banner printing means a signal is caught.
-fn stop_on_signal(drain: Option<ikigai_quic::Drain>) {
+fn stop_on_signal(drain: Option<ikigai_quic::Drain>, record: Option<Arc<access::Record>>) {
     use signal_hook::consts::{SIGINT, SIGTERM};
     let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT])
         .unwrap_or_else(|e| fail(&format!("cannot catch SIGTERM and SIGINT: {e}")));
@@ -2110,6 +2139,10 @@ fn stop_on_signal(drain: Option<ikigai_quic::Drain>) {
         };
         let Some(drain) = drain else {
             eprintln!("ikigai-gonk: {name}: no QUIC door to drain; exiting");
+            // `log:ProcessStop`, so the segment ends as a stop and not as a crash.
+            if let Some(record) = &record {
+                record.close();
+            }
             std::process::exit(0)
         };
         eprintln!(

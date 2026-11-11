@@ -46,7 +46,8 @@ use ikigai_store::DurableStore;
 
 // ikigai-store 0.2.24 adds `store-graph-info` (needs the graph's read token) and `store-dump`
 // (needs the broad `urn:cap:store:read`, which gonk grants no client: only the owner holds it).
-const STORE_IDS: [&str; 15] = [
+// Store 0.5 adds the per-graph freshness marker, writable with that graph's token.
+const STORE_IDS: [&str; 16] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -61,6 +62,7 @@ const STORE_IDS: [&str; 15] = [
     "store-dump",
     "store-update",
     "store-graph-update",
+    "store-graph-written",
     "store-load",
 ];
 
