@@ -46,7 +46,8 @@ use ikigai_store::DurableStore;
 
 // ikigai-store 0.2.24 adds `store-graph-info` (needs the graph's read token) and `store-dump`
 // (needs the broad `urn:cap:store:read`, which gonk grants no client: only the owner holds it).
-const STORE_IDS: [&str; 15] = [
+// Store 0.5 adds the per-graph freshness marker, writable with that graph's token.
+const STORE_IDS: [&str; 16] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -61,6 +62,7 @@ const STORE_IDS: [&str; 15] = [
     "store-dump",
     "store-update",
     "store-graph-update",
+    "store-graph-written",
     "store-load",
 ];
 
@@ -95,13 +97,14 @@ const LEDGER_IDS: [&str; 28] = [
     "ledger-reopen",
 ];
 
-/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Five:
-/// the page renderer's chunk transform, bound where the process's one cache is
-/// (`ikigai_gonk::render::rendered_chunks` says why), which reads nothing and is gated by
-/// nothing; and the four `urn:sparql:*` forms (`ikigai_gonk::sparql`, ledger #836), each one
+/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Six:
+/// the page renderer's chunk transform and a layer entry's Markdown, bound where the process's
+/// one cache is (`ikigai_gonk::render::rendered_chunks` says why), which read nothing and are
+/// gated by nothing; and the four `urn:sparql:*` forms (`ikigai_gonk::sparql`, ledger #836), each one
 /// hop onto the store's graph-scoped twin under the caller's capability.
-const HUB_IDS: [&str; 5] = [
+const HUB_IDS: [&str; 6] = [
     "gonk-render",
+    "gonk-render-markdown",
     "sparql-select",
     "sparql-ask",
     "sparql-construct",
@@ -201,6 +204,12 @@ fn fixtures() -> Suite {
             Fixture::new("gonk-render", Verb::Source)
                 .arg("content", ikigai_gonk::render::chunk("")),
         )
+        // Its linking context is `render::layer_refs`'s value, which no ArgSpec can shape.
+        .fixture(
+            Fixture::new("gonk-render-markdown", Verb::Source)
+                .arg("content", "# heading")
+                .arg("refs", ikigai_gonk::render::layer_refs(None, &[])),
+        )
 }
 
 /// The fixtures plus what the reads PROMISE about caching — for a kernel that caches.
@@ -214,6 +223,7 @@ fn suite() -> Suite {
         // A chunk's HTML is a function of the document alone; the content-addressed
         // request is the cache key and nothing needs a thread to cut.
         .pure("gonk-render")
+        .pure("gonk-render-markdown")
         // The store's answer, forwarded whole: cacheable under its write threads, keyed on
         // the capability fingerprint, and the readable-set read beside it on the same threads.
         .cacheable("sparql-select")
@@ -339,7 +349,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 42] = [
+const WEB_IDS: [&str; 43] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -373,6 +383,7 @@ const WEB_IDS: [&str; 42] = [
     "gonk-view-agent",
     "gonk-page-ledger",
     "gonk-fragment-items",
+    "gonk-fragment-facet",
     "gonk-page-item",
     "gonk-fragment-item",
     "gonk-page-doctor",
@@ -420,7 +431,9 @@ fn http_door_with_space(hub: Arc<Kernel>, config: &std::path::Path) -> (Kernel, 
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     doors::http_kernel_serving_with_space(hub, ikigai_gonk::web::space(face), Vec::new(), None)
 }
@@ -574,6 +587,14 @@ fn the_http_door_conforms() {
              a face. Its action declares `urn:cap:annotate` and the browse wildcard, so ENFORCED \
              saw the kernel refuse it under no grants. The face a batch serves is exercised \
              where a browse root exists, by `tests/queue.rs`'s batch tests",
+        )
+        .fixture(
+            Fixture::new("gonk-fragment-facet", Verb::Source)
+                .binding("ledger", "default")
+                .capability(Capability::scoped([
+                    "urn:cap:ledger:read:default".to_string(),
+                    ikigai_store::cap_read_graph("urn:iki:ledger:graph:default"),
+                ])),
         )
         .fixture(Fixture::new("gonk-page-item", Verb::Source).binding("id", &a))
         .fixture(Fixture::new("gonk-fragment-item", Verb::Source).binding("id", &a))

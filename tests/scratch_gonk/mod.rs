@@ -42,7 +42,50 @@ pub struct Gonk {
     pub layout: quic::Layout,
     /// One QUIC client, `alpha`, enrolled to write the default ledger.
     pub client: quic::Bundle,
+    /// How it was started, for [`Gonk::restart`].
+    start: Start,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
+}
+
+/// The arguments and homes a child runs over, the same for every start of one [`Gonk`].
+struct Start {
+    config: PathBuf,
+    data: PathBuf,
+    home: PathBuf,
+    /// HTTP binds port 0 by flag; `false` when the config's own `gonk.bind` is under test.
+    bound_by_flag: bool,
+    with_quic: bool,
+}
+
+impl Start {
+    fn spawn(&self, socket: &Path, stderr: &Path) -> Child {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
+        command
+            .arg("--config-home")
+            .arg(&self.config)
+            .arg("--data-home")
+            .arg(&self.data)
+            .arg("--socket")
+            .arg(socket)
+            .arg("--no-backup");
+        // ★ Port 0: the child binds whatever is free and the banner names it — by flag, unless
+        // the config's own `gonk.bind` is what is under test (a flag would override it).
+        if self.bound_by_flag {
+            command.args(["--port", "0"]);
+        }
+        if self.with_quic {
+            command.args(["--quic-bind", "127.0.0.1:0"]);
+        } else {
+            command.arg("--no-quic");
+        }
+        command
+            .env("HOME", &self.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(File::create(stderr).unwrap())
+            .spawn()
+            .expect("spawn ikigai-gonk")
+    }
 }
 
 #[allow(dead_code)] // see the module docs: not every binary calls every constructor
@@ -111,32 +154,14 @@ impl Gonk {
 
         let socket = short.path().join("s");
         let stderr = home.path().join("stderr.log");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"));
-        command
-            .arg("--config-home")
-            .arg(&config)
-            .arg("--data-home")
-            .arg(&data)
-            .arg("--socket")
-            .arg(&socket)
-            .arg("--no-backup");
-        // ★ Port 0: the child binds whatever is free and the banner names it — by flag, unless
-        // the config's own `gonk.bind` is what is under test (a flag would override it).
-        if bound.is_none() {
-            command.args(["--port", "0"]);
-        }
-        if with_quic {
-            command.args(["--quic-bind", "127.0.0.1:0"]);
-        } else {
-            command.arg("--no-quic");
-        }
-        let child = command
-            .env("HOME", home.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .expect("spawn ikigai-gonk");
+        let start = Start {
+            config,
+            data,
+            home: home.path().to_path_buf(),
+            bound_by_flag: bound.is_none(),
+            with_quic,
+        };
+        let child = start.spawn(&socket, &stderr);
         let mut gonk = Gonk {
             child,
             // The port is unknown until the banner says; nothing reads it before then.
@@ -147,12 +172,26 @@ impl Gonk {
             stderr,
             layout,
             client,
+            start,
             _dirs: (home, short),
         };
         if let Err(why) = gonk.until_ready() {
             panic!("{why}");
         }
         gonk
+    }
+
+    /// Start the child again over the same homes, store and socket, once the last one has
+    /// exited: the ports are new, and the banner names them.
+    pub fn restart(&mut self) {
+        self.child = self.start.spawn(&self.socket, &self.stderr);
+        self.http.set_port(0);
+        if let Some(quic) = &mut self.quic {
+            quic.set_port(0);
+        }
+        if let Err(why) = self.until_ready() {
+            panic!("{why}");
+        }
     }
 
     /// Wait until every door this child opened ANSWERS — not until its files exist.
@@ -193,6 +232,20 @@ impl Gonk {
     /// The child's stderr so far: the banner, and how it died if it did.
     pub fn log(&self) -> String {
         std::fs::read_to_string(&self.stderr).unwrap_or_default()
+    }
+
+    /// Every line of every log segment this gonk wrote in its data home (`gonk/log/`, ledger
+    /// #383), oldest segment first: where the door lines and the sign-in lines are.
+    #[allow(dead_code)]
+    pub fn segments(&self) -> String {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(self.layout.log_dir())
+            .map(|dir| dir.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        paths.sort();
+        paths
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect()
     }
 
     /// One QUIC connection as this test's enrolled client. Only for a child with the door open.

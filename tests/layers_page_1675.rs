@@ -365,7 +365,9 @@ impl Gonk {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, view);
         let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, access));
@@ -373,6 +375,7 @@ impl Gonk {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         std::thread::spawn(move || {

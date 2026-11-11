@@ -114,17 +114,16 @@ fn served(dir: &Path, overrides: &[(String, String)]) -> (Arc<Kernel>, RootWatch
         .expect("a shared in-memory store");
     let (watch, refused) = RootWatch::start(&roots);
     assert!(refused.is_empty(), "{refused:?}");
-    let wired = browse::wire(
+    let wired = browse::wire_with_github(
         roots.clone(),
         store.shared_writer().expect("the store's writer"),
         Some(&watch),
         None,
         &graph,
         None,
+        overrides,
     );
-    let space = wired
-        .space
-        .with_github(Arc::new(github::space(&roots, overrides)));
+    let space = wired.space;
     let hub = Arc::new(compose_with(
         store,
         Some(Arc::new(space)),
@@ -165,6 +164,10 @@ fn href(kernel: &Kernel, iri: &str) -> Option<String> {
 
 /// The browse page `/browse/{start}` as the HTTP door renders it, under `cap`.
 fn shell(hub: &Arc<Kernel>, start: &str, cap: &Capability) -> String {
+    page(hub, &format!("urn:iki:gonk:page:browse:{start}"), cap)
+}
+
+fn page(hub: &Arc<Kernel>, iri: &str, cap: &Capability) -> String {
     let config = tempfile::tempdir().expect("a config home");
     let layout = quic::Layout::in_config_home(config.path());
     let face = Arc::new(web::Web {
@@ -176,16 +179,12 @@ fn shell(hub: &Arc<Kernel>, start: &str, cap: &Capability) -> String {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = doors::http_kernel(Arc::clone(hub), web::space(face));
-    read(
-        &http,
-        &format!("urn:iki:gonk:page:browse:{start}"),
-        &[("as", "text/html")],
-        cap,
-    )
-    .unwrap_or_else(|e| panic!("the browse page for {start}: {e}"))
+    read(&http, iri, &[("as", "text/html")], cap).unwrap_or_else(|e| panic!("the page {iri}: {e}"))
 }
 
 // ---------------------------------------------------------------- the tests
@@ -517,4 +516,647 @@ fn a_selected_line_carries_onto_a_file_link_and_nothing_else_does() {
         fragment.contains("return LINES_HASH.test(href) ? href : \"\";"),
         "{fragment}"
     );
+}
+
+/// Ledger #3198's minimum reproduction: a configured browse root really contains the
+/// object, and the viewer has root authority, but the item's about-target is plain text.
+/// This reproduces the original plain-text rendering through the real HTTP page endpoint.
+fn git_about_link(kind: &str) {
+    let (dir, head) = scratch(None);
+    let sha = match kind {
+        "commit" => head,
+        "blob" => git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]),
+        _ => unreachable!(),
+    };
+    let target = format!("urn:git:{kind}:{sha}");
+    let (hub, _watch) = served(dir.path(), &[]);
+    let filed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg(
+                "content",
+                ArgRef::Inline(b"Git object link reproduction".to_vec()),
+            )
+            .with_arg("about", ArgRef::Inline(target.as_bytes().to_vec())),
+        &Capability::root(),
+    ))
+    .expect("file an item about the existing git object");
+    let filed = String::from_utf8(filed.bytes).unwrap();
+    let prefix = "urn:iki:ledger:default:item:";
+    let rest = filed.split_once(prefix).expect("the filed item IRI").1;
+    let id: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    assert!(!id.is_empty(), "{filed}");
+    let html = page(
+        &hub,
+        &format!("urn:iki:gonk:page:item:default:{id}"),
+        &Capability::root(),
+    );
+    assert!(html.contains(&target), "the about IRI is visible: {html}");
+    let linked = html.split("<a ").any(|anchor| {
+        let Some((attributes, body)) = anchor.split_once('>') else {
+            return false;
+        };
+        attributes.contains("href=")
+            && body
+                .split("</a>")
+                .next()
+                .is_some_and(|text| text.contains(&target))
+    });
+    assert!(
+        linked,
+        "an existing {kind} should link into the configured clone: {html}"
+    );
+}
+
+#[test]
+fn an_about_commit_in_a_browse_root_links_to_code() {
+    git_about_link("commit");
+}
+
+#[test]
+fn an_about_blob_in_a_browse_root_links_to_code() {
+    git_about_link("blob");
+}
+
+/// Ledger #3238: an `about` target naming a file at the working tree,
+/// `urn:repo:file:{root}/{path}`, links to browse's page for that file when the viewer may
+/// read the root, the way a Git object's about target already links. Before the change the
+/// IRI rendered as plain text.
+fn file_about_page(cap: &Capability) -> (String, String) {
+    let (dir, _head) = scratch(None);
+    let target = "urn:repo:file:demo/src/lib.rs".to_string();
+    let (hub, _watch) = served(dir.path(), &[]);
+    let filed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg(
+                "content",
+                ArgRef::Inline(b"File link reproduction".to_vec()),
+            )
+            .with_arg("about", ArgRef::Inline(target.as_bytes().to_vec())),
+        &Capability::root(),
+    ))
+    .expect("file an item about a working-tree file");
+    let filed = String::from_utf8(filed.bytes).unwrap();
+    let id: String = filed
+        .split_once("urn:iki:ledger:default:item:")
+        .unwrap()
+        .1
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let html = page(&hub, &format!("urn:iki:gonk:page:item:default:{id}"), cap);
+    (target, html)
+}
+
+#[test]
+fn an_about_working_tree_file_links_to_browse() {
+    let (target, html) = file_about_page(&Capability::root());
+    let linked = html.split("<a ").any(|anchor| {
+        anchor.split_once('>').is_some_and(|(attributes, body)| {
+            attributes.contains("href='/browse/urn:repo:demo:file:src/lib.rs'")
+                && body.starts_with(&format!("{target}</a>"))
+        })
+    });
+    assert!(
+        linked,
+        "a readable root's file should link to browse: {html}"
+    );
+}
+
+#[test]
+fn an_about_file_in_an_unreadable_root_stays_text() {
+    let cap = Capability::scoped(
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Read).unwrap(),
+    );
+    let (target, html) = file_about_page(&cap);
+    assert!(html.contains(&target), "the about IRI is visible: {html}");
+    assert!(!html.contains("/browse/urn:repo:demo:file:"), "{html}");
+}
+
+// Git object map (#3198). All subprocesses below only construct fixtures.
+fn object_hub(repositories: &[ikigai_gonk::git_object::Repository]) -> Arc<Kernel> {
+    Arc::new(compose_with(
+        DurableStore::in_memory().unwrap(),
+        None,
+        Vec::new(),
+        vec![Arc::new(ikigai_gonk::git_object::space(
+            "configured",
+            repositories,
+        ))],
+        None,
+        None,
+        None,
+    ))
+}
+
+fn mapped(dir: &Path) -> ikigai_gonk::git_object::Repository {
+    ikigai_gonk::git_object::Repository {
+        name: "demo".into(),
+        dir: dir.to_path_buf(),
+        commit: Some("https://code.example/commit/{sha}".into()),
+        blob: Some("https://code.example/blob/{commit}/{path}?object={sha}&view=code".into()),
+        file: Some("https://code.example/tree/{path}".into()),
+        browse: false,
+    }
+}
+
+fn object_link(hub: &Kernel, kind: &str, sha: &str, cap: &Capability) -> String {
+    read(
+        hub,
+        &ikigai_gonk::git_object::link_iri("configured", kind, sha),
+        &[],
+        cap,
+    )
+    .unwrap()
+}
+
+#[test]
+fn object_map_links_commits_and_blob_snapshots_and_encodes_paths() {
+    let (dir, head) = scratch(None);
+    let blob = git(dir.path(), &["rev-parse", &format!("HEAD:{ODD}")]);
+    let hub = object_hub(&[mapped(dir.path())]);
+    assert_eq!(
+        object_link(&hub, "commit", &head, &Capability::root()),
+        format!("https://code.example/commit/{head}")
+    );
+    assert_eq!(
+        object_link(&hub, "blob", &blob, &Capability::root()),
+        format!("https://code.example/blob/{head}/{ODD_ON_GITHUB}?object={blob}&view=code")
+    );
+    // The object type must match the IRI, and malformed or missing identities stay plain.
+    for (kind, sha) in [
+        ("commit", blob.as_str()),
+        ("blob", head.as_str()),
+        ("commit", "main"),
+        ("commit", &"f".repeat(40)),
+    ] {
+        assert_eq!(object_link(&hub, kind, sha, &Capability::root()), "");
+    }
+    assert_eq!(
+        object_link(&hub, "commit", &head.to_uppercase(), &Capability::root()),
+        format!("https://code.example/commit/{head}")
+    );
+}
+
+#[test]
+fn object_map_searches_each_readable_clone_and_checks_authority_on_cache_hits() {
+    let (first, _) = scratch(None);
+    let (second, _) = scratch(None);
+    write(second.path(), "unique", "Only in the second repository\n");
+    let head = commit(second.path(), "Unique");
+    let mut a = mapped(first.path());
+    a.name = "first".into();
+    let mut b = mapped(second.path());
+    b.name = "second".into();
+    let hub = object_hub(&[a, b]);
+    let reader = Capability::scoped(["urn:cap:exec:git", "urn:cap:browse:read:second"]);
+    assert_eq!(
+        object_link(&hub, "commit", &head, &reader),
+        format!("https://code.example/commit/{head}")
+    );
+    for scopes in [
+        vec!["urn:cap:exec:git"],
+        vec!["urn:cap:browse:read:second"],
+        vec!["urn:cap:exec:git", "urn:cap:browse:read:first"],
+    ] {
+        let stranger = Capability::scoped(scopes);
+        assert_eq!(object_link(&hub, "commit", &head, &stranger), "");
+        assert!(read(
+            &hub,
+            &ikigai_gonk::git_object::object_iri("configured", "second", &head),
+            &[],
+            &stranger
+        )
+        .is_err());
+    }
+    // Positive resolution is SHA-keyed: removing the loose object cannot change the answer.
+    std::fs::remove_file(
+        second
+            .path()
+            .join(".git/objects")
+            .join(&head[..2])
+            .join(&head[2..]),
+    )
+    .unwrap();
+    assert_eq!(
+        object_link(&hub, "commit", &head, &reader),
+        format!("https://code.example/commit/{head}")
+    );
+}
+
+#[test]
+fn an_absent_object_can_be_resolved_after_it_arrives() {
+    let (dir, _) = scratch(None);
+    write(dir.path(), "untracked", "A not-yet-written blob\n");
+    let sha = git(dir.path(), &["hash-object", "untracked"]);
+    let mut repo = mapped(dir.path());
+    repo.blob = Some("https://code.example/object/{sha}".into());
+    let hub = object_hub(&[repo]);
+    assert_eq!(object_link(&hub, "blob", &sha, &Capability::root()), "");
+    git(dir.path(), &["hash-object", "-w", "untracked"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let answer = loop {
+        let answer = object_link(&hub, "blob", &sha, &Capability::root());
+        if !answer.is_empty() || Instant::now() >= deadline {
+            break answer;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(answer, format!("https://code.example/object/{sha}"));
+}
+
+#[test]
+fn local_blob_view_reads_historical_bytes_and_escapes_code() {
+    let (dir, _head) = scratch(None);
+    write(dir.path(), "src/lib.rs", "// <script> & historical\n");
+    let original = commit(dir.path(), "Historical code");
+    let sha = git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]);
+    write(dir.path(), "src/lib.rs", "// current code differs\n");
+    commit(dir.path(), "Current code");
+    let (hub, _watch) = served(dir.path(), &[]);
+    let iri = ikigai_gonk::git_object::object_iri("browse", "demo", &sha);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert!(html.contains("&lt;script&gt; &amp; historical"), "{html}");
+    assert!(
+        html.contains(&original) && !html.contains("current code differs"),
+        "{html}"
+    );
+    assert!(html.contains("aria-label='File contents'") && html.contains("tabindex='0'"));
+    let shell = shell(&hub, &iri, &Capability::root());
+    assert!(shell.contains(&iri), "{shell}");
+    assert!(read(
+        &hub,
+        &iri,
+        &[("as", "text/html")],
+        &Capability::scoped(["urn:cap:exec:git"])
+    )
+    .is_err());
+}
+
+/// ★ A commit's page (#3233): its message, author, date and changed files, each changed file
+/// linked to its blob page, a deleted one shown as text, every value escaped.
+#[test]
+fn local_commit_view_shows_message_author_date_and_linked_files() {
+    let (dir, _) = scratch(None);
+    write(dir.path(), "src/lib.rs", "pub fn two() {}\n");
+    write(dir.path(), "docs/new <b>.md", "# New\n");
+    std::fs::remove_file(dir.path().join(ODD)).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(
+        dir.path(),
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Change <lib> & docs",
+            "-m",
+            "Why: the <b>body</b>.\nSecond line.",
+        ],
+    );
+    let head = git(dir.path(), &["rev-parse", "HEAD"]);
+    let lib = git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]);
+    let docs = git(dir.path(), &["rev-parse", "HEAD:docs/new <b>.md"]);
+    let (hub, _watch) = served(dir.path(), &[]);
+    let iri = ikigai_gonk::git_object::object_iri("browse", "demo", &head);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert!(
+        html.contains("<h2>Change &lt;lib&gt; &amp; docs</h2>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<code>Why: the &lt;b&gt;body&lt;/b&gt;.\nSecond line.</code></pre>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("Scratch")
+            && html.contains("<time datetime='2026-10-18T12:00:00Z'>2026-10-18T12:00:00Z</time>"),
+        "{html}"
+    );
+    let link = |sha: &str, label: &str| {
+        format!(
+            "<li><a href='/browse/{}'>{label}</a>",
+            ikigai_gonk::git_object::object_iri("browse", "demo", sha)
+        )
+    };
+    assert!(html.contains(&link(&lib, "src/lib.rs")), "{html}");
+    assert!(
+        html.contains(&link(&docs, "docs/new &lt;b&gt;.md")),
+        "{html}"
+    );
+    assert!(html.contains("<h2>Changed files</h2><p>3 files changed (compared with its first parent).</p><ul><li>"), "{html}");
+    assert!(
+        html.contains("<li><code class='iri'>sp ace/a b#c%d+e&amp;f=g é.rs</code> (deleted)</li>"),
+        "{html}"
+    );
+    // The page is behind the same grants as the object.
+    assert!(read(
+        &hub,
+        &iri,
+        &[("as", "text/html")],
+        &Capability::scoped(["urn:cap:exec:git"])
+    )
+    .is_err());
+}
+
+/// A changed file whose blob has no code link the viewer may follow stays its path, as text.
+#[test]
+fn a_commit_file_without_a_readable_blob_stays_text() {
+    let (dir, head) = scratch(None);
+    let mut repo = mapped(dir.path());
+    repo.blob = None;
+    let hub = object_hub(&[repo]);
+    let iri = ikigai_gonk::git_object::object_iri("configured", "demo", &head);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert!(html.contains("<h2>the first commit</h2>"), "{html}");
+    assert!(
+        html.contains("<li><code class='iri'>src/lib.rs</code> (added)</li>"),
+        "{html}"
+    );
+    assert!(!html.contains("<li><a "), "{html}");
+}
+
+/// A large commit lists a bounded number of files and says how many more it changed.
+#[test]
+fn a_large_commit_lists_a_bounded_number_of_files() {
+    let (dir, _) = scratch(None);
+    let shown = ikigai_gonk::git_object::CHANGED_FILES_SHOWN;
+    for n in 0..shown + 3 {
+        write(dir.path(), &format!("many/{n:03}.txt"), &format!("{n}\n"));
+    }
+    let head = commit(dir.path(), "Many files");
+    let mut repo = mapped(dir.path());
+    repo.blob = None;
+    let hub = object_hub(&[repo]);
+    let iri = ikigai_gonk::git_object::object_iri("configured", "demo", &head);
+    let html = text(&hub, &iri, &[("as", "text/html")]);
+    assert_eq!(html.matches("<li>").count(), shown, "{html}");
+    assert!(
+        html.contains(&format!("{} files changed", shown + 3)),
+        "{html}"
+    );
+    assert!(html.contains("3 more files are not listed here."), "{html}");
+}
+
+#[test]
+fn close_evidence_git_iris_link_and_survive_reopening() {
+    let (dir, head) = scratch(None);
+    let (hub, _watch) = served(dir.path(), &[]);
+    let target = format!("urn:git:commit:{head}");
+    let filed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg("content", ArgRef::Inline(b"Evidence fixture".to_vec())),
+        &Capability::root(),
+    ))
+    .unwrap();
+    let filed = String::from_utf8(filed.bytes).unwrap();
+    let id: String = filed
+        .split_once("urn:iki:ledger:default:item:")
+        .unwrap()
+        .1
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let item = format!("urn:iki:ledger:default:item:{id}");
+    for action in ["close", "reopen"] {
+        let mut req = Request::new(
+            Verb::Sink,
+            Iri::parse(format!("urn:iki:ledger:{action}")).unwrap(),
+        )
+        .with_arg("item", ArgRef::Inline(item.as_bytes().to_vec()));
+        if action == "close" {
+            req = req.with_arg("evidence", ArgRef::Inline(target.as_bytes().to_vec()));
+        }
+        block_on(Kernel::issue(&hub, req, &Capability::root())).unwrap();
+        let html = page(
+            &hub,
+            &format!("urn:iki:gonk:page:item:default:{id}"),
+            &Capability::root(),
+        );
+        assert!(html.contains("close evidence"), "{html}");
+        assert!(html.contains(&format!(">{target}</a>")), "{html}");
+    }
+    let denied = Capability::scoped(
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Read).unwrap(),
+    );
+    let html = page(
+        &hub,
+        &format!("urn:iki:gonk:page:item:default:{id}"),
+        &denied,
+    );
+    assert!(
+        html.contains(&format!("<code class='iri'>{target}</code>")),
+        "{html}"
+    );
+}
+
+// ---------------------------------------------------------------- the resolution route (#3238)
+
+/// `GET /resolution/iri/{name}` as the HTTP door's page space answers it, under `cap`.
+fn resolution(hub: &Arc<Kernel>, name: &str, cap: &Capability) -> Result<String, Error> {
+    let config = tempfile::tempdir().expect("a config home");
+    let layout = quic::Layout::in_config_home(config.path());
+    let face = Arc::new(web::Web {
+        hub: Arc::clone(hub),
+        ledgers: vec!["default".to_string()],
+        browse_roots: vec!["demo".to_string()].into(),
+        passkeys: Arc::new(Passkeys::new(layout, 1062)),
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        queue: ikigai_gonk::config::QueuePolicy::default(),
+        epochs: None,
+        holder_aliases: Default::default(),
+        page_assets: Default::default(),
+        toolbox: false,
+        faces: Vec::new(),
+    });
+    let http = doors::http_kernel(Arc::clone(hub), web::door_space(face, None));
+    read(
+        &http,
+        &format!("urn:iki:gonk:resolution:iri:{name}"),
+        &[("as", "text/html")],
+        cap,
+    )
+}
+
+/// The resolved page: the instant refresh and the visible link both name `target` (escaped).
+fn assert_resolves(page: &str, target: &str) {
+    assert!(
+        page.contains(&format!(
+            "<meta content='0; url={target}' http-equiv='refresh'/>"
+        )),
+        "the refresh names {target}: {page}"
+    );
+    assert!(
+        page.contains(&format!("<a href='{target}'>{target}</a>")),
+        "a visible link to {target}: {page}"
+    );
+}
+
+/// The 404's words with the name taken out, so two names' answers can be compared.
+fn refusal(answer: Result<String, Error>, name: &str) -> String {
+    match answer {
+        Err(Error::NotFound(words)) => words.replace(name, "NAME"),
+        other => panic!("{name}: expected the one 404, got {other:?}"),
+    }
+}
+
+const NOBODY: [&str; 1] = ["urn:cap:ledger:read:elsewhere"];
+
+#[test]
+fn a_commit_and_a_blob_under_a_readable_root_resolve_with_the_target_escaped() {
+    let (dir, head) = scratch(None);
+    let blob = git(dir.path(), &["rev-parse", "HEAD:src/lib.rs"]);
+    let hub = object_hub(&[mapped(dir.path())]);
+    let root = Capability::root();
+    let page = resolution(&hub, &format!("urn:git:commit:{head}"), &root).unwrap();
+    assert_resolves(&page, &format!("https://code.example/commit/{head}"));
+    assert!(page.contains("<h1>Name resolved</h1>"), "{page}");
+    let page = resolution(&hub, &format!("urn:git:blob:{blob}"), &root).unwrap();
+    // The template's `&` is escaped in both places, never raw.
+    assert_resolves(
+        &page,
+        &format!("https://code.example/blob/{head}/src/lib.rs?object={blob}&amp;view=code"),
+    );
+    assert!(!page.contains("&view=code"), "{page}");
+    // A reader without the root's grant gets the same 404 as a name nobody knows.
+    let stranger = Capability::scoped(NOBODY);
+    let name = format!("urn:git:commit:{head}");
+    assert_eq!(
+        refusal(resolution(&hub, &name, &stranger), &name),
+        refusal(
+            resolution(&hub, "urn:example:nothing", &root),
+            "urn:example:nothing"
+        )
+    );
+}
+
+#[test]
+fn a_file_resolves_to_browse_or_else_to_its_template() {
+    let (dir, _) = scratch(None);
+    let name = "urn:repo:file:demo/src/lib.rs";
+    let hub = object_hub(&[mapped(dir.path())]);
+    let browse = Capability::scoped(["urn:cap:browse:read:demo"]);
+    assert_resolves(
+        &resolution(&hub, name, &browse).unwrap(),
+        "/browse/urn:repo:demo:file:src/lib.rs",
+    );
+    // No browse grant: the root's `gonk.repository.file` template.
+    assert_resolves(
+        &resolution(&hub, name, &Capability::scoped(NOBODY)).unwrap(),
+        "https://code.example/tree/src/lib.rs",
+    );
+    // No browse grant and no template: the one 404, byte for byte the unknown name's.
+    let mut bare = mapped(dir.path());
+    bare.file = None;
+    let hub = object_hub(&[bare]);
+    let stranger = Capability::scoped(NOBODY);
+    assert_eq!(
+        refusal(resolution(&hub, name, &stranger), name),
+        refusal(
+            resolution(&hub, "tag:example.com,2026:none", &stranger),
+            "tag:example.com,2026:none"
+        )
+    );
+}
+
+#[test]
+fn a_ledger_item_resolves_only_when_its_ledger_is_readable() {
+    let hub = object_hub(&[]);
+    let name = "urn:iki:ledger:default:item:12";
+    assert_resolves(
+        &resolution(&hub, name, &Capability::root()).unwrap(),
+        "/l/default/item/12",
+    );
+    let stranger = Capability::scoped(NOBODY);
+    assert_eq!(
+        refusal(resolution(&hub, name, &stranger), name),
+        refusal(
+            resolution(&hub, "urn:example:nothing", &stranger),
+            "urn:example:nothing"
+        )
+    );
+}
+
+#[test]
+fn a_layer_entry_is_unknown_without_a_readable_layers_view() {
+    let hub = object_hub(&[]);
+    let name = "urn:layer:talk-chris:entry:01m6vcrdky000000000001y";
+    assert_eq!(
+        refusal(resolution(&hub, name, &Capability::root()), name),
+        refusal(
+            resolution(&hub, "urn:example:nothing", &Capability::root()),
+            "urn:example:nothing"
+        )
+    );
+}
+
+#[test]
+fn a_github_alias_resolves_to_its_issue() {
+    let hub = object_hub(&[]);
+    assert_resolves(
+        &resolution(&hub, "gh:ikigai-rs/ikigai-gonk%23319", &Capability::root())
+            .or_else(|_| resolution(&hub, "gh:ikigai-rs/ikigai-gonk#319", &Capability::root()))
+            .unwrap(),
+        "https://github.com/ikigai-rs/ikigai-gonk/issues/319",
+    );
+}
+
+/// No name becomes a URL it carries: the target is only ever built by gonk.
+#[test]
+fn a_name_that_smuggles_an_absolute_url_never_becomes_the_target() {
+    let (dir, _) = scratch(None);
+    let hub = object_hub(&[mapped(dir.path())]);
+    let root = Capability::root();
+    for name in [
+        "https://evil.example/x",
+        "urn:repo:file:https://evil.example/x",
+        "urn:repo:file:demo//evil.example/x",
+        "urn:repo:file:demo/../../etc/passwd",
+        "urn:iki:ledger:default:item:1//evil.example",
+        "urn:iki:ledger:https://evil.example:item:1",
+        "gh:evil.example/x#1",
+        "gh:o/r#1/../../evil",
+        "urn:layer:x:entry:1//evil.example",
+    ] {
+        match resolution(&hub, name, &root) {
+            Ok(page) => assert!(
+                !page.contains("evil.example'") && !page.contains("url=https://evil"),
+                "{name}: {page}"
+            ),
+            Err(Error::NotFound(_)) => {}
+            Err(other) => panic!("{name}: {other}"),
+        }
+    }
+}
+
+/// Ledger #3268: an origin alone does not opt a root into the PR source.
+#[test]
+fn pull_request_panels_require_a_configured_github_repository() {
+    let (repo, _) = scratch(Some(ORIGIN));
+    for (overrides, enabled) in [
+        (vec![], false),
+        (
+            vec![("demo".to_string(), "ikigai-rs/demo".to_string())],
+            true,
+        ),
+    ] {
+        let (hub, _watch) = served(repo.path(), &overrides);
+        for iri in ["urn:repo:demo:tree", "urn:repo:demo:tree:src"] {
+            let html = text(&hub, iri, &[("as", "text/html")]);
+            assert_eq!(html.contains("browse-recent-prs"), enabled, "{iri}: {html}");
+            assert_eq!(html.contains("pull requests"), enabled, "{iri}: {html}");
+            assert_eq!(
+                html.contains("hx-trigger=\"load\""),
+                enabled,
+                "{iri}: {html}"
+            );
+            let reader = Capability::scoped(["urn:cap:browse:read:demo"]);
+            let html = read(&hub, iri, &[("as", "text/html")], &reader).expect("tree read");
+            assert!(!html.contains("pull requests"), "{iri}: {html}");
+        }
+    }
 }

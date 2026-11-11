@@ -78,17 +78,22 @@ impl Endpoint for Summary {
             Some(path) => format!("urn:repo:{}:findings:{path}", self.root),
             None => format!("urn:repo:{}:findings", self.root),
         };
-        // No page or limit: count the whole set. Browse refuses an oversized unpaged
-        // answer rather than truncating it; propagate that refusal instead of reporting
-        // a partial count. The nested read also owns what "pending" means.
+        // Count the whole set through bounded pages. The nested reads own what
+        // "pending" means and retain the caller's grant and dependencies.
         let request = Request::new(
             Verb::Source,
             Iri::parse(&listing).map_err(|e| Error::Endpoint(e.to_string()))?,
         )
         .with_arg("state", ArgRef::Inline(b"pending".to_vec()))
         .with_arg("as", ArgRef::Inline(JSON.as_bytes().to_vec()));
-        let answer = inv.issue(request).await?;
-        let findings: Vec<Finding> = serde_json::from_slice(&answer.bytes)
+        let mut pages = crate::findings_pages::Pages::new(request);
+        loop {
+            let answer = inv.issue(pages.request()).await?;
+            if !pages.accept(&answer.bytes).map_err(Error::Endpoint)? {
+                break;
+            }
+        }
+        let findings: Vec<Finding> = serde_json::from_value(serde_json::Value::Array(pages.rows()))
             .map_err(|e| Error::Endpoint(format!("findings-summary: invalid findings: {e}")))?;
         let mut files = BTreeMap::<String, FileCounts>::new();
         // A named file with no findings still answers explicitly with zero counts.

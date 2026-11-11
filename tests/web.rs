@@ -41,6 +41,12 @@ use ikigai_gonk::{doors, quic, web};
 use ikigai_store::DurableStore;
 use p256::ecdsa::SigningKey;
 
+/// One facet row as the stylesheet writes it (ledger #3193): the term, then its count, before
+/// any Include and Exclude links. The term is not repeated on screen.
+fn facet_row(term: &str, count: usize) -> String {
+    format!("<span class='facet-term'>{term}</span> <span class='facet-count'>({count})</span>")
+}
+
 const CHROME_ACCEPT: &str =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
@@ -49,6 +55,7 @@ struct Server {
     layout: quic::Layout,
     /// The hub behind the door, for a test that must seed what no door may write.
     hub: Arc<ikigai_core::Kernel>,
+    http: Arc<ikigai_core::Kernel>,
     _config: tempfile::TempDir,
 }
 
@@ -123,15 +130,19 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
+        let http_for_test = Arc::clone(&http);
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
                 http,
@@ -144,6 +155,7 @@ impl Server {
             addr,
             layout,
             hub,
+            http: http_for_test,
             _config: config,
         }
     }
@@ -288,6 +300,519 @@ fn file(server: &Server, content: &str) -> (String, String) {
     );
     assert_eq!(filed.status, 200, "{filed:?}");
     first_item(&filed.body)
+}
+
+#[test]
+fn ledger_label_filters_use_the_ledgers_count_and_listing() {
+    let server = Server::start();
+    let mut filed = Vec::new();
+    for (title, labels) in [
+        ("Matching queue", "needs-person,book:ikigai"),
+        ("Other queue", "decide"),
+        ("Excluded queue", "needs-person,book:ikigai,blocked"),
+        ("Closed queue", "needs-person,book:ikigai"),
+        ("Matching elsewhere", "needs-person"),
+        ("Encoded queue", ""),
+    ] {
+        let response = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "append"),
+                ("_then", "items"),
+                ("content", title),
+                ("labels", labels),
+            ],
+            None,
+        );
+        assert_eq!(response.status, 200, "{response:?}");
+        assert!(
+            response
+                .body
+                .contains("name='limit' type='hidden' value='50'"),
+            "a form response without an explicit limit still has a valid search form: {response:?}"
+        );
+        filed.push(first_item(&response.body));
+    }
+    // Seed a pre-0.21.0 label directly: the write grammar now refuses these characters,
+    // but stored labels must still survive URL and HTML escaping in filters and listings.
+    let term = "c++ & café/?#%=yes";
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "<{}> <https://ikigai-rs.dev/ns/ledger#label> {} .",
+            filed[5].0,
+            serde_json::to_string(term).unwrap()
+        ),
+    );
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &filed[3].0),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+
+    for (filter, titles) in [
+        (
+            "labels=needs-person",
+            vec!["Matching queue", "Excluded queue", "Matching elsewhere"],
+        ),
+        ("without=needs-person", vec!["Other queue", "Encoded queue"]),
+        (
+            "labels=needs-person,book%3Aikigai&without=blocked&text=queue",
+            vec!["Matching queue"],
+        ),
+        (
+            "status=closed&labels=needs-person&without=blocked&text=queue",
+            vec!["Closed queue"],
+        ),
+        (
+            "status=all&labels=needs-person&without=blocked&text=queue",
+            vec!["Matching queue", "Closed queue"],
+        ),
+        ("labels=missing", vec![]),
+        ("labels=needs-person&without=needs-person", vec![]),
+    ] {
+        let count = server.raw(
+            "GET",
+            &format!("/iki/ledger/count?as=application%2Fjson&{filter}"),
+            &[("Accept", "application/json".into())],
+            "",
+        );
+        assert_eq!(count.status, 200, "{count:?}");
+        let count: serde_json::Value = serde_json::from_str(&count.body).unwrap();
+        assert_eq!(count["total"], titles.len(), "{filter}");
+        // Facets mirror the ledger's filter even though they run as one grouped query.
+        // These items all have unset priority, so that bucket equals the ledger total.
+        let facets = server.page(&format!("/l/default/facet?{filter}"), None);
+        assert_eq!(facets.status, 200, "{facets:?}");
+        if titles.is_empty() {
+            assert!(
+                facets.body.contains("No labels or priorities match."),
+                "{facets:?}"
+            );
+        } else {
+            assert!(
+                facets.body.contains(&facet_row("unset", titles.len())),
+                "{facets:?}"
+            );
+        }
+        for path in ["/l/default", "/l/default/items"] {
+            let page = server.page(&format!("{path}?{filter}"), None);
+            assert_eq!(page.status, 200, "{page:?}");
+            assert_eq!(
+                page.body.matches("<li class='row ").count(),
+                titles.len(),
+                "{page:?}"
+            );
+            for title in &titles {
+                assert!(page.body.contains(title), "{page:?}");
+            }
+            if titles.is_empty() {
+                assert!(page.body.contains("No items match."), "{page:?}");
+            } else {
+                assert!(
+                    page.body.contains(&format!(
+                        "{} {} items",
+                        titles.len(),
+                        if filter.starts_with("status=closed") {
+                            "closed"
+                        } else {
+                            "open"
+                        }
+                    )) || (filter.starts_with("status=all") && page.body.contains("2 items")),
+                    "{page:?}"
+                );
+            }
+        }
+    }
+    let filtered = server.page(
+        "/l/default?labels=needs-person&without=absent&text=queue&limit=1",
+        None,
+    );
+    assert!(
+        filtered
+            .body
+            .contains("limit=2&amp;text=queue&amp;labels=needs-person&amp;without=absent"),
+        "{filtered:?}"
+    );
+    assert!(
+        filtered.body.contains(
+            "status=closed&amp;labels=needs-person&amp;without=absent&amp;text=queue&amp;limit=1"
+        ),
+        "{filtered:?}"
+    );
+    // Row chips add a term to either side, preserving the other filters and resetting paging.
+    assert!(filtered.body.contains("href='/l/default?status=open&amp;limit=1&amp;text=queue&amp;labels=needs-person%2Cbook%3Aikigai&amp;without=absent'"), "{filtered:?}");
+    assert!(filtered.body.contains("href='/l/default?status=open&amp;limit=1&amp;text=queue&amp;labels=needs-person&amp;without=absent%2Cbook%3Aikigai'"), "{filtered:?}");
+    // Active terms can be removed or moved, including an excluded term.
+    for url in [
+        "?status=open&amp;limit=1&amp;text=queue&amp;without=absent",
+        "?status=open&amp;limit=1&amp;text=queue&amp;without=absent%2Cneeds-person",
+        "?status=open&amp;limit=1&amp;text=queue&amp;labels=needs-person%2Cabsent",
+    ] {
+        assert!(filtered.body.contains(url), "{filtered:?}");
+    }
+    let encoded = ikigai_fn::html::url_segment(term);
+    let all = server.page("/l/default", None);
+    assert!(
+        all.body.contains(&format!(
+            "href='/l/default?status=open&amp;limit=50&amp;labels={encoded}'"
+        )),
+        "{all:?}"
+    );
+    let encoded_page = server.page(&format!("/l/default?labels={encoded}"), None);
+    assert_eq!(encoded_page.status, 200, "{encoded_page:?}");
+    assert!(
+        encoded_page.body.contains("Encoded queue"),
+        "{encoded_page:?}"
+    );
+    assert_eq!(
+        encoded_page.body.matches("<li class='row ").count(),
+        1,
+        "{encoded_page:?}"
+    );
+    assert!(
+        encoded_page.body.contains("value='c++ &amp; café/?#%=yes'"),
+        "{encoded_page:?}"
+    );
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &filed[0].0),
+            ("_labels", "needs-person,book:ikigai"),
+            ("_without", "blocked"),
+            ("_text", "queue"),
+            ("_limit", "1"),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(closed.body.contains("No items match."), "{closed:?}");
+    assert!(
+        closed.body.contains("value='needs-person,book:ikigai'"),
+        "{closed:?}"
+    );
+    assert!(closed.body.contains("value='blocked'"), "{closed:?}");
+    assert!(closed.body.contains("value='queue'"), "{closed:?}");
+}
+
+#[test]
+fn ledger_label_filters_do_not_widen_the_viewers_capability() {
+    for grants in [Vec::new(), vec!["urn:cap:ledger:read:default".to_string()]] {
+        let server = Server::start_configured(ikigai_gonk::rules::DEFAULT_RULES, grants);
+        for path in [
+            "/l/default?labels=private",
+            "/l/default/items?without=private",
+            "/l/default/facet?labels=private",
+        ] {
+            let response = server.page(path, None);
+            assert_eq!(response.status, 403, "{response:?}");
+        }
+    }
+}
+
+#[test]
+fn listing_facets_count_the_whole_match_without_blocking_the_list() {
+    let server = Server::start();
+    for (title, labels, priority) in [
+        ("Matching first", "team,shared", "1"),
+        ("Matching second", "team,shared,extra", "2"),
+        ("Matching blocked", "team,blocked", "1"),
+        ("Other", "other", "0"),
+    ] {
+        assert_eq!(
+            server
+                .form(
+                    &[
+                        ("_ledger", "default"),
+                        ("_action", "append"),
+                        ("_then", "items"),
+                        ("content", title),
+                        ("labels", labels),
+                        ("priority", priority),
+                    ],
+                    None
+                )
+                .status,
+            200
+        );
+    }
+    let filter = "status=open&labels=team&without=blocked&text=Matching&limit=1";
+    let page = server.page(&format!("/l/default?{filter}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(
+        page.body.contains("id='listing-facet'"),
+        "missing independent facet load: {page:?}"
+    );
+    assert!(
+        !page.body.contains(&facet_row("shared", 2)),
+        "counts must load separately"
+    );
+    let start = Instant::now();
+    let facets = server.page(&format!("/l/default/facet?{filter}"), None);
+    eprintln!("facet HTTP request: {:?}", start.elapsed());
+    assert_eq!(facets.status, 200, "{facets:?}");
+    assert!(facets.body.contains(&facet_row("shared", 2)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("extra", 1)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("p1", 1)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("p2", 1)), "{facets:?}");
+    assert!(
+        !facets.body.contains("class='facet-term'>other<"),
+        "{facets:?}"
+    );
+    assert!(
+        !facets.body.contains("class='facet-term'>blocked<"),
+        "{facets:?}"
+    );
+    assert!(facets.body.contains("labels=team%2Cshared"), "{facets:?}");
+    assert!(
+        facets.body.contains("without=blocked%2Cshared"),
+        "{facets:?}"
+    );
+}
+
+#[test]
+fn priority_counts_are_text_and_list_uses_ledger_resources() {
+    use ikigai_core::{Capability, Iri, Request, Verb};
+    let server = Server::start();
+    seed(&server);
+    let trace = Arc::new(FacetTrace::default());
+    server.hub.set_tracer(trace.clone());
+    for resource in [
+        "urn:iki:gonk:page:ledger:default",
+        "urn:iki:gonk:fragment:items:default",
+    ] {
+        let mut request = Request::new(Verb::Source, Iri::parse(resource).unwrap());
+        for (name, value) in [
+            ("status", "open"),
+            ("labels", "repo:ikigai-gonk"),
+            ("without", "absent"),
+            ("text", "Refuse"),
+            ("priority", "1"),
+        ] {
+            request =
+                request.with_arg(name, ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()));
+        }
+        let response = futures::executor::block_on(server.http.issue_traced(
+            request,
+            &Capability::scoped(grants_for("default", Authority::Read).unwrap()),
+            Arc::new(FacetTrace::default()),
+        ))
+        .unwrap();
+        let body = String::from_utf8_lossy(&response.bytes);
+        assert!(!body.contains("search-priority"), "priority form remains");
+        let events = std::mem::take(&mut *trace.0.lock().unwrap());
+        for suffix in ["count", "items"] {
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.target == format!("urn:iki:ledger:default:{suffix}")),
+                "missing ledger {suffix}: {events:?}"
+            );
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.target == "urn:iki:store:graph-construct"),
+            "list bypassed ledger: {events:?}"
+        );
+    }
+    server.hub.clear_tracer();
+    let facets = server.page("/l/default/facet?labels=repo:ikigai-gonk", None);
+    assert!(facets.body.contains(&facet_row("p1", 2)), "{facets:?}");
+    assert!(
+        !facets.body.contains("priority="),
+        "priority link remains: {facets:?}"
+    );
+    assert!(
+        !facets.body.contains("<span class='sr-only'> label p"),
+        "{facets:?}"
+    );
+}
+
+#[test]
+fn facets_respect_grants_named_ledgers_empty_matches_and_escaped_terms() {
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("default", Authority::Read).unwrap(),
+        Vec::new(),
+        &["default", "private"],
+    );
+    let ttl = r#"@prefix l: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix d: <http://purl.org/dc/terms/> .
+        <urn:facet:one> a l:Item; l:number 1; d:title "Café <script>"; l:status l:open;
+          l:label "team", "c++ & café/?#%=yes" .
+        <urn:facet:two> a l:Item; l:number 2; d:title "Closed"; l:status l:closed;
+          l:label "team", "closed-only"; l:priority 0 .
+        <urn:facet:three> a l:Item; l:number 3; d:title "Unlabeled priority";
+          l:status l:open; l:priority 2 .
+        <urn:facet:four> a l:Item; l:number 4; d:title "Unlabeled unset";
+          l:status l:open ."#;
+    load(&server, "urn:iki:ledger:graph:default", ttl);
+    load(
+        &server,
+        "urn:iki:ledger:graph:private",
+        &ttl.replace("team", "private-label"),
+    );
+    let response = server.page(
+        "/l/default/facet?labels=team&without=closed-only&text=caf%C3%A9",
+        None,
+    );
+    assert_eq!(response.status, 200, "{response:?}");
+    assert!(
+        response
+            .body
+            .contains(&facet_row("c++ &amp; café/?#%=yes", 1)),
+        "{response:?}"
+    );
+    assert!(
+        response.body.contains(&facet_row("unset", 1)),
+        "{response:?}"
+    );
+    assert!(
+        response
+            .body
+            .contains("team%2Cc%2B%2B%20%26%20caf%C3%A9%2F%3F%23%25%3Dyes"),
+        "{response:?}"
+    );
+    assert!(!response.body.contains("private-label"));
+    for path in ["/l/private/facet", "/l/missing/facet"] {
+        assert_eq!(server.page(path, None).status, 403, "{path}");
+    }
+    let unlabeled = server.page("/l/default/facet?text=Unlabeled", None);
+    assert_eq!(unlabeled.status, 200, "{unlabeled:?}");
+    assert!(
+        unlabeled.body.contains(&facet_row("unset", 1)),
+        "{unlabeled:?}"
+    );
+    assert!(
+        unlabeled.body.contains(&facet_row("p2", 1)),
+        "{unlabeled:?}"
+    );
+    let closed = server.page("/l/default/facet?status=closed&labels=team", None);
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(
+        closed.body.contains(&facet_row("closed-only", 1)),
+        "{closed:?}"
+    );
+    let all = server.page("/l/default/facet?status=all&labels=team", None);
+    assert!(all.body.contains(&facet_row("team", 2)), "{all:?}");
+    for filter in [
+        "labels=team&without=team",
+        "labels=missing",
+        "text=%22%7D%20UNION%20%7B%3Fs%20%3Fp%20%3Fo",
+    ] {
+        let empty = server.page(&format!("/l/default/facet?{filter}"), None);
+        assert_eq!(empty.status, 200, "{empty:?}");
+        assert!(
+            empty.body.contains("No labels or priorities match."),
+            "{empty:?}"
+        );
+    }
+    let page = server.page("/l/default/facet?page=true", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(
+        page.body.contains("<h1>Labels and priority counts</h1>"),
+        "{page:?}"
+    );
+}
+
+#[derive(Default)]
+struct FacetTrace(std::sync::Mutex<Vec<ikigai_core::TraceEvent>>);
+
+impl ikigai_core::Tracer for FacetTrace {
+    fn record(&self, event: ikigai_core::TraceEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn facets_issue_one_grouped_store_read_and_no_item_reads() {
+    use ikigai_core::{Capability, Iri, Request, Verb};
+    let server = Server::start();
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        r#"
+        @prefix l: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix d: <http://purl.org/dc/terms/> .
+        <urn:facet:one> a l:Item; l:number 1; d:title "One"; l:status l:open;
+          l:label "a", "b", "c"; l:priority 1 ."#,
+    );
+    let trace = Arc::new(FacetTrace::default());
+    server.hub.set_tracer(trace.clone());
+    let response = futures::executor::block_on(server.http.issue_traced(
+        Request::new(
+            Verb::Source,
+            Iri::parse("urn:iki:gonk:fragment:facet:ledger:default").unwrap(),
+        ),
+        &Capability::scoped(grants_for("default", Authority::Read).unwrap()),
+        Arc::new(FacetTrace::default()),
+    ))
+    .unwrap();
+    server.hub.clear_tracer();
+    assert!(String::from_utf8_lossy(&response.bytes).contains(&facet_row("p1", 1)));
+    let events = trace.0.lock().unwrap();
+    let reads: Vec<_> = events
+        .iter()
+        .filter(|e| e.target.starts_with("urn:iki:store:"))
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].target, "urn:iki:store:graph-select");
+    assert!(
+        events
+            .iter()
+            .all(|e| !e.target.starts_with("urn:iki:ledger:")),
+        "{events:?}"
+    );
+}
+
+/// Repeatable cost measurement, deliberately outside the ordinary test gate.
+#[test]
+#[ignore = "whole-match facet cost measurement: run with --ignored --nocapture"]
+fn measure_listing_facets_3193() {
+    for size in [100, 1000, 5000] {
+        let server = Server::start();
+        let mut ttl = String::from("@prefix l: <https://ikigai-rs.dev/ns/ledger#> . @prefix d: <http://purl.org/dc/terms/> .\n");
+        for n in 0..size {
+            ttl.push_str(&format!(
+                "<urn:facet-cost:{n}> a l:Item; l:number {n}; d:title \"Item {n}\"; \
+                 l:status l:open; l:priority {}; l:label \"team\", \"bucket:{}\"; \
+                 d:created \"2026-11-06T00:00:00Z\"; d:modified \"2026-11-06T00:00:00Z\" .\n",
+                n % 5,
+                n % 50
+            ));
+        }
+        load(&server, "urn:iki:ledger:graph:default", &ttl);
+        // This feature starts after a list was drawn: stylesheet initialization and the
+        // ordinary list's reads have already happened. Keep them outside the facet time.
+        assert_eq!(server.page("/l/default?limit=1", None).status, 200);
+        for (kind, query) in [
+            ("all", ""),
+            ("narrow", "?labels=team,bucket:1&without=absent&text=Item"),
+        ] {
+            for pass in 0..2 {
+                let start = Instant::now();
+                let response = server.page(&format!("/l/default/facet{query}"), None);
+                let elapsed = start.elapsed();
+                assert_eq!(response.status, 200, "{response:?}");
+                assert!(
+                    response.body.contains("class='facet-term'>team<"),
+                    "{response:?}"
+                );
+                eprintln!(
+                    "facet: items={size}, filter={kind}, pass={pass}, HTTP+render={elapsed:?}"
+                );
+            }
+        }
+    }
 }
 
 /// ★ **A listing renders a BOUNDED number of rows and says so.** `xrust` costs ~6–15 ms per
@@ -757,7 +1282,7 @@ fn an_item_page_lists_its_children_as_links() {
     assert_eq!(child.status, 200, "{child:?}");
     assert!(
         child.body.contains(&format!(
-            "<a href='/l/default/item/{parent_id}'>default {parent_id}</a>"
+            "<a class='title' href='/l/default/item/{parent_id}'>The epic<span class='sr-only'> (in default)</span></a>"
         )),
         "{child:?}"
     );
@@ -1456,7 +1981,8 @@ fn a_repo_label_asks_the_ledger_the_next_question() {
 /// ⚠ The label comes out of the store, and the store holds text other people wrote. A label
 /// carrying a quote and a closing brace must not be able to change the SHAPE of the query it
 /// runs — the whole value stays one string literal, so the query is well-formed and simply
-/// matches nothing.
+/// matches only the item carrying that literal. New writes refuse this label, but older
+/// stores may still hold it.
 #[test]
 fn a_label_that_looks_like_sparql_cannot_reshape_the_query_it_runs() {
     let server = Server::start();
@@ -1471,7 +1997,19 @@ fn a_label_that_looks_like_sparql_cannot_reshape_the_query_it_runs() {
         ],
         None,
     );
-    assert_eq!(filed.status, 200, "{filed:?}");
+    assert_eq!(filed.status, 400, "{filed:?}");
+    assert!(filed.body.contains("label may hold only"), "{filed:?}");
+
+    // Seed a pre-0.21.0 label directly: query rendering must still treat stored text as data.
+    let (iri, _) = file(&server, "A label that reads like a query\n\nbody");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "<{iri}> <https://ikigai-rs.dev/ns/ledger#label> {} .",
+            serde_json::to_string(hostile).unwrap()
+        ),
+    );
 
     let query = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>\n\
                  SELECT ?label WHERE { ?i a ledger:Item ; ledger:label ?label \
@@ -1614,7 +2152,8 @@ fn a_passkey_identity_adds_its_grant_and_only_its_grant() {
     // that file still parses as the QUIC door's enrollment.
     let clients = std::fs::read_to_string(server.layout.clients_json()).unwrap();
     assert!(
-        clients.contains("\"passkeys\"") && clients.contains("\"grant\": \"brian\""),
+        clients.contains("\"passkeys\"")
+            && clients.contains("\"grants\": [\n        \"brian\"\n      ]"),
         "{clients}"
     );
     quic::parse_enrolment(&clients).unwrap();
@@ -2450,6 +2989,162 @@ fn urls_and_ledger_references_in_bodies_are_links_and_nothing_else_is() {
     );
 }
 
+/// Ledger [#3345](http://localhost:1062/l/default/item/3345): an item's body and a comment's
+/// render as Markdown, as a layer entry's do (`render::item_markdown`): strikethrough, a table,
+/// a task list and a code block become their elements, a raw HTML tag stays text, and every
+/// link `linkify` makes survives inside the rendered markup (a URL, `ledger #N`, a qualified
+/// `crew#3`, a GitHub reference). A body with no Markdown in it shows as written, as before.
+#[test]
+fn item_bodies_and_comments_render_as_markdown_with_their_links() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew"],
+    );
+    let body = "~~Superseded plan~~ see crew#3 and ledger #12.\n\
+                \n\
+                | Step | Where |\n\
+                |---|---|\n\
+                | one | https://example.com/a |\n\
+                \n\
+                - [x] done in o/r#7\n\
+                - [ ] next, <b>bold?</b>\n\
+                \n\
+                ```\n\
+                let x = 1 < 2; // ledger #13\n\
+                ```";
+    let (iri, id) = file(&server, &format!("Markdown body\n\n{body}"));
+    let comment = |content: &str| {
+        let commented = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "comment"),
+                ("_id", &id),
+                ("_then", "card"),
+                ("item", &iri),
+                ("content", content),
+            ],
+            None,
+        );
+        assert_eq!(commented.status, 200, "{commented:?}");
+    };
+    comment("# Update\n\n~~crew #4~~ is <i>replaced</i> by https://example.org/c.");
+    comment("A plain comment,\nwith two   lines and ledger #5.");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let html = &page.body;
+        for (what, want) in [
+            (
+                "strikethrough, with its links",
+                "<p><del>Superseded plan</del> see <a href='/l/crew/item/3'>crew#3</a> and \
+                 <a href='/l/default/item/12'>ledger #12</a>.</p>",
+            ),
+            ("a table's head", "<th scope='col'>Step</th>"),
+            (
+                "a URL in a table cell",
+                "<td><a href='https://example.com/a'>https://example.com/a</a></td>",
+            ),
+            (
+                "a checked task",
+                "<input aria-label='task' checked='checked'",
+            ),
+            (
+                "a GitHub reference in a task",
+                "<a href='https://github.com/o/r/issues/7'",
+            ),
+            (
+                "a raw tag in a task, as text",
+                "next, &lt;b&gt;bold?&lt;/b&gt;",
+            ),
+            (
+                "a code block, unlinked",
+                "<pre><code>let x = 1 &lt; 2; // ledger #13\n</code></pre>",
+            ),
+            ("the comment's heading, under Comments", "<h3>Update</h3>"),
+            (
+                "the comment's strikethrough and links",
+                "<del><a href='/l/crew/item/4'>crew #4</a></del> is &lt;i&gt;replaced&lt;/i&gt; \
+                 by <a href='https://example.org/c'>https://example.org/c</a>.",
+            ),
+            (
+                "a plain comment, as written",
+                "data-linkify='default;default,crew'>A plain comment,\nwith two   lines and \
+                 <a href='/l/default/item/5'>ledger #5</a>.</div>",
+            ),
+        ] {
+            assert!(html.contains(want), "{what}: want {want:?} in {html}");
+        }
+        assert_eq!(
+            html.matches("class='body markdown as-written'").count(),
+            2,
+            "{html}"
+        );
+        // The edit form's textarea holds the text as written; the rendered page above it, none.
+        let shown = html.split("id='act-title'").next().unwrap_or_default();
+        for raw in ["<b>", "<i>", "~~", "| Step", "- [x]", "```", "# Update"] {
+            assert!(
+                !shown.contains(raw),
+                "{raw:?} is not shown as written: {shown}"
+            );
+        }
+    }
+}
+
+/// Ledger [#3344](http://localhost:1062/l/default/item/3344): an item's and a comment's body
+/// link a QUALIFIED reference (`crew#3`, `crew #3`, `crew:#3`) to that ledger's item when this
+/// gonk holds it and the viewer may read it, as a layer entry's do (`render::qualified_ref_at`).
+/// A ledger it does not hold (`nosuch`) or the viewer may not read (`private`) stays text, and
+/// the page's own `ledger #N` still links into the page's ledger.
+#[test]
+fn qualified_ledger_references_in_bodies_link_only_into_held_readable_ledgers() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let body = "See crew#3, crew #3 and crew:#3; not private#4, nosuch#5 or a.example/crew#6; \
+                and ledger #12.";
+    let (iri, id) = file(&server, &format!("Qualified references\n\n{body}"));
+    let commented = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "comment"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &iri),
+            ("content", "Comment: crew #7 and private #8."),
+        ],
+        None,
+    );
+    assert_eq!(commented.status, 200, "{commented:?}");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let html = &page.body;
+        assert!(
+            html.contains(
+                "See <a href='/l/crew/item/3'>crew#3</a>, <a href='/l/crew/item/3'>crew #3</a> \
+                 and <a href='/l/crew/item/3'>crew:#3</a>; not private#4, nosuch#5 or \
+                 a.example/crew#6; and <a href='/l/default/item/12'>ledger #12</a>."
+            ),
+            "the body's references: {html}"
+        );
+        assert!(
+            html.contains("Comment: <a href='/l/crew/item/7'>crew #7</a> and private #8."),
+            "the comment's references: {html}"
+        );
+        assert!(!html.contains("/l/private/"), "{html}");
+        assert!(!html.contains("/l/nosuch/"), "{html}");
+    }
+}
+
 /// Ledger [#1376](http://localhost:1062/l/default/item/1376): the linker compared a body's
 /// first eight BYTES at each word boundary, so `http:/` followed by a wide character, or any
 /// word whose eighth byte fell inside one, panicked the render and the item's page failed for
@@ -2521,11 +3216,10 @@ fn a_stored_link_to_gonk_at_port_1060_renders_onto_this_server() {
     let page = server.page(&format!("/l/default/item/{id}"), None);
     assert_eq!(page.status, 200, "{page:?}");
     let html = &page.body;
+    // The body has Markdown in it (ledger #3345), so `[#739](…)` is a Markdown link: its href
+    // is rehomed and its text is the link's own, `#739`.
     for (href, text) in [
-        (
-            "/l/default/item/739",
-            "http://localhost:1060/l/default/item/739",
-        ),
+        ("/l/default/item/739", "#739"),
         (
             "/browse/urn:repo:x:tree",
             "http://127.0.0.1:1060/browse/urn:repo:x:tree",
@@ -2829,10 +3523,10 @@ fn the_doctor_says_what_it_judged_against_on_one_line() {
     }
 }
 
-/// A signed-in caller's editor and header must agree on the ledger in force,
-/// regardless of configuration order or whether default is readable.
+/// A signed-in caller's editor keeps its query ledger selection, regardless of configuration
+/// order or whether default is readable. The header links are not the current page (#1894).
 #[test]
-fn a_multi_ledger_passkey_defaults_to_default_in_both_pickers() {
+fn a_multi_ledger_passkey_selects_its_query_ledger_without_a_current_header_link() {
     for (readable, expected_default) in [
         (vec!["alpha", "default", "zeta"], "default"),
         (vec!["alpha", "zeta"], "zeta"),
@@ -2872,12 +3566,7 @@ fn a_multi_ledger_passkey_defaults_to_default_in_both_pickers() {
                 "{path}: header ledger"
             );
             let header = body.split("</header>").next().unwrap();
-            assert!(
-                header.contains(&format!(
-                    "aria-current=\"page\" class=\"ledger-link\" href=\"/l/{expected}\""
-                )),
-                "{path}: {header}"
-            );
+            assert!(!header.contains("aria-current"), "{path}: {header}");
             if expected_default != "default" {
                 assert!(!select.contains("value=\"default\""), "{select}");
             }
@@ -3009,4 +3698,1060 @@ fn a_lifecycle_page_uses_the_named_ledgers_definition_and_escapes_its_text() {
     assert!(!page.body.contains("<script> & owner"), "{page:?}");
     assert!(page.body.contains("href='/l/tasks'"), "{page:?}");
     assert!(page.body.contains("href='/l/tasks/doctor'"), "{page:?}");
+}
+
+// A single-ledger context makes the visible ledger prefix redundant (ledger #3215).
+#[test]
+fn single_ledger_rows_use_bare_numbers_and_name_the_ledger_in_the_link() {
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("crew", Authority::Write).unwrap(),
+        Vec::new(),
+        &["crew"],
+    );
+    assert_eq!(server.page("/l/default", None).status, 403);
+    let filed = server.form(
+        &[
+            ("_ledger", "crew"),
+            ("_action", "append"),
+            ("_then", "items"),
+            ("content", "A crew item"),
+        ],
+        None,
+    );
+    assert_eq!(filed.status, 200, "{filed:?}");
+    let iri_start = filed.body.find("urn:iki:ledger:crew:item:").unwrap();
+    let id: String = filed.body[iri_start + "urn:iki:ledger:crew:item:".len()..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let href = format!("/l/crew/item/{id}");
+    for path in ["/l/crew", "/l/crew/items"] {
+        let page = server.page(path, None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert!(
+            page.body.contains("<span class='num'>#1</span>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains("A crew item<span class='sr-only'> (in crew)</span>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body.contains(&format!("class='title' href='{href}'")),
+            "{page:?}"
+        );
+        assert!(
+            !page.body.contains("<span class='num'>crew#1</span>"),
+            "{page:?}"
+        );
+    }
+    let card = server.page(&href, None);
+    assert_eq!(card.status, 200, "{card:?}");
+    assert!(
+        card.body.contains("<span class='num'>#1</span>"),
+        "{card:?}"
+    );
+    for media in ["text/turtle", "application/json"] {
+        let data = server.raw(
+            "GET",
+            &format!("/iki/ledger/crew/item/{id}"),
+            &[("Accept", media.to_string())],
+            "",
+        );
+        assert_eq!(data.status, 200, "{data:?}");
+        assert!(
+            data.body
+                .contains(&format!("urn:iki:ledger:crew:item:{id}")),
+            "{data:?}"
+        );
+        assert!(!data.body.contains("sr-only"), "{data:?}");
+        assert!(!data.body.contains("urn:iki:gonk:view:"), "{data:?}");
+    }
+}
+
+/// Ledger #3195: a row shows the hub's own facts as badges, each with its words: the lifecycle
+/// state (an in-flight one said so, from the lifecycle document), the claim's holder with an
+/// expired lease marked, awaiting with whom it awaits, and deferred as before. None of them is
+/// a label, so a label spelled like one adds no badge.
+#[test]
+fn a_row_shows_its_state_claim_awaiting_and_deferred_as_badges() {
+    let server = Server::start();
+    let mut last = String::new();
+    for title in ["In flight", "Held long ago", "Handed back", "Plain"] {
+        let filed = server.form(
+            &[
+                ("_ledger", "default"),
+                ("_action", "append"),
+                ("_then", "items"),
+                ("content", title),
+            ],
+            None,
+        );
+        assert_eq!(filed.status, 200, "{filed:?}");
+        last = filed.body;
+    }
+    let prefix = "urn:iki:ledger:default:item:";
+    let mut items: Vec<String> = last
+        .match_indices(prefix)
+        .map(|(at, _)| {
+            let id: String = last[at + prefix.len()..]
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            format!("{prefix}{id}")
+        })
+        .collect();
+    items.sort();
+    items.dedup();
+    assert_eq!(items.len(), 4, "{items:?}");
+    let iri_of = |title: &str| -> String {
+        let turtle = items
+            .iter()
+            .find(|iri| {
+                let id = iri.rsplit_once(":item:").unwrap().1;
+                turtle(&server, id).contains(title)
+            })
+            .unwrap_or_else(|| panic!("no item titled {title}"));
+        turtle.clone()
+    };
+    let (flying, held, waiting) = (
+        iri_of("In flight"),
+        iri_of("Held long ago"),
+        iri_of("Handed back"),
+    );
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            r#"
+            @prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            <{flying}> ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> ;
+                ledger:claimedBy "w1" ; ledger:claimKind ledger:machine ;
+                ledger:lease "1h" ; ledger:leaseExpires "2999-01-01T00:00:00.000Z"^^xsd:dateTime ;
+                ledger:label "lifecycle:shipping" .
+            <{held}> ledger:state <urn:iki:ledger:lifecycle:kata-flight:queued> ;
+                ledger:claimedBy "w2" ; ledger:claimKind ledger:machine ;
+                ledger:lease "30m" ; ledger:leaseExpires "2001-01-01T00:00:00.000Z"^^xsd:dateTime ;
+                ledger:deferred true .
+            <{waiting}> ledger:awaiting <urn:iki:ledger:awaiting:dispatcher> .
+            "#
+        ),
+    );
+    for path in ["/l/default", "/l/default?theme=dark"] {
+        let page = server.page(path, None);
+        assert_eq!(page.status, 200, "{page:?}");
+        for badge in [
+            "<span class='badge state in-flight'>state: resolving · in flight</span>",
+            "<span class='badge state'>state: queued</span>",
+            "<span class='badge state'>state: filed</span>",
+            "<span class='badge claimed'>claimed by w1</span>",
+            "<span class='badge claimed expired'>claimed by w2 · lease expired</span>",
+            "<span class='badge awaiting'>awaiting dispatcher</span>",
+            "<span class='badge deferred'>deferred</span>",
+        ] {
+            assert!(page.body.contains(badge), "missing {badge}: {page:?}");
+        }
+        assert!(
+            !page.body.contains("state: shipping"),
+            "a label is never the state: {page:?}"
+        );
+        assert_eq!(
+            page.body.matches("class='badge awaiting'").count(),
+            1,
+            "{page:?}"
+        );
+    }
+    let id = flying.rsplit_once(":item:").unwrap().1;
+    let card = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(card.status, 200, "{card:?}");
+    assert!(
+        card.body
+            .contains("<span class='badge state in-flight'>state: resolving · in flight</span>"),
+        "{card:?}"
+    );
+}
+
+/// Ledger #3197: the record's outgoing members are live listing rows, not identifiers.
+#[test]
+fn outgoing_links_are_live_rows_with_state_rollups() {
+    let server = Server::start();
+    let (record, id) = file(&server, "Flight plan");
+    let (member, member_id) = file(&server, "A live member");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!("<{record}> <https://ikigai-rs.dev/ns/ledger#related> <{member}> ."),
+    );
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let links = page
+        .body
+        .split("id='links-title'")
+        .nth(1)
+        .expect("Links panel");
+    let links = links.split("</section>").next().unwrap();
+    assert!(
+        links.contains("A live member"),
+        "linked title absent: {links}"
+    );
+    assert!(
+        links.contains("class='row open'"),
+        "not a ledger row: {links}"
+    );
+    assert!(links.contains("filed: 1"), "no state rollup: {links}");
+    assert!(
+        links.contains(&format!("/l/default/item/{member_id}")),
+        "{links}"
+    );
+}
+
+/// Fixture writes bypass the viewer's grant; page reads below must still use it.
+fn linked_fixture(server: &Server, ledger: &str, title: &str) -> (String, String) {
+    let request = ikigai_core::Request::new(
+        ikigai_core::Verb::Sink,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:append")).unwrap(),
+    )
+    .with_arg(
+        "content",
+        ikigai_core::ArgRef::Inline(title.as_bytes().to_vec()),
+    );
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap();
+    let text = String::from_utf8(answer.bytes).unwrap();
+    let prefix = format!("urn:iki:ledger:{ledger}:item:");
+    let rest = text.split(&prefix).nth(1).unwrap();
+    let id: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    (format!("{prefix}{id}"), id)
+}
+
+fn links_panel(html: &str) -> &str {
+    html.split("id='links-title'")
+        .nth(1)
+        .expect("Links panel")
+        .split("</section>")
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn outgoing_links_respect_the_viewers_grant_and_partition_by_relation_and_ledger() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    grants.extend(ikigai_gonk::grants::link_in_grants("crew").unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let (record, id) = linked_fixture(&server, "default", "Record <plan>");
+    let (member, _) = linked_fixture(&server, "crew", "Crew <member> & partner");
+    let (secret, _) = linked_fixture(&server, "private", "Never disclose this title");
+    let missing = "urn:iki:ledger:crew:item:01missing";
+    load(&server, "urn:iki:ledger:graph:default", &format!(
+        "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+         <{record}> ledger:related <{member}>, <{secret}>, <{missing}> ; ledger:parent <{record}> ; ledger:about <urn:external:record> ."
+    ));
+    // A real edge carries the ledger's link node and mirror, so unlink exercises the
+    // same representation a browser-created link uses (raw triples are read fixtures).
+    let linked = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "link"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &record),
+            ("type", "blocks"),
+            ("content", &member),
+        ],
+        None,
+    );
+    assert_eq!(linked.status, 200, "{linked:?}");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert_eq!(
+            page.body.matches("<h1").count(),
+            1,
+            "self-link must not become another card"
+        );
+        let links = links_panel(&page.body);
+        assert_eq!(
+            links.matches("Crew &lt;member&gt; &amp; partner").count(),
+            4,
+            "one title and one unlink name per relation: {links}"
+        );
+        assert!(
+            links.contains("blocks · crew") && links.contains("related · crew"),
+            "{links}"
+        );
+        assert!(links.contains("parent · default"), "{links}");
+        assert!(!page.body.contains("Never disclose this title"), "{page:?}");
+        for target in [&secret, missing, "urn:external:record"] {
+            assert!(
+                links.contains(&format!("<code class='iri'>{target}</code>")),
+                "bare unavailable IRI: {links}"
+            );
+        }
+        assert!(!links.contains("href='/l/private/item/"), "{links}");
+        assert!(
+            !links.contains("name='_action' type='hidden' value='close'"),
+            "linked rows must return to their source card"
+        );
+        assert!(
+            links.contains(&format!("name='_id' type='hidden' value='{id}'")),
+            "unlink addresses the source: {links}"
+        );
+    }
+    // Unlink as a browser does: the response is the refreshed record, not the member.
+    let unlinked = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "link"),
+            ("_verb", "Delete"),
+            ("_id", &id),
+            ("_then", "card"),
+            ("item", &record),
+            ("type", "blocks"),
+            ("content", &member),
+        ],
+        None,
+    );
+    assert_eq!(unlinked.status, 200, "{unlinked:?}");
+    let links = links_panel(&unlinked.body);
+    assert!(
+        !links.contains("blocks · crew") && links.contains("related · crew"),
+        "{links}"
+    );
+}
+
+#[test]
+fn outgoing_links_refresh_badges_rollups_and_landing_order_without_following_another_hop() {
+    let server = Server::start();
+    let (record, id) = linked_fixture(&server, "default", "Live plan");
+    let (first, first_id) = linked_fixture(&server, "default", "First member");
+    let (second, _) = linked_fixture(&server, "default", "Second member");
+    let (grandchild, _) = linked_fixture(&server, "default", "Never follow another hop");
+    load(&server, "urn:iki:ledger:graph:default", &format!(
+        "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+         <{record}> ledger:related <{first}>, <{second}> .\n\
+         <{first}> ledger:related <{grandchild}> ; ledger:state <urn:iki:ledger:lifecycle:kata-flight:resolving> ; ledger:claimedBy \"worker\" ; ledger:deferred true ."
+    ));
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    let links = links_panel(&page.body);
+    // No blocks links and no priorities: the ledger's landing order is number order (#3226).
+    assert!(
+        links.find("First member") < links.find("Second member"),
+        "landing order: {links}"
+    );
+    assert!(links.contains("filed: 1; resolving: 1"), "{links}");
+    assert!(
+        links.contains("claimed by worker") && links.contains(">deferred</span>"),
+        "{links}"
+    );
+    assert!(!links.contains("Never follow another hop"), "{links}");
+    let closed = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "close"),
+            ("_id", &first_id),
+            ("_then", "card"),
+            ("item", &first),
+            ("reason", "done"),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    let page = server.page(&format!("/l/default/item/{id}/card"), None);
+    let links = links_panel(&page.body);
+    assert!(
+        links.contains("class='row closed'"),
+        "closed members stay in the plan: {links}"
+    );
+    assert!(links.contains("closed · done"), "{links}");
+    let edited = server.form(
+        &[
+            ("_ledger", "default"),
+            ("_action", "item"),
+            ("_id", &first_id),
+            ("_then", "card"),
+            ("content", "Renamed member"),
+            ("priority", "1"),
+        ],
+        None,
+    );
+    assert_eq!(edited.status, 200, "{edited:?}");
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    let links = links_panel(&page.body);
+    assert!(
+        links.contains("Renamed member") && links.contains(">p1</span>"),
+        "{links}"
+    );
+    assert!(
+        !links.contains("First member"),
+        "the target read must not be stale: {links}"
+    );
+}
+
+#[test]
+fn outgoing_links_keep_all_rows_across_render_chunks() {
+    let server = Server::start();
+    let (record, id) = linked_fixture(&server, "default", "A larger flight plan");
+    let mut targets = Vec::new();
+    for n in 0..12 {
+        targets.push(linked_fixture(&server, "default", &format!("Plan member {n:02}")).0);
+    }
+    let edges = targets
+        .iter()
+        .map(|target| format!("<{target}>"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!("<{record}> <https://ikigai-rs.dev/ns/ledger#related> {edges} ."),
+    );
+    let page = server.page(&format!("/l/default/item/{id}/card"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let links = links_panel(&page.body);
+    assert_eq!(links.matches("class='row open'").count(), 12, "{links}");
+    assert!(links.contains("12 linked items. filed: 12."), "{links}");
+    assert!(
+        !links.contains("gonk-slot"),
+        "every chunk is spliced: {links}"
+    );
+    let mut order: Vec<_> = (0..12)
+        .map(|n| (links.find(&format!("Plan member {n:02}")).unwrap(), n))
+        .collect();
+    order.sort();
+    // No blocks links and no priorities: the ledger's landing order is number order (#3226),
+    // the reverse of the listing's newest first, kept across the chunk boundary.
+    assert_eq!(
+        order.into_iter().map(|(_, n)| n).collect::<Vec<_>>(),
+        (0..12).collect::<Vec<_>>(),
+        "the landing order across chunks"
+    );
+}
+
+#[test]
+fn outgoing_link_rows_do_not_render_the_members_body() {
+    let server = Server::start();
+    let (record, id) = linked_fixture(&server, "default", "Plan for a large record");
+    // The body alone fits the renderer's byte limit, but enriching a full card duplicates
+    // it into view:content. A listing row needs neither copy.
+    let content = format!("A member with a large body\n\n{}", "x".repeat(600_000));
+    let (member, _) = linked_fixture(&server, "default", &content);
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!("<{record}> <https://ikigai-rs.dev/ns/ledger#related> <{member}> ."),
+    );
+    let page = server.page(&format!("/l/default/item/{id}/card"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(links_panel(&page.body).contains("A member with a large body"));
+    assert!(
+        page.body.len() < 20_000,
+        "the row does not carry a member body"
+    );
+}
+
+/// Ledger #3226: a relation group reads in the ledger's `sort=landing` order, so a blocker
+/// comes before what it blocks. The chain below differs from both the old modified-descending
+/// order (C, B, A) and number order (A, B, C).
+#[test]
+fn a_blocks_chain_inside_a_related_group_renders_in_landing_order() {
+    let server = Server::start();
+    let (a, _) = file(&server, "Alpha lands first");
+    let (b, _) = file(&server, "Bravo lands last");
+    let (c, _) = file(&server, "Charlie lands second");
+    let (record, id) = file(&server, "Flight plan");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+             <{record}> ledger:related <{a}>, <{b}>, <{c}> .\n\
+             <{a}> ledger:blocks <{c}> .\n\
+             <{c}> ledger:blocks <{b}> ."
+        ),
+    );
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let links = links_panel(&page.body);
+        let related = links
+            .split("<h3>related · default</h3>")
+            .nth(1)
+            .expect("the related group");
+        let at = |title: &str| {
+            related
+                .find(title)
+                .unwrap_or_else(|| panic!("{title} absent: {related}"))
+        };
+        assert!(
+            at("Alpha lands first") < at("Charlie lands second")
+                && at("Charlie lands second") < at("Bravo lands last"),
+            "not in landing order: {related}"
+        );
+        assert!(links.contains("in landing order"), "{links}");
+        assert!(!links.contains("most recently updated first"), "{links}");
+    }
+}
+
+/// Ledger #3226: a cycle in the blocks graph is the ledger's refusal, said in the panel; the
+/// page and its rows still render.
+#[test]
+fn a_blocks_cycle_answers_the_ledgers_refusal_in_the_panel() {
+    let server = Server::start();
+    let (a, _) = file(&server, "Around one way");
+    let (b, _) = file(&server, "Around the other");
+    let (record, id) = file(&server, "Circular plan");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            "@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .\n\
+             <{record}> ledger:related <{a}>, <{b}> .\n\
+             <{a}> ledger:blocks <{b}> .\n\
+             <{b}> ledger:blocks <{a}> ."
+        ),
+    );
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let links = links_panel(&page.body);
+        assert!(
+            links.contains("Around one way") && links.contains("Around the other"),
+            "the rows still render: {links}"
+        );
+        assert!(
+            links.contains("landing order cannot be computed because the matching readable blocks graph has a cycle"),
+            "the ledger's refusal is not in the panel: {links}"
+        );
+        assert!(!links.contains("in landing order"), "{links}");
+    }
+}
+
+/// `title` appended to `ledger` with `labels` under the ROOT capability, as no door may for a
+/// ledger the test's viewer cannot write; answers the item's id.
+fn append_as_root(server: &Server, ledger: &str, title: &str, labels: &str) -> String {
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        ikigai_core::Request::new(
+            ikigai_core::Verb::Sink,
+            ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:append")).unwrap(),
+        )
+        .with_arg(
+            "content",
+            ikigai_core::ArgRef::Inline(title.as_bytes().to_vec()),
+        )
+        .with_arg(
+            "labels",
+            ikigai_core::ArgRef::Inline(labels.as_bytes().to_vec()),
+        ),
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("appending to {ledger}: {e}"));
+    let text = String::from_utf8_lossy(&answer.bytes).into_owned();
+    let prefix = format!("urn:iki:ledger:{ledger}:item:");
+    let at = text.find(&prefix).unwrap_or_else(|| panic!("{text}"));
+    text[at + prefix.len()..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+/// The rows' titles on a listing page, in page order.
+fn row_titles(body: &str) -> Vec<String> {
+    body.split("class='title' href='")
+        .skip(1)
+        .map(|row| {
+            let start = row.find('>').unwrap() + 1;
+            row[start..].split('<').next().unwrap().to_string()
+        })
+        .collect()
+}
+
+/// Ledger #3216: the ledger page and fragment carry `ledgers=` to the ledger's own union
+/// (ikigai-ledger 0.20), read under the viewer's capability: a ledger the viewer cannot read
+/// is left out (and said so), each row says `ledger#N` and links into its own ledger, the
+/// count is the ledger's count of the same union, and every link the page builds (paging,
+/// status, search, label filters, the facet) keeps the union, as does a form's re-render.
+#[test]
+fn a_ledger_page_lists_the_union_of_ledgers_the_viewer_may_read() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Write).unwrap());
+    // Half a grant is no grant: the ledger read without the graph read.
+    grants.push("urn:cap:ledger:read:ghost".to_string());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private", "ghost"],
+    );
+    append_as_root(&server, "default", "Default team one", "team");
+    append_as_root(&server, "crew", "Crew team one", "team,shared");
+    append_as_root(&server, "default", "Default other", "other");
+    let crew_two = append_as_root(&server, "crew", "Crew team two", "team");
+    append_as_root(&server, "private", "Private team secret", "team,secret");
+    append_as_root(&server, "ghost", "Ghost team secret", "team,secret");
+    let union = "ledgers=default,crew,private,ghost";
+    let union_link = "ledgers=default%2Ccrew%2Cprivate%2Cghost";
+    let readable = [
+        "Crew team two",
+        "Default other",
+        "Crew team one",
+        "Default team one",
+    ];
+
+    // The ledger's own count of the union, under the same viewer: the page must agree.
+    let count = |filter: &str| -> u64 {
+        let response = server.raw(
+            "GET",
+            &format!("/iki/ledger/count?as=application%2Fjson&{union}&{filter}"),
+            &[("Accept", "application/json".into())],
+            "",
+        );
+        assert_eq!(response.status, 200, "{response:?}");
+        let doc: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(doc["ledgers"], serde_json::json!(["crew", "default"]));
+        doc["total"].as_u64().unwrap()
+    };
+    assert_eq!(count("status=open"), 4);
+
+    for path in ["/l/default", "/l/default/items"] {
+        let page = server.page(&format!("{path}?{union}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let mut titles = row_titles(&page.body);
+        titles.sort();
+        let mut want: Vec<String> = readable.iter().map(|t| t.to_string()).collect();
+        want.sort();
+        assert_eq!(titles, want, "{page:?}");
+        assert!(!page.body.contains("secret"), "{page:?}");
+        assert!(page.body.contains("4 open items"), "{page:?}");
+        assert!(
+            page.body.contains(
+                "Items from 2 ledgers: crew, default. Left out, because this grant cannot \
+                 read them: private, ghost."
+            ),
+            "{page:?}"
+        );
+        // A default row's action is named with its ledger too.
+        assert!(
+            page.body.contains("aria-label='Close default#1 with"),
+            "{page:?}"
+        );
+        // Rows from several ledgers say which: `ledger#N`, the default ledger's too.
+        for number in ["crew#1", "crew#2", "default#1", "default#2"] {
+            assert!(
+                page.body
+                    .contains(&format!("<span class='num'>{number}</span>")),
+                "{number}: {page:?}"
+            );
+        }
+        assert!(
+            !page.body.contains("<span class='num'>#1</span>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains(&format!("class='title' href='/l/crew/item/{crew_two}'")),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains("Crew team two<span class='sr-only'> (in crew)</span>"),
+            "{page:?}"
+        );
+        // Status tabs, the search form and the facet keep the union.
+        for status in ["open", "closed", "all"] {
+            assert!(
+                page.body.contains(&format!(
+                    "href='/l/default?status={status}&amp;{union_link}&amp;limit=50'"
+                )),
+                "{status}: {page:?}"
+            );
+        }
+        assert!(
+            page.body
+                .contains("name='ledgers' type='hidden' value='default,crew,private,ghost'"),
+            "{page:?}"
+        );
+        assert!(
+            page.body.contains(&format!(
+                "/l/default/facet?status=open&amp;limit=50&amp;{union_link}"
+            )),
+            "{page:?}"
+        );
+        // A row's label links keep it too.
+        assert!(
+            page.body.contains(&format!(
+                "href='/l/default?status=open&amp;limit=50&amp;labels=shared&amp;{union_link}'"
+            )),
+            "{page:?}"
+        );
+        // One ledger's chart is not the union's, so a union page draws none.
+        assert!(!page.body.contains("class='chart"), "{page:?}");
+    }
+    assert_eq!(
+        server.page("/l/default?status=all", None).status,
+        200,
+        "the single-ledger page is unchanged"
+    );
+
+    // Filters run in the ledger over the whole union, and the count agrees.
+    for (filter, titles) in [
+        (
+            "labels=team",
+            vec!["Crew team one", "Crew team two", "Default team one"],
+        ),
+        (
+            "labels=team&without=shared",
+            vec!["Crew team two", "Default team one"],
+        ),
+        ("text=crew", vec!["Crew team one", "Crew team two"]),
+        ("labels=secret", vec![]),
+    ] {
+        let page = server.page(&format!("/l/default?{union}&{filter}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let mut got = row_titles(&page.body);
+        got.sort();
+        assert_eq!(got, titles, "{filter}: {page:?}");
+        assert_eq!(count(filter), titles.len() as u64, "{filter}");
+        if !titles.is_empty() {
+            assert!(
+                page.body.contains(&format!("{} open items", titles.len())),
+                "{filter}: {page:?}"
+            );
+        }
+        // The facet counts the same union, never the left-out ledgers.
+        let facet = server.page(&format!("/l/default/facet?{union}&{filter}"), None);
+        assert_eq!(facet.status, 200, "{facet:?}");
+        if titles.is_empty() {
+            assert!(
+                facet.body.contains("No labels or priorities match."),
+                "{facet:?}"
+            );
+        } else {
+            assert!(
+                facet.body.contains(&facet_row("unset", titles.len())),
+                "{filter}: {facet:?}"
+            );
+            assert!(!facet.body.contains("secret"), "{facet:?}");
+            assert!(facet.body.contains(union_link), "{facet:?}");
+        }
+    }
+    // With no chart the label-filter note says nothing of one, and keeps its words apart.
+    let filtered = server.page(&format!("/l/default?{union}&labels=team"), None);
+    assert!(
+        filtered
+            .body
+            .contains("<p>Label filters in force. <a href="),
+        "{filtered:?}"
+    );
+    let facet = server.page(&format!("/l/default/facet?{union}"), None);
+    assert!(facet.body.contains(&facet_row("team", 3)), "{facet:?}");
+    assert!(facet.body.contains(&facet_row("shared", 1)), "{facet:?}");
+
+    // Paging walks the union a row at a time: every readable row once, and the links keep it.
+    let mut seen = Vec::new();
+    for offset in 0..4 {
+        let page = server.page(&format!("/l/default?{union}&limit=1&offset={offset}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let rows = row_titles(&page.body);
+        assert_eq!(rows.len(), 1, "{offset}: {page:?}");
+        seen.extend(rows);
+        // "Show N more" (the same start, more rows) keeps the union.
+        let more = format!(
+            "class='more' href='/l/default?status=open&amp;limit={}{}&amp;{union_link}'",
+            4 - offset,
+            if offset > 0 {
+                format!("&amp;offset={offset}")
+            } else {
+                String::new()
+            }
+        );
+        assert_eq!(page.body.contains(&more), offset < 3, "{more}: {page:?}");
+    }
+    seen.sort();
+    let mut want: Vec<String> = readable.iter().map(|t| t.to_string()).collect();
+    want.sort();
+    assert_eq!(seen, want);
+    assert_eq!(
+        server
+            .page(&format!("/l/default?{union}&limit=1&offset=4"), None)
+            .status,
+        400,
+        "an offset past the union's total is refused"
+    );
+
+    // A row's close names its own ledger and re-renders the union page it was on.
+    let closed = server.form(
+        &[
+            ("_ledger", "crew"),
+            ("_listLedger", "default"),
+            ("_ledgers", "default,crew,private,ghost"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &format!("urn:iki:ledger:crew:item:{crew_two}")),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(closed.body.contains("3 open items"), "{closed:?}");
+    assert!(
+        closed.body.contains("Items from 2 ledgers: crew, default."),
+        "{closed:?}"
+    );
+    assert!(
+        closed.body.contains("<h1>Ledgers crew, default</h1>"),
+        "{closed:?}"
+    );
+    assert!(
+        closed
+            .body
+            .contains("name='_listLedger' type='hidden' value='default'"),
+        "{closed:?}"
+    );
+    let closed_page = server.page(&format!("/l/default?{union}&status=closed"), None);
+    assert_eq!(row_titles(&closed_page.body), vec!["Crew team two"]);
+    assert_eq!(count("status=closed"), 1);
+
+    // Nothing the viewer can read: an empty page that says so, never another ledger's rows.
+    let none = server.page("/l/default?ledgers=private,ghost", None);
+    assert_eq!(none.status, 200, "{none:?}");
+    assert!(none.body.contains("No items match."), "{none:?}");
+    assert!(
+        none.body
+            .contains("None of the ledgers asked for can be read with this grant."),
+        "{none:?}"
+    );
+    assert!(!none.body.contains("secret"), "{none:?}");
+    // The page is still its own ledger's: a union never opens a ledger page the viewer cannot
+    // read, and a name the ledger refuses is refused.
+    for path in [
+        "/l/private?ledgers=default",
+        "/l/private/items?ledgers=default,crew",
+        "/l/private/facet?ledgers=default",
+    ] {
+        assert_eq!(server.page(path, None).status, 403, "{path}");
+    }
+    assert_eq!(
+        server
+            .page("/l/default?ledgers=default,Not%20A%20Name", None)
+            .status,
+        400
+    );
+}
+
+/// A link written as the ledger writes one, under the root capability: a link across
+/// ledgers also writes its mirror into the target's graph (ikigai-ledger #2829).
+fn link_fixture(server: &Server, ledger: &str, subject: &str, target: &str, kind: &str) {
+    let request = [("item", subject), ("content", target), ("type", kind)]
+        .iter()
+        .fold(
+            ikigai_core::Request::new(
+                ikigai_core::Verb::Sink,
+                ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:link")).unwrap(),
+            ),
+            |request, (name, value)| {
+                request.with_arg(
+                    *name,
+                    ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()),
+                )
+            },
+        );
+    futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("linking {subject} {kind} {target}: {e}"));
+}
+
+fn close_fixture(server: &Server, ledger: &str, item: &str) {
+    let request = ikigai_core::Request::new(
+        ikigai_core::Verb::Sink,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:close")).unwrap(),
+    )
+    .with_arg(
+        "item",
+        ikigai_core::ArgRef::Inline(item.as_bytes().to_vec()),
+    );
+    futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("closing {item}: {e}"));
+}
+
+/// The listing row whose title is `title`, from its `<li` to its `</li>`.
+fn row_of<'a>(html: &'a str, title: &str) -> &'a str {
+    let at = html
+        .find(&format!(">{title}<"))
+        .unwrap_or_else(|| panic!("no row titled {title}: {html}"));
+    let start = html[..at].rfind("<li").expect("a row's start");
+    let end = at + html[at..].find("</li>").expect("a row's end");
+    &html[start..end]
+}
+
+fn number_of(server: &Server, ledger: &str, iri: &str) -> String {
+    let id = iri.rsplit_once(":item:").unwrap().1;
+    let request = ikigai_core::Request::new(
+        ikigai_core::Verb::Source,
+        ikigai_core::Iri::parse(format!("urn:iki:ledger:{ledger}:item:{id}")).unwrap(),
+    )
+    .with_arg(
+        "as",
+        ikigai_core::ArgRef::Inline(b"application/json".to_vec()),
+    );
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&answer.bytes).unwrap();
+    doc["item"]["number"].to_string()
+}
+
+/// Ledger #3217: a row knows what it blocks, not what blocks it. The page reads the reverse
+/// from the ledger's own graph, so a blocked row names its open blocker, and a row whose only
+/// blocker is closed, or that nothing blocks, shows no blocked badge at all.
+#[test]
+fn a_blocked_row_names_its_open_blocker_and_an_unblocked_row_shows_nothing() {
+    let server = Server::start();
+    let (blocker, _) = linked_fixture(&server, "default", "The open blocker");
+    let (blocked, blocked_id) = linked_fixture(&server, "default", "Waits on the blocker");
+    let (done, _) = linked_fixture(&server, "default", "A finished blocker");
+    let (released, _) = linked_fixture(&server, "default", "Released by a close");
+    linked_fixture(&server, "default", "Nothing blocks this");
+    link_fixture(&server, "default", &blocker, &blocked, "blocks");
+    link_fixture(&server, "default", &done, &released, "blocks");
+    close_fixture(&server, "default", &done);
+    let number = number_of(&server, "default", &blocker);
+
+    let page = server.page("/l/default", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let row = row_of(&page.body, "Waits on the blocker");
+    assert!(
+        row.contains(&format!(
+            "<span class='badge blocked'>blocked by #{number}</span>"
+        )),
+        "the blocked row names its blocker: {row}"
+    );
+    for title in [
+        "Nothing blocks this",
+        "Released by a close",
+        "The open blocker",
+    ] {
+        let row = row_of(&page.body, title);
+        assert!(!row.contains("blocked"), "{title} is not blocked: {row}");
+    }
+    // The item's own badges say the same.
+    let card = server.page(&format!("/l/default/item/{blocked_id}"), None);
+    assert!(
+        card.body.contains(&format!(
+            "<span class='badge blocked'>blocked by #{number}</span>"
+        )),
+        "{card:?}"
+    );
+}
+
+/// Ledger #3217: an item page lists what links TO it, in any ledger, through the mirrors,
+/// grouped by relation and ledger and read under the viewer's own capability: a linker the
+/// viewer cannot read is its IRI and nothing more.
+#[test]
+fn an_item_page_lists_inbound_links_across_ledgers_and_an_unreadable_linker_as_its_iri() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let (target, id) = linked_fixture(&server, "default", "The linked-to item");
+    let (here, _) = linked_fixture(&server, "default", "A blocker in this ledger");
+    let (seealso, _) = linked_fixture(&server, "default", "Related in this ledger");
+    let (crew, crew_id) = linked_fixture(&server, "crew", "A crew blocker");
+    let (secret, _) = linked_fixture(&server, "private", "Never disclose this title");
+    link_fixture(&server, "default", &here, &target, "blocks");
+    link_fixture(&server, "default", &seealso, &target, "related");
+    link_fixture(&server, "crew", &crew, &target, "blocks");
+    link_fixture(&server, "private", &secret, &target, "blocks");
+
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert!(!page.body.contains("Never disclose this title"), "{page:?}");
+        let inbound = page
+            .body
+            .split("id='inbound-title'")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no inbound panel: {page:?}"))
+            .split("</section>")
+            .next()
+            .unwrap();
+        let group = |heading: &str| {
+            inbound
+                .split(&format!("<h3>{heading}</h3>"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("no group {heading}: {inbound}"))
+                .split("</div>")
+                .next()
+                .unwrap()
+        };
+        assert!(
+            group("blocks this · default").contains("A blocker in this ledger"),
+            "{inbound}"
+        );
+        assert!(
+            group("related to this · default").contains("Related in this ledger"),
+            "{inbound}"
+        );
+        let crew_group = group("blocks this · crew");
+        assert!(crew_group.contains("A crew blocker"), "{inbound}");
+        assert!(
+            crew_group.contains(&format!("/l/crew/item/{crew_id}")),
+            "{inbound}"
+        );
+        assert!(
+            inbound.contains(&format!("<code class='iri'>{secret}</code>")),
+            "the unreadable linker is its IRI: {inbound}"
+        );
+        assert!(!inbound.contains("href='/l/private/"), "{inbound}");
+        // The page's own badge names every open blocker, the unreadable one by its IRI.
+        let badge = page
+            .body
+            .split("<span class='badge blocked'>")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no blocked badge: {page:?}"))
+            .split("</span>")
+            .next()
+            .unwrap();
+        assert!(
+            badge.contains(&format!("#{}", number_of(&server, "default", &here)))
+                && badge.contains(&format!("crew {crew_id}"))
+                && badge.contains(&secret),
+            "{badge}"
+        );
+    }
+    // An item nothing links to has no inbound panel.
+    let page = server.page(
+        &format!("/l/default/item/{}", here.rsplit_once(":item:").unwrap().1),
+        None,
+    );
+    assert!(!page.body.contains("inbound-title"), "{page:?}");
 }

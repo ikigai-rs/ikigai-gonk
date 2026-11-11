@@ -687,9 +687,67 @@ fn a_mirror_token_reads_no_other_ledger_over_quic() {
     .expect("the close writes the mirror under the caller's grants");
 }
 
+/// Ledger #2896: the QUIC door stamps `principal` on every call, and that stamp is the door's, not
+/// a parameter of the plan. A read-only plan runs under the client's own capability, and every
+/// other rule of `urn:plan:eval` still holds.
+#[test]
+fn a_read_only_plan_runs_over_quic_under_the_clients_capability() {
+    let gonk = with_a_closer();
+    let closer = |args: &[(&str, &str)]| {
+        gonk.as_client("closer", request(Verb::Source, "urn:plan:eval", args))
+    };
+
+    let union = plan_over("urn:sparql:select", None);
+    let answer = closer(&[("in", &union)]).expect("a read-only plan runs over QUIC");
+    let answer = String::from_utf8_lossy(&answer.bytes).into_owned();
+    assert!(answer.contains("In cli"), "{answer}");
+    assert!(!answer.contains("In acme"), "{answer}");
+
+    // Under the client's capability, not the door's: a graph it may not read stays refused.
+    let named = plan_over("urn:iki:store:graph-select", Some(ACME));
+    match closer(&[("in", &named)]) {
+        Err(Error::Denied(why)) => {
+            assert!(why.contains(&ikigai_store::cap_read_graph(ACME)), "{why}")
+        }
+        other => panic!("a plan naming acme: {other:?}"),
+    }
+    // A plan that writes is still root's alone.
+    match closer(&[("in", &union.replace("\"Source\"", "\"Sink\""))]) {
+        Err(Error::Denied(why)) => assert!(why.contains("`Sink` or `Delete` step"), "{why}"),
+        other => panic!("a writing plan over QUIC: {other:?}"),
+    }
+    // A plan may still not declare the door's name for itself.
+    let declares = format!(
+        "{union}<urn:plan:raw> ik:input <urn:plan:raw:who> .\n\
+         <urn:plan:raw:who> ik:inputName \"principal\" ; ik:required false .\n"
+    );
+    match closer(&[("in", &declares)]) {
+        Err(Error::Denied(why)) => assert!(why.contains("would never arrive"), "{why}"),
+        other => panic!("a plan declaring `principal`: {other:?}"),
+    }
+    // Only the stamp is set aside: any other argument the plan does not declare is refused.
+    match closer(&[("in", &union), ("label", "triage")]) {
+        Err(Error::InvalidArgument { name, .. }) => assert_eq!(name, "label"),
+        other => panic!("an undeclared argument: {other:?}"),
+    }
+}
+
+/// Ledger #2896's other door: HTTP stamps `principal` on writes only, and `urn:plan:eval` is a
+/// read, so a signed-in person's plan never carried one. Pinned, so the two doors stay alike.
+#[test]
+fn a_read_only_plan_runs_signed_in_over_http() {
+    let gonk = Gonk::start("");
+    items(&gonk);
+    let token = gonk.sign_in(&grants_for("cli", Authority::Write).unwrap());
+    let plan = encode(&plan_over("urn:sparql:select", None));
+    let (status, body) = gonk.query(&token, &format!("/plan/eval?in={plan}"));
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("In cli"), "{body}");
+    assert!(!body.contains("In acme"), "{body}");
+}
+
 /// A plan's steps and a draft's dry run read in sub-requests inside the hub, out of the door's
-/// sight. Over the socket, because an owner process sealed to a grant names no principal: a QUIC
-/// client's stamped `principal` is an argument `urn:plan:eval` refuses on every plan.
+/// sight. Over the socket here, for an owner process sealed to a grant, which names no principal.
 #[test]
 fn a_sealed_mirror_token_reads_no_other_ledger_through_a_plan_or_a_draft_check() {
     let gonk = with_a_closer();

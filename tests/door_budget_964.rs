@@ -104,13 +104,16 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).unwrap(),
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: door_ms,
         };
         let served = Arc::clone(&http);
@@ -471,6 +474,7 @@ fn the_door_marks_exactly_the_anonymous_capability() {
         ikigai_web::HttpRequest {
             method: "GET".to_string(),
             path: "/".to_string(),
+            raw_target: "/".to_string(),
             query: Vec::new(),
             headers,
             body: Vec::new(),

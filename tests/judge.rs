@@ -132,7 +132,9 @@ fn door_with(
         queue: QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),

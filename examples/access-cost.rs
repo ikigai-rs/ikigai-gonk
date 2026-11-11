@@ -1,10 +1,11 @@
 //! `cargo run --release --example access-cost -- [--rounds N]` — what the access log costs a
-//! request (ledger #739).
+//! request (ledger #739, #383).
 //!
 //! Two reads, each through a door kernel built the way `main` builds it, with the log OFF
-//! (not wrapped at all, as `gonk.log.access = false` leaves it) and ON (wrapped, every line
-//! formatted and written with one `write_all` to `/dev/null`, which is the syscall a line to
-//! stderr costs without a terminal's speed in the number):
+//! (not wrapped at all, as `gonk.log.access = false` leaves it) and ON (wrapped, every request
+//! a `log:Access` entry written by `ikigai-log` into a REAL segment file in a scratch
+//! directory, as `main` opens it: rendered, appended through `FileSink`, flushed and folded
+//! into the hash chain, entry by entry):
 //!
 //! - **a page**: `urn:iki:gonk:page:ledger:default` through the HTTP door's kernel — a ledger
 //!   page with 50 items, sub-requests and an XSLT render, the hot path a browser drives;
@@ -13,15 +14,14 @@
 //!
 //! The two variants are interleaved round by round, so drift on a shared machine lands on
 //! both. Each prints min / median / mean in microseconds. Nothing touches `~/.ikigai`: the
-//! store is in memory.
+//! store is in memory and the segment is in a temporary directory.
 
-use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
-use ikigai_gonk::access::{AccessLog, Door};
+use ikigai_gonk::access::{AccessLog, Door, Record};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose, doors, quic, web};
@@ -48,24 +48,11 @@ fn main() {
         .expect("an append");
     }
 
-    let devnull = Arc::new(Mutex::new(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/null")
-            .expect("/dev/null"),
-    ));
-    let log = |door: Door| {
-        let out = Arc::clone(&devnull);
-        AccessLog::to(
-            door,
-            Arc::new(move |line: &str| {
-                let mut bytes = String::with_capacity(line.len() + 1);
-                bytes.push_str(line);
-                bytes.push('\n');
-                let _ = out.lock().unwrap().write_all(bytes.as_bytes());
-            }),
-        )
-    };
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let record = Record::open(scratch.path(), &scratch.path().join("log"))
+        .expect("a segment")
+        .expect("the file destination");
+    let log = |door: Door| AccessLog::on(door, Arc::clone(&record));
 
     let config = tempfile::tempdir().expect("a config home");
     let face = || {
@@ -81,7 +68,9 @@ fn main() {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         })
     };
     let anonymous = Capability::scoped(grants_for("default", Authority::Write).unwrap());

@@ -78,6 +78,42 @@
 //! waits, so six open gonk tabs would leave none for a click; a ten-second answer from memory
 //! holds none. The cost is up to ten seconds of latency, which a header indicator can afford;
 //! the open layer's own page polls every three seconds (above).
+//!
+//! # ★ Public feeds without a configured identity (ledger [#3291](http://localhost:1062/l/default/item/3291))
+//!
+//! [`crate::feeds_join`] adds a second identity beside this view's, or instead of it. It reads
+//! through a [`PublicReader`], which the view's door routes by layer name, so the one copy, the
+//! cursors, the subscriptions and the pages stay as they are and only discovery and the follower
+//! know that there are two doors. See that module for what the identity may do.
+//!
+//! # ★ Feeds (ledger [#3285](http://localhost:1062/l/default/item/3285))
+//!
+//! ```text
+//! /feed            urn:iki:gonk:page:feed          Source  every feed the identity reads, Subscribe, the concept filter
+//! /feed/subscribe  urn:iki:gonk:layers:subscribe   Sink    subscribe, unsubscribe or save a filter, for this viewer
+//! /feed/ask        urn:iki:gonk:layers:ask         Sink    an ik:Question about a feed entry, in the viewer's own channel
+//! /feed/join       urn:iki:gonk:feeds:join         Sink    join the host's public feeds ([`crate::feeds_join`])
+//! /feed/leave      urn:iki:gonk:feeds:leave        Sink    delete that identity
+//! ```
+//!
+//! A feed is a channel whose definition is typed `ik:Feed` (ikigai-layers 0.8, ledger #3284).
+//!
+//! - **A reader is found by asking, not by the manifest.** A feed's manifest names only its
+//!   publishers, so that no answer counts its readers; a mount that does not name this identity
+//!   is probed: a definition it may read and that is typed `ik:Feed` is a feed it reads.
+//! - **Subscriptions are per viewer** (`{feed, concepts}` in `subscription.json`, beside the read
+//!   cursors) and are never sent to the layer host. The door hears only what the one configured
+//!   identity reads: the `concept=` of a filtered page, and which feeds the follower waits on.
+//! - **The follower waits only on a feed somebody here subscribes to** ([`LayersView::followed`]),
+//!   and an unsubscribed feed is not in that viewer's Layers view at all. ⚠ A first subscriber's
+//!   feed joins the long poll when the one already in flight returns, so its first live update
+//!   can take up to [`FEED_WAIT_SECS`]; the entries already published are read at once.
+//! - **A filtered page reads the door** (`entries concept=`, which follows `skos:broader*`), so a
+//!   narrow filter is not limited to the newest [`WINDOW`] of the whole feed. The poll and the
+//!   unread counts answer from this process's copy and the scheme, so they count within the
+//!   newest [`WINDOW`] entries.
+//! - **A feed page is read-only, for every identity**, publishers included; a question about an
+//!   entry goes to the viewer's own channel instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -94,6 +130,7 @@ use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{Literal, NamedNode, Term, Triple};
 use sha2::{Digest, Sha256};
 
+use crate::feeds_join::{PublicFeeds, CAP_JOIN, JOIN_IRI, JOIN_PATH, LEAVE_IRI, LEAVE_PATH};
 use crate::layer::Door;
 use crate::mount::{LazyMount, Target};
 use crate::render::{self, element, envelope, wrap};
@@ -139,6 +176,18 @@ pub const COUNT_PATH: &str = "/layers/~/count";
 pub const SAY_TEMPLATE: &str = "urn:iki:gonk:layers:say:{layer}";
 /// A checked file download.
 pub const FILE_TEMPLATE: &str = "urn:iki:gonk:layers:file:{layer}:{id}";
+/// The Feeds page.
+pub const FEEDS_IRI: &str = "urn:iki:gonk:page:feed";
+/// Its path.
+pub const FEEDS_PATH: &str = "/feed";
+/// Subscribe, unsubscribe or save a concept filter.
+pub const SUBSCRIBE_IRI: &str = "urn:iki:gonk:layers:subscribe";
+/// Its path.
+pub const SUBSCRIBE_PATH: &str = "/feed/subscribe";
+/// A question about a feed entry, posted to the viewer's own channel.
+pub const ASK_IRI: &str = "urn:iki:gonk:layers:ask";
+/// Its path.
+pub const ASK_PATH: &str = "/feed/ask";
 
 /// The `Content-Security-Policy` a file download is served under: no script, no plugin, no
 /// same-origin, nothing loaded, whatever the bytes are.
@@ -178,6 +227,7 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const DCT_TITLE: &str = "http://purl.org/dc/terms/title";
 const DCT_CREATED: &str = "http://purl.org/dc/terms/created";
+const DCT_SUBJECT: &str = "http://purl.org/dc/terms/subject";
 const PROV_ATTRIBUTED: &str = "http://www.w3.org/ns/prov#wasAttributedTo";
 const PROV_USED: &str = "http://www.w3.org/ns/prov#used";
 const PROV_ASSOCIATED: &str = "http://www.w3.org/ns/prov#wasAssociatedWith";
@@ -366,6 +416,99 @@ impl Door for Confined {
     }
 }
 
+/// The layer a name under `urn:layer:` is about.
+fn layer_of(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("urn:layer:")?;
+    Some(rest.split(':').next().unwrap_or(rest))
+}
+
+/// A door that only reads: the joined identity's (ledger #3291). Its grant holds nothing but
+/// `read` and `feed`, and this says so again here, so no post can reach the host under it.
+struct ReadOnly(Arc<dyn Door>);
+
+impl Door for ReadOnly {
+    fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+        if request.verb != Verb::Source {
+            return Err(Error::Denied(
+                "the identity that joined the public feeds only reads".to_string(),
+            ));
+        }
+        self.0.call(request)
+    }
+}
+
+/// The door behind a view with no identity of its own to read or post as.
+struct NoOwnDoor;
+
+impl Door for NoOwnDoor {
+    fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+        Err(Error::Denied(format!(
+            "this server has no {KEY} line, and the identity that joined the public feeds does              not read {}",
+            request.target.as_str()
+        )))
+    }
+}
+
+/// The joined identity as a view reads it: two read-only doors, like the view's own, and the
+/// layers it may add ([`crate::feeds_join`]).
+pub struct PublicReader {
+    door: Confined,
+    feed_door: Confined,
+    principal: String,
+    layers: BTreeSet<String>,
+    /// The layers actually read through this reader: public, and not already the view
+    /// identity's. Decided at discovery, read by [`Routed`].
+    routed: Mutex<BTreeSet<String>>,
+    /// Whether this reader's follower is running.
+    following: AtomicBool,
+}
+
+impl PublicReader {
+    /// A reader over two doors dialed with the joined identity's certificate.
+    pub fn new(
+        door: Arc<dyn Door>,
+        feed: Arc<dyn Door>,
+        principal: String,
+        layers: BTreeSet<String>,
+    ) -> Arc<PublicReader> {
+        Arc::new(PublicReader {
+            door: Confined(Arc::new(ReadOnly(door))),
+            feed_door: Confined(Arc::new(ReadOnly(feed))),
+            principal,
+            layers,
+            routed: Mutex::new(BTreeSet::new()),
+            following: AtomicBool::new(false),
+        })
+    }
+
+    fn routes(&self, layer: &str) -> bool {
+        lock(&self.routed).contains(layer)
+    }
+}
+
+/// The joined reader a view holds, shared with its door.
+type PublicSlot = Arc<Mutex<Option<Arc<PublicReader>>>>;
+
+/// The view's door: a layer the joined identity reads goes through it, and everything else
+/// through the view's own identity. One door, so the one copy, its cursors and the pages need
+/// not know which identity read what.
+struct Routed {
+    own: Arc<dyn Door>,
+    public: PublicSlot,
+}
+
+impl Door for Routed {
+    fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+        let reader = lock(&self.public).clone();
+        if let Some(reader) = reader {
+            if layer_of(request.target.as_str()).is_some_and(|l| reader.routes(l)) {
+                return reader.door.call(request);
+            }
+        }
+        self.own.call(request)
+    }
+}
+
 fn get(iri: &str, args: &[(&str, String)]) -> Request {
     let mut request = Request::new(
         Verb::Source,
@@ -381,7 +524,9 @@ fn text(representation: &Representation) -> String {
     String::from_utf8_lossy(&representation.bytes).into_owned()
 }
 
-fn json(representation: &Representation) -> std::result::Result<serde_json::Value, String> {
+pub(crate) fn json(
+    representation: &Representation,
+) -> std::result::Result<serde_json::Value, String> {
     serde_json::from_slice(&representation.bytes).map_err(|e| format!("not JSON: {e}"))
 }
 
@@ -409,11 +554,63 @@ pub struct LayerInfo {
     pub model: Model,
     /// The verbs the identity's collaborations grant it here.
     pub verbs: BTreeSet<String>,
+    /// A feed layer's SKOS scheme; `None` for every other layer.
+    pub feed: Option<Scheme>,
+    /// Whether the host's definition says this feed is public (`public = true`).
+    pub public: bool,
 }
 
 impl LayerInfo {
     fn holds(&self, verb: &str) -> bool {
         self.verbs.contains(verb)
+    }
+
+    fn is_feed(&self) -> bool {
+        self.feed.is_some()
+    }
+}
+
+/// A feed's SKOS concept scheme, as `urn:layer:{feed}:scheme` answers it.
+#[derive(Debug, Clone, Default)]
+pub struct Scheme {
+    /// Its concepts, by notation.
+    pub concepts: Vec<Concept>,
+}
+
+/// One concept of a [`Scheme`].
+#[derive(Debug, Clone)]
+pub struct Concept {
+    /// Its IRI.
+    pub iri: String,
+    /// `skos:prefLabel`.
+    pub label: String,
+    /// `skos:broader`.
+    pub broader: Vec<String>,
+}
+
+impl Scheme {
+    fn has(&self, iri: &str) -> bool {
+        self.concepts.iter().any(|c| c.iri == iri)
+    }
+
+    /// Whether one of `subjects` is one of `wanted` or under one through `skos:broader*`.
+    fn covers(&self, wanted: &[String], subjects: &[String]) -> bool {
+        subjects.iter().any(|subject| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![subject.as_str()];
+            while let Some(iri) = stack.pop() {
+                if !seen.insert(iri) {
+                    continue;
+                }
+                if wanted.iter().any(|w| w == iri) {
+                    return true;
+                }
+                if let Some(concept) = self.concepts.iter().find(|c| c.iri == iri) {
+                    stack.extend(concept.broader.iter().map(String::as_str));
+                }
+            }
+            false
+        })
     }
 }
 
@@ -463,6 +660,8 @@ pub struct Entry {
     pub offer: Option<String>,
     /// A file entry's description.
     pub file: Option<FileMeta>,
+    /// `dcterms:subject`: a feed entry's concepts, or the feed entry a question is about.
+    pub subjects: Vec<String>,
 }
 
 /// One take in a tuplespace.
@@ -582,6 +781,96 @@ impl Cursors {
     }
 }
 
+// ------------------------------------------------------------------------------ subscriptions
+
+/// Viewer → feed → the concepts the viewer filters it by (none: the whole feed).
+type SubscriptionMap = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+
+/// Who subscribes to which feed, kept beside the cursors and never sent to the layer host.
+struct Subscriptions {
+    path: Option<PathBuf>,
+    map: Mutex<SubscriptionMap>,
+}
+
+impl Subscriptions {
+    fn open(path: Option<PathBuf>) -> Subscriptions {
+        let map = path
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|json| Subscriptions::parse(&json))
+            .unwrap_or_default();
+        Subscriptions {
+            path,
+            map: Mutex::new(map),
+        }
+    }
+
+    fn parse(json: &serde_json::Value) -> SubscriptionMap {
+        let mut map = SubscriptionMap::new();
+        for (viewer, rows) in json.as_object().into_iter().flatten() {
+            let feeds = map.entry(viewer.clone()).or_default();
+            for row in rows.as_array().into_iter().flatten() {
+                let Some(feed) = row["feed"].as_str() else {
+                    continue;
+                };
+                let concepts = row["concepts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.as_str().map(str::to_string))
+                    .collect();
+                feeds.insert(feed.to_string(), concepts);
+            }
+        }
+        map
+    }
+
+    fn get(&self, viewer: &str, feed: &str) -> Option<Vec<String>> {
+        lock(&self.map).get(viewer)?.get(feed).cloned()
+    }
+
+    fn anyone(&self, feed: &str) -> bool {
+        lock(&self.map).values().any(|f| f.contains_key(feed))
+    }
+
+    /// Change `viewer`'s subscriptions, saved before it takes effect: unlike an unread marker, a
+    /// subscription that would vanish at the next restart is refused rather than kept quietly.
+    fn change(
+        &self,
+        viewer: &str,
+        update: impl FnOnce(&mut BTreeMap<String, Vec<String>>),
+    ) -> Result<()> {
+        let mut map = lock(&self.map);
+        let mut next = map.clone();
+        update(next.entry(viewer.to_string()).or_default());
+        if let Some(path) = &self.path {
+            let rows: BTreeMap<&String, Vec<serde_json::Value>> = next
+                .iter()
+                .map(|(viewer, feeds)| {
+                    let rows = feeds
+                        .iter()
+                        .map(|(feed, concepts)| {
+                            serde_json::json!({ "feed": feed, "concepts": concepts })
+                        })
+                        .collect();
+                    (viewer, rows)
+                })
+                .collect();
+            write_atomically(path, &serde_json::to_vec_pretty(&rows).unwrap_or_default()).map_err(
+                |e| {
+                    Error::Endpoint(format!(
+                        "the subscription could not be saved to {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
+        }
+        *map = next;
+        Ok(())
+    }
+}
+
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -604,6 +893,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The Layers page's state: one door, one follower, one copy of what was read.
 pub struct LayersView {
+    /// Whether this view has an identity of its own ([`KEY`]); `false` is a view of the joined
+    /// identity alone ([`LayersView::public_only`]).
+    own: bool,
+    public: PublicSlot,
     door: Confined,
     /// The follower's long poll, on a door of its own: a QUIC door answers the calls on one
     /// connection ONE AT A TIME (ikigai-quic's `serve_bounded`), so a 50-second feed read on
@@ -612,6 +905,10 @@ pub struct LayersView {
     origin: String,
     feed_wait: u64,
     cursors: Cursors,
+    subscriptions: Subscriptions,
+    /// A filtered feed's newest entries, by (feed, concepts), as read at the feed position
+    /// held beside them: one read per filter per publish, whoever asks.
+    filtered: Mutex<FilteredEntries>,
     state: Mutex<Snapshot>,
     discovered_at: Mutex<Option<Instant>>,
     changed: Condvar,
@@ -621,6 +918,12 @@ pub struct LayersView {
     /// Who else writes on this host's side ([`LOCAL_KEY`]).
     local: Mutex<BTreeSet<String>>,
 }
+
+/// (feed, concepts) → (the feed position they were read at, the newest entries matching).
+type FilteredEntries = BTreeMap<(String, Vec<String>), (u64, Vec<Entry>)>;
+
+/// How many filters [`LayersView::filtered`] remembers before it starts over.
+const FILTERS_KEPT: usize = 256;
 
 /// How a test sizes the waits.
 #[derive(Debug, Clone, Copy)]
@@ -657,12 +960,48 @@ impl LayersView {
         cursors: Option<PathBuf>,
         waits: Waits,
     ) -> Arc<LayersView> {
+        LayersView::assemble(true, door, feed, origin, cursors, waits)
+    }
+
+    /// A view of the joined identity alone: there is no [`KEY`] line, so every layer it shows
+    /// is one `reader` reads.
+    pub(crate) fn public_only(
+        reader: Arc<PublicReader>,
+        origin: String,
+        cursors: Option<PathBuf>,
+        waits: Waits,
+    ) -> Arc<LayersView> {
+        let none: Arc<dyn Door> = Arc::new(NoOwnDoor);
+        let view = LayersView::assemble(false, Arc::clone(&none), none, origin, cursors, waits);
+        view.attach_public(reader);
+        view
+    }
+
+    fn assemble(
+        own: bool,
+        door: Arc<dyn Door>,
+        feed: Arc<dyn Door>,
+        origin: String,
+        cursors: Option<PathBuf>,
+        waits: Waits,
+    ) -> Arc<LayersView> {
+        let subscriptions = cursors
+            .as_ref()
+            .map(|path| path.with_file_name("subscription.json"));
+        let public = PublicSlot::default();
         Arc::new(LayersView {
-            door: Confined(door),
+            own,
+            door: Confined(Arc::new(Routed {
+                own: door,
+                public: Arc::clone(&public),
+            })),
+            public,
             feed_door: Confined(feed),
             origin,
             feed_wait: waits.feed_secs.min(60),
             cursors: Cursors::open(cursors),
+            subscriptions: Subscriptions::open(subscriptions),
+            filtered: Mutex::new(FilteredEntries::new()),
             state: Mutex::new(Snapshot::default()),
             discovered_at: Mutex::new(None),
             changed: Condvar::new(),
@@ -707,14 +1046,92 @@ impl LayersView {
 
     /// Start the follower, once. Called by the first page that needs the copy.
     pub fn start(self: &Arc<Self>) {
-        if self.started.swap(true, Ordering::SeqCst) {
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let view = Arc::clone(self);
+            std::thread::Builder::new()
+                .name("gonk-layers-view".to_string())
+                .spawn(move || view.follow())
+                .expect("a thread for the layers follower");
+        }
+        self.follow_public();
+    }
+
+    /// Read the public feeds this view's identity lacks through `reader` from now on.
+    pub(crate) fn attach_public(self: &Arc<Self>, reader: Arc<PublicReader>) {
+        *lock(&self.public) = Some(reader);
+        *lock(&self.discovered_at) = None;
+        if self.started.load(Ordering::SeqCst) {
+            self.follow_public();
+        }
+    }
+
+    /// Stop reading with the joined identity, and forget what only it read.
+    pub(crate) fn detach_public(&self) {
+        let Some(reader) = lock(&self.public).take() else {
+            return;
+        };
+        let routed = std::mem::take(&mut *lock(&reader.routed));
+        self.changed_with(|s| {
+            for name in &routed {
+                s.layers.remove(name);
+            }
+            !routed.is_empty()
+        });
+        *lock(&self.discovered_at) = None;
+    }
+
+    /// Whether the door has been read and the joined identity reads nothing there any more.
+    pub(crate) fn public_lapsed(&self) -> bool {
+        let reader = lock(&self.public).clone();
+        let reads = reader.is_none_or(|r| !lock(&r.routed).is_empty());
+        !reads && lock(&self.state).discovered
+    }
+
+    /// Whether this view's own identity is on `host` and reads a feed that host says is public:
+    /// then there is nothing a joined identity could add from there.
+    pub(crate) fn reads_public_at(&self, host: &str) -> bool {
+        self.own
+            && crate::feeds_join::host_of(&self.origin).as_deref() == Some(host)
+            && lock(&self.state)
+                .layers
+                .values()
+                .any(|l| l.info.is_feed() && l.info.public)
+    }
+
+    /// Start the joined reader's follower, once per reader.
+    fn follow_public(self: &Arc<Self>) {
+        let Some(reader) = lock(&self.public).clone() else {
+            return;
+        };
+        if reader.following.swap(true, Ordering::SeqCst) {
             return;
         }
         let view = Arc::clone(self);
         std::thread::Builder::new()
-            .name("gonk-layers-view".to_string())
-            .spawn(move || view.follow())
-            .expect("a thread for the layers follower");
+            .name("gonk-layers-public".to_string())
+            .spawn(move || view.follow_reader(reader))
+            .expect("a thread for the public feeds' follower");
+    }
+
+    /// The joined identity's long poll, for as long as it stays attached.
+    fn follow_reader(self: Arc<Self>, reader: Arc<PublicReader>) {
+        let mut backoff = Duration::from_secs(1);
+        while lock(&self.public)
+            .as_ref()
+            .is_some_and(|now| Arc::ptr_eq(now, &reader))
+        {
+            match self.long_poll(&reader.feed_door, |name| reader.routes(name)) {
+                Ok(()) => backoff = Duration::from_secs(1),
+                Err(why) => {
+                    // With an identity of its own the view is not down because of this one.
+                    if !self.own {
+                        self.set_down(Some(why));
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                }
+            }
+        }
     }
 
     /// A copy of what was read.
@@ -771,9 +1188,147 @@ impl LayersView {
                 .layers
                 .values()
                 .filter(|l| Some(l.info.name.as_str()) != except)
-                .map(|l| l.last - self.cursors.get(viewer, &l.info.name).min(l.last))
+                .map(|l| self.unread_of(viewer, l))
                 .sum(),
         )
+    }
+
+    /// How many of `layer`'s entries `viewer` has not been shown: nothing on a feed the viewer
+    /// does not subscribe to, and on a filtered feed only what the filter lets through.
+    fn unread_of(&self, viewer: &str, layer: &LayerView) -> u64 {
+        if !self.shown(viewer, &layer.info) {
+            return 0;
+        }
+        let seen = self.cursors.get(viewer, &layer.info.name).min(layer.last);
+        let concepts = self.filter_of(viewer, &layer.info);
+        match (&layer.info.feed, concepts.is_empty()) {
+            (Some(scheme), false) => layer
+                .entries
+                .iter()
+                .filter(|e| e.seq > seen && scheme.covers(&concepts, &e.subjects))
+                .count() as u64,
+            _ => layer.last - seen,
+        }
+    }
+
+    /// Whether the follower reads this layer: anything but a feed nobody here subscribes to.
+    pub fn followed(&self, info: &LayerInfo) -> bool {
+        !info.is_feed() || self.subscriptions.anyone(&info.name)
+    }
+
+    /// Whether `viewer`'s Layers view has this layer: anything but a feed they do not subscribe to.
+    fn shown(&self, viewer: &str, info: &LayerInfo) -> bool {
+        !info.is_feed() || self.subscriptions.get(viewer, &info.name).is_some()
+    }
+
+    /// The concepts `viewer` filters this feed by, leaving out any the scheme no longer has (the
+    /// door refuses a concept outside it). Empty for the whole feed, and for any other layer.
+    fn filter_of(&self, viewer: &str, info: &LayerInfo) -> Vec<String> {
+        let Some(scheme) = &info.feed else {
+            return Vec::new();
+        };
+        let mut concepts = self
+            .subscriptions
+            .get(viewer, &info.name)
+            .unwrap_or_default();
+        concepts.retain(|c| scheme.has(c));
+        concepts
+    }
+
+    /// Read a feed up to its end now, so a new subscriber's page is not empty until the long
+    /// poll comes round.
+    fn catch_up_feed(&self, name: &str) -> std::result::Result<(), String> {
+        let _sync = lock(&self.sync);
+        let Some((info, last, synced)) = lock(&self.state)
+            .layers
+            .get(name)
+            .map(|l| (l.info.clone(), l.last, l.synced))
+        else {
+            return Ok(());
+        };
+        let now = self.feed_last(&info)?;
+        self.catch_up(&info, if synced { last } else { 0 }, now)
+    }
+
+    /// The newest entries of `info` whose subject is under one of `concepts`, read at the door
+    /// and kept until the feed moves past `last`.
+    fn filtered_entries(
+        &self,
+        info: &LayerInfo,
+        concepts: &[String],
+        last: u64,
+    ) -> std::result::Result<Vec<Entry>, String> {
+        let key = (info.name.clone(), concepts.to_vec());
+        if let Some((at, kept)) = lock(&self.filtered).get(&key) {
+            if *at == last {
+                return Ok(kept.clone());
+            }
+        }
+        let iri = format!("urn:layer:{}:entries", info.name);
+        let prefix = format!("urn:layer:{}:entry:", info.name);
+        let mut after = 0;
+        let mut read = Vec::new();
+        loop {
+            let answer = self
+                .door
+                .call(get(
+                    &iri,
+                    &[
+                        ("after", after.to_string()),
+                        ("limit", PAGE.to_string()),
+                        ("concept", concepts.join(",")),
+                    ],
+                ))
+                .map_err(|e| format!("reading {iri}: {e}"))?;
+            let graph = Graph::parse(&answer.bytes).map_err(|e| format!("{iri}: {e}"))?;
+            let page = entries_of(&graph, &prefix);
+            let full = page.len() as u64 >= PAGE;
+            let top = page.iter().map(|e| e.seq).max().unwrap_or(after);
+            read.extend(page);
+            if !full || top <= after {
+                break;
+            }
+            after = top;
+        }
+        read.sort_by_key(|e| e.seq);
+        let excess = read.len().saturating_sub(WINDOW);
+        read.drain(..excess);
+        let mut filtered = lock(&self.filtered);
+        if filtered.len() >= FILTERS_KEPT {
+            filtered.clear();
+        }
+        filtered.insert(key, (last, read.clone()));
+        Ok(read)
+    }
+
+    /// A feed's newest entry, read at the door: for a feed the follower is not reading.
+    fn newest_of(&self, info: &LayerInfo) -> Option<Entry> {
+        let last = self.feed_last(info).ok()?;
+        let iri = format!("urn:layer:{}:entries", info.name);
+        let prefix = format!("urn:layer:{}:entry:", info.name);
+        let mut after = if last == u64::MAX {
+            0
+        } else {
+            last.saturating_sub(1)
+        };
+        let mut newest = None;
+        loop {
+            let answer = self
+                .door
+                .call(get(
+                    &iri,
+                    &[("after", after.to_string()), ("limit", PAGE.to_string())],
+                ))
+                .ok()?;
+            let page = entries_of(&Graph::parse(&answer.bytes).ok()?, &prefix);
+            let full = page.len() as u64 >= PAGE;
+            let top = page.iter().map(|e| e.seq).max().unwrap_or(after);
+            newest = page.into_iter().next_back().or(newest);
+            if !full || top <= after {
+                return newest;
+            }
+            after = top;
+        }
     }
 
     /// Read the door now: discover when due, sync what is unsynced, catch up the layers no
@@ -816,7 +1371,7 @@ impl LayersView {
         let unsynced: Vec<LayerInfo> = lock(&self.state)
             .layers
             .values()
-            .filter(|l| !l.synced)
+            .filter(|l| !l.synced && self.followed(&l.info))
             .map(|l| l.info.clone())
             .collect();
         for info in unsynced {
@@ -826,7 +1381,7 @@ impl LayersView {
         let unfed: Vec<(LayerInfo, u64)> = lock(&self.state)
             .layers
             .values()
-            .filter(|l| !l.info.holds("feed"))
+            .filter(|l| !l.info.holds("feed") && self.followed(&l.info))
             .map(|l| (l.info.clone(), l.last))
             .collect();
         for (info, last) in unfed {
@@ -845,6 +1400,43 @@ impl LayersView {
     /// `urn:layers:me`, then each collaboration's manifest, then each readable layer's
     /// definition.
     fn discover(&self) -> std::result::Result<(Me, Vec<LayerInfo>), String> {
+        let reader = lock(&self.public).clone();
+        let (principal, kind, mut verbs) = if self.own {
+            self.discover_own()?
+        } else if let Some(reader) = &reader {
+            (reader.principal.clone(), None, BTreeMap::new())
+        } else {
+            return Err("this view's identity has left the public feeds".to_string());
+        };
+        if let Some(reader) = &reader {
+            let mut routed = BTreeSet::new();
+            for name in &reader.layers {
+                if verbs.get(name).is_some_and(|held| held.contains("read")) {
+                    continue;
+                }
+                match Self::feed_reader_verbs(&reader.door, name) {
+                    Ok(Some(held)) if held.contains("read") => {
+                        routed.insert(name.clone());
+                        verbs.insert(name.clone(), held);
+                    }
+                    Ok(_) => {}
+                    // A view with its own identity keeps working while this door is away.
+                    Err(_) if self.own => {}
+                    Err(why) => return Err(why),
+                }
+            }
+            *lock(&reader.routed) = routed;
+        }
+        let infos = self.layer_infos(verbs)?;
+        Ok((Me { principal, kind }, infos))
+    }
+
+    /// What the view's own identity holds: `urn:layers:me`, then each collaboration's manifest.
+    #[allow(clippy::type_complexity)]
+    fn discover_own(
+        &self,
+    ) -> std::result::Result<(String, Option<String>, BTreeMap<String, BTreeSet<String>>), String>
+    {
         let me = self
             .door
             .call(get("urn:layers:me", &[("as", "application/json".into())]))
@@ -856,6 +1448,8 @@ impl LayersView {
             .to_string();
         let kind = me["kind"].as_str().map(str::to_string);
         let mut verbs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // Mounts whose manifest does not name this identity: how a feed's reader looks.
+        let mut unnamed: BTreeSet<String> = BTreeSet::new();
         for collab in me["collaborations"].as_array().into_iter().flatten() {
             let Some(collab) = collab.as_str().filter(|c| c.starts_with("urn:collab:")) else {
                 continue;
@@ -866,21 +1460,37 @@ impl LayersView {
                 .map_err(|e| format!("reading {collab}: {e}"))?;
             let manifest = json(&manifest).map_err(|e| format!("{collab}: {e}"))?;
             for mount in manifest["mounts"].as_array().into_iter().flatten() {
-                let (Some(layer), Some(held)) = (
-                    mount["layer"].as_str(),
-                    mount["grants"][principal.as_str()].as_array(),
-                ) else {
+                let Some(layer) = mount["layer"]
+                    .as_str()
+                    .filter(|l| crate::layer::is_layer_name(l))
+                else {
                     continue;
                 };
-                if !crate::layer::is_layer_name(layer) {
+                let Some(held) = mount["grants"][principal.as_str()].as_array() else {
+                    unnamed.insert(layer.to_string());
                     continue;
-                }
+                };
                 verbs
                     .entry(layer.to_string())
                     .or_default()
                     .extend(held.iter().filter_map(|v| v.as_str()).map(str::to_string));
             }
         }
+        for name in unnamed {
+            if let std::collections::btree_map::Entry::Vacant(slot) = verbs.entry(name) {
+                if let Some(held) = Self::feed_reader_verbs(&self.door, slot.key())? {
+                    slot.insert(held);
+                }
+            }
+        }
+        Ok((principal, kind, verbs))
+    }
+
+    /// Each readable layer's definition.
+    fn layer_infos(
+        &self,
+        verbs: BTreeMap<String, BTreeSet<String>>,
+    ) -> std::result::Result<Vec<LayerInfo>, String> {
         let mut infos = Vec::new();
         for (name, held) in verbs {
             if !held.contains("read") {
@@ -898,6 +1508,13 @@ impl LayersView {
                 Some(other) => Model::Other(other.to_string()),
                 None => Model::Other("unstated".to_string()),
             };
+            let is_feed = graph.values(&iri, RDF_TYPE).contains(&ik("Feed"));
+            let feed = if is_feed {
+                Some(self.scheme(&name)?)
+            } else {
+                None
+            };
+            let public = is_feed && self.says_public(&iri);
             infos.push(LayerInfo {
                 label: graph
                     .value(&iri, RDFS_LABEL)
@@ -905,9 +1522,77 @@ impl LayersView {
                 name,
                 model,
                 verbs: held,
+                feed,
+                public,
             });
         }
-        Ok((Me { principal, kind }, infos))
+        Ok(infos)
+    }
+
+    /// Whether the definition's JSON face says this feed is public; a door too old to say is
+    /// the same as `false`.
+    fn says_public(&self, iri: &str) -> bool {
+        self.door
+            .call(get(iri, &[("as", "application/json".into())]))
+            .ok()
+            .and_then(|answer| json(&answer).ok())
+            .is_some_and(|body| body["public"].as_bool() == Some(true))
+    }
+
+    /// What the identity holds on a layer whose manifest does not name it: `read`, and `feed`
+    /// when the layer's feed answers, if the layer is a feed it may read. A feed's manifest names
+    /// only its publishers, so reading it is the one way to learn this; `None` for anything else.
+    fn feed_reader_verbs(
+        door: &Confined,
+        name: &str,
+    ) -> std::result::Result<Option<BTreeSet<String>>, String> {
+        let iri = format!("urn:layer:{name}");
+        let definition = match door.call(get(&iri, &[])) {
+            Ok(definition) => definition,
+            Err(Error::Denied(_) | Error::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(format!("reading {iri}: {e}")),
+        };
+        let graph = Graph::parse(&definition.bytes).map_err(|e| format!("{iri}: {e}"))?;
+        if !graph.values(&iri, RDF_TYPE).contains(&ik("Feed")) {
+            return Ok(None);
+        }
+        let mut held = BTreeSet::from(["read".to_string()]);
+        let feed = get(
+            &format!("{iri}:feed"),
+            &[("after", "0".into()), ("as", "application/json".into())],
+        );
+        if door.call(feed).is_ok() {
+            held.insert("feed".to_string());
+        }
+        Ok(Some(held))
+    }
+
+    /// `urn:layer:{name}:scheme`, by notation.
+    fn scheme(&self, name: &str) -> std::result::Result<Scheme, String> {
+        let iri = format!("urn:layer:{name}:scheme");
+        let answer = self
+            .door
+            .call(get(&iri, &[("as", "application/json".into())]))
+            .map_err(|e| format!("reading {iri}: {e}"))?;
+        let body = json(&answer).map_err(|e| format!("{iri}: {e}"))?;
+        let concepts = body["concepts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                Some(Concept {
+                    iri: c["@id"].as_str()?.to_string(),
+                    label: c["prefLabel"].as_str()?.to_string(),
+                    broader: c["broader"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|b| b.as_str().map(str::to_string))
+                        .collect(),
+                })
+            })
+            .collect();
+        Ok(Scheme { concepts })
     }
 
     /// The layer's last feed position, from its own feed's JSON face (`after=0` answers it
@@ -1073,17 +1758,36 @@ impl LayersView {
 
     fn step(&self) -> std::result::Result<(), String> {
         self.refresh()?;
+        if !self.own {
+            // The joined reader's own follower holds the long poll.
+            std::thread::sleep(Duration::from_secs(self.feed_wait.max(1)));
+            return Ok(());
+        }
+        let reader = lock(&self.public).clone();
+        self.long_poll(&self.feed_door, |name| {
+            !reader.as_ref().is_some_and(|r| r.routes(name))
+        })
+    }
+
+    /// One long poll at `door`, over the layers `reads` says that door reads.
+    fn long_poll(
+        &self,
+        door: &Confined,
+        reads: impl Fn(&str) -> bool,
+    ) -> std::result::Result<(), String> {
         let cursor: Vec<String> = lock(&self.state)
             .layers
             .values()
-            .filter(|l| l.synced && l.info.holds("feed"))
+            .filter(|l| {
+                l.synced && l.info.holds("feed") && self.followed(&l.info) && reads(&l.info.name)
+            })
             .map(|l| format!("{}:{}", l.info.name, l.last))
             .collect();
         if cursor.is_empty() {
             std::thread::sleep(Duration::from_secs(self.feed_wait.max(1)));
             return Ok(());
         }
-        let answer = self.feed_door.call(get(
+        let answer = door.call(get(
             "urn:layers:feed",
             &[
                 ("after", cursor.join(",")),
@@ -1379,6 +2083,7 @@ fn entries_of(graph: &Graph, prefix: &str) -> Vec<Entry> {
                 addressed_to: graph.value(s, &ik("addressedTo")),
                 offer: graph.value(s, &ik("offer")),
                 file,
+                subjects: graph.values(s, DCT_SUBJECT),
             })
         })
         .collect();
@@ -1433,6 +2138,34 @@ pub fn say_turtle(
     body: &str,
     reply_to: Option<&str>,
 ) -> std::result::Result<String, Error> {
+    entry_turtle(kind, body, reply_to, None)
+}
+
+/// The `ik:Question` an "Ask a question about this" form posts: [`say_turtle`] with
+/// `dcterms:subject` naming the feed entry.
+///
+/// ```
+/// use ikigai_gonk::layers_view::ask_turtle;
+/// let t = ask_turtle("Why?", "urn:layer:releases:entry:01a").unwrap();
+/// assert!(t.contains("Question"));
+/// assert!(t.contains("subject"));
+/// assert!(t.contains("urn:layer:releases:entry:01a"));
+/// assert!(ask_turtle(" ", "urn:layer:releases:entry:01a").is_err());
+/// ```
+///
+/// # Errors
+///
+/// An empty body, a subject that is not an IRI.
+pub fn ask_turtle(body: &str, subject: &str) -> std::result::Result<String, Error> {
+    entry_turtle("question", body, None, Some(subject))
+}
+
+fn entry_turtle(
+    kind: &str,
+    body: &str,
+    reply_to: Option<&str>,
+    about: Option<&str>,
+) -> std::result::Result<String, Error> {
     let class = match kind {
         "message" => "Message",
         "question" => "Question",
@@ -1469,10 +2202,13 @@ pub fn say_turtle(
     ];
     if let Some(reply) = reply_to {
         triples.push(Triple::new(
-            subject,
+            subject.clone(),
             named(&ik("inReplyTo"))?,
             named(reply)?,
         ));
+    }
+    if let Some(about) = about {
+        triples.push(Triple::new(subject, named(DCT_SUBJECT)?, named(about)?));
     }
     let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle)
         .with_prefix("ik", IK)
@@ -1563,7 +2299,7 @@ fn verbs_sentence(info: &LayerInfo) -> String {
     if info.holds("feed") {
         can.push("follow");
     }
-    let posts = info.holds("say") && info.model == Model::Channel;
+    let posts = info.holds("say") && info.model == Model::Channel && !info.is_feed();
     if posts {
         can.push("post");
     }
@@ -1583,8 +2319,11 @@ fn list_words(words: &[&str]) -> String {
     }
 }
 
-fn model_word(model: &Model) -> String {
-    match model {
+fn model_word(info: &LayerInfo) -> String {
+    if info.is_feed() {
+        return "a feed: read-only announcements from its publishers".to_string();
+    }
+    match &info.model {
         Model::Channel => "a channel: messages, questions, briefs, issues and files".to_string(),
         Model::Tuplespace => "a task layer: offers taken atomically, with receipts".to_string(),
         Model::Other(m) => format!("a `{m}` layer, which this page cannot show"),
@@ -1601,6 +2340,13 @@ struct Rows<'a> {
     held: Vec<String>,
     /// The principals whose entries are this host's own side: the identity, and [`LOCAL_KEY`]'s.
     local: BTreeSet<String>,
+    /// Entry id to rendered body ([`Rows::render_bodies`]). An entry without one is shown as
+    /// written.
+    markdown: BTreeMap<String, String>,
+    /// Every feed the identity reads: its name → its label, and whether this viewer subscribes.
+    feeds: BTreeMap<String, (String, bool)>,
+    /// On a feed's page, the feed and the channels the viewer may ask in ([`own_channels`]).
+    ask: Option<(String, Vec<(String, String)>)>,
 }
 
 impl<'a> Rows<'a> {
@@ -1618,6 +2364,53 @@ impl<'a> Rows<'a> {
                 .map(|l| l.name().to_string())
                 .collect(),
             local,
+            markdown: BTreeMap::new(),
+            feeds: BTreeMap::new(),
+            ask: None,
+        }
+    }
+
+    /// Know the feeds, so a question about one of their entries can link back; and, when
+    /// `layer` is a feed, offer its entries' "Ask a question about this".
+    fn for_layer(
+        &mut self,
+        inv: &Invocation<'_>,
+        view: &LayersView,
+        snapshot: &Snapshot,
+        layer: &LayerInfo,
+    ) {
+        let viewer = viewer(inv);
+        self.feeds = snapshot
+            .layers
+            .values()
+            .filter(|l| l.info.is_feed())
+            .map(|l| {
+                let subscribed = view.shown(&viewer, &l.info);
+                (l.info.name.clone(), (l.info.label.clone(), subscribed))
+            })
+            .collect();
+        if layer.is_feed() && inv.capability.allows(CAP_SAY) {
+            let channels = own_channels(snapshot);
+            if !channels.is_empty() {
+                self.ask = Some((layer.name.clone(), channels));
+            }
+        }
+    }
+
+    /// Render `entries`' bodies as Markdown for [`entry_row`], each through the hub's cache.
+    async fn render_bodies<'e>(
+        &mut self,
+        inv: &Invocation<'_>,
+        entries: impl Iterator<Item = &'e Entry>,
+    ) {
+        for entry in entries {
+            let Some(body) = entry.body.as_deref() else {
+                continue;
+            };
+            let refs = self.refs(&entry.who);
+            if let Some(fragment) = render::rendered_markdown(inv, body, &refs).await {
+                self.markdown.insert(entry.id.clone(), fragment);
+            }
         }
     }
 
@@ -1692,6 +2485,19 @@ fn entry_row(
             ));
         }
     }
+    if entry.kind == "Question" {
+        let about = entry.subjects.iter().find_map(|subject| {
+            let (feed, id) = feed_entry(subject)?;
+            let (label, subscribed) = cx.feeds.get(feed)?;
+            Some((feed, id, label, *subscribed))
+        });
+        if let Some((feed, id, label, subscribed)) = about {
+            attributes.push(("about-label", label.clone()));
+            if subscribed {
+                attributes.push(("about-href", format!("{PAGE_PATH}/{feed}#entry-{id}")));
+            }
+        }
+    }
     if let Some(to) = &entry.addressed_to {
         attributes.push(("addressed-to", who(to, me)));
     }
@@ -1721,12 +2527,52 @@ fn entry_row(
     }
     let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let refs = cx.refs(&entry.who);
-    let body = entry
-        .body
-        .as_deref()
-        .map(|b| element("body", &[("linkify", &refs)], b))
-        .unwrap_or_default();
-    wrap(name, &attributes, &body)
+    // A fragment `render::entry_markdown` built is markup; anything else is text.
+    let body = match (cx.markdown.get(&entry.id), entry.body.as_deref()) {
+        (Some(fragment), _) => render::wrap("rendered", &[], fragment),
+        (None, Some(b)) => element("body", &[("linkify", &refs)], b),
+        (None, None) => String::new(),
+    };
+    let ask = match &cx.ask {
+        Some((feed, channels)) if name == "entry" => ask_form(feed, &entry.id, channels),
+        _ => String::new(),
+    };
+    wrap(name, &attributes, &format!("{body}{ask}"))
+}
+
+/// A feed entry's "Ask a question about this" form.
+fn ask_form(feed: &str, id: &str, channels: &[(String, String)]) -> String {
+    let rows: String = channels
+        .iter()
+        .map(|(name, label)| element("ask-channel", &[("name", name), ("label", label)], ""))
+        .collect();
+    wrap(
+        "ask",
+        &[
+            ("action", ASK_PATH),
+            ("feed", feed),
+            ("entry", id),
+            ("single", if channels.len() == 1 { "true" } else { "false" }),
+        ],
+        &rows,
+    )
+}
+
+/// The channels the identity may post a question to: `say` on a channel that is not a feed,
+/// and a person posting. Empty hides the form.
+fn own_channels(snapshot: &Snapshot) -> Vec<(String, String)> {
+    snapshot
+        .layers
+        .values()
+        .filter(|l| may_post(snapshot, &l.info))
+        .map(|l| (l.info.name.clone(), l.info.label.clone()))
+        .collect()
+}
+
+/// `(feed, entry id)` when `iri` names an entry of a layer: `urn:layer:{feed}:entry:{id}`.
+fn feed_entry(iri: &str) -> Option<(&str, &str)> {
+    let (feed, id) = iri.strip_prefix("urn:layer:")?.split_once(":entry:")?;
+    (crate::layer::is_layer_name(feed) && is_entry_id(id)).then_some((feed, id))
 }
 
 fn receipt_row(receipt: &Receipt, me: Option<&Me>, new: bool, item: Option<&ItemLink>) -> String {
@@ -1753,14 +2599,23 @@ fn receipt_row(receipt: &Receipt, me: Option<&Me>, new: bool, item: Option<&Item
 /// [`render::MAX_CHUNK_BYTES`]: xrust's cost is superlinear in one document (ledger #519).
 fn chunks(rows: &[String]) -> Vec<String> {
     let budget = render::MAX_CHUNK_BYTES / 2;
+    let tag_budget = render::MAX_MARKDOWN_TAGS;
     let mut out = Vec::new();
     let mut current = String::new();
     let mut count = 0;
+    let mut tags = 0;
     for row in rows {
-        if count > 0 && (count >= render::CHUNK_ROWS || current.len() + row.len() > budget) {
+        let row_tags = row.matches('<').count();
+        if count > 0
+            && (count >= render::CHUNK_ROWS
+                || current.len() + row.len() > budget
+                || tags + row_tags > tag_budget)
+        {
             out.push(render::chunk(&std::mem::take(&mut current)));
             count = 0;
+            tags = 0;
         }
+        tags += row_tags;
         current.push_str(row);
         count += 1;
     }
@@ -1845,6 +2700,7 @@ fn lacking() -> web::Lacking {
 fn may_post(snapshot: &Snapshot, info: &LayerInfo) -> bool {
     info.holds("say")
         && info.model == Model::Channel
+        && !info.is_feed()
         && snapshot
             .me
             .as_ref()
@@ -1892,6 +2748,24 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
 }
 
 /// Start the follower and wait (off the async thread) for the first read.
+/// Whether the viewer may read `layer` on the Layers page (ledger #3238): the page's own grant,
+/// and the layer among those this server reads. The name resolver's check, at follow time.
+pub(crate) async fn may_read_layer(
+    view: Option<&Arc<LayersView>>,
+    inv: &Invocation<'_>,
+    layer: &str,
+) -> bool {
+    let Some(view) = view else { return false };
+    let viewer = viewer(inv);
+    inv.capability.allows(CAP_READ)
+        && ready(view).await.is_ok_and(|snapshot| {
+            snapshot
+                .layers
+                .get(layer)
+                .is_some_and(|l| view.shown(&viewer, &l.info))
+        })
+}
+
 async fn ready(view: &Arc<LayersView>) -> Result<Snapshot> {
     view.start();
     let waiting = Arc::clone(view);
@@ -1928,8 +2802,44 @@ fn layer_arg() -> ArgSpec {
 
 // ------------------------------------------------------------------------------ the pages
 
+/// Which view a page reads right now: the identity [`KEY`] configures, or the one that joined
+/// the public feeds ([`crate::feeds_join`]), which can appear and go while the server runs.
+#[derive(Clone, Default)]
+pub struct Views {
+    own: Option<Arc<LayersView>>,
+    feeds: Option<Arc<PublicFeeds>>,
+}
+
+impl Views {
+    /// The pages' views: the configured one, and the public feeds this server may join.
+    pub fn new(own: Option<Arc<LayersView>>, feeds: Option<Arc<PublicFeeds>>) -> Views {
+        Views { own, feeds }
+    }
+
+    /// The view that reads for a page now; `None` when nothing is configured or joined.
+    pub fn current(&self) -> Option<Arc<LayersView>> {
+        match (&self.own, &self.feeds) {
+            (Some(own), feeds) => {
+                if let Some(feeds) = feeds {
+                    feeds.sync();
+                }
+                Some(Arc::clone(own))
+            }
+            (None, Some(feeds)) => feeds.view_for_pages(),
+            (None, None) => None,
+        }
+    }
+}
+
+impl From<Option<Arc<LayersView>>> for Views {
+    fn from(own: Option<Arc<LayersView>>) -> Views {
+        Views { own, feeds: None }
+    }
+}
+
 /// Bind the page's resources into the HTTP face's page space.
-pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: Option<Arc<LayersView>>) -> EndpointSpace {
+pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: impl Into<Views>) -> EndpointSpace {
+    let view: Views = view.into();
     let template = |t: &str| UriTemplate::parse(t).expect("a constant template");
     space
         .bind(
@@ -1947,6 +2857,35 @@ pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: Option<Arc<LayersView>>)
             },
         )
         .bind(Exact::new(COUNT_IRI), Count { view: view.clone() })
+        .bind(
+            Exact::new(FEEDS_IRI),
+            FeedsPage {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
+        .bind(
+            Exact::new(SUBSCRIBE_IRI),
+            Subscribe {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
+        .bind(
+            Exact::new(JOIN_IRI),
+            JoinFeeds {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
+        .bind(
+            Exact::new(LEAVE_IRI),
+            LeaveFeeds {
+                web: Arc::clone(web),
+                view: view.clone(),
+            },
+        )
+        .bind(Exact::new(ASK_IRI), Ask { view: view.clone() })
         .bind(template(SAY_TEMPLATE), Say { view: view.clone() })
         .bind(template(FILE_TEMPLATE), File { view: view.clone() })
         .bind(
@@ -1964,9 +2903,9 @@ fn overview_rows(snapshot: &Snapshot, view: &LayersView, viewer: &str) -> (Strin
     let rows = snapshot
         .layers
         .values()
+        .filter(|layer| view.shown(viewer, &layer.info))
         .map(|layer| {
-            let seen = view.cursors.get(viewer, &layer.info.name).min(layer.last);
-            let unread = layer.last - seen;
+            let unread = view.unread_of(viewer, layer);
             total += unread;
             let newest = layer
                 .entries
@@ -1980,7 +2919,7 @@ fn overview_rows(snapshot: &Snapshot, view: &LayersView, viewer: &str) -> (Strin
                     ("name", &layer.info.name),
                     ("label", &layer.info.label),
                     ("href", &format!("{PAGE_PATH}/{}", layer.info.name)),
-                    ("model", &model_word(&layer.info.model)),
+                    ("model", &model_word(&layer.info)),
                     ("verbs", &verbs_sentence(&layer.info)),
                     (
                         "unread",
@@ -2024,7 +2963,7 @@ fn me_attributes(snapshot: &Snapshot) -> Vec<(&'static str, String)> {
 /// `urn:iki:gonk:page:layers`: every layer the identity reads.
 struct Overview {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -2043,21 +2982,27 @@ impl Endpoint for Overview {
             ("view", "layers".to_string()),
             ("full", "true".to_string()),
             ("ui-theme", crate::render::theme_of(inv).to_string()),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+            ),
             ("title", "Layers".to_string()),
         ];
         if !inv.capability.allows(CAP_READ) {
             children.push_str(&lacking().element());
         } else {
-            let snapshot = match &self.view {
+            let current = self.view.current();
+            let snapshot = match &current {
                 Some(view) => ready(view).await?,
                 None => Snapshot::default(),
             };
-            children.push_str(&notices(self.view.as_deref(), &snapshot));
-            if let Some(view) = &self.view {
+            children.push_str(&notices(current.as_deref(), &snapshot));
+            if let Some(view) = &current {
                 let (rows, total) = overview_rows(&snapshot, view, &viewer(inv));
+                let nothing = rows.is_empty();
                 children.push_str(&rows);
                 attributes.extend(me_attributes(&snapshot));
-                if snapshot.discovered && snapshot.layers.is_empty() {
+                if snapshot.discovered && nothing {
                     attributes.push((
                         "empty",
                         "The door names no layer this identity may read.".to_string(),
@@ -2103,7 +3048,7 @@ impl Endpoint for Overview {
 /// `urn:iki:gonk:page:layer:{layer}`: one layer's entries, or its tuples and takes.
 struct LayerPage {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -2130,14 +3075,28 @@ impl Endpoint for LayerPage {
             ("title", layer.clone()),
             ("name", layer.clone()),
             ("ui-theme", crate::render::theme_of(inv).to_string()),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+            ),
         ];
         let mut slots: Vec<(String, String)> = Vec::new();
         if !inv.capability.allows(CAP_READ) {
             children.push_str(&lacking().element());
-        } else if let Some(view) = &self.view {
+        } else if let Some(view) = &self.view.current() {
             let snapshot = ready(view).await?;
             children.push_str(&notices(Some(view), &snapshot));
-            let Some(found) = snapshot.layers.get(&layer) else {
+            let who_views = viewer(inv);
+            let Some(found) = snapshot
+                .layers
+                .get(&layer)
+                .filter(|l| view.shown(&who_views, &l.info))
+            else {
+                if snapshot.layers.contains_key(&layer) {
+                    return Err(Error::NotFound(format!(
+                        "you do not subscribe to the feed `{layer}`; subscribe on {FEEDS_PATH}"
+                    )));
+                }
                 if snapshot.discovered {
                     return Err(Error::NotFound(format!(
                         "the identity this page reads as holds no read grant on a layer \
@@ -2152,12 +3111,12 @@ impl Endpoint for LayerPage {
                     render::render(&doc, true).map_err(web::render_err)?,
                 ));
             };
-            let who_views = viewer(inv);
             let seen = view.cursors.get(&who_views, &layer).min(found.last);
             let me = snapshot.me.as_ref();
-            let cx = Rows::new(&self.web, inv, view, me);
+            let mut cx = Rows::new(&self.web, inv, view, me);
+            cx.for_layer(inv, view, &snapshot, &found.info);
             attributes[2].1 = found.info.label.clone();
-            attributes.push(("model", model_word(&found.info.model)));
+            attributes.push(("model", model_word(&found.info)));
             attributes.push(("verbs", verbs_sentence(&found.info)));
             attributes.extend(me_attributes(&snapshot));
             let posts = may_post(&snapshot, &found.info) && inv.capability.allows(CAP_SAY);
@@ -2166,6 +3125,17 @@ impl Endpoint for LayerPage {
                     .filter(|id| is_entry_id(id))
                     .filter(|id| found.entries.iter().any(|e| &e.id == id));
                 children.push_str(&say_form(&layer, &found.info.label, reply.as_deref()));
+            } else if found.info.is_feed() {
+                attributes.push((
+                    "no-post",
+                    if cx.ask.is_some() {
+                        "A feed is read-only here. To ask about an entry, use its \"Ask a \
+                         question about this\": the question goes to your own channel."
+                            .to_string()
+                    } else {
+                        "A feed is read-only here.".to_string()
+                    },
+                ));
             } else if found.info.holds("say") && found.info.model == Model::Channel {
                 attributes.push((
                     "no-post",
@@ -2199,15 +3169,40 @@ impl Endpoint for LayerPage {
                     slots.push(("entries".to_string(), rendered(inv, &[]).await?));
                 }
                 Model::Channel => {
-                    let rows: Vec<String> = found
-                        .entries
+                    let concepts = view.filter_of(&who_views, &found.info);
+                    let filtered = !concepts.is_empty();
+                    let entries = if filtered {
+                        let reading = Arc::clone(view);
+                        let (info, last) = (found.info.clone(), found.last);
+                        let read =
+                            off_thread(move || reading.filtered_entries(&info, &concepts, last))
+                                .await?;
+                        read.unwrap_or_else(|why| {
+                            children.push_str(&element(
+                                "notice",
+                                &[("kind", "error")],
+                                &format!("The filtered entries could not be read: {why}."),
+                            ));
+                            Vec::new()
+                        })
+                    } else {
+                        found.entries.clone()
+                    };
+                    if let Some(scheme) = &found.info.feed {
+                        attributes.push((
+                            "feed-filter",
+                            filter_words(scheme, &view.filter_of(&who_views, &found.info)),
+                        ));
+                    }
+                    cx.render_bodies(inv, entries.iter()).await;
+                    let rows: Vec<String> = entries
                         .iter()
                         .rev()
                         .map(|e| entry_row("entry", e, &layer, &cx, e.seq > seen, posts, None))
                         .collect();
-                    let unread_shown = found.entries.iter().filter(|e| e.seq > seen).count() as u64;
+                    let unread_shown = entries.iter().filter(|e| e.seq > seen).count() as u64;
                     let unread = found.last - seen;
-                    if unread > unread_shown {
+                    if !filtered && unread > unread_shown {
                         attributes.push((
                             "older-unread",
                             format!(
@@ -2224,6 +3219,7 @@ impl Endpoint for LayerPage {
                 Model::Tuplespace => {
                     attributes.push(("tuplespace", "true".to_string()));
                     let links = item_links(&self.web, inv, &layer).await;
+                    cx.render_bodies(inv, found.tuples.iter()).await;
                     let (tuples, receipts) = tuple_rows(found, &cx, seen, &links);
                     children.push_str(&render::slot("tuples"));
                     children.push_str(&render::slot("receipts"));
@@ -2408,14 +3404,14 @@ fn say_form(layer: &str, label: &str, reply: Option<&str>) -> String {
 /// the next watcher. The name is from when it was a long poll (ledger #1705 says why it is not).
 struct Wait {
     web: Arc<Web>,
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
 impl Endpoint for Wait {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
         let after: u64 =
@@ -2478,19 +3474,37 @@ impl Endpoint for Wait {
                 ));
             }
             Some(name) => {
-                let found = snapshot.layers.get(name);
+                let found = snapshot
+                    .layers
+                    .get(name)
+                    .filter(|l| view.shown(&who_views, &l.info));
                 let last = found.map_or(after, |l| l.last);
                 if let Some(found) = found.filter(|l| l.last > after) {
-                    let cx = Rows::new(&self.web, inv, view, snapshot.me.as_ref());
+                    let mut cx = Rows::new(&self.web, inv, view, snapshot.me.as_ref());
+                    cx.for_layer(inv, view, &snapshot, &found.info);
                     match found.info.model {
                         Model::Channel => {
                             let posts =
                                 may_post(&snapshot, &found.info) && inv.capability.allows(CAP_SAY);
-                            let rows: Vec<String> = found
+                            let concepts = view.filter_of(&who_views, &found.info);
+                            // What the page's filter lets through, read from the copy.
+                            let new: Vec<&Entry> = found
                                 .entries
                                 .iter()
-                                .rev()
                                 .filter(|e| e.seq > after)
+                                .filter(|e| {
+                                    concepts.is_empty()
+                                        || found
+                                            .info
+                                            .feed
+                                            .as_ref()
+                                            .is_some_and(|s| s.covers(&concepts, &e.subjects))
+                                })
+                                .collect();
+                            cx.render_bodies(inv, new.iter().copied()).await;
+                            let rows: Vec<String> = new
+                                .iter()
+                                .rev()
                                 .map(|e| entry_row("entry", e, name, &cx, true, posts, None))
                                 .collect();
                             if !rows.is_empty() {
@@ -2509,6 +3523,7 @@ impl Endpoint for Wait {
                         Model::Tuplespace => {
                             let seen = view.cursors.get(&who_views, name).min(found.last);
                             let links = item_links(&self.web, inv, name).await;
+                            cx.render_bodies(inv, found.tuples.iter()).await;
                             let (tuples, receipts) =
                                 tuple_rows(found, &cx, seen.min(after), &links);
                             attributes.push(("tuplespace", "true".to_string()));
@@ -2579,7 +3594,7 @@ impl Endpoint for Wait {
 /// badge and the URL of the next poll; a sentence for the header's live region only when the
 /// count ROSE past `seen`, so a poll that brings nothing new says nothing.
 struct Count {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 /// The URL the header's count polls: `seen` is the count the page shows (`None`: none known).
@@ -2625,7 +3640,7 @@ impl Endpoint for Count {
         let quiet = optional_arg(inv, "quiet").as_deref() == Some("1");
         let mut attributes: Vec<(&str, String)> = vec![("view", "layers-count".to_string())];
         // Not configured: an inert badge, and no next poll.
-        if let Some(view) = &self.view {
+        if let Some(view) = &self.view.current() {
             // The first count a reader of the layers asks for starts the follower; until it
             // has read the door once there is no count to show.
             view.start();
@@ -2700,7 +3715,7 @@ impl Endpoint for Count {
 /// `urn:iki:gonk:layers:say:{layer}`: a say form → one entry at the door, as the configured
 /// identity.
 struct Say {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
@@ -2709,10 +3724,16 @@ impl Endpoint for Say {
         if inv.request.verb != Verb::Sink {
             return Err(Error::Endpoint("a post answers Sink only".to_string()));
         }
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
+        if !view.own {
+            return Err(Error::Denied(
+                "this server reads the public feeds with a joined identity, which never posts"
+                    .to_string(),
+            ));
+        }
         let layer = layer_binding(inv)?;
         let fields = web::form(inv.inline_str("content")?);
         let snapshot = ready(view).await?;
@@ -2726,6 +3747,12 @@ impl Endpoint for Say {
                     view.origin()
                 ))
             })?;
+        if info.is_feed() {
+            return Err(Error::Denied(format!(
+                "`{layer}` is a feed and this page never posts to one: it is read-only here, \
+                 publishers included"
+            )));
+        }
         if !info.holds("say") || info.model != Model::Channel {
             return Err(Error::Denied(format!(
                 "the identity this page posts as holds no `say` on the channel `{layer}`, so the \
@@ -2811,16 +3838,645 @@ impl Endpoint for Say {
     }
 }
 
+// ------------------------------------------------------------------------------ feeds
+
+/// The feed page's sentence saying what the viewer's filter shows.
+fn filter_words(scheme: &Scheme, concepts: &[String]) -> String {
+    if concepts.is_empty() {
+        return "Showing the whole feed.".to_string();
+    }
+    let labels: Vec<&str> = scheme
+        .concepts
+        .iter()
+        .filter(|c| concepts.contains(&c.iri))
+        .map(|c| c.label.as_str())
+        .collect();
+    format!(
+        "Showing only {}, and everything under {}.",
+        list_words(&labels),
+        if labels.len() == 1 { "it" } else { "them" }
+    )
+}
+
+/// A feed's scheme as nested `view:concept`s, by notation. A concept with several broader
+/// concepts is drawn once, under its first; the door's filter still follows every one of them.
+/// A cycle has no root, so what the walk from the roots did not reach is drawn at the top.
+fn concept_tree(scheme: &Scheme, checked: &[String]) -> String {
+    let mut children: BTreeMap<&str, Vec<&Concept>> = BTreeMap::new();
+    let mut roots = Vec::new();
+    for concept in &scheme.concepts {
+        match concept.broader.iter().find(|b| scheme.has(b)) {
+            Some(broader) => children.entry(broader).or_default().push(concept),
+            None => roots.push(concept),
+        }
+    }
+    fn draw<'a>(
+        concept: &'a Concept,
+        children: &BTreeMap<&str, Vec<&'a Concept>>,
+        checked: &[String],
+        seen: &mut BTreeSet<&'a str>,
+    ) -> String {
+        if !seen.insert(&concept.iri) {
+            return String::new();
+        }
+        let narrower: String = children
+            .get(concept.iri.as_str())
+            .into_iter()
+            .flatten()
+            .map(|c| draw(c, children, checked, seen))
+            .collect();
+        wrap(
+            "concept",
+            &[
+                ("iri", &concept.iri),
+                ("label", &concept.label),
+                (
+                    "checked",
+                    if checked.contains(&concept.iri) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
+            ],
+            &narrower,
+        )
+    }
+    let mut seen = BTreeSet::new();
+    let mut out = String::new();
+    for root in roots {
+        out.push_str(&draw(root, &children, checked, &mut seen));
+    }
+    for concept in &scheme.concepts {
+        out.push_str(&draw(concept, &children, checked, &mut seen));
+    }
+    out
+}
+
+/// One feed's row on `/feed`.
+fn feed_row(
+    layer: &LayerView,
+    subscribed: Option<&[String]>,
+    newest: Option<&Entry>,
+) -> Option<String> {
+    let scheme = layer.info.feed.as_ref()?;
+    let mut attributes: Vec<(&str, String)> = vec![
+        ("name", layer.info.name.clone()),
+        ("label", layer.info.label.clone()),
+        ("action", SUBSCRIBE_PATH.to_string()),
+        (
+            "subscribed",
+            if subscribed.is_some() {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
+    ];
+    if subscribed.is_some() {
+        attributes.push(("href", format!("{PAGE_PATH}/{}", layer.info.name)));
+    }
+    if let Some(entry) = newest {
+        attributes.push((
+            "newest-title",
+            entry
+                .title
+                .clone()
+                .or_else(|| entry.body.as_ref().map(|b| b.chars().take(120).collect()))
+                .unwrap_or_else(|| entry.id.clone()),
+        ));
+        attributes.push(("datetime", entry.created.clone()));
+        attributes.push(("when", web::when(&entry.created)));
+    }
+    let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let tree = subscribed.map_or_else(String::new, |checked| concept_tree(scheme, checked));
+    Some(wrap("feed-row", &attributes, &tree))
+}
+
+/// `/feed` itself, with `flash` above the list after a change.
+async fn feeds_page(
+    web: &Arc<Web>,
+    views: &Views,
+    inv: &Invocation<'_>,
+    flash: Option<(&str, &str)>,
+) -> Result<String> {
+    let view = views.current();
+    let ledgers = web::readable_ledgers(web, inv.capability);
+    let mut children = web::nav_on_feeds(web, inv.capability, &ledgers);
+    let mut attributes = vec![
+        ("view", "feed".to_string()),
+        ("full", "true".to_string()),
+        ("ui-theme", crate::render::theme_of(inv).to_string()),
+        (
+            "safe",
+            crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
+        ),
+        ("title", "Feeds".to_string()),
+    ];
+    if !inv.capability.allows(CAP_READ) {
+        children.push_str(&lacking().element());
+    } else if let Some(view) = &view {
+        let snapshot = ready(view).await?;
+        children.push_str(&notices(Some(view), &snapshot));
+        if let Some((kind, flash)) = flash {
+            children.push_str(&element("flash", &[("kind", kind)], flash));
+        }
+        let who_views = viewer(inv);
+        let mut rows = String::new();
+        for layer in snapshot.layers.values().filter(|l| l.info.is_feed()) {
+            let newest = match layer.entries.last() {
+                Some(entry) if layer.synced => Some(entry.clone()),
+                // A feed the follower is not reading: asked once, for this page.
+                _ if snapshot.down.is_none() => {
+                    let reading = Arc::clone(view);
+                    let info = layer.info.clone();
+                    off_thread(move || reading.newest_of(&info)).await?
+                }
+                _ => None,
+            };
+            let subscribed = view
+                .subscriptions
+                .get(&who_views, &layer.info.name)
+                .map(|_| view.filter_of(&who_views, &layer.info));
+            rows.extend(feed_row(layer, subscribed.as_deref(), newest.as_ref()));
+        }
+        if snapshot.discovered && rows.is_empty() {
+            attributes.push((
+                "empty",
+                "The door names no feed this identity may read.".to_string(),
+            ));
+        }
+        children.push_str(&rows);
+    } else if let Some(feeds) = &views.feeds {
+        if let Some((kind, flash)) = flash {
+            children.push_str(&element("flash", &[("kind", kind)], flash));
+        }
+        if !inv.capability.allows(CAP_JOIN) {
+            attributes.push((
+                "empty",
+                format!(
+                    "This server reads no feeds yet. Joining the public feeds of {} needs \
+                     {CAP_JOIN} in your passkey's grant.",
+                    feeds.door()
+                ),
+            ));
+        }
+    } else {
+        children.push_str(&notices(None, &Snapshot::default()));
+    }
+    children.push_str(&join_controls(views, inv));
+    let attributes: Vec<(&str, &str)> = attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let doc = envelope("page", &attributes, &children);
+    render::render(&doc, true).map_err(web::render_err)
+}
+
+/// The Join or Leave button: only for a holder of [`CAP_JOIN`], and Join only when this server
+/// holds no identity that reads this door's public feeds.
+fn join_controls(views: &Views, inv: &Invocation<'_>) -> String {
+    let Some(feeds) = &views.feeds else {
+        return String::new();
+    };
+    if !inv.capability.allows(CAP_JOIN) {
+        return String::new();
+    }
+    let host = feeds.door();
+    if feeds.joined().is_some() {
+        let lapsed = views.current().is_some_and(|view| view.public_lapsed());
+        let note = if lapsed {
+            format!(
+                "The identity this server joined {host} with no longer reads any of its public \
+                 feeds: the host lets an identity expire when it stops being read. Join again \
+                 to read them, or leave to delete it here."
+            )
+        } else {
+            format!(
+                "This server reads the public feeds of {host} with an identity of its own, \
+                 which only reads. Leaving deletes that identity here; the host lets it expire."
+            )
+        };
+        let mut controls = element(
+            "feeds-join",
+            &[("state", "joined"), ("action", LEAVE_PATH), ("note", &note)],
+            "",
+        );
+        if lapsed {
+            controls.push_str(&element(
+                "feeds-join",
+                &[("state", "offer"), ("action", JOIN_PATH), ("note", "")],
+                "",
+            ));
+        }
+        return controls;
+    }
+    let covered = crate::feeds_join::host_of(host)
+        .is_some_and(|name| views.own.as_ref().is_some_and(|o| o.reads_public_at(&name)));
+    if covered {
+        return String::new();
+    }
+    element(
+        "feeds-join",
+        &[
+            ("state", "offer"),
+            ("action", JOIN_PATH),
+            (
+                "note",
+                &format!(
+                    "Joining makes this server a certificate of its own and asks {host} to let \
+                     it read its public feeds and nothing else. No person approves it, and it \
+                     can never post."
+                ),
+            ),
+        ],
+        "",
+    )
+}
+
+/// `urn:iki:gonk:page:feed`: every feed the identity reads, and the viewer's Subscribe buttons
+/// and concept filters.
+struct FeedsPage {
+    web: Arc<Web>,
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for FeedsPage {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(
+                "the Feeds page answers Source only".to_string(),
+            ));
+        }
+        web::html_only(inv)?;
+        Ok(web::html(
+            feeds_page(&self.web, &self.view, inv, None).await?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds")
+            .title("Feeds")
+            .summary(
+                "Every layer the configured identity reads whose definition is typed ik:Feed: \
+                 its label, its newest entry, and Subscribe or Unsubscribe, for this viewer. A \
+                 subscribed feed has a tree of concepts to filter it by. Shows the grant it \
+                 needs to a caller without urn:cap:gonk:layers:read.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(web::as_html_arg())
+            .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:layers:subscribe`: one viewer's subscribe, unsubscribe or concept filter.
+/// Subscribing is reading, so it needs [`CAP_READ`] and nothing about posting.
+struct Subscribe {
+    web: Arc<Web>,
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for Subscribe {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint(
+                "a subscription answers Sink only".to_string(),
+            ));
+        }
+        if !inv.capability.allows(CAP_READ) {
+            return Err(Error::Denied(format!("a subscription needs {CAP_READ}")));
+        }
+        let current = self.view.current();
+        let view = current
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
+        let pairs = web::form_pairs(inv.inline_str("content")?);
+        let field = |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default()
+        };
+        let feed = field("feed");
+        let snapshot = ready(view).await?;
+        let found = snapshot
+            .layers
+            .get(&feed)
+            .filter(|l| l.info.is_feed())
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "the identity this page reads as reads no feed `{feed}` at {}",
+                    view.origin()
+                ))
+            })?;
+        let who_views = viewer(inv);
+        let label = found.info.label.clone();
+        let flash = match field("action").as_str() {
+            "subscribe" => {
+                let name = feed.clone();
+                view.subscriptions.change(&who_views, move |feeds| {
+                    feeds.entry(name).or_default();
+                })?;
+                let reading = Arc::clone(view);
+                let name = feed.clone();
+                let read = off_thread(move || reading.catch_up_feed(&name)).await?;
+                // What was already published is not news to a new subscriber.
+                let last = view
+                    .snapshot()
+                    .layers
+                    .get(&feed)
+                    .map_or(found.last, |l| l.last);
+                view.cursors.set(&who_views, &feed, last);
+                match read {
+                    Ok(()) => format!("Subscribed to {label}. It is in your Layers view."),
+                    Err(why) => format!(
+                        "Subscribed to {label}. It shows in your Layers view once the door \
+                         answers ({why})."
+                    ),
+                }
+            }
+            "unsubscribe" => {
+                let name = feed.clone();
+                view.subscriptions.change(&who_views, move |feeds| {
+                    feeds.remove(&name);
+                })?;
+                format!("Unsubscribed from {label}.")
+            }
+            "filter" => {
+                let scheme = found.info.feed.as_ref().expect("filtered on is_feed above");
+                if view.subscriptions.get(&who_views, &feed).is_none() {
+                    return Err(Error::Conflict(format!(
+                        "you do not subscribe to {label}, so it has no filter to save"
+                    )));
+                }
+                let mut concepts: Vec<String> = pairs
+                    .iter()
+                    .filter(|(k, _)| k == "concept")
+                    .map(|(_, v)| v.trim().to_string())
+                    .collect();
+                concepts.sort();
+                concepts.dedup();
+                if let Some(unknown) = concepts.iter().find(|c| !scheme.has(c)) {
+                    return Err(Error::InvalidArgument {
+                        name: "concept".to_string(),
+                        detail: format!("`{unknown}` is no concept of {label}'s scheme"),
+                    });
+                }
+                let words = filter_words(scheme, &concepts);
+                let name = feed.clone();
+                view.subscriptions.change(&who_views, move |feeds| {
+                    feeds.insert(name, concepts);
+                })?;
+                format!("Filter saved for {label}. {words}")
+            }
+            other => {
+                return Err(Error::InvalidArgument {
+                    name: "action".to_string(),
+                    detail: format!("`{other}` is not subscribe, unsubscribe or filter"),
+                })
+            }
+        };
+        Ok(web::html(
+            feeds_page(&self.web, &self.view, inv, Some(("ok", &flash))).await?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds-subscribe"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds-subscribe")
+            .title("Subscribe to a feed")
+            .summary(
+                "A form (`feed`, `action` subscribe, unsubscribe or filter, and for a filter \
+                 any number of `concept`s of the feed's scheme) → this viewer's subscription, \
+                 kept by this server and never sent to the layer host; answers the Feeds page.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_READ)
+            .input(arg(
+                "content",
+                "the form, url-encoded: feed, action, concept (repeated)",
+            ))
+            .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:feeds:join`: join the door's public feeds ([`crate::feeds_join`]). Answers the
+/// Feeds page, with the host's reason on it when the host refused.
+struct JoinFeeds {
+    web: Arc<Web>,
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for JoinFeeds {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint("a join answers Sink only".to_string()));
+        }
+        if !inv.capability.allows(CAP_JOIN) {
+            return Err(Error::Denied(format!("joining needs {CAP_JOIN}")));
+        }
+        let feeds =
+            self.view.feeds.clone().ok_or_else(|| {
+                Error::NotFound("this server does not join public feeds".to_string())
+            })?;
+        let joining = Arc::clone(&feeds);
+        let flash = match off_thread(move || joining.join()).await? {
+            Ok(joined) => {
+                if let Some(view) = self.view.current() {
+                    let _ = off_thread(move || view.refresh()).await?;
+                }
+                (
+                    "ok",
+                    format!(
+                        "Joined the public feeds of {}. Subscribe to one below to read it in \
+                         your Layers view.",
+                        joined.host
+                    ),
+                )
+            }
+            Err(why) => ("error", why),
+        };
+        Ok(web::html(
+            feeds_page(&self.web, &self.view, inv, Some((flash.0, &flash.1))).await?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds-join"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds-join")
+            .title("Join the public feeds")
+            .summary(
+                "Reads the host's descriptor over web PKI, checks its door's certificate against \
+                 the sha256 it states, makes a certificate for this server if it has none, and \
+                 asks the door's join lobby for read and feed on every public feed it lists. \
+                 Answers the Feeds page, with the host's reason when it refused.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_JOIN)
+            .input(arg("content", "the form, url-encoded (empty)").optional())
+            .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:feeds:leave`: delete the joined identity.
+struct LeaveFeeds {
+    web: Arc<Web>,
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for LeaveFeeds {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint("leaving answers Sink only".to_string()));
+        }
+        if !inv.capability.allows(CAP_JOIN) {
+            return Err(Error::Denied(format!("leaving needs {CAP_JOIN}")));
+        }
+        let feeds =
+            self.view.feeds.clone().ok_or_else(|| {
+                Error::NotFound("this server does not join public feeds".to_string())
+            })?;
+        let leaving = Arc::clone(&feeds);
+        let flash = match off_thread(move || leaving.leave()).await? {
+            Ok(()) => (
+                "ok",
+                "You left the public feeds. This server no longer holds that identity; the \
+                 host lets it expire."
+                    .to_string(),
+            ),
+            Err(why) => ("error", why),
+        };
+        Ok(web::html(
+            feeds_page(&self.web, &self.view, inv, Some((flash.0, &flash.1))).await?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds-leave"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds-leave")
+            .title("Leave the public feeds")
+            .summary(
+                "Deletes the identity this server joined the public feeds with and stops \
+                 reading with it. The host is not told: it lets the identity expire.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_JOIN)
+            .input(arg("content", "the form, url-encoded (empty)").optional())
+            .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:layers:ask`: an `ik:Question` about a feed entry, in the viewer's own channel.
+struct Ask {
+    view: Views,
+}
+
+#[async_trait]
+impl Endpoint for Ask {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint("a question answers Sink only".to_string()));
+        }
+        let current = self.view.current();
+        let view = current
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
+        let fields = web::form(inv.inline_str("content")?);
+        let field = |name: &str| {
+            fields
+                .get(name)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        };
+        let (feed, id, channel) = (field("feed"), field("entry"), field("channel"));
+        let snapshot = ready(view).await?;
+        let found = snapshot
+            .layers
+            .get(&feed)
+            .filter(|l| l.info.is_feed())
+            .ok_or_else(|| Error::NotFound(format!("no feed `{feed}` is read here")))?;
+        if !is_entry_id(&id) {
+            return Err(Error::InvalidArgument {
+                name: "entry".to_string(),
+                detail: format!("`{id}` is not an entry of `{feed}`"),
+            });
+        }
+        let channels = own_channels(&snapshot);
+        let Some((_, label)) = channels.iter().find(|(name, _)| *name == channel) else {
+            return Err(Error::Denied(format!(
+                "`{channel}` is not a channel this page may ask a question in"
+            )));
+        };
+        let subject = format!("urn:layer:{feed}:entry:{id}");
+        let turtle = ask_turtle(fields.get("body").map_or("", String::as_str), &subject)?;
+        let posting = Arc::clone(view);
+        let on = channel.clone();
+        let said = off_thread(move || posting.say(&on, turtle)).await??;
+        let flash =
+            format!("Asked in {label}: {said}. It appears there when the door's feed carries it.");
+        let doc = envelope(
+            "page",
+            &[("view", "layers-ask"), ("flash", &flash)],
+            &ask_form(&found.info.name, &id, &channels),
+        );
+        Ok(web::html(
+            render::render(&doc, false).map_err(web::render_err)?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "gonk-feeds-ask"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-feeds-ask")
+            .title("Ask a question about a feed entry")
+            .summary(
+                "A form (`feed`, `entry`, `channel`, `body`) → one ik:Question said in `channel` \
+                 with dcterms:subject naming the feed entry. The channel must be one the \
+                 configured identity, a person, may say on and not a feed.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            .requires(CAP_SAY)
+            .input(arg(
+                "content",
+                "the form, url-encoded: feed, entry, channel, body",
+            ))
+            .output("text/html")
+    }
+}
+
 /// `urn:iki:gonk:layers:file:{layer}:{id}`: a file entry's bytes, after the check.
 struct File {
-    view: Option<Arc<LayersView>>,
+    view: Views,
 }
 
 #[async_trait]
 impl Endpoint for File {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let view = self
-            .view
+        let current = self.view.current();
+        let view = current
             .as_ref()
             .ok_or_else(|| Error::NotFound("the Layers page is not configured".to_string()))?;
         let layer = layer_binding(inv)?;
@@ -2869,6 +4525,49 @@ impl Endpoint for File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A door that refuses like a host that no longer knows this certificate.
+    struct Expired;
+
+    impl Door for Expired {
+        fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
+            Err(Error::Denied(format!(
+                "no grant on {}",
+                request.target.as_str()
+            )))
+        }
+    }
+
+    #[test]
+    fn a_joined_identity_the_host_let_expire_is_noticed() {
+        let reader = PublicReader::new(
+            Arc::new(Expired),
+            Arc::new(Expired),
+            "urn:iki:host:edge:client:ab".to_string(),
+            BTreeSet::from(["releases".to_string()]),
+        );
+        let view = LayersView::public_only(reader, "door".to_string(), None, Waits::default());
+        assert!(!view.public_lapsed(), "nothing has been read yet");
+        view.refresh().expect("a refusal is an answer");
+        assert!(view.public_lapsed());
+        assert!(view.snapshot().layers.is_empty());
+    }
+
+    #[test]
+    fn the_joined_door_refuses_everything_but_reading() {
+        struct Passes;
+        impl Door for Passes {
+            fn call(&self, _: Request) -> std::result::Result<Representation, Error> {
+                panic!("a write never reaches the host under the joined identity")
+            }
+        }
+        let door = ReadOnly(Arc::new(Passes));
+        let say = Request::new(
+            Verb::Sink,
+            Iri::parse("urn:layer:releases:say").expect("an IRI"),
+        );
+        assert!(matches!(door.call(say), Err(Error::Denied(_))));
+    }
 
     #[test]
     fn a_bare_name_is_never_a_path() {

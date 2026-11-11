@@ -253,6 +253,8 @@ impl Edge {
             "urn:cap:layer:feed:grants",
             "urn:cap:layer:say:grants",
             "urn:cap:collab:read:onboard",
+            // The controller's own grant: the manifests that name it, `crew` here.
+            "urn:cap:collab:read:crew",
         ];
         self.door(
             Capability::scoped(scopes)
@@ -309,6 +311,40 @@ impl Edge {
         )
     }
 
+    /// The owner edits the host's roster: `name` joins `participants.ttl` and the crew manifest.
+    fn put_on_the_roster(&self, name: &str) {
+        let append = |rel: &str, line: String| {
+            let path = self.config.path().join(rel);
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(path, format!("{text}{line}")).unwrap();
+        };
+        append(
+            "participants.ttl",
+            format!("<urn:collab:participant:{name}> a <http://xmlns.com/foaf/0.1/Person> .\n"),
+        );
+        append("collabs/crew.toml", format!("{name} = [\"read\"]\n"));
+    }
+
+    /// The owner enrolls `name` by hand under a certificate of its own, in no manifest the
+    /// controller reads: gonk's name check cannot see it, and the host refuses an entitlement
+    /// for that name.
+    fn enroll_by_hand(&self, name: &str) {
+        let participants = self.config.path().join("participants.ttl");
+        let text = std::fs::read_to_string(&participants).unwrap();
+        std::fs::write(
+            participants,
+            format!(
+                "{text}<urn:collab:participant:{name}> a <http://xmlns.com/foaf/0.1/Person> .\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            self.config.path().join("enrollment.toml"),
+            format!("{name} = \"{}\"\n", node().fingerprint),
+        )
+        .unwrap();
+    }
+
     fn trusted(&self, fingerprint: &str) -> bool {
         self.config
             .path()
@@ -348,6 +384,17 @@ impl Gonk {
         door: onboard::GonkDoor,
         kinds_ttl: &str,
     ) -> Gonk {
+        Gonk::through(edge.controller_door(), keys, public, door, kinds_ttl)
+    }
+
+    /// A gonk that reaches the layer host through `layer_door`.
+    fn through(
+        layer_door: Arc<dyn Door>,
+        keys: Arc<Memory>,
+        public: &str,
+        door: onboard::GonkDoor,
+        kinds_ttl: &str,
+    ) -> Gonk {
         let home = tempfile::tempdir().unwrap();
         let layout = Layout::in_config_home(home.path());
         let kinds = home.path().join("kinds.ttl");
@@ -355,7 +402,7 @@ impl Gonk {
         let clock = Arc::new(AtomicU64::new(NOW));
         let ticks = Arc::clone(&clock);
         let onboard = Onboard::new(Parts {
-            door: edge.controller_door(),
+            door: layer_door,
             door_authority: "edge.example:4434".to_string(),
             door_server_cert: ikigai_quic::generate().cert_pem,
             lobby: "enroll".to_string(),
@@ -962,12 +1009,8 @@ fn the_controller_is_per_gonk() {
     );
 }
 
-#[test]
-fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
-    let (edge, a) = world("brian");
-    let minted = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
-    let mini = node();
-    let id = mini.request(&edge, &minted.invite.id, &minted.code);
+/// The Onboard page as `cap` is shown it.
+fn onboard_page(a: &Gonk, cap: &Capability) -> String {
     let config = tempfile::tempdir().unwrap();
     let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
         Layout::in_config_home(config.path()),
@@ -982,19 +1025,76 @@ fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let pages = onboard::bind_page(ikigai_gonk::web::space(Arc::clone(&face)), &face);
     let http = ikigai_gonk::doors::http_kernel_serving(Arc::clone(&a.hub), pages, Vec::new(), None);
-    let page = |cap: &Capability| {
-        let answer = block_on(Kernel::issue(
-            &http,
-            Request::new(Verb::Source, Iri::parse(onboard::PAGE_IRI).unwrap()),
-            cap,
-        ))
-        .unwrap();
-        String::from_utf8(answer.bytes).unwrap()
-    };
+    let answer = block_on(Kernel::issue(
+        &http,
+        Request::new(Verb::Source, Iri::parse(onboard::PAGE_IRI).unwrap()),
+        cap,
+    ))
+    .unwrap();
+    String::from_utf8(answer.bytes).unwrap()
+}
+
+#[test]
+fn the_page_says_refused_with_the_hosts_reason_in_words() {
+    let (edge, a) = world("brian");
+    edge.enroll_by_hand("hidden");
+    let minted = a.onboard.invite("hidden", &kinds(&["worker"])).unwrap();
+    let id = node().request(&edge, &minted.invite.id, &minted.code);
+    let (said, status) = a.onboard.approve(&id).unwrap();
+    let reason = refusal_of(&status, &said);
+
+    let page = onboard_page(&a, &Capability::scoped([onboard::CAP_READ]));
+
+    assert!(
+        page.contains(&format!(
+            "urn:collab:participant:hidden</strong>: refused, {reason}"
+        )),
+        "{page}"
+    );
+    assert!(
+        !page.contains("verdicts"),
+        "the host's verdicts read: {page}"
+    );
+}
+
+#[test]
+fn the_page_says_when_the_hosts_verdicts_did_not_read() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::through(
+        Arc::new(NoStatus(edge.controller_door())),
+        keys,
+        &public,
+        onboard::GonkDoor::Default { port: None },
+        KINDS,
+    );
+    let minted = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let id = node().request(&edge, &minted.invite.id, &minted.code);
+    a.onboard.approve(&id).unwrap();
+
+    let page = onboard_page(&a, &Capability::scoped([onboard::CAP_READ]));
+
+    assert!(page.contains(": in force"), "{page}");
+    assert!(page.contains("own verdicts, so an entitlement"), "{page}");
+    assert!(
+        !page.contains("the status is away"),
+        "the door's own words stay off the page"
+    );
+}
+
+#[test]
+fn the_page_shows_pending_with_the_command_and_offers_no_approval() {
+    let (edge, a) = world("brian");
+    let minted = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let mini = node();
+    let id = mini.request(&edge, &minted.invite.id, &minted.code);
+    let page = |cap: &Capability| onboard_page(&a, cap);
     let reader = page(&Capability::scoped([onboard::CAP_READ]));
     assert!(reader.contains(&id), "{reader}");
     assert!(
@@ -1075,4 +1175,305 @@ fn the_door_is_the_gonk_setting_and_wins_over_a_kinds_door() {
     assert_eq!(advertised(none(), KINDS), None);
     // Locally: no door at all, whatever the kind says.
     assert_eq!(advertised(onboard::GonkDoor::Socket, &with_door), None);
+}
+
+// ---- ledger #3293: a name already in use is refused at invite and at approve ----
+
+/// The refusal's reason, for a call that must be a conflict.
+fn conflict<T: std::fmt::Debug>(answer: Result<T, Error>) -> String {
+    match answer {
+        Err(Error::Conflict(why)) => why,
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+}
+
+fn open_codes(keys: &Memory) -> usize {
+    keys.0
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|k| k.starts_with(onboard::INVITE_SECRET_PREFIX))
+        .count()
+}
+
+#[test]
+fn a_name_on_the_hosts_roster_is_refused_at_invite_and_a_fresh_one_passes() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::new(&edge, Arc::clone(&keys), &public);
+
+    let why = conflict(a.onboard.invite("brian-gonk", &kinds(&["worker"])));
+    assert!(why.contains("`brian-gonk`"), "names the name: {why}");
+    assert!(why.contains("participants.ttl"), "names the file: {why}");
+    assert!(why.contains("`crew`"), "names where it is used: {why}");
+    assert!(why.contains("`brian-gonk-2`"), "suggests another: {why}");
+    assert_eq!(open_codes(&keys), 0, "a refusal mints nothing");
+
+    let minted = a.onboard.invite("fresh", &kinds(&["worker"])).unwrap();
+    assert_eq!(minted.invite.name, "fresh");
+    assert_eq!(open_codes(&keys), 1);
+}
+
+#[test]
+fn a_pending_or_approved_invite_holds_its_name_until_it_expires_or_is_revoked() {
+    let (edge, a) = world("brian");
+    let first = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains(&first.invite.id), "names the invite: {why}");
+    assert!(why.contains("pending"), "{why}");
+    assert!(why.contains("`mini-2`"), "{why}");
+
+    // A suggestion is itself free.
+    a.onboard.invite("mini-2", &kinds(&["worker"])).unwrap();
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains("`mini-3`"), "{why}");
+
+    // An invite past its 24 hours holds nothing.
+    a.advance_hours(onboard::INVITE_HOURS + 1);
+    let second = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+
+    // Approved: its entitlement holds the name.
+    let mini = node();
+    let id = mini.request(&edge, &second.invite.id, &second.code);
+    a.onboard.approve(&id).unwrap();
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains("entitlement"), "{why}");
+    assert!(why.contains("urn:layer:grants:entry:"), "{why}");
+
+    // Revoked: the name is free again, the way a node gets a new certificate.
+    a.onboard.revoke("mini").unwrap();
+    let third = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    // And the new invite holds it like any other.
+    let why = conflict(a.onboard.invite("mini", &kinds(&["worker"])));
+    assert!(why.contains(&third.invite.id), "{why}");
+}
+
+#[test]
+fn approve_checks_the_roster_again() {
+    let (edge, a) = world("brian");
+    let minted = a.onboard.invite("late", &kinds(&["worker"])).unwrap();
+    let late = node();
+    let id = late.request(&edge, &minted.invite.id, &minted.code);
+
+    edge.put_on_the_roster("late");
+
+    let why = conflict(a.onboard.approve(&id));
+    assert!(why.contains("`late`"), "{why}");
+    assert!(why.contains("participants.ttl"), "{why}");
+    assert!(why.contains("`crew`"), "{why}");
+    assert!(why.contains("`late-2`"), "{why}");
+    // Nothing was said or spent: the request still waits, and nobody was enrolled.
+    assert_eq!(a.onboard.pending().unwrap().len(), 1);
+    assert!(a.onboard.status().records.is_empty());
+    assert_eq!(a.enrolled_grant(&late.fingerprint), None);
+    assert!(edge.enrolled_door(&late.fingerprint).is_none());
+}
+
+#[test]
+fn approve_refuses_a_name_another_certificate_took_meanwhile() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::new(&edge, Arc::clone(&keys), &public);
+    let b = Gonk::new(&edge, keys, &public);
+    // Each gonk's invites are its own, so neither saw the other's.
+    let from_a = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let from_b = b.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let first = node();
+    let second = node();
+    let first_id = first.request(&edge, &from_a.invite.id, &from_a.code);
+    let second_id = second.request(&edge, &from_b.invite.id, &from_b.code);
+
+    let (said, _) = a.onboard.approve(&first_id).unwrap();
+    let why = conflict(b.onboard.approve(&second_id));
+    assert!(why.contains(&said), "names the entitlement: {why}");
+    assert!(edge.enrolled_door(&second.fingerprint).is_none());
+}
+
+#[test]
+fn a_certificate_may_be_approved_again_under_the_name_it_holds() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::new(&edge, Arc::clone(&keys), &public);
+    let b = Gonk::new(&edge, keys, &public);
+    let from_a = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let from_b = b.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let mini = node();
+    let first = mini.request(&edge, &from_a.invite.id, &from_a.code);
+    let again = mini.request(&edge, &from_b.invite.id, &from_b.code);
+    a.onboard.approve(&first).unwrap();
+    b.onboard.approve(&again).unwrap();
+}
+
+/// The record of `entry` in `status`.
+fn verdict_of(status: &onboard::Status, entry: &str) -> Verdict {
+    status
+        .records
+        .iter()
+        .find(|r| r.entry == entry)
+        .unwrap_or_else(|| panic!("no record of {entry}: {status:?}"))
+        .verdict
+        .clone()
+}
+
+/// The host's reason, or a panic naming what the status said instead.
+fn refusal_of(status: &onboard::Status, entry: &str) -> String {
+    match verdict_of(status, entry) {
+        Verdict::Refused { reason } => reason,
+        other => panic!("expected {entry} refused, got {other:?}: {status:?}"),
+    }
+}
+
+#[test]
+fn an_entitlement_the_host_refuses_reads_refused_with_the_hosts_reason() {
+    let (edge, a) = world("brian");
+    let minted = a.onboard.invite("hidden", &kinds(&["worker"])).unwrap();
+    let hidden = node();
+    let id = hidden.request(&edge, &minted.invite.id, &minted.code);
+    edge.enroll_by_hand("hidden");
+
+    let (said, status) = a.onboard.approve(&id).unwrap();
+
+    assert!(
+        edge.enrolled_door(&hidden.fingerprint).is_none(),
+        "the host turned it away"
+    );
+    let reason = refusal_of(&status, &said);
+    assert!(reason.contains("the layer host"), "says whose: {reason}");
+    assert!(
+        reason.contains("enrollment.toml"),
+        "the host's reason: {reason}"
+    );
+    assert!(status.text().contains(&reason), "{}", status.text());
+    assert_eq!(status.json()["records"][0]["verdict"], "refused");
+    assert_eq!(status.json()["records"][0]["reason"], reason.as_str());
+    assert_eq!(
+        a.enrolled_grant(&hidden.fingerprint),
+        None,
+        "gonk's half follows the host's verdict"
+    );
+}
+
+#[test]
+fn an_entitlement_the_host_later_takes_out_of_force_leaves_gonk_too() {
+    let (edge, a) = world("brian");
+    let minted = a.onboard.invite("late", &kinds(&["worker"])).unwrap();
+    let late = node();
+    let id = late.request(&edge, &minted.invite.id, &minted.code);
+    let (said, status) = a.onboard.approve(&id).unwrap();
+    assert_eq!(verdict_of(&status, &said), Verdict::InForce, "{status:?}");
+    assert_eq!(
+        a.enrolled_grant(&late.fingerprint).as_deref(),
+        Some("onb-late")
+    );
+
+    // A manifest now grants the name, and the host applies again at the next entitlement.
+    edge.put_on_the_roster("late");
+    let minted = a.onboard.invite("next", &kinds(&["worker"])).unwrap();
+    let id = node().request(&edge, &minted.invite.id, &minted.code);
+    let (_, status) = a.onboard.approve(&id).unwrap();
+
+    let reason = refusal_of(&status, &said);
+    assert!(reason.contains("manifest"), "the host's reason: {reason}");
+    assert_eq!(a.enrolled_grant(&late.fingerprint), None);
+    assert_eq!(status.removed.len(), 1, "{status:?}");
+}
+
+#[test]
+fn a_certificate_the_host_refused_can_be_approved_under_another_name() {
+    let (edge, a) = world("brian");
+    let hidden = node();
+    edge.enroll_by_hand("hidden");
+    let minted = a.onboard.invite("hidden", &kinds(&["worker"])).unwrap();
+    let id = hidden.request(&edge, &minted.invite.id, &minted.code);
+    let (refused, _) = a.onboard.approve(&id).unwrap();
+
+    // Refused there means not current there, so the retry supersedes nothing, or the host
+    // would refuse it too.
+    let minted = a.onboard.invite("other", &kinds(&["worker"])).unwrap();
+    let id = hidden.request(&edge, &minted.invite.id, &minted.code);
+    let (said, status) = a.onboard.approve(&id).unwrap();
+
+    assert_eq!(verdict_of(&status, &said), Verdict::InForce, "{status:?}");
+    refusal_of(&status, &refused);
+    assert!(edge.enrolled_door(&hidden.fingerprint).is_some());
+    assert_eq!(
+        a.enrolled_grant(&hidden.fingerprint).as_deref(),
+        Some("onb-other")
+    );
+}
+
+/// The controller's door, on a host whose onboarding status does not answer.
+struct NoStatus(Arc<dyn Door>);
+
+impl Door for NoStatus {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        if request.target.to_string() == "urn:layer:onboard:status" {
+            return Err(Error::Endpoint("the status is away".to_string()));
+        }
+        self.0.call(request)
+    }
+}
+
+#[test]
+fn a_status_that_does_not_read_keeps_gonks_verdict_and_says_so() {
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let a = Gonk::through(
+        Arc::new(NoStatus(edge.controller_door())),
+        keys,
+        &public,
+        onboard::GonkDoor::Default { port: None },
+        KINDS,
+    );
+    let minted = a.onboard.invite("mini", &kinds(&["worker"])).unwrap();
+    let mini = node();
+    let id = mini.request(&edge, &minted.invite.id, &minted.code);
+
+    let (said, status) = a.onboard.approve(&id).unwrap();
+
+    assert_eq!(verdict_of(&status, &said), Verdict::InForce, "{status:?}");
+    assert!(status
+        .host_unread
+        .as_deref()
+        .is_some_and(|why| why.contains("the status is away")));
+    assert!(
+        status.text().contains("may have refused"),
+        "{}",
+        status.text()
+    );
+    assert_eq!(status.error, None, "gonk's own pass ran: {status:?}");
+    assert_eq!(
+        a.enrolled_grant(&mini.fingerprint).as_deref(),
+        Some("onb-mini"),
+        "an unread status takes nobody out"
+    );
+}
+
+/// A layer host nobody can reach.
+struct Down;
+
+impl Door for Down {
+    fn call(&self, _request: Request) -> Result<Representation, Error> {
+        Err(Error::Endpoint("the layer door is down".to_string()))
+    }
+}
+
+#[test]
+fn an_invite_that_cannot_check_its_name_mints_nothing() {
+    let (keys, public) = keystore();
+    let a = Gonk::through(
+        Arc::new(Down),
+        Arc::clone(&keys),
+        &public,
+        onboard::GonkDoor::Default { port: None },
+        KINDS,
+    );
+    match a.onboard.invite("mini", &kinds(&["worker"])) {
+        Err(Error::Endpoint(why)) => {
+            assert!(why.contains("`mini`"), "{why}");
+            assert!(why.contains("the layer door is down"), "{why}");
+        }
+        other => panic!("expected the door's failure, got {other:?}"),
+    }
+    assert_eq!(open_codes(&keys), 0);
 }

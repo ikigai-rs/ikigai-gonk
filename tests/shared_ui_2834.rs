@@ -68,7 +68,9 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel_serving(
             hub,
@@ -80,6 +82,7 @@ impl Server {
             anonymous: anonymous_http_grants(&["default".to_string()]).unwrap(),
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         let edge = doors::edge_config(door.clone());

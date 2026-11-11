@@ -17,8 +17,11 @@
 //!                                       # UDP at the HTTP port once a certificate is enrolled
 //! # ledgers the HTTP door's anonymous loopback caller may READ; repeatable
 //! gonk.http.ledger = "default"
+//! # gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in
+//!                                       # (this IS the default; 1 to 720), but one whose grant
+//!                                       # can write ends after 12 h whatever this says
 //! # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long
-//!                                       # ends (this IS the default; 1 to 720, the 12 h bound)
+//!                                       # ends (this IS the default; 1 to 60 × the line above)
 //! # a browsable repository; repeatable
 //! gonk.browse.root = "core=~/git-personal/ikigai-core"
 //! # the GitHub repository a root's "On GitHub" links name, when its origin does not; repeatable
@@ -61,7 +64,7 @@
 //!                                       # default; 0 for none): scripts, plans, draft dry runs
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
-//! # one access line per request on stderr (this IS the default; `false` for none)
+//! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
 //! # gonk.log.access = true
 //! ```
 //!
@@ -124,7 +127,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 44] = [
+const KEYS: [&str; 53] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -134,6 +137,7 @@ const KEYS: [&str; 44] = [
     "gonk.layer.deny",
     "gonk.layers.view",
     "gonk.layers.local",
+    "gonk.feeds.door",
     "gonk.queue.serious",
     "gonk.bind",
     "gonk.port",
@@ -143,8 +147,13 @@ const KEYS: [&str; 44] = [
     "gonk.ledger.lifecycle",
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.http.session_idle_minutes",
+    "gonk.http.session_max_hours",
     "gonk.browse.root",
     "gonk.browse.github",
+    "gonk.repository",
+    "gonk.repository.commit",
+    "gonk.repository.blob",
+    "gonk.repository.file",
     "gonk.mount",
     "gonk.mount.calls_per_hour",
     "gonk.explain.file.provider",
@@ -169,6 +178,9 @@ const KEYS: [&str; 44] = [
     "gonk.review.judge",
     "gonk.review.judge_max_tokens",
     crate::toolbox::KEY,
+    crate::face::KEY,
+    crate::page_assets::STYLE_KEY,
+    crate::page_assets::SCRIPT_KEY,
 ];
 
 /// How to invoke the binary.
@@ -190,6 +202,11 @@ usage:
                                    key pair (or, with --cert, its certificate) and unenrolls the
                                    old fingerprint. --port / --quic-bind name the server's, so
                                    the printed --connect line names the right port
+  ikigai-gonk feeds join|leave [--config PATH] [--config-home DIR] [--data-home DIR]
+                                   join the public feeds of gonk.feeds.door (https://ikigai-rs.dev
+                                   by default) with a certificate of this server's own, in
+                                   <data home>/feeds/identity, or delete that identity. A
+                                   running server notices. The same as the buttons on /feed
   ikigai-gonk client list [--config PATH]
                                    every QUIC client: each bundle and each enrolled
                                    fingerprint, its grant, and whether a connection from it is
@@ -200,8 +217,22 @@ usage:
                                    grant name may be shared. Effective at its next call;
                                    its certificate stays TLS-trusted until a restart
   ikigai-gonk passkey list [--config PATH]
-                                   every enrolled passkey: its label, grant, credential id
-                                   and IRI
+                                   every enrolled passkey: its label, grants, credential id
+                                   and IRI, each grant's scopes as grants.json stores them,
+                                   and each grant an invite added to it (or that was
+                                   removed), with the invite's hash
+  ikigai-gonk passkey grant add <label> | --credential <id> <grant> [--config PATH]
+                                   add one grant grants.json defines to one passkey, leaving
+                                   every other passkey and grants.json alone, and append a
+                                   gonk:PasskeyGrantAdded line (by=owner) to gonk/passkeys.log.
+                                   A grant it already holds is refused. Effective at its next
+                                   request; its sessions stay signed in
+  ikigai-gonk passkey grant remove <label> | --credential <id> <grant> [--config PATH]
+                                   take one grant off one passkey, leaving its other grants,
+                                   every other passkey and grants.json alone, and append a
+                                   gonk:PasskeyGrantRemoved line to gonk/passkeys.log. Its
+                                   last grant is refused (revoke the passkey instead).
+                                   `passkey remove-grant <label> --grant <name>` is the same
   ikigai-gonk passkey revoke <label> | --credential <id> [--config PATH]
                                    remove one passkey from clients.json and append a
                                    gonk:PasskeyRevoked line to gonk/passkeys.log. A label two
@@ -218,14 +249,20 @@ usage:
   ikigai-gonk passkey invite <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--alias <ledger>=<scheme>]... [--link-in <ledger>]... [--mirror-to <ledger>]...
-                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--minutes N] [--port N] [--config PATH] [--force]
+                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--scope <urn:cap:…>]...
+                     [--minutes N] [--port N] [--config PATH] [--force]
                                    write grant <name> and print a one-time
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrolls a passkey under that grant. Refused on a
-                                   bind localhost cannot reach (127.0.0.2); warned on [::1]
+                                   bind localhost cannot reach (127.0.0.2); warned on [::1].
+                                   --scope adds a scope no other flag names (urn:cap:exec:git),
+                                   in the same write; a repeat, or one a flag already grants, is
+                                   stored once
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
-  remove and add; --force writes it and prints the same list. A grant name is shared by every
+  remove and add; --force writes it and prints the same list. --force writes the grant WHOLE
+  from the flags, narrowing included, by design: a scope no flag names stays only if a --scope
+  names it. A grant name is shared by every
   certificate and passkey enrolled under it, so the change reaches all of them.
 
   --browse is the repositories as a ROLE (each role holds the one before it):
@@ -517,6 +554,28 @@ pub enum Command {
         /// `--config`.
         flags: Flags,
     },
+    /// Take one grant off one enrolled passkey and record it (ledger #3388).
+    PasskeyRemoveGrant {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// `--grant`: the grant name to take off.
+        grant: String,
+        /// `--config`.
+        flags: Flags,
+    },
+    /// Add one grant to one enrolled passkey and record it (ledger #3400).
+    PasskeyAddGrant {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// The grant name to add, as `grants.json` defines it.
+        grant: String,
+        /// `--config`.
+        flags: Flags,
+    },
     /// End every session of one enrolled passkey and record it (ledger #1824).
     PasskeyLogoutAll {
         /// The label, or — with `--credential` — the credential id.
@@ -546,6 +605,9 @@ pub enum Command {
         scripts: Vec<(String, ScriptAuthority)>,
         /// `--nl draft`: draft queries with `urn:nl:sparql` (ledger #1138).
         nl_draft: bool,
+        /// `--scope <urn>`: scopes no other flag names, written into the same grant in the
+        /// same write ([`scope_spec`], ledger #3401). Repeats are kept once.
+        scopes: Vec<String>,
         /// Replace an existing grant of that name with different scopes.
         force: bool,
         /// How long the invite is valid.
@@ -575,6 +637,11 @@ pub enum Command {
     /// File one roborev review's findings into a ledger over the owner-only socket.
     RoborevFile(crate::roborev::FileArgs),
     /// The onboarding controller's commands (ledger #2009, [`crate::onboard`]).
+    Feeds {
+        /// `join` or `leave`.
+        op: FeedsOp,
+        flags: Flags,
+    },
     Onboard(crate::onboard::Args),
     /// Clone or fast-forward the repositories gonk browses, and print their root lines.
     Checkout(crate::checkout::Args),
@@ -682,6 +749,10 @@ pub struct Settings {
     /// (`gonk.http.session_idle_minutes`, default [`crate::identity::DEFAULT_IDLE_SECONDS`]):
     /// see [`session_idle_seconds`].
     pub session_idle_seconds: u64,
+    /// How long a passkey session lasts after its sign-in at most, in seconds
+    /// (`gonk.http.session_max_hours`, default [`crate::identity::SESSION_SECONDS`]): see
+    /// [`session_max_seconds`]. A session whose grant can write is held to 12 h whatever this is.
+    pub session_max_seconds: u64,
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
     pub browse_roots: Vec<(String, PathBuf)>,
@@ -689,6 +760,8 @@ pub struct Settings {
     /// root's "On GitHub" links name in place of its origin's ([`crate::github`]), normalized
     /// to `https://github.com/{owner}/{repo}`.
     pub browse_github: Vec<(String, String)>,
+    /// Local clone map and commit/blob URL templates (#3198).
+    pub repositories: Vec<crate::git_object::Repository>,
     /// The mounted peers. Empty means `urn:llm:*` resolves nowhere, and the explanation
     /// families are therefore not bound — see [`Settings::explains`].
     pub mounts: Vec<Mount>,
@@ -697,6 +770,8 @@ pub struct Settings {
     /// The Layers page's door and identity (`gonk.layers.view`, [`crate::layers_view`]), or
     /// `None`: the page says it is not configured.
     pub layers_view: Option<crate::layers_view::ViewConfig>,
+    /// The host whose public feeds this server may join (`gonk.feeds.door`, ledger #3291).
+    pub feeds_door: String,
     /// The per-kind providers and spend ceilings the explanation families derive under.
     pub explain: ExplainTiers,
     /// Where backups land, how many are kept, and how often one is taken.
@@ -709,8 +784,8 @@ pub struct Settings {
     pub queue: QueuePolicy,
     /// Which name each holder counts under on the Dashboard's Agents tab (`gonk.holder.alias`).
     pub holder_aliases: crate::holders::HolderAliases,
-    /// Whether every door writes one access line per request to stderr (`gonk.log.access`,
-    /// on unless a line says `false`) — see [`crate::access`].
+    /// Whether every door writes one `log:Access` entry per request into the log segment
+    /// (`gonk.log.access`, on unless a line says `false`) — see [`crate::access`].
     pub access_log: bool,
     /// Where the scripts live (`gonk.script.dir`, default [`crate::script::DIR_NAME`] under the
     /// data home): one directory of plain files, this server's alone — see [`crate::script`].
@@ -730,6 +805,12 @@ pub struct Settings {
     /// The RDF Toolbox's build directory (`gonk.toolbox.dist`, [`crate::toolbox`]), or `None`:
     /// no `/toolbox`, and nothing else changes.
     pub toolbox: Option<crate::toolbox::Toolbox>,
+    /// A deployment's own pages (`gonk.face`, [`crate::face`], ledger #3199), one per line;
+    /// empty for none: no `/face/name/…`, and nothing else changes.
+    pub faces: Vec<crate::face::Face>,
+    /// A deployment's own stylesheets and scripts on gonk's pages (`gonk.page.style`,
+    /// `gonk.page.script`, [`crate::page_assets`], ledger #3379); empty for none.
+    pub page_assets: crate::page_assets::PageAssets,
     /// The onboarding controller's door and files (`gonk.onboard`, [`crate::onboard`]), or
     /// `None`: no `urn:iki:onboard:*`, and nothing else changes.
     pub onboard: Option<crate::onboard::Config>,
@@ -1096,6 +1177,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return crate::onboard::parse_args(args).map(Command::Onboard);
         }
+        Some("feeds") => {
+            args.next();
+            return parse_feeds(args);
+        }
         Some("roborev") => {
             args.next();
             return crate::roborev::parse_args(args).map(Command::RoborevFile);
@@ -1289,6 +1374,34 @@ fn parse_layer(mut args: impl Iterator<Item = String>) -> Result<Command, String
         }
     }
     Ok(Command::LayerTake { offer, flags })
+}
+
+/// What `ikigai-gonk feeds` does (ledger #3291).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedsOp {
+    /// `feeds join`.
+    Join,
+    /// `feeds leave`.
+    Leave,
+}
+
+fn parse_feeds(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let op = match args.next().as_deref() {
+        Some("join") => FeedsOp::Join,
+        Some("leave") => FeedsOp::Leave,
+        Some(other) => return Err(format!("feeds: `{other}` is not join or leave")),
+        None => return Err("feeds: expected `join` or `leave`".to_string()),
+    };
+    let mut flags = Flags::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other => return Err(format!("feeds: unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::Feeds { op, flags })
 }
 
 /// What `ikigai-gonk browse` does (ledger #2154).
@@ -1548,6 +1661,81 @@ fn script_spec(spec: &str) -> Result<(String, ScriptAuthority), String> {
     Ok((name.to_string(), authority))
 }
 
+/// `passkey grant add|remove (<label> | --credential <id>) <grant>` (ledger #3400). `grant
+/// remove` is `remove-grant` spelled as the pair; the grant may also be given as `--grant`.
+fn parse_passkey_grant(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let add = match args.next().as_deref() {
+        Some("add") => true,
+        Some("remove") => false,
+        Some(other) => {
+            return Err(format!(
+                "passkey grant: unknown subcommand `{other}` (expected `add` or `remove`)"
+            ))
+        }
+        None => {
+            return Err(
+                "passkey grant: expected `add <label> <grant>` or `remove <label> \
+                        <grant>`"
+                    .to_string(),
+            )
+        }
+    };
+    let sub = if add { "grant add" } else { "grant remove" };
+    let mut flags = Flags::default();
+    let (mut positional, mut credential, mut grant) = (Vec::new(), None, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--credential" => credential = Some(value(&mut args, "--credential")?),
+            "--grant" => grant = Some(value(&mut args, "--grant")?),
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("passkey {sub}: unknown argument `{other}`"))
+            }
+            other => positional.push(other.to_string()),
+        }
+    }
+    let mut positional = positional.into_iter();
+    let (key, by_label) = match credential {
+        Some(credential) => (credential, false),
+        None => (
+            positional.next().ok_or_else(|| {
+                format!(
+                    "passkey {sub}: expected <label> or --credential <id> (as `passkey list` \
+                     prints them)"
+                )
+            })?,
+            true,
+        ),
+    };
+    let grant = match (grant, positional.next()) {
+        (Some(grant), None) | (None, Some(grant)) => grant,
+        (None, None) => return Err(format!("passkey {sub}: expected the grant's name")),
+        (Some(_), Some(other)) => {
+            return Err(format!("passkey {sub}: unexpected argument `{other}`"))
+        }
+    };
+    if let Some(other) = positional.next() {
+        return Err(format!("passkey {sub}: unexpected argument `{other}`"));
+    }
+    Ok(if add {
+        Command::PasskeyAddGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        }
+    } else {
+        Command::PasskeyRemoveGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        }
+    })
+}
+
 fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     match args.next().as_deref() {
         Some("invite") => {}
@@ -1563,12 +1751,16 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             }
             return Ok(Command::PasskeyList { flags });
         }
-        Some(sub @ ("revoke" | "logout")) => {
+        Some("grant") => return parse_passkey_grant(args),
+        Some(sub @ ("revoke" | "logout" | "remove-grant")) => {
             let mut flags = Flags::default();
-            let (mut label, mut credential, mut all) = (None, None, false);
+            let (mut label, mut credential, mut all, mut grant) = (None, None, false, None);
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    "--grant" if sub == "remove-grant" => {
+                        grant = Some(value(&mut args, "--grant")?)
+                    }
                     "--all" if sub == "logout" => all = true,
                     flag @ ("--config" | "--config-home" | "--data-home") => {
                         home_flag(flag, &mut args, &mut flags)?
@@ -1599,6 +1791,17 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                     ))
                 }
             };
+            if sub == "remove-grant" {
+                let grant = grant.ok_or(
+                    "passkey remove-grant: expected --grant <name> (as `passkey list` prints it)",
+                )?;
+                return Ok(Command::PasskeyRemoveGrant {
+                    key,
+                    by_label,
+                    grant,
+                    flags,
+                });
+            }
             return Ok(if sub == "logout" {
                 Command::PasskeyLogoutAll {
                     key,
@@ -1615,13 +1818,14 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         }
         Some(other) => {
             return Err(format!(
-                "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke` or \
-                 `logout --all`)"
+                "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke`, \
+                 `grant add`, `grant remove` or `logout --all`)"
             ))
         }
         None => {
             return Err(
-                "passkey: expected `invite <name>`, `list`, `revoke <label>` or \
+                "passkey: expected `invite <name>`, `list`, `revoke <label>`, \
+                        `grant add <label> <grant>`, `grant remove <label> <grant>` or \
                         `logout --all <label>`"
                     .to_string(),
             )
@@ -1640,11 +1844,17 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
     );
     let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
     let mut across = Vec::new();
-    let (mut scripts, mut nl_draft) = (Vec::new(), false);
+    let (mut scripts, mut nl_draft, mut scopes) = (Vec::new(), false, Vec::new());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
             "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
+            "--scope" => {
+                let scope = scope_spec(&name, &value(&mut args, "--scope")?)?;
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
             "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--root" => roots.push(value(&mut args, "--root")?),
             "--ledger" => {
@@ -1700,10 +1910,62 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         browse: browse_grant(role, roots)?,
         scripts,
         nl_draft,
+        scopes,
         force,
         minutes,
         flags,
     })
+}
+
+/// One `passkey invite --scope <urn>` (ledger #3401): a scope no other flag names, such as
+/// `urn:cap:exec:git` for ikigai-repo's code links.
+///
+/// It must be a `urn:cap:` scope with no empty segment and nothing but visible ASCII, and
+/// it must pass [`crate::quic::grant_refusal`], the rule every grant in `grants.json` is
+/// held to at startup and per use, so a scope the doors would refuse (a whole-dataset
+/// token, an offering wildcard, a door's marker, an identity's name, the owner's tokens)
+/// is refused here, before anything is written. The refusal names the value.
+///
+/// A value that repeats another `--scope`, or one another flag already grants, is kept once,
+/// silently: the grant is a set, so a duplicate changes nothing and confuses nothing.
+///
+/// ```
+/// use ikigai_gonk::config::scope_spec;
+/// assert_eq!(scope_spec("chris", "urn:cap:exec:git").unwrap(), "urn:cap:exec:git");
+/// assert!(scope_spec("chris", "exec:git").unwrap_err().contains("`exec:git`"));
+/// assert!(scope_spec("chris", "urn:cap:exec:*").unwrap_err().contains("`urn:cap:exec:*`"));
+/// ```
+///
+/// # Errors
+///
+/// A sentence naming the value and what is wrong with it.
+pub fn scope_spec(grant: &str, spec: &str) -> Result<String, String> {
+    const PREFIX: &str = "urn:cap:";
+    let malformed = |why: &str| format!("--scope `{spec}`: {why}; nothing was written");
+    let Some(rest) = spec.strip_prefix(PREFIX) else {
+        return Err(malformed(
+            "a grant's scopes are capability URNs, so this must start with `urn:cap:` \
+             (for example `urn:cap:exec:git`)",
+        ));
+    };
+    if !spec.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(malformed(
+            "a scope is visible ASCII only, with no whitespace or control characters",
+        ));
+    }
+    if rest.is_empty() || rest.split(':').any(str::is_empty) {
+        return Err(malformed(
+            "a scope has no empty segment: nothing may follow `urn:cap:` empty, and no `::` \
+             or trailing `:`",
+        ));
+    }
+    if let Some(refusal) = crate::quic::grant_refusal(grant, &[spec.to_string()]) {
+        return Err(format!(
+            "--scope `{spec}` is refused, as grants.json would refuse it: {refusal}; nothing \
+             was written"
+        ));
+    }
+    Ok(spec.to_string())
 }
 
 /// `ikigai-gonk grants --browse <read|derive> [--root R]... [--config PATH]`.
@@ -1877,6 +2139,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     };
     let browse_roots = browse_roots(flags, text, homes)?;
     let browse_github = browse_github(text, &browse_roots)?;
+    let repositories = crate::git_object::configured(text, &homes.home, &browse_roots)?;
     let mounts = mounts(flags, text, homes)?;
     let mut layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
     if let Some(deny) = layer_deny(text, homes)? {
@@ -1921,6 +2184,17 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             crate::layers_view::check_not_a_binding(&view, &layers)?;
             view.local = local;
             Some(view)
+        }
+    };
+    let feeds_door = match values_for(text, crate::feeds_join::DOOR_KEY).as_slice() {
+        [] => crate::feeds_join::DEFAULT_DOOR.to_string(),
+        [line] => crate::feeds_join::parse_door(line)?,
+        lines => {
+            return Err(format!(
+                "{} is given {} times: a server joins one host's public feeds",
+                crate::feeds_join::DOOR_KEY,
+                lines.len()
+            ))
         }
     };
     let onboard = match values_for(text, crate::onboard::KEY).as_slice() {
@@ -1975,6 +2249,8 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     let anonymous_sparql_budget_ms = crate::budget::anonymous_budget(
         value_for(text, "gonk.http.anonymous_sparql_budget_ms").as_deref(),
     )?;
+    let session_max_seconds =
+        session_max_seconds(value_for(text, "gonk.http.session_max_hours").as_deref())?;
     Ok(Settings {
         max_scoped_copy_quads: max_scoped_copy_quads(text)?,
         http,
@@ -1985,12 +2261,16 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         anonymous_sparql_budget_ms,
         session_idle_seconds: session_idle_seconds(
             value_for(text, "gonk.http.session_idle_minutes").as_deref(),
+            session_max_seconds,
         )?,
+        session_max_seconds,
         browse_roots,
         browse_github,
+        repositories,
         mounts,
         layers,
         layers_view,
+        feeds_door,
         explain,
         backup,
         review,
@@ -2011,6 +2291,11 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),
         )?,
         toolbox: toolbox(text, homes)?,
+        faces: crate::face::parse_all(&values_for(text, crate::face::KEY), &homes.home)?,
+        page_assets: crate::page_assets::PageAssets::parse(
+            &values_for(text, crate::page_assets::STYLE_KEY),
+            &values_for(text, crate::page_assets::SCRIPT_KEY),
+        )?,
         onboard,
     })
 }
@@ -2050,38 +2335,84 @@ fn toolbox(text: &str, homes: &Homes) -> Result<Option<crate::toolbox::Toolbox>,
     }
 }
 
-/// `gonk.http.session_idle_minutes`, checked and in seconds: a whole number of minutes from 1
-/// to 720, absent meaning [`crate::identity::DEFAULT_IDLE_SECONDS`] (an hour). Ledger
-/// [#1824](http://localhost:1062/l/default/item/1824).
+/// `gonk.http.session_max_hours`, checked and in seconds: a whole number of hours from 1 to
+/// 720 (30 days), absent meaning [`crate::identity::SESSION_SECONDS`] (12 h). Ledger
+/// [#3229](http://localhost:1062/l/default/item/3229).
 ///
-/// The bound is beside the 12 h absolute one ([`crate::identity::SESSION_SECONDS`]), never
-/// instead of it: past 720 it could never be reached, and `0` would end every session at its
-/// first request, so both are refused rather than read as "off".
+/// It is the absolute lifetime of a session whose grant only READS
+/// ([`crate::identity::read_only`]). A session whose grant can write ends after 12 h whatever
+/// this says. Never unbounded: a stolen cookie for a read-only session still reads everything
+/// its grant covers, so past 720 is refused, and so is `0`.
 ///
 /// ```
-/// use ikigai_gonk::config::session_idle_seconds;
-/// assert_eq!(session_idle_seconds(None), Ok(3600));
-/// assert_eq!(session_idle_seconds(Some("15")), Ok(900));
-/// assert_eq!(session_idle_seconds(Some("720")), Ok(43_200));
-/// for bad in ["0", "721", "-5", "1h", ""] {
-///     assert!(session_idle_seconds(Some(bad)).is_err(), "{bad}");
+/// use ikigai_gonk::config::session_max_seconds;
+/// assert_eq!(session_max_seconds(None), Ok(43_200));
+/// assert_eq!(session_max_seconds(Some("240")), Ok(864_000));
+/// assert_eq!(session_max_seconds(Some("720")), Ok(2_592_000));
+/// for bad in ["0", "721", "-5", "12h", ""] {
+///     let refusal = session_max_seconds(Some(bad)).unwrap_err();
+///     assert!(refusal.contains("gonk.http.session_max_hours"), "{refusal}");
+///     assert!(refusal.contains(&format!("`{bad}`")), "{refusal}");
+///     assert!(refusal.contains("from 1 to 720"), "{refusal}");
 /// }
 /// ```
 ///
 /// # Errors
 ///
-/// When the value is not a whole number of minutes from 1 to 720.
-pub fn session_idle_seconds(value: Option<&str>) -> Result<u64, String> {
+/// When the value is not a whole number of hours from 1 to 720.
+pub fn session_max_seconds(value: Option<&str>) -> Result<u64, String> {
     let Some(value) = value else {
-        return Ok(crate::identity::DEFAULT_IDLE_SECONDS);
+        return Ok(crate::identity::SESSION_SECONDS);
     };
-    let most = crate::identity::SESSION_SECONDS / 60;
+    let most = crate::identity::READ_ONLY_SESSION_SECONDS / 3600;
+    let write = crate::identity::SESSION_SECONDS / 3600;
+    match value.trim().parse::<u64>() {
+        Ok(hours) if (1..=most).contains(&hours) => Ok(hours * 3600),
+        _ => Err(format!(
+            "gonk.http.session_max_hours = `{value}` is not a whole number of hours from 1 to \
+             {most} (a passkey session ends that long after its sign-in; one whose grant can \
+             write ends after {write} hours whatever this says)"
+        )),
+    }
+}
+
+/// `gonk.http.session_idle_minutes`, checked and in seconds: a whole number of minutes from 1
+/// to the absolute lifetime `max_seconds` ([`session_max_seconds`]) in minutes, absent meaning
+/// [`crate::identity::DEFAULT_IDLE_SECONDS`] (an hour). Ledger
+/// [#1824](http://localhost:1062/l/default/item/1824).
+///
+/// The bound is beside the absolute one, never instead of it: past it, it could never be
+/// reached, and `0` would end every session at its first request, so both are refused rather
+/// than read as "off".
+///
+/// ```
+/// use ikigai_gonk::config::session_idle_seconds;
+/// let twelve_hours = 43_200;
+/// assert_eq!(session_idle_seconds(None, twelve_hours), Ok(3600));
+/// assert_eq!(session_idle_seconds(Some("15"), twelve_hours), Ok(900));
+/// assert_eq!(session_idle_seconds(Some("720"), twelve_hours), Ok(43_200));
+/// assert_eq!(session_idle_seconds(Some("1440"), 2 * twelve_hours), Ok(86_400));
+/// for bad in ["0", "721", "-5", "1h", ""] {
+///     let refusal = session_idle_seconds(Some(bad), twelve_hours).unwrap_err();
+///     assert!(refusal.contains("gonk.http.session_idle_minutes"), "{refusal}");
+///     assert!(refusal.contains("from 1 to 720"), "{refusal}");
+/// }
+/// ```
+///
+/// # Errors
+///
+/// When the value is not a whole number of minutes from 1 to the absolute lifetime.
+pub fn session_idle_seconds(value: Option<&str>, max_seconds: u64) -> Result<u64, String> {
+    let most = (max_seconds / 60).max(1);
+    let Some(value) = value else {
+        return Ok(crate::identity::DEFAULT_IDLE_SECONDS.min(most * 60));
+    };
     match value.trim().parse::<u64>() {
         Ok(minutes) if (1..=most).contains(&minutes) => Ok(minutes * 60),
         _ => Err(format!(
             "gonk.http.session_idle_minutes = `{value}` is not a whole number of minutes from 1 \
              to {most} (a passkey session with no request for that long ends; it always ends \
-             {most} minutes after its sign-in)"
+             {most} minutes after its sign-in, `gonk.http.session_max_hours`)"
         )),
     }
 }
@@ -2695,6 +3026,59 @@ mod tests {
             let refused = with(line).map(|_| ()).unwrap_err();
             assert!(refused.contains(says), "{line}: {refused}");
         }
+    }
+
+    /// Ledger #3232: the README's "Linking Git evidence to code" example, exactly as written,
+    /// starts the server through `settings` (the path taken at start, where `check_keys` runs
+    /// before the repository map is read) and reaches `repositories`.
+    #[test]
+    fn the_documented_repository_map_is_accepted_at_start() {
+        let readme = include_str!("../README.md");
+        let section = readme
+            .split("Configure local clones and optional web URL templates in `config.toml`:")
+            .nth(1)
+            .expect("the README's repository-map section");
+        let block = section
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the section's toml block");
+        for key in [
+            "gonk.repository =",
+            "gonk.repository.commit =",
+            "gonk.repository.blob =",
+            "gonk.repository.file =",
+        ] {
+            assert!(block.contains(key), "the example sets {key}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("git/ikigai-core")).unwrap();
+        let homes = Homes {
+            home: home.path().to_path_buf(),
+            ..homes()
+        };
+        let settings = settings(&Flags::default(), block, &homes).unwrap();
+        let [repository] = settings.repositories.as_slice() else {
+            panic!("one repository, got {:?}", settings.repositories.len());
+        };
+        assert_eq!(repository.name, "core");
+        assert_eq!(
+            repository.dir,
+            home.path().join("git/ikigai-core").canonicalize().unwrap()
+        );
+        assert_eq!(
+            repository.commit.as_deref(),
+            Some("https://github.com/ikigai-rs/ikigai-core/commit/{sha}")
+        );
+        assert_eq!(
+            repository.blob.as_deref(),
+            Some("https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}")
+        );
+        // Ledger #3238: the working-tree file template, read through `settings` the same way.
+        assert_eq!(
+            repository.file.as_deref(),
+            Some("https://github.com/ikigai-rs/ikigai-core/blob/HEAD/{path}")
+        );
     }
 
     /// Ledger #3034: a bad rule stops the server at start, naming the line.
@@ -3636,6 +4020,11 @@ mod tests {
                 None => spelled.split_whitespace().next().unwrap_or(""),
             };
             checked += 1;
+            if name.starts_with("gonk.") && !KEYS.contains(&name) {
+                wrong.push(format!(
+                    "{name}: documented, but not in KEYS, so it stops the start"
+                ));
+            }
             if read != meant {
                 wrong.push(format!(
                     "{name}: the reader takes `{read}`, the line means `{meant}`"
@@ -3715,6 +4104,25 @@ mod tests {
     /// Ledger #1856: `gonk.layers.local` names who else writes on this host's side of a layer.
     /// It reaches the Layers page's config, is refused without a Layers page, given twice, or
     /// naming nobody, and its absence means only the page's own identity.
+    #[test]
+    fn feeds_join_and_leave_parse_and_nothing_else_does() {
+        let parse = |words: &[&str]| parse_feeds(words.iter().map(|w| w.to_string()));
+        assert!(matches!(
+            parse(&["join", "--data-home", "/d"]),
+            Ok(Command::Feeds { op: FeedsOp::Join, flags }) if flags.data_home.is_some()
+        ));
+        assert!(matches!(
+            parse(&["leave"]),
+            Ok(Command::Feeds {
+                op: FeedsOp::Leave,
+                ..
+            })
+        ));
+        assert!(parse(&["subscribe"]).is_err());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["join", "--force"]).is_err());
+    }
+
     #[test]
     fn the_local_participants_reach_the_layers_view() {
         let dir = tempfile::tempdir().unwrap();

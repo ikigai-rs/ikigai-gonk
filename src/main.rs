@@ -90,6 +90,7 @@ fn main() {
                         ledger_graphs: &ledger_graphs,
                         across: &across,
                         scripts: &scripts,
+                        scopes: &[],
                     },
                     &browse_scopes,
                 ),
@@ -114,6 +115,18 @@ fn main() {
             by_label,
             flags,
         } => passkey_logout_all(&key, by_label, &flags),
+        Command::PasskeyRemoveGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        } => passkey_remove_grant(&key, by_label, &grant, &flags),
+        Command::PasskeyAddGrant {
+            key,
+            by_label,
+            grant,
+            flags,
+        } => passkey_add_grant(&key, by_label, &grant, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -123,6 +136,7 @@ fn main() {
             browse,
             scripts,
             nl_draft,
+            scopes,
             force,
             minutes,
             flags,
@@ -134,6 +148,7 @@ fn main() {
                 ledger_graphs: &ledger_graphs,
                 across: &across,
                 scripts: &scripts,
+                scopes: &scopes,
             },
             browse.as_ref(),
             nl_draft,
@@ -142,6 +157,7 @@ fn main() {
             &flags,
         ),
         Command::Onboard(args) => onboard_command(&args),
+        Command::Feeds { op, flags } => feeds_command(op, &flags),
         Command::RoborevFile(args) => {
             let door = bridge_door(args.quic.clone(), &args.flags);
             ikigai_gonk::roborev::run(&args, &door, &mut std::io::stdout())
@@ -183,6 +199,9 @@ fn bridge_door(
 }
 
 fn serve(flags: &config::Flags) -> ! {
+    // Before any line is written: the log names each caller, so it is owner-only and rotated
+    // daily, 14 kept (ledger #3159).
+    ikigai_gonk::logfile::narrow_and_rotate();
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let (config_path, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     // Not prefixed with the config path: a setting may have come from a flag, and a message
@@ -197,12 +216,19 @@ fn serve(flags: &config::Flags) -> ! {
     config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
     // The anonymous loopback caller: its ledgers' READ tokens (ledger #1687), and the right to run
     // and read a PUBLIC script (ledger #939, `script::ANONYMOUS`).
-    // And, when `gonk.toolbox.dist` is set, a read on exactly the toolbox's files (ledger #1933,
-    // `grants::toolbox_read_grants`): the toolbox reads its build under its caller's capability.
-    let mut http_grants =
+    let http_grants =
         grants::anonymous_http_grants(&settings.http_ledgers).unwrap_or_else(|e| fail(&e));
+    // The door's PUBLIC files, read by the anonymous loopback caller and by every live passkey
+    // session from any peer (ledger #3202, `doors::HttpDoor::public`): when `gonk.toolbox.dist`
+    // is set, a read on exactly the toolbox's files (ledger #1933, `grants::toolbox_read_grants`),
+    // and a read on each `gonk.face` directory (ledger #3199, `face::Face::grants`). Each is
+    // read under its caller's capability, and nobody holds a write there.
+    let mut public_reads: Vec<String> = Vec::new();
     if let Some(toolbox) = &settings.toolbox {
-        http_grants.extend(toolbox.grants());
+        public_reads.extend(toolbox.grants());
+    }
+    for face in &settings.faces {
+        public_reads.extend(face.grants());
     }
 
     // Authority is decided before the store opens: a broken authority file stops the server
@@ -316,7 +342,7 @@ fn serve(flags: &config::Flags) -> ! {
         .shared_writer()
         .expect("a store opened shared hands out its writer");
     let browse = browses.then(|| {
-        browse::wire(
+        browse::wire_with_github(
             settings.browse_roots.clone(),
             writer.clone(),
             Some(&root_watch),
@@ -325,6 +351,7 @@ fn serve(flags: &config::Flags) -> ! {
             // `Graph::chosen()`, which would be a second decision.
             &browse_graph,
             Some(homes.config.clone()),
+            &settings.browse_github,
         )
     });
     let browse_line = browse_line(&settings.browse_roots, root_watch.watched(), &browse_graph);
@@ -335,14 +362,7 @@ fn serve(flags: &config::Flags) -> ! {
     let (browse_space, style) = match browse {
         Some(wired) => (
             Some(Arc::new(
-                wired
-                    .space
-                    .observing_reviews(Arc::clone(&activity))
-                    // "On GitHub" with the operator's `gonk.browse.github` lines (ledger #1907).
-                    .with_github(Arc::new(ikigai_gonk::github::space(
-                        &settings.browse_roots,
-                        &settings.browse_github,
-                    ))),
+                wired.space.observing_reviews(Arc::clone(&activity)),
             )),
             Some(wired.style),
         ),
@@ -360,16 +380,16 @@ fn serve(flags: &config::Flags) -> ! {
                 let (graph, config_home, writer) =
                     (browse_graph.clone(), homes.config.clone(), writer.clone());
                 let build: roots::Build = Box::new(move |roots, watch, github| {
-                    browse::wire(
+                    browse::wire_with_github(
                         roots.to_vec(),
                         writer.clone(),
                         Some(watch),
                         explain.as_ref(),
                         &graph,
                         Some(config_home.clone()),
+                        github,
                     )
                     .space
-                    .with_github(Arc::new(ikigai_gonk::github::space(roots, github)))
                 });
                 roots::Source::Config {
                     path: config_path.clone(),
@@ -455,6 +475,11 @@ fn serve(flags: &config::Flags) -> ! {
         Some(t) => resolve_reviewer(t, &layout),
         None => None,
     };
+    // ★ The one record of who did what (ledger #383): an `ikigai-log` segment in gonk's data
+    // home, hash-chained, that every door's line and every passkey sign-in lands in. Opened
+    // before the hub, which serves it as `urn:log:*` to the owner alone (`grants::CAP_GONK_ADMIN`).
+    let record =
+        access::Record::open(&homes.config, &layout.log_dir()).unwrap_or_else(|e| fail(&e));
     let mut trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
@@ -517,6 +542,13 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    if let Some(record) = &record {
+        trigger_spaces.push(Arc::new(ikigai_log::endpoints::space(record.handle())));
+    }
+    trigger_spaces.push(Arc::new(ikigai_gonk::git_object::space(
+        "configured",
+        &settings.repositories,
+    )));
     // ★ The named views (ledger #2006, `views`): core's dynamic space LAST in the hub, rebuilt
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();
@@ -583,6 +615,15 @@ fn serve(flags: &config::Flags) -> ! {
             Some(homes.data.join("layers-view").join("cursors.json")),
         )
     });
+    // ★ The public feeds (ledger #3291): nothing is fetched or dialed until the owner joins.
+    let public_feeds = ikigai_gonk::feeds_join::PublicFeeds::open(
+        settings.feeds_door.clone(),
+        &homes.data,
+        Arc::new(ikigai_gonk::feeds_join::WebPki),
+        layers_view.clone(),
+        Some(homes.data.join("layers-view").join("cursors.json")),
+        ikigai_gonk::layers_view::Waits::default(),
+    );
     let layers_line = match (&settings.layers_view, &layers_view) {
         (Some(_), Some(view)) => format!(
             "/layers reads and posts at {} as the identity its certificates name (asked of the              door on first use); a passkey grant needs {} (and {} to post)",
@@ -709,7 +750,9 @@ fn serve(flags: &config::Flags) -> ! {
     let access = |door: access::Door| {
         settings
             .access_log
-            .then(|| access::AccessLog::stderr(door).gonk_polls())
+            .then_some(())
+            .and(record.as_ref())
+            .map(|record| access::AccessLog::on(door, Arc::clone(record)).gonk_polls())
     };
     let (socket, door) = (
         settings.socket.clone(),
@@ -724,8 +767,8 @@ fn serve(flags: &config::Flags) -> ! {
         ))
     });
 
-    let quic_line = match quic_door {
-        quic::QuicDoor::Off(why) => why,
+    let (quic_line, quic_drain) = match quic_door {
+        quic::QuicDoor::Off(why) => (why, None),
         quic::QuicDoor::Open {
             addr,
             identity,
@@ -763,24 +806,44 @@ fn serve(flags: &config::Flags) -> ! {
             for client in &clients {
                 line.push_str(&format!("\n          {client}"));
             }
+            let drain = ikigai_quic::Drain::new();
+            let draining = drain.clone();
+            let closing = record.clone();
             std::thread::spawn(move || {
-                let error = ikigai_quic::serve_bounded_on(
-                    door,
+                let served = ikigai_quic::serve_draining_on(
+                    Arc::new(door),
                     socket,
                     &identity,
-                    &trusted,
+                    ikigai_quic::Admission::Pinned(&trusted),
                     minter,
                     ikigai_quic::DEFAULT_IDLE_TIMEOUT,
                     // A widened grant reaches a standing connection within this bound; a
                     // removed or narrowed one does not wait for it (ledger #1710).
                     Some(quic::MAX_CONNECTION_AGE),
-                )
-                .err();
-                fail(&format!("the QUIC door on {bound} stopped: {error:?}"))
+                    &draining,
+                );
+                match served {
+                    // Only a signal triggers the drain, so this is the process stopping as
+                    // asked. Every other return is still a door that died (ledger #3326).
+                    Ok(ikigai_quic::Served::Drained { cut_off }) => {
+                        if cut_off > 0 {
+                            eprintln!(
+                                "ikigai-gonk: the drain cut off {cut_off} connection(s) with \
+                                 calls still running at the cap"
+                            );
+                        }
+                        if let Some(record) = &closing {
+                            record.close();
+                        }
+                        std::process::exit(0)
+                    }
+                    other => fail(&format!("the QUIC door on {bound} stopped: {other:?}")),
+                }
             });
-            line
+            (line, Some(drain))
         }
     };
+    stop_on_signal(quic_drain, record.clone());
 
     // The HTTP door's workers and blocking pool, sized explicitly rather than through the
     // default `stack::enlarge_default` set: a request recurses on these threads (ledger #915).
@@ -799,11 +862,13 @@ fn serve(flags: &config::Flags) -> ! {
             .unwrap_or(settings.http.port());
         // Sign-ins and sign-outs are written whatever `gonk.log.access` says: they are rare,
         // and they are the audit of who held a session (ledger #1824).
-        let passkeys = Arc::new(
-            Passkeys::new(layout.clone(), port)
-                .with_idle_seconds(settings.session_idle_seconds)
-                .auditing(ikigai_gonk::access::stderr_sink()),
-        );
+        let passkeys = Passkeys::new(layout.clone(), port)
+            .with_idle_seconds(settings.session_idle_seconds)
+            .with_max_seconds(settings.session_max_seconds);
+        let passkeys = Arc::new(match &record {
+            Some(record) => passkeys.auditing(Arc::clone(record)),
+            None => passkeys,
+        });
         let face = Arc::new(web::Web {
             hub: Arc::clone(&hub),
             ledgers: settings.http_ledgers.clone(),
@@ -815,17 +880,28 @@ fn serve(flags: &config::Flags) -> ! {
             queue: settings.queue.clone(),
             epochs: Some(Arc::clone(&epochs)),
             holder_aliases: settings.holder_aliases.clone(),
+            page_assets: settings.page_assets.clone(),
             // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
             // (ledger #2021).
             toolbox: settings.toolbox.is_some(),
+            // The header offers each `gonk.face` by name (ledger #3199).
+            faces: settings.faces.iter().map(|f| f.name().to_string()).collect(),
         });
-        let pages = web::door_space(Arc::clone(&face), layers_view);
+        let pages = web::door_space(
+            Arc::clone(&face),
+            ikigai_gonk::layers_view::Views::new(layers_view, Some(public_feeds)),
+        );
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
-        let faces = settings
+        let mut faces = settings
             .toolbox
             .as_ref()
             .map(|toolbox| toolbox.spaces())
             .unwrap_or_default();
+        // A deployment's own pages (ledger #3199), in this door alone, jailed and read-only.
+        faces.extend(ikigai_gonk::face::spaces_with(
+            &settings.faces,
+            &settings.page_assets,
+        ));
         let http = Arc::new(doors::http_kernel_serving(
             Arc::clone(&hub),
             pages,
@@ -845,12 +921,20 @@ fn serve(flags: &config::Flags) -> ! {
         let bound = std::net::SocketAddr::new(settings.http.ip(), port);
         system.listening("HTTP", bound.to_string());
         eprintln!(
-            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s), sessions {} h or {} min idle; anonymous SPARQL budget {} ms",
+            "  http    {} — loopback ({}); anonymous read: {}; {} passkey(s), sessions {} or {} min idle; anonymous SPARQL budget {} ms",
             doors::http_url(bound),
             settings.http,
             settings.http_ledgers.join(", "),
             passkeys.enrolled_count(),
-            identity::SESSION_SECONDS / 3600,
+            if passkeys.max_seconds() > identity::SESSION_SECONDS {
+                format!(
+                    "{} h when read-only, {} h when the grant can write,",
+                    passkeys.max_seconds() / 3600,
+                    identity::SESSION_SECONDS / 3600
+                )
+            } else {
+                format!("{} h", passkeys.max_seconds() / 3600)
+            },
             passkeys.idle_seconds() / 60,
             settings.anonymous_sparql_budget_ms
         );
@@ -902,12 +986,26 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  quic    {quic_line}");
         eprintln!(
             "  log     {}",
-            if settings.access_log {
-                "one `gonk:Access` line per request at each door, on stderr; the Queue \
-                 badge's poll only when it fails, takes a second, or is the 60th \
-                 (`gonk.log.access = false` turns it off)"
-            } else {
-                "no access lines (`gonk.log.access = false`)"
+            match (&record, settings.access_log) {
+                (None, _) => "off — log.toml or gonk.log.toml says `destination = \"off\"`; no \
+                              access entries and no sign-in entries are written"
+                    .to_string(),
+                (Some(record), access) => format!(
+                    "segments in {} (hash-chained; `urn:log:segments`, `urn:log:verify` over the \
+                     socket only), not in the backup; {}; passkey sign-ins and sign-outs",
+                    record
+                        .handle()
+                        .config()
+                        .directory
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default(),
+                    if access {
+                        "one `log:Access` entry per request at each door, polls sampled \
+                         (`gonk.log.access = false` turns them off)"
+                    } else {
+                        "no access entries (`gonk.log.access = false`)"
+                    }
+                ),
             }
         );
         eprintln!(
@@ -918,6 +1016,7 @@ fn serve(flags: &config::Flags) -> ! {
         // `edge_config`) are computed from the same cookie by the same `HttpDoor`.
         let door = doors::HttpDoor {
             anonymous: http_grants,
+            public: public_reads,
             // The address actually bound: the configured IP, with the port the listener got
             // (a config may ask for 0). Its IP is one of the names the door answers to
             // (ledger #1045).
@@ -930,6 +1029,11 @@ fn serve(flags: &config::Flags) -> ! {
         let edge = match settings.toolbox {
             Some(_) => ikigai_gonk::toolbox::route(edge),
             None => edge,
+        };
+        let edge = if settings.faces.is_empty() {
+            edge
+        } else {
+            ikigai_gonk::face::route(edge)
         };
         // A browser navigating to an error gets it in gonk's own page, with the passkey
         // sign-in on it when signing in would cure it (ledger #2021).
@@ -1248,6 +1352,9 @@ struct Subjects<'a> {
     across: &'a [grants::Across],
     /// `--script <name>=<read|run|publish>` (ledger #939).
     scripts: &'a [(String, grants::ScriptAuthority)],
+    /// `passkey invite --scope <urn>`: scopes no other flag names, already checked by
+    /// [`config::scope_spec`] (ledger #3401).
+    scopes: &'a [String],
 }
 
 impl Subjects<'_> {
@@ -1257,6 +1364,7 @@ impl Subjects<'_> {
             && self.ledger_graphs.is_empty()
             && self.across.is_empty()
             && self.scripts.is_empty()
+            && self.scopes.is_empty()
     }
 }
 
@@ -1303,6 +1411,11 @@ fn scopes_for(subjects: &Subjects<'_>, browse: &[String]) -> Vec<String> {
         for token in grants::script_grants(script, *authority).unwrap_or_else(|e| fail(&e)) {
             add(token);
         }
+    }
+    // ★ Ledger #3401: in the same list, so the same write. A `--scope` another flag already
+    // grants is kept once, silently: the grant is a set.
+    for token in subjects.scopes {
+        add(token.clone());
     }
     scopes
 }
@@ -1477,6 +1590,41 @@ fn browse_command(op: &config::BrowseOp, flags: &config::Flags) {
 }
 
 /// `ikigai-gonk onboard …` (ledger #2009): `init` here, everything else over the socket.
+/// `ikigai-gonk feeds join|leave` (ledger #3291): what `/feed`'s buttons do, from the owner's
+/// shell. A running server notices the identity directory change.
+fn feeds_command(op: config::FeedsOp, flags: &config::Flags) {
+    use ikigai_gonk::feeds_join::{PublicFeeds, WebPki};
+    let settings = read_settings(flags);
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let feeds = PublicFeeds::open(
+        settings.feeds_door.clone(),
+        &homes.data,
+        std::sync::Arc::new(WebPki),
+        None,
+        None,
+        ikigai_gonk::layers_view::Waits::default(),
+    );
+    match op {
+        config::FeedsOp::Join => {
+            let joined = feeds.join().unwrap_or_else(|e| fail(&e));
+            println!(
+                "joined the public feeds of {} as {}\nfeeds: {}\nidentity: {}",
+                joined.host,
+                joined.principal,
+                joined.layers.join(", "),
+                feeds.identity_dir().display()
+            );
+        }
+        config::FeedsOp::Leave => {
+            feeds.leave().unwrap_or_else(|e| fail(&e));
+            println!(
+                "left the public feeds of {}; the identity is deleted and the host lets it expire",
+                feeds.door()
+            );
+        }
+    }
+}
+
 fn onboard_command(args: &ikigai_gonk::onboard::Args) {
     use ikigai_gonk::onboard::{self as onb, CliOp};
     let settings = read_settings(&args.flags);
@@ -1797,15 +1945,116 @@ fn passkey_list(flags: &config::Flags) {
             layout.clients_json().display()
         );
     }
+    // Each widening (and narrowing) under the passkey it changed (ledger #3388). The log is a
+    // record: an unreadable one is said, and the list from clients.json still printed.
+    let changes = identity::grant_changes(&layout).unwrap_or_else(|e| {
+        eprintln!("ikigai-gonk: grant changes not shown: {e}");
+        Vec::new()
+    });
+    // ★ Ledger #3401: each passkey's grant scopes AS STORED, so a scope `--scope` wrote (or a
+    // `--force` dropped) is visible without opening grants.json.
+    let grants = quic::read_grants(&layout.grants_json());
     for entry in enrolled.values() {
+        let word = if entry.grants.len() == 1 {
+            "grant "
+        } else {
+            "grants"
+        };
         println!(
-            "{:<16} grant {:<12} credential {}  {}",
+            "{:<16} {word} {:<12} credential {}  {}",
             entry.label,
-            entry.grant,
+            entry.grant_names(),
             entry.credential_id,
             identity::passkey_iri(&entry.credential_id)
         );
+        for grant in &entry.grants {
+            match grants.as_ref().map(|grants| grants.get(grant)) {
+                Ok(Some(scopes)) => {
+                    for scope in scopes {
+                        println!("  scope {scope}  (grant `{grant}`)");
+                    }
+                }
+                Ok(None) => println!(
+                    "  no grant `{grant}` in {}: this passkey is refused",
+                    layout.grants_json().display()
+                ),
+                Err(e) => println!("  the scopes of grant `{grant}` cannot be read: {e}"),
+            }
+        }
+        for change in changes
+            .iter()
+            .filter(|c| c.credential_id == entry.credential_id)
+        {
+            match (change.added, &change.invite) {
+                (true, Some(invite)) => println!(
+                    "  {}  added grant `{}` by invite {invite}",
+                    change.at, change.grant
+                ),
+                (true, None) if change.by.as_deref() == Some(identity::BY_OWNER) => println!(
+                    "  {}  added grant `{}` by the owner (command line)",
+                    change.at, change.grant
+                ),
+                (true, None) => println!("  {}  added grant `{}`", change.at, change.grant),
+                (false, _) => println!("  {}  removed grant `{}`", change.at, change.grant),
+            }
+        }
     }
+}
+
+/// `ikigai-gonk passkey grant remove <label> | --credential <id> <grant>`, or its alias
+/// `passkey remove-grant … --grant <name>` (ledgers #3388, #3400): take one grant off one passkey.
+fn passkey_remove_grant(key: &str, by_label: bool, grant: &str, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let now = identity::remove_grant(&layout, which, grant, now_ms).unwrap_or_else(|e| fail(&e));
+    println!(
+        "removed grant `{grant}` from passkey `{}` ({}); it holds {} — effective at its next \
+         request",
+        now.label,
+        identity::passkey_iri(&now.credential_id),
+        now.grant_names(),
+    );
+    println!(
+        "  recorded in {}. grants.json and every other passkey are unchanged",
+        identity::audit_log(&layout).display()
+    );
+}
+
+/// `ikigai-gonk passkey grant add <label> | --credential <id> <grant>` (ledger #3400): add one
+/// grant to one passkey, as the box's owner.
+fn passkey_add_grant(key: &str, by_label: bool, grant: &str, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let now = identity::add_grant(&layout, which, grant, now_ms).unwrap_or_else(|e| fail(&e));
+    println!(
+        "added grant `{grant}` to passkey `{}` ({}); it holds {} — effective at its next \
+         request, and its sessions stay signed in (`passkey logout --all` ends them)",
+        now.label,
+        identity::passkey_iri(&now.credential_id),
+        now.grant_names(),
+    );
+    println!(
+        "  recorded in {}. grants.json and every other passkey are unchanged",
+        identity::audit_log(&layout).display()
+    );
 }
 
 /// `ikigai-gonk passkey revoke <label> | --credential <id>` (ledger #313).
@@ -1823,11 +2072,11 @@ fn passkey_revoke(key: &str, by_label: bool, flags: &config::Flags) {
         .unwrap_or(0);
     let revoked = identity::revoke(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
     println!(
-        "revoked passkey `{}` ({}, grant `{}`) from {} — refused from its next request, and its \
+        "revoked passkey `{}` ({}, grants `{}`) from {} — refused from its next request, and its \
          live sessions are deleted",
         revoked.label,
         identity::passkey_iri(&revoked.credential_id),
-        revoked.grant,
+        revoked.grant_names(),
         layout.clients_json().display()
     );
     println!(
@@ -1853,11 +2102,11 @@ fn passkey_logout_all(key: &str, by_label: bool, flags: &config::Flags) {
         .unwrap_or(0);
     let ended = identity::end_sessions(&layout, which, now_ms).unwrap_or_else(|e| fail(&e));
     println!(
-        "every session of passkey `{}` ({}, grant `{}`) ends at the server's next signed-in \
+        "every session of passkey `{}` ({}, grants `{}`) ends at the server's next signed-in \
          request or sign-in; the passkey stays enrolled and can sign in again",
         ended.label,
         identity::passkey_iri(&ended.credential_id),
-        ended.grant,
+        ended.grant_names(),
     );
     println!(
         "  recorded in {}, which the running server reads",
@@ -1937,6 +2186,50 @@ fn passkey_invite(
         "  in a browser on this machine (localhost, not 127.0.0.1); the passkey is enrolled in {}",
         layout.clients_json().display()
     );
+}
+
+/// Stop on SIGTERM or SIGINT (ledger #3326): the first drains the QUIC door, whose thread exits
+/// 0 when the drain returns, within [`quic::DRAIN_CAP`]; with no QUIC door open it exits 0 at
+/// once. A second signal during the drain exits at once, as `128 + signal`.
+///
+/// The drain waits for calls, not work, and re-queues nothing: a claim stays as it is, its
+/// holder and lease intact. The other doors are not drained. Handlers are installed before this
+/// returns, so the banner printing means a signal is caught.
+fn stop_on_signal(drain: Option<ikigai_quic::Drain>, record: Option<Arc<access::Record>>) {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT])
+        .unwrap_or_else(|e| fail(&format!("cannot catch SIGTERM and SIGINT: {e}")));
+    std::thread::spawn(move || {
+        let mut signals = signals.forever();
+        let Some(first) = signals.next() else { return };
+        let name = if first == SIGTERM {
+            "SIGTERM"
+        } else {
+            "SIGINT"
+        };
+        let Some(drain) = drain else {
+            eprintln!("ikigai-gonk: {name}: no QUIC door to drain; exiting");
+            // `log:ProcessStop`, so the segment ends as a stop and not as a crash.
+            if let Some(record) = &record {
+                record.close();
+            }
+            std::process::exit(0)
+        };
+        eprintln!(
+            "ikigai-gonk: {name}: draining the QUIC door (at most {:?}); another signal exits at once",
+            quic::DRAIN_CAP
+        );
+        drain.trigger(quic::DRAIN_CAP);
+        if let Some(second) = signals.next() {
+            eprintln!("ikigai-gonk: a second signal during the drain; exiting now");
+            // Still a stop someone asked for, not a crash: the segment ends with
+            // `log:ProcessStop` (ledger #3414).
+            if let Some(record) = &record {
+                record.close();
+            }
+            std::process::exit(128 + second)
+        }
+    });
 }
 
 fn fail(message: &str) -> ! {

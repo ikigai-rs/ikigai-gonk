@@ -387,6 +387,9 @@ pub fn check_root_name(name: &str) -> std::result::Result<(), String> {
 /// `--config-home X` styled its pages from, and watched, the operator's real `a11y.toml`.
 /// `None` states that this process has none — built-in themes, no watch — which is what a
 /// hermetic test wants.
+///
+/// No GitHub entries are configured here, so tree pages have no pull-request panel.
+/// Use [`wire_with_github`] when the operator configured `gonk.browse.github`.
 pub fn wire(
     roots: Vec<(String, PathBuf)>,
     writer: SharedWriter,
@@ -395,6 +398,22 @@ pub fn wire(
     graph: &Graph,
     config_home: Option<PathBuf>,
 ) -> Wired {
+    wire_with_github(roots, writer, watch, explain, graph, config_home, &[])
+}
+
+/// Wire browse with the operator's `gonk.browse.github` entries. Only these roots
+/// have a pull-request source; an origin used by "On GitHub" does not opt one in.
+/// Used for both startup and live configuration reloads.
+pub fn wire_with_github(
+    roots: Vec<(String, PathBuf)>,
+    writer: SharedWriter,
+    watch: Option<&RootWatch>,
+    explain: Option<&ExplainTiers>,
+    graph: &Graph,
+    config_home: Option<PathBuf>,
+    github_repositories: &[(String, String)],
+) -> Wired {
+    let roots_for_objects = roots.clone();
     let first = roots.first().map(|(name, _)| name.clone());
     let root_names = roots
         .iter()
@@ -402,9 +421,8 @@ pub fn wire(
         .collect::<Vec<_>>();
     // The git-history series (ledger #1631) over the same roots, before the mount takes them.
     let history = crate::history::space(&roots);
-    // "On GitHub" over the same roots (ledger #1907), with no override: `main` replaces it
-    // with [`CachedReads::with_github`] when a `gonk.browse.github` line names one.
-    let github = crate::github::space(&roots, &[]);
+    // "On GitHub" and the PR panel use the same configuration (ledger #3268).
+    let github = crate::github::space(&roots, github_repositories);
     // The dev-tooling facades (`urn:repo:git:*`, `gh:*`, `cargo:*`) confined to the same roots
     // (ledger #1712): since ikigai-repo 0.3 a space built with no roots refuses every `dir=`,
     // so browse's repository views were refused until the roots came here too.
@@ -414,6 +432,7 @@ pub fn wire(
     // `ExplainConfig` on any other `Arc<Store>`, even one over the same dataset.
     let store = Arc::clone(writer.store());
     let mount = graph.on(Mount::new(roots)
+        .pull_request_roots(github_repositories.iter().map(|(name, _)| name.clone()))
         .annotations_through(writer)
         // The PROCESS's name: it selects the `gonk.a11y.toml` layer `urn:repo:style`
         // reads its themes and its contrast floor from. Without it that file would sit
@@ -435,7 +454,11 @@ pub fn wire(
         .reading_contracts_through(first)
         .with_history(Arc::new(history))
         .with_github(Arc::new(github))
-        .with_repo(Arc::new(repo)),
+        .with_repo(Arc::new(repo))
+        .with_git_objects(Arc::new(crate::git_object::space(
+            "browse",
+            &crate::git_object::browse_repositories(&roots_for_objects),
+        ))),
         style,
     }
 }
@@ -568,6 +591,7 @@ pub fn cached_reads(
             contract_root: None,
             history: None,
             github: None,
+            git_objects: None,
             repo: None,
         })),
         epochs,
@@ -604,6 +628,7 @@ struct Arrangement {
     history: Option<Arc<dyn Space>>,
     /// "On GitHub" over the same roots ([`CachedReads::with_github`]), threaded.
     github: Option<Arc<dyn Space>>,
+    git_objects: Option<Arc<dyn Space>>,
     /// The dev-tooling facades confined to the same roots ([`CachedReads::with_repo`]), threaded.
     repo: Option<Arc<dyn Space>>,
 }
@@ -743,6 +768,22 @@ impl CachedReads {
         Some(Arc::new(Part {
             arrangement: Arc::clone(&self.arrangement),
             which: Which::Github,
+        }))
+    }
+
+    /// Carry SHA-keyed Git object links with the current browse roots.
+    #[must_use]
+    pub fn with_git_objects(mut self, objects: Arc<dyn Space>) -> Self {
+        self.current_mut().git_objects = Some(threaded(objects));
+        self
+    }
+
+    /// Git object links in the arrangement in force.
+    pub fn git_objects(&self) -> Option<Arc<dyn Space>> {
+        self.current().git_objects.as_ref()?;
+        Some(Arc::new(Part {
+            arrangement: Arc::clone(&self.arrangement),
+            which: Which::GitObjects,
         }))
     }
 
@@ -903,6 +944,7 @@ impl Space for CachedReads {
 enum Which {
     History,
     Github,
+    GitObjects,
     Repo,
 }
 
@@ -920,6 +962,7 @@ impl Part {
         match self.which {
             Which::History => current.history.clone(),
             Which::Github => current.github.clone(),
+            Which::GitObjects => current.git_objects.clone(),
             Which::Repo => current.repo.clone(),
         }
     }

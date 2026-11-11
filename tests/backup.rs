@@ -36,7 +36,8 @@ const STOPGAP: &str = "gonk-store-2026-09-16T172813Z.nq";
 
 // ikigai-store 0.2.24 adds `store-graph-info` (needs the graph's read token) and `store-dump`
 // (needs the broad `urn:cap:store:read`, which gonk grants no client: only the owner holds it).
-const STORE_IDS: [&str; 15] = [
+// Store 0.5 adds the per-graph freshness marker, writable with that graph's token.
+const STORE_IDS: [&str; 16] = [
     "store-select",
     "store-ask",
     "store-construct",
@@ -51,6 +52,7 @@ const STORE_IDS: [&str; 15] = [
     "store-dump",
     "store-update",
     "store-graph-update",
+    "store-graph-written",
     "store-load",
 ];
 
@@ -88,8 +90,9 @@ const LEDGER_IDS: [&str; 28] = [
 /// gonk's own hub resources: the page renderer's chunk transform and the four `urn:sparql:*`
 /// forms, in every composition (`tests/conformance.rs` walks and pins them; here they are
 /// only counted).
-const HUB_IDS: [&str; 5] = [
+const HUB_IDS: [&str; 6] = [
     "gonk-render",
+    "gonk-render-markdown",
     "sparql-select",
     "sparql-ask",
     "sparql-construct",

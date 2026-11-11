@@ -522,6 +522,7 @@ pub struct Render;
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new(RENDER_IRI), Render)
+        .bind(Exact::new(MARKDOWN_IRI), RenderMarkdown)
         .named(crate::spaces::iri(crate::spaces::RENDER))
 }
 
@@ -605,6 +606,208 @@ impl Endpoint for Render {
                     .class("http://www.w3.org/2001/XMLSchema#string"),
             )
             .output("text/html")
+    }
+}
+
+/// `urn:iki:gonk:render:markdown`: a layer entry's body as a linked XHTML fragment. See
+/// [`rendered_markdown`].
+pub const MARKDOWN_IRI: &str = "urn:iki:gonk:render:markdown";
+
+/// Added to a body's heading levels: an entry's own heading is `<h3>` (`web/gonk.xsl`), so a `#`
+/// in a body is an `<h4>`, under it in the page's outline.
+pub const MARKDOWN_HEADING_OFFSET: u8 = 3;
+
+/// The deepest a linked fragment may nest: the chunk's page, the row and `view:rendered` above
+/// it use three of [`MAX_CHUNK_DEPTH`]'s levels, and a deeper row would have the chunk refused,
+/// so one entry would take the whole page down with it (ledger #3281).
+pub const MAX_MARKDOWN_DEPTH: usize = MAX_CHUNK_DEPTH - 3;
+
+/// The most a linked fragment may be, in bytes: a chunk holds at most [`MAX_CHUNK_BYTES`].
+pub const MAX_MARKDOWN_BYTES: usize = 1 << 18;
+
+/// The most tags (`<`, opening and closing alike) a linked fragment may hold: xrust's cost is
+/// quadratic in the nodes one transform makes, so a list of a hundred thousand items posted by
+/// one participant must not cost every reader the render budget (ledger #519, #3281).
+pub const MAX_MARKDOWN_TAGS: usize = 4000;
+
+/// `text`, an entry's body, as an XHTML fragment with its references linked, or `None` when it
+/// is over a bound and the page shows it as written instead.
+///
+/// `ikigai_fn::markdown` makes the fragment, so nothing an author writes becomes markup but what
+/// its walker builds; [`linkify`]'s rules then link each text node by `refs`
+/// ([`layer_refs`]'s value), outside `<a>` and `<code>`. It is a pure function of its arguments.
+///
+/// ```
+/// use ikigai_gonk::render::{entry_markdown, layer_refs};
+/// let refs = layer_refs(Some("default"), &["default"]);
+/// assert_eq!(
+///     entry_markdown("# Hi ledger #7 and `ledger #8`", &refs).unwrap(),
+///     "<h4>Hi <a href='/l/default/item/7'>ledger #7</a> and <code>ledger #8</code></h4>"
+/// );
+/// // Nested past what a chunk may hold: shown as written, never a broken page.
+/// assert_eq!(entry_markdown(&"> ".repeat(14), &refs), None);
+/// ```
+pub fn entry_markdown(text: &str, refs: &str) -> Option<String> {
+    use ikigai_fn::markdown::{map_text_nodes, try_render_untrusted, Options};
+    let options = Options {
+        heading_offset: MARKDOWN_HEADING_OFFSET,
+    };
+    let fragment = try_render_untrusted(text, &options).ok()?;
+    let linked = map_text_nodes(&fragment, |node| linkify_text(node, refs));
+    (linked.len() <= MAX_MARKDOWN_BYTES
+        && linked.matches('<').count() <= MAX_MARKDOWN_TAGS
+        && nesting_depth(&linked) <= MAX_MARKDOWN_DEPTH)
+        .then_some(linked)
+}
+
+/// An item's body or a comment's as a linked XHTML fragment (ledger
+/// [#3345](http://localhost:1062/l/default/item/3345)), or `None` when the page is to show it
+/// as written: text with no Markdown in it, or text over [`entry_markdown`]'s bounds.
+///
+/// The fragment is [`entry_markdown`]'s, made the same way (`ikigai_fn::markdown`, so nothing an
+/// author writes becomes markup but what its walker builds) and linked by the same rules, with
+/// `refs` a [`ledger_refs`] value. Two things differ, both for the item's page:
+///
+/// - **`heading_offset`** places a `#` under the heading the text sits under: the item's body
+///   sits under the page's `<h1>` (offset 1, `#` is an `<h2>`), a comment under "Comments"'s
+///   `<h2>` (offset 2, `#` is an `<h3>`).
+/// - **Text with no Markdown in it reads as it does today.** When the fragment would be nothing
+///   but paragraphs, the answer is `None` and the page shows the text as written, every line
+///   break and space kept, so a plain comment is unchanged byte for byte.
+///
+/// ```
+/// use ikigai_gonk::render::{item_markdown, ledger_refs};
+/// let refs = ledger_refs("default", &["default", "crew"]);
+/// assert_eq!(
+///     item_markdown("~~old~~ new, see crew#3", &refs, 1).unwrap(),
+///     "<p><del>old</del> new, see <a href='/l/crew/item/3'>crew#3</a></p>"
+/// );
+/// // Plain prose, a raw tag included: shown as written, as before.
+/// assert_eq!(item_markdown("Two lines\nand <b>a tag</b>, ledger #4.", &refs, 1), None);
+/// assert_eq!(item_markdown("# Plan", &refs, 2).unwrap(), "<h3>Plan</h3>");
+/// // A link to gonk at its old port points at this server, as a bare one does.
+/// assert_eq!(
+///     item_markdown("~~was~~ [#739](http://localhost:1060/l/default/item/739)", &refs, 1).unwrap(),
+///     "<p><del>was</del> <a href=\"/l/default/item/739\">#739</a></p>"
+/// );
+/// ```
+pub fn item_markdown(text: &str, refs: &str, heading_offset: u8) -> Option<String> {
+    use ikigai_fn::markdown::{map_text_nodes, try_render_untrusted, Options};
+    let fragment = try_render_untrusted(text, &Options { heading_offset }).ok()?;
+    if only_paragraphs(&fragment) {
+        return None;
+    }
+    let fragment = rehome_hrefs(&fragment);
+    let linked = map_text_nodes(&fragment, |node| linkify_text(node, refs));
+    (linked.len() <= MAX_MARKDOWN_BYTES
+        && linked.matches('<').count() <= MAX_MARKDOWN_TAGS
+        && nesting_depth(&linked) <= MAX_MARKDOWN_DEPTH)
+        .then_some(linked)
+}
+
+/// `fragment`, an `ikigai_fn::markdown` fragment, with every link to gonk at its OLD port
+/// pointed at this server, as [`linkify`] points a bare one ([`rehome`]): a Markdown link
+/// `[#739](http://localhost:1060/l/default/item/739)` gets the href `/l/default/item/739`, its
+/// text kept. The walker writes every link as `<a href="…"`, with ` rel="noopener noreferrer"`
+/// right after for one that leaves the page's origin; a rehomed href is root-relative, so it
+/// drops that `rel`, as the walker does for a link that starts on this origin.
+fn rehome_hrefs(fragment: &str) -> String {
+    const OPEN: &str = "<a href=\"";
+    const REL: &str = " rel=\"noopener noreferrer\"";
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(at) = rest.find(OPEN) {
+        let (head, tail) = rest.split_at(at + OPEN.len());
+        out.push_str(head);
+        let Some(end) = tail.find('"') else {
+            rest = tail;
+            break;
+        };
+        let (href, after) = tail.split_at(end);
+        match rehome(href) {
+            Some(home) => {
+                out.push_str(&home);
+                out.push('"');
+                rest = after[1..].strip_prefix(REL).unwrap_or(&after[1..]);
+            }
+            None => {
+                out.push_str(href);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether every tag in `fragment`, an `ikigai_fn::markdown` fragment, is `<p>` or `</p>`.
+fn only_paragraphs(fragment: &str) -> bool {
+    fragment.match_indices('<').all(|(at, _)| {
+        ["<p>", "</p>"]
+            .iter()
+            .any(|tag| fragment[at..].starts_with(tag))
+    })
+}
+
+/// [`entry_markdown`] through the hub, so a rendered body is cached forever: an entry never
+/// changes, and the content-addressed request (the text and its linking context) is the key,
+/// the way [`rendered_chunks`] keys a chunk. `None` is the page's cue to show the text as
+/// written: a body over a bound, or a read that failed.
+pub async fn rendered_markdown(inv: &Invocation<'_>, text: &str, refs: &str) -> Option<String> {
+    let iri = ikigai_core::Iri::parse(MARKDOWN_IRI).ok()?;
+    let request = Request::new(Verb::Source, iri)
+        .with_arg("content", ArgRef::Inline(text.as_bytes().to_vec()))
+        .with_arg("refs", ArgRef::Inline(refs.as_bytes().to_vec()));
+    let answer = inv.issue(request).await.ok()?;
+    let fragment = String::from_utf8_lossy(&answer.bytes).into_owned();
+    (!fragment.is_empty()).then_some(fragment)
+}
+
+/// The endpoint behind [`MARKDOWN_IRI`]. Empty when [`entry_markdown`] answers `None`, so that
+/// answer is cached too.
+pub struct RenderMarkdown;
+
+#[async_trait]
+impl Endpoint for RenderMarkdown {
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        if inv.request.verb != Verb::Source {
+            return Err(Error::Endpoint(format!(
+                "`{MARKDOWN_IRI}` answers Source only"
+            )));
+        }
+        let fragment = entry_markdown(inv.inline_str("content")?, inv.inline_str("refs")?);
+        Ok(Representation::new(
+            ReprType::new("application/xhtml+xml"),
+            fragment.unwrap_or_default().into_bytes(),
+        )
+        .cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "gonk-render-markdown"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("gonk-render-markdown")
+            .title("Render one layer entry's body as Markdown")
+            .summary(
+                "An entry's text as a safe XHTML fragment with its references linked, or \
+                 nothing when the text is over a bound and is to be shown as written. A pure \
+                 function of its input and cacheable with no golden thread.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ArgSpec::new("content")
+                    .summary("the entry's text; a pipe fills it")
+                    .class("http://www.w3.org/2001/XMLSchema#string"),
+            )
+            .input(
+                ArgSpec::new("refs")
+                    .summary("the linking context, `render::layer_refs`'s value")
+                    .class("http://www.w3.org/2001/XMLSchema#string"),
+            )
+            .output("application/xhtml+xml")
     }
 }
 
@@ -843,6 +1046,15 @@ fn linkify_text(text: &str, value: &str) -> String {
                 .next_back()
                 .is_some_and(|c| matches!(c, '/' | '.' | '-' | '_' | ':' | '@' | '#'));
             if !joined {
+                if let Some(len) = iri_at(here) {
+                    let name = &here[..len];
+                    out.push_str(&format!(
+                        "<a href='{}'>{name}</a>",
+                        crate::resolution::href(name)
+                    ));
+                    i += len;
+                    continue;
+                }
                 if let Some((len, href)) = github_ref_at(here) {
                     out.push_str(&format!(
                         "<a href='{href}'{NEW_TAB_ATTRS}>{}{NEW_TAB_NOTE}</a>",
@@ -975,6 +1187,100 @@ fn url_at(text: &str) -> Option<usize> {
         url = trimmed;
     }
     (url.len() > scheme.len()).then_some(url.len())
+}
+
+/// The length of the full name that `text` starts with, linked to its resolution route
+/// ([`crate::resolution`], ledger #3238): any `urn:{nid}:…` or `tag:…` IRI, or a
+/// `gh:{owner}/{repo}#{n}` alias; trailing punctuation is given back to the sentence. A
+/// `urn:git:` IRI must name a full SHA (an abbreviation is not an identity) and a
+/// `urn:repo:file:` IRI a valid root and path, or the text stays text. No lookup: whether
+/// the name resolves, or exists, is the route's to answer when the link is followed.
+///
+/// ```
+/// use ikigai_gonk::render::{iri_at, linkify};
+/// let sha = "0123456789abcdef0123456789abcdef01234567";
+/// let at = |t: &str| iri_at(t).map(|len| t[..len].to_string());
+/// assert_eq!(at(&format!("urn:git:commit:{sha}.")), Some(format!("urn:git:commit:{sha}")));
+/// assert_eq!(at(&format!("urn:git:blob:{sha}, then")), Some(format!("urn:git:blob:{sha}")));
+/// assert_eq!(at("urn:git:commit:0123abc"), None);
+/// assert_eq!(at("urn:repo:file:demo/src/lib.rs)"), Some("urn:repo:file:demo/src/lib.rs".into()));
+/// assert_eq!(at("urn:repo:file:demo/../x"), None);
+/// assert_eq!(at("urn:iki:ledger:default:item:12;"), Some("urn:iki:ledger:default:item:12".into()));
+/// assert_eq!(at("urn:layer:talk-chris:entry:01m6vcrdky000000000001y!"), Some("urn:layer:talk-chris:entry:01m6vcrdky000000000001y".into()));
+/// assert_eq!(at("tag:example.com,2026:x?"), Some("tag:example.com,2026:x".into()));
+/// assert_eq!(at("gh:ikigai-rs/ikigai-gonk#319."), Some("gh:ikigai-rs/ikigai-gonk#319".into()));
+/// assert_eq!(at("gh:not a ref"), None);
+/// assert_eq!(at("urn:"), None);
+/// assert_eq!(at("urn:x"), None);
+/// // In a page: the link text is the name as written, the href the route.
+/// assert_eq!(
+///     linkify(&format!("<p data-linkify='default'>see urn:git:commit:{sha}.</p>")),
+///     format!("<p data-linkify='default'>see <a href='/resolution/iri/urn%3Agit%3Acommit%3A{sha}'>urn:git:commit:{sha}</a>.</p>")
+/// );
+/// // An abbreviated SHA stays text.
+/// assert_eq!(
+///     linkify("<p data-linkify='default'>urn:git:commit:0123abc</p>"),
+///     "<p data-linkify='default'>urn:git:commit:0123abc</p>"
+/// );
+/// // A name inside a URL stays part of the URL.
+/// assert_eq!(
+///     linkify("<p data-linkify='default'>https://a.example/urn:repo:file:demo/x</p>"),
+///     "<p data-linkify='default'><a href='https://a.example/urn:repo:file:demo/x'>https://a.example/urn:repo:file:demo/x</a></p>"
+/// );
+/// assert_eq!(
+///     linkify("<p data-linkify='default'>(gh:o/r#7)</p>"),
+///     "<p data-linkify='default'>(<a href='/resolution/iri/gh%3Ao%2Fr%237'>gh:o/r#7</a>)</p>"
+/// );
+/// ```
+pub fn iri_at(text: &str) -> Option<usize> {
+    let lower = |n: usize| text.get(..n).map(str::to_ascii_lowercase);
+    let urn = lower(4).as_deref() == Some("urn:");
+    let tag = lower(4).as_deref() == Some("tag:");
+    let gh = text.starts_with("gh:");
+    if !(urn || tag || gh) {
+        return None;
+    }
+    // Where the name ends: whitespace, markup, a quote, or any entity (`&`: an IRI with one is
+    // rare, and an escaped one would not survive as a name).
+    let end = text
+        .char_indices()
+        .find(|&(_, c)| {
+            c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | '"' | '\'' | '&')
+        })
+        .map_or(text.len(), |(i, _)| i);
+    let mut name = &text[..end];
+    loop {
+        let trimmed = match name.chars().next_back() {
+            Some('.' | ',' | ';' | ':' | '!' | '?') => &name[..name.len() - 1],
+            Some(')') if name.matches(')').count() > name.matches('(').count() => {
+                &name[..name.len() - 1]
+            }
+            _ => break,
+        };
+        name = trimmed;
+    }
+    if gh {
+        return crate::resolution::github_alias(name).map(|_| name.len());
+    }
+    if urn {
+        // `urn:{nid}:{nss}`: a namespace of letters, digits and inner hyphens, then a name.
+        let (nid, nss) = name.get(4..)?.split_once(':')?;
+        if nid.is_empty()
+            || nss.is_empty()
+            || !nid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return None;
+        }
+        if nid.eq_ignore_ascii_case("git") && crate::git_object::git_iri(name).is_none() {
+            return None;
+        }
+        if name.starts_with("urn:repo:file:") && crate::web::repo_file(name).is_none() {
+            return None;
+        }
+    } else if name.len() <= 4 {
+        return None;
+    }
+    Some(name.len())
 }
 
 /// The length and the GitHub URL of the `owner/repo#N`, `owner/repo PR N` or `owner/repo PR #N`
@@ -1151,6 +1457,35 @@ pub fn layer_refs(bare: Option<&str>, held: &[&str]) -> String {
     format!("{LAYER_CONTEXT}{bare}:{}", held.join(","))
 }
 
+/// The [`LINKIFY_ATTR`] value for an item's or a comment's text on `ledger`'s page (ledger
+/// [#3344](http://localhost:1062/l/default/item/3344)): a bare `ledger #N` is `ledger`'s, and a
+/// QUALIFIED reference (`crew#3`, `crew #3`, `crew:#3`) links into one of `held`, the ledgers
+/// this gonk holds that the viewer may read, exactly as a layer entry's does ([`layer_refs`]).
+/// A ledger not in `held` stays text.
+///
+/// The value is `<ledger>;<held,...>`: a ledger name has neither `;` nor `:`, so it can be
+/// confused with neither a plain ledger's name nor a layer context. A name that is not a ledger
+/// name is dropped, as [`layer_refs`] drops it.
+///
+/// ```
+/// use ikigai_gonk::render::{ledger_refs, linkify};
+/// let refs = ledger_refs("default", &["default", "crew", "../x"]);
+/// assert_eq!(refs, "default;default,crew");
+/// assert_eq!(
+///     linkify(&format!("<p data-linkify='{refs}'>crew:#3, nosuch#4, ledger #5</p>")),
+///     "<p data-linkify='default;default,crew'><a href='/l/crew/item/3'>crew:#3</a>, nosuch#4, \
+///      <a href='/l/default/item/5'>ledger #5</a></p>"
+/// );
+/// ```
+pub fn ledger_refs(ledger: &str, held: &[&str]) -> String {
+    let held: Vec<&str> = held
+        .iter()
+        .copied()
+        .filter(|name| is_ledger_word(name))
+        .collect();
+    format!("{ledger};{}", held.join(","))
+}
+
 /// Whether `name` has a ledger name's shape: lowercase ASCII letters, digits, `-` and `_`
 /// (`ikigai_ledger::Ledger::parse` is the full rule; this is the part an `href` relies on).
 fn is_ledger_word(name: &str) -> bool {
@@ -1165,7 +1500,8 @@ fn is_ledger_word(name: &str) -> bool {
 struct Refs<'a> {
     /// The ledger a bare `ledger #N` links to.
     bare: Option<&'a str>,
-    /// The ledgers a qualified `name#N` may link to: none outside a layer context.
+    /// The ledgers a qualified `name#N` may link to: none unless the marker names them
+    /// ([`layer_refs`], [`ledger_refs`]).
     held: Vec<&'a str>,
     /// Whether the text is a layer entry's ([`layer_refs`]).
     layer: bool,
@@ -1174,11 +1510,15 @@ struct Refs<'a> {
 impl<'a> Refs<'a> {
     fn parse(value: &'a str) -> Refs<'a> {
         match value.strip_prefix(LAYER_CONTEXT) {
-            None => Refs {
-                bare: Some(value).filter(|v| is_ledger_word(v)),
-                held: Vec::new(),
-                layer: false,
-            },
+            None => {
+                // `<ledger>` alone, or `<ledger>;<held,...>` ([`ledger_refs`]).
+                let (bare, held) = value.split_once(';').unwrap_or((value, ""));
+                Refs {
+                    bare: Some(bare).filter(|b| is_ledger_word(b)),
+                    held: held.split(',').filter(|n| is_ledger_word(n)).collect(),
+                    layer: false,
+                }
+            }
             Some(rest) => {
                 let (bare, held) = rest.split_once(':').unwrap_or(("", ""));
                 let held: Vec<&str> = held.split(',').filter(|n| is_ledger_word(n)).collect();

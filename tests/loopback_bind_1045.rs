@@ -26,6 +26,7 @@ fn door(bind: &str) -> doors::HttpDoor {
         anonymous: Vec::new(),
         bind: bind.parse().unwrap(),
         passkeys: None,
+        public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
     }
 }
@@ -38,6 +39,7 @@ fn request(method: &str, headers: &[(&str, &str)]) -> HttpRequest {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         path: "/".to_string(),
+        raw_target: "/".to_string(),
         query: Vec::new(),
         body: Vec::new(),
         peer: None,

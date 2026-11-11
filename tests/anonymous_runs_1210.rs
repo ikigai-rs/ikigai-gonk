@@ -346,13 +346,16 @@ fn over_http_an_anonymous_plan_and_check_stop_at_the_door_budget() {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        page_assets: Default::default(),
         toolbox: false,
+        faces: Vec::new(),
     });
     let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
     let door = doors::HttpDoor {
         anonymous: anonymous_http_grants(&["default".to_string()]).unwrap(),
         bind: addr,
         passkeys: Some(passkeys),
+        public: Vec::new(),
         anonymous_sparql_budget_ms: DOOR_MS,
     };
     std::thread::spawn(move || {

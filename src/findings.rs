@@ -403,22 +403,20 @@ pub fn run(
 ) -> Result<Vec<Outcome>, String> {
     let ledger = Ledger::parse(&args.ledger).map_err(|e| e.to_string())?;
     let listing = crate::queue::findings_iri(&args.root);
-    let bytes = issue(
-        Request::new(
-            Verb::Source,
-            Iri::parse(&listing).map_err(|e| format!("`{listing}`: {e}"))?,
-        )
-        .with_arg("state", inline(PUBLISHED))
-        .with_arg("as", inline("application/json")),
-    )?;
-    let rows: Vec<Value> = match serde_json::from_slice(&bytes) {
-        Ok(Value::Array(rows)) => rows,
-        _ => {
-            return Err(format!(
-                "`{listing}` answered something that is not a JSON array of findings"
-            ))
+    let request = Request::new(
+        Verb::Source,
+        Iri::parse(&listing).map_err(|e| format!("`{listing}`: {e}"))?,
+    )
+    .with_arg("state", inline(PUBLISHED))
+    .with_arg("as", inline("application/json"));
+    let mut pages = crate::findings_pages::Pages::new(request);
+    loop {
+        let bytes = issue(pages.request())?;
+        if !pages.accept(&bytes)? {
+            break;
         }
-    };
+    }
+    let rows = pages.rows();
     let filter = Filter {
         policy,
         scope: args.scope,
@@ -532,6 +530,45 @@ fn inline(value: &str) -> ArgRef {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_later_page_failure_files_nothing() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let issue = |request: Request| {
+            assert_eq!(
+                request.verb,
+                Verb::Source,
+                "nothing may be filed before every page succeeds"
+            );
+            assert_eq!(request.args.get("limit"), Some(&inline("2000")));
+            assert_eq!(request.args.get("state"), Some(&inline(PUBLISHED)));
+            let n = calls.get();
+            calls.set(n + 1);
+            if n == 0 {
+                assert!(!request.args.contains_key("after"));
+                Ok(serde_json::to_vec(&json!({
+                    "rows": [row("000000000000000000000001", Some("s1"), Some(PUBLISHED), true)],
+                    "next": "000000000000000000000001"
+                }))
+                .unwrap())
+            } else {
+                assert_eq!(
+                    request.args.get("after"),
+                    Some(&inline("000000000000000000000001"))
+                );
+                Err("second page refused".to_string())
+            }
+        };
+        let args = parse_args(["file", "demo"].into_iter().map(str::to_string)).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(
+            run(&issue, &args, &policy(), &mut out).unwrap_err(),
+            "second page refused"
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(out.is_empty());
+    }
 
     /// The serious set, as a test spells it: these words are a fixture here, not a copy of
     /// the contract's set (the integration test reads the contract's).

@@ -676,7 +676,10 @@ fn git(
     on_line: impl FnMut(&[u8]),
 ) -> Result<()> {
     let mut command = Command::new("git");
-    command.arg("-C").arg(dir).args(args);
+    crate::git_env::harden_local(&mut command)
+        .arg("-C")
+        .arg(dir)
+        .args(args);
     stream(command, deadline, on_line)
 }
 
@@ -1035,5 +1038,15 @@ mod tests {
         assert!(!is_full_sha("abc123"));
         assert!(!is_full_sha(&"A".repeat(40)));
         assert!(is_full_sha(&"0".repeat(64)));
+    }
+
+    /// Ledger #3489: a root whose tracked `commondir` names another repository counts none of
+    /// that repository's history.
+    #[test]
+    fn a_planted_commondir_counts_no_history_outside_the_root() {
+        let p = crate::git_env::fixture::planted();
+        let budget = Duration::from_secs(30);
+        assert!(count(&p.secret, &p.secret_sha, 2, budget).is_ok());
+        assert!(count(&p.escape(), &p.secret_sha, 2, budget).is_err());
     }
 }

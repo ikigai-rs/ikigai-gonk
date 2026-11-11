@@ -55,6 +55,11 @@
                  swap never takes. includeIndicatorStyles:false: htmx would inject a <style>
                  element, which the CSP refuses; gonk styles no indicator. -->
             <meta name="htmx-config"><xsl:attribute name="content">{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false}</xsl:attribute></meta>
+            <!-- Ledger #3238: a resolved name's interim page refreshes at once to its target
+                 (WCAG H76), with a visible link in the body for a browser that does not. -->
+            <xsl:if test="@refresh">
+              <meta http-equiv="refresh"><xsl:attribute name="content">0; url=<xsl:value-of select="@refresh"/></xsl:attribute></meta>
+            </xsl:if>
             <title><xsl:value-of select="@title"/> · gonk</title>
             <!-- The shared tokens first (urn:iki:ui:tokens.css), so gonk's layout wins a tie. -->
             <link rel="stylesheet" href="/static/tokens.css"/>
@@ -75,6 +80,21 @@
             <script src="/static/shell.js"></script>
             <script src="/static/htmx.min.js" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" defer="defer"></script>
             <script src="/static/gonk.js" defer="defer"></script>
+            <!-- Ledger #3379: the deployment's own stylesheets and scripts (src/page_assets.rs),
+                 LAST in the head, so a stylesheet wins a tie and a script, deferred after gonk.js,
+                 runs once gonk's own behavior is wired. Left out in safe mode (?safe=1). The gate
+                 before them is the per-browser toggle: it reloads with ?safe=1 before they load. -->
+            <xsl:if test="view:page-assets and not(@safe = 'true')">
+              <script src="/static/gonk-safe.js"></script>
+              <xsl:if test="view:page-assets/view:page-style">
+                <xsl:comment> This deployment's own stylesheets (its gonk.page.style lines), not gonk's. Load the page with ?safe=1 to see it without them. </xsl:comment>
+                <xsl:apply-templates select="view:page-assets/view:page-style"/>
+              </xsl:if>
+              <xsl:if test="view:page-assets/view:page-script">
+                <xsl:comment> This deployment's own scripts (its gonk.page.script lines), not gonk's. Load the page with ?safe=1 to see it without them. </xsl:comment>
+                <xsl:apply-templates select="view:page-assets/view:page-script"/>
+              </xsl:if>
+            </xsl:if>
           </head>
           <body>
             <a class="skip" href="#main">Skip to content</a>
@@ -85,6 +105,7 @@
               <xsl:apply-templates select="view:browse"/>
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
+              <xsl:apply-templates select="view:feeds-link"/>
               <xsl:apply-templates select="view:views-link"/>
               <xsl:apply-templates select="view:onboard-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
@@ -99,20 +120,41 @@
               <!-- ikigai-ui's theme chooser: src/render.rs::render puts its markup here. -->
               <xsl:comment>theme-chooser</xsl:comment>
             </header>
+            <!-- A deployment's own pages (ledger #3279), quieter than gonk's navigation and named
+                 as add-ons in words. A face's page shows the same row in gonk's bar
+                 (src/face_frame.rs). No gonk.face line, no row. -->
+            <xsl:if test="view:face-link">
+              <nav class="addons" aria-label="Add-ons">
+                <span class="addons-label">Add-ons</span>
+                <ul class="addons-list"><xsl:apply-templates select="view:face-link"/></ul>
+              </nav>
+            </xsl:if>
             <xsl:apply-templates select="view:first-passkey"/>
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>
               <p>This link carries a one-time invite. Creating the passkey enrolls it under the grant the invite names; after that, signing in with it gives this browser that grant.</p>
+              <!-- Signed in, the invite's grant is added to the passkey signed in with by default
+                   (ledger #3388), confirmed by that passkey; creating a new one is the other
+                   choice. web/gonk.js shows this, and the Label field only for a new passkey. -->
+              <p id="enrol-signed-in" hidden="hidden">You are signed in. Adding the invite's grant to the passkey you are signed in with keeps its other grants and asks that passkey to confirm (its fingerprint, face or PIN), then signs you in again with the wider grant. No other passkey changes.</p>
               <form id="enrol-form" class="row">
-                <label for="enrol-label">Label</label>
-                <input id="enrol-label" name="label" type="text" autocomplete="off" placeholder="e.g. laptop Touch ID"/>
-                <button type="submit">Create passkey</button>
+                <fieldset id="enrol-choice" hidden="hidden">
+                  <legend>What should this invite do?</legend>
+                  <label><input type="radio" name="enrol-mode" id="enrol-add" value="add" checked="checked"/> Add its grant to the passkey you are signed in with</label>
+                  <label><input type="radio" name="enrol-mode" id="enrol-create" value="create"/> Create a new passkey</label>
+                </fieldset>
+                <span id="enrol-new" class="row">
+                  <label for="enrol-label">Label</label>
+                  <input id="enrol-label" name="label" type="text" autocomplete="off" placeholder="e.g. laptop Touch ID"/>
+                </span>
+                <button type="submit" id="enrol-submit">Create passkey</button>
               </form>
             </section>
             <div id="status" class="flash-area" role="status" aria-live="polite"></div>
             <main id="main">
               <xsl:call-template name="body"/>
             </main>
+            <xsl:apply-templates select="view:page-assets"/>
           </body>
         </html>
       </xsl:when>
@@ -319,10 +361,18 @@
   <xsl:template name="body">
     <xsl:choose>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
+      <xsl:when test="@view = 'facet'">
+        <xsl:if test="@full = 'true'">
+          <h1>Labels and priority counts</h1>
+          <p><a><xsl:attribute name="href"><xsl:value-of select="@back"/></xsl:attribute>Back to the filtered list</a></p>
+        </xsl:if>
+        <xsl:apply-templates select="view:facet"/>
+      </xsl:when>
       <xsl:when test="@view = 'item'"><xsl:call-template name="item"/></xsl:when>
       <xsl:when test="@view = 'lifecycle'"><xsl:apply-templates select="view:lifecycle"/></xsl:when>
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
+      <xsl:when test="@view = 'resolution'"><xsl:apply-templates select="view:resolution"/></xsl:when>
       <xsl:when test="@view = 'refusal'"><xsl:apply-templates select="view:refusal"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
@@ -339,6 +389,8 @@
       <xsl:when test="@view = 'layers-wait'"><xsl:call-template name="layers-wait"/></xsl:when>
       <xsl:when test="@view = 'layers-count'"><xsl:call-template name="layers-count"/></xsl:when>
       <xsl:when test="@view = 'layers-say'"><xsl:call-template name="layers-say"/></xsl:when>
+      <xsl:when test="@view = 'layers-ask'"><xsl:call-template name="layers-ask"/></xsl:when>
+      <xsl:when test="@view = 'feed'"><xsl:call-template name="feed"/></xsl:when>
       <xsl:when test="@view = 'views'"><xsl:call-template name="views"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
@@ -346,6 +398,7 @@
       <xsl:when test="@view = 'chunk'">
         <xsl:apply-templates select="view:chart"/>
         <xsl:apply-templates select="view:agent-panel"/>
+        <xsl:apply-templates select="view:facet-term"/>
         <xsl:apply-templates select="view:finding"/>
         <xsl:apply-templates select="view:group"/>
         <xsl:apply-templates select="view:batch"/>
@@ -353,7 +406,10 @@
         <xsl:apply-templates select="view:entry"/>
         <xsl:apply-templates select="view:tuple"/>
         <xsl:apply-templates select="view:receipt"/>
+        <!-- An outgoing-link group's rows carry their ledger's landing rank (#3226), zero
+             padded so a text sort is a numeric one; listing rows carry none and tie on it. -->
         <xsl:apply-templates select="rdf:RDF/ledger:Item">
+          <xsl:sort select="view:landing"/>
           <xsl:sort select="dcterms:modified" order="descending"/>
         </xsl:apply-templates>
       </xsl:when>
@@ -476,6 +532,36 @@
   <!-- The RDF Toolbox (ledger #2021), present only when this server serves one: a
        gonk.toolbox.dist line (src/web.rs::nav_with, Web::toolbox). The toolbox is its own page
        with its own script and CSP, so this is an ordinary link: a full navigation, never a swap. -->
+  <!-- Ledger #3379: a deployment's own stylesheet and script, linked by the head above. -->
+  <xsl:template match="view:page-style">
+    <link rel="stylesheet" data-gonk-deployment="style"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute></link>
+  </xsl:template>
+  <xsl:template match="view:page-script">
+    <script defer="defer" data-gonk-deployment="script"><xsl:attribute name="src"><xsl:value-of select="@src"/></xsl:attribute></script>
+  </xsl:template>
+  <!-- …and the footer that says so, on every page that has them, with safe mode one link away
+       (a query flag, which works with no script) and, with a script, a per-browser toggle
+       (web/gonk.js wires #safe-toggle; web/gonk-safe.js honors it). -->
+  <xsl:template match="view:page-assets">
+    <footer id="deployment-note" class="deployment-note">
+      <xsl:choose>
+        <xsl:when test="../@safe = 'true'">
+          <p><strong>Safe mode</strong>: this page is shown without this deployment's <xsl:value-of select="substring-after(@adds, 'its ')"/>, as gonk draws it alone. <a class="safe-leave" href="?">Show it with them</a></p>
+        </xsl:when>
+        <xsl:otherwise>
+          <p>This deployment adds <xsl:value-of select="@adds"/> to gonk's pages. If something looks or works wrong, <a class="safe-enter" href="?safe=1">load this page in safe mode</a>, without them, to see whether it is gonk or the deployment.</p>
+        </xsl:otherwise>
+      </xsl:choose>
+      <p><button id="safe-toggle" type="button" class="quiet" hidden="hidden">Use safe mode on every page in this browser</button></p>
+    </footer>
+  </xsl:template>
+
+  <!-- A deployment's own pages (ledger #3199, src/face.rs), one link per `gonk.face`, named by
+       the face's name: an item of the add-on row. -->
+  <xsl:template match="view:face-link">
+    <li><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a></li>
+  </xsl:template>
+
   <xsl:template match="view:toolbox-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Toolbox</a>
   </xsl:template>
@@ -484,6 +570,11 @@
        reads the views declaration (src/web.rs::nav_with). An ordinary link, beside Layers. -->
   <xsl:template match="view:dashboard-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Dashboard</a>
+  </xsl:template>
+
+  <!-- Feeds (ledger #3285, src/layers_view.rs), on the Layers link's rule (src/web.rs::nav_with). -->
+  <xsl:template match="view:feeds-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Feeds</a>
   </xsl:template>
 
   <xsl:template match="view:views-link">
@@ -535,6 +626,7 @@
       <xsl:if test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
       <xsl:if test="@error"><p class="note" role="alert"><xsl:value-of select="@error"/></p></xsl:if>
       <xsl:if test="@restart"><p class="note" data-announce=""><xsl:value-of select="@restart"/></p></xsl:if>
+      <xsl:if test="@host-unread"><p class="note" data-announce=""><xsl:value-of select="@host-unread"/></p></xsl:if>
       <xsl:if test="not(@note)">
         <h2 id="onboard-pending-title">Waiting for approval</h2>
         <p class="note">Approve on this machine, from a terminal: the command is beside each request.</p>
@@ -636,6 +728,7 @@
         <p class="note">The door says this page reads and posts as <code class="iri"><xsl:value-of select="@me"/></code>, <xsl:value-of select="@me-kind"/>.</p>
       </xsl:if>
       <xsl:if test="@no-post"><p class="note"><xsl:value-of select="@no-post"/></p></xsl:if>
+      <xsl:if test="@feed-filter"><p class="note"><xsl:value-of select="@feed-filter"/><xsl:text> · </xsl:text><a href="/feed">Change the filter on Feeds</a></p></xsl:if>
       <xsl:if test="@reading"><p class="note"><xsl:value-of select="@reading"/></p></xsl:if>
       <xsl:apply-templates select="view:say"/>
       <p id="layers-live" class="note live"></p>
@@ -692,6 +785,13 @@
             <xsl:text> · replaces </xsl:text>
             <a><xsl:attribute name="href"><xsl:value-of select="@supersedes-href"/></xsl:attribute><xsl:value-of select="@supersedes-label"/></a>
           </xsl:if>
+          <xsl:if test="@about-label">
+            <xsl:text> · about </xsl:text>
+            <xsl:choose>
+              <xsl:when test="@about-href"><a class="entry-about"><xsl:attribute name="href"><xsl:value-of select="@about-href"/></xsl:attribute>an entry of <xsl:value-of select="@about-label"/></a></xsl:when>
+              <xsl:otherwise>an entry of <xsl:value-of select="@about-label"/></xsl:otherwise>
+            </xsl:choose>
+          </xsl:if>
           <xsl:if test="@addressed-to"><xsl:text> · addressed to </xsl:text><xsl:value-of select="@addressed-to"/></xsl:if>
           <xsl:if test="@offer"><xsl:text> · about the offer </xsl:text><code><xsl:value-of select="@offer"/></code></xsl:if>
           <xsl:if test="@item-href"><xsl:text> · tracked here as </xsl:text><a class="entry-item"><xsl:attribute name="href"><xsl:value-of select="@item-href"/></xsl:attribute><xsl:value-of select="@item-label"/></a></xsl:if>
@@ -728,9 +828,14 @@
              src/render.rs::layer_refs's value, built from who wrote it and the ledgers this gonk
              holds, never `default` by assumption and never a name from the layer. -->
         <xsl:if test="view:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:body/@linkify"/></xsl:attribute><xsl:value-of select="view:body"/></div></xsl:if>
+        <!-- Its body as Markdown (ledger #3281): `render::entry_markdown`'s fragment, references
+             already linked, so it carries no data-linkify. `view:body` above is the text as
+             written, for a body over that function's bounds. -->
+        <xsl:if test="view:rendered"><div class="body markdown"><xsl:copy-of select="view:rendered/node()"/></div></xsl:if>
         <xsl:if test="@answer-href">
           <p class="entry-actions"><a><xsl:attribute name="href"><xsl:value-of select="@answer-href"/></xsl:attribute>Reply<span class="sr-only"> to the <xsl:value-of select="@kind-label"/> from <xsl:value-of select="@who"/>, number <xsl:value-of select="@seq"/></span></a></p>
         </xsl:if>
+        <xsl:apply-templates select="view:ask"/>
       </article>
     </li>
   </xsl:template>
@@ -770,7 +875,7 @@
           <a><xsl:attribute name="href"><xsl:value-of select="@cancel-href"/></xsl:attribute>Do not reply to it</a>
         </p>
       </xsl:if>
-      <label for="say-body">Text (Markdown is shown as written)</label>
+      <label for="say-body">Text (Markdown)</label>
       <textarea id="say-body" name="body" rows="4" required="required"></textarea>
       <p class="row"><button type="submit">Post</button></p>
     </form>
@@ -782,6 +887,133 @@
     <div id="status" hx-swap-oob="innerHTML">
       <p class="flash ok"><xsl:value-of select="@flash"/></p>
     </div>
+  </xsl:template>
+
+  <!-- A feed entry's question (ledger #3285): a native disclosure, so the form is out of the
+       way until it is wanted and opens with no script. It goes to the viewer's OWN channel: a
+       choice when the identity has several, named when it has one. Each form's fields carry the
+       entry's id, so no two entries on a page share an id. -->
+  <xsl:template match="view:ask">
+    <details class="ask">
+      <summary>Ask a question about this<span class="sr-only">, entry <xsl:value-of select="@entry"/></span></summary>
+      <xsl:apply-templates select="." mode="form"/>
+    </details>
+  </xsl:template>
+
+  <xsl:template match="view:ask" mode="form">
+      <form class="say" method="post" hx-target="this" hx-swap="outerHTML">
+        <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+        <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
+        <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@feed"/></xsl:attribute></input>
+        <input type="hidden" name="entry"><xsl:attribute name="value"><xsl:value-of select="@entry"/></xsl:attribute></input>
+        <xsl:choose>
+          <xsl:when test="@single = 'true'">
+            <input type="hidden" name="channel"><xsl:attribute name="value"><xsl:value-of select="view:ask-channel/@name"/></xsl:attribute></input>
+            <p class="note">The question goes to your own channel, <xsl:value-of select="view:ask-channel/@label"/>.</p>
+          </xsl:when>
+          <xsl:otherwise>
+            <label><xsl:attribute name="for">ask-<xsl:value-of select="@entry"/>-channel</xsl:attribute>Ask in</label>
+            <select name="channel"><xsl:attribute name="id">ask-<xsl:value-of select="@entry"/>-channel</xsl:attribute>
+              <xsl:for-each select="view:ask-channel">
+                <option><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute><xsl:value-of select="@label"/></option>
+              </xsl:for-each>
+            </select>
+          </xsl:otherwise>
+        </xsl:choose>
+        <label><xsl:attribute name="for">ask-<xsl:value-of select="@entry"/>-body</xsl:attribute>Your question (Markdown)</label>
+        <textarea name="body" rows="3" required="required"><xsl:attribute name="id">ask-<xsl:value-of select="@entry"/>-body</xsl:attribute></textarea>
+        <p class="row"><button type="submit">Ask</button></p>
+      </form>
+  </xsl:template>
+
+  <!-- A question's answer: a fresh form, and the flash in the page's one status region. -->
+  <xsl:template name="layers-ask">
+    <xsl:apply-templates select="view:ask" mode="form"/>
+    <div id="status" hx-swap-oob="innerHTML">
+      <p class="flash ok"><xsl:value-of select="@flash"/></p>
+    </div>
+  </xsl:template>
+
+  <!-- /feed (ledger #3285): every feed the identity reads. Plain forms, so Subscribe and a saved
+       filter work with no script, and the answer is the page with what changed said above it. -->
+  <xsl:template name="feed">
+    <section class="panel layers" aria-labelledby="feeds-title">
+      <h1 id="feeds-title"><xsl:value-of select="@title"/></h1>
+      <xsl:apply-templates select="view:signin"/>
+      <div id="layers-banner"><xsl:apply-templates select="view:notice"/></div>
+      <xsl:apply-templates select="view:flash" mode="announce"/>
+      <xsl:apply-templates select="view:feeds-join"/>
+      <xsl:if test="@empty"><p class="empty"><xsl:value-of select="@empty"/></p></xsl:if>
+      <ul class="layer-list">
+        <xsl:apply-templates select="view:feed-row"/>
+      </ul>
+    </section>
+  </xsl:template>
+
+  <!-- Join or leave a host's public feeds (ledger #3291): a plain POST, one sentence saying what
+       it does, the button's name its visible words. -->
+  <xsl:template match="view:feeds-join">
+    <form class="feed-toggle" method="post">
+      <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+      <xsl:if test="@note != ''"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
+      <button type="submit"><xsl:choose><xsl:when test="@state = 'joined'">Leave the public feeds</xsl:when><xsl:otherwise>Join the public feeds</xsl:otherwise></xsl:choose></button>
+    </form>
+  </xsl:template>
+
+  <xsl:template match="view:feed-row">
+    <li class="layer-row">
+      <h2 class="layer-name">
+        <xsl:choose>
+          <xsl:when test="@href"><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@label"/></a></xsl:when>
+          <xsl:otherwise><xsl:value-of select="@label"/></xsl:otherwise>
+        </xsl:choose>
+        <span class="note"> (<xsl:value-of select="@name"/>)</span>
+      </h2>
+      <p class="layer-facts">
+        <xsl:choose>
+          <xsl:when test="@newest-title">
+            <xsl:text>Newest: </xsl:text><xsl:value-of select="@newest-title"/>
+            <xsl:if test="@when != ''">
+              <xsl:text> · </xsl:text>
+              <time><xsl:attribute name="datetime"><xsl:value-of select="@datetime"/></xsl:attribute><xsl:value-of select="@when"/></time>
+            </xsl:if>
+          </xsl:when>
+          <xsl:otherwise>Nothing has been published yet.</xsl:otherwise>
+        </xsl:choose>
+      </p>
+      <form class="feed-toggle" method="post">
+        <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+        <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
+        <input type="hidden" name="action"><xsl:attribute name="value"><xsl:choose><xsl:when test="@subscribed = 'true'">unsubscribe</xsl:when><xsl:otherwise>subscribe</xsl:otherwise></xsl:choose></xsl:attribute></input>
+        <button type="submit"><xsl:choose><xsl:when test="@subscribed = 'true'">Unsubscribe<span class="sr-only"> from <xsl:value-of select="@label"/></span></xsl:when><xsl:otherwise>Subscribe<span class="sr-only"> to <xsl:value-of select="@label"/></span></xsl:otherwise></xsl:choose></button>
+      </form>
+      <xsl:if test="view:concept">
+        <form class="feed-filter" method="post">
+          <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
+          <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
+          <input type="hidden" name="action" value="filter"/>
+          <fieldset>
+            <legend>Filter <xsl:value-of select="@label"/> by concept</legend>
+            <p class="note">A checked concept includes everything under it. With none checked you get the whole feed.</p>
+            <ul class="concepts"><xsl:apply-templates select="view:concept"/></ul>
+          </fieldset>
+          <p class="row"><button type="submit">Save the filter<span class="sr-only"> for <xsl:value-of select="@label"/></span></button></p>
+        </form>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:concept">
+    <li>
+      <label>
+        <input type="checkbox" name="concept">
+          <xsl:attribute name="value"><xsl:value-of select="@iri"/></xsl:attribute>
+          <xsl:if test="@checked = 'true'"><xsl:attribute name="checked">checked</xsl:attribute></xsl:if>
+        </input>
+        <xsl:value-of select="@label"/>
+      </label>
+      <xsl:if test="view:concept"><ul class="concepts"><xsl:apply-templates select="view:concept"/></ul></xsl:if>
+    </li>
   </xsl:template>
 
   <!-- The poll's answer: the next watcher in place of this one, and what changed, out of
@@ -2170,6 +2402,7 @@
     <section id="ledger" class="ledger">
       <header class="ledger-head">
         <h1><xsl:value-of select="@title"/></h1>
+        <xsl:apply-templates select="view:union"/>
         <nav class="filters" aria-label="Status">
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'open'"/></xsl:call-template>
           <xsl:call-template name="status-link"><xsl:with-param name="status" select="'closed'"/></xsl:call-template>
@@ -2182,13 +2415,34 @@
           <xsl:attribute name="action"><xsl:value-of select="@page-url"/></xsl:attribute>
           <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/></xsl:attribute>
           <input type="hidden" name="status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
-          <label class="sr-only" for="search-text">Search titles</label>
-          <input id="search-text" type="search" name="text" placeholder="Search titles">
-            <xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute>
-          </input>
+          <input type="hidden" name="limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
+          <!-- A union page (ledger #3216): a search keeps the ledgers it lists. -->
+          <xsl:if test="@ledgers != ''">
+            <input type="hidden" name="ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
+          </xsl:if>
+          <div class="search-field">
+            <label for="search-text">Search titles</label>
+            <input id="search-text" type="search" name="text" placeholder="Search titles">
+              <xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute>
+            </input>
+          </div>
+          <div class="search-field">
+            <label for="search-labels">Labels (all must match)</label>
+            <input id="search-labels" name="labels" type="text" aria-describedby="label-filter-help">
+              <xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute>
+            </input>
+          </div>
+          <div class="search-field">
+            <label for="search-without">Without (none may match)</label>
+            <input id="search-without" name="without" type="text" aria-describedby="label-filter-help">
+              <xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute>
+            </input>
+          </div>
           <button type="submit" class="quiet">Search</button>
+          <p id="label-filter-help" class="note">Separate labels with commas.</p>
         </form>
       </header>
+      <xsl:apply-templates select="view:label-filters"/>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
@@ -2197,7 +2451,12 @@
           <input type="hidden" name="_then" value="items"/>
           <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="@ledger"/></xsl:attribute></input>
           <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
-          <label for="file-content">File an item — first line is the title, then a blank line, then the body</label>
+          <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute></input>
+          <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute></input>
+          <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
+          <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
+          <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
+          <label for="file-content">File an item<xsl:if test="@ledgers != ''"> in <xsl:value-of select="@ledger"/></xsl:if> — first line is the title, then a blank line, then the body</label>
           <textarea id="file-content" name="content" rows="3" required="required"></textarea>
           <details>
             <summary>More fields</summary>
@@ -2220,6 +2479,8 @@
           <button type="submit">File</button>
         </form>
       </xsl:if>
+      <div class="listing-body">
+        <div class="listing-results">
       <!-- ⚠ `@has-rows`, not `count(rdf:RDF/ledger:Item)`: the rows are rendered in chunks
            apart from this shell (ledger #519), so the shell holds none of them and the
            count is the Rust side's (`web::Count`), evaluated once. -->
@@ -2259,15 +2520,95 @@
           <xsl:apply-templates select="view:slot[@name = 'items']"/>
         </ol>
       </xsl:if>
+        </div>
+        <aside class="listing-facet-panel" aria-labelledby="listing-facet-title">
+          <h2 id="listing-facet-title">Labels and priorities</h2>
+          <p><a><xsl:attribute name="href"><xsl:value-of select="@facet-url"/>&amp;page=true</xsl:attribute>Open labels and priority counts</a></p>
+          <div id="listing-facet" hx-trigger="load" hx-target="this" hx-swap="outerHTML" data-ui-quiet="true">
+            <xsl:attribute name="hx-get"><xsl:value-of select="@facet-url"/></xsl:attribute>
+            <p>Counts load separately from the list. With scripts off, open the counts link.</p>
+          </div>
+        </aside>
+      </div>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:facet">
+    <div id="listing-facet" data-loaded="true">
+      <p>Counts cover the whole filtered list, including items on other pages. Include keeps only items with that label; Exclude leaves them out. Priority counts are informational.</p>
+      <xsl:choose>
+        <xsl:when test="@empty = 'true'"><p>No labels or priorities match.</p></xsl:when>
+        <xsl:otherwise>
+          <!-- The whole page (page=true) has an h1 above this; the panel on the ledger page an h2. -->
+          <xsl:if test="@labels = 'true'">
+            <xsl:choose>
+              <xsl:when test="../@full = 'true'"><h2>Labels</h2></xsl:when>
+              <xsl:otherwise><h3>Labels</h3></xsl:otherwise>
+            </xsl:choose>
+            <ul class="facet-terms"><xsl:apply-templates select="view:slot[@name = 'facet-label']"/></ul>
+          </xsl:if>
+          <xsl:if test="@priorities = 'true'">
+            <xsl:choose>
+              <xsl:when test="../@full = 'true'"><h2>Priorities</h2></xsl:when>
+              <xsl:otherwise><h3>Priorities</h3></xsl:otherwise>
+            </xsl:choose>
+            <ul class="facet-terms"><xsl:apply-templates select="view:slot[@name = 'facet-priority']"/></ul>
+          </xsl:if>
+        </xsl:otherwise>
+      </xsl:choose>
+    </div>
+  </xsl:template>
+
+  <!-- One row: the term and its count first, then Include and Exclude. The term is not
+       repeated on screen; each link's hidden words name it ("Include label http"), and its
+       name begins with the visible word (WCAG 2.5.3). -->
+  <xsl:template match="view:facet-term">
+    <li>
+      <span class="facet-term"><xsl:value-of select="@term"/></span><xsl:value-of select="' '"/><span class="facet-count">(<xsl:value-of select="@count"/>)</span>
+      <xsl:if test="@include != ''">
+        <xsl:value-of select="' '"/>
+        <span class="facet-actions">
+          <a class="facet-action"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute>Include<span class="sr-only"><xsl:value-of select="concat(' label ', @term)"/></span></a>
+          <xsl:value-of select="' '"/>
+          <a class="facet-action"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude<span class="sr-only"><xsl:value-of select="concat(' label ', @term)"/></span></a>
+        </span>
+      </xsl:if>
+    </li>
+  </xsl:template>
+
+  <!-- A union page (ledger #3216) says in words which ledgers its rows are from, and which
+       asked-for ledgers this grant left out; each row's number then carries its ledger. -->
+  <xsl:template match="view:union">
+    <p class="note union"><xsl:value-of select="."/></p>
+  </xsl:template>
+
+  <xsl:template match="view:label-filters">
+    <div class="active-filters">
+      <p>Label filters in force.<xsl:if test="@chart = 'true'"> The chart counts this status across all labels and priorities.</xsl:if><xsl:value-of select="' '"/><a><xsl:attribute name="href"><xsl:value-of select="@clear"/></xsl:attribute>Clear label filters</a></p>
+      <ul><xsl:apply-templates select="view:filter-term"/></ul>
+    </div>
+  </xsl:template>
+
+  <xsl:template match="view:filter-term">
+    <li><xsl:value-of select="@description"/><xsl:text>: </xsl:text><strong><xsl:value-of select="@term"/></strong><xsl:text>. </xsl:text>
+      <a><xsl:attribute name="href"><xsl:value-of select="@remove"/></xsl:attribute>Remove <xsl:value-of select="@term"/></a><xsl:text> · </xsl:text>
+      <a><xsl:attribute name="href"><xsl:value-of select="@move"/></xsl:attribute><xsl:value-of select="@action"/><xsl:value-of select="' '"/><xsl:value-of select="@term"/></a>
+    </li>
+  </xsl:template>
+
+  <xsl:template match="view:label-chip">
+    <span class="label-actions">
+      <a class="badge label"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@term"/></a><xsl:value-of select="' '"/>
+      <a class="note"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@term"/></a>
+    </span>
   </xsl:template>
 
   <xsl:template name="status-link">
     <xsl:param name="status"/>
     <a hx-target="#ledger" hx-swap="outerHTML">
-      <xsl:attribute name="href"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
-      <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
-      <xsl:attribute name="hx-push-url"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/></xsl:attribute>
+      <xsl:attribute name="href"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/><xsl:value-of select="@status-tail"/></xsl:attribute>
+      <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/>?status=<xsl:value-of select="$status"/><xsl:value-of select="@status-tail"/></xsl:attribute>
+      <xsl:attribute name="hx-push-url"><xsl:value-of select="@page-url"/>?status=<xsl:value-of select="$status"/><xsl:value-of select="@status-tail"/></xsl:attribute>
       <xsl:if test="@status = $status"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
       <xsl:value-of select="$status"/>
     </a>
@@ -2277,21 +2618,27 @@
   <xsl:template match="ledger:Item">
     <li>
       <xsl:attribute name="class">row <xsl:value-of select="view:status"/></xsl:attribute>
-      <span class="num"><xsl:value-of select="view:short"/></span>
+      <span class="num"><xsl:value-of select="view:localNumber"/></span>
       <a class="title">
         <xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute>
-        <xsl:value-of select="dcterms:title"/>
+        <xsl:value-of select="dcterms:title"/><span class="sr-only"> (in <xsl:value-of select="view:ledger"/>)</span>
       </a>
       <span class="badges">
         <xsl:call-template name="badges"/>
       </span>
-      <xsl:if test="view:canWrite = 'true'">
+      <xsl:if test="view:canWrite = 'true' and not(view:linked)">
         <xsl:if test="view:status = 'open'">
           <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
             <input type="hidden" name="_action" value="close"/>
             <input type="hidden" name="_then" value="items"/>
             <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
             <input type="hidden" name="_status"><xsl:attribute name="value"><xsl:value-of select="view:listStatus"/></xsl:attribute></input>
+            <input type="hidden" name="_labels"><xsl:attribute name="value"><xsl:value-of select="view:listLabels"/></xsl:attribute></input>
+            <input type="hidden" name="_without"><xsl:attribute name="value"><xsl:value-of select="view:listWithout"/></xsl:attribute></input>
+            <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="view:listText"/></xsl:attribute></input>
+            <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
+            <input type="hidden" name="_listLedger"><xsl:attribute name="value"><xsl:value-of select="view:listLedger"/></xsl:attribute></input>
+            <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="view:listLedgers"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
             <button type="submit" class="quiet small">
               <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> with the ledger's default reason</xsl:attribute>
@@ -2299,6 +2646,19 @@
             </button>
           </form>
         </xsl:if>
+      </xsl:if>
+      <xsl:if test="view:canUnlink = 'true'">
+        <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <input type="hidden" name="_action" value="link"/>
+          <input type="hidden" name="_verb" value="Delete"/>
+          <input type="hidden" name="_then" value="card"/>
+          <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:sourceLedger"/></xsl:attribute></input>
+          <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:sourceId"/></xsl:attribute></input>
+          <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:sourceItem"/></xsl:attribute></input>
+          <input type="hidden" name="content"><xsl:attribute name="value"><xsl:value-of select="view:target"/></xsl:attribute></input>
+          <input type="hidden" name="type"><xsl:attribute name="value"><xsl:value-of select="view:rel"/></xsl:attribute></input>
+          <button type="submit" class="quiet small"><xsl:attribute name="aria-label">Unlink <xsl:value-of select="dcterms:title"/> (<xsl:value-of select="view:rel"/>)</xsl:attribute>Unlink</button>
+        </form>
       </xsl:if>
     </li>
   </xsl:template>
@@ -2319,9 +2679,30 @@
       <xsl:if test="view:reason"> · <xsl:value-of select="view:reason"/></xsl:if>
     </span>
     <span class="badge priority"><xsl:value-of select="view:priority"/></span>
+    <!-- Ledger #3195: the hub's own facts, each one badge whose words carry it (color is only
+         emphasis): the lifecycle state, in flight when the lifecycle document says so; the
+         claim's holder, an expired lease said in words; and whom a handed-back item awaits. -->
+    <span>
+      <xsl:attribute name="class">badge state<xsl:if test="view:stateInFlight = 'true'"> in-flight</xsl:if></xsl:attribute>
+      <xsl:text>state: </xsl:text><xsl:value-of select="view:state"/>
+      <xsl:if test="view:stateInFlight = 'true'"> · in flight</xsl:if>
+    </span>
     <xsl:if test="view:deferred = 'true'"><span class="badge deferred">deferred</span></xsl:if>
-    <xsl:if test="ledger:claimedBy"><span class="badge claimed">claimed by <xsl:value-of select="ledger:claimedBy"/></span></xsl:if>
-    <xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each>
+    <xsl:if test="ledger:claimedBy">
+      <span>
+        <xsl:attribute name="class">badge claimed<xsl:if test="view:leaseExpired = 'true'"> expired</xsl:if></xsl:attribute>
+        <xsl:text>claimed by </xsl:text><xsl:value-of select="ledger:claimedBy"/>
+        <xsl:if test="view:leaseExpired = 'true'"> · lease expired</xsl:if>
+      </span>
+    </xsl:if>
+    <xsl:if test="view:awaiting"><span class="badge awaiting">awaiting <xsl:value-of select="view:awaiting"/></span></xsl:if>
+    <!-- Ledger #3217: the open items that block this one, named (src/web.rs::enrich_blocked):
+         a number in this ledger, `ledger id` in another, an IRI where the viewer cannot read. -->
+    <xsl:if test="view:blockedBy"><span class="badge blocked">blocked by <xsl:value-of select="view:blockedBy"/></span></xsl:if>
+    <xsl:choose>
+      <xsl:when test="view:label-chip"><xsl:apply-templates select="view:label-chip"/></xsl:when>
+      <xsl:otherwise><xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each></xsl:otherwise>
+    </xsl:choose>
   </xsl:template>
 
   <!-- Ledger #1617: the configured lifecycle, with counts from the viewer's ledger. -->
@@ -2389,18 +2770,37 @@
 
   <!-- ============================================================ one item -->
 
+  <xsl:template match="view:link-group">
+    <div class="link-group">
+      <h3><xsl:value-of select="@relation"/><xsl:text> · </xsl:text><xsl:value-of select="@ledger"/></h3>
+      <p class="count"><xsl:value-of select="view:rollup"/></p>
+      <ol class="items"><xsl:apply-templates select="view:slot"/></ol>
+    </div>
+  </xsl:template>
+
   <xsl:template name="item">
     <article id="item" class="item-page">
       <xsl:apply-templates select="view:flash"/>
       <xsl:apply-templates select="rdf:RDF/ledger:Item" mode="card"/>
-      <xsl:if test="count(rdf:RDF/view:Link) &gt; 0">
+      <xsl:if test="view:link-group or view:unavailable-link">
         <section class="panel links" aria-labelledby="links-title">
           <h2 id="links-title">Links</h2>
-          <ul class="plain">
-            <xsl:apply-templates select="rdf:RDF/view:Link">
-              <xsl:sort select="view:order"/>
-            </xsl:apply-templates>
-          </ul>
+          <xsl:apply-templates select="view:link-group"/>
+          <xsl:if test="view:unavailable-link">
+            <ul class="plain"><xsl:apply-templates select="view:unavailable-link/rdf:RDF/view:Link"/></ul>
+          </xsl:if>
+        </section>
+      </xsl:if>
+      <!-- Ledger #3217: what links TO this item, in any ledger (src/web.rs::inbound_links),
+           grouped as the Links panel is; a linker the viewer cannot read is its IRI alone. -->
+      <xsl:if test="view:inbound">
+        <section class="panel links inbound" aria-labelledby="inbound-title">
+          <h2 id="inbound-title">Linked to this</h2>
+          <p class="note">Items that link to this one, from any ledger. One you cannot read is shown only as its IRI.</p>
+          <xsl:apply-templates select="view:inbound/view:link-group"/>
+          <xsl:if test="view:inbound/view:unavailable-link">
+            <ul class="plain"><xsl:apply-templates select="view:inbound/view:unavailable-link/rdf:RDF/view:Link"/></ul>
+          </xsl:if>
         </section>
       </xsl:if>
       <!-- The inbound parent edges (ledger #1501): src/web.rs::enrich_children. -->
@@ -2417,11 +2817,39 @@
       <section class="panel comments" aria-labelledby="comments-title">
         <h2 id="comments-title">Comments</h2>
         <xsl:if test="count(rdf:RDF/ledger:Comment) = 0"><p class="empty">No comments yet.</p></xsl:if>
+        <!-- Ledger #3379: oldest or newest first, gonk's own control. Plain links work with no
+             script (`comments=newest`, src/web.rs::comment_order); web/gonk.js turns them into an
+             in-place switch and remembers the choice in this browser. -->
+        <xsl:if test="count(rdf:RDF/ledger:Comment) &gt; 1">
+          <nav id="comment-order" class="comment-order" aria-label="Comment order">
+            <span class="comment-order-label">Show</span>
+            <xsl:value-of select="' '"/>
+            <a href="?comments=oldest" data-order="oldest">
+              <xsl:if test="not(@comments = 'newest')"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+              <xsl:text>oldest first</xsl:text>
+            </a>
+            <xsl:text> · </xsl:text>
+            <a href="?comments=newest" data-order="newest">
+              <xsl:if test="@comments = 'newest'"><xsl:attribute name="aria-current">true</xsl:attribute></xsl:if>
+              <xsl:text>newest first</xsl:text>
+            </a>
+          </nav>
+        </xsl:if>
         <xsl:if test="count(rdf:RDF/ledger:Comment) &gt; 0">
           <ol class="plain comment-list">
-            <xsl:apply-templates select="rdf:RDF/ledger:Comment">
-              <xsl:sort select="dcterms:created"/>
-            </xsl:apply-templates>
+            <xsl:attribute name="data-order"><xsl:choose><xsl:when test="@comments = 'newest'">newest</xsl:when><xsl:otherwise>oldest</xsl:otherwise></xsl:choose></xsl:attribute>
+            <xsl:choose>
+              <xsl:when test="@comments = 'newest'">
+                <xsl:apply-templates select="rdf:RDF/ledger:Comment">
+                  <xsl:sort select="dcterms:created" order="descending"/>
+                </xsl:apply-templates>
+              </xsl:when>
+              <xsl:otherwise>
+                <xsl:apply-templates select="rdf:RDF/ledger:Comment">
+                  <xsl:sort select="dcterms:created"/>
+                </xsl:apply-templates>
+              </xsl:otherwise>
+            </xsl:choose>
           </ol>
         </xsl:if>
       </section>
@@ -2433,7 +2861,7 @@
     <header class="item-head">
       <p class="crumbs">
         <a><xsl:attribute name="href"><xsl:value-of select="view:ledgerHref"/></xsl:attribute><xsl:value-of select="view:ledger"/></a>
-        <span class="num"><xsl:value-of select="view:short"/></span>
+        <span class="num"><xsl:value-of select="view:localNumber"/></span>
       </p>
       <h1 class="item-title"><xsl:value-of select="dcterms:title"/></h1>
       <p class="badges"><xsl:call-template name="badges"/></p>
@@ -2449,8 +2877,16 @@
       </xsl:if>
     </header>
     <!-- data-linkify: src/render.rs::linkify links this text's http(s) URLs and `ledger #N`
-         references after the transform (ledger #989); the value is the ledger they resolve in. -->
-    <xsl:if test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:if>
+         references after the transform (ledger #989); the value (view:linkify,
+         render::ledger_refs) names the ledger they resolve in and the held ledgers a qualified
+         `crew#3` may link into (ledger #3344). -->
+    <!-- Or the body as Markdown (ledger #3345): src/render.rs::item_markdown's fragment,
+         references already linked, so it carries no data-linkify. A body with no Markdown in it
+         has no view:rendered and shows as written. -->
+    <xsl:choose>
+      <xsl:when test="view:rendered"><div class="body markdown as-written"><xsl:copy-of select="view:rendered/node()"/></div></xsl:when>
+      <xsl:when test="ledger:body"><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:when>
+    </xsl:choose>
     <dl class="meta">
       <dt>Filed</dt><dd><xsl:value-of select="view:created"/><xsl:if test="view:author"> by <xsl:value-of select="view:author"/><xsl:call-template name="author-claim"/></xsl:if></dd>
       <dt>Updated</dt><dd><xsl:value-of select="view:modified"/></dd>
@@ -2483,7 +2919,7 @@
       <span class="rel"><xsl:value-of select="view:rel"/></span>
       <xsl:choose>
         <xsl:when test="view:href">
-          <a><xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute><xsl:value-of select="view:text"/></a>
+          <a class="iri"><xsl:attribute name="href"><xsl:value-of select="view:href"/></xsl:attribute><xsl:value-of select="view:text"/></a>
         </xsl:when>
         <xsl:otherwise><code class="iri"><xsl:value-of select="view:text"/></code></xsl:otherwise>
       </xsl:choose>
@@ -2517,7 +2953,10 @@
           <xsl:otherwise>unattributed</xsl:otherwise>
         </xsl:choose>
       </p>
-      <div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:ledger"/></xsl:attribute><xsl:value-of select="ledger:body"/></div>
+      <xsl:choose>
+        <xsl:when test="view:rendered"><div class="body markdown as-written"><xsl:copy-of select="view:rendered/node()"/></div></xsl:when>
+        <xsl:otherwise><div class="body"><xsl:attribute name="data-linkify"><xsl:value-of select="view:linkify"/></xsl:attribute><xsl:value-of select="ledger:body"/></div></xsl:otherwise>
+      </xsl:choose>
     </li>
   </xsl:template>
 
@@ -2698,6 +3137,14 @@
     <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
     <input type="hidden" name="_id"><xsl:attribute name="value"><xsl:value-of select="view:id"/></xsl:attribute></input>
     <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
+  </xsl:template>
+
+  <!-- Ledger #3238: where one name resolves. The name is text; the target is a link. -->
+  <xsl:template match="view:resolution">
+    <section class="panel">
+      <h1>Name resolved</h1>
+      <p>This name, <code class="iri"><xsl:value-of select="@iri"/></code>, resolves to <a><xsl:attribute name="href"><xsl:value-of select="@target"/></xsl:attribute><xsl:value-of select="@target"/></a>.</p>
+    </section>
   </xsl:template>
 
   <xsl:template name="gone">

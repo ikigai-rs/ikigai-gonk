@@ -319,7 +319,9 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel_with(
             Arc::clone(&hub),
@@ -330,6 +332,7 @@ impl Server {
             anonymous: grants_for("default", Authority::Write).unwrap(),
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         std::thread::spawn(move || {
@@ -549,7 +552,7 @@ fn r6_a_read_cannot_name_its_own_principal_in_the_access_log() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        page.contains(" principal=- "),
+        page.contains(" principal=anon ") && !page.contains("Q1JFRC1CUklBTg"),
         "an anonymous GET named its own principal in the access log: {page}"
     );
 }

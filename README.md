@@ -1,5 +1,8 @@
 # ikigai-gonk
 
+**Website:** [gonk.ikigai-rs.dev](https://gonk.ikigai-rs.dev/), with what gonk does and how to start. The
+[gonk Book](https://ikigai-rs.github.io/ikigai-tutorial/gonk/introduction.html) teaches it chapter by chapter.
+
 **A standalone work-ledger server for [ikigai](https://github.com/ikigai-rs).** One binary
 holds the machine's durable RDF store and serves named ledgers — items, comments, labels,
 links, claims, and a ranked `next` — through three doors: HTTP on loopback port 1062, with a
@@ -74,6 +77,20 @@ name, and a browser refuses an IP address as one.
 - **Browse.** The front page is the first ledger you may read, open items first, with filters
   for closed and all and a title search. Each item has its own page: body, filing metadata,
   labels, links, `about` targets and comments.
+- **Labels and priorities beside a list.** Their counts cover every item the current
+  status, title and label filters match, including other pages. A label count
+  requires that label; Exclude leaves it out. Priority counts are plain text until
+  the ledger supports priority filtering. Counts load independently after the list appears,
+  with one grouped read of that ledger under your grant. Without JavaScript, the
+  counts link opens a separate page; the list's filters still work.
+- **Several ledgers on one page.** `/l/default?ledgers=default,crew` lists the union of
+  those ledgers, through the ledger's own `ledgers=` listing (ikigai-ledger 0.20): the ledger
+  reads each under your grant and leaves out one you cannot read, and the page says which
+  ledgers its rows are from and which it left out. Each row shows `ledger#N` and links into
+  its own ledger. Paging, the status tabs, search, the label filter's links and the counts
+  beside the list keep `ledgers=`, so a bookmark per project (a union plus a label filter)
+  is a saved view. The page is still its own ledger's: you must be able to read it, filing
+  files there, and it draws no chart, since a chart is one ledger's.
 - **A listing renders fifty rows and says so.** The line above the list is the count the
   filter matched, not the count the page drew — "showing the 50 most recently updated of 411
   open items", with a link for the rest. `?limit=<n>` or `?limit=all` asks for more, up to
@@ -163,8 +180,22 @@ What you will see:
    with passkey to use it.*
 3. **Sign in with passkey**, in the header, and approve the sheet a second time. The page
    reloads showing *Signed in as … (grant brian)*, and that browser holds the grant until it
-   signs out, the session's 12 hours end, an hour passes with no request from it
-   (`gonk.http.session_idle_minutes`, 1 to 720), or the server restarts.
+   signs out, the session's lifetime ends (`gonk.http.session_max_hours`, 12 hours by
+   default), or an hour passes with no request from it (`gonk.http.session_idle_minutes`, 1
+   to 60 times the lifetime in hours). A restart does not sign anyone out: each live
+   session is kept in `gonk/sessions.json` (the SHA-256 of its token, never the token; its
+   principal, grant, and when it was issued, last used and ends), written whole and readable
+   by gonk's user only, and a restarted gonk loads the ones that have not ended.
+   `passkey logout --all`, `passkey revoke` and removing the passkey still end its sessions,
+   in the file as well, even when run while gonk is stopped.
+
+   **Only a read-only grant gets a long session.** `gonk.http.session_max_hours` takes 1 to
+   720 (30 days). A session whose grant holds nothing but `urn:cap:…:read:…` scopes lasts
+   that long; a session whose grant can do anything more (write, claim, comment, …) ends
+   after 12 hours whatever the setting says, and so does a read-only session whose grant is
+   later widened. The cap never goes away: a stolen cookie for a read-only session still reads
+   everything its grant covers. A value outside 1 to 720 is refused when gonk starts, with a
+   sentence naming the setting, the value and the range.
 
 The second click is deliberate. When the creation sheet closes it still holds the window's
 focus, and a browser refuses a sign-in prompt from a page without focus, so gonk waits for
@@ -172,15 +203,63 @@ the click rather than chaining the two. If a sheet is canceled or times out, the
 and names the button to click again. A creation that did not finish leaves the invite unused,
 good until it expires.
 
+**What the system's passkey picker shows** (ledger #3387). Every gonk is the one `localhost`
+relying party, so the picker lists every gonk's passkeys together. Each is created with the
+label and the host as its name (*laptop Touch ID @ localhost:1062*) and the label and the grant
+as its display name (*laptop Touch ID · brian*), each kept within the 64 bytes an
+authenticator stores, a long label shortened with `…`. **The grant's name becomes visible in
+the device's passkey manager** (and in anything that syncs it), so name grants with that in
+mind; no invite, token or credential id is ever in either name. A grant or label can change
+after creation, so where the browser supports WebAuthn's
+`PublicKeyCredential.signalCurrentUserDetails` (Chrome does; others may not yet), each sign-in
+tells the passkey manager the current label and grant. Elsewhere the picker keeps the names
+the passkey was created with until it is re-created.
+
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under
   `clients`, passkeys under `passkeys`), and the grant name maps to scopes in
   `gonk/grants.json`, the one file where scope lists live. Enrol a laptop certificate and a
   passkey under the same name and they hold the same authority, and editing the grant changes
   both on the next request or connection.
+- **A passkey can hold several grants** (ledger #3388). Its entry in `clients.json` is
+  `"grants": ["brian", "reviewer"]`, and its scopes are the union of theirs (a grant that does
+  not resolve refuses the sign-in, as one always has). The single-name form `"grant": "brian"`
+  every earlier gonk wrote is still read; the next write of that entry is the list form. A
+  grant is shared by every passkey that holds it, so **one person is widened by adding a grant
+  to their passkey, never by editing a grant**, which would widen everyone under it.
+- **Redeeming an invite while signed in** (ledger #3388) offers two choices: *Add its grant to
+  the passkey you are signed in with* (the default) or *Create a new passkey*. Adding asks that
+  passkey for a FRESH assertion (the system sheet, user verification required) and is refused
+  without one, so a stolen session cookie plus an invite link raises nothing. The grant is
+  appended to that passkey's list only. Every session of the passkey is then ENDED and one new
+  session is opened from the fresh assertion (end and re-establish, not refresh), and the page
+  reloads signed in with the wider grant. A grant the passkey already holds is refused and the
+  invite stays good. Each widening appends `<RFC 3339 ms> gonk:PasskeyGrantAdded
+  urn:iki:gonk:passkey:<credential id> label=… grant=<every grant, comma-separated> added=…
+  invite=sha256:<hash of the code>` to `gonk/passkeys.log` (never the code), and if that line
+  cannot be written the change is undone. `passkey list` prints each widening under its passkey.
+- **Add one grant to one passkey from the command line** (ledger #3400). `ikigai-gonk passkey
+  grant add <label> <grant>` (or `--credential <id> <grant>`) appends a grant `grants.json`
+  already defines to that passkey's list, with no invite and no hand edit of `clients.json`.
+  A grant `grants.json` does not define (or gives no scopes) and a grant the passkey already
+  holds are refused, and nothing is written. Every other passkey and `grants.json` are
+  unchanged. It appends the line an invite's widening writes, with `by=owner` in place of
+  `invite=…`: `gonk:PasskeyGrantAdded urn:iki:gonk:passkey:<credential id> label=…
+  grant=<every grant> added=… by=owner`, and `passkey list` prints it under the passkey as
+  *added grant `…` by the owner (command line)*. It takes effect at the passkey's next request,
+  and its sessions stay signed in: the invite path ends them because whoever holds a session
+  cookie and an invite link could be asking, so it demands a fresh assertion; the box's owner
+  needs no such proof. `passkey logout --all` ends them if you want that.
+- **Remove one grant from one passkey** (ledger #3388). `ikigai-gonk passkey grant remove
+  <label> <grant>` (or `--credential <id> <grant>`) takes that grant off that passkey and nothing
+  else: its other grants, every other passkey and `grants.json` are unchanged. Its last grant is
+  refused (`passkey revoke` removes a passkey). It appends a `gonk:PasskeyGrantRemoved … removed=…`
+  line, and takes effect at the passkey's next request. `passkey remove-grant <label> --grant
+  <name>`, the name #3388 shipped, still works and is the same command.
 - **List and revoke** (ledger #313). `ikigai-gonk passkey list` prints every enrolled passkey:
-  its label, grant, credential id and IRI. `ikigai-gonk passkey revoke <label>` (or
-  `--credential <id>`, which a label two passkeys share requires) removes that one entry from
+  its label, grants, credential id and IRI, then each grant's scopes as stored (ledger #3401).
+  `ikigai-gonk passkey revoke <label>` (or `--credential <id>`, which a label two passkeys share
+  requires) removes that one entry from
   `clients.json`, with no restart, and the passkey's live sessions are DELETED, not just
   refused (ledger #1824): enrolling the same credential again, or restoring `clients.json`
   from a backup, never brings one back, and only a new sign-in opens a session. It appends one line to
@@ -196,11 +275,15 @@ good until it expires.
   `gonk:PasskeySessionsEnded` line to `gonk/passkeys.log`, and the server ends the sessions at
   its next signed-in request or sign-in, with no restart. A signed-in page can do the same for
   its own passkey with `POST /auth/logout-all` and its session token as the body.
-- **Sign-ins and sign-outs are logged** (ledger #1824), on stderr beside the access log and
-  in its grammar, whatever `gonk.log.access` says: `gonk:Login` or `gonk:Logout`, the passkey
-  resource, then `door`, `outcome`, `principal` (the passkey IRI, `-` for a refused sign-in),
-  `credential`, `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`,
-  `unenrolled`, `expired`, `idle`). A session token is never written.
+- **Sign-ins and sign-outs are logged** (ledger #1824), in the log segment beside the door
+  lines (ledger #383), whatever `gonk.log.access` says: `urn:iki:gonk:class:Login` or
+  `…:Logout`, the passkey resource, then `door`, `outcome`, `principal` (the passkey IRI,
+  `anon` for a refused sign-in), `credential=https://ikigai-rs.dev/ns/log#passkey`, `passkey` (the credential id),
+  `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`, `unenrolled`,
+  `expired`, `idle`, `widened`). Adding an invite's grant while signed in is a Login entry for the
+  resource `add-grant` (ledger #3388). A session token is never written. `gonk/passkeys.log` is not a second
+  copy: it is the channel `passkey revoke` and `passkey logout --all` use to tell a running
+  server, and `gonk/sessions.json` is the live session table, state rather than history.
 - **A ledger page your grant does not reach is a `403`, in one of two sentences** (ledger
   #2021). Signed out: *Sign in to read the ledger "ventures".*, followed by where the sign-in is
   (the header of every gonk page). Signed in: *Your passkey's grant doesn't include the ledger
@@ -548,6 +631,7 @@ there.
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
 | `/layers/{layer}/file/{id}` | `urn:iki:gonk:layers:file:{layer}:{id}` | a file entry's bytes, after its size and digest are checked |
 | `/toolbox` · `/toolbox/{…}` | `urn:iki:gonk:page:toolbox` · `urn:toolbox:{…}` | the RDF Toolbox, only when `gonk.toolbox.dist` is set (see "The RDF Toolbox") |
+| `/face/name/{name}/` · `/face/name/{name}/{…}` | `urn:face:name:{name}:index.html` · `urn:face:name:{name}:{…}` | a deployment's own pages, only when a `gonk.face` line names one (see "A deployment's own pages") |
 
 These exist **only on the HTTP door**. The socket and QUIC doors serve exactly the store and
 the ledger, as before, plus gonk's own hub resources: the four `urn:sparql:*` forms, and
@@ -665,6 +749,118 @@ whatever no rule takes from it. No ledger's records change, and a raw question a
 was. A rule that cannot be read (no arrow, a date that is not a date, a row with a space in it) or
 that could never match stops the server at start, naming the line.
 
+### A deployment's own pages at `/face/name/{name}/` (ledger #3199)
+
+A deployment can write its own HTML and scripts and have gonk serve them from gonk's origin, so
+they read and write through gonk's existing routes with the viewer's own passkey session:
+
+```toml
+gonk.face = "ops ~/.local/share/ops-face"
+```
+
+One `<name> <directory>` line per face, repeatable. `/face/name/ops/` serves `index.html`, and
+`/face/name/ops/js/app.js` serves `js/app.js`. The directory is jailed (no `..`, no symbolic
+link, no hidden name, only the extensions in `face::MEDIA_TYPES`), read-only, and served under
+the door's default CSP (`script-src 'self'`, no inline script). Every fetch a face makes is
+judged under the viewer's capability, so a face reaches nothing its viewer could not reach by
+hand. A line naming something that is not a directory stops the server at start. Each face gets
+a header link, named by its name. Like the toolbox, the directory's read
+(`urn:cap:fs:read:{directory}`) is one of the door's public reads: the anonymous loopback caller
+and every live passkey session hold it, from this machine or another (ledger #3202), so a viewer
+signed in from another machine loads the face with no token copied into their grant. A caller
+from another machine with no session gets nothing.
+
+gonk owns the frame and a face stays plain static pages (ledger #3279). Every native page shows
+the configured faces, in config order, in an "Add-ons" row directly below the main header; with
+no face there is no row. When gonk serves a face's `text/html` file it writes three things into
+the copy it sends: `data-theme='auto'` on `<html>` when the face set none, gonk's
+`/static/gonk-frame.css` and ikigai-ui's `/static/shell.js` at the start of `<head>` (after any
+leading `<meta>`), and a slim bar right after the opening `<body>` tag. The bar links gonk's
+home, names the face and marks it "add-on" in text, and repeats the add-on row with this face
+marked current. So the bar and the page's `<html data-theme>` follow the theme chosen in gonk's
+header (`ikigai-ui:theme`); style a face for `[data-theme]` to follow it too, and a face that
+names its own `data-theme` keeps it.
+
+A page gonk cannot frame safely is served byte for byte: one with no `<body>` tag, or with
+content before that tag. Every other file type is never touched. Nothing inline is added, so the
+door's CSP is unchanged. The bar's rules are all under `#gonk-frame` and `!important`, so a face's
+CSS does not restyle it unless it names that id. The bar is an ordinary first child of `<body>`:
+a face that lays out `body` itself (`display: grid`, say) lays out the bar with it.
+
+Link and bookmark the slash form, `/face/name/ops/`, so relative stylesheet and module paths
+resolve inside the face's directory. The bare `/face/name/ops`, as a person types it, answers
+`308 Permanent Redirect` to `/face/name/ops/` with its query kept (ledger #3231); a file below a
+face (`/face/name/ops/app.css`, `/face/name/ops/js/app.js`) is never redirected.
+
+### A deployment's own stylesheet and script on gonk's pages (ledger #3379)
+
+A deployment can skin gonk's pages together with its own faces, and add page controls of its
+own, with a stylesheet and a script served from this origin (usually from a face's directory):
+
+```toml
+gonk.page.style  = "/face/name/ops/site.css"
+gonk.page.script = "/face/name/ops/site.js"
+```
+
+Both keys repeat, in config order. Each value is a path on this server: it starts with one `/`
+and holds no space, quote, angle bracket, backslash or `--`; anything else (`https://…`,
+`//cdn…`, a relative path) stops the server at start, naming the key. The door's content
+security policy is unchanged, so nothing from another origin and nothing inline can be added
+this way.
+
+**Where they go.** Every page drawn through gonk's shared head: the home page, the ledgers index,
+a ledger's list, an item, the Dashboard, SPARQL, Browse, the Queue, Layers, Feeds, Views,
+Onboard, and every refusal and error page a browser navigates to (sign-in included). The
+stylesheets are the LAST thing in `<head>`, so a rule of the deployment's wins a tie with
+gonk's; the scripts are `defer`red and come after `gonk.js`, so they run once gonk's own
+behavior is wired and the page has parsed. On a face's page they follow gonk's frame and
+precede the face's own sheets, so the face keeps the last word on its own page. `/toolbox`
+keeps its own page and policy and is not covered. An htmx swap carries no `<head>`, so a script
+that decorates swapped content listens for `htmx:afterSwap` itself.
+
+**Telling gonk from the deployment.** Each page says which part is whose:
+
+- a comment in `<head>` names the `gonk.page.style` or `gonk.page.script` lines before their
+  links, and each link carries `data-gonk-deployment="style"` or `"script"`;
+- a footer (`#deployment-note`) on every covered page says "This deployment adds its own style
+  and script to gonk's pages", and a face's bar has a "Safe mode" link.
+
+**Safe mode.** Add `?safe=1` to any covered page and gonk draws it without the deployment's
+stylesheets and scripts, as gonk alone draws it. The footer links to it, with no script needed,
+and says "Safe mode" while it is on. With scripts on, the footer's "Use safe mode on every page
+in this browser" keeps it on for this browser (in `localStorage`, `gonk:safe`): a small blocking
+script, `/static/gonk-safe.js`, linked just before the deployment's assets, stops such a page and
+loads it again with `?safe=1`, before any of the deployment's assets load. "Stop using safe mode
+in this browser" ends it. Safe mode changes nothing on the server and nothing for anybody else.
+
+**Failures stay the deployment's.** A deployment script that throws stops only itself: gonk's
+script ran first, and nothing of gonk's waits on a deployment script.
+`tests/page_assets_3379.rs` checks this in a real browser (with a headless Chromium in
+`GONK_CHROMIUM`, run with `--ignored`): a deployment script that throws, followed by one that
+presses gonk's own comment-order control, leaves gonk's footer, toggle and comment order
+working.
+
+**What a deployment may rely on.** `ikigai-ui`'s tokens (`--bg`, `--fg`, `--muted`, `--accent`,
+`--surface`, `--rule`, `--line`, `--focus` and the rest of `tokens.css`), `[data-theme]` on
+`<html>`, and these ids and classes, which gonk keeps stable across releases
+(`page_assets::STABLE_HOOKS`, pinned by the tests): `#main`, `header.top`, `#status`, `#item`,
+`.item-title`, `.comment-list`, `.comment`, `.comment-meta`, `#comment-order` and
+`#deployment-note`. Everything else in gonk's markup, its classes and `gonk.js` may change at
+any pin move. A stylesheet that hides or restyles gonk's text is held to the same accessibility
+floor gonk is, and that is the deployment's to keep (see [ACCESSIBILITY.md](ACCESSIBILITY.md)).
+
+**Reporting a problem.** Load the page with `?safe=1` first. If the problem stays in safe mode it
+is gonk's: report it here (a security problem through
+[private vulnerability reporting](https://github.com/ikigai-rs/ikigai-gonk/security/advisories/new),
+never a public issue), say that you checked in safe mode, and give the page's address and gonk's
+version. If it goes away in safe mode it is the deployment's stylesheet or script, and its
+owner's to fix.
+
+**An item's comment order** is gonk's own and needs no deployment script: an item with more
+than one comment offers "oldest first" and "newest first" (`#comment-order`). They are plain
+links (`?comments=newest`) with no script; with one they reorder the list in place and the
+choice is remembered in this browser (`gonk:comments`) for every item.
+
 ### The RDF Toolbox at `/toolbox` (ledger #1933)
 
 The [RDF Toolbox](https://github.com/ikigai-rs/ikigai-toolbox) is turtle-lsp's Validate, Format,
@@ -723,8 +919,9 @@ new build copied over the old one is served at once, with no restart.
 - a read on exactly the toolbox's files for the anonymous loopback caller, one
   `urn:cap:fs:read:<dist>/<name>` for each name in `ikigai_toolbox::FILES`
   (`grants::toolbox_read_grants`), because the toolbox reads its build under its caller's
-  capability. A signed-in passkey holds it too, since a passkey holds the anonymous grant plus its
-  own. Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
+  capability. Every live passkey session holds it too, from this machine or another, with no token
+  copied into its grant (ledger #3202); a caller from another machine with no session does not.
+  Nothing grants an `fs` write or delete. Any other file left in the directory is refused,
   by `/toolbox/…` and by the directory's own name (`/iki/toolbox/dist/…`) alike.
 - the toolbox's own Content-Security-Policy (`ikigai_toolbox::TOOLBOX_CSP`) on the `/toolbox`
   rows and no others: it adds `'wasm-unsafe-eval'`, which lets the page's worker compile the
@@ -1031,6 +1228,23 @@ Use --force to replace it, which changes every identity enrolled under it
 ```
 
 A reordering of the same scopes is no change, and is written without `--force`.
+
+**`--force` writes the grant whole, narrowing included, by design**: a ledger or root that
+leaves the flags leaves the grant, so a script can keep a grant in step with what it serves. A
+scope no flag names (`urn:cap:exec:git` for ikigai-repo's code links, say) is kept by naming it
+with `passkey invite --scope <urn>`, repeatable, which goes into the same grant in the same
+write as every other flag, so no session under the grant ever sees it missing (ledger
+[#3401](http://localhost:1060/l/default/item/3401)):
+
+```sh
+ikigai-gonk passkey invite chris --ledger default=write --scope urn:cap:exec:git --force
+```
+
+Each value must be a `urn:cap:` scope with no empty segment and no whitespace, and it is held to
+the rule `grants.json` is held to (no whole-dataset token, offering wildcard, door marker,
+identity name or owner token); a refused value is named and nothing is written. A repeated
+`--scope`, or one another flag already grants, is stored once, silently. `passkey list` prints
+each passkey's grant scopes as `grants.json` stores them.
 
 ⚠ **A click on Explain spends inference.** The per-face token ceilings
 (`gonk.explain.*.max_tokens`) bound ONE call; what bounds them over time is one window on the
@@ -1395,8 +1609,12 @@ grant `client add` enrolled it under. That grant is narrow (`--ledger default=wr
 ledger, and a write to any other is `Denied`), revocable (`ikigai-gonk client remove roborev`),
 and the client's own: **every item is authored by the client**
 (`urn:iki:host:gonk:client:<fingerprint>`, shown as `roborev`), not by gonk's owner. A
-certificate gonk does not trust, or one enrolled under no grant, is refused at the door, and the
-command says so. Without `--quic`, the command files over the running gonk's owner-only socket
+certificate gonk does not trust, or one enrolled under no grant, is refused at the door.
+QUIC reports an unadmitted certificate as `Denied` (`the client certificate is not admitted`);
+a door that closes the connection instead appears as a transport error. In either case, the
+command includes the enrollment instruction:
+`ikigai-gonk client add <name> --ledger <ledger>=write`, then restart gonk. Without `--quic`,
+the command files over the running gonk's owner-only socket
 (`gonk.socket`, default `~/.ikigai/gonk.sock`; `--socket PATH` or `--config PATH` names
 another), whose caller is the user who runs gonk, `author roborev`: a convenience for a hook
 running as that user, on that machine, outside any sandbox, which carries the owner's whole
@@ -2152,6 +2370,21 @@ worker holding the same six lines cannot release it, whatever holder name it spe
 grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
 this through the QUIC door of a real gonk.
 
+#### Stopping gonk: the QUIC door drains (ledger #3326)
+
+SIGTERM or SIGINT drains the QUIC door and exits 0. Calls in progress finish and their clients
+get their replies. A call opened after the signal is turned away unread, so its client sends it
+again on a new connection, and a handshake is left for the next process on the port. The wait is
+capped at two seconds so a restart stays well under the client's five-second connect timeout: a
+call still running at the cap has its connection closed, the log says how many, and the process
+still exits 0. A second signal during the drain exits at once, with status 128 + the
+signal.
+
+The drain waits for calls, not work, and re-queues nothing: a claim keeps its holder and its lease
+across the restart. Only the QUIC door drains; the HTTP door and the socket stop with the process.
+⚠ `kill -9` and a crash are not covered: they end every call in flight, and a client cannot tell
+whether a write it had in progress applied.
+
 #### Who wrote it: a committer and a verified or claimed author
 
 Since `ikigai-ledger` 0.15 (ledger #2836) every entry records `ledger:committer`, the principal the
@@ -2589,8 +2822,10 @@ this line.
   link's `download` attribute names the bare file name. ⚠ `Content-Disposition: attachment`
   is not sent yet: the HTTP transport (`ikigai-web` 0.1.63) cannot set a response header from a
   resource; ikigai-rs/ikigai-cli PR 516 adds it, unpublished.
-- Bodies are shown as written, the way gonk shows every body (escaped text, links made
-  clickable), not rendered as Markdown.
+- **An entry's body is rendered as Markdown** (ledger #3281), by `ikigai_fn::markdown`: raw HTML
+  and a `javascript:` link are text, references link outside code, and a body nested or sized
+  past what a page can render is shown as written. Each rendered body is cached with no expiry
+  (`urn:iki:gonk:render:markdown`).
 - **A ledger reference in an entry links by context** (ledger #1856). A qualified one
   (`bobby#2`, `bobby #2`, `bobby:#2`) links to `/l/bobby/item/2` when this gonk holds `bobby` and
   the viewer may read it, whoever wrote it; a ledger it does not hold stays text. A bare
@@ -2606,6 +2841,75 @@ this line.
 - To look at it without a layer door or a passkey, `cargo run --example layers-preview` serves
   the page over a scratch layer host in process (its anonymous caller is handed the two tokens,
   which the real server never does) and prints the URL; `bobby` posts every 30 seconds.
+
+
+### Feeds (ledger #3285)
+
+A **feed** is a layer whose definition is typed `ik:Feed` (`feed = true` in
+[ikigai-layers](https://github.com/ikigai-rs/ikigai-layers), which publishers only may write and
+whose membership is invisible). A caller holding `urn:cap:gonk:layers:read` sees **Feeds** in the
+header:
+
+- **`/feed`** lists every feed the `gonk.layers.view` identity reads, with its newest entry and
+  a Subscribe button. A feed starts unsubscribed. Subscribing needs only the read grant, since
+  subscribing is reading.
+- **A concept filter.** A subscribed feed shows its SKOS scheme as a tree of checkboxes. Checking a
+  concept includes everything under it, and none checked means the whole feed. A filtered page
+  reads `entries concept=` at the door.
+- **Subscriptions are per viewer** (the signed-in passkey), kept as `{feed, concepts}` in
+  `<data home>/layers-view/subscription.json` beside the read cursors, and never sent to the layer
+  host. The door hears only what the one configured identity reads.
+- **The Layers view.** A subscribed feed has a row in the overview and a page like any channel's,
+  filtered by the viewer's concepts and read-only for every identity, publishers included. An
+  unsubscribed feed is not shown, and the follower does not wait on it. Unread counts respect the
+  filter.
+- **Asking about an entry.** Each entry of a feed has "Ask a question about this": an `ik:Question`
+  posted to the viewer's own channel (a channel the identity may `say` on that is not a feed; a
+  choice when there are several, hidden when there are none, and needing
+  `urn:cap:gonk:layers:say`) with `dcterms:subject` naming the feed entry. In that channel the
+  question links back to the entry. **The channel's shape must allow `dcterms:subject` on
+  `ik:Question`**; a closed shape that does not refuses the question, and the door's refusal is
+  the answer.
+
+A filtered feed's unread count and live updates are worked out from gonk's copy of the newest 50
+entries, so a viewer more than 50 entries behind on a filtered feed is under-counted, while the
+page itself reads the door and shows the newest 50 that match. A first subscriber's feed joins the
+long poll when the one in flight returns (up to 50 seconds); what is already published shows at once.
+
+### Joining the public feeds (ledger #3291)
+
+A gonk with no layer identity can read a host's public feeds. No person approves it, and no config
+line is needed:
+
+```toml
+gonk.feeds.door = "https://ikigai-rs.dev"   # the default; any https://host[:port]
+```
+
+**Join** is a button on `/feed`, for a passkey whose grant holds `urn:cap:gonk:feeds:join` (the
+owner puts it there), or `ikigai-gonk feeds join` from the owner's shell. A running server notices
+either way. gonk then:
+
+1. reads `https://<host>/.well-known/ikigai/layers.json` over HTTPS with the Mozilla roots and no
+   redirects: the door's address, its `server.crt` and that certificate's sha256, the join lobby
+   and the public layers (`ikigai-layers descriptor` writes it);
+2. reads `server.crt` beside it, and **refuses** if its sha256 is not the one stated, before
+   anything is made or dialed;
+3. makes a certificate in `<data home>/feeds/identity/` if there is none (`client.crt`,
+   `client.key`, the pinned `server.crt`, owner-only);
+4. posts one `onb:JoinRequest` naming every public feed the descriptor lists. The host's answer is
+   the grant; a refusal is shown with the host's reason, and only a granted join is recorded
+   (`joined.json`).
+
+**What it reads with.** With no `gonk.layers.view`, the joined identity reads for `/feed` and the
+Layers view. With one, the view identity's own grants are used and the joined identity only adds
+the public feeds it lacks. The joined identity **never says anything**: its door refuses every verb
+but reading, so a post or a question cannot go out under it, and "Ask a question about this" is
+offered only through the view identity's own channel.
+
+**Leave** is the "Leave the public feeds" button, or `ikigai-gonk feeds leave`. It deletes the
+identity directory. The host is not told: it lets the identity expire when it stops being read, and
+an expired identity may join again. Your subscriptions are this server's own and stay. If the host
+has expired the identity, `/feed` says so and offers Join again beside Leave.
 
 ## Onboarding a node (ledger #2009)
 
@@ -2684,6 +2988,38 @@ has no Approve button, on purpose.
 certificate that does not hash to its fingerprint. The code is kept in the keystore beside the
 controller key until its invite is used (the proof is keyed by the code itself, so a hash of it
 could not check one); the store holds only its SHA-256.
+
+**A name already in use is refused at `invite`, and checked again at `approve`** (ledger #3293),
+before anything is minted or signed, so the owner does not first hear of it from the layer host's
+refusal at apply time. The refusal says where the name is used and suggests a free one (`mini-2`):
+
+- on the layer host's roster. `participants.ttl` is read as far as the controller's grant reaches:
+  the collaborations `urn:layers:me` lists for it, each through `urn:collab:{name}:participants`.
+  The whole roster, `urn:layers:participants`, is the host operator's and no generated grant reads
+  it, so **a name listed only in a collaboration the controller is not in is not seen here**; the
+  layer host still refuses a name another certificate holds, when it applies the entitlement, and
+  `onboard status` then says so (below);
+- on the grants layer, an entitlement of another certificate, in force or expired (an expired one
+  holds its name until it is revoked, as on the host);
+- in this gonk's invites, one pending and unexpired (at `invite` only) or one already approved.
+
+A **revoked** name is free again, wherever it is still listed: the host never removes a node from
+`participants.ttl`, and giving a node a new certificate is a revocation, then a new invite under
+its name. At `approve`, the request's own invite and an entitlement its own certificate already
+holds do not count against it. `invite` needs the layer host: if it cannot be asked, nothing is
+minted and the error says so. `pending` does not run this check, so a request can list as pending
+and still be refused by `approve`.
+
+**A verdict is the layer host's as well as gonk's** (ledger #3315). The host stores an entitlement
+whatever it decides about it, so gonk reads the host's own decision, `urn:layer:onboard:status`,
+each time it folds the grants layer. An entitlement the host refused (a participant another
+certificate holds, a participant a manifest grants) shows as `refused` in `onboard status` and on
+the Onboard page, with the host's reason after `the layer host:`. It is not in force: gonk's half
+is not enrolled, or is taken out if the host refused it later (a manifest line added for an entitled
+participant takes it out of force), and it is not current, so a new approval for that certificate
+supersedes nothing. If the host's status does not read, gonk keeps its own verdicts, leaves the
+enrollments as they are, and says so (`host_unread` in the JSON, a line in the text, a sentence on
+the page). The host decides when it applies: at each entitlement said and when it opens.
 
 **Several kinds, one entitlement.** An invite for `worker,task-member` becomes ONE entitlement with
 the union of the kinds' grants (the grants layer keeps one per certificate). Every entitlement
@@ -3054,7 +3390,9 @@ author rules below), and a script's steps never arrive anywhere. For the same re
 that writes runs only as root** at `urn:plan:eval`, at every depth: below root a plan step could
 write a ledger graph raw, or name another person as a comment's `author`, past both rules. A
 read-only plan runs for anyone, under their own capability, which is exactly the requests they
-could make one at a time.
+could make one at a time. That holds at every door: the `principal` the QUIC door stamps on a call
+never reaches `urn:plan:eval`, which would refuse it as a parameter the plan does not declare,
+and a plan still may not declare that name itself (ledger #2896).
 
 ### What else is decided here
 
@@ -3965,9 +4303,12 @@ gonk.backup.every = "24h"
 # gonk.review.root = "~/.ikigai/spaces"
 # gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
 # gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
-# gonk.log.access = false             # no access lines (they are ON by default)
+# gonk.log.access = false             # no door lines in the log segment (ON by default)
 # gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
-# gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long ends, 1..720
+# gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in, 1..720;
+                                      # one whose grant can write ends after 12 h whatever this says
+# gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long ends,
+                                      # 1..(60 × session_max_hours)
 # gonk.toolbox.dist = "~/.local/share/ikigai-toolbox/dist"  # the RDF Toolbox's build; unset, no /toolbox
 ```
 
@@ -4640,7 +4981,12 @@ numerals and summed — X + M + L — for the orientation NetKernel 3 was built 
 
 ## Running it as a service
 
-A `launchd` agent needs only the binary; everything else comes from the config home.
+A `launchd` agent needs only the binary; everything else comes from the config home. Its log
+lives in an owner-only directory — create it once, before loading the agent:
+
+```sh
+mkdir -m 700 -p ~/Library/Logs/ikigai-gonk
+```
 
 ```xml
 <plist version="1.0"><dict>
@@ -4648,39 +4994,77 @@ A `launchd` agent needs only the binary; everything else comes from the config h
   <key>ProgramArguments</key><array><string>/Users/you/.cargo/bin/ikigai-gonk</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/ikigai-gonk.log</string>
+  <key>StandardOutPath</key><string>/Users/you/Library/Logs/ikigai-gonk/gonk.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/ikigai-gonk/gonk.log</string>
 </dict></plist>
 ```
 
+⚠ **Until ledger #3159 the log was `/tmp/ikigai-gonk.log`**, which launchd creates `0644`:
+every local account could read who called gonk and when. Moving an existing install: create the
+directory above, change both paths in the plist, `launchctl bootout` and `bootstrap` the agent,
+then delete `/tmp/ikigai-gonk.log` (or move it into the new directory as `gonk.log.1` if its
+lines are still wanted, and `chmod 600` it).
+
+**The log file is owner-only and rotated by gonk** (ledger #3159, [`src/logfile.rs`](src/logfile.rs)).
+At start `serve` sets its stdout and stderr to `0600` when they are regular files, whatever mode
+launchd created them with, and warns when the directory they are in is open to anyone else.
+Once a day (UTC midnight, and at a start on a later day than the file was last written) it
+renames `gonk.log` to `gonk.log.1`, shifts the older ones up by one, deletes `gonk.log.15`, and
+writes on in a fresh `0600` `gonk.log`. **What it holds is kept for 14 days** after the day it
+was written, plus the current day; nothing older than `gonk.log.14` is kept. Since ledger #383
+that is the startup banner and fatal errors (and any access lines an older gonk wrote there);
+the access lines themselves are in the log segments below, rotated by their own `[rotation]`.
+A pipe or a terminal on stderr is left alone and never rotated.
+
 ### The access log
 
-Every door writes one line per request to stderr, so under that agent a slow page can be read
-back from `/tmp/ikigai-gonk.log` after the fact (ledger #739). The grammar is `ikigai-log`'s —
-time, class, subject IRI, then `key=value` columns, every key on every line in this order:
+Every door writes one `log:Access` entry per request into gonk's **log segment**, a
+hash-chained `ikigai-log` file in `gonk/log/` beside `clients.json` (ledger #739, #383). It is
+the one record of who did what: the lines went to stderr until ledger #383, and stderr now
+carries only the startup banner and fatal errors. The entry is written by `ikigai-log`'s own
+door-line helper, so every column is declared in its vocabulary and a segment transrepts to
+Turtle as it stands:
 
 ```text
-2026-10-06T04:57:53.855Z gonk:Access urn:iki:gonk:page:ledger:default door=http verb=source outcome=ok bytes=3943 dur=1468 principal=- q=as=text/html&status=all
-2026-10-06T04:57:55.323Z gonk:Access urn:iki:ledger:append door=http verb=sink outcome=ok bytes=48 dur=2 principal=anon q=-
-2026-10-06T04:57:53.886Z gonk:Access urn:iki:ledger:items door=socket verb=source outcome=ok bytes=46 dur=2 principal=owner q=-
+2026-11-10T04:57:53.855Z log:Access urn:iki:gonk:page:ledger:default seq=7 door=http verb=source outcome=ok bytes=3943 dur=1468 principal=anon credential=https://ikigai-rs.dev/ns/log#anonymous q=as=text/html&status=all
+2026-11-10T04:57:55.323Z log:Access urn:iki:ledger:append seq=8 door=http verb=sink outcome=ok bytes=48 dur=2 principal=urn:iki:gonk:passkey:… credential=https://ikigai-rs.dev/ns/log#passkey
+2026-11-10T04:57:53.886Z log:Access urn:iki:ledger:items seq=9 door=socket verb=source outcome=ok bytes=46 dur=2 principal=urn:iki:host:gonk:owner credential=https://ikigai-rs.dev/ns/log#socketOwner
 ```
 
-`dur` is milliseconds and the time is when the request started; `grep ' dur=[0-9]\{4,\} '` is
-every request that took a second or more. `outcome` is `ok` or the kernel's error kind — **not
-the HTTP status**, which `ikigai-web` decides after the kernel returns and does not report
-back. An HTTP request's `principal` is the signed-in passkey the door minted into its
-capability, on reads as well as writes (ledger #1077); an anonymous read is `-`, and a
-`?principal=` a reader types is never written as one (ledger #864, R6). A QUIC line names the client the connection authenticated,
-`urn:iki:host:gonk:client:<fingerprint>` (ledger #816, #1183), on every verb and whatever
-capability the client carries (ledger #879); a line written before 2026-10-10 says
-`urn:iki:gonk:client:<fingerprint>`, and stays as written. A refusal the door kernel makes before dispatch (a capability
-floor, a name nothing binds) writes no line. A foreign `Host`, a cross-site write and (ledger
-#880) a GET another page loads are refused at the EDGE, before the kernel (which is what keeps
-`OPTIONS` and `?description` from answering them), and the edge writes their line itself
-(ledger #894): `outcome=denied bytes=- dur=0`, under the IRI the route table would have mapped
-the path to, with the query in `q` and the principal of an anonymous request whatever cookie it
-carried (a refused request's session is not believed). Between ledger #879 and #894 they wrote
-none, so probing was invisible. No line ever carries a cookie, a token or a form
-body. `gonk.log.access = false` turns it off; [`src/access.rs`](src/access.rs) has the rest.
+`dur` is milliseconds and the time is when the request started; `grep ' dur=[0-9]\{4,\} '
+gonk/log/*` is every request that took a second or more. `outcome` is `ok` or the kernel's
+error kind — **not the HTTP status**, which `ikigai-web` decides after the kernel returns and
+does not report back.
+
+**Who is the door's, per request** (ledger #383). Each door names the caller IT authenticated,
+and how (`credential`): the socket's is the owner (`urn:iki:host:gonk:owner`,
+`log:socketOwner`); the QUIC door's is the client its certificate named,
+`urn:iki:host:gonk:client:<fingerprint>` (`log:clientCertificate`); an HTTP request's is the
+signed-in passkey the door minted into its capability (`log:passkey`), on reads as well as
+writes. Anyone else is `principal=anon credential=https://ikigai-rs.dev/ns/log#anonymous` — explicitly, so "nobody said
+who" is in the record, and with nothing that identifies the caller. A `?principal=` a reader
+types, or a `principal` argument any client sends, is never written as one (ledger #864, R6).
+gonk installs no kernel tracer: the principal comes from the capability each door minted, not
+from a process-wide setting.
+
+A refusal the door kernel makes before dispatch (a capability floor, a name nothing binds)
+writes no line. A foreign `Host`, a cross-site write and (ledger #880) a GET another page loads
+are refused at the EDGE, before the kernel, and the edge writes their line itself (ledger
+#894): `outcome=denied dur=0`, under the IRI the route table would have mapped the path to,
+with the query in `q` and the anonymous caller whatever cookie it carried (a refused request's
+session is not believed). No entry ever carries a cookie, a token or a form body.
+`gonk.log.access = false` turns the door lines off; [`src/access.rs`](src/access.rs) has the
+rest.
+
+**The segments.** `log.toml`, then `gonk.log.toml`, in the ikigai config home configure them
+(`directory`, `level`, `destination = "off"`, `[seal]`, `[rotation]`); with neither, they are
+in `gonk/log/` at the default level. Reading them is the owner's: `urn:log:segments`,
+`urn:log:verify` (the hash chain, across rotations and restarts), `urn:log:<segment>` and
+`urn:log:config` answer the socket, and need `urn:cap:log:*`, which no grant may carry — the
+HTTP door answers `403` and the QUIC door refuses, as for the backup. ⚠ **The backup does not
+include them**: they live outside the store. Their chain is their own tamper evidence, but a
+lost disk loses them, so copy `gonk/log/` beside the archives if the record must outlive the
+machine.
 
 ★ **The Queue badge's poll is sampled** (ledger #767). Every open page fetches
 `/queue/depth` every ten seconds, so one forgotten tab wrote 360 lines an hour into a file
@@ -4689,8 +5073,8 @@ only when it fails, when it takes a second or more (so the `dur=[0-9]\{4,\}` gre
 finds every slow one), or when that poll has written no quiet line for ten minutes, to show it
 is alive. The sample is per polled resource and by time (ledger #1718): the Queue badge, the
 header's Layers count and an open Layers page's three-second poll each write one quiet line per
-ten minutes, however many pages ask. Every other request is still one line. The file itself is still unrotated:
-that is the launchd install's to do (`newsyslog`), not gonk's.
+ten minutes, however many pages ask. Every other request is still one line. Rotation is the
+segment's (`[rotation]` in `gonk.log.toml`), sealed and verified by `ikigai-log`.
 
 ## Upgrading past audit round 4 (ledger #864)
 
@@ -4827,6 +5211,58 @@ and run](#install-and-run)). The access log names a QUIC request's client as its
   *Keeping them current*), a command outside the server.
 
 The page's htmx is htmx 2.0.4 (Zero-Clause BSD), `ikigai-ui`'s vendored copy, pinned by digest and by the page's `integrity=`.
+
+## Linking Git evidence to code
+
+Item pages recognize full `urn:git:commit:<sha>` and `urn:git:blob:<sha>` IRIs in
+`about` targets and close evidence, including evidence retained after reopening.
+Configure local clones and optional web URL templates in `config.toml`:
+
+```toml
+gonk.repository = "core=~/git/ikigai-core"
+gonk.repository.commit = "core=https://github.com/ikigai-rs/ikigai-core/commit/{sha}"
+gonk.repository.blob = "core=https://github.com/ikigai-rs/ikigai-core/blob/{commit}/{path}"
+gonk.repository.file = "core=https://github.com/ikigai-rs/ikigai-core/blob/HEAD/{path}"
+```
+
+Each key is repeatable, keyed by repository name. `{sha}` is the object's full SHA;
+for blobs, `{commit}` and `{path}` name its first appearance in retained reachable
+history. `gonk.repository.file` takes `{path}` only: it is where a working-tree file IRI,
+`urn:repo:file:{name}/{path}`, resolves when the viewer may not read the browse root of that
+name (or there is none). Each path segment is URL encoded. Templates must use HTTP or HTTPS, without
+credentials. Unknown names, duplicate names/templates, missing directories and unknown
+placeholders stop startup. Repository map changes take a restart.
+
+Configured repositories are searched in configuration order, followed by the browse roots.
+A `gonk.browse.root` also supplies a local fallback: the link opens gonk's object view,
+which identifies the commit or shows the blob's historical file contents. Its separate
+"current working tree" link explicitly names that destination; the commit view does not
+show a diff. A blob without a path in retained history is identified without file contents.
+
+### Resolving a name: `/resolution/iri/{iri}`
+
+Stored text keeps the NAME, never a URL. A full IRI in an item's body or comments
+(`urn:git:commit:<sha>`, `urn:git:blob:<sha>`, `urn:repo:file:{root}/{path}`,
+`urn:iki:ledger:{ledger}:item:{id}`, `urn:layer:{layer}:entry:{id}`, any other `urn:` or
+`tag:` IRI) and a `gh:{owner}/{repo}#{n}` alias link to `/resolution/iri/{iri}`, the IRI
+percent-encoded as one segment. Rendering does no lookup. When the link is followed, gonk
+resolves the name under the viewer's own grants: a Git object as `about` links do; a file to
+browse when the viewer may read the root, else to the root's `gonk.repository.file` template;
+a ledger item when the viewer may read the ledger; a layer entry when the viewer may read the
+layer on the Layers page; a `gh:` alias to its GitHub issue. Any other name is unknown.
+
+For now the answer is a `200` page with an instant refresh to the target and a visible link
+(ikigai-web lets only a write's answer redirect); the target is always a gonk path or a
+configured template, never a URL taken from the name. An unknown name and a name the viewer
+may not read get the same `404`.
+An external blob template using only `{sha}` can link such an object directly.
+
+Resolution requires the viewer's `urn:cap:browse:read:<name>` (or the all-roots grant)
+**and** `urn:cap:exec:git`, which ikigai-repo requires. No grant is minted or widened by
+rendering a page. Clones are queried through ikigai-repo, with no network fetch. Positive
+lookups are cached by full SHA; missing objects can be retried after they arrive. Wrong
+object types, unreadable clones, invalid IRIs and unresolved objects remain plain text.
+Only a configured clone that is also the same named browse root has a local fallback.
 
 ## Accessibility
 

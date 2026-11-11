@@ -64,13 +64,16 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
         let door = doors::HttpDoor {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
+            public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
         };
         std::thread::spawn(move || {
@@ -263,6 +266,42 @@ fn the_menu_lists_exactly_the_readable_ledgers_with_the_current_one_marked() {
     );
     assert!(sparql.contains("<option value=\"beta\">"), "{sparql}");
     assert!(!nav.contains("<select"), "{nav}");
+}
+
+/// The SPARQL ledger is a query input, not the current navigation page (#1894).
+#[test]
+fn sparql_keeps_its_selected_ledger_without_marking_a_ledger_link_current() {
+    for names in [&["default"][..], &["default", "alpha"][..]] {
+        let server = Server::start(names, names);
+        for (path, selected) in [
+            ("/sparql", "default"),
+            ("/sparql?ledger=default", "default"),
+        ]
+        .into_iter()
+        .chain(
+            names
+                .contains(&"alpha")
+                .then_some(("/sparql?ledger=alpha", "alpha")),
+        ) {
+            let page = server.ok(path);
+            let nav = header_nav(&page).expect("the SPARQL header's ledger links");
+            assert!(!nav.contains("aria-current"), "{path}: {nav}");
+            let select = page
+                .split("<select id=\"q-ledger\" name=\"ledger\">")
+                .nth(1)
+                .unwrap()
+                .split("</select>")
+                .next()
+                .unwrap();
+            assert!(
+                select.contains(&format!(
+                    "<option selected=\"selected\" value=\"{selected}\">"
+                )),
+                "{path}: {select}"
+            );
+            assert_eq!(select.matches("selected=").count(), 1, "{path}: {select}");
+        }
+    }
 }
 
 /// ★ With no script it is a `<details>`: the summary opens it, every link is inside it and

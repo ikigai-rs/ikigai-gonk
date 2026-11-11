@@ -16,6 +16,7 @@
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/lifecycle      urn:iki:gonk:page:lifecycle:{ledger}   Source  ordered states and item counts
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
+//! /l/{ledger}/facet          urn:iki:gonk:fragment:facet:ledger:{ledger} Source  whole-match label/priority counts
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
 //! /l/{ledger}/item/{id}/card urn:iki:gonk:fragment:item:{…}:{id}    Source  the same, as a fragment
 //! /act                       urn:iki:gonk:act                       Sink    a form → one ledger action
@@ -80,6 +81,8 @@ use crate::quic;
 use crate::render::{self, element, envelope, Graph};
 use crate::rows;
 use crate::rules::{self, Rules};
+
+mod facet;
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
@@ -159,9 +162,19 @@ pub struct Web {
     /// no entry: a header link to a `/toolbox` that answers `404` is a door nobody should be
     /// shown, the rule ledger #442 set for Browse.
     pub toolbox: bool,
+    /// The names of the deployment's own pages this server serves (`gonk.face`,
+    /// [`crate::face`], ledger [#3199](http://localhost:1062/l/default/item/3199)), each offered
+    /// in the add-on row under the header at `/face/name/{name}/`, in config order (ledger
+    /// [#3279](http://localhost:1062/l/default/item/3279)). Empty for none, and no row.
+    pub faces: Vec<String>,
     /// Which row each holder counts in on the Dashboard's Agents tab (`gonk.holder.alias`, ledger
     /// [#3034](http://localhost:1062/l/default/item/3034)).
     pub holder_aliases: crate::holders::HolderAliases,
+    /// A deployment's own stylesheets and scripts (`gonk.page.style`, `gonk.page.script`,
+    /// [`crate::page_assets`], ledger [#3379](http://localhost:1062/l/default/item/3379)), linked
+    /// from every page drawn through the shared head unless the page is asked for in safe mode.
+    /// Empty for none, and every page is as it was.
+    pub page_assets: crate::page_assets::PageAssets,
 }
 
 /// Bind the face.
@@ -273,6 +286,12 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             LedgerView {
                 web: Arc::clone(&web),
                 shape: Shape::Page,
+            },
+        )
+        .bind(
+            template(facet::TEMPLATE),
+            facet::Facet {
+                web: Arc::clone(&web),
             },
         )
         .bind(
@@ -425,9 +444,11 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
 /// a skolem IRI in `urn:kernel:topology`, and a trace credits their hits to the door around them.
 pub fn door_space(
     web: Arc<Web>,
-    layers_view: Option<Arc<crate::layers_view::LayersView>>,
+    layers_view: impl Into<crate::layers_view::Views>,
 ) -> EndpointSpace {
-    let pages = crate::layers_view::bind(space(Arc::clone(&web)), &web, layers_view);
+    let layers_view = layers_view.into();
+    let pages = crate::resolution::bind(space(Arc::clone(&web)), &web, layers_view.clone());
+    let pages = crate::layers_view::bind(pages, &web, layers_view);
     crate::onboard::bind_page(pages, &web).named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
@@ -557,6 +578,11 @@ pub(crate) fn nav_on_views(web: &Web, capability: &Capability, ledgers: &[Ledger
     nav_with(web, capability, ledgers, Here::Views, None)
 }
 
+/// [`nav`] on the Feeds page, whose header link carries `aria-current`.
+pub(crate) fn nav_on_feeds(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
+    nav_with(web, capability, ledgers, Here::Feeds, None)
+}
+
 /// [`nav`] on the Dashboard, whose header link carries `aria-current`.
 pub(crate) fn nav_on_dashboard(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
     nav_with(web, capability, ledgers, Here::Dashboard, None)
@@ -567,11 +593,15 @@ pub(crate) fn nav_on_dashboard(web: &Web, capability: &Capability, ledgers: &[Le
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Here<'a> {
     Ledger(&'a str),
+    /// The SPARQL editor selects a query ledger without navigating to its page.
+    Sparql(&'a str),
     Index,
     /// The Views page: not in the ledgers, but its header link is the current page's.
     Views,
     /// The Dashboard: over the ledgers, and its header link is the current page's.
     Dashboard,
+    /// The Feeds page: its header link is the current page's.
+    Feeds,
     Elsewhere,
 }
 
@@ -589,7 +619,7 @@ fn nav_with(
     count_query: Option<&str>,
 ) -> String {
     let current = match here {
-        Here::Ledger(name) => Some(name),
+        Here::Ledger(name) | Here::Sparql(name) => Some(name),
         _ => None,
     };
     // ★ The header's picker (ledger #1888), FIRST: the stylesheet draws it where the one link
@@ -673,6 +703,12 @@ fn nav_with(
             ],
             "",
         ));
+        // ★ Feeds (ledger #3285), on the Layers rule: they are layers a person subscribes to.
+        let mut feeds = vec![("href", crate::layers_view::FEEDS_PATH)];
+        if here == Here::Feeds {
+            feeds.push(("current", "true"));
+        }
+        out.push_str(&element("feeds-link", &feeds, ""));
     }
     // ★ The Views page (ledger [#2099](http://localhost:1062/l/default/item/2099)), beside
     // Layers, on the browse rule: offered only to a caller whose grant reads the views
@@ -694,10 +730,10 @@ fn nav_with(
         ));
     }
     // ★ The RDF Toolbox (ledger [#2021](http://localhost:1062/l/default/item/2021)), when this
-    // server serves one. No grant gates it: the door adds the toolbox's file reads to the
-    // anonymous grant whenever the build is configured (`main`, `Toolbox::grants`), and a
-    // signed-in caller holds the anonymous grant plus its own, so every caller of a server that
-    // has it may open it.
+    // server serves one. No grant gates it: the toolbox's file reads are among the door's public
+    // reads whenever the build is configured (`main`, `Toolbox::grants`, `HttpDoor::public`),
+    // which the anonymous loopback caller and every live passkey session hold from any peer
+    // (ledger #3202), so every caller this server serves at all may open it.
     if web.toolbox {
         out.push_str(&element(
             "toolbox-link",
@@ -705,6 +741,21 @@ fn nav_with(
             "",
         ));
     }
+    // ★ A deployment's own pages (ledger [#3199](http://localhost:1062/l/default/item/3199)),
+    // in the add-on row under the header (ledger #3279). Ungated on the toolbox's rule: each face's read is one of the
+    // door's public reads (`main`, `Face::grants`, `HttpDoor::public`), and what the face's scripts then fetch is
+    // judged under the viewer's own capability.
+    for name in &web.faces {
+        let href = format!("{}/{name}/", crate::face::PATH);
+        out.push_str(&element(
+            "face-link",
+            &[("href", href.as_str()), ("name", name.as_str())],
+            "",
+        ));
+    }
+    // ★ A deployment's own stylesheets and scripts (ledger #3379): the shell links them last in
+    // its head and says so in its footer, unless the page was asked for with `safe=1`.
+    out.push_str(&web.page_assets.view());
     if withholds(web, capability, reads_a_root, offers_queue) {
         out.push_str(&element(
             "withheld",
@@ -825,7 +876,7 @@ fn ledger_menu(ledgers: &[Ledger], here: Here<'_>) -> String {
         })
         .collect();
     let label = match here {
-        Here::Ledger(name) => format!("Ledger: {name}"),
+        Here::Ledger(name) | Here::Sparql(name) => format!("Ledger: {name}"),
         _ => "Ledgers".to_string(),
     };
     render::wrap(
@@ -904,6 +955,10 @@ impl Endpoint for LedgersIndex {
                     ("view", "empty"),
                     ("full", "true"),
                     ("ui-theme", crate::render::theme_of(inv)),
+                    (
+                        "safe",
+                        crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                    ),
                     ("title", "No ledger to show"),
                 ],
                 &children,
@@ -938,6 +993,10 @@ impl Endpoint for LedgersIndex {
                 ("view", "ledgers"),
                 ("full", "true"),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", "Ledgers"),
                 ("count", &count),
             ],
@@ -1187,11 +1246,24 @@ fn enrich_close_reasons(graph: &mut Graph, hub: &Kernel, ledger: &Ledger) {
 }
 
 /// The view triples an item needs, added to `graph` in place.
-fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_status: &str) {
-    let can_write = inv.capability.allows(&ledger.cap_write());
-    let can_delete = inv.capability.allows(&ledger.cap_delete());
-    let can_purge = inv.capability.allows(&ledger.cap_purge());
+///
+/// Each item is enriched for the ledger its own IRI names, `ledger` only when it names none:
+/// a union listing (ledger #3216) holds rows of several ledgers, and a row's link, actions
+/// and grants are its own ledger's. `qualified` shows each row's number as `ledger#N`, which
+/// a page of rows from several ledgers needs; one ledger's page shows `#N` (ledger #3215).
+fn enrich_items(
+    graph: &mut Graph,
+    ledger: &Ledger,
+    inv: &Invocation<'_>,
+    list_status: &str,
+    qualified: bool,
+) {
     for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let own = Ledger::item_iri(&item).map(|(own, _)| own);
+        let ledger = own.as_ref().unwrap_or(ledger);
+        let can_write = inv.capability.allows(&ledger.cap_write());
+        let can_delete = inv.capability.allows(&ledger.cap_delete());
+        let can_purge = inv.capability.allows(&ledger.cap_purge());
         let id = item
             .rsplit_once(":item:")
             .map(|(_, id)| id)
@@ -1232,11 +1304,20 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
 
         graph.view(&item, "iri", item.clone());
         graph.view(&item, "id", id.clone());
-        graph.view(
-            &item,
-            "short",
-            ledger.number(number.parse::<i64>().unwrap_or_default()),
-        );
+        // Each enrichment uses one ledger, including an outgoing-link partition. Keep
+        // `short` qualified for action names; the visible number is local to that ledger.
+        // A union qualifies both, the default ledger's rows too: `#12` alone is ambiguous.
+        let (short, local) = if qualified {
+            let both = format!("{}#{number}", ledger.name());
+            (both.clone(), both)
+        } else {
+            (
+                ledger.number(number.parse::<i64>().unwrap_or_default()),
+                format!("#{number}"),
+            )
+        };
+        graph.view(&item, "short", short);
+        graph.view(&item, "localNumber", local);
         graph.view(&item, "href", format!("{}/item/{id}", ledger_href(ledger)));
         graph.view(&item, "ledger", ledger.name());
         graph.view(&item, "ledgerHref", ledger_href(ledger));
@@ -1285,6 +1366,25 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
         if let Some(lease) = graph.value(&item, &format!("{LEDGER_NS}lease")) {
             graph.view(&item, "lease", lease);
         }
+        // Ledger #3195: an expired lease is marked on the row, against the KERNEL clock the
+        // ledger stamped the expiry from (`ikigai_ledger::claim`). Both sides are the ledger's
+        // own `YYYY-MM-DDTHH:MM:SS.mmmZ`, so they compare as text. No clock, no mark: a page
+        // that cannot tell says nothing rather than guess.
+        if let (Some(expires), Some(now)) = (
+            graph.value(&item, &format!("{LEDGER_NS}leaseExpires")),
+            inv.now(),
+        ) {
+            let now = ikigai_ledger::sparql::iso8601(now.as_millis());
+            graph.view(&item, "leaseExpired", flag(expires <= now));
+        }
+        // Who an open item waits on after a hand-back, in the ledger's own word for it.
+        if let Some(awaiting) = graph.value(&item, &format!("{LEDGER_NS}awaiting")) {
+            graph.view(
+                &item,
+                "awaiting",
+                ikigai_ledger::model::awaiting_name(&awaiting).to_string(),
+            );
+        }
 
         // Links and about-targets become view nodes, because a repeated sub-element that needs
         // its item's IRI cannot reach it in xrust (no parent axis worth trusting, no variable).
@@ -1326,6 +1426,51 @@ fn enrich_items(graph: &mut Graph, ledger: &Ledger, inv: &Invocation<'_>, list_s
             .value(&comment, &format!("{DCTERMS}created"))
             .unwrap_or_default();
         graph.view(&comment, "created", when(&created));
+    }
+}
+
+/// `view:stateInFlight` for every item whose lifecycle state the lifecycle document declares
+/// in flight, in place (ledger [#3195](http://localhost:1062/l/default/item/3195)).
+///
+/// The state's look is the lifecycle's, never a label's: the state IRI names its lifecycle
+/// (`urn:iki:ledger:lifecycle:{lc}:{state}`), and that document is read once per lifecycle on
+/// the page, through the hub, under the viewer's own capability, as the lifecycle page reads
+/// it. An item with no state is `filed`, and no row is read for it. A document the viewer
+/// cannot read, or one that does not parse, leaves the badge plain (its words still name the
+/// state): the row is the item's, and a lifecycle read failing must not take the page down.
+async fn enrich_states(graph: &mut Graph, inv: &Invocation<'_>) {
+    let mut documents: BTreeMap<String, Option<ikigai_ledger::Lifecycle>> = BTreeMap::new();
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let Some(state) = graph.value(&item, &format!("{LEDGER_NS}state")) else {
+            continue;
+        };
+        let Some((lifecycle, _)) = state
+            .strip_prefix(ikigai_ledger::lifecycle::PREFIX)
+            .and_then(|rest| rest.rsplit_once(':'))
+        else {
+            continue;
+        };
+        let iri = format!("{}{lifecycle}", ikigai_ledger::lifecycle::PREFIX);
+        if !documents.contains_key(&iri) {
+            let read = match request(Verb::Source, &iri) {
+                Ok(read) => with(read, "as", "text/turtle"),
+                Err(_) => {
+                    documents.insert(iri.clone(), None);
+                    continue;
+                }
+            };
+            let parsed = fetch(inv, read).await.ok().and_then(|bytes| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| ikigai_ledger::Lifecycle::parse(text).ok())
+            });
+            documents.insert(iri.clone(), parsed);
+        }
+        if let Some(Some(document)) = documents.get(&iri) {
+            if document.state_by_iri(&state).is_some_and(|s| s.in_flight) {
+                graph.view(&item, "stateInFlight", "true");
+            }
+        }
     }
 }
 
@@ -1495,11 +1640,225 @@ struct Listing<'a> {
     status: &'a str,
     /// A case-insensitive substring of the title.
     text: Option<&'a str>,
+    labels: Option<&'a str>,
+    without: Option<&'a str>,
     /// How many rows to render — see [`rows::rows_wanted`]. The filter above is what gets
     /// COUNTED; this is only what gets drawn.
     limit: Option<&'a str>,
     /// How many matching items to skip — see [`rows::offset_wanted`].
     offset: Option<&'a str>,
+    /// `ledgers=`, as the viewer wrote it: the ledger's own union of these ledgers instead
+    /// of the page's one (ikigai-ledger 0.20, ledger #3216). Passed through, never parsed for
+    /// a decision here: the ledger chooses which of them the viewer may read.
+    ledgers: Option<&'a str>,
+}
+
+/// URL and presentation state only. Matching stays in the ledger and `facet::pattern`.
+struct LabelFilters<'a> {
+    labels: Option<&'a str>,
+    without: Option<&'a str>,
+    /// Not a label filter, but every link a label filter builds keeps it (ledger #3216).
+    ledgers: Option<&'a str>,
+}
+
+enum LabelChange<'a> {
+    Keep,
+    Clear,
+    Require(&'a str),
+    Exclude(&'a str),
+    RemoveRequired(&'a str),
+    RemoveExcluded(&'a str),
+}
+
+impl LabelFilters<'_> {
+    fn append(&self, mut query: String) -> String {
+        for (name, value) in [
+            ("labels", self.labels),
+            ("without", self.without),
+            ("ledgers", self.ledgers),
+        ] {
+            if let Some(value) = value.filter(|v| !v.is_empty()) {
+                query.push_str(&format!("&{name}={}", ikigai_fn::html::url_segment(value)));
+            }
+        }
+        query
+    }
+
+    // This splits terms for the controls, never to decide which items match.
+    fn terms(value: Option<&str>) -> Vec<&str> {
+        let mut terms = Vec::new();
+        for term in value
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            if !terms.contains(&term) {
+                terms.push(term);
+            }
+        }
+        terms
+    }
+
+    fn url(&self, listing: &Listing<'_>, page: &str, change: LabelChange<'_>) -> String {
+        let mut labels = Self::terms(self.labels);
+        let mut without = Self::terms(self.without);
+        match change {
+            LabelChange::Keep => {}
+            LabelChange::Clear => {
+                labels.clear();
+                without.clear();
+            }
+            LabelChange::Require(term) => {
+                without.retain(|t| *t != term);
+                if !labels.contains(&term) {
+                    labels.push(term);
+                }
+            }
+            LabelChange::Exclude(term) => {
+                labels.retain(|t| *t != term);
+                if !without.contains(&term) {
+                    without.push(term);
+                }
+            }
+            LabelChange::RemoveRequired(term) => labels.retain(|t| *t != term),
+            LabelChange::RemoveExcluded(term) => without.retain(|t| *t != term),
+        }
+        let labels = labels.join(",");
+        let without = without.join(",");
+        let filter = LabelFilters {
+            labels: Some(&labels),
+            without: Some(&without),
+            ledgers: self.ledgers,
+        };
+        let mut query = format!("?status={}", listing.status);
+        if let Some(limit) = listing.limit {
+            query.push_str(&format!("&limit={}", ikigai_fn::html::url_segment(limit)));
+        }
+        if let Some(text) = listing.text.filter(|t| !t.is_empty()) {
+            query.push_str(&format!("&text={}", ikigai_fn::html::url_segment(text)));
+        }
+        format!("{page}{}", filter.append(query))
+    }
+
+    /// `chart` says whether the page draws one, so the note names it only then.
+    fn active(&self, listing: &Listing<'_>, page: &str, chart: bool) -> String {
+        let mut terms = String::new();
+        for (side, value, description, action) in [
+            (true, self.labels, "Must have label", "Exclude"),
+            (false, self.without, "Must not have label", "Require"),
+        ] {
+            for term in Self::terms(value) {
+                terms.push_str(&element(
+                    "filter-term",
+                    &[
+                        ("description", description),
+                        ("term", term),
+                        ("action", action),
+                        (
+                            "remove",
+                            &self.url(
+                                listing,
+                                page,
+                                if side {
+                                    LabelChange::RemoveRequired(term)
+                                } else {
+                                    LabelChange::RemoveExcluded(term)
+                                },
+                            ),
+                        ),
+                        (
+                            "move",
+                            &self.url(
+                                listing,
+                                page,
+                                if side {
+                                    LabelChange::Exclude(term)
+                                } else {
+                                    LabelChange::Require(term)
+                                },
+                            ),
+                        ),
+                    ],
+                    "",
+                ));
+            }
+        }
+        if terms.is_empty() {
+            return String::new();
+        }
+        render::wrap(
+            "label-filters",
+            &[
+                ("clear", &self.url(listing, page, LabelChange::Clear)),
+                ("chart", flag(chart)),
+            ],
+            &terms,
+        )
+    }
+
+    fn chips(&self, graph: &Graph, item: &str, listing: &Listing<'_>, page: &str) -> String {
+        graph
+            .values(item, &format!("{LEDGER_NS}label"))
+            .iter()
+            .map(|term| {
+                element(
+                    "label-chip",
+                    &[
+                        ("term", term),
+                        (
+                            "include",
+                            &self.url(listing, page, LabelChange::Require(term)),
+                        ),
+                        (
+                            "exclude",
+                            &self.url(listing, page, LabelChange::Exclude(term)),
+                        ),
+                    ],
+                    "",
+                )
+            })
+            .collect()
+    }
+}
+
+/// Add row-local presentation elements to the render projection, leaving the RDF untouched.
+/// Chunk rendering can then read each row independently, including its encoded filter links.
+fn listing_chips(
+    graph: &Graph,
+    filters: &LabelFilters<'_>,
+    listing: &Listing<'_>,
+    page: &str,
+) -> Result<String> {
+    use quick_xml::events::Event;
+    let xml = graph.view_xml().map_err(render_err)?;
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    loop {
+        let event = reader.read_event().map_err(|e| render_err(e.to_string()))?;
+        if matches!(event, Event::Eof) {
+            break;
+        }
+        writer
+            .write_event(event.borrow())
+            .map_err(|e| render_err(e.to_string()))?;
+        if let Event::Start(tag) = &event {
+            if tag.name().as_ref() == b"ledger:Item" {
+                for attribute in tag.attributes() {
+                    let attribute = attribute.map_err(|e| render_err(e.to_string()))?;
+                    if attribute.key.as_ref() == b"about" {
+                        let item = attribute
+                            .unescape_value()
+                            .map_err(|e| render_err(e.to_string()))?;
+                        writer.get_mut().extend_from_slice(
+                            filters.chips(graph, &item, listing, page).as_bytes(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    String::from_utf8(writer.into_inner()).map_err(|e| render_err(e.to_string()))
 }
 
 async fn ledger_listing(
@@ -1513,9 +1872,14 @@ async fn ledger_listing(
     let Listing {
         status,
         text,
+        labels,
+        without,
         limit,
         offset,
+        ledgers: union,
     } = *listing;
+    // The page is still this ledger's (its header, its filing form), so it reads this
+    // ledger even when `ledgers=` lists others; the union's own grants are the ledger's call.
     require_read(inv.capability, ledger)?;
     if !matches!(status, "open" | "closed" | "all") {
         return Err(Error::InvalidArgument {
@@ -1540,10 +1904,19 @@ async fn ledger_listing(
         if let Some(text) = text {
             read = with(read, "text", text);
         }
+        for (name, value) in [("labels", labels), ("without", without), ("ledgers", union)] {
+            if let Some(value) = value {
+                read = with(read, name, value);
+            }
+        }
         Ok(read)
     };
     // The total first: an offset past it is refused before anything is drawn.
-    let total = ledger_total(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
+    let counted = ledger_count_document(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
+    let total = counted.total;
+    // ★ The ledgers the union READ, as the ledger says (ledger #3216): the viewer's grants
+    // decided, under the viewer's capability, and an unreadable one was never queried.
+    let selected = union.map(|_| counted.ledgers.clone().unwrap_or_default());
     if offset > 0 && offset >= total {
         return Err(Error::InvalidArgument {
             name: "offset".to_string(),
@@ -1570,50 +1943,109 @@ async fn ledger_listing(
         total,
         offset,
     };
-    enrich_items(&mut graph, ledger, inv, status);
+    enrich_items(&mut graph, ledger, inv, status, union.is_some());
+    enrich_states(&mut graph, inv).await;
+    enrich_blocked(vec![&mut graph], inv).await;
+    for item in &order {
+        for (name, value) in [
+            ("listLedger", Some(ledger.name())),
+            ("listLedgers", union),
+            ("listLabels", labels),
+            ("listWithout", without),
+            ("listText", text),
+            ("listLimit", limit),
+        ] {
+            graph.view(item, name, value.unwrap_or(""));
+        }
+    }
     enrich_authors(&mut graph, &web.passkeys);
     let ledgers = readable_ledgers(web, inv.capability);
     let mut children = nav(web, inv.capability, &ledgers, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
+    if let Some(selected) = &selected {
+        children.push_str(&union_note(union.unwrap_or_default(), selected));
+    }
     // The chart over the list (ledger #2542): one more cached read and one more keyed render.
+    // ⚠ It is one ledger's, so a union page draws none rather than one that is not the list's.
     children.push_str(&render::slot(CHART_SLOT));
-    let lines = crate::dashboard::Lines::for_status(status);
-    let chart: Vec<_> = crate::dashboard::chart_chunk(inv, ledger, lines, None)
-        .await
-        .into_iter()
-        .collect();
+    let chart: Vec<_> = if selected.is_none() {
+        let lines = crate::dashboard::Lines::for_status(status);
+        crate::dashboard::chart_chunk(inv, ledger, lines, None)
+            .await
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
     // ★ The rows go into the shell's slot in chunks of `render::CHUNK_ROWS` items (ledger
     // #443, #519): each window is its own RDF/XML document in the listing's order, so the
     // stylesheet's per-chunk `xsl:sort` and this order agree, and the spliced page is the
     // one a single transform produced. `render::chunk` has the numbers.
     children.push_str(&render::slot(ITEMS_SLOT));
+    let filters = LabelFilters {
+        labels,
+        without,
+        ledgers: union,
+    };
+    let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
     for window in graph.windows(&order, render::CHUNK_ROWS) {
-        chunks.push(render::chunk(&window.view_xml().map_err(render_err)?));
+        let xml = listing_chips(&window, &filters, listing, &page_url)?;
+        chunks.push(render::chunk(&xml));
     }
-    let title = if ledger.is_default() {
-        "Ledger".to_string()
-    } else {
-        format!("Ledger {}", ledger.name())
+    let title = match &selected {
+        Some(names) if names.is_empty() => "Ledgers: none readable".to_string(),
+        Some(names) => format!("Ledgers {}", names.join(", ")),
+        None if ledger.is_default() => "Ledger".to_string(),
+        None => format!("Ledger {}", ledger.name()),
     };
     let page_url = ledger_href(ledger);
     let items_url = format!("{}/items", ledger_href(ledger));
-    let query = count.more_query(status, text);
-    let next = count.next_query(status, text);
+    let query = count.more_query(status, text).map(|q| filters.append(q));
+    let next = count.next_query(status, text).map(|q| filters.append(q));
+    children.push_str(&filters.active(listing, &page_url, selected.is_none()));
+    let facet_url = format!(
+        "{page_url}/facet{}",
+        filters.url(listing, "", LabelChange::Keep)
+    );
+    let status_tail = filters.append(String::new());
+    let status_tail = if let Some(text) = text.filter(|t| !t.is_empty()) {
+        format!("{status_tail}&text={}", ikigai_fn::html::url_segment(text))
+    } else {
+        status_tail
+    };
+    let status_tail = if let Some(limit) = limit {
+        format!(
+            "{status_tail}&limit={}",
+            ikigai_fn::html::url_segment(limit)
+        )
+    } else {
+        status_tail
+    };
     let doc = envelope(
         "page",
         &[
             ("view", "ledger"),
             ("full", flag(full)),
             ("ui-theme", crate::render::theme_of(inv)),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+            ),
             ("title", &title),
             ("ledger", ledger.name()),
             ("status", status),
             ("text", text.unwrap_or("")),
+            ("labels", labels.unwrap_or("")),
+            ("without", without.unwrap_or("")),
+            ("ledgers", union.unwrap_or("")),
+            ("limit", &wanted.to_string()),
+            ("status-tail", &status_tail),
             ("page-url", &page_url),
             ("items-url", &items_url),
+            ("facet-url", &facet_url),
             ("count", &count.sentence(status)),
             ("more", flag(query.is_some())),
             ("more-label", &count.more_label()),
@@ -1760,9 +2192,47 @@ impl Count {
 /// many items its filter matches, counted by the ledger. A face without one is an error, never
 /// a guess.
 fn ledger_total(json: &[u8]) -> Result<usize> {
+    ledger_count_document(json).map(|doc| doc.total)
+}
+
+/// A ledger's whole `count` JSON face: the total, and under `ledgers=` the ledgers it read.
+fn ledger_count_document(json: &[u8]) -> Result<ikigai_ledger::json::CountDocument> {
     serde_json::from_slice::<ikigai_ledger::json::CountDocument>(json)
-        .map(|doc| doc.total)
         .map_err(|e| Error::Endpoint(format!("the ledger's count: {e}")))
+}
+
+/// What a union page says over its rows (ledger #3216): which ledgers they are from, and
+/// which of those the viewer asked for were left out because this grant cannot read them.
+/// `asked` is the viewer's own `ledgers=`, already accepted by the ledger; `read` is the
+/// ledger's answer. The page decides nothing from this; it only says it.
+fn union_note(asked: &str, read: &[String]) -> String {
+    let mut left_out: Vec<&str> = Vec::new();
+    for name in asked.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if !read.iter().any(|r| r == name) && !left_out.contains(&name) {
+            left_out.push(name);
+        }
+    }
+    let noun = |n: usize| if n == 1 { "ledger" } else { "ledgers" };
+    let shown = if read.is_empty() {
+        "None of the ledgers asked for can be read with this grant.".to_string()
+    } else {
+        format!(
+            "Items from {} {}: {}.",
+            read.len(),
+            noun(read.len()),
+            read.join(", ")
+        )
+    };
+    let note = if left_out.is_empty() || read.is_empty() {
+        shown
+    } else {
+        format!(
+            "{shown} Left out, because this grant cannot read {}: {}.",
+            if left_out.len() == 1 { "it" } else { "them" },
+            left_out.join(", ")
+        )
+    };
+    element("union", &[], &note)
 }
 
 /// Cut `graph` down to the `rows` most recently updated items, and say how many it kept and
@@ -1804,8 +2274,11 @@ impl Endpoint for LedgerView {
         html_only(inv)?;
         let status = optional(inv, "status").unwrap_or_else(|| "open".to_string());
         let text = optional(inv, "text");
+        let labels = optional(inv, "labels");
+        let without = optional(inv, "without");
         let limit = optional(inv, "limit");
         let offset = optional(inv, "offset");
+        let ledgers = optional(inv, "ledgers");
         let ledger = match self.shape {
             Shape::Home => match readable_ledgers(&self.web, inv.capability)
                 .into_iter()
@@ -1822,6 +2295,10 @@ impl Endpoint for LedgerView {
                             ("view", "empty"),
                             ("full", "true"),
                             ("ui-theme", crate::render::theme_of(inv)),
+                            (
+                                "safe",
+                                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                            ),
                             ("title", "No ledger to show"),
                         ],
                         &format!(
@@ -1842,8 +2319,11 @@ impl Endpoint for LedgerView {
             &Listing {
                 status: &status,
                 text: text.as_deref(),
+                labels: labels.as_deref(),
+                without: without.as_deref(),
                 limit: limit.as_deref(),
                 offset: offset.as_deref(),
+                ledgers: ledgers.as_deref(),
             },
             self.shape != Shape::Fragment,
             None,
@@ -1901,6 +2381,18 @@ impl Endpoint for LedgerView {
                 .optional(),
         )
         .input(arg("text", "A case-insensitive substring of the title.").optional())
+        .input(arg("labels", "Comma-separated labels: every label must match.").optional())
+        .input(arg("without", "Comma-separated labels: none may match.").optional())
+        .input(
+            arg(
+                "ledgers",
+                "Comma-separated ledger names: list the ledger's own union of these ledgers \
+                 instead of this one, each read under the caller's own grants (a ledger the \
+                 caller cannot read is left out). Kept by paging, status, search and label \
+                 links.",
+            )
+            .optional(),
+        )
         .input(
             arg("limit", &rows::limit_summary())
                 .default_value(rows::ROWS.to_string())
@@ -2046,6 +2538,10 @@ impl Endpoint for LifecycleView {
                 ("view", "lifecycle"),
                 ("full", flag(true)),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", &format!("lifecycle · {}", ledger.name())),
                 ("ledger", ledger.name()),
                 ("page-url", &format!("{}/lifecycle", ledger_href(&ledger))),
@@ -2154,6 +2650,10 @@ impl Endpoint for DoctorView {
                 ("view", "doctor"),
                 ("full", flag(true)),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", &format!("doctor · {}", ledger.name())),
                 ("ledger", ledger.name()),
                 ("page-url", &format!("{}/doctor", ledger_href(&ledger))),
@@ -2197,6 +2697,449 @@ struct ItemView {
     full: bool,
 }
 
+struct LinkedRow {
+    short: String,
+    number: i64,
+    target: String,
+    graph: Graph,
+}
+
+/// One ledger's own landing order (#3226): its open items' short numbers, each blocker before
+/// what it blocks, as `items sort=landing` answers under the page's capability. The plain face
+/// is the ledger's fixed, greppable line (`#12  open  p1  title`), so only the first word of
+/// each line before the footer is read. A refusal, such as a blocks cycle naming its items, is
+/// the ledger's own sentence.
+async fn landing_order(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+) -> std::result::Result<Vec<String>, String> {
+    let read = request(Verb::Source, &format!("{}items", ledger.prefix()))
+        .map_err(|_| "the ledger did not answer its landing order".to_string())?;
+    let read = [
+        ("sort", "landing"),
+        ("status", "open"),
+        ("limit", &usize::MAX.to_string()),
+        ("as", "text/plain"),
+    ]
+    .iter()
+    .fold(read, |read, (name, value)| with(read, name, value));
+    match fetch(inv, read).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .take_while(|line| !line.trim().is_empty())
+            .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+            .collect()),
+        Err(Error::InvalidArgument { detail, .. }) => Err(detail),
+        Err(_) => Err("the ledger did not answer its landing order".to_string()),
+    }
+}
+
+async fn linked_row(inv: &Invocation<'_>, ledger: &Ledger, target: &str) -> Option<Graph> {
+    if !inv.capability.allows(&ledger.cap_read()) {
+        return None;
+    }
+    let read = with(request(Verb::Source, target).ok()?, "as", "text/turtle");
+    let mut row = Graph::from_turtle(&fetch(inv, read).await.ok()?).ok()?;
+    // An item face includes its body, comments and outgoing edges; the listing row needs
+    // only these fields. In particular, a large body must not be duplicated into
+    // view:content and spend the bounded row chunk's byte budget (#3197).
+    row.retain(|t| {
+        let predicate = t.predicate.as_str();
+        let displayed = matches!(
+            predicate,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                | "http://purl.org/dc/terms/title"
+                | "http://purl.org/dc/terms/created"
+                | "http://purl.org/dc/terms/modified"
+        ) || predicate.strip_prefix(LEDGER_NS).is_some_and(|local| {
+            matches!(
+                local,
+                "number"
+                    | "status"
+                    | "closedReason"
+                    | "priority"
+                    | "deferred"
+                    | "state"
+                    | "claimedBy"
+                    | "claimKind"
+                    | "lease"
+                    | "leaseExpires"
+                    | "awaiting"
+                    | "label"
+            )
+        });
+        displayed
+            && matches!(&t.subject,
+            NamedOrBlankNode::NamedNode(s) if s.as_str() == target)
+    });
+    if !row
+        .subjects_of_type(&format!("{LEDGER_NS}Item"))
+        .iter()
+        .any(|item| item == target)
+    {
+        return None;
+    }
+    enrich_items(&mut row, ledger, inv, "all", false);
+    enrich_states(&mut row, inv).await;
+    Some(row)
+}
+
+/// Outgoing flight-plan rows (#3197), partitioned by relation and ledger. Reads use the
+/// page's invocation, including its capability; failures disclose only the stored target IRI.
+/// Separate row graphs keep self-links and target comments/actions out of the source card.
+struct LinkedItems {
+    xml: String,
+    slots: Vec<(String, String)>,
+}
+
+async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Result<LinkedItems> {
+    let mut cache: BTreeMap<String, Option<Graph>> = BTreeMap::new();
+    let links = graph.subjects_of_type(&format!("{}Link", render::VIEW_NS));
+    for link in &links {
+        let target = graph
+            .value(link, &format!("{}target", render::VIEW_NS))
+            .unwrap_or_default();
+        if let Some((ledger, canonical)) = Ledger::item_iri(&target).as_ref() {
+            if !cache.contains_key(canonical) {
+                cache.insert(canonical.clone(), linked_row(inv, ledger, canonical).await);
+            }
+        }
+    }
+    // One reverse read per target ledger for the rows' blocked badges (#3217), never one per row.
+    enrich_blocked(cache.values_mut().flatten().collect(), inv).await;
+    let mut groups: BTreeMap<(String, String), Vec<LinkedRow>> = BTreeMap::new();
+    let mut unavailable = String::new();
+    for link in links {
+        let target = graph
+            .value(&link, &format!("{}target", render::VIEW_NS))
+            .unwrap_or_default();
+        if let Some((ledger, canonical)) = Ledger::item_iri(&target).as_ref() {
+            if let Some(Some(cached)) = cache.get(canonical) {
+                let mut row = cached.windows(std::slice::from_ref(canonical), 1).remove(0);
+                row.view(canonical, "linked", "true");
+                for (from, to) in [
+                    ("ledger", "sourceLedger"),
+                    ("id", "sourceId"),
+                    ("item", "sourceItem"),
+                    ("target", "target"),
+                    ("rel", "rel"),
+                    ("canUnlink", "canUnlink"),
+                ] {
+                    if let Some(value) = graph.value(&link, &format!("{}{from}", render::VIEW_NS)) {
+                        row.view(canonical, to, value);
+                    }
+                }
+                let rel = graph
+                    .value(&link, &format!("{}rel", render::VIEW_NS))
+                    .unwrap_or_default();
+                let number = row
+                    .value(canonical, &format!("{LEDGER_NS}number"))
+                    .and_then(|n| n.parse::<i64>().ok())
+                    .unwrap_or_default();
+                groups
+                    .entry((rel, ledger.name().to_string()))
+                    .or_default()
+                    .push(LinkedRow {
+                        short: ledger.number(number),
+                        number,
+                        target: canonical.clone(),
+                        graph: row,
+                    });
+                continue;
+            }
+        }
+        let mut fallback = graph.windows(std::slice::from_ref(&link), 1).remove(0);
+        let href = format!("{}href", render::VIEW_NS);
+        let text = format!("{}text", render::VIEW_NS);
+        if crate::git_object::git_iri(&target).is_none() && repo_file(&target).is_none() {
+            fallback.retain(|t| t.predicate.as_str() != href && t.predicate.as_str() != text);
+        }
+        if fallback.value(&link, &text).is_none() {
+            fallback.view(&link, "text", target);
+        }
+        unavailable.push_str(&render::wrap(
+            "unavailable-link",
+            &[],
+            &fallback.view_xml().map_err(render_err)?,
+        ));
+    }
+    // One landing read per target ledger, shared by its relation groups.
+    let mut landings: BTreeMap<String, std::result::Result<BTreeMap<String, usize>, String>> =
+        BTreeMap::new();
+    for (_, ledger) in groups.keys() {
+        if landings.contains_key(ledger) {
+            continue;
+        }
+        let order = match Ledger::parse(ledger) {
+            Ok(parsed) => landing_order(inv, &parsed).await,
+            Err(_) => Err("the ledger did not answer its landing order".to_string()),
+        };
+        let ranks = order.map(|shorts| {
+            shorts
+                .into_iter()
+                .enumerate()
+                .map(|(rank, short)| (short, rank))
+                .collect()
+        });
+        landings.insert(ledger.clone(), ranks);
+    }
+    let mut output = String::new();
+    let mut slots = Vec::new();
+    for ((rel, ledger), mut members) in groups {
+        // What must land first comes first: a closed member has already landed, then the
+        // open ones in the ledger's landing order. A refused order falls back to numbers.
+        let order = match &landings[&ledger] {
+            Ok(ranks) => {
+                members.sort_by_key(|m| (ranks.get(&m.short).copied(), m.number));
+                "in landing order, closed items first, then each blocker before what it blocks."
+                    .to_string()
+            }
+            Err(refusal) => {
+                members.sort_by_key(|m| m.number);
+                format!(
+                    "in number order, because the ledger refused its landing order: {}.",
+                    refusal.trim_end_matches('.')
+                )
+            }
+        };
+        let mut states: BTreeMap<String, usize> = BTreeMap::new();
+        let mut row_xml = Vec::new();
+        for (rank, member) in members.iter_mut().enumerate() {
+            // The chunk stylesheet sorts its rows; this key keeps them in the order above.
+            member
+                .graph
+                .view(&member.target, "landing", format!("{rank:06}"));
+            let state = member
+                .graph
+                .value(&member.target, &format!("{}state", render::VIEW_NS))
+                .unwrap_or_default();
+            *states.entry(state).or_default() += 1;
+            row_xml.push(member.graph.view_xml().map_err(render_err)?);
+        }
+        let counts = states
+            .iter()
+            .map(|(state, count)| format!("{state}: {count}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let noun = if members.len() == 1 { "item" } else { "items" };
+        let summary = format!(
+            "{} linked {noun}. {counts}. As of this page load; {order}",
+            members.len()
+        );
+        // Keep the same bounded, content-keyed row transforms as the ledger listing.
+        let chunks: Vec<_> = row_xml
+            .chunks(render::CHUNK_ROWS)
+            .map(|window| render::chunk(&window.concat()))
+            .collect();
+        let key = format!("{kind}-row:{rel}:{ledger}");
+        slots.push((key.clone(), render::rendered_chunks(inv, &chunks).await?));
+        output.push_str(&render::wrap(
+            "link-group",
+            &[("relation", &rel), ("ledger", &ledger)],
+            &format!("{}{}", element("rollup", &[], &summary), render::slot(&key)),
+        ));
+    }
+    output.push_str(&unavailable);
+    Ok(LinkedItems { xml: output, slots })
+}
+
+/// The root and path of a working-tree file IRI, `urn:repo:file:{root}/{path}` (ledger #3238):
+/// a valid root name and a non-empty relative path with no empty, `.` or `..` segment.
+pub(crate) fn repo_file(target: &str) -> Option<(&str, &str)> {
+    let (root, path) = target.strip_prefix("urn:repo:file:")?.split_once('/')?;
+    (crate::browse::check_root_name(root).is_ok()
+        && !path.is_empty()
+        && path.split('/').all(|s| !matches!(s, "" | "." | ".."))
+        && !path.chars().any(|c| c.is_whitespace() || c.is_control()))
+    .then_some((root, path))
+}
+
+/// Browse's page for a working-tree file, when the caller may read its root (ledger #3238).
+/// A capability check only: whether the file exists is browse's to answer when it is followed.
+pub(crate) fn repo_file_href(target: &str, capability: &Capability) -> Option<String> {
+    let (root, path) = repo_file(target)?;
+    if !(capability.allows(&format!("{}{root}", ikigai_browse::CAP_PREFIX))
+        || capability.allows(ikigai_browse::CAP_WILDCARD))
+    {
+        return None;
+    }
+    let path = path
+        .split('/')
+        .map(ikigai_fn::html::url_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    let href = format!(
+        "/browse/urn:repo:{}:file:{path}",
+        ikigai_fn::html::url_segment(root)
+    );
+    ikigai_fn::html::safe_href(&href).map(str::to_string)
+}
+
+/// The code link of a full Git object, searched in the configured map and then the browse map
+/// under the viewer's own capability; `None` when no readable repository holds it.
+pub(crate) async fn git_href(inv: &Invocation<'_>, kind: &str, sha: &str) -> Option<String> {
+    for map in ["configured", "browse"] {
+        let Ok(read) = request(Verb::Source, &crate::git_object::link_iri(map, kind, sha)) else {
+            continue;
+        };
+        if let Ok(bytes) = fetch(inv, read).await {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                if let Some(safe) = ikigai_fn::html::safe_href(text).filter(|s| !s.is_empty()) {
+                    return Some(safe.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `view:blockedBy` for every open item an open item blocks, in place (ledger
+/// [#3217](http://localhost:1062/l/default/item/3217)): its open blockers, named, in one value,
+/// because the stylesheet cannot order a repeated property. A row knows what it blocks, not
+/// what blocks it, so [`crate::inbound`] reads the reverse from each item's own ledger graph,
+/// one read per ledger across all of `graphs`, under the viewer's capability. A closed
+/// blocker blocks nothing, and an item nothing open blocks carries nothing.
+async fn enrich_blocked(mut graphs: Vec<&mut Graph>, inv: &Invocation<'_>) {
+    let open = format!("{LEDGER_NS}open");
+    let mut by_ledger: BTreeMap<String, (Ledger, Vec<String>)> = BTreeMap::new();
+    for graph in &graphs {
+        for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+            if graph.value(&item, &format!("{LEDGER_NS}status")).as_deref() != Some(open.as_str()) {
+                continue;
+            }
+            if let Some((ledger, canonical)) = Ledger::item_iri(&item) {
+                if canonical == item {
+                    by_ledger
+                        .entry(ledger.name().to_string())
+                        .or_insert_with(|| (ledger, Vec::new()))
+                        .1
+                        .push(item);
+                }
+            }
+        }
+    }
+    let mut named = BTreeMap::new();
+    for (ledger, items) in by_ledger.values() {
+        named.extend(crate::inbound::blockers(inv, ledger, items).await);
+    }
+    for graph in graphs.iter_mut() {
+        for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+            if let Some(blockers) = named.get(&item) {
+                graph.view(&item, "blockedBy", blockers.join(", "));
+            }
+        }
+    }
+}
+
+/// The words a group of inbound links is headed with: the relation, read from the linker.
+fn inbound_phrase(rel: &str) -> &'static str {
+    match rel {
+        "blocks" => "blocks this",
+        "parent" => "part of this",
+        _ => "related to this",
+    }
+}
+
+/// What links TO the item (ledger [#3217](http://localhost:1062/l/default/item/3217)), in any
+/// ledger, as its ledger's graph and mirrors hold it ([`crate::inbound`]), rendered as
+/// [`outgoing_links`] renders what it links to: live rows grouped by relation and ledger, each
+/// read under the viewer's capability, and a linker the viewer cannot read shown only as its
+/// IRI. A `parent` edge from this ledger is left to the Children panel, which already lists it
+/// ([`enrich_children`]). Nothing here unlinks: an edge belongs to the item that holds it.
+async fn inbound_links(
+    graph: &Graph,
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+) -> Result<LinkedItems> {
+    let mut links = Graph::default();
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let id = item
+            .rsplit_once(":item:")
+            .map(|(_, id)| id.to_string())
+            .unwrap_or_default();
+        let edges = crate::inbound::read(
+            inv,
+            ledger,
+            std::slice::from_ref(&item),
+            &crate::inbound::RELATIONS,
+        )
+        .await;
+        for (order, edge) in edges.iter().enumerate() {
+            let here =
+                Ledger::item_iri(&edge.subject).is_some_and(|(of, _)| of.name() == ledger.name());
+            if edge.rel == "parent" && here {
+                continue;
+            }
+            let node = format!("urn:iki:gonk:view:inbound:{id}:{}", order + 1);
+            links.typed(&node, &format!("{}Link", render::VIEW_NS));
+            links.view(&node, "order", format!("{:04}", order + 1));
+            links.view(&node, "rel", inbound_phrase(&edge.rel));
+            links.view(&node, "ledger", ledger.name());
+            links.view(&node, "id", id.clone());
+            links.view(&node, "item", item.clone());
+            links.view(&node, "target", edge.subject.clone());
+            links.view(&node, "canUnlink", "false");
+        }
+    }
+    if links.triples().is_empty() {
+        return Ok(LinkedItems {
+            xml: String::new(),
+            slots: Vec::new(),
+        });
+    }
+    outgoing_links(&links, inv, "inbound").await
+}
+
+/// Resolve only recognized Git IRIs and working-tree file IRIs, through the viewer's own
+/// invocation.
+async fn enrich_git_links(graph: &mut Graph, inv: &Invocation<'_>) {
+    // The ordinary item face omits events. History is the ledger's own read boundary.
+    for item in graph.subjects_of_type(&format!("{LEDGER_NS}Item")) {
+        let Ok(read) = request(Verb::Source, &format!("{item}:history")) else {
+            continue;
+        };
+        let Ok(bytes) = fetch(inv, with(read, "as", "application/json")).await else {
+            continue;
+        };
+        let Ok(history) = serde_json::from_slice::<ikigai_ledger::json::HistoryDocument>(&bytes)
+        else {
+            continue;
+        };
+        for event in history.events {
+            for (index, target) in event.evidence.into_iter().enumerate() {
+                let node = format!(
+                    "urn:iki:gonk:view:close-evidence:event:{}:target:{index}",
+                    ikigai_fn::html::url_segment(&event.iri)
+                );
+                graph.typed(&node, &format!("{}Link", render::VIEW_NS));
+                graph.view(&node, "rel", "close evidence");
+                graph.view(&node, "target", target.clone());
+                graph.view(&node, "text", target);
+            }
+        }
+    }
+    let mut resolved = BTreeMap::new();
+    for link in graph.subjects_of_type(&format!("{}Link", render::VIEW_NS)) {
+        let Some(target) = graph.value(&link, &format!("{}target", render::VIEW_NS)) else {
+            continue;
+        };
+        if let Some(href) = repo_file_href(&target, inv.capability) {
+            graph.view(&link, "href", href);
+            continue;
+        }
+        let Some((kind, sha)) = crate::git_object::git_iri(&target) else {
+            continue;
+        };
+        if !resolved.contains_key(&target) {
+            let href = git_href(inv, kind, &sha).await;
+            resolved.insert(target.clone(), href);
+        }
+        if let Some(Some(href)) = resolved.get(&target) {
+            graph.view(&link, "href", href.clone());
+        }
+    }
+}
+
 async fn item_card(
     web: &Web,
     inv: &Invocation<'_>,
@@ -2212,43 +3155,91 @@ async fn item_card(
         "text/turtle",
     );
     let mut graph = Graph::from_turtle(&fetch(inv, read).await?).map_err(render_err)?;
-    enrich_items(&mut graph, ledger, inv, "open");
+    enrich_items(&mut graph, ledger, inv, "open", false);
+    enrich_states(&mut graph, inv).await;
+    enrich_blocked(vec![&mut graph], inv).await;
     enrich_close_reasons(&mut graph, &web.hub, ledger);
+    enrich_git_links(&mut graph, inv).await;
     enrich_children(&mut graph);
     enrich_repo_labels(&mut graph, web, inv.capability);
     enrich_authors(&mut graph, &web.passkeys);
-    // The ledger a comment's `ledger #N` references resolve in (`render::linkify`, ledger #989).
-    for comment in graph.subjects_of_type(&format!("{LEDGER_NS}Comment")) {
-        graph.view(&comment, "ledger", ledger.name());
+    // How the body's and the comments' references link (`render::linkify`, ledgers #989 and
+    // #3344): a bare `ledger #N` into this ledger, a qualified `crew#3` into a ledger this gonk holds that the viewer may read.
+    // The held set is the header's own list, computed once here for both: no store read.
+    let readable = readable_ledgers(web, inv.capability);
+    let held: Vec<&str> = readable.iter().map(Ledger::name).collect();
+    let refs = render::ledger_refs(ledger.name(), &held);
+    // The body and each comment as Markdown (ledger #3345), as a layer entry's body is: the
+    // fragment goes in as a `view:rendered` holding a placeholder, swapped for the fragment in
+    // the XML below. A body with no Markdown in it has none and shows as written.
+    let mut rendered: Vec<(String, String)> = Vec::new();
+    for (kind, heading_offset) in [("Item", 1), ("Comment", 2)] {
+        for subject in graph.subjects_of_type(&format!("{LEDGER_NS}{kind}")) {
+            graph.view(&subject, "linkify", refs.clone());
+            let fragment = graph
+                .value(&subject, &format!("{LEDGER_NS}body"))
+                .and_then(|body| render::item_markdown(&body, &refs, heading_offset));
+            if let Some(fragment) = fragment {
+                let placeholder = format!("gonk-markdown-{}", rendered.len());
+                graph.view(&subject, "rendered", placeholder.clone());
+                rendered.push((placeholder, fragment));
+            }
+        }
     }
     let title = graph
         .subjects_of_type(&format!("{LEDGER_NS}Item"))
         .first()
         .and_then(|item| graph.value(item, &format!("{DCTERMS}title")))
         .unwrap_or_else(|| id.to_string());
-    let mut children = nav(
-        web,
-        inv.capability,
-        &readable_ledgers(web, inv.capability),
-        Some(ledger.name()),
-    );
+    let mut children = nav(web, inv.capability, &readable, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
-    children.push_str(&graph.view_xml().map_err(render_err)?);
+    let mut xml = graph.view_xml().map_err(render_err)?;
+    for (placeholder, fragment) in &rendered {
+        // A literal's text is escaped in the XML, so this element can only be the one the
+        // graph wrote: a body that spells it out arrives as `&lt;view:rendered&gt;`.
+        let element = format!("<view:rendered>{placeholder}</view:rendered>");
+        if !xml.contains(&element) {
+            return Err(render_err(format!(
+                "the item's XML holds no `{element}` for its rendered body"
+            )));
+        }
+        xml = xml.replacen(
+            &element,
+            &format!("<view:rendered>{fragment}</view:rendered>"),
+            1,
+        );
+    }
+    children.push_str(&xml);
+    let mut linked = outgoing_links(&graph, inv, "link").await?;
+    children.push_str(&linked.xml);
+    let inbound = inbound_links(&graph, inv, ledger).await?;
+    if !inbound.xml.is_empty() {
+        children.push_str(&render::wrap("inbound", &[], &inbound.xml));
+    }
+    linked.slots.extend(inbound.slots);
     let doc = envelope(
         "page",
         &[
             ("view", "item"),
             ("full", flag(full)),
+            ("comments", comment_order(inv)),
             ("ui-theme", crate::render::theme_of(inv)),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+            ),
             ("title", &title),
             ("ledger", ledger.name()),
             ("page-url", &ledger_href(ledger)),
         ],
         &children,
     );
-    Ok(html(render::render(&doc, full).map_err(render_err)?))
+    let shell = render::render(&doc, full).map_err(render_err)?;
+    Ok(html(
+        render::splice(shell, &linked.slots).map_err(render_err)?,
+    ))
 }
 
 #[async_trait]
@@ -2401,6 +3392,16 @@ impl Endpoint for Act {
         let id = take("_id");
         let then = take("_then").unwrap_or_else(|| "items".to_string());
         let list_status = take("_status").unwrap_or_else(|| "open".to_string());
+        let list_labels = take("_labels");
+        let list_without = take("_without");
+        let list_text = take("_text");
+        let list_limit = take("_limit");
+        let list_ledgers = take("_ledgers");
+        // A union page's row names its OWN ledger in `_ledger`, the action's target; the page
+        // it re-renders is the listing's (ledger #3216).
+        let list_ledger = take("_listLedger")
+            .map(|name| Ledger::parse(&name))
+            .transpose()?;
         let target = if action == "item" {
             ledger.item(
                 id.as_deref()
@@ -2499,11 +3500,15 @@ impl Endpoint for Act {
             _ => {
                 let listing = Listing {
                     status: &list_status,
-                    text: None,
-                    limit: None,
+                    text: list_text.as_deref(),
+                    labels: list_labels.as_deref(),
+                    without: list_without.as_deref(),
+                    limit: list_limit.as_deref(),
                     offset: None,
+                    ledgers: list_ledgers.as_deref(),
                 };
-                ledger_listing(&self.web, inv, &ledger, &listing, false, flash).await
+                let page = list_ledger.as_ref().unwrap_or(&ledger);
+                ledger_listing(&self.web, inv, page, &listing, false, flash).await
             }
         }
     }
@@ -3342,7 +4347,13 @@ impl Endpoint for Sparql {
         };
         let children = format!(
             "{}{}{}{}{}",
-            nav(&self.web, inv.capability, &ledgers, Some(ledger.name())),
+            nav_with(
+                &self.web,
+                inv.capability,
+                &ledgers,
+                Here::Sparql(ledger.name()),
+                None,
+            ),
             samples(),
             cross_graph(),
             element("query", &[], query.as_deref().unwrap_or(DEFAULT_QUERY)),
@@ -3354,6 +4365,10 @@ impl Endpoint for Sparql {
                 ("view", "sparql"),
                 ("full", "true"),
                 ("ui-theme", crate::render::theme_of(inv)),
+                (
+                    "safe",
+                    crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+                ),
                 ("title", "SPARQL"),
             ],
             &children,
@@ -3490,11 +4505,13 @@ fn require_graph(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
 
 // ----------------------------------------------------------------------------- passkeys
 
-const PASSKEY_OPS: [&str; 7] = [
+const PASSKEY_OPS: [&str; 9] = [
     "register-options",
     "register",
     "login-options",
     "login",
+    "add-grant-options",
+    "add-grant",
     "logout",
     "logout-all",
     "session",
@@ -3533,13 +4550,33 @@ impl Endpoint for PasskeyDoor {
                 } else {
                     Purpose::Register
                 };
+                // A registration may name its label first, so a taken one is refused before
+                // the authenticator is asked to create anything (ledger #3384), and its invite,
+                // so the answer carries the grant the passkey's display name shows (#3387).
+                let mut grant = None;
+                if purpose == Purpose::Register {
+                    let asked = serde_json::from_str::<serde_json::Value>(content).ok();
+                    let field = |name: &str| {
+                        asked
+                            .as_ref()
+                            .and_then(|v| v.get(name)?.as_str().map(str::to_string))
+                    };
+                    if let Some(label) = field("label") {
+                        self.passkeys.check_label(&label).map_err(refused)?;
+                    }
+                    if let Some(invite) = field("invite") {
+                        grant = Some(self.passkeys.invite_grant(&invite).map_err(refused)?);
+                    }
+                }
                 let challenge = self
                     .passkeys
                     .challenge(purpose, now)
                     .map_err(Error::Unavailable)?;
-                Ok(json_repr(
-                    json!({ "challenge": challenge, "rpId": identity::RP_ID }),
-                ))
+                let mut answer = json!({ "challenge": challenge, "rpId": identity::RP_ID });
+                if let Some(grant) = grant {
+                    answer["grant"] = json!(grant);
+                }
+                Ok(json_repr(answer))
             }
             "register" => {
                 let enrolled = self
@@ -3547,8 +4584,51 @@ impl Endpoint for PasskeyDoor {
                     .register(content.as_bytes(), now)
                     .map_err(refused)?;
                 Ok(json_repr(
-                    json!({ "label": enrolled.label, "grant": enrolled.grant }),
+                    json!({ "label": enrolled.label, "grant": enrolled.grant_names() }),
                 ))
+            }
+            // Redeeming an invite while signed in adds its grant to THAT passkey (ledger #3388).
+            // The options answer what would be added, spending nothing, and a challenge only a
+            // fresh assertion by the signed-in passkey can answer; the session alone is never
+            // enough.
+            "add-grant-options" => {
+                let asked = serde_json::from_str::<serde_json::Value>(content)
+                    .map_err(|e| refused(format!("not JSON: {e}")))?;
+                let field = |name: &str| {
+                    asked
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .ok_or_else(|| refused(format!("`{name}` is missing")))
+                };
+                let (grant, credential) = self
+                    .passkeys
+                    .add_grant_preview(field("session")?.trim(), &field("invite")?, now)
+                    .map_err(refused)?;
+                let challenge = self
+                    .passkeys
+                    .challenge(Purpose::AddGrant, now)
+                    .map_err(Error::Unavailable)?;
+                Ok(json_repr(json!({
+                    "challenge": challenge,
+                    "rpId": identity::RP_ID,
+                    "grant": grant,
+                    "credential": credential,
+                })))
+            }
+            "add-grant" => {
+                let (token, who, added) = self
+                    .passkeys
+                    .add_grant(content.as_bytes(), now)
+                    .map_err(Error::Denied)?;
+                Ok(json_repr(json!({
+                    "session": token,
+                    "seconds": who.expires.saturating_sub(now),
+                    "label": who.enrolled.label,
+                    "grant": who.enrolled.grant_names(),
+                    "grants": who.enrolled.grants,
+                    "added": added,
+                })))
             }
             "login" => {
                 let (token, who) = self
@@ -3559,7 +4639,8 @@ impl Endpoint for PasskeyDoor {
                     "session": token,
                     "seconds": who.expires.saturating_sub(now),
                     "label": who.enrolled.label,
-                    "grant": who.enrolled.grant,
+                    "grant": who.enrolled.grant_names(),
+                    "grants": who.enrolled.grants,
                 })))
             }
             "logout" => {
@@ -3577,7 +4658,8 @@ impl Endpoint for PasskeyDoor {
             "session" => match self.passkeys.identity(content.trim(), now) {
                 Some(who) => Ok(json_repr(json!({
                     "label": who.enrolled.label,
-                    "grant": who.enrolled.grant,
+                    "grant": who.enrolled.grant_names(),
+                    "grants": who.enrolled.grants,
                     "scopes": who.scopes,
                     "seconds": who.expires.saturating_sub(now),
                 }))),
@@ -3603,7 +4685,10 @@ impl Endpoint for PasskeyDoor {
                 "The WebAuthn ceremonies and the session they open. `register-options` and \
                  `login-options` mint a single-use challenge; `register` enrolls a credential \
                  against a one-time invite; `login` verifies an assertion and opens a session \
-                 whose capability is its grant in gonk/grants.json; `session`, `logout` and \
+                 whose capability is the union of its passkey's grants in gonk/grants.json; \
+                 `add-grant-options` and `add-grant` redeem an invite while signed in by adding \
+                 its grant to that passkey, against a fresh assertion by it, and re-open the \
+                 session; `session`, `logout` and \
                  `logout-all` (every session of that token's passkey) take the session token as \
                  the body. Public by design — this is how a caller with no \
                  grant gets one — so it declares no capability. The HTTP door refuses a foreign \
@@ -3686,10 +4771,38 @@ impl Endpoint for RenderRules {
 
 // ------------------------------------------------------------------------------ assets
 
-const ASSETS: [(&str, &str, &str); 2] = [
+const ASSETS: [(&str, &str, &str); 3] = [
     ("gonk.css", "text/css", include_str!("../web/gonk.css")),
     ("gonk.js", "text/javascript", include_str!("../web/gonk.js")),
+    // The per-browser safe-mode gate (ledger #3379, [`crate::page_assets::GATE`]).
+    (
+        crate::page_assets::GATE,
+        "text/javascript",
+        include_str!("../web/gonk-safe.js"),
+    ),
 ];
+
+/// The order an item page lists its comments in (`comments=newest`, ledger
+/// [#3379](http://localhost:1062/l/default/item/3379)): `newest` first when asked, else `oldest`
+/// first, the order they were written in. gonk's own control, so it needs no deployment script.
+fn comment_order(inv: &Invocation<'_>) -> &'static str {
+    match inv.inline_str("comments") {
+        Ok("newest") => "newest",
+        _ => "oldest",
+    }
+}
+
+/// The file named `name`: one of [`ASSETS`], or the bar around a face, whose sheet is composed
+/// from ikigai-ui's palettes (ledger #3279, [`crate::face_frame::stylesheet`]).
+fn asset(name: &str) -> Option<(&'static str, &'static str)> {
+    if name == crate::face_frame::SHEET {
+        return Some(("text/css", crate::face_frame::stylesheet()));
+    }
+    ASSETS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, media, body)| (*media, *body))
+}
 
 struct Asset;
 
@@ -3697,12 +4810,10 @@ struct Asset;
 impl Endpoint for Asset {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let name = binding(inv, "name")?;
-        let (_, media, body) = ASSETS
-            .iter()
-            .find(|(n, _, _)| *n == name)
-            .ok_or_else(|| Error::NotFound(format!("no asset called `{name}`")))?;
+        let (media, body) =
+            asset(&name).ok_or_else(|| Error::NotFound(format!("no asset called `{name}`")))?;
         Ok(Representation::new(
-            ReprType::new(*media).with_param("charset", "utf-8"),
+            ReprType::new(media).with_param("charset", "utf-8"),
             body.as_bytes().to_vec(),
         ))
     }
@@ -3724,7 +4835,12 @@ impl Endpoint for Asset {
             .input(
                 arg("name", "Which file.")
                     .binding()
-                    .one_of(ASSETS.iter().map(|(n, _, _)| *n))
+                    .one_of(
+                        ASSETS
+                            .iter()
+                            .map(|(n, _, _)| *n)
+                            .chain([crate::face_frame::SHEET]),
+                    )
                     .default_value("gonk.css"),
             )
             .output("text/css")
@@ -3754,7 +4870,9 @@ mod tests {
             queue: crate::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            page_assets: Default::default(),
             toolbox: false,
+            faces: Vec::new(),
         };
         let root = Capability::root();
         let ledgers = readable_ledgers(&web, &root);
@@ -3776,6 +4894,107 @@ mod tests {
         }
         assert!(header.contains("<view:withheld"));
         assert_eq!(header, nav_for(&web, &partial));
+    }
+
+    #[test]
+    fn conflicting_terms_can_be_removed_independently() {
+        let filters = LabelFilters {
+            labels: Some("same,keep"),
+            without: Some("same,skip"),
+            ledgers: None,
+        };
+        let listing = Listing {
+            status: "all",
+            text: None,
+            labels: filters.labels,
+            without: filters.without,
+            limit: None,
+            offset: Some("50"),
+            ledgers: None,
+        };
+        assert_eq!(
+            filters.url(&listing, "/l/default", LabelChange::RemoveRequired("same")),
+            "/l/default?status=all&labels=keep&without=same%2Cskip"
+        );
+        assert_eq!(
+            filters.url(&listing, "/l/default", LabelChange::RemoveExcluded("same")),
+            "/l/default?status=all&labels=same%2Ckeep&without=skip"
+        );
+    }
+
+    #[test]
+    fn next_page_carries_encoded_label_filters() {
+        let count = Count {
+            shown: rows::MAX_ROWS,
+            total: rows::MAX_ROWS + 1,
+            offset: 0,
+        };
+        let filters = LabelFilters {
+            labels: Some("book:ikigai,c++ & café"),
+            without: Some("blocked,decide"),
+            ledgers: None,
+        };
+        let query = filters.append(count.next_query("closed", Some("queue & review")).unwrap());
+        assert_eq!(query, format!("?status=closed&limit={0}&offset={0}&text=queue%20%26%20review&labels=book%3Aikigai%2Cc%2B%2B%20%26%20caf%C3%A9&without=blocked%2Cdecide", rows::MAX_ROWS));
+    }
+
+    /// Ledger #3216: the next page and every label link keep `ledgers=`, encoded, last.
+    #[test]
+    fn paging_and_label_links_keep_the_union() {
+        let count = Count {
+            shown: rows::MAX_ROWS,
+            total: rows::MAX_ROWS + 1,
+            offset: 0,
+        };
+        let filters = LabelFilters {
+            labels: Some("team"),
+            without: None,
+            ledgers: Some("default,crew"),
+        };
+        let query = filters.append(count.next_query("open", None).unwrap());
+        assert_eq!(
+            query,
+            format!(
+                "?status=open&limit={0}&offset={0}&labels=team&ledgers=default%2Ccrew",
+                rows::MAX_ROWS
+            )
+        );
+        let listing = Listing {
+            status: "open",
+            text: None,
+            labels: filters.labels,
+            without: None,
+            limit: None,
+            offset: None,
+            ledgers: filters.ledgers,
+        };
+        for change in [
+            LabelChange::Clear,
+            LabelChange::Exclude("team"),
+            LabelChange::RemoveRequired("team"),
+        ] {
+            assert!(filters
+                .url(&listing, "/l/default", change)
+                .ends_with("ledgers=default%2Ccrew"));
+        }
+    }
+
+    #[test]
+    fn a_union_note_names_what_was_read_and_what_was_left_out() {
+        let note = |asked, read: &[&str]| {
+            union_note(
+                asked,
+                &read.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert!(note("crew, default,crew", &["crew", "default"])
+            .contains(">Items from 2 ledgers: crew, default.<"));
+        assert!(note("default,secret", &["default"]).contains(
+            ">Items from 1 ledger: default. Left out, because this grant cannot read it: \
+             secret.<"
+        ));
+        assert!(note("secret", &[])
+            .contains(">None of the ledgers asked for can be read with this grant.<"));
     }
 
     /// ★ Ledger #480: a page the CAP stopped says so, beside what it drew and out of what; a
