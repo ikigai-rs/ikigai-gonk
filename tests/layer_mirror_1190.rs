@@ -2959,6 +2959,49 @@ impl Door for Counting {
     }
 }
 
+/// Ledger #3557: late progress must not renew a successor taken by the same participant.
+#[test]
+fn progress_on_a_superseded_offer_does_not_renew_the_successor_claim() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("Measure the cache\n\nBefore and after.", &[]);
+    let first = offered(&pass(&mirror));
+    w.take(&them(), &first).unwrap();
+    pass(&mirror);
+    w.report(&them(), "Release", &first, "");
+    let second = offered(&pass(&mirror));
+    assert_ne!(first, second);
+    w.take(&them(), &second).unwrap();
+    pass(&mirror);
+    let shorten = Request::new(
+        Verb::Sink,
+        Iri::parse(format!("urn:iki:ledger:{LEDGER}:claim")).unwrap(),
+    )
+    .with_arg("item", ArgRef::Inline(n.to_string().into_bytes()))
+    .with_arg("content", ArgRef::Inline(them().into_bytes()))
+    .with_arg("lease", ArgRef::Inline(b"1h".to_vec()))
+    .with_arg("renew", ArgRef::Inline(b"true".to_vec()));
+    Resolver::issue_as(
+        &*w.hub,
+        shorten,
+        &mirror::capability(&w.binding(LAYER)).unwrap(),
+    )
+    .unwrap();
+    let claim = w.item(n)["claim"].clone();
+    let progress = w.report(&them(), "Progress", &first, "; ik:note \"late update\"");
+    let report = pass(&mirror);
+    assert_eq!(
+        w.item(n)["claim"],
+        claim,
+        "late progress changed the successor claim"
+    );
+    assert!(!report.actions.iter().any(|a| a.starts_with("renewed ")));
+    assert!(comments_starting(&w, n, "Progress in layer")
+        .iter()
+        .any(|c| c.contains(&progress)));
+    settled(&mirror);
+}
+
 /// Ledger #2800: a former taker may still report on an offer they released.
 #[test]
 fn a_hand_back_on_a_superseded_offer_is_only_a_comment() {
