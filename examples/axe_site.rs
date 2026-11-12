@@ -331,7 +331,7 @@ fn main() {
     render:matchPrefix "https://example.org/a-deployment-with-a-long-namespace/another-long-segment/vocabulary#" ;
     render:curie "deployment" .
 "#
-        ),
+        ).into(),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
