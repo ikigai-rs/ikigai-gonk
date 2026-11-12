@@ -16,7 +16,7 @@ ikigai-gonk 0.1.0 — holding the store at /Users/you/.ikigai/store
   http    http://localhost:1062/ — loopback (127.0.0.1:1062); anonymous read: default; 0 passkey(s)
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
   scripts urn:script:* in /Users/you/.ikigai/scripts — sparql and plan, read-only (the ledgers' reads); anonymous runs PUBLIC scripts and read-only plans, 30 a minute in all (draft checks too), each held to the anonymous budget; a QUIC client drafts, a person publishes; backed up with the store
-  llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
+  llm     not mounted — no gonk.mount for urn:llm:; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   socket  /Users/you/.ikigai/gonk.sock — owner only
   quic    off — no client certificate is enrolled (there is no /Users/you/.config/ikigai/gonk/clients.json); to open it, run `ikigai-gonk client add <name> --ledger <ledger>=write` and restart
   mount   mount = "prefer urn:iki:ledger:=/Users/you/.ikigai/gonk.sock"  (and the same for urn:iki:store:)
@@ -2610,6 +2610,50 @@ certificate identity may derive when its grant was minted with `--browse derive`
 ([the roles](#provisioning-a-browsing-identity-the---browse-roles)), whose net scope names
 this mount's host.
 
+### Mounting a peer under any prefix (ledger #3553)
+
+`urn:llm:` is the mount explain derives through, but a `gonk.mount` line may name any prefix: a
+dashboard, a classifier, a project's own module, served by a peer on a Unix socket or over QUIC.
+Its names then answer through every gonk door — the socket, QUIC and HTTP — as if gonk served
+them.
+
+```toml
+gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+gonk.mount = "prefer urn:dashboard:=~/.ikigai/dashboard.sock"
+gonk.mount = "prefer urn:x-proj:classify:=quic://build.local:4433 ~/.config/ikigai/gonk/quic/peers/build"
+```
+
+Every mount has what the `urn:llm:` one has, and the cli's mount line has: the spelling
+`prefer <prefix>=<target> [cert-dir]`; `prefer` meaning **an absent peer costs that prefix and
+nothing else** (no dial at startup, a failed dial held off by a backoff from 1 s to 30 s); a
+socket or a `quic://` target with the client certificate directory the cli's `--cert-dir`
+reads; and a deadline of 20 s for the peer to describe itself, two thirds of what gonk's own
+callers give gonk. A caller reaching any mounted peer needs `urn:cap:net:<the peer's host>`
+(`localhost` for a socket). Only the `urn:llm:` mount spends the model-call window
+(`gonk.mount.calls_per_hour`), and only it binds explain, review and `urn:nl:sparql`.
+
+The rules a line must keep, each refused at startup with the line named:
+
+- **One peer per prefix**, and the prefix is a scheme and at least one segment ending in `:`
+  (`urn:dashboard:`, not `urn:dashboard` or `urn:`), so it claims whole names. Lines nested
+  under each other (`urn:dash:` and `urn:dash:panel:`) are composed longest first, as the cli
+  orders its mounts.
+- **Never a prefix gonk serves itself.** A mount is composed in front of gonk's own spaces, so
+  one over the ledger would hand the ledger to the peer. A line whose prefix is under, or
+  contains, one of these is refused, naming what gonk serves there: `urn:iki:ledger:` (the
+  ledger), `urn:iki:store:` (the store), `urn:iki:gonk:` (the pages and gonk's own families),
+  `urn:repo:`, `urn:iki:browse:` and `urn:git:` (browse), `urn:iki:finding:`,
+  `urn:iki:annotation:` and `urn:space:` (the review queue), `urn:iki:space:` (the views),
+  `urn:sparql:`, `urn:script:`, `urn:plan:`, `urn:nl:`, `urn:kernel:`, `urn:toolbox:`,
+  `urn:compress:`, and the task layers' `urn:layer:`, `urn:layers:` and `urn:collab:`, which
+  a `gonk.layer` line mounts.
+
+```text
+ikigai-gonk: gonk.mount `prefer urn:iki:=/tmp/peer.sock`: `urn:iki:` overlaps `urn:iki:ledger:`,
+which gonk serves itself — the ledger. A mount is composed in front of gonk's own spaces, so it
+would hand those names to the peer; mount the peer under a prefix of its own
+```
+
 ## A ledger bound to a task layer (ledger #1190)
 
 A **layer** is a shared space on a layer host ([`ikigai-layers`](https://github.com/ikigai-rs/ikigai-layers),
@@ -4308,6 +4352,8 @@ gonk.browse.root = "core=~/git-personal/ikigai-core"
 # gonk.holder.alias = "lawnboy -> lawnboy-claude before 2026-10-21"
 # gonk.holder.alias = "lawnboy -> lawnboy-codex"
 gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+# repeatable, one line per prefix; any prefix but gonk's own (see "Mounting a peer under any prefix")
+# gonk.mount = "prefer urn:dashboard:=~/.ikigai/dashboard.sock"
 # gonk.explain.file.provider = "urn:llm:coder:ask"     # the tiers, and the per-call ceilings
 # gonk.explain.file.max_tokens = 400                   # file 400, dir 600, review 800, pr 600
 # gonk.explain.dir.provider = "urn:llm:ask"            # .dir / .review / .pr take the same pair

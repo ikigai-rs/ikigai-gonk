@@ -18,7 +18,7 @@
 //!
 //! # What a binding mounts
 //!
-//! gonk mounts `urn:llm:` and nothing else on purpose ([`crate::mount`]). A binding adds the
+//! A `gonk.mount` line may not claim a layer's names ([`crate::mount::OWN_PREFIXES`]). A binding adds the
 //! three names a layer CLIENT needs (ledger [#1283](http://localhost:1060/l/default/item/1283)),
 //! as override mounts on the configured door, and still nothing else:
 //!

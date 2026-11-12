@@ -384,9 +384,9 @@ pub fn compose_serving_with_lifecycles(
         None => store,
     };
     // The mounts go FIRST — an override forwards its prefix unchanged, and precedence is
-    // half of what makes it an override. Nothing local is shadowed by that today (this
-    // server binds nothing under `urn:llm:`), and `crate::mount` is where the prefix a
-    // mount may claim is decided.
+    // half of what makes it an override. Nothing local is shadowed by that: a `gonk.mount`
+    // line that overlaps a prefix this server serves is refused at startup
+    // (`crate::mount::OWN_PREFIXES`, ledger #3553).
     let mut spaces: Vec<Arc<dyn Space>> = mounted;
     spaces.push(store);
     // ★ Ledger #775 step 3: every claim's KIND is stamped from the door's principal

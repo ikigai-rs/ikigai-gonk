@@ -86,7 +86,7 @@ ikigai-gonk 0.1.1 — holding the store at /home/you/.ikigai/store
   http    http://localhost:1062/ — loopback (127.0.0.1:1062); anonymous read: default; 0 passkey(s), sessions 12 h or 60 min idle; anonymous SPARQL budget 1000 ms
   browse  not composed — no gonk.browse.root; urn:repo:* and the git/gh facades are not bound
   backup  every 24h into /home/you/.ikigai/backups — keep 5, the first in 1m. …
-  llm     not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
+  llm     not mounted — no gonk.mount for urn:llm:; urn:llm:* resolves nowhere, so explain, review and the PR-derived layers are not bound
   review  not configured — no gonk.review.space; no queue is bound and urn:iki:gonk:review:pass is not offered
   …
   socket  /home/you/.ikigai/gonk.sock — owner only

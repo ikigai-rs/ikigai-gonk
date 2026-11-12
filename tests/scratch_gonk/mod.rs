@@ -96,6 +96,17 @@ impl Gonk {
         Gonk::launch(config, false, None, &|_, _| {})
     }
 
+    /// [`Gonk::start`], but a child that EXITS while starting is an `Err` carrying its stderr
+    /// rather than a panic: for a test of a config gonk must refuse.
+    pub fn try_start(config: &str) -> Result<Gonk, String> {
+        std::panic::catch_unwind(|| Gonk::start(config)).map_err(|panic| {
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "gonk panicked while starting".to_string())
+        })
+    }
+
     /// A gonk whose HTTP door binds where `config` says (`gonk.bind = "<ip>:0"`), not where
     /// `--port 0` would put it: no port flag, so the config home's own key decides, and `ip`
     /// is the address the test then dials (ledger
