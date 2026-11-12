@@ -1,4 +1,4 @@
-//! The render rules: **a resource that says which result cells become controls**.
+//! The render rules: **a resource for result-cell controls and IRI abbreviation**.
 //!
 //! A SPARQL result set is terminal by default — numbers a person reads out and types
 //! somewhere else. These rules make a cell a link or a next question instead. What they are
@@ -41,7 +41,7 @@
 //! URL. A rule author writes `"{value}"` and cannot opt out of either: the templates carry
 //! placeholders, never concatenated text.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ikigai_fn::html::url_segment;
 
@@ -90,6 +90,8 @@ enum Template {
     Link(String),
     /// A SPARQL query the cell runs, in the editor, against the current ledger.
     Query(String),
+    /// A display prefix bound to the rule's sole matchPrefix namespace.
+    Curie(String),
 }
 
 /// The rule table in effect.
@@ -118,21 +120,24 @@ impl Rules {
             |subject: &str, local: &str| graph.values(subject, &format!("{RENDER_NS}{local}"));
         let mut rules = Vec::new();
         for iri in graph.subjects_of_type(&format!("{RENDER_NS}Rule")) {
-            let link = one(&iri, "link");
-            let query = one(&iri, "query");
-            let template = match (link, query) {
-                (Some(_), Some(_)) => {
-                    return Err(format!(
-                        "{iri}: a rule states both render:link and render:query; it may state one"
-                    ))
-                }
-                (Some(url), None) => Template::Link(url),
-                (None, Some(sparql)) => Template::Query(sparql),
-                (None, None) => {
-                    return Err(format!(
-                        "{iri}: a rule with no render:link and no render:query does nothing"
-                    ))
-                }
+            let links = many(&iri, "link");
+            let queries = many(&iri, "query");
+            let curies = many(&iri, "curie");
+            let count = links.len() + queries.len() + curies.len();
+            if count == 0 {
+                return Err(format!("{iri}: a rule with no action does nothing"));
+            }
+            if count != 1 {
+                return Err(format!(
+                    "{iri}: a rule may state one action: render:link, render:query or render:curie"
+                ));
+            }
+            let template = if let Some(url) = links.into_iter().next() {
+                Template::Link(url)
+            } else if let Some(sparql) = queries.into_iter().next() {
+                Template::Query(sparql)
+            } else {
+                Template::Curie(curies.into_iter().next().expect("one action"))
             };
             let shapes: BTreeSet<String> = many(&iri, "matchShape").into_iter().collect();
             for shape in &shapes {
@@ -157,11 +162,39 @@ impl Rules {
                     .map_err(|_| format!("{iri}: render:order `{text}` is not an integer"))?,
                 None => 100,
             };
+            let prefixes = many(&iri, "matchPrefix");
+            if let Template::Curie(prefix) = &template {
+                // Keep the binding unambiguous and reversible. These are display prefixes,
+                // not arbitrary templates; a literal must never masquerade as an IRI.
+                if !prefix
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphabetic)
+                    || !prefix
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                {
+                    return Err(format!(
+                        "{iri}: render:curie needs a prefix matching [A-Za-z][A-Za-z0-9_-]*"
+                    ));
+                }
+                if kinds.len() != 1 || !kinds.contains("uri") {
+                    return Err(format!(
+                        "{iri}: render:curie requires render:matchKind \"uri\""
+                    ));
+                }
+                if prefixes.len() != 1
+                    || prefixes[0].is_empty()
+                    || oxigraph::model::NamedNode::new(&prefixes[0]).is_err()
+                {
+                    return Err(format!("{iri}: render:curie requires exactly one absolute IRI namespace in render:matchPrefix"));
+                }
+            }
             rules.push(Rule {
                 order,
                 vars: many(&iri, "matchVar").into_iter().collect(),
                 kinds,
-                prefixes: many(&iri, "matchPrefix"),
+                prefixes,
                 shapes,
                 template,
                 label: one(&iri, "label").or_else(|| graph.value(&iri, RDFS_LABEL)),
@@ -171,6 +204,19 @@ impl Rules {
         // Lowest order wins, ties broken on the IRI — never on parse order, so the same
         // table always renders the same page.
         rules.sort_by(|a, b| (a.order, &a.iri).cmp(&(b.order, &b.iri)));
+        let mut bindings = BTreeMap::new();
+        for rule in &rules {
+            if let Template::Curie(prefix) = &rule.template {
+                if let Some(namespace) = bindings.insert(prefix, &rule.prefixes[0]) {
+                    if namespace != &rule.prefixes[0] {
+                        return Err(format!(
+                            "{}: render:curie prefix `{prefix}` is bound to conflicting namespaces",
+                            rule.iri
+                        ));
+                    }
+                }
+            }
+        }
         Ok(Rules { rules })
     }
 
@@ -179,9 +225,33 @@ impl Rules {
         self.rules.len()
     }
 
-    /// Whether the table is empty — a table with no rules renders exactly today's page.
+    /// Whether the table is empty — no controls or IRI abbreviation.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    /// Abbreviate an IRI using the first matching display rule. Control rules are
+    /// evaluated independently, so a shortened IRI can still link using its full value.
+    /// Returns the display text and its prefix/namespace binding for the visible legend.
+    pub fn curie(&self, var: &str, kind: &str, value: &str) -> Option<(String, &str, &str)> {
+        for rule in &self.rules {
+            let Template::Curie(prefix) = &rule.template else {
+                continue;
+            };
+            if !rule.matches(var, kind, value) {
+                continue;
+            }
+            let namespace = &rule.prefixes[0];
+            let local = value.strip_prefix(namespace)?;
+            if local.is_empty()
+                || local.contains(['/', '#'])
+                || local.chars().any(char::is_whitespace)
+            {
+                continue;
+            }
+            return Some((format!("{prefix}:{local}"), prefix, namespace));
+        }
+        None
     }
 
     /// The action for one cell, or `None` when no rule matches it.
@@ -208,24 +278,12 @@ impl Rules {
             ),
         ];
         for rule in &self.rules {
-            if !rule.vars.is_empty() && !rule.vars.contains(var) {
-                continue;
-            }
-            if !rule.kinds.is_empty() && !rule.kinds.contains(kind) {
-                continue;
-            }
-            if !rule.prefixes.is_empty() && !rule.prefixes.iter().any(|p| value.starts_with(p)) {
-                continue;
-            }
-            if !rule.shapes.iter().all(|shape| match shape.as_str() {
-                "ledgerItemIri" => item.is_some(),
-                "integer" => is_integer(value),
-                _ => false,
-            }) {
+            if !rule.matches(var, kind, value) {
                 continue;
             }
             let (href, kind) = match &rule.template {
                 Template::Link(url) => (fill(url, &bindings, url_segment)?, "link"),
+                Template::Curie(_) => continue,
                 Template::Query(sparql) => {
                     let query = fill(sparql, &bindings, sparql_string)?;
                     (
@@ -248,6 +306,29 @@ impl Rules {
             return Some(Action { href, label, kind });
         }
         None
+    }
+}
+
+impl Rule {
+    fn matches(&self, var: &str, kind: &str, value: &str) -> bool {
+        let item = ledger_item_iri(value);
+        if !self.vars.is_empty() && !self.vars.contains(var) {
+            return false;
+        }
+        if !self.kinds.is_empty() && !self.kinds.contains(kind) {
+            return false;
+        }
+        if !self.prefixes.is_empty() && !self.prefixes.iter().any(|p| value.starts_with(p)) {
+            return false;
+        }
+        if !self.shapes.iter().all(|shape| match shape.as_str() {
+            "ledgerItemIri" => item.is_some(),
+            "integer" => is_integer(value),
+            _ => false,
+        }) {
+            return false;
+        }
+        true
     }
 }
 
@@ -361,9 +442,9 @@ mod tests {
     #[test]
     fn the_shipped_table_parses_and_is_ordered() {
         let rules = rules();
-        assert_eq!(rules.len(), 3, "{rules:?}");
+        assert_eq!(rules.len(), 4, "{rules:?}");
         let orders: Vec<i64> = rules.rules.iter().map(|r| r.order).collect();
-        assert_eq!(orders, vec![10, 20, 30]);
+        assert_eq!(orders, vec![10, 20, 30, 40]);
     }
 
     /// ★ The general half: an item IRI links whatever the column is called, because the
@@ -555,8 +636,96 @@ mod tests {
         ))
         .contains("render:order"));
         assert!(bad("not turtle at all").contains("not Turtle"));
-        // An empty table is legal: it renders exactly the page gonk rendered before.
+        // An empty table is legal: no controls or abbreviation.
         assert!(Rules::parse("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn curies_obey_conditions_and_order_independently_of_controls() {
+        let table = Rules::parse(
+            r#"@prefix render: <urn:iki:gonk:render#> .
+<urn:x:z> a render:Rule ; render:order 1 ; render:matchKind "uri" ;
+    render:matchPrefix "urn:custom:" ; render:curie "second" .
+<urn:x:a> a render:Rule ; render:order 1 ; render:matchKind "uri" ;
+    render:matchVar "state" ; render:matchPrefix "urn:custom:" ; render:curie "first" .
+<urn:x:link> a render:Rule ; render:order 0 ; render:matchKind "uri" ;
+    render:matchPrefix "urn:custom:" ; render:link "/inspect?value={value}" .
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            table.curie("state", "uri", "urn:custom:open"),
+            Some(("first:open".into(), "first", "urn:custom:"))
+        );
+        assert_eq!(
+            table.curie("other", "uri", "urn:custom:open").unwrap().0,
+            "second:open"
+        );
+        assert_eq!(
+            table
+                .action("state", "uri", "urn:custom:open", "default")
+                .unwrap()
+                .href,
+            "/inspect?value=urn%3Acustom%3Aopen"
+        );
+        for value in [
+            "urn:custom:",
+            "urn:custom:a/b",
+            "urn:custom:a#b",
+            "urn:custom:a b",
+            "urn:unknown:open",
+        ] {
+            assert!(table.curie("state", "uri", value).is_none(), "{value}");
+        }
+        for kind in ["literal", "bnode"] {
+            assert!(table.curie("state", kind, "urn:custom:open").is_none());
+        }
+        assert!(Rules::parse("")
+            .unwrap()
+            .curie("state", "uri", "https://ikigai-rs.dev/ns/ledger#open")
+            .is_none());
+        assert_eq!(
+            Rules::default()
+                .curie("anything", "uri", "https://ikigai-rs.dev/ns/ledger#open")
+                .unwrap()
+                .0,
+            "ledger:open"
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_unusable_curie_bindings_are_refused() {
+        let prefix = "@prefix render: <urn:iki:gonk:render#> .\n";
+        for body in [
+            "render:curie \"bad:prefix\" ; render:matchKind \"uri\" ; render:matchPrefix \"urn:x:\"",
+            "render:curie \"\" ; render:matchKind \"uri\" ; render:matchPrefix \"urn:x:\"",
+            "render:curie \"x\" ; render:matchPrefix \"urn:x:\"",
+            "render:curie \"x\" ; render:matchKind \"literal\" ; render:matchPrefix \"urn:x:\"",
+            "render:curie \"x\" ; render:matchKind \"uri\"",
+            "render:curie \"x\" ; render:matchKind \"uri\" ; render:matchPrefix \"\"",
+            "render:curie \"x\" ; render:matchKind \"uri\" ; render:matchPrefix \"relative\"",
+            "render:curie \"x\" ; render:matchKind \"uri\" ; render:matchPrefix \"urn:x:\", \"urn:y:\"",
+            "render:curie \"x\", \"y\" ; render:matchKind \"uri\" ; render:matchPrefix \"urn:x:\"",
+            "render:curie \"x\" ; render:link \"/x\" ; render:matchKind \"uri\" ; render:matchPrefix \"urn:x:\"",
+        ] {
+            assert!(Rules::parse(&format!("{prefix}<urn:x:r> a render:Rule ; {body} .")).is_err(), "{body}");
+        }
+        let rule = |iri: &str, namespace: &str| {
+            format!("<{iri}> a render:Rule ; render:curie \"x\" ; render:matchKind \"uri\" ; render:matchPrefix \"{namespace}\" .")
+        };
+        assert!(Rules::parse(&format!(
+            "{prefix}{}{}",
+            rule("urn:r:1", "urn:x:"),
+            rule("urn:r:2", "urn:y:")
+        ))
+        .unwrap_err()
+        .contains("conflicting namespaces"));
+        assert!(Rules::parse(&format!(
+            "{prefix}{}{}",
+            rule("urn:r:1", "urn:x:"),
+            rule("urn:r:2", "urn:x:")
+        ))
+        .is_ok());
     }
 
     fn decode(encoded: &str) -> String {
