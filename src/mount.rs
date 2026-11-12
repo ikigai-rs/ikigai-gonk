@@ -1,4 +1,6 @@
-//! The one namespace a `gonk.mount` line mounts: `urn:llm:` on a peer that serves it.
+//! What a `gonk.mount` line mounts: any prefix the config names, on a peer that serves it —
+//! `urn:llm:` for the model explain derives through, and whatever else a peer serves (a
+//! dashboard, a classifier, a project's own module), on a socket or over QUIC.
 //!
 //! (A task layer's names are mounted too, by a `gonk.layer` binding and by nothing else; see
 //! [`crate::layer`]. They reuse [`LazyMount`], in its [`LazyMount::fresh`] form.)
@@ -6,7 +8,14 @@
 //! ```toml
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! gonk.mount = "prefer urn:llm:=~/.ikigai/host.sock"
+//! gonk.mount = "prefer urn:dashboard:=~/.ikigai/dashboard.sock"
 //! ```
+//!
+//! ★ **Any prefix, except one gonk serves itself** (ledger #3553; through gonk 0.x the only
+//! prefix was `urn:llm:`). A mount is composed IN FRONT of the local spaces, so a mount over
+//! one of gonk's own names would hand the ledger, the store, browse or the pages to a peer.
+//! [`OWN_PREFIXES`] names what gonk serves, and a line that overlaps one — narrower or wider —
+//! is refused at startup, naming the line and what it would take over.
 //!
 //! # Why a mount and not a dependency
 //!
@@ -92,14 +101,73 @@ use ikigai_resolve::{CacheStatus, MountedRemote, Resolver};
 
 use crate::budget::Window;
 
-/// The only prefix this server mounts.
+/// The prefix of the model peer: what `urn:repo:{root}:explain`, review and `urn:nl:sparql`
+/// derive through, and the one mount whose forwarded calls spend the model-call window.
 ///
-/// A mount is composed IN FRONT of the local spaces and its catalog is surfaced through
-/// every door, so a general `gonk.mount` key would let one config line put an arbitrary
-/// remote namespace behind the socket, the QUIC door and the HTTP door at once — and the
-/// manifest's claim that what is not linked is not reachable would become a claim about a
-/// file nobody reads. One prefix, for the one thing this server has a use for.
+/// Any other prefix may be mounted too (ledger #3553): a mount reaches ONE configured peer,
+/// whose own capability ceiling decides what the connection may do, and gonk binds nothing
+/// under it — but it is composed in front of the local spaces and surfaced through every door,
+/// so a mount may never claim a name gonk serves itself ([`OWN_PREFIXES`]).
 pub const LLM_PREFIX: &str = "urn:llm:";
+
+/// The prefixes gonk serves itself, each with what it is: a `gonk.mount` line whose prefix
+/// overlaps one of these (is under it, or contains it) is refused ([`own_overlap`]).
+///
+/// The task layers' prefixes are here too: they are mounted, but by a `gonk.layer` line,
+/// which binds the ledger to the layer as well ([`crate::layer`]).
+pub const OWN_PREFIXES: [(&str, &str); 20] = [
+    ("urn:iki:ledger:", "the ledger"),
+    ("urn:iki:store:", "the store"),
+    (
+        "urn:iki:gonk:",
+        "gonk's pages and its own families (render, backup, review, views)",
+    ),
+    ("urn:repo:", "repository browse"),
+    ("urn:iki:browse:", "repository browse"),
+    ("urn:git:", "repository browse (git objects)"),
+    ("urn:iki:finding:", "the review queue's findings"),
+    ("urn:iki:annotation:", "the review queue's annotations"),
+    ("urn:iki:space:", "the views"),
+    ("urn:space:", "the review queue"),
+    ("urn:sparql:", "the SPARQL face over the store"),
+    ("urn:script:", "the scripts"),
+    ("urn:plan:", "the plan doors"),
+    ("urn:nl:", "natural-language drafting"),
+    ("urn:kernel:", "the kernel's own resources"),
+    ("urn:toolbox:", "the toolbox"),
+    ("urn:compress:", "the backup family's compression"),
+    (
+        "urn:layer:",
+        "the task layers (a `gonk.layer` line mounts them)",
+    ),
+    (
+        "urn:layers:",
+        "the task layers (a `gonk.layer` line mounts them)",
+    ),
+    (
+        "urn:collab:",
+        "the task layers (a `gonk.layer` line mounts them)",
+    ),
+];
+
+/// The first of [`OWN_PREFIXES`] that `prefix` overlaps — `prefix` under it, or it under
+/// `prefix` — as `(own prefix, what it is)`.
+///
+/// ```
+/// use ikigai_gonk::mount::own_overlap;
+/// assert_eq!(own_overlap("urn:iki:ledger:default:"), Some(("urn:iki:ledger:", "the ledger")));
+/// assert_eq!(own_overlap("urn:iki:"), Some(("urn:iki:ledger:", "the ledger")));
+/// assert_eq!(own_overlap("urn:llm:"), None);
+/// assert_eq!(own_overlap("urn:dashboard:"), None);
+/// // A shared spelling is not an overlap: `urn:repos:` is not under `urn:repo:`.
+/// assert_eq!(own_overlap("urn:repos:"), None);
+/// ```
+pub fn own_overlap(prefix: &str) -> Option<(&'static str, &'static str)> {
+    OWN_PREFIXES
+        .iter()
+        .find(|(own, _)| prefix.starts_with(own) || own.starts_with(prefix))
+        .copied()
+}
 
 /// The LONGEST a failed dial is remembered before another is attempted: the cap of the
 /// backoff [`FIRST_HOLD`] starts ([`hold_after`]).
@@ -303,7 +371,7 @@ impl std::fmt::Display for Target {
 /// One `gonk.mount` line, parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
-    /// The IRI prefix — always [`LLM_PREFIX`] today.
+    /// The IRI prefix: any the line names but one of [`OWN_PREFIXES`], ending in `:`.
     pub prefix: String,
     /// Where it resolves.
     pub target: Target,
@@ -315,7 +383,8 @@ pub struct Mount {
 ///
 /// # Errors
 ///
-/// When the mode is not `prefer`, the prefix is not [`LLM_PREFIX`], a `quic://` target
+/// When the mode is not `prefer`, the prefix does not end in `:` (or is no more than a
+/// scheme) or overlaps one gonk serves itself ([`own_overlap`]), a `quic://` target
 /// carries no certificate directory (or one that is not a directory), or a socket target
 /// carries one.
 pub fn parse(line: &str, home: &Path) -> Result<Mount, String> {
@@ -336,12 +405,24 @@ pub fn parse(line: &str, home: &Path) -> Result<Mount, String> {
     let (prefix, target) = spec
         .split_once('=')
         .ok_or_else(|| format!("gonk.mount `{line}`: expected <prefix>=<target>, got `{spec}`"))?;
-    if prefix != LLM_PREFIX {
+    // `scheme:segment:` at least, ending on a segment boundary: `urn:llm` would also claim
+    // `urn:llmx:…`, and a bare `urn:` everything.
+    let segments = prefix.trim_end_matches(':').split(':');
+    if !prefix.ends_with(':')
+        || segments.clone().count() < 2
+        || segments.clone().any(str::is_empty)
+        || Iri::parse(format!("{prefix}x")).is_err()
+    {
         return Err(format!(
-            "gonk.mount `{line}`: this server mounts `{LLM_PREFIX}` only (not `{prefix}`). A \
-             mount is composed in front of the local spaces and its catalog is served \
-             through every door, so the namespaces this binary can serve stay a property of \
-             its manifest"
+            "gonk.mount `{line}`: the prefix `{prefix}` must be a scheme and at least one \
+             segment, ending in `:` (as `urn:llm:` does), so it claims whole names"
+        ));
+    }
+    if let Some((own, what)) = own_overlap(prefix) {
+        return Err(format!(
+            "gonk.mount `{line}`: `{prefix}` overlaps `{own}`, which gonk serves itself — \
+             {what}. A mount is composed in front of gonk's own spaces, so it would hand \
+             those names to the peer; mount the peer under a prefix of its own"
         ));
     }
     let certs = parts.next().map(|dir| expand_home(dir, home));
@@ -414,14 +495,15 @@ pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
 /// grant naming another host satisfies. Every resource under the prefix now also declares the
 /// exact token the mount checks.
 ///
-/// ★ **And every call it forwards TO A MODEL is counted against `calls`** (ledger
+/// ★ **And every call the [`LLM_PREFIX`] mount forwards TO A MODEL is counted against `calls`** (ledger
 /// [#308](http://localhost:1062/l/default/item/308), [`crate::budget::model_calls`]): one
 /// window over every caller and every family that reaches the model, consulted when the call
 /// is invoked — after the kernel has checked the caller's grant, so a refused caller spends
 /// nothing — and never for a `Meta`, which the kernel answers from the description without
 /// invoking anything. A read that calls no model ([`reaches_a_model`]) still goes through the
 /// mount and still needs its net grant; it just spends nothing (ledger
-/// [#1576](http://localhost:1062/l/default/item/1576)).
+/// [#1576](http://localhost:1062/l/default/item/1576)). A mount under any other prefix calls no
+/// model gonk knows of, so it spends nothing either (ledger #3553): its net grant is its bound.
 pub fn space(mount: &Mount, calls: &Window) -> Arc<dyn Space> {
     let origin = mount.target.to_string();
     let remote = Arc::new(MountedRemote::overriding(
@@ -433,8 +515,14 @@ pub fn space(mount: &Mount, calls: &Window) -> Arc<dyn Space> {
         remote,
         &mount.prefix,
         format!("urn:cap:net:{}", mount.target.net_host()),
-        calls,
+        window_for(&mount.prefix, calls),
     )
+}
+
+/// The model-call window a mount under `prefix` spends: `calls` for [`LLM_PREFIX`], and none
+/// for any other prefix (ledger #3553).
+fn window_for<'a>(prefix: &str, calls: &'a Window) -> Option<&'a Window> {
+    (prefix == LLM_PREFIX).then_some(calls)
 }
 
 /// The names under [`LLM_PREFIX`] that `ikigai-llm` binds and that answer WITHOUT calling a
@@ -497,12 +585,17 @@ pub fn reaches_a_model(target: &str) -> bool {
 }
 
 /// [`space`]'s overlay over any `inner`: what it adds to a mount, apart from the mount.
-fn declaring(inner: Arc<dyn Space>, prefix: &str, scope: String, calls: &Window) -> Arc<dyn Space> {
+fn declaring(
+    inner: Arc<dyn Space>,
+    prefix: &str,
+    scope: String,
+    calls: Option<&Window>,
+) -> Arc<dyn Space> {
     Arc::new(Declaring {
         inner,
         prefix: prefix.to_string(),
         scope,
-        calls: calls.clone(),
+        calls: calls.cloned(),
     })
 }
 
@@ -517,8 +610,9 @@ struct Declaring {
     prefix: String,
     /// `urn:cap:net:{host}`, exactly what [`net_grant`] checks.
     scope: String,
-    /// The model-call window every forwarded call counts against.
-    calls: Window,
+    /// The model-call window every forwarded call to a model counts against: the
+    /// [`LLM_PREFIX`] mount's, and `None` for any other.
+    calls: Option<Window>,
 }
 
 impl Space for Declaring {
@@ -529,7 +623,11 @@ impl Space for Declaring {
         }
         // Decided by the name that is FORWARDED: the mount overrides, so the peer resolves
         // exactly this IRI.
-        let calls = reaches_a_model(request.target.as_str()).then(|| self.calls.clone());
+        let calls = self
+            .calls
+            .as_ref()
+            .filter(|_| reaches_a_model(request.target.as_str()))
+            .cloned();
         // `map_endpoint` carries the canonical name and the answering space through, and
         // leaves a limiter alone.
         resolution.map_endpoint(|endpoint| {
@@ -1048,7 +1146,7 @@ mod tests {
             Arc::new(peer),
             LLM_PREFIX,
             "urn:cap:net:localhost".to_string(),
-            &calls,
+            Some(&calls),
         ));
         let ask = || Request::new(Verb::Source, Iri::parse("urn:llm:ask").unwrap());
         let issue = |cap: &Capability| futures::executor::block_on(kernel.issue(ask(), cap));
@@ -1124,28 +1222,76 @@ mod tests {
         );
     }
 
-    /// ★ Both halves of what this key will NOT do: another mode, and another namespace.
+    /// ★ What this key will NOT do: another mode, a prefix that is not whole segments, and a
+    /// prefix gonk serves itself (ledger #3553). Any other prefix mounts.
     #[test]
-    fn only_prefer_and_only_the_llm_prefix() {
+    fn only_prefer_and_never_gonks_own_prefixes() {
         let overridden = parse("override urn:llm:=/tmp/x.sock", &home()).unwrap_err();
         assert!(overridden.contains("must be `prefer`"), "{overridden}");
-        let elsewhere = parse("prefer urn:personal:=/tmp/x.sock", &home()).unwrap_err();
-        assert!(elsewhere.contains("urn:llm:` only"), "{elsewhere}");
-        // A layer is reached by binding it (`gonk.layer`), never by a mount line.
-        for prefix in ["urn:layer:", "urn:layers:", "urn:collab:"] {
-            let layer = parse(&format!("prefer {prefix}=/tmp/x.sock"), &home()).unwrap_err();
-            assert!(layer.contains("urn:llm:` only"), "{layer}");
+        for prefix in ["urn:personal:", "urn:dashboard:", "urn:x-proj:classify:"] {
+            let mount = parse(&format!("prefer {prefix}=/tmp/x.sock"), &home()).unwrap();
+            assert_eq!(mount.prefix, prefix);
         }
-        assert!(
-            parse("prefer urn:llm=/tmp/x.sock", &home()).is_err(),
-            "no colon"
-        );
-        assert!(
-            parse("prefer urn:llm:ask=/tmp/x.sock", &home()).is_err(),
-            "one resource"
-        );
+        // A layer is reached by binding it (`gonk.layer`), never by a mount line.
+        for prefix in [
+            "urn:layer:",
+            "urn:layers:",
+            "urn:collab:",
+            "urn:layer:tasks:",
+        ] {
+            let layer = parse(&format!("prefer {prefix}=/tmp/x.sock"), &home()).unwrap_err();
+            assert!(layer.contains("gonk.layer"), "{layer}");
+        }
+        for (prefix, what) in [
+            ("urn:iki:ledger:", "the ledger"),
+            ("urn:iki:ledger:default:", "the ledger"),
+            ("urn:iki:", "the ledger"),
+            ("urn:iki:store:", "the store"),
+            ("urn:repo:", "repository browse"),
+            ("urn:iki:gonk:", "pages"),
+            ("urn:sparql:", "SPARQL"),
+        ] {
+            let line = format!("prefer {prefix}=/tmp/x.sock");
+            let own = parse(&line, &home()).unwrap_err();
+            assert!(
+                own.contains(&format!("gonk.mount `{line}`")) && own.contains(what),
+                "{own}"
+            );
+        }
+        for whole in ["urn:llm", "urn:llm:ask", "urn:", "urn::x:", ":", "urn:a b:"] {
+            assert!(
+                parse(&format!("prefer {whole}=/tmp/x.sock"), &home()).is_err(),
+                "{whole}"
+            );
+        }
         assert!(parse("prefer", &home()).is_err());
         assert!(parse("", &home()).is_err());
+    }
+
+    /// A mount under any prefix but `urn:llm:` spends none of the model-call window: what it
+    /// forwards reaches no model gonk knows of.
+    #[test]
+    fn only_the_llm_mount_spends_the_model_window() {
+        let calls = crate::budget::Window::new(
+            crate::budget::MODEL_CALLS_IRI,
+            ikigai_throttle::Rate::new(1, Duration::from_secs(3600)),
+        );
+        assert!(window_for(LLM_PREFIX, &calls).is_some());
+        let mount = parse("prefer urn:dash:=/nonexistent/dash.sock", &home()).unwrap();
+        let peer =
+            ikigai_core::EndpointSpace::new().bind(ikigai_core::Exact::new("urn:dash:ask"), Ask);
+        let kernel = ikigai_core::Kernel::new(declaring(
+            Arc::new(peer),
+            &mount.prefix,
+            "urn:cap:net:localhost".to_string(),
+            window_for(&mount.prefix, &calls),
+        ));
+        let ask = || Request::new(Verb::Source, Iri::parse("urn:dash:ask").unwrap());
+        // A window of ONE call, and three go through: none of them was counted.
+        for _ in 0..3 {
+            let answer = futures::executor::block_on(kernel.issue(ask(), &Capability::root()));
+            assert_eq!(answer.unwrap().bytes, b"ok");
+        }
     }
 
     /// A dial that cannot succeed fails as a TRANSIENT, is held off rather than retried per

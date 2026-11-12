@@ -973,7 +973,8 @@ fn serve(flags: &config::Flags) -> ! {
                      (--nl draft), saving DRAFT scripts a person publishes",
                     settings.nl_ask
                 ),
-                None => "no urn:nl:sparql (no gonk.mount, so no model to draft with)".to_string(),
+                None => "no urn:nl:sparql (no gonk.mount for urn:llm:, so no model to draft with)"
+                    .to_string(),
             }
         );
         eprintln!("  backup  {backup_line}");
@@ -1253,8 +1254,24 @@ fn browse_line(
 /// an operator who cannot see them has no way to know what a configured tier will spend
 /// short of reading this source.
 fn mount_line(settings: &config::Settings, explains: bool) -> String {
-    let Some(mount) = settings.mounts.first() else {
-        return "not mounted — no gonk.mount; urn:llm:* resolves nowhere, so explain, review \
+    let others: Vec<String> = settings
+        .mounts
+        .iter()
+        .filter(|mount| mount.prefix != mount::LLM_PREFIX)
+        .map(|mount| format!("{}* at {} (prefer)", mount.prefix, mount.target))
+        .collect();
+    let others = if others.is_empty() {
+        String::new()
+    } else {
+        format!("; also mounted: {}", others.join(", "))
+    };
+    format!("{}{others}", llm_line(settings, explains))
+}
+
+/// [`mount_line`]'s half for the model peer, the `urn:llm:` mount.
+fn llm_line(settings: &config::Settings, explains: bool) -> String {
+    let Some(mount) = settings.llm_mount() else {
+        return "not mounted — no gonk.mount for urn:llm:; urn:llm:* resolves nowhere, so explain, review \
                 and the PR-derived layers are not bound"
             .to_string();
     };

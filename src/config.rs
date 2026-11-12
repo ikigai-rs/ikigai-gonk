@@ -31,6 +31,8 @@
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
 //! # gonk.mount.calls_per_hour = 2000   # calls that reach the mounted model, every caller
 //!                                       # together (this IS the default; 0 for none)
+//! # any other prefix a peer serves, but never one gonk serves itself; repeatable
+//! # gonk.mount = "prefer urn:dashboard:=~/.ikigai/dashboard.sock"
 //! # a ledger bound to a task layer, offering its items (or taking them: `take`); repeatable
 //! # gonk.layer = "tasks-bobby offer quic://ikigai-rs.dev:4434 ~/.config/ikigai/gonk/layers ledger=bobby collab=bobby"
 //! # gonk.layer.deny = "~/.config/ikigai/gonk/layer-deny.txt"   # words an offer never carries
@@ -437,9 +439,10 @@ serve flags (each overrides its config key wholesale):
   --browse-root N=PATH  serve urn:repo:N:* over PATH (repeatable; config `gonk.browse.root`).
                         Unset, the browse family and ikigai-repo's git/gh facades are not
                         bound at all; the socket door's root capability reaches both
-  --mount SPEC          `prefer urn:llm:=<target> [cert-dir]` (repeatable; config
-                        `gonk.mount`) — the peer that serves urn:llm:*, which is what binds
-                        the explain and review families over the browse roots. Unset, they
+  --mount SPEC          `prefer <prefix>=<target> [cert-dir]` (repeatable; config
+                        `gonk.mount`) — a peer serving any prefix but gonk's own. The one
+                        for urn:llm: binds the explain and review families over the browse
+                        roots. Unset, they
                         are not bound at all: an action no kernel can satisfy is an
                         over-offer. Deriving one requires a net grant naming this
                         mount's host, which only `--browse derive` mints — see `grants`
@@ -762,8 +765,9 @@ pub struct Settings {
     pub browse_github: Vec<(String, String)>,
     /// Local clone map and commit/blob URL templates (#3198).
     pub repositories: Vec<crate::git_object::Repository>,
-    /// The mounted peers. Empty means `urn:llm:*` resolves nowhere, and the explanation
-    /// families are therefore not bound — see [`Settings::explains`].
+    /// The mounted peers, longest prefix first. With none for `urn:llm:`, `urn:llm:*` resolves
+    /// nowhere, and the explanation families are therefore not bound — see
+    /// [`Settings::explains`].
     pub mounts: Vec<Mount>,
     /// The ledgers bound to task layers, one per `gonk.layer` line ([`crate::layer`]).
     pub layers: Vec<crate::layer::Binding>,
@@ -942,17 +946,25 @@ impl Settings {
     /// different question from bindability: a CONFIGURED peer that happens to be down makes
     /// explain transiently `Unavailable`, which is an honest answer and what `prefer` means.
     pub fn explains(&self) -> bool {
-        !self.mounts.is_empty() && !self.browse_roots.is_empty()
+        self.llm_mount().is_some() && !self.browse_roots.is_empty()
     }
 
-    /// The host a `urn:cap:net:` grant must name to reach the mounted peer, or `None` with
-    /// no `gonk.mount` — see [`crate::mount::Target::net_host`].
+    /// The `gonk.mount` line for [`crate::mount::LLM_PREFIX`] — the model peer — if there is
+    /// one. Every other mount is a peer's own namespace and derives nothing (ledger #3553).
+    pub fn llm_mount(&self) -> Option<&Mount> {
+        self.mounts
+            .iter()
+            .find(|mount| mount.prefix == mount::LLM_PREFIX)
+    }
+
+    /// The host a `urn:cap:net:` grant must name to reach the mounted MODEL peer, or `None`
+    /// with no `gonk.mount` line for `urn:llm:` — see [`crate::mount::Target::net_host`].
     ///
     /// ★ Derived from the mount, never typed: a grant that names `localhost` for a peer
     /// mounted at `127.0.0.1` says something the mount does not, and the first remote peer
     /// would make a hard-coded `localhost` say something false.
     pub fn mount_host(&self) -> Option<String> {
-        self.mounts.first().map(|mount| mount.target.net_host())
+        self.llm_mount().map(|mount| mount.target.net_host())
     }
 }
 
@@ -2438,8 +2450,8 @@ pub fn nl_ask(text: &str) -> Result<String, String> {
     let spelled = spelled.trim();
     if !spelled.starts_with(mount::LLM_PREFIX) || spelled.len() == mount::LLM_PREFIX.len() {
         return Err(format!(
-            "gonk.nl.ask: `{spelled}` is not a model door under `{}` — the only prefix a \
-             gonk.mount line may claim, so nothing in this process could resolve it",
+            "gonk.nl.ask: `{spelled}` is not a model door under `{}` — the prefix the \
+             model's gonk.mount line claims, so nothing else in this process resolves it",
             mount::LLM_PREFIX
         ));
     }
@@ -2623,8 +2635,10 @@ fn parse_every(spelled: &str) -> Result<Duration, String> {
     Ok(interval)
 }
 
-/// The mounted peers, from flags then config — one [`crate::mount::parse`] per line, and at
-/// most one mount per prefix.
+/// The mounted peers, from flags then config — one [`crate::mount::parse`] per line, at most
+/// one mount per prefix, LONGEST prefix first, as the cli orders its mounts: a mount nested
+/// under another (`urn:dash:panel:` under `urn:dash:`) is composed in front of it, so it
+/// answers for its own names.
 fn mounts(flags: &Flags, text: &str, homes: &Homes) -> Result<Vec<Mount>, String> {
     let lines = if flags.mounts.is_empty() {
         values_for(text, "gonk.mount")
@@ -2636,22 +2650,22 @@ fn mounts(flags: &Flags, text: &str, homes: &Homes) -> Result<Vec<Mount>, String
         let mount = mount::parse(&line, &homes.home)?;
         if mounts.iter().any(|seen| seen.prefix == mount.prefix) {
             return Err(format!(
-                "gonk.mount `{}`: `{}` is mounted twice — one prefix, one peer. (The cli \
-                 orders overlapping mounts by prefix length; there is nothing to order here, \
-                 because this server mounts one prefix.)",
+                "gonk.mount `{}`: `{}` is mounted twice — one prefix, one peer",
                 line, mount.prefix
             ));
         }
         mounts.push(mount);
     }
+    // Stable, so lines of equal length keep the order they were written in.
+    mounts.sort_by_key(|mount| std::cmp::Reverse(mount.prefix.len()));
     Ok(mounts)
 }
 
 /// The explanation tiers, from the config over [`ExplainTiers::default`].
 ///
 /// A provider outside `urn:llm:` is refused here rather than at the first derivation: the
-/// only prefix a `gonk.mount` line may claim is `urn:llm:`, so such a provider could not
-/// resolve anywhere in this process — and the symptom, an `Unresolved` in the middle of an
+/// explanation families derive through the model's `gonk.mount` line, under `urn:llm:`, so
+/// such a provider would not reach the model — and the symptom, an `Unresolved` in the middle of an
 /// explain, would read as a peer problem rather than as the typo it is.
 fn explain_tiers(text: &str) -> Result<ExplainTiers, String> {
     let mut tiers = ExplainTiers::default();
@@ -2668,8 +2682,8 @@ fn explain_tiers(text: &str) -> Result<ExplainTiers, String> {
             {
                 return Err(format!(
                     "gonk.explain.{kind}.provider: `{provider}` is not a provider under \
-                     `{}` — the only prefix a gonk.mount line may claim, so nothing in this \
-                     process could resolve it",
+                     `{}` — the prefix the model's gonk.mount line claims, so nothing else \
+                     in this process resolves it",
                     mount::LLM_PREFIX
                 ));
             }
@@ -2717,8 +2731,8 @@ fn judge_provider(spelled: &str) -> Result<Option<String>, String> {
     }
     if !spelled.starts_with(mount::LLM_PREFIX) || spelled.len() == mount::LLM_PREFIX.len() {
         return Err(format!(
-            "gonk.review.judge: `{spelled}` is neither a provider under `{}` — the only prefix \
-             a gonk.mount line may claim, so nothing in this process could resolve it — nor \
+            "gonk.review.judge: `{spelled}` is neither a provider under `{}` — the prefix \
+             the model's gonk.mount line claims, so nothing else in this process resolves it — nor \
              `off`, which runs review passes with no judge",
             mount::LLM_PREFIX
         ));
@@ -3512,6 +3526,25 @@ mod tests {
             .unwrap()
             .mounts
             .is_empty());
+    }
+
+    /// Ledger #3553: mounts under other prefixes sit beside the model's, longest prefix first,
+    /// and the model's host is the `urn:llm:` line's whichever line comes first.
+    #[test]
+    fn any_prefix_mounts_beside_the_model_and_longest_first() {
+        let text = "gonk.mount = \"prefer urn:dash:=quic://far.example:1 /tmp\"\n\
+                    gonk.mount = \"prefer urn:llm:=/tmp/llm.sock\"\n\
+                    gonk.mount = \"prefer urn:dash:panel:=/tmp/panel.sock\"\n";
+        let settings = settings(&Flags::default(), text, &homes()).unwrap();
+        let prefixes: Vec<&str> = settings.mounts.iter().map(|m| m.prefix.as_str()).collect();
+        assert_eq!(prefixes, ["urn:dash:panel:", "urn:dash:", "urn:llm:"]);
+        assert_eq!(settings.mount_host().as_deref(), Some("localhost"));
+
+        let no_model = "gonk.mount = \"prefer urn:dash:=/tmp/dash.sock\"\n";
+        let settings = super::settings(&Flags::default(), no_model, &homes()).unwrap();
+        assert_eq!(settings.mounts.len(), 1);
+        assert_eq!(settings.mount_host(), None, "no model mount, no model host");
+        assert!(settings.llm_mount().is_none());
     }
 
     /// ★ The ceilings are the per-call half of the spend gate, so a typo in one must stop the
