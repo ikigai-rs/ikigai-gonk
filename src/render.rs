@@ -867,11 +867,16 @@ pub fn render(document: &str, full_page: bool) -> Result<String, String> {
     })
 }
 
+/// Where `web/gonk.xsl` asks for this process's instance id (ledger #375), a comment for the
+/// same reason as [`THEME_CHOOSER_MARKER`].
+const INSTANCE_MARKER: &str = "<!--gonk-instance-->";
+
 /// Where `web/gonk.xsl` asks for the theme chooser: a comment, which only the stylesheet can
 /// write, since a `<` in text arrives here as `&lt;`.
 const THEME_CHOOSER_MARKER: &str = "<!--theme-chooser-->";
 
-/// Give a full page its theme and ikigai-ui's chooser (ledger #2834, UI conventions D12): the
+/// Give a full page its theme and ikigai-ui's chooser (ledger #2834, UI conventions D12), and
+/// this process's instance id (ledger #375, [`crate::instance`]): the
 /// envelope's `ui-theme` ([`theme_of`]) on `<html>`, and the chooser's markup, whole, where the
 /// header asks for it, so gonk holds no copy for it to drift from. The shell moves into
 /// `urn:iki:ui:template:shell` in phase 2.
@@ -885,6 +890,14 @@ fn themed(document: &str, page: String) -> String {
     let chooser = ikigai_ui::theme_chooser(theme).unwrap_or_default();
     page.replacen("data-theme='auto'", &format!("data-theme='{theme}'"), 1)
         .replacen(THEME_CHOOSER_MARKER, &chooser, 1)
+        .replacen(
+            INSTANCE_MARKER,
+            &format!(
+                "<meta name='gonk-instance' content='{}'>",
+                crate::instance::id()
+            ),
+            1,
+        )
 }
 
 /// The theme a page renders in: `theme=` when it is one ikigai-ui knows, else `auto`, so an

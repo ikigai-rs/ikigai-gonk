@@ -360,6 +360,11 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             },
         )
         .bind(template("urn:iki:gonk:asset:{name}"), Asset)
+        // Ledger #375: this process's instance id, which every full page also carries.
+        .bind(
+            Exact::new(crate::instance::INSTANCE_IRI),
+            crate::instance::Instance,
+        )
         // The browse family's door — see [`crate::k`]. Bound here because these are pages
         // of this face, reachable through the HTTP door and no other.
         .bind(

@@ -47,6 +47,9 @@
           <head>
             <meta charset="utf-8"/>
             <meta name="viewport" content="width=device-width, initial-scale=1"/>
+            <!-- Ledger #375: this server process's instance id, `<meta name='gonk-instance'>`,
+                 written here by src/render.rs::render. web/gonk.js compares it with /instance. -->
+            <xsl:comment>gonk-instance</xsl:comment>
             <!-- htmx's configuration, set once (UI conventions D7) and pinned by
                  tests/htmx_config_1958.rs. allowScriptTags:false: htmx 2.0.4 would otherwise
                  run a <script> inside swapped content, a src= one included, which CSP's
@@ -129,6 +132,10 @@
                 <ul class="addons-list"><xsl:apply-templates select="view:face-link"/></ul>
               </nav>
             </xsl:if>
+            <!-- Ledger #375: shown by web/gonk.js when /instance answers an id other than the
+                 one this page was served with, and said once in #status. Hidden with no script,
+                 since nothing then compares. -->
+            <p id="moved" class="moved" hidden="hidden">gonk has restarted since this page loaded, so what it shows may be out of date. <a id="moved-reload" href="">Reload this page</a></p>
             <xsl:apply-templates select="view:first-passkey"/>
             <section id="enrol" class="panel enrol" hidden="hidden" aria-labelledby="enrol-title">
               <h2 id="enrol-title">Create a passkey for this server</h2>

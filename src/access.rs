@@ -379,8 +379,8 @@ impl AccessLog {
         }
     }
 
-    /// gonk's own polls, sampled: the Queue badge, the header's layers count and an open Layers
-    /// page's poll, all short polls (the Layers page's was a long poll until ledger #1705). What
+    /// gonk's own polls, sampled: the Queue badge, the header's layers count, an open Layers
+    /// page's poll and every page's instance check (ledger #375), all short polls (the Layers page's was a long poll until ledger #1705). What
     /// `main` gives every door.
     ///
     /// ```
@@ -391,6 +391,7 @@ impl AccessLog {
     /// assert!(log.samples(ikigai_gonk::queue::BADGE_IRI));
     /// assert!(log.samples(ikigai_gonk::layers_view::COUNT_IRI));
     /// assert!(log.samples(ikigai_gonk::layers_view::WAIT_IRI));
+    /// assert!(log.samples(ikigai_gonk::instance::INSTANCE_IRI));
     /// assert!(!log.samples("urn:iki:gonk:page:layers"));
     /// ```
     pub fn gonk_polls(self) -> AccessLog {
@@ -398,6 +399,7 @@ impl AccessLog {
             crate::queue::BADGE_IRI,
             crate::layers_view::COUNT_IRI,
             crate::layers_view::WAIT_IRI,
+            crate::instance::INSTANCE_IRI,
         ])
     }
 
