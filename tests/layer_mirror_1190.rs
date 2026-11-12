@@ -2959,6 +2959,61 @@ impl Door for Counting {
     }
 }
 
+/// Ledger #3558: restart after taking Progress but before applying it.
+#[test]
+fn progress_taken_before_restart_loses_renewal_until_the_next_report() {
+    let w = World::new();
+    let mirror = w.mirror();
+    let n = w.file("Measure the cache\n\nBefore and after.", &[]);
+    let offer = offered(&pass(&mirror));
+    w.take(&them(), &offer).unwrap();
+    pass(&mirror);
+    // Shorten the claim so renewal moves the expiry without a timing-dependent sleep.
+    let shorten = Request::new(
+        Verb::Sink,
+        Iri::parse(format!("urn:iki:ledger:{LEDGER}:claim")).unwrap(),
+    )
+    .with_arg("item", ArgRef::Inline(n.to_string().into_bytes()))
+    .with_arg("content", ArgRef::Inline(them().into_bytes()))
+    .with_arg("lease", ArgRef::Inline(b"1h".to_vec()))
+    .with_arg("renew", ArgRef::Inline(b"true".to_vec()));
+    Resolver::issue_as(
+        &*w.hub,
+        shorten,
+        &mirror::capability(&w.binding(LAYER)).unwrap(),
+    )
+    .unwrap();
+    let claim = w.item(n)["claim"].clone();
+    let progress = w.report(&them(), "Progress", &offer, "; ik:note \"still working\"");
+    // The take is durable, but the mirror stops before applying its receipt.
+    w.take(&us(), &progress).unwrap();
+    drop(mirror);
+    let cold = w.mirror();
+    let recovered = pass(&cold);
+    assert_eq!(w.item(n)["claim"], claim, "replay must not renew");
+    assert!(!recovered.actions.iter().any(|a| a.starts_with("renewed ")));
+    assert!(comments_starting(&w, n, "Progress in layer")
+        .iter()
+        .any(|c| c.contains(&progress)));
+    settled(&cold);
+    assert_eq!(w.item(n)["claim"], claim, "a sweep must not renew");
+    // A second cold start recovers the same receipt and keyed comment without renewal.
+    drop(cold);
+    let cold = w.mirror();
+    settled(&cold);
+    assert_eq!(w.item(n)["claim"], claim, "another restart must not renew");
+    // A new report, even without a note, restores the normal lease while still held.
+    w.report(&them(), "Progress", &offer, "");
+    let next = pass(&cold);
+    assert!(next.actions.iter().any(|a| a.starts_with("renewed ")));
+    let renewed = w.item(n)["claim"].clone();
+    assert!(renewed["expires"].as_str().unwrap() > claim["expires"].as_str().unwrap());
+    assert_eq!(renewed["holder"], claim["holder"]);
+    assert_eq!(comments_starting(&w, n, "Progress in layer").len(), 1);
+    settled(&cold);
+    assert_eq!(w.item(n)["claim"], renewed);
+}
+
 /// Ledger #3557: late progress must not renew a successor taken by the same participant.
 #[test]
 fn progress_on_a_superseded_offer_does_not_renew_the_successor_claim() {
