@@ -349,7 +349,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 43] = [
+const WEB_IDS: [&str; 44] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -393,6 +393,8 @@ const WEB_IDS: [&str; 43] = [
     "gonk-fragment-sparql",
     "gonk-passkey",
     "gonk-asset",
+    // This process's instance id (ledger #375).
+    "gonk-instance",
     "gonk-render-rules",
     // The Views page and its form adapter (ledger #2099).
     "gonk-page-views",
