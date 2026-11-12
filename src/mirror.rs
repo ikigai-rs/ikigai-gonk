@@ -31,6 +31,16 @@
 //! ([`capability`]), and never `close` or `write`: the taker's hand-back makes the item wait for
 //! its dispatcher, who checks the evidence and closes it.
 //!
+//! # Progress across a stop
+//!
+//! A `Progress` renews only in the pass that takes it. If the mirror stops after the layer
+//! records the take but before the ledger renewal succeeds, that renewal is lost. On restart,
+//! the receipt is recovered and any note is applied as a keyed comment, but the claim keeps
+//! its previous expiry. This loss is accepted: the next `Progress` taken while the claim is
+//! still held renews it normally. A taker must keep reporting before its existing lease expires.
+//! Recovered receipts and comments alone never renew: replaying them on a sweep or restart
+//! would otherwise keep extending a lease after its taker stopped reporting (ledger #3558).
+//!
 //! # Where an offer is recorded
 //!
 //! On its item, as an `about` edge to the offer's IRI (`item:{id}:about`), written before the
@@ -92,7 +102,7 @@ use oxigraph::model::Term;
 
 use crate::layer::{self, Binding, Door};
 
-/// How long a taker's claim is held between its reports: renewed by every `Progress`.
+/// How long a taker's claim is held between its reports: renewed by freshly taken `Progress`.
 pub const LEASE: &str = "7d";
 
 /// How many times one item is released and offered again before the mirror stops offering it
@@ -1267,7 +1277,8 @@ impl Mirror {
                 commented.map(|_| ())
             } else {
                 // Progress: renew a lease only when this pass took the report, so a sweep
-                // does not extend a lease nobody is reporting on.
+                // does not extend a lease nobody is reporting on. A stop before renewal
+                // loses it; see "Progress across a stop" in the module docs.
                 let held = item.claim.as_ref().is_some_and(|c| c.holder == taker);
                 if fresh.contains(subject)
                     && held
