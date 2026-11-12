@@ -1269,7 +1269,11 @@ impl Mirror {
                 // Progress: renew a lease only when this pass took the report, so a sweep
                 // does not extend a lease nobody is reporting on.
                 let held = item.claim.as_ref().is_some_and(|c| c.holder == taker);
-                if fresh.contains(subject) && held && item.status == "open" {
+                if fresh.contains(subject)
+                    && held
+                    && item.status == "open"
+                    && newest.get(&item.iri) == Some(&offer)
+                {
                     match self.claim(item, &taker, true) {
                         Ok(()) => {
                             report
