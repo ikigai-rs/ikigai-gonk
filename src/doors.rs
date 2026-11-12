@@ -1425,13 +1425,14 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 23] = [
+pub const GONK_PATHS: [&str; 24] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
     "/act",
     "/sparql",
     "/render-rules",
+    crate::instance::INSTANCE_PATH,
     "/view/",
     "/resolution/",
     crate::views_page::PAGE_PATH,
