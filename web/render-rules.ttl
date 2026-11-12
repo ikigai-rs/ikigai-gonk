@@ -1,4 +1,4 @@
-# The render rules — which SPARQL result cells become controls, and what they do.
+# The render rules — result-cell controls and IRI abbreviation.
 #
 # ★ This is a RESOURCE, not a constant and not a config key. It is served at
 # `urn:iki:gonk:render-rules` (HTTP `/render-rules`, text/turtle), so it can be resolved,
@@ -24,8 +24,18 @@
 #
 #   render:link   "<url template>"      the cell becomes an anchor to that URL
 #   render:query  "<SPARQL template>"   the cell becomes an anchor that RUNS that query
+#   render:curie  "prefix"             abbreviates an IRI as prefix:local
 #
-# Substitutions, in either template and in render:label:
+# A curie rule requires matchKind "uri" and exactly one matchPrefix containing an absolute
+# namespace IRI. The prefix must match [A-Za-z][A-Za-z0-9_-]*; one prefix cannot bind two
+# namespaces. Empty local names, local names containing / or #, and whitespace are not
+# abbreviated. Other match conditions apply as usual. CURIE rules and control rules are
+# evaluated independently: the first matching rule of each kind wins, so an abbreviated
+# IRI can still link with its original lexical value. Used bindings appear once each as
+# visible text above the table (including bindings used in links). An empty replacement
+# table disables both controls and abbreviation; machine faces always keep full IRIs.
+#
+# Substitutions, in link/query templates and in render:label:
 #
 #   {value}       the cell's lexical value, as the store returned it
 #   {ledger}      the ledger this query ran against
@@ -111,3 +121,13 @@ SELECT ?number ?priority ?title WHERE {
   OPTIONAL { ?item ledger:priority ?priority }
 }
 ORDER BY COALESCE(?priority, 9) ?number""" .
+
+# ------------------------------------------------------ 4. vocabulary IRIs read as CURIEs
+
+<urn:iki:gonk:render:rule:ledger-curie>
+    a                  render:Rule ;
+    rdfs:label         "The ledger vocabulary reads as ledger:local" ;
+    render:order       40 ;
+    render:matchKind   "uri" ;
+    render:matchPrefix "https://ikigai-rs.dev/ns/ledger#" ;
+    render:curie       "ledger" .

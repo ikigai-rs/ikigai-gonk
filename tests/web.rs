@@ -1809,7 +1809,7 @@ fn a_ledger_iri_reads_as_its_local_name_only_in_the_html_face() {
     assert!(
         fragment.body.contains(&format!(
             "<p class='result-meta legend'>{}</p>",
-            ikigai_gonk::web::PREFIX_LEGEND
+            "ledger: is short for https://ikigai-rs.dev/ns/ledger# — this table writes it that way."
         )),
         "the prefix is bound once, in text: {fragment:?}"
     );
@@ -2109,6 +2109,128 @@ fn the_render_rules_are_a_resource_a_deployment_can_replace() {
             .contains("urn:x:rule:ticket"),
         "the served table is the one in effect"
     );
+}
+
+/// A deployment can abbreviate its own namespace through the served rule resource.
+#[test]
+fn deployment_curie_rules_control_display_and_the_visible_legend() {
+    let theirs = r#"@prefix render: <urn:iki:gonk:render#> .
+<urn:x:curie> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "https://example.test/vocab#" ; render:curie "example" .
+<urn:x:link> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "https://example.test/vocab#" ; render:link "/inspect?iri={value}" ;
+    render:label "Inspect {value}" .
+"#;
+    let server = Server::start_with_rules(theirs);
+    let query = "SELECT ?value WHERE { VALUES ?value { <https://example.test/vocab#open> <https://example.test/vocab#closed> <https://ikigai-rs.dev/ns/ledger#open> } }";
+    let fragment = server.page(&format!("/sparql/results?query={}", encode(query)), None);
+    assert_eq!(fragment.status, 200, "{fragment:?}");
+    assert!(fragment.body.contains(">example:open</a>"), "{fragment:?}");
+    assert!(
+        fragment
+            .body
+            .contains("example:open — Inspect https://example.test/vocab#open"),
+        "{fragment:?}"
+    );
+    assert_eq!(
+        fragment
+            .body
+            .matches("example: is short for https://example.test/vocab#")
+            .count(),
+        1,
+        "{fragment:?}"
+    );
+    assert!(
+        !fragment.body.contains("ledger: is short for"),
+        "{fragment:?}"
+    );
+    assert!(
+        fragment
+            .body
+            .contains(">https://ikigai-rs.dev/ns/ledger#open</td>"),
+        "{fragment:?}"
+    );
+}
+
+#[test]
+fn curie_legends_list_only_used_bindings_and_leave_machine_faces_unchanged() {
+    let theirs = r#"@prefix render: <urn:iki:gonk:render#> .
+<urn:r:1> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "urn:custom:" ; render:curie "custom" .
+<urn:r:2> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "https://other.test/a?b&c=" ; render:curie "other" .
+<urn:r:3> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "urn:unused:" ; render:curie "unused" .
+"#;
+    let server = Server::start_with_rules(theirs);
+    seed(&server);
+    let query = "SELECT ?value WHERE { VALUES ?value { <urn:custom:open> <urn:custom:closed> <https://other.test/a?b&c=ok> \"urn:custom:literal\" <urn:custom:> <urn:custom:a/b> } }";
+    for path in ["/sparql", "/sparql/results"] {
+        let page = server.page(&format!("{path}?query={}", encode(query)), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        assert_eq!(
+            page.body.matches("result-meta legend").count(),
+            2,
+            "{page:?}"
+        );
+        for binding in [
+            "custom: is short for urn:custom:",
+            "other: is short for https://other.test/a?b&amp;c=",
+        ] {
+            assert_eq!(page.body.matches(binding).count(), 1, "{page:?}");
+        }
+        assert!(!page.body.contains("unused: is short for"), "{page:?}");
+        assert!(
+            page.body
+                .contains("title='urn:custom:open'>custom:open</td>"),
+            "{page:?}"
+        );
+        assert!(
+            page.body
+                .contains("class='literal'>urn:custom:literal</td>"),
+            "{page:?}"
+        );
+        assert!(page.body.contains(">urn:custom:</td>"), "{page:?}");
+        assert!(page.body.contains(">urn:custom:a/b</td>"), "{page:?}");
+    }
+    let machine = server.raw(
+        "GET",
+        &format!("/sparql?query={}", encode(query)),
+        &[("Accept", "application/sparql-results+json".into())],
+        "",
+    );
+    assert_eq!(machine.status, 200, "{machine:?}");
+    assert!(machine.body.contains("urn:custom:open"), "{machine:?}");
+    assert!(
+        !machine.body.contains("\"value\":\"custom:open\""),
+        "{machine:?}"
+    );
+    assert!(!machine.body.contains("is short for"), "{machine:?}");
+    let empty = server.page(
+        &format!(
+            "/sparql/results?query={}",
+            encode("SELECT ?value WHERE { VALUES ?value { <urn:unmatched:x> } }")
+        ),
+        None,
+    );
+    assert!(!empty.body.contains("result-meta legend"), "{empty:?}");
+
+    let server = Server::start_with_rules("");
+    let page = server.page(
+        &format!(
+            "/sparql/results?query={}",
+            encode(
+                "SELECT ?value WHERE { VALUES ?value { <https://ikigai-rs.dev/ns/ledger#open> } }"
+            )
+        ),
+        None,
+    );
+    assert!(
+        page.body
+            .contains(">https://ikigai-rs.dev/ns/ledger#open</td>"),
+        "{page:?}"
+    );
+    assert!(!page.body.contains("result-meta legend"), "{page:?}");
 }
 
 fn challenge(server: &Server, op: &str) -> String {

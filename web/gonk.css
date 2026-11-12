@@ -337,6 +337,8 @@ th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(
 /* A column header is a short label; it never wraps, mid-word or otherwise. */
 th { background: var(--surface); white-space: nowrap; }
 td.uri { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
+/* Deployment namespaces can be long; the visible bindings wrap outside the table. */
+.result-meta.legend { overflow-wrap: anywhere; }
 td.unbound { color: var(--muted); }
 
 /* A cell the render rules turned into a control (see src/rules.rs). It is a real anchor:

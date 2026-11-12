@@ -120,7 +120,8 @@ name, and a browser refuses an IP address as one.
   security, recently updated, items with comments, closed with their reasons, and a body-text
   search to edit. A sample fills the box and runs nothing: you press Run. A `ledger:` IRI
   reads as a CURIE (`ledger:open`, not `…/ledger#open`), with the prefix bound once above the
-  table; the same URL answers a machine in the store's own formats, raw IRIs and all: `curl -H
+  table. Deployment rules can add or replace namespace bindings; the same URL answers a
+  machine in the store's own formats, raw IRIs and all: `curl -H
   'Accept: application/sparql-results+json' 'http://127.0.0.1:1062/sparql?query=…'`.
   ⚠ There is deliberately **no "oldest" sample**: `dcterms:created` is when an item was
   *filed*, and a bulk migration files hundreds in one minute, so it does not say how long the
@@ -614,7 +615,7 @@ there.
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
 | `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | the editor page and its results; with a results `Accept`, the SPARQL 1.1 Protocol (GET, and POST as a read) over `urn:sparql:*` |
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
-| `/render-rules` | `urn:iki:gonk:render-rules` | which result cells become controls, as Turtle |
+| `/render-rules` | `urn:iki:gonk:render-rules` | result controls and IRI abbreviation rules, as Turtle |
 | `/view/{name}` | `urn:iki:gonk:view:{name}` | a named view: whatever its target answers, under your own grant (see "Named views") |
 | `/views` · `POST /views/save` | `urn:iki:gonk:page:views` · `urn:iki:gonk:views:save` | the Views page: the named views in force and the views space's status, and with the declaration's write token a form to add, change or remove each (see "The Views page") |
 | `/static/tokens.css`, `/static/shell.js`, `/static/htmx.min.js` | `urn:iki:ui:tokens.css`, `urn:iki:ui:shell.js`, `urn:iki:ui:htmx` | `ikigai-ui`'s tokens, shell script and htmx, by their own names (ledger #2834) |
@@ -1501,6 +1502,26 @@ because a rule that silently did nothing would look exactly like one in effect.
 | `rule:item-iri` | a `urn:iki:ledger:{ledger}:item:{id}` value, under any column | a link to that item |
 | `rule:item-number` | a bare integer, under a column named `number`, `item`, `n`, … | a link to that item |
 | `rule:repo-label` | a literal starting `repo:` | a link that runs that repo's **open** items |
+| `rule:ledger-curie` | an IRI in the ledger vocabulary namespace | `ledger:local`, with a visible prefix binding above the table |
+
+A deployment can also abbreviate its own vocabulary without changing gonk:
+
+```turtle
+@prefix render: <urn:iki:gonk:render#> .
+<urn:example:curie> a render:Rule ;
+    render:matchKind "uri" ;
+    render:matchPrefix "https://example.org/vocab#" ;
+    render:curie "example" .
+```
+
+This displays `https://example.org/vocab#open` as `example:open`. Each used prefix is bound
+once in visible text above the result table, including prefixes in linked cells. A CURIE rule
+and a control rule can both apply: controls still match and substitute the original full IRI,
+and their accessible names include the visible CURIE. Ordering is independent for display and
+controls, using `render:order` then the rule IRI. Each CURIE rule requires one namespace and
+`matchKind "uri"`; conflicting bindings for the same prefix are refused. Replacing the table
+replaces abbreviation too: an empty table leaves full IRIs and no controls. Machine faces
+always keep their original values. See the served Turtle for the complete vocabulary.
 
 ⚠ **A bare integer is genuinely ambiguous, and that is why one rule reads a column name.**
 `SELECT ?number ?title (COUNT(?comment) AS ?comments)` renders `244 … 3`: a result set carries

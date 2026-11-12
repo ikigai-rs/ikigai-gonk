@@ -316,7 +316,22 @@ fn main() {
         ledgers: vec!["default".to_string(), "crew".to_string()],
         browse_roots: Vec::new().into(),
         passkeys: Arc::clone(&passkeys),
-        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        // Ledger #365: include deployment CURIE bindings in the browser fixture.
+        rules: format!(
+            "{}\n{}",
+            ikigai_gonk::rules::DEFAULT_RULES,
+            r#"
+@prefix render: <urn:iki:gonk:render#> .
+<urn:example:curie> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "https://example.org/vocab#" ; render:curie "example" .
+<urn:example:link> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "https://example.org/vocab#" ; render:link "/inspect?value={value}" ;
+    render:label "Inspect {value}" .
+<urn:example:long> a render:Rule ; render:matchKind "uri" ;
+    render:matchPrefix "https://example.org/a-deployment-with-a-long-namespace/another-long-segment/vocabulary#" ;
+    render:curie "deployment" .
+"#
+        ),
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
@@ -361,6 +376,19 @@ fn main() {
         assert_eq!(status, 200, "{path}");
         bodies.push((name.to_string(), "text/html; charset=utf-8", body));
     }
+    // Used bindings are visible once each, including a linked CURIE; the long namespace
+    // exercises legend wrapping at phone width in the CI axe job.
+    let query = "SELECT ?value WHERE { VALUES ?value { <https://example.org/vocab#open> <https://example.org/vocab#closed> <https://example.org/a-deployment-with-a-long-namespace/another-long-segment/vocabulary#ready> <https://ikigai-rs.dev/ns/ledger#open> } }";
+    let (status, body) = get(
+        addr,
+        &format!("/sparql?query={}", ikigai_fn::html::url_segment(query)),
+    );
+    assert_eq!(status, 200, "the CURIE fixture");
+    bodies.push((
+        "sparql-curies.html".into(),
+        "text/html; charset=utf-8",
+        body,
+    ));
     // The local object fragment in the same page shell and shared tokens as the item.
     let (_, shell) = get(addr, "/l/default/item/1");
     let object_page = String::from_utf8(shell).unwrap().replace(

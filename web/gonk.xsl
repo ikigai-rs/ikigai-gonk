@@ -3228,8 +3228,8 @@
     <xsl:apply-templates select="view:error"/>
     <xsl:if test="@summary"><p class="result-meta"><xsl:value-of select="@summary"/></p></xsl:if>
     <!-- The prefix legend: once per result set, as TEXT, so a shortened IRI is reachable
-         without a tooltip. See web::PREFIX_LEGEND. -->
-    <xsl:if test="view:prefix"><p class="result-meta legend"><xsl:value-of select="view:prefix"/></p></xsl:if>
+         without a tooltip. Each used binding comes from the render rules. -->
+    <xsl:for-each select="view:prefix"><p class="result-meta legend"><xsl:value-of select="."/></p></xsl:for-each>
     <xsl:apply-templates select="view:table"/>
     <xsl:if test="view:boolean"><p class="boolean"><xsl:value-of select="view:boolean"/></p></xsl:if>
     <xsl:if test="view:graph"><pre class="mono graph"><xsl:value-of select="view:graph"/></pre></xsl:if>
