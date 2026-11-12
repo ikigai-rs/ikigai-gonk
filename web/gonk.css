@@ -79,6 +79,8 @@ main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
 /* No passkey enrolled yet (ledger #1847): the column main reads in, and a long command wraps. */
 .first-passkey { max-width: 60rem; margin: 0.75rem auto 0; padding: 0 1rem; }
 .first-passkey code { overflow-wrap: anywhere; }
+/* Ledger #375: the page is older than the server. Words and a link, on tokens already held to the floor. */
+.moved { max-width: 60rem; margin: 0.75rem auto 0; padding: 0.5rem 1rem; background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); }
 
 form { margin: 0; }
 label { font-size: 0.9rem; color: var(--muted); }

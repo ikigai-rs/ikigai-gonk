@@ -202,6 +202,8 @@ fn serve(flags: &config::Flags) -> ! {
     // Before any line is written: the log names each caller, so it is owner-only and rotated
     // daily, 14 kept (ledger #3159).
     ikigai_gonk::logfile::narrow_and_rotate();
+    // Ledger #375: this process's instance id, drawn before anything can render a page.
+    let instance = ikigai_gonk::instance::id();
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let (config_path, text) = config::read_config(flags, &homes).unwrap_or_else(|e| fail(&e));
     // Not prefixed with the config path: a setting may have come from a flag, and a message
@@ -913,6 +915,7 @@ fn serve(flags: &config::Flags) -> ! {
             env!("CARGO_PKG_VERSION"),
             store_path.display()
         );
+        eprintln!("  instance {instance} — new at every start; open pages compare it");
         // ★ The URL that REACHES this bind (`doors::http_url`): `localhost` for 127.0.0.1,
         // because WebAuthn refuses an IP address as a relying party and a page opened at
         // 127.0.0.1 cannot use a passkey at all; the bound IP for any other loopback address,

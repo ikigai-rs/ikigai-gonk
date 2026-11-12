@@ -26,7 +26,8 @@
 // close, with a filter that narrows its links past eight ledgers (ledger #1888). (11) a browse
 // page's "On GitHub" link follows the region to the view it now shows, which htmx swaps in
 // without changing the page's URL, and carries a selected line onto it (ledger #1907, and a
-// pull request's page, #2117).
+// pull request's page, #2117). (12) a page asks the server, now and then, whether it is still
+// the process that served it, and says so when it is not (ledger #375).
 //
 // ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
 // Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
@@ -1643,8 +1644,53 @@
   // A swap that re-renders the item (a comment posted, an edit) draws it in written order.
   document.addEventListener("htmx:afterSwap", wireCommentOrder);
 
+  // ------------------------------------------------ the server moved (ledger #375)
+  //
+  // Every full page carries the instance id of the process that served it
+  // (`<meta name="gonk-instance">`), and /instance answers the running one's. A different answer
+  // means the server restarted, and maybe upgraded, since this page loaded: the page may be an
+  // old UI over a new server. The version cannot say so (it does not move with the code); the
+  // process can. Asked once a minute while the tab is visible, and at once when it becomes
+  // visible again, which is when a person comes back to it after a restart. A failed ask is no
+  // news (the server may be restarting), so it is silent and asked again. Once moved, the notice
+  // stays, is said once in #status, and nothing is asked again.
+  const INSTANCE_EVERY_MS = 60000;
+  function watchInstance() {
+    const meta = document.querySelector("meta[name='gonk-instance']");
+    const moved = $("moved");
+    if (!meta || !moved || !window.fetch) return;
+    const mine = meta.getAttribute("content");
+    let done = false;
+    let asking = false;
+    async function check() {
+      if (done || asking || document.hidden) return;
+      asking = true;
+      try {
+        const r = await fetch("/instance", { cache: "no-store", credentials: "same-origin" });
+        const now = r.ok ? (await r.text()).trim() : "";
+        if (now && now !== mine) {
+          done = true;
+          clearInterval(timer);
+          moved.hidden = false;
+          announce(moved.textContent.trim());
+        }
+      } catch (_) {
+        // Not answering is not news.
+      } finally {
+        asking = false;
+      }
+    }
+    const timer = setInterval(check, INSTANCE_EVERY_MS);
+    document.addEventListener("visibilitychange", check);
+    // A page restored from the back/forward cache is the page it was, with its old id.
+    window.addEventListener("pageshow", (e) => {
+      if (e.persisted) check();
+    });
+  }
+
   async function init() {
     wireSafeMode();
+    watchInstance();
     wireCommentOrder();
     wireSamples();
     wireLedgerMenu();

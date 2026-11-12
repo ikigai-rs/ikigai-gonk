@@ -1363,6 +1363,12 @@ fn routes() -> Vec<Route> {
         // of a fragment like `/queue/rows`, and it is the trigger's only liveness
         // signal — see `queue::Badge`.
         route("/queue/depth", crate::queue::BADGE_IRI),
+        // Ledger #375: this process's instance id, polled by every open page to tell
+        // that the server has restarted since it loaded.
+        route(
+            crate::instance::INSTANCE_PATH,
+            crate::instance::INSTANCE_IRI,
+        ),
         // The browse family's landing page. ⚠ It must be listed BEFORE the
         // `/browse/{p1}…` arities below — not for precedence (the patterns cannot
         // both match: this one has no segment after `/browse`) but because reading
@@ -1419,13 +1425,14 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 23] = [
+pub const GONK_PATHS: [&str; 24] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
     "/act",
     "/sparql",
     "/render-rules",
+    crate::instance::INSTANCE_PATH,
     "/view/",
     "/resolution/",
     crate::views_page::PAGE_PATH,

@@ -626,6 +626,7 @@ there.
 | `POST /queue/decide` | `urn:iki:gonk:queue:decide` | one human decision on one finding |
 | `POST /queue/batch` | `urn:iki:gonk:queue:batch` | one batch decline, one decision per ticked finding |
 | `/queue/depth` | `urn:iki:gonk:fragment:queue-depth` | the header's live badge, polled every 10s |
+| `/instance` | `urn:iki:gonk:instance` | this process's instance id, new at every start; every page carries it in `<meta name="gonk-instance">` and polls this every minute to say when the server has restarted since it loaded (ledger #375) |
 | `/layers` · `/layers/{layer}` | `urn:iki:gonk:page:layers` · `…:page:layer:{layer}` | the Layers page: every layer the configured identity reads, and one layer (see "The Layers page") |
 | `/layers/~/wait` | `urn:iki:gonk:fragment:layers-wait` | what an open Layers page asks every 3 s, answered at once from gonk's copy |
 | `POST /layers/{layer}/say` | `urn:iki:gonk:layers:say:{layer}` | a message or a question, said at the layer door as the configured identity |
@@ -5072,8 +5073,8 @@ launchd never rotates — 64% of the live log's lines on 2026-10-10. A poll now 
 only when it fails, when it takes a second or more (so the `dur=[0-9]\{4,\}` grep above still
 finds every slow one), or when that poll has written no quiet line for ten minutes, to show it
 is alive. The sample is per polled resource and by time (ledger #1718): the Queue badge, the
-header's Layers count and an open Layers page's three-second poll each write one quiet line per
-ten minutes, however many pages ask. Every other request is still one line. Rotation is the
+header's Layers count, an open Layers page's three-second poll and every page's once-a-minute
+`/instance` check (ledger #375) each write one quiet line per ten minutes, however many pages ask. Every other request is still one line. Rotation is the
 segment's (`[rotation]` in `gonk.log.toml`), sealed and verified by `ikigai-log`.
 
 ## Upgrading past audit round 4 (ledger #864)
