@@ -151,7 +151,7 @@ fn a_longer_page_runs_no_more_store_queries() {
         vec![
             read("urn:iki:ledger:default:count", 1, false),
             read("urn:iki:ledger:default:counts", 1, false),
-            read("urn:iki:ledger:default:items", 6, false),
+            read("urn:iki:ledger:default:items", 5, false),
         ]
     );
 }
@@ -170,13 +170,14 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
     // <item>` in the Turtle this page reads). The count is unchanged at one.
     // ⚠ And SIX since ikigai-ledger 0.18.0 (its #2927): a row carries its cross-ledger links, the page's links out
     // and mirrors in, two queries for the whole page. A second test holds them to not growing.
+    // ⚠ And FIVE since ikigai-ledger 0.22.0 (its PR 108, ledger #1741): the page and its total are one store query.
     let cold = one_render(&runtime, &hub, &http);
     assert_eq!(
         cold,
         vec![
             read("urn:iki:ledger:default:count", 1, false),
             read("urn:iki:ledger:default:counts", 1, false),
-            read("urn:iki:ledger:default:items", 6, false),
+            read("urn:iki:ledger:default:items", 5, false),
         ]
     );
     // ★ Since ledger #2542 the page's chart reads the daily `counts`: one query, cached like the rest.
@@ -205,7 +206,7 @@ fn one_render_reads_the_count_and_one_page_of_rows() {
         vec![
             read("urn:iki:ledger:default:count", 1, false),
             read("urn:iki:ledger:default:counts", 1, false),
-            read("urn:iki:ledger:default:items", 6, false),
+            read("urn:iki:ledger:default:items", 5, false),
         ]
     );
 }

@@ -1097,7 +1097,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2030,9 +2030,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-core"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "946134588b75c8bbe2ad7ea7e5b2e6f82ba7a30750dae90f2994eee7e56962cf"
+checksum = "2de9ae0e84bd82b82fee481f9cf62549356b11a02fe04cdc8c73bee1c831b713"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2283,9 +2283,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-ledger"
-version = "0.21.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff0fb0a737cf2ad83ed4486bb0daa09777a48d85a1f84a30bae98114e5fa15cd"
+checksum = "3e43cf42c44f0aa66c7209266e302519a0af919d070f8a51445ea18c27a80127"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -4171,7 +4171,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4543,7 +4543,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5187,7 +5187,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5725,7 +5725,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

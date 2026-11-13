@@ -66,7 +66,7 @@ const STORE_IDS: [&str; 16] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 28] = [
+const LEDGER_IDS: [&str; 30] = [
     "alias",
     "alias-scheme",
     "ledger-append",
@@ -83,6 +83,7 @@ const LEDGER_IDS: [&str; 28] = [
     "ledger-item-about",
     "ledger-item-closed",
     "ledger-item-history",
+    "ledger-item-sessions",
     "ledger-item-holder-is",
     "ledger-item-state",
     "ledger-item-state-is",
@@ -95,6 +96,7 @@ const LEDGER_IDS: [&str; 28] = [
     "ledger-policy",
     "ledger-purge",
     "ledger-reopen",
+    "ledger-sessions",
 ];
 
 /// gonk's own resources in the HUB — behind every door, socket and QUIC included. Six:
