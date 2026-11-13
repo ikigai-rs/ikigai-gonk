@@ -38,8 +38,9 @@
 //! `concurrent_hooks_filing_one_finding_file_it_once`). A finding whose item was deleted is
 //! not filed again either: the deleted item's tombstone keeps the key.
 //!
-//! The key is ALSO filed as one of the item's `about` IRIs, beside the file's: browse joins
-//! items to files on `about`, and items filed before keys existed carry only that (`ikigai-gonk
+//! The key is ALSO filed as one of the item's `about` IRIs, beside the file's canonical IRI
+//! (`urn:repo:file:{root}/{path}`, [`file_iri`], ledger #3657): items are joined to files on
+//! `about`, and items filed before keys existed carry only that (`ikigai-gonk
 //! ledger backfill-keys` gives them the key, [`crate::keys`]).
 //!
 //! Every answer is read through the ledger's JSON face (`as=application/json`, schema 1,
@@ -114,6 +115,17 @@ impl Severity {
             Severity::High => 1,
             Severity::Medium => 2,
             Severity::Low => 3,
+        }
+    }
+
+    /// The `ledger:Finding` severity label roborev's level maps onto (ledger #3657): critical
+    /// stays critical, high is major, medium is minor, low is trivial.
+    pub fn class_label(self) -> &'static str {
+        match self {
+            Severity::Critical => "severity:critical",
+            Severity::High => "severity:major",
+            Severity::Medium => "severity:minor",
+            Severity::Low => "severity:trivial",
         }
     }
 
@@ -309,11 +321,35 @@ pub fn location_path(location: &str, repo_path: Option<&str>) -> Option<String> 
     Some(path.to_string())
 }
 
-/// `urn:repo:{root}:file:{path}` — the IRI browse serves the file at, and joins items on.
+/// `urn:repo:file:{root}/{path}` — the canonical file IRI a finding names its file by
+/// (ledger #3657, Brian's decision of 2026-11-13 on #3655): the form `ledger:Finding`'s
+/// comment names and `gonk.repository.file` resolves ([`crate::web`]'s `repo_file`), and the
+/// one items are joined to a file on.
+///
+/// ⚠ It is NOT the IRI browse serves the file at: that is `urn:repo:{root}:file:{path}`
+/// ([`browse_file_iri`]), and browse keeps serving it there. Items filed before #3657 carry
+/// that older form; `ikigai-gonk ledger canonical-file-iris` ([`crate::file_iris`]) rewrites
+/// them.
 ///
 /// The path is percent-encoded the way `ikigai-browse` encodes it (its `iri_encode`, which is
 /// crate-private there, so this is a copy): `/` and the URN-safe punctuation stay literal.
+///
+/// ```
+/// use ikigai_gonk::roborev::file_iri;
+///
+/// assert_eq!(file_iri("ikigai-gonk", "src/a b.rs"), "urn:repo:file:ikigai-gonk/src/a%20b.rs");
+/// ```
 pub fn file_iri(root: &str, path: &str) -> String {
+    format!("urn:repo:file:{root}/{}", encode_path(path))
+}
+
+/// `urn:repo:{root}:file:{path}` — the IRI browse serves the file at, which items about a file
+/// carried before ledger #3657.
+pub fn browse_file_iri(root: &str, path: &str) -> String {
+    format!("urn:repo:{root}:file:{}", encode_path(path))
+}
+
+fn encode_path(path: &str) -> String {
     const SAFE: &[u8] = b"-._~/!$&'()*+,;=:@";
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
@@ -323,8 +359,11 @@ pub fn file_iri(root: &str, path: &str) -> String {
             encoded.push_str(&format!("%{byte:02X}"));
         }
     }
-    format!("urn:repo:{root}:file:{encoded}")
+    encoded
 }
+
+/// The class a roborev finding is filed as: `ledger:Finding` (`append kind=`).
+pub const FINDING_CLASS: &str = "https://ikigai-rs.dev/ns/ledger#Finding";
 
 /// The idempotence key's prefix: `urn:roborev:finding:{32 hex}`.
 pub const KEY_PREFIX: &str = "urn:roborev:finding:";
@@ -521,7 +560,11 @@ pub fn plan(args: &FileArgs, findings: &[Finding]) -> Vec<Planned> {
             };
             let mut append = vec![
                 ("key", key.clone()),
-                ("labels", format!("roborev,{}", finding.severity.word())),
+                ("kind", FINDING_CLASS.to_string()),
+                (
+                    "labels",
+                    format!("roborev,{}", finding.severity.class_label()),
+                ),
                 ("priority", finding.severity.priority().to_string()),
                 ("about", about),
                 ("author", "roborev".to_string()),
@@ -752,12 +795,33 @@ mod tests {
     }
 
     #[test]
-    fn file_iris_encode_like_browse() {
+    fn file_iris_are_canonical_and_encode_like_browse() {
         assert_eq!(
             file_iri("gonk", "src/a b.rs"),
+            "urn:repo:file:gonk/src/a%20b.rs"
+        );
+        assert_eq!(
+            file_iri("ikigai-gonk", "src/k.rs"),
+            "urn:repo:file:ikigai-gonk/src/k.rs"
+        );
+        // The canonical form is the one `gonk.repository.file` resolves.
+        assert_eq!(
+            crate::web::repo_file(&file_iri("ikigai-gonk", "src/a b.rs")),
+            Some(("ikigai-gonk", "src/a%20b.rs"))
+        );
+        assert_eq!(
+            browse_file_iri("gonk", "src/a b.rs"),
             "urn:repo:gonk:file:src/a%20b.rs"
         );
-        assert_eq!(file_iri("gonk", "src/k.rs"), "urn:repo:gonk:file:src/k.rs");
+    }
+
+    #[test]
+    fn severities_map_onto_the_finding_class() {
+        let label = |s: Severity| s.class_label();
+        assert_eq!(label(Severity::Critical), "severity:critical");
+        assert_eq!(label(Severity::High), "severity:major");
+        assert_eq!(label(Severity::Medium), "severity:minor");
+        assert_eq!(label(Severity::Low), "severity:trivial");
     }
 
     #[test]
@@ -790,8 +854,17 @@ mod tests {
         assert_eq!(get(&planned[2], "priority").as_deref(), Some("2"));
         assert_eq!(
             get(&planned[0], "labels").as_deref(),
-            Some("roborev,critical")
+            Some("roborev,severity:critical")
         );
+        assert_eq!(
+            get(&planned[1], "labels").as_deref(),
+            Some("roborev,severity:major")
+        );
+        assert_eq!(
+            get(&planned[2], "labels").as_deref(),
+            Some("roborev,severity:minor")
+        );
+        assert_eq!(get(&planned[0], "kind").as_deref(), Some(FINDING_CLASS));
         assert_eq!(get(&planned[0], "revision").as_deref(), Some("abc123"));
         assert_eq!(
             get(&planned[0], "key").unwrap(),
@@ -800,7 +873,7 @@ mod tests {
         );
         assert_eq!(
             get(&planned[0], "about").unwrap(),
-            format!("urn:repo:gonk:file:src/a.rs {}", planned[0].key)
+            format!("urn:repo:file:gonk/src/a.rs {}", planned[0].key)
         );
         assert_eq!(
             get(&planned[1], "about").unwrap(),

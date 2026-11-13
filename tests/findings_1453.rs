@@ -304,7 +304,8 @@ fn published_findings_are_filed_once_and_pending_ones_never() {
     let mut about = strings(&item["about"]);
     about.sort();
     let mut want_about = vec![
-        format!("urn:repo:{ROOT}:file:src/lib.rs"),
+        // The canonical file IRI (ledger #3657), not the one browse serves the file at.
+        format!("urn:repo:file:{ROOT}/src/lib.rs"),
         format!("urn:iki:finding:{SERIOUS}"),
         format!("urn:iki:annotation:{SERIOUS}"),
     ];
