@@ -45,7 +45,8 @@ pub struct Repository {
     pub browse: bool,
 }
 
-/// Browse roots double as an object map. No origin is guessed.
+/// Browse roots double as an object map. Missing external templates use the root's
+/// GitHub resource at read time, under the same capability and cache dependencies.
 pub fn browse_repositories(roots: &[(String, PathBuf)]) -> Vec<Repository> {
     roots
         .iter()
@@ -249,7 +250,24 @@ impl Endpoint for Object {
         let href = if let Some(configured) = configured {
             expand(configured, normalized, &value)
         } else if repo.browse && matches!(kind, "commit" | "blob") {
-            Some(format!("/browse/{}", inv.request.target))
+            // Compose over the same repository resolver as "On GitHub", including its
+            // override and state dependency. Object presence is SHA-keyed, but its external
+            // destination must still change when the root's origin changes.
+            let github = inv
+                .source(&request(&crate::github::root_iri(&repo.name))?.target)
+                .await?;
+            let fields = crate::github::fields(&String::from_utf8_lossy(&github.bytes));
+            fields
+                .and_then(|fields| fields.get("repository").cloned())
+                .and_then(|repository| {
+                    let template = if kind == "commit" {
+                        format!("{repository}/commit/{{sha}}")
+                    } else {
+                        format!("{repository}/blob/{{commit}}/{{path}}")
+                    };
+                    expand(&template, normalized, &value)
+                })
+                .or_else(|| Some(format!("/browse/{}", inv.request.target)))
         } else {
             None
         };
