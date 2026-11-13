@@ -458,7 +458,7 @@ fn insert_key(graph: &str, keying: &Keying) -> Result<String, String> {
     ))
 }
 
-fn select(
+pub(crate) fn select(
     issue: &dyn Fn(Request) -> Result<Vec<u8>, String>,
     graph: &str,
     query: &str,
@@ -491,7 +491,7 @@ fn select(
         .collect())
 }
 
-fn update(
+pub(crate) fn update(
     issue: &dyn Fn(Request) -> Result<Vec<u8>, String>,
     graph: &str,
     update: &str,
@@ -507,13 +507,13 @@ fn update(
     .map(|_| ())
 }
 
-fn need(row: &BTreeMap<String, String>, name: &str) -> Result<String, String> {
+pub(crate) fn need(row: &BTreeMap<String, String>, name: &str) -> Result<String, String> {
     row.get(name)
         .cloned()
         .ok_or_else(|| format!("a store row with no `{name}`"))
 }
 
-fn number(row: &BTreeMap<String, String>) -> Result<i64, String> {
+pub(crate) fn number(row: &BTreeMap<String, String>) -> Result<i64, String> {
     let text = need(row, "number")?;
     text.parse()
         .map_err(|_| format!("a ledger:number `{text}` that is not an integer"))

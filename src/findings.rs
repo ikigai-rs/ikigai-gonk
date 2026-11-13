@@ -40,8 +40,9 @@
 //! hash of the pass and the quote, so it is stable, and the keyed append (`ikigai-ledger`
 //! 0.4.0) checks the key and files in one store update: a re-run, or two runs at once, answer
 //! `existing` and file nothing. The key is ALSO one of the item's `about` IRIs, beside the file
-//! (or pull request) the finding annotates and the annotation its publication minted, so browse
-//! joins the item to the file exactly as it joins a roborev item.
+//! (or pull request) the finding annotates and the annotation its publication minted. A file is
+//! named by its canonical IRI, `urn:repo:file:{root}/{path}` (ledger #3657,
+//! [`crate::file_iris`]), exactly as a roborev item names it.
 //!
 //! ⚠ The gonk Book's "Review every commit" chapter, written before this command, filed by hand
 //! with `key=finding:{id}`. An item filed that way is a different key, and this command files
@@ -329,9 +330,15 @@ fn decide(root: &str, row: &Value, filter: Filter<'_>) -> Result<Planned, String
     // `about`: the file (or PR) the finding annotates, the finding, and the annotation its
     // publication minted — each only when it is an IRI the space-separated list can carry.
     let mut about: Vec<String> = Vec::new();
-    for iri in [text(row, "annotates"), Some(key.as_str()), minted]
-        .into_iter()
-        .flatten()
+    // A file is named by its canonical IRI (ledger #3657), not the one browse serves it at.
+    let file = text(row, "annotates").and_then(crate::file_iris::canonical);
+    for iri in [
+        file.as_deref().or(text(row, "annotates")),
+        Some(key.as_str()),
+        minted,
+    ]
+    .into_iter()
+    .flatten()
     {
         let carries = !iri.contains(char::is_whitespace) && Iri::parse(iri).is_ok();
         if carries && !about.iter().any(|a| a == iri) {
@@ -634,7 +641,7 @@ mod tests {
         assert_eq!(arg(p, "key"), "urn:iki:finding:aa01");
         assert_eq!(
             arg(p, "about"),
-            "urn:repo:demo:file:src/lib.rs urn:iki:finding:aa01 urn:iki:annotation:aa01"
+            "urn:repo:file:demo/src/lib.rs urn:iki:finding:aa01 urn:iki:annotation:aa01"
         );
         assert_eq!(arg(p, "labels"), "finding,repo:demo,s1,reproduced");
         assert!(

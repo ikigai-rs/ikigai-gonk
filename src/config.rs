@@ -406,6 +406,7 @@ usage:
                                    writing --ledger grant, which reads the participants graph.
                                    `ledger unenroll` takes the same arguments
   ikigai-gonk ledger backfill-keys [--ledger default] [--socket PATH] [--config PATH] [--dry-run]
+  ikigai-gonk ledger canonical-file-iris [--ledger default] [--socket PATH] [--config PATH] [--apply]
                                    give the items roborev and kata filed BEFORE keyed appends,
                                    and published findings filed by hand without a key,
                                    their `ledger:key` (from their bridge `about` IRI), and list
@@ -664,6 +665,9 @@ pub enum Command {
     KataImport(crate::kata::ImportArgs),
     /// Give the items the bridges filed before keys existed their key, over the socket.
     BackfillKeys(crate::keys::BackfillArgs),
+    /// Rewrite findings' old-form file IRIs to the canonical form, over the socket (ledger
+    /// #3657). A dry run unless `--apply`.
+    CanonicalFileIris(crate::file_iris::Args),
     /// `ledger enroll` / `ledger unenroll`: write the participants graph over the socket
     /// ([`crate::participants`], ledger #2836).
     Enroll(crate::participants::EnrollArgs),
@@ -1223,6 +1227,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
                 let remove = word == "unenroll";
                 args.next();
                 return crate::participants::parse_args(remove, args).map(Command::Enroll);
+            }
+            if args.peek().map(String::as_str) == Some("canonical-file-iris") {
+                args.next();
+                return crate::file_iris::parse_args(args).map(Command::CanonicalFileIris);
             }
             return crate::keys::parse_args(args).map(Command::BackfillKeys);
         }

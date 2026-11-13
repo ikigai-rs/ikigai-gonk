@@ -4,6 +4,10 @@
 //!
 //! - [`a_review_files_one_item_per_finding_once`] — the mapping (about, labels, priority,
 //!   revision), and the same payload filed twice yields each item once.
+//! - [`an_old_form_finding_is_migrated_and_joins_on_the_canonical_iri`] — a finding filed with
+//!   browse's own file IRI before ledger #3657: `ledger canonical-file-iris` prints the rewrite
+//!   and writes nothing, then with `--apply` rewrites it, and the join on the canonical IRI
+//!   finds it beside a new filing.
 //! - [`a_gonk_that_is_not_running_is_said_plainly`] — the error names the socket.
 //!
 //! The real binary's own doors — a bridge filing over its socket, and its HTTP door still
@@ -142,11 +146,12 @@ fn a_review_files_one_item_per_finding_once() {
     let all = items(&hub, "reviews", &[]);
     assert_eq!(item_lines(&all).len(), 3, "{all}");
 
-    // The mapping: severity → priority and label, the file joined by `about`.
+    // The mapping: severity → priority and the `ledger:Finding` severity label (ledger #3657),
+    // the file joined by `about` on its canonical IRI.
     let retry = items(
         &hub,
         "reviews",
-        &[("about", "urn:repo:demo:file:src/retry.rs")],
+        &[("about", "urn:repo:file:demo/src/retry.rs")],
     );
     let lines = item_lines(&retry);
     assert_eq!(
@@ -156,16 +161,19 @@ fn a_review_files_one_item_per_finding_once() {
     );
     let critical = lines
         .iter()
-        .find(|l| l.contains("[critical roborev]"))
+        .find(|l| l.contains("[roborev severity:critical]"))
         .unwrap_or_else(|| panic!("{retry}"));
     assert!(critical.contains(" p0 "), "{critical}");
     assert!(
         critical.contains("`write_with_retry` loops while the store"),
         "{critical}"
     );
-    let high = lines.iter().find(|l| l.contains("[high roborev]")).unwrap();
+    let high = lines
+        .iter()
+        .find(|l| l.contains("[roborev severity:major]"))
+        .unwrap();
     assert!(high.contains(" p1 "), "{high}");
-    let medium = items(&hub, "reviews", &[("labels", "medium")]);
+    let medium = items(&hub, "reviews", &[("labels", "severity:minor")]);
     assert!(item_lines(&medium)[0].contains(" p2 "), "{medium}");
 
     // One item, in full: body, revision, both about IRIs.
@@ -178,7 +186,7 @@ fn a_review_files_one_item_per_finding_once() {
     let one = block_on(Kernel::issue(&hub, request, &Capability::root())).unwrap();
     let one = String::from_utf8_lossy(&one.bytes);
     for expected in [
-        "urn:repo:demo:file:src/retry.rs",
+        "urn:repo:file:demo/src/retry.rs",
         "urn:roborev:finding:",
         "Fix: Bound the loop",
         "- commit: 0123456789abcdef0123456789abcdef01234567",
@@ -202,8 +210,114 @@ fn a_review_files_one_item_per_finding_once() {
     let all = items(&hub, "reviews", &[]);
     assert_eq!(item_lines(&all).len(), 4, "{all}");
     assert!(
-        all.contains("[low roborev]") && all.contains(" p3 "),
+        all.contains("[roborev severity:trivial]") && all.contains(" p3 "),
         "{all}"
+    );
+}
+
+/// ledger #3657: a finding filed before the canonical form carries browse's
+/// `urn:repo:{root}:file:{path}`. The migration's dry run prints the rewrite and writes nothing;
+/// `--apply` rewrites it; afterwards the canonical join finds the old finding beside a new one,
+/// and the old finding is still recognized (its key did not change), so it is not filed again.
+#[test]
+fn an_old_form_finding_is_migrated_and_joins_on_the_canonical_iri() {
+    let (hub, gonk) = serve("reviews");
+    let canonical = "urn:repo:file:demo/src/retry.rs";
+    let old = "urn:repo:demo:file:src/retry.rs";
+
+    // The critical finding of the fixture, filed the way `roborev file` filed it before #3657.
+    let ikigai_gonk::roborev::Review::Findings(found) =
+        ikigai_gonk::roborev::parse(FIXTURE).unwrap()
+    else {
+        panic!("the fixture is a structured review")
+    };
+    let critical = found
+        .iter()
+        .find(|f| f.severity == ikigai_gonk::roborev::Severity::Critical)
+        .unwrap();
+    let key = ikigai_gonk::roborev::finding_key("demo", Some("src/retry.rs"), &critical.problem);
+    let sink = |args: &[(&str, &str)], content: &str| {
+        let request = args.iter().fold(
+            Request::new(
+                Verb::Sink,
+                Iri::parse("urn:iki:ledger:reviews:append").unwrap(),
+            )
+            .with_arg("content", ArgRef::Inline(content.as_bytes().to_vec())),
+            |r, (n, v)| r.with_arg(*n, ArgRef::Inline(v.as_bytes().to_vec())),
+        );
+        block_on(Kernel::issue(&hub, request, &Capability::root())).unwrap();
+    };
+    sink(
+        &[
+            ("key", &key),
+            ("about", &format!("{old} {key}")),
+            ("labels", "roborev,critical"),
+            ("author", "roborev"),
+        ],
+        "An old-form finding",
+    );
+    let unrelated = "urn:repo:demo:file:src/hand.rs";
+    sink(&[("about", unrelated)], "Filed by hand about browse's IRI");
+    assert!(item_lines(&items(&hub, "reviews", &[("about", canonical)])).is_empty());
+
+    let migrate = |extra: &[&str]| {
+        stdout(
+            &gonk
+                .command()
+                .args(["ledger", "canonical-file-iris", "--ledger", "reviews"])
+                .args(gonk.flags())
+                .args(extra)
+                .output()
+                .expect("run ikigai-gonk"),
+        )
+    };
+    let dry = migrate(&[]);
+    println!("--- dry run ---\n{dry}");
+    assert!(
+        dry.contains(&format!(
+            "would rewrite  reviews#1  about {old}  ->  {canonical}"
+        )),
+        "{dry}"
+    );
+    assert!(dry.contains("dry run, nothing written"), "{dry}");
+    assert!(
+        !dry.contains("src/hand.rs"),
+        "a hand-filed item is not a finding: {dry}"
+    );
+    assert!(
+        item_lines(&items(&hub, "reviews", &[("about", canonical)])).is_empty(),
+        "the dry run wrote nothing"
+    );
+    assert_eq!(
+        item_lines(&items(&hub, "reviews", &[("about", old)])).len(),
+        1
+    );
+
+    let applied = migrate(&["--apply"]);
+    println!("--- applied ---\n{applied}");
+    assert!(
+        applied.contains("1 about(s) rewritten, 0 old-form file IRI(s) left"),
+        "{applied}"
+    );
+    assert!(item_lines(&items(&hub, "reviews", &[("about", old)])).is_empty());
+    assert_eq!(
+        item_lines(&items(&hub, "reviews", &[("about", unrelated)])).len(),
+        1,
+        "the hand-filed item is untouched"
+    );
+    let again = migrate(&["--apply"]);
+    assert!(again.contains("0 about(s) rewritten"), "{again}");
+
+    // A new review: the old finding is recognized by its key, the high one is filed with the
+    // canonical IRI, and the join on that IRI shows both.
+    let filed = stdout(&file(&gonk, "reviews", &[]));
+    assert!(filed.contains("already  critical reviews#1"), "{filed}");
+    let joined = items(&hub, "reviews", &[("about", canonical)]);
+    let lines = item_lines(&joined);
+    assert_eq!(lines.len(), 2, "{joined}");
+    assert!(
+        lines.iter().any(|l| l.starts_with("reviews#1 ")),
+        "{joined}"
     );
 }
 
@@ -246,7 +360,7 @@ fn concurrent_hooks_filing_one_finding_file_it_once() {
         let lines = item_lines(&items(
             &hub,
             "reviews",
-            &[("about", "urn:repo:demo:file:src/race.rs")],
+            &[("about", "urn:repo:file:demo/src/race.rs")],
         ))
         .len();
         assert_eq!(

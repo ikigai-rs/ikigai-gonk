@@ -190,6 +190,7 @@ fn main() {
                 .unwrap_or_else(|e| fail(&e));
         }
         Command::BackfillKeys(args) => backfill_keys(&args),
+        Command::CanonicalFileIris(args) => canonical_file_iris(&args),
         Command::Enroll(args) => enroll(&args),
         Command::FindingsFile(args) => findings_file(&args),
         Command::Serve(flags) => serve(&flags),
@@ -1467,6 +1468,28 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
         ikigai_ledger::Ledger::parse(&args.ledger).unwrap_or_else(|e| fail(&e.to_string()));
     let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
+        .unwrap_or_else(|e| fail(&e));
+}
+
+/// `ikigai-gonk ledger canonical-file-iris` — over the socket of the gonk this config describes
+/// (ledger #3657). A dry run unless `--apply`.
+fn canonical_file_iris(args: &ikigai_gonk::file_iris::Args) {
+    let socket = match &args.socket {
+        Some(path) => path.clone(),
+        None => {
+            let flags = config::Flags {
+                config: args.config.clone(),
+                config_home: args.config_home.clone(),
+                data_home: args.data_home.clone(),
+                ..config::Flags::default()
+            };
+            read_settings(&flags).socket
+        }
+    };
+    let ledger =
+        ikigai_ledger::Ledger::parse(&args.ledger).unwrap_or_else(|e| fail(&e.to_string()));
+    let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
+    ikigai_gonk::file_iris::run(&issue, &ledger, args.apply, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
 }
 
