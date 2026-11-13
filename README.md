@@ -1246,7 +1246,18 @@ Each value must be a `urn:cap:` scope with no empty segment and no whitespace, a
 the rule `grants.json` is held to (no whole-dataset token, offering wildcard, door marker,
 identity name or owner token); a refused value is named and nothing is written. A repeated
 `--scope`, or one another flag already grants, is stored once, silently. `passkey list` prints
-each passkey's grant scopes as `grants.json` stores them.
+each passkey's grant scopes as `grants.json` stores them. `client add --scope <urn>` takes the
+same flag under the same contract, for a certificate's grant (ledger
+[#3652](http://localhost:1060/l/default/item/3652)).
+
+To learn what a set of flags means before writing it, `client add … --print` prints the scopes
+they resolve to and, for an existing grant, the `removes` and `adds` lines a write would make,
+and says whether it would be refused without `--force`. It mints no bundle and writes nothing,
+`--force` or not:
+
+```sh
+ikigai-gonk client add chris --ledger default=purge --scope urn:cap:exec:git --print
+```
 
 ⚠ **A click on Explain spends inference.** The per-face token ceilings
 (`gonk.explain.*.max_tokens`) bound ONE call; what bounds them over time is one window on the
