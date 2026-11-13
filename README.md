@@ -5313,8 +5313,13 @@ credentials. Unknown names, duplicate names/templates, missing directories and u
 placeholders stop startup. Repository map changes take a restart.
 
 Configured repositories are searched in configuration order, followed by the browse roots.
-A `gonk.browse.root` also supplies a local fallback: the link opens gonk's object view,
-which identifies the commit or shows the blob's historical file contents. Its separate
+For a browse root without an explicit commit or blob template, links use the GitHub
+repository resolved from its `remote.origin.url` or `gonk.browse.github` override:
+`{repository}/commit/{sha}` or `{repository}/blob/{commit}/{path}`. Each explicit template
+wins independently. Other origins supply no external fallback.
+A `gonk.browse.root` also supplies a local fallback when no external link is available:
+the link opens gonk's object view, which identifies the commit or shows the blob's
+historical file contents. Its separate
 "current working tree" link explicitly names that destination; the commit view does not
 show a diff. A blob without a path in retained history is identified without file contents.
 

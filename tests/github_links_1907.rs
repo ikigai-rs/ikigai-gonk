@@ -108,6 +108,14 @@ fn origin_has_head(dir: &Path) {
 /// The composition `main` builds for one root named `demo` over `dir`, watched, with the
 /// given `gonk.browse.github` overrides.
 fn served(dir: &Path, overrides: &[(String, String)]) -> (Arc<Kernel>, RootWatch) {
+    served_with_object_repositories(dir, overrides, &[])
+}
+
+fn served_with_object_repositories(
+    dir: &Path,
+    overrides: &[(String, String)],
+    repositories: &[ikigai_gonk::git_object::Repository],
+) -> (Arc<Kernel>, RootWatch) {
     let roots = vec![("demo".to_string(), dir.to_path_buf())];
     let graph = browse::Graph::chosen();
     let (store, _handle) = DurableStore::in_memory_shared_declaring(graph.sharer_writes())
@@ -128,7 +136,10 @@ fn served(dir: &Path, overrides: &[(String, String)]) -> (Arc<Kernel>, RootWatch
         store,
         Some(Arc::new(space)),
         Vec::new(),
-        Vec::new(),
+        vec![Arc::new(ikigai_gonk::git_object::space(
+            "configured",
+            repositories,
+        ))],
         None,
         None,
         None,
@@ -672,6 +683,120 @@ fn object_link(hub: &Kernel, kind: &str, sha: &str, cap: &Capability) -> String 
         cap,
     )
     .unwrap()
+}
+
+/// Ledger #3653: Git evidence uses the same GitHub repository as the browse root.
+#[test]
+fn browse_git_objects_fall_back_to_the_resolved_github_repository() {
+    for (origin, overrides, repository) in [
+        (Some(ORIGIN), vec![], Some(REPO)),
+        (Some("https://gitlab.com/owner/demo.git"), vec![], None),
+        (None, vec![], None),
+        (
+            None,
+            vec![("demo".into(), "https://github.com/other/override".into())],
+            Some("https://github.com/other/override"),
+        ),
+        (
+            Some(ORIGIN),
+            vec![("demo".into(), "https://github.com/other/override".into())],
+            Some("https://github.com/other/override"),
+        ),
+        (
+            Some("https://gitlab.com/owner/demo.git"),
+            vec![("demo".into(), "https://github.com/other/override".into())],
+            Some("https://github.com/other/override"),
+        ),
+    ] {
+        let (dir, head) = scratch(origin);
+        let blob = git(dir.path(), &["rev-parse", &format!("HEAD:{ODD}")]);
+        let (hub, _watch) = served(dir.path(), &overrides);
+        for (kind, sha, suffix) in [
+            ("commit", head.as_str(), format!("commit/{head}")),
+            (
+                "blob",
+                blob.as_str(),
+                format!("blob/{head}/{ODD_ON_GITHUB}"),
+            ),
+        ] {
+            let answer = text(
+                &hub,
+                &ikigai_gonk::git_object::link_iri("browse", kind, sha),
+                &[],
+            );
+            let expected = repository.map_or_else(
+                || {
+                    format!(
+                        "/browse/{}",
+                        ikigai_gonk::git_object::object_iri("browse", "demo", sha)
+                    )
+                },
+                |repository| format!("{repository}/{suffix}"),
+            );
+            assert_eq!(answer, expected, "origin {origin:?}, kind {kind}");
+        }
+    }
+}
+
+#[test]
+fn github_git_object_fallback_changes_when_the_origin_changes() {
+    let (dir, head) = scratch(Some(ORIGIN));
+    let (hub, watch) = served(dir.path(), &[]);
+    let iri = ikigai_gonk::git_object::link_iri("browse", "commit", &head);
+    assert_eq!(text(&hub, &iri, &[]), format!("{REPO}/commit/{head}"));
+    git(
+        dir.path(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:other/moved.git",
+        ],
+    );
+    let expected = format!("https://github.com/other/moved/commit/{head}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answer = text(&hub, &iri, &[]);
+    while answer != expected && Instant::now() < deadline {
+        let _ = watch.apply_next(&hub, Duration::from_millis(100));
+        answer = text(&hub, &iri, &[]);
+    }
+    assert_eq!(answer, expected);
+}
+
+#[test]
+fn explicit_git_templates_win_independently_over_github_fallbacks() {
+    let (dir, head) = scratch(Some(ORIGIN));
+    let blob = git(dir.path(), &["rev-parse", &format!("HEAD:{ODD}")]);
+    for explicit_commit in [true, false] {
+        let mut repository = mapped(dir.path());
+        repository.browse = true;
+        if explicit_commit {
+            repository.blob = None;
+        } else {
+            repository.commit = None;
+        }
+        let (hub, _watch) = served_with_object_repositories(dir.path(), &[], &[repository]);
+        assert_eq!(
+            object_link(&hub, "commit", &head, &Capability::root()),
+            format!(
+                "{}/commit/{head}",
+                if explicit_commit {
+                    "https://code.example"
+                } else {
+                    REPO
+                }
+            ),
+        );
+        let expected = if explicit_commit {
+            format!("{REPO}/blob/{head}/{ODD_ON_GITHUB}")
+        } else {
+            format!("https://code.example/blob/{head}/{ODD_ON_GITHUB}?object={blob}&view=code")
+        };
+        assert_eq!(
+            object_link(&hub, "blob", &blob, &Capability::root()),
+            expected
+        );
+    }
 }
 
 #[test]
