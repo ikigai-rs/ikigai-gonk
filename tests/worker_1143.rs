@@ -12,7 +12,8 @@
 //! What it may do: read, claim, renew, comment (a hand-back included) and release. What it may
 //! not: close, reopen, file, label, edit, or write the ledger's graph raw. And since 0.8.0 a claim
 //! records the door's principal, so a second worker holding the same grant cannot release the
-//! first one's claim, under any holder name.
+//! first one's claim, under any holder name. Since `ikigai-ledger` 0.22.0 (ledger #3561) it also
+//! records its session's content-free summary on the item it handed back, and nothing more.
 
 use std::path::{Path, PathBuf};
 
@@ -151,6 +152,8 @@ fn client_add_worker_mints_the_published_worker_grant() {
             "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
             "urn:cap:ledger:claim:default",
             "urn:cap:ledger:comment:default",
+            // ikigai-ledger 0.22.0 (ledger #3561): a worker records its session's summary.
+            "urn:cap:ledger:session:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
             // Gonk's own line (ledger #2836): an enrolled worker claims its author.
             "urn:cap:store:read:graph:urn:collab:participants",
@@ -350,4 +353,131 @@ fn a_worker_claims_renews_comments_and_releases_but_cannot_close() {
     for said in ["PR is up", "done: PR 7"] {
         assert!(rendered.contains(said), "{said}: {item}");
     }
+}
+
+/// A session summary the ledger's closed `ledger:SessionSummaryShape` accepts.
+const SUMMARY: &str = r#"{
+  "session": "0b5e41aa",
+  "machineName": "lawnboy",
+  "harness": "claude",
+  "model": "claude-opus-5-5",
+  "exitStatus": 0,
+  "wallClockMs": 1830000,
+  "turns": 41,
+  "toolCalls": 118,
+  "inputTokens": 5120,
+  "cachedInputTokens": 880000,
+  "cacheCreationTokens": 64000,
+  "outputTokens": 21000
+}"#;
+
+/// ★ Ledger #3561: a worker records its session's summary on the item it handed back
+/// (`urn:cap:ledger:session:{L}`, in the ledger's published worker grant since 0.22.0), and the
+/// session line widens nothing else: `about`, close and label are still each a `Denied`.
+#[test]
+fn a_worker_records_its_session_summary_on_its_hand_back_and_nothing_more() {
+    let gonk = with_two_workers();
+    for title in ["Fix the widget", "Fix the gadget"] {
+        gonk.over_socket(request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &[("content", title)],
+        ))
+        .expect("append over the socket");
+    }
+    gonk.as_worker(
+        "w1",
+        request(
+            Verb::Sink,
+            "urn:iki:ledger:claim",
+            &[("item", "1"), ("content", "w1"), ("lease", "1h")],
+        ),
+    )
+    .expect("a worker claims");
+    gonk.as_worker(
+        "w1",
+        request(
+            Verb::Sink,
+            "urn:iki:ledger:comment",
+            &[
+                ("item", "1"),
+                ("content", "done: PR 7"),
+                ("handback", "true"),
+            ],
+        ),
+    )
+    .expect("a worker hands the item back");
+
+    // ── The summary, a request of its own after the hand-back.
+    let recorded = gonk
+        .as_worker(
+            "w1",
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:item:1:sessions",
+                &[("content", SUMMARY)],
+            ),
+        )
+        .expect("a worker records its session's summary on its hand-back");
+    assert!(text(&recorded).contains("0b5e41aa"), "{}", text(&recorded));
+    let read = gonk
+        .over_socket(request(
+            Verb::Source,
+            "urn:iki:ledger:item:1:sessions",
+            &[("as", "application/json")],
+        ))
+        .expect("the owner reads item 1's sessions");
+    assert!(text(&read).contains("0b5e41aa"), "{}", text(&read));
+    // An item with no hand-back has nothing to record a session on: a Conflict, not a Denied.
+    match gonk.as_worker(
+        "w1",
+        request(
+            Verb::Sink,
+            "urn:iki:ledger:item:2:sessions",
+            &[("content", SUMMARY)],
+        ),
+    ) {
+        Err(Error::Conflict(_)) => {}
+        other => panic!("a session on an item never handed back: {other:?}"),
+    }
+
+    // ── And nothing more than before: no about, no verdict, no relabel.
+    let why = denied(
+        gonk.as_worker(
+            "w1",
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:item:1:about",
+                &[("content", "urn:agents:session:0b5e41aa")],
+            ),
+        ),
+        "about",
+    );
+    assert!(why.contains("urn:cap:ledger:about:default"), "{why}");
+    let why = denied(
+        gonk.as_worker(
+            "w1",
+            request(Verb::Sink, "urn:iki:ledger:close", &[("item", "1")]),
+        ),
+        "close",
+    );
+    assert!(why.contains("urn:cap:ledger:close:default"), "{why}");
+    denied(
+        gonk.as_worker(
+            "w1",
+            request(
+                Verb::Sink,
+                "urn:iki:ledger:label",
+                &[("item", "1"), ("content", "urgent")],
+            ),
+        ),
+        "label",
+    );
+    let item = gonk.item(1);
+    assert_eq!(item["status"].as_str(), Some("open"), "{item}");
+    assert_eq!(item["awaiting"].as_str(), Some("dispatcher"), "{item}");
+    assert!(
+        item["about"].as_array().is_none_or(|a| a.is_empty()),
+        "{item}"
+    );
 }

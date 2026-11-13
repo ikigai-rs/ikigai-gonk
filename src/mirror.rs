@@ -26,7 +26,7 @@
 //!    handed back is withdrawn (taken back by us); a taken offer's item is claimed for its taker
 //!    for [`LEASE`]; an offer released by its taker is replaced by a new one.
 //!
-//! ★ **Nothing closes across.** The mirror holds `urn:cap:ledger:{read,claim,comment}:{ledger}`
+//! ★ **Nothing closes across.** The mirror holds `urn:cap:ledger:{read,claim,comment,session}:{ledger}`
 //! (the worker grant, [`crate::grants::Authority::Worker`]) plus `urn:cap:ledger:about:{ledger}`
 //! ([`capability`]), and never `close` or `write`: the taker's hand-back makes the item wait for
 //! its dispatcher, who checks the evidence and closes it.
