@@ -194,7 +194,8 @@ usage:
   ikigai-gonk client add <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
                      [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
                      [--alias <ledger>=<scheme>]... [--link-in <ledger>]... [--mirror-to <ledger>]...
-                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--cert <client.crt>] [--force] [--rotate]
+                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--scope <urn:cap:…>]...
+                     [--cert <client.crt>] [--force] [--rotate] [--print]
                      [--port N] [--quic-bind IP:PORT] [--config PATH]
                                    trust a QUIC client: mint its identity (or import the
                                    certificate it generated with --cert) into a bundle, and
@@ -203,7 +204,11 @@ usage:
                                    identity: --force replaces its grant, --rotate replaces its
                                    key pair (or, with --cert, its certificate) and unenrolls the
                                    old fingerprint. --port / --quic-bind name the server's, so
-                                   the printed --connect line names the right port
+                                   the printed --connect line names the right port.
+                                   --scope adds a scope no other flag names, in the same write,
+                                   as passkey invite's does. --print prints the scopes the flags
+                                   resolve to and, for an existing grant, what they would remove
+                                   and add; it mints no bundle and writes nothing
   ikigai-gonk feeds join|leave [--config PATH] [--config-home DIR] [--data-home DIR]
                                    join the public feeds of gonk.feeds.door (https://ikigai-rs.dev
                                    by default) with a certificate of this server's own, in
@@ -496,6 +501,13 @@ pub enum Command {
         scripts: Vec<(String, ScriptAuthority)>,
         /// `--nl draft`: draft queries with `urn:nl:sparql` (ledger #1138).
         nl_draft: bool,
+        /// `--scope <urn>`: scopes no other flag names, written into the same grant in the
+        /// same write ([`scope_spec`], ledger #3652, the invite's contract from #3401).
+        /// Repeats are kept once.
+        scopes: Vec<String>,
+        /// `--print`: print the scopes the flags resolve to and, for an existing grant, what
+        /// they would remove and add; mint no bundle and write nothing (ledger #3652).
+        print: bool,
         /// Replace an existing GRANT (or an enrollment under another grant). Never the key
         /// pair: that is `rotate`.
         force: bool,
@@ -1550,10 +1562,17 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
     let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
     let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
     let (mut ledger_graphs, mut scripts, mut nl_draft) = (Vec::new(), Vec::new(), false);
-    let mut across = Vec::new();
+    let (mut across, mut scopes, mut print) = (Vec::new(), Vec::new(), false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
+            "--scope" => {
+                let scope = scope_spec(&name, &value(&mut args, "--scope")?)?;
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+            "--print" => print = true,
             "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
             "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
             "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
@@ -1606,6 +1625,8 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         browse: browse_grant(role, roots)?,
         scripts,
         nl_draft,
+        scopes,
+        print,
         force,
         rotate,
         flags,
@@ -1929,8 +1950,9 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
     })
 }
 
-/// One `passkey invite --scope <urn>` (ledger #3401): a scope no other flag names, such as
-/// `urn:cap:exec:git` for ikigai-repo's code links.
+/// One `passkey invite --scope <urn>` (ledger #3401) or `client add --scope <urn>` (ledger
+/// #3652): a scope no other flag names, such as `urn:cap:exec:git` for ikigai-repo's code
+/// links.
 ///
 /// It must be a `urn:cap:` scope with no empty segment and nothing but visible ASCII, and
 /// it must pass [`crate::quic::grant_refusal`], the rule every grant in `grants.json` is
@@ -3719,12 +3741,18 @@ mod tests {
                 browse,
                 scripts,
                 nl_draft,
+                scopes,
+                print,
                 cert,
                 force,
                 rotate,
                 flags,
             } => {
                 assert_eq!(name, "laptop");
+                assert!(
+                    scopes.is_empty() && !print,
+                    "no --scope, no --print unless named"
+                );
                 assert!(scripts.is_empty(), "no script grant unless named");
                 assert!(!nl_draft, "no drafting unless named");
                 assert!(ledger_graphs.is_empty(), "no raw grant unless named");

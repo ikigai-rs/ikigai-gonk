@@ -68,6 +68,8 @@ fn main() {
             browse,
             scripts,
             nl_draft,
+            scopes: extra,
+            print,
             force,
             rotate,
             flags,
@@ -80,23 +82,28 @@ fn main() {
             } else {
                 Vec::new()
             };
-            client_add(
-                &name,
-                cert.as_deref(),
-                &scopes_for(
-                    &Subjects {
-                        ledgers: &ledgers,
-                        browse_graph,
-                        ledger_graphs: &ledger_graphs,
-                        across: &across,
-                        scripts: &scripts,
-                        scopes: &[],
-                    },
-                    &browse_scopes,
-                ),
-                Rewrite { force, rotate },
-                &flags,
-            )
+            let scopes = scopes_for(
+                &Subjects {
+                    ledgers: &ledgers,
+                    browse_graph,
+                    ledger_graphs: &ledger_graphs,
+                    across: &across,
+                    scripts: &scripts,
+                    scopes: &extra,
+                },
+                &browse_scopes,
+            );
+            if print {
+                client_add_print(&name, &scopes, force, &flags);
+            } else {
+                client_add(
+                    &name,
+                    cert.as_deref(),
+                    &scopes,
+                    Rewrite { force, rotate },
+                    &flags,
+                )
+            }
         }
         Command::ClientList { flags } => client_list(&flags),
         Command::ClientRemove {
@@ -1372,8 +1379,8 @@ struct Subjects<'a> {
     across: &'a [grants::Across],
     /// `--script <name>=<read|run|publish>` (ledger #939).
     scripts: &'a [(String, grants::ScriptAuthority)],
-    /// `passkey invite --scope <urn>`: scopes no other flag names, already checked by
-    /// [`config::scope_spec`] (ledger #3401).
+    /// `--scope <urn>` (`passkey invite`, ledger #3401; `client add`, ledger #3652): scopes no
+    /// other flag names, already checked by [`config::scope_spec`].
     scopes: &'a [String],
 }
 
@@ -1897,6 +1904,60 @@ fn client_add(
              nothing new; it connects as before:"
         );
         println!("    ikigai --connect quic://<gonk host>:{port} --cert-dir <its bundle>");
+    }
+}
+
+/// `ikigai-gonk client add … --print` (ledger #3652): the scopes the flags resolve to and,
+/// for an existing grant, what writing them would remove and add ([`quic::GrantChange::lines`]).
+/// It mints no bundle and writes nothing, so an operator can learn what a set of flags means
+/// without probing a scratch copy of the config home.
+///
+/// A scope no identity may hold, or a name that cannot be a grant, is refused as the write
+/// would refuse it. A change to an existing grant is described, not refused, with or without
+/// `--force`: saying what it would do is the point. The identity is not looked at, so
+/// `--cert` and `--rotate` change nothing here.
+fn client_add_print(name: &str, scopes: &[String], force: bool, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    println!("client add `{name}` --print: no bundle was minted and nothing was written");
+    if scopes.is_empty() {
+        println!("  no scopes: these flags name no grant, so the client would not be enrolled");
+        return;
+    }
+    // The same refusals the write makes before it mints anything, but never the rewrite
+    // refusal: `force` is passed as true so the change comes back to be described.
+    let change =
+        quic::enrol_refusal(&layout, name, None, scopes, true).unwrap_or_else(|e| fail(&e));
+    println!("  grant `{name}` would hold {} scope(s):", scopes.len());
+    for scope in scopes {
+        println!("    {scope}");
+    }
+    let grants_json = layout.grants_json();
+    if !change.existed {
+        println!(
+            "  grant `{name}` is not in {}: writing it adds it",
+            grants_json.display()
+        );
+    } else if !change.changes() {
+        println!(
+            "  grant `{name}` in {} already holds exactly these: writing it changes nothing",
+            grants_json.display()
+        );
+    } else {
+        println!(
+            "  grant `{name}` in {} holds a different set; writing it would{}:",
+            grants_json.display(),
+            if change.narrows() { " NARROW it" } else { "" }
+        );
+        println!("{}", change.lines());
+        println!(
+            "  {} — every identity enrolled under `{name}` holds the new list from its next call",
+            if force {
+                "--force would write it"
+            } else {
+                "refused without --force"
+            }
+        );
     }
 }
 
