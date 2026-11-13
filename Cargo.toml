@@ -297,7 +297,7 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # dated history as claimed. Answer shapes are unchanged. `"0.20.0"` was `<0.21.0`.
 # 0.21.1: Counts follow their own ledger graph thread on store 0.5 (ledger #3375).
 # `"0.21.1"` is `<0.22.0`.
-ikigai-ledger = "0.21.1"
+ikigai-ledger = "0.22.0"
 
 # The door line and its hash-chained segments (ledger #383): every request a door serves is one
 # `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under
