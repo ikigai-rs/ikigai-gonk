@@ -2388,16 +2388,20 @@ urn:cap:ledger:read:default
 urn:cap:store:read:graph:urn:iki:ledger:graph:default
 urn:cap:ledger:claim:default
 urn:cap:ledger:comment:default
+urn:cap:ledger:session:default
 urn:cap:store:write:graph:urn:iki:ledger:graph:default
+urn:cap:store:read:graph:urn:collab:participants
 ```
 
 It may read items, claim one (`sink urn:iki:ledger:claim item=N`), renew its lease
 (`renew=true`), comment (`comment handback=true` hands the item back to its dispatcher, and
-`next` stops offering it), and release its claim (`delete urn:iki:ledger:claim item=N`). It may
-not close or reopen an item (the dispatcher's verdict, `urn:cap:ledger:close:{L}` or `write`),
+`next` stops offering it), record its session's content-free summary on that hand-back
+(`sink urn:iki:ledger:item:N:sessions`, ikigai-ledger 0.22.0, ledger #3561), and release its
+claim (`delete urn:iki:ledger:claim item=N`). It may not add an `about` edge, close or reopen
+an item (the dispatcher's verdict, `urn:cap:ledger:close:{L}` or `write`),
 file, label, link, defer or edit one: each is a `Denied` naming the grant that would do. A claim
 is recorded with the client's principal (`urn:iki:host:gonk:client:<fingerprint>`), so another
-worker holding the same six lines cannot release it, whatever holder name it spells.
+worker holding the same seven lines cannot release it, whatever holder name it spells.
 ⚠ The store write token is raw quad authority on a bare kernel; behind this server's doors a raw
 `urn:iki:store:graph-update` against a ledger graph is refused without the `--ledger-graph`
 grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
@@ -2801,7 +2805,7 @@ every five minutes as a backstop:
   the item for the taker when it is open and free, and leaves the rest to the dispatcher.
 
 **The mirror holds the worker grant plus `about`, and never `close`**
-(`urn:cap:ledger:{read,claim,comment,about}:{ledger}` and the ledger graph's store tokens): the
+(`urn:cap:ledger:{read,claim,comment,session,about}:{ledger}` and the ledger graph's store tokens): the
 taker's hand-back makes the item wait, and the dispatcher checks the evidence and closes it.
 Nothing closes across.
 

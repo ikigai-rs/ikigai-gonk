@@ -26,7 +26,8 @@ use ikigai_ledger::Ledger;
 ///
 /// ★ **`Worker` sits beside the chain, between `Read` and `Write`** (ledger
 /// [#1143](http://localhost:1060/l/default/item/1143)): everything `Read` holds, plus taking,
-/// renewing and releasing a claim and commenting, and NOTHING else. `Write` holds everything
+/// renewing and releasing a claim, commenting, and (`ikigai-ledger` 0.22.0, ledger #3561)
+/// recording its session's summary on a hand-back, and NOTHING else. `Write` holds everything
 /// `Worker` does (the ledger's write grant covers claim and comment), so a worker is not a
 /// prefix of the next.
 ///
@@ -45,7 +46,8 @@ pub enum Authority {
     /// not the ledger, not either graph, and not a purge.
     Audit,
     /// `Read` (not `Audit`), plus `claim` (take, renew, release) and `comment` (a hand-back
-    /// included), through `ikigai-ledger` 0.7's per-verb grants. Not `close` or `reopen` (the dispatcher's verdict
+    /// included), through `ikigai-ledger` 0.7's per-verb grants, plus `session` (0.22.0): recording
+    /// a session's content-free summary on its hand-back at `item:{id}:sessions`. Not `close` or `reopen` (the dispatcher's verdict
     /// on the work), and not filing, linking, labeling, deferring or editing an item.
     Worker,
     /// …plus `append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, and
@@ -89,7 +91,8 @@ impl std::str::FromStr for Authority {
 ///         "urn:cap:store:read:graph:urn:collab:participants",
 ///     ]
 /// );
-/// // A WORKER: claim and comment, never close (ikigai-ledger's published worker grant).
+/// // A WORKER: claim, comment and record its session, never close or `about` (ikigai-ledger's
+/// // published worker grant; the session line since 0.22.0, ledger #3561).
 /// assert_eq!(
 ///     grants_for("acme", Authority::Worker).unwrap(),
 ///     [
@@ -97,6 +100,7 @@ impl std::str::FromStr for Authority {
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
 ///         "urn:cap:ledger:claim:acme",
 ///         "urn:cap:ledger:comment:acme",
+///         "urn:cap:ledger:session:acme",
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
 ///         "urn:cap:store:read:graph:urn:collab:participants",
 ///     ]
@@ -146,6 +150,7 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
     if authority == Authority::Worker {
         grants.push(ledger.cap_claim());
         grants.push(ledger.cap_comment());
+        grants.push(ledger.cap_session());
         grants.push(ikigai_store::cap_write_graph(&graph));
         grants.push(ikigai_store::cap_read_graph(crate::participants::GRAPH));
         return Ok(grants);
@@ -174,7 +179,8 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 
 /// Whether `held` already carries `token`, counting what one ledger grant implies about
 /// another: `urn:cap:ledger:write:{L}` covers `…:claim:{L}`, `…:comment:{L}` and `…:close:{L}`
-/// (`ikigai-ledger` 0.7.0), `…:about:{L}` (0.10.0) and `…:alias:{L}` (0.16.0), and never
+/// (`ikigai-ledger` 0.7.0), `…:about:{L}` (0.10.0), `…:alias:{L}` (0.16.0) and `…:session:{L}`
+/// (0.22.0), and never
 /// `…:link-in:{L}` (0.17.0: a link in decides what the target's `next` offers). Used to say a minted grant ADDS something to what a caller already
 /// holds, which a literal comparison would misjudge for a worker.
 ///
@@ -187,6 +193,7 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
 ///     .all(|t| implied_by(t, &write)));
 /// assert!(implied_by("urn:cap:ledger:about:acme", &write));
 /// assert!(implied_by("urn:cap:ledger:alias:acme", &write));
+/// assert!(implied_by("urn:cap:ledger:session:acme", &write));
 /// assert!(!implied_by("urn:cap:ledger:link-in:acme", &write));
 /// assert!(!implied_by("urn:cap:ledger:claim:other", &write));
 /// assert!(!implied_by("urn:cap:ledger:delete:acme", &write));
@@ -195,7 +202,7 @@ pub fn implied_by(token: &str, held: &[String]) -> bool {
     if held.iter().any(|h| h == token) {
         return true;
     }
-    ["claim", "comment", "close", "about", "alias"]
+    ["claim", "comment", "close", "about", "alias", "session"]
         .iter()
         .any(|verb| {
             token
