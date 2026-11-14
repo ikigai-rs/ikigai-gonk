@@ -41,8 +41,8 @@
 //! except, once a minute, for the windowed questions. ⚠ A write to ANY ledger costs the next load
 //! all of them, for the reason [`crate::dashboard`] gives.
 //!
-//! ★ **A panel lists the agents of the last [`ACTIVE_WINDOW_MS`]** (a claim in it, or an item in
-//! flight) and says in a sentence how many older ones the totals count. It stops at
+//! ★ **Past [`ALL_ROWS_UP_TO`] agents, a panel lists those of the last [`ACTIVE_WINDOW_MS`]** (a
+//! claim in it, or an item in flight) and says in a sentence how many older ones the totals count. It stops at
 //! [`PANEL_DEADLINE`] and draws what finished, with a sentence that the rest did not.
 //!
 //! ★ **A total is the question asked once, never the column's sum** (ledger #3178). The set's own
@@ -945,6 +945,9 @@ pub const PANEL_DEADLINE: Duration = Duration::from_secs(10);
 /// still count it, and a sentence says how many there are (ledger #3678).
 pub const ACTIVE_WINDOW_MS: u64 = 30 * DAY_MS;
 
+/// Up to this many holders, every one is a row, idle or not: the window only folds a long history.
+pub const ALL_ROWS_UP_TO: usize = 50;
+
 /// What the panel says when its deadline passed before every question was answered.
 const UNFINISHED: &str = "Some numbers did not finish in time and show as unavailable; the next \
                           refresh asks again.";
@@ -1094,7 +1097,9 @@ async fn rows(
     }
     // ★ A row is a holder with a claim in the window or an item in flight; the rest are counted
     // in the totals, and a sentence says how many.
-    let cutoff = now.map(|now| since_of(now, ACTIVE_WINDOW_MS));
+    let cutoff = now
+        .filter(|_| holders.len() > ALL_ROWS_UP_TO)
+        .map(|now| since_of(now, ACTIVE_WINDOW_MS));
     let in_flight = match &grouped_answers[0].1 {
         Some(Ok(numbers)) => Some(numbers),
         _ => None,
