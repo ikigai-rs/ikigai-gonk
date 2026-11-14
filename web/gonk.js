@@ -634,6 +634,55 @@
   document.addEventListener("htmx:sendError", (e) => {
     if (isGithub(e.detail && e.detail.elt)) hideGithub();
   });
+
+  // ------------------------- the ledger items about a file follow the region (ledger #3667)
+  //
+  // The browse shell draws the section for the file it opens on (src/file_items.rs), marked
+  // with that view in `data-view`. When a swap into #browse came from
+  // `/k?c=source urn:repo:{root}:file:…` for ANOTHER file, this asks the server for that
+  // file's section (`urn:iki:gonk:fragment:file-items:{view}`) and swaps it in; a swap to any
+  // view that is not a file hides it. The server reads the items, under the caller's own
+  // grant, and builds every link: this only relays which view is showing.
+  const FILE_VIEW = /^urn:repo:[^:]+:file:.+$/;
+
+  function isFileItems(elt) {
+    return !!(elt && elt.closest && elt.closest("#file-items"));
+  }
+
+  function hideFileItems() {
+    const s = $("file-items");
+    if (!s) return;
+    s.hidden = true;
+    s.textContent = "";
+    s.removeAttribute("aria-labelledby");
+    s.removeAttribute("data-view");
+  }
+
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    const section = $("file-items");
+    if (!target || target.id !== "browse" || !section) return;
+    const config = e.detail.requestConfig;
+    const view = viewOf(config && config.path);
+    if (!view) return;
+    if (!FILE_VIEW.test(view)) {
+      hideFileItems();
+      return;
+    }
+    if (section.getAttribute("data-view") === view) return;
+    htmx.ajax(
+      "GET",
+      "/k?c=" + encodeURIComponent("source urn:iki:gonk:fragment:file-items:" + view + " as=text/html"),
+      { target: "#file-items", swap: "outerHTML" },
+    );
+  });
+  document.addEventListener("htmx:responseError", (e) => {
+    if (isFileItems(e.detail && e.detail.elt)) hideFileItems();
+  });
+  document.addEventListener("htmx:sendError", (e) => {
+    if (isFileItems(e.detail && e.detail.elt)) hideFileItems();
+  });
+
   // A new link, a view that brought an annotation card in, and a moved selection.
   document.addEventListener("htmx:afterSettle", carryLines);
   window.addEventListener("hashchange", carryLines);
