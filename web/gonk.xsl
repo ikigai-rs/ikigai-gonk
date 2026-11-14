@@ -1437,6 +1437,7 @@
             <xsl:attribute name="hx-get"><xsl:value-of select="@start-url"/></xsl:attribute>
             <p class="note"><xsl:value-of select="@message"/></p>
           </div>
+          <xsl:apply-templates select="view:file-items"/>
         </xsl:when>
         <xsl:otherwise>
           <div id="browse" class="browse panel">
@@ -1451,6 +1452,48 @@
     </section>
   </xsl:template>
 
+
+  <!--
+    The open ledger items about the file the browse page opens on (ledger #3667,
+    src/file_items.rs): a heading, then a list, findings first by severity, each a link to its
+    item with its severity said in words; or a sentence when there are none. Only what the
+    caller's grant reads is here. web/gonk.js hides the section when the region moves to
+    another view, so it never sits beside another file.
+  -->
+  <xsl:template match="view:file-items">
+    <section id="file-items" class="file-items panel" aria-labelledby="file-items-heading">
+      <xsl:attribute name="data-file"><xsl:value-of select="@file"/></xsl:attribute>
+      <xsl:attribute name="data-browse-view"><xsl:value-of select="@view"/></xsl:attribute>
+      <h2 id="file-items-heading">Ledger items about this file</h2>
+      <xsl:choose>
+        <xsl:when test="view:file-item">
+          <p class="note">Open items in the ledgers you may read, findings first, most severe first.</p>
+          <ul class="file-items-list">
+            <xsl:for-each select="view:file-item">
+              <li>
+                <a>
+                  <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+                  <span class="file-item-number"><xsl:value-of select="@display"/></span>
+                  <xsl:text> </xsl:text>
+                  <xsl:value-of select="."/>
+                </a>
+                <xsl:if test="@severity">
+                  <xsl:text> </xsl:text>
+                  <span class="file-item-severity">(finding, <xsl:value-of select="@severity"/>)</span>
+                </xsl:if>
+              </li>
+            </xsl:for-each>
+          </ul>
+          <xsl:if test="@more != '0'">
+            <p class="note"><xsl:value-of select="@more"/> more open items about this file are not listed.</p>
+          </xsl:if>
+        </xsl:when>
+        <xsl:otherwise>
+          <p class="note">No open ledger item you may read is about this file.</p>
+        </xsl:otherwise>
+      </xsl:choose>
+    </section>
+  </xsl:template>
 
   <!--
     "On GitHub" (ledger #1907, src/github.rs): the same directory or file on GitHub, above

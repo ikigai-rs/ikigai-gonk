@@ -612,6 +612,18 @@
     p.textContent = "";
   }
 
+  // The items about the file the page opened on (ledger #3667, src/file_items.rs) belong to
+  // that file: when the region moves to another view, the section is hidden rather than left
+  // beside a different file, and shown again when the region comes back to its file.
+  document.addEventListener("htmx:afterSwap", (e) => {
+    const target = e.detail && e.detail.target;
+    const items = $("file-items");
+    if (!target || target.id !== "browse" || !items) return;
+    const config = e.detail.requestConfig;
+    const view = viewOf(config && config.path);
+    if (view) items.hidden = view !== items.getAttribute("data-browse-view");
+  });
+
   document.addEventListener("htmx:afterSwap", (e) => {
     const target = e.detail && e.detail.target;
     if (!target || target.id !== "browse" || !$("github")) return;
