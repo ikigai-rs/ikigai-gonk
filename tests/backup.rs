@@ -101,12 +101,14 @@ const HUB_IDS: [&str; 6] = [
     "sparql-describe",
 ];
 
-const BACKUP_IDS: [&str; 5] = [
+const BACKUP_IDS: [&str; 7] = [
     "gonk-backup",
     "gonk-backup-status",
     "gonk-backup-archive",
     "gonk-restore",
     "gonk-restore-scripts",
+    "gonk-backup-chunks",
+    "gonk-restore-chunks",
 ];
 
 const COMPRESS_IDS: [&str; 4] = [
@@ -447,6 +449,8 @@ fn the_backup_composition_conforms() {
             "a synthesized `into` would write a scripts directory wherever the walk's argument \
              happened to point; it is walked with real archives by `tests/script_backup_1175.rs`",
         )
+        .opt_out("gonk-backup-chunks", None, "chunked snapshots write directories; exercised by chunked endpoint tests")
+        .opt_out("gonk-restore-chunks", None, "restores need a real snapshot and isolated target; exercised by chunked endpoint tests")
         .fixture(Fixture::new("gonk-backup-archive", Verb::Source).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-archive", Verb::Exists).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-status", Verb::Source))
@@ -1875,4 +1879,108 @@ fn the_socket_door_hands_the_archive_on_as_the_same_body() {
     assert_eq!(replay.len_hint(), Some(size));
     let tail = replay.open_at(size - 3).expect("seekable");
     assert_eq!(drain(tail).unwrap(), b"\0\0\0");
+}
+
+/// The scalable format is reachable under the same private capability boundary as the
+/// single-file backup. Restoring never changes the live dataset, and status/startup phase
+/// recognize chunked snapshots as successful backups.
+#[test]
+fn chunked_endpoints_restore_verify_report_status_and_rotate() {
+    let rotation = tempfile::tempdir().unwrap();
+    let hub = hub(rotation.path(), 1);
+    seed(&hub);
+    let report = issue(&hub, Verb::Source, backup::BACKUP_CHUNKS, &[]);
+    let name = report
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("backup ")
+        .unwrap();
+    let status = issue(&hub, Verb::Source, backup::STATUS, &[]);
+    assert!(status.contains(name), "{status}");
+    assert!(!status.contains("NO BACKUP"), "{status}");
+    let json: serde_json::Value = serde_json::from_str(&issue(
+        &hub,
+        Verb::Source,
+        backup::STATUS,
+        &[("as", b"application/json")],
+    ))
+    .unwrap();
+    assert_eq!(json["newest"]["archive"], name);
+    assert_eq!(json["newest"]["quads"], 6);
+    assert!(json["newest"]["taken_at_ms"].as_u64().is_some());
+    assert_eq!(json["newest"]["graphs"]["urn:iki:ledger:graph:default"], 2);
+    assert!(backup::newest_taken_at_ms(rotation.path()).is_some());
+    let scratch = tempfile::tempdir().unwrap();
+    let into = scratch.path().join("restored");
+    let restored = issue(
+        &hub,
+        Verb::Sink,
+        backup::RESTORE_CHUNKS,
+        &[
+            ("content", name.as_bytes()),
+            ("into", into.to_str().unwrap().as_bytes()),
+        ],
+    );
+    assert!(restored.contains("restored 6 quads"), "{restored}");
+    assert_eq!(counts_on_disk(&into), seeded_counts());
+    assert!(
+        try_issue(
+            &hub,
+            Verb::Sink,
+            backup::RESTORE_CHUNKS,
+            &[
+                ("content", name.as_bytes()),
+                ("into", into.to_str().unwrap().as_bytes()),
+            ]
+        )
+        .is_err(),
+        "a second restore would merge"
+    );
+    // A denied caller cannot create directories or read snapshot metadata.
+    for (target, verb) in [
+        (backup::BACKUP_CHUNKS, Verb::Source),
+        (backup::RESTORE_CHUNKS, Verb::Sink),
+    ] {
+        assert!(matches!(
+            block_on(hub.issue(
+                Request::new(verb, Iri::parse(target).unwrap()),
+                &Capability::scoped(Vec::<String>::new())
+            )),
+            Err(Error::Denied(_))
+        ));
+    }
+    let second = issue(&hub, Verb::Source, backup::BACKUP_CHUNKS, &[]);
+    assert_ne!(second.lines().next(), report.lines().next());
+    assert!(
+        !rotation.path().join(name).exists(),
+        "keep=1 prunes the old chunked snapshot"
+    );
+    let newer = second
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("backup ")
+        .unwrap();
+    assert!(rotation.path().join(newer).is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(rotation.path().join(newer))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(rotation.path().join(newer).join("manifest.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
 }

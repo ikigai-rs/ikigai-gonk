@@ -110,6 +110,9 @@
 //! shows as a growing `since_last`; a job that fires and fails shows as
 //! `failures_in_a_row`. Neither reads as "fine".
 
+mod chunked;
+pub use chunked::{BACKUP_CHUNKS, RESTORE_CHUNKS};
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -339,9 +342,9 @@ pub struct Backups {
 }
 
 /// The backup family's space: [`BACKUP`], [`STATUS`], [`ARCHIVE`], [`RESTORE`] and
-/// [`RESTORE_SCRIPTS`].
+/// [`RESTORE_SCRIPTS`], plus [`BACKUP_CHUNKS`] and [`RESTORE_CHUNKS`].
 pub fn space(backups: Backups) -> EndpointSpace {
-    EndpointSpace::new()
+    chunked::bind(EndpointSpace::new(), backups.clone())
         .bind(
             Exact::new(BACKUP),
             TakeBackup {
@@ -780,12 +783,15 @@ fn is_own_archive(name: &str) -> bool {
 /// and the wrong answer here is "a backup was taken recently", which is the answer mtime
 /// gives on a freshly copied directory.
 pub fn newest_taken_at_ms(dir: &Path) -> Option<u64> {
-    archives(dir)
-        .last()?
-        .meta
-        .as_deref()
-        .and_then(|meta| field(meta, "taken_at_ms"))
-        .and_then(|value| value.parse().ok())
+    let single = archives(dir).last().and_then(|archive| {
+        archive
+            .meta
+            .as_deref()
+            .and_then(|meta| field(meta, "taken_at_ms"))
+            .and_then(|value| value.parse::<u64>().ok())
+    });
+    let chunks = chunked::newest(dir).map(|latest| latest.taken_at_ms);
+    single.into_iter().chain(chunks).max()
 }
 
 // ---------------------------------------------------------------- when the timer fires
@@ -1015,7 +1021,8 @@ impl Endpoint for TakeBackup {
                  archive (the bytes `urn:compress:gzip` writes for them), within the store's \
                  time and answer bounds for the caller, writes it into this server's backup \
                  directory with a sidecar recording the per-graph counts and both digests, \
-                 and prunes the rotation set oldest-first. Quad-shaped on purpose: a Turtle \
+                 and prunes the rotation set oldest-first. At the full answer ceilings, a size or \
+                 time refusal retries as bounded per-graph pieces (backup:chunks). Quad-shaped on purpose: a Turtle \
                  or N-Triples dump collapses every named graph into one and destroys the \
                  per-graph tenancy boundary while the quad count still matches.",
             )
@@ -1050,7 +1057,21 @@ impl TakeBackup {
         // archive is the same bytes either way (`tests/backup.rs` pins that); what is no longer
         // held is the dataset, two or three times over.
         let bounds = Bounds::for_caller(&self.backups.dataset, inv.capability);
-        let dump = dump_off_thread(self.backups.dataset.clone(), bounds).await?;
+        let dump = match dump_off_thread(self.backups.dataset.clone(), bounds).await {
+            Ok(dump) => dump,
+            Err(error)
+                if bounds.bytes == JOB_ANSWER_BYTES_MAX
+                    && bounds.rows == JOB_ANSWER_ROWS_MAX
+                    && (matches!(&error, Error::InvalidArgument { name, detail }
+                    if name == "query" && detail.contains("answer exceeds"))
+                        || matches!(&error, Error::Timeout(_))) =>
+            {
+                // A full-authority scheduled/owner backup has outgrown a single answer.
+                // Restart from a NEW consistent snapshot in bounded per-graph pieces.
+                return chunked::backup(&self.backups, inv).await;
+            }
+            Err(error) => return Err(error),
+        };
         let quads = dump.quads();
         let nquads_digest = dump.nquads_sha256.clone();
         let nquads_bytes = usize::try_from(dump.nquads_bytes).unwrap_or(usize::MAX);
@@ -1402,30 +1423,45 @@ impl Status {
                 settings.keep
             )),
         }
-        match found.last() {
-            None => out
-                .push_str("  ⚠ NO BACKUP HAS EVER BEEN TAKEN — there is nothing here to restore\n"),
-            Some(newest) => {
-                out.push_str(&format!("  newest    {}\n", newest.name));
-                match &newest.meta {
-                    None => out.push_str(
-                        "    ⚠ no sidecar: this archive was written but its counts were not \
+        let chunks = chunked::newest(&settings.dir);
+        let single_time = found
+            .last()
+            .and_then(|a| a.meta.as_deref())
+            .and_then(|m| field(m, "taken_at_ms"))
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(latest) =
+            chunks.filter(|latest| single_time.is_none_or(|s| latest.taken_at_ms >= s))
+        {
+            out.push_str(&format!(
+                "  newest    {} (per-graph pieces)\n{}",
+                latest.name, latest.text
+            ));
+        } else {
+            match found.last() {
+                None => out.push_str(
+                    "  ⚠ NO BACKUP HAS EVER BEEN TAKEN — there is nothing here to restore\n",
+                ),
+                Some(newest) => {
+                    out.push_str(&format!("  newest    {}\n", newest.name));
+                    match &newest.meta {
+                        None => out.push_str(
+                            "    ⚠ no sidecar: this archive was written but its counts were not \
                          recorded. Treat it as unverified.\n",
-                    ),
-                    Some(meta) => {
-                        for key in [
-                            "taken_at",
-                            "quads",
-                            "nquads_bytes",
-                            "archive_bytes",
-                            "nquads_sha256",
-                        ] {
-                            if let Some(value) = field(meta, key) {
-                                out.push_str(&format!("    {key:<14} {value}\n"));
+                        ),
+                        Some(meta) => {
+                            for key in [
+                                "taken_at",
+                                "quads",
+                                "nquads_bytes",
+                                "archive_bytes",
+                                "nquads_sha256",
+                            ] {
+                                if let Some(value) = field(meta, key) {
+                                    out.push_str(&format!("    {key:<14} {value}\n"));
+                                }
                             }
-                        }
-                        out.push_str(&format!("    graphs         {}\n", graph_line(meta)));
-                        match field(meta, "scripts_archive") {
+                            out.push_str(&format!("    graphs         {}\n", graph_line(meta)));
+                            match field(meta, "scripts_archive") {
                             Some(scripts) => out.push_str(&format!(
                                 "    scripts        {scripts}: {} script(s), {} file(s)\n",
                                 field(meta, "scripts_names").unwrap_or_default(),
@@ -1435,6 +1471,7 @@ impl Status {
                                 "    scripts        not in this backup (no script family bound, \
                                  or taken before ledger #1175)\n",
                             ),
+                        }
                         }
                     }
                 }
@@ -1519,10 +1556,16 @@ impl Status {
     fn json(&self) -> String {
         let settings = &self.backups.settings;
         let found = archives(&settings.dir);
-        let newest = found
+        let mut newest = found
             .last()
             .and_then(|a| a.meta.clone())
             .unwrap_or_else(|| "null".to_string());
+        let single_time = field(&newest, "taken_at_ms").and_then(|v| v.parse::<u64>().ok());
+        if let Some(latest) = chunked::newest(&settings.dir)
+            .filter(|latest| single_time.is_none_or(|s| latest.taken_at_ms >= s))
+        {
+            newest = latest.json.to_string();
+        }
         let rotation: Vec<String> = found
             .iter()
             .map(|a| format!("{{\"name\":{},\"bytes\":{}}}", quote(&a.name), a.bytes))
