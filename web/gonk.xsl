@@ -1474,11 +1474,11 @@
                 <a>
                   <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
                   <span class="file-item-number"><xsl:value-of select="@display"/></span>
-                  <xsl:text> </xsl:text>
+                  <xsl:value-of select="' '"/>
                   <xsl:value-of select="."/>
                 </a>
                 <xsl:if test="@severity">
-                  <xsl:text> </xsl:text>
+                  <xsl:value-of select="' '"/>
                   <span class="file-item-severity">(finding, <xsl:value-of select="@severity"/>)</span>
                 </xsl:if>
               </li>

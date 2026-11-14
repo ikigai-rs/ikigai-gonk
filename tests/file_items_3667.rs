@@ -177,7 +177,14 @@ fn a_file_with_findings_lists_them_in_severity_order() {
             "{word}: {page}"
         );
     }
-    assert!(page.contains("A critical finding"), "{page}");
+    // The spaces survive xrust (ledger #1693): the number, the title and the severity are words.
+    assert!(
+        page.contains(&format!(
+            "<span class='file-item-number'>#{critical}</span> A critical finding</a> \
+             <span class='file-item-severity'>(finding, critical)</span>"
+        )),
+        "{page}"
+    );
     assert!(
         !page.contains(&format!("href='/l/default/item/{closed}'")),
         "a closed item is not listed: {page}"
