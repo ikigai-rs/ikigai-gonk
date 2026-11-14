@@ -99,12 +99,15 @@ const LEDGER_IDS: [&str; 30] = [
     "ledger-sessions",
 ];
 
-/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Six:
+/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Eight:
 /// the page renderer's chunk transform and a layer entry's Markdown, bound where the process's
 /// one cache is (`ikigai_gonk::render::rendered_chunks` says why), which read nothing and are
 /// gated by nothing; and the four `urn:sparql:*` forms (`ikigai_gonk::sparql`, ledger #836), each one
-/// hop onto the store's graph-scoped twin under the caller's capability.
-const HUB_IDS: [&str; 6] = [
+/// hop onto the store's graph-scoped twin under the caller's capability; and the dispatch
+/// view and acknowledgment, whose cursor facts live in the caller's ledger graph.
+const HUB_IDS: [&str; 8] = [
+    "gonk-dispatch",
+    "gonk-dispatch-ack",
     "gonk-render",
     "gonk-render-markdown",
     "sparql-select",
@@ -180,6 +183,38 @@ fn fixtures() -> Suite {
     let suite = HUB_IDS
         .iter()
         .fold(Suite::new(), |suite, id| suite.own(*id));
+    let suite = suite
+        .fixture(
+            Fixture::new("gonk-dispatch", Verb::Source)
+                .binding("ledger", "default")
+                .capability(
+                    Capability::scoped(
+                        ikigai_gonk::grants::grants_for(
+                            "default",
+                            ikigai_gonk::grants::Authority::Write,
+                        )
+                        .unwrap(),
+                    )
+                    .with_principal("urn:test:dispatcher")
+                    .unwrap(),
+                ),
+        )
+        .fixture(
+            Fixture::new("gonk-dispatch-ack", Verb::Sink)
+                .binding("ledger", "default")
+                .capability(
+                    Capability::scoped(
+                        ikigai_gonk::grants::grants_for(
+                            "default",
+                            ikigai_gonk::grants::Authority::Write,
+                        )
+                        .unwrap(),
+                    )
+                    .with_principal("urn:test:dispatcher")
+                    .unwrap(),
+                )
+                .arg("content", "[]"),
+        );
     SPARQL_FIXTURES
         .iter()
         .fold(suite, |suite, (id, query)| {
@@ -334,6 +369,7 @@ fn a_door_kernel_conforms_like_the_hub() {
     seed(&door);
     let report = HUB_IDS
         .iter()
+        .filter(|id| !id.starts_with("gonk-dispatch"))
         .fold(suite, |suite, id| {
             suite.opt_out_check(
                 *id,
@@ -482,6 +518,7 @@ fn the_http_door_conforms() {
     let suite = WEB_IDS.iter().fold(suite, |suite, id| suite.own(*id));
     let report = HUB_IDS
         .iter()
+        .filter(|id| !id.starts_with("gonk-dispatch"))
         .fold(suite, |suite, id| {
             suite.opt_out_check(
                 *id,

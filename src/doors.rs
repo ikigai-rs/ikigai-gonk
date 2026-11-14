@@ -1302,6 +1302,11 @@ fn routes() -> Vec<Route> {
             crate::dashboard::AGENTS_TEMPLATE,
         ),
         route(crate::dashboard::NOTE_PATH, crate::dashboard::NOTE_IRI),
+        route("/l/{ledger}/dispatch", "urn:iki:gonk:dispatch:{ledger}"),
+        route(
+            "/l/{ledger}/dispatch/ack",
+            "urn:iki:gonk:dispatch:{ledger}:ack",
+        ),
         route("/l/{ledger}", "urn:iki:gonk:page:ledger:{ledger}"),
         route("/l/{ledger}/items", "urn:iki:gonk:fragment:items:{ledger}"),
         route(

@@ -611,6 +611,7 @@ there.
 | `/dashboard/cache` · `/dashboard/system` · `/dashboard/panel/{cache,system}` · `/dashboard/part/{part}` | `urn:iki:gonk:page:dashboard:{cache,system}` · `urn:iki:gonk:fragment:dashboard-panel:{cache,system}` · `urn:iki:gonk:fragment:dashboard-part:{part}` | the operator's two tabs, their panels and each part as polled; each answers `403` without its capability |
 | `/l/{ledger}` · `/l/{ledger}/items` | `urn:iki:gonk:page:ledger:{ledger}` · `…:fragment:items:{ledger}` | a ledger, page and fragment, with the chart of its counts under the status line |
 | `/l/{ledger}/item/{id}` · `…/card` | `urn:iki:gonk:page:item:{ledger}:{id}` · `…:fragment:item:…` | one item |
+| `/l/{ledger}/dispatch` · `POST /l/{ledger}/dispatch/ack` | `urn:iki:gonk:dispatch:{ledger}` · `…:{ledger}:ack` | unread dispatcher events and explicit acknowledgment, text or JSON; `?item=12` scopes either resource to one item |
 | `/l/{ledger}/doctor` | `urn:iki:gonk:page:doctor:{ledger}` | the ledger's doctor: every problem and its remedy, read-only |
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
 | `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | the editor page and its results; with a results `Accept`, the SPARQL 1.1 Protocol (GET, and POST as a read) over `urn:sparql:*` |
@@ -1603,7 +1604,50 @@ Comments are read inside the item they belong to — `GET /iki/ledger/item/244` 
 urn:iki:ledger:item:244`) carries them, in Turtle too — and written through the one comment
 resource the ledger binds, `Sink urn:iki:ledger:comment`. A listing face across items would be
 [`ikigai-ledger`](https://github.com/ikigai-rs/ikigai-ledger)'s to add; this server binds the
-ledger's resources and hand-writes none of its own over them, so it does not paper over the gap.
+ledger's resources unchanged. The dispatcher view below composes comments and recorded events
+into a separate unread feed.
+
+### What changed since the dispatcher last looked (#3712)
+
+`Source urn:iki:gonk:dispatch:default` returns unread events across the default ledger;
+`item=12` scopes it to one item. Over HTTP these are `GET /l/default/dispatch` and
+`GET /l/default/dispatch?item=12`. Both text (the default) and JSON are available through every door: request
+`as=application/json` on the socket or QUIC, or `Accept: application/json` on HTTP. The
+dashboard can consume the JSON face.
+
+The reader is the authenticated capability's principal. Only the root socket caller may
+supply an arbitrary `reader=dispatcher-name`, which root must supply because it has no
+principal. A different principal cannot select that reader's cursor through this API.
+The cursor is a set of acknowledged event IDs, stored as ledger facts in the ledger's own
+graph, with separate cursors for each reader and scope. It survives restarts and follows the
+ledger's backup. It is not browser storage. Like other ledger facts it is visible to readers
+of that graph; this is a reading position, not private activity tracking.
+
+Hand-backs, recorded rejections of hand-backs, takeovers, and blocking-link changes come
+first. Routine claim events are folded into `folded.claims`. `attention` lists currently
+expired leases and open incoming blockers, including cross-ledger mirrors already held by
+this ledger; it never looks up a target in another ledger. These conditions remain visible
+after acknowledgment until they stop holding. The ledger does not record renewals or
+transport refusals as events: `folded.renewals` is `null`, not zero, and both faces say why.
+A creation row carries the item's current metadata; edit events name changed fields, and
+the existing item resource supplies their current values and full context.
+
+Reading does not advance the cursor. After processing a response, send its `acknowledge`
+array unchanged as `content` to `Sink urn:iki:gonk:dispatch:default:ack`, with the same
+`item` and, for root, `reader`. For HTTP, POST the JSON array itself as the body to
+`/l/default/dispatch/ack?item=12` under the signed-in writing identity. Acknowledgment needs the
+ledger's write token and its graph write token in addition to its two read grants.
+Only supplied IDs belonging to that scope are recorded; deleted or unrelated IDs are ignored.
+Repeated and concurrent acknowledgments are safe. A new event arriving while the response
+is being processed stays unread, including an imported event dated before earlier reads.
+
+`limit` is 1–500 events (default 100), counted before folding. `more=true` means acknowledge
+this batch and read again for the next one. `acknowledge` includes the folded claims, so
+those do not return forever. Current conditions have a separate 500-row bound and
+`more_attention` flag. All responses are live reads, and `budget` lowers the store query
+budget as on the other store-backed resources. Cursor storage grows with acknowledged
+IDs and readers; this deliberately avoids treating an authored timestamp as a reliable
+arrival order. Nothing acknowledges automatically or closes, releases, or changes an item.
 
 ## Filing roborev findings
 

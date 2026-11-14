@@ -48,6 +48,7 @@ pub mod budget;
 pub mod checkout;
 pub mod config;
 pub mod dashboard;
+pub mod dispatch;
 pub mod doors;
 pub mod egress;
 pub mod face;
@@ -173,6 +174,8 @@ pub mod spaces {
     pub const RENDER: &str = "urn:iki:gonk:space:render";
     /// The backup family ([`backup::space`](crate::backup::space)).
     pub const BACKUP: &str = "urn:iki:gonk:space:backup";
+    /// The compact per-reader dispatcher view and acknowledgment.
+    pub const DISPATCH: &str = "urn:iki:gonk:space:dispatch";
     /// The `urn:sparql:*` query face over the store ([`sparql::space`](crate::sparql::space)).
     pub const SPARQL: &str = "urn:iki:gonk:space:sparql";
     /// The repository browse family AS GONK COMPOSES IT — `ikigai-browse`'s doors with
@@ -418,6 +421,7 @@ pub fn compose_serving_with_lifecycles(
     // Aliases are a deployment-wide authority with grants of their own, beside the ledgers
     // (`crate::grants::alias_grants`).
     spaces.push(Arc::new(ikigai_ledger::alias::space()));
+    spaces.push(Arc::new(dispatch::space()));
     // ★ Scripts as resources (ledger #939, [`crate::script`]): `urn:script:*`, the plan doors
     // a plan script reaches and the validator they compose — every door reaches the first two,
     // and none reaches the validator (`crate::doors`). After the store, the ledger and
