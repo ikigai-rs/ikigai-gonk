@@ -456,8 +456,12 @@ fn restore(from: &Path, into: &Path) -> Result<String> {
     let staging = private_staging(into)?;
     let store =
         ikigai_store::Store::open(staging.path()).map_err(|e| Error::Endpoint(e.to_string()))?;
+    // Publication is atomic at the staging-directory boundary. Ingest batches as they
+    // arrive so RocksDB can compact them: retaining every SST until one final commit
+    // exhausts file descriptors on large snapshots (reproduced at 10 million quads).
     let mut loader = store
         .bulk_loader()
+        .without_atomicity()
         .with_num_threads(2)
         .with_max_memory_size_in_megabytes(128);
     for (index, piece) in manifest.pieces.iter().enumerate() {
