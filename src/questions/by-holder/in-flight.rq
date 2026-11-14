@@ -1,0 +1,13 @@
+# in-flight.rq asked once of every holder, each row naming its holder (ledger #3678).
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?holder ?number ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:claimedBy ?signed ;
+        ledger:claimedAt ?claimed ;
+        ledger:number ?number ;
+        dcterms:title ?title .
+  BIND(ROW(?signed, ?claimed) AS ?holder)
+}
+ORDER BY ?holder ?number

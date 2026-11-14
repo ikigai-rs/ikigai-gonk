@@ -480,22 +480,38 @@ fn a_takeover_counts_as_released_for_the_holder_it_replaced() {
 
 /// One holder's hand-backs at the given minutes after their claims, as raw history.
 fn seed_times(server: &Server, ledger: &str, holder: &str, minutes: &[u32]) {
+    let base = recent_base();
     let mut triples = String::new();
     for (n, minutes) in minutes.iter().enumerate() {
         let item = format!("urn:sample:{holder}:{n}");
-        let (days, hours, mins) = (minutes / 1440, minutes % 1440 / 60, minutes % 60);
         triples.push_str(&format!(
             "<{item}> a ledger:Item ; ledger:number {number} ; dcterms:title \"t\" .\n\
              <{item}:claim> a ledger:ClaimEvent ; ledger:onItem <{item}> ; \
              ledger:claimedBy \"{holder}\" ; \
-             dcterms:created \"2026-01-01T00:00:00Z\"^^xsd:dateTime .\n\
+             dcterms:created \"{claimed}\"^^xsd:dateTime .\n\
              <{item}:back> ledger:onItem <{item}> ; ledger:handedBackBy \"{holder}\" ; \
-             dcterms:created \"2026-01-{day:02}T{hours:02}:{mins:02}:00Z\"^^xsd:dateTime .\n",
+             dcterms:created \"{back}\"^^xsd:dateTime .\n",
             number = n + 100,
-            day = days + 1,
+            claimed = iso(base),
+            back = iso(base + u64::from(*minutes) * 60_000),
         ));
     }
     server.update(ledger, &format!("INSERT {{ {triples} }} WHERE {{}}"));
+}
+
+/// The start of the day ten days ago: a history recent enough that its holders are rows of their
+/// own (ledger #3678), and old enough to stay out of the windows of a day and a week.
+fn recent_base() -> u64 {
+    const DAY: u64 = 86_400_000;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    (now - 10 * DAY) / DAY * DAY
+}
+
+fn iso(ms: u64) -> String {
+    ikigai_ledger::sparql::iso8601(ms)
 }
 
 /// ⚠ Durations order by their length, and their text does not: `P2D` sorts before `PT1H`.
@@ -755,15 +771,15 @@ fn a_question_is_a_resource_and_the_answer_is_the_panels_number() {
 fn every_question_answers_for_a_busy_agent() {
     const HANDBACKS: usize = 1500;
     let server = Server::readers(&["default"], &["default"]);
+    let base = recent_base();
     for batch in 0..HANDBACKS / 150 {
         let mut triples = String::new();
         for n in 0..150 {
             let number = batch * 150 + n + 1;
             let item = format!("urn:sample:busy:{number}");
             let at = format!(
-                "\"2026-01-02T{:02}:{:02}:00Z\"^^xsd:dateTime",
-                n / 60,
-                n % 60
+                "\"{}\"^^xsd:dateTime",
+                iso(base + 86_400_000 + n as u64 * 60_000)
             );
             triples.push_str(&format!(
                 "<{item}> a ledger:Item ; ledger:number {number} ; dcterms:title \"t\" ; \
@@ -771,12 +787,13 @@ fn every_question_answers_for_a_busy_agent() {
                  ledger:closedAt {at} .\n\
                  <{item}:claim> a ledger:ClaimEvent ; ledger:onItem <{item}> ; \
                  ledger:claimedBy \"busy\" ; \
-                 dcterms:created \"2026-01-01T00:00:00Z\"^^xsd:dateTime .\n\
+                 dcterms:created \"{claimed}\"^^xsd:dateTime .\n\
                  <{item}:back> ledger:onItem <{item}> ; ledger:handedBackBy \"busy\" ; \
                  dcterms:created {at} .\n\
                  <{item}:release> a ledger:ReleaseEvent ; ledger:onItem <{item}> ; \
                  ledger:claimedBy \"busy\" ; ledger:releaseReason \"released\" ; \
-                 dcterms:created {at} .\n"
+                 dcterms:created {at} .\n",
+                claimed = iso(base),
             ));
         }
         server.update("default", &format!("INSERT {{ {triples} }} WHERE {{}}"));
@@ -851,11 +868,12 @@ fn a_load_between_writes_asks_the_store_nothing() {
         }
     };
     // ★ Each tab asks its own questions and none of the other's (ledger #2971). Per ledger, the
-    // Ledgers tab: the chart's counts. The Agents tab: its agents, seven questions per agent, and
-    // the seven again across all of them for the totals row (ledger #3178).
+    // Ledgers tab: the chart's counts. The Agents tab: its agents, the seven questions once grouped
+    // by holder (ledger #3678), and the seven again across all of them for the totals row (ledger
+    // #3178): the same whatever `AGENTS` is.
     let tabs = [
         ("urn:iki:gonk:page:dashboard:ledgers", 1),
-        ("urn:iki:gonk:page:dashboard:agents", 1 + 7 * (AGENTS + 1)),
+        ("urn:iki:gonk:page:dashboard:agents", 1 + 7 + 7),
     ];
     // Per-graph freshness keeps other ledgers warm: only this ledger's answers are read.
     for (page, own) in tabs {
@@ -1005,4 +1023,80 @@ fn the_polled_table_updates_the_totals() {
     let totals = totals_in(&after, "default");
     assert_eq!(totals[0].0, "2", "{totals:?}");
     assert_eq!(totals[1].0, "2", "{totals:?}");
+}
+
+/// `count` claims of item 1 in `ledger`, each by a holder of its own named `{prefix}-{n}`, at `at`:
+/// a long history imported at once, as only a raw update can write it.
+fn synthetic_holders(server: &Server, ledger: &str, prefix: &str, count: usize, at: &str) {
+    let mut triples = String::new();
+    for n in 0..count {
+        triples.push_str(&format!(
+            "<urn:test:claim:{prefix}:{n}> a ledger:ClaimEvent ; ledger:claimedBy \"{prefix}-{n}\" ; \
+             ledger:onItem ?item ; dcterms:created \"{at}\"^^xsd:dateTime .\n"
+        ));
+    }
+    server.update(
+        ledger,
+        &format!("INSERT {{ {triples} }} WHERE {{ ?item ledger:number 1 }}"),
+    );
+}
+
+/// ★ The reproduction of ledger #3678: the Agents panel asked seven questions per holder that ever
+/// took a claim, so a ledger with a long history cost tens of thousands of queries. Its cost is now
+/// the same for three holders or three thousand, and the idle ones are folded into the totals with
+/// a sentence saying how many.
+#[test]
+fn a_panel_costs_the_same_whatever_the_number_of_holders() {
+    let server = Server::readers(&["default"], &["default"]);
+    for _ in 0..3 {
+        server.file("default", "sample item");
+    }
+    let names = vec!["default".to_string()];
+    let reader = Capability::scoped(grants_for_all(&names, Authority::Read).unwrap());
+    let page = "urn:iki:gonk:page:dashboard:agents";
+    let cold = |server: &Server| {
+        // A write first, so every question is asked of the store and none read from its cache.
+        server.update(
+            "default",
+            "INSERT { <urn:test:poke> <urn:test:at> \"x\" } WHERE {}",
+        );
+        one_load(server, page, &reader).0
+    };
+
+    for n in 0..3 {
+        server.claim("default", &(n + 1).to_string(), &format!("agent-{n}"));
+    }
+    let few = cold(&server);
+
+    // Two thousand holders from long ago, one thousand recent, as an imported history has them.
+    synthetic_holders(&server, "default", "past", 2_000, "2020-01-01T00:00:00Z");
+    let now = ikigai_ledger::sparql::iso8601(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    );
+    synthetic_holders(&server, "default", "recent", 1_000, &now);
+    let many = cold(&server);
+    assert_eq!(few, 1 + 7 + 7, "three holders");
+    assert_eq!(
+        many, few,
+        "three thousand and three holders cost what three did"
+    );
+
+    let body = server.ok("/dashboard/agents");
+    let panel = agents_panel(&body, "default").expect("a panel");
+    assert!(
+        panel.contains("2000 more agents, with no claim in the last 30 days and nothing in flight"),
+        "{panel}"
+    );
+    assert!(!panel.contains("past-1999"), "an idle holder has no row");
+    assert!(
+        panel.contains(">recent-999</th>"),
+        "a recent holder has a row"
+    );
+    assert!(panel.contains(">agent-2</th>"), "{panel}");
+    // The totals still count every holder: 3,003 claims, of three items.
+    let totals = totals_in(&body, "default");
+    assert_eq!(totals[1].0, "3", "{totals:?}");
 }

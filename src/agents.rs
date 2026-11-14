@@ -33,15 +33,17 @@
 //! for every load in that minute, and a load between writes reads from the cache. A window's
 //! number can be up to a minute behind the clock, and the page says the minute.
 //!
-//! ★ **What one page costs**, with `A` agents across `L` ledgers: `L` queries for the agents and
-//! `7A` for the answers. Each answer is cached under the store's write threads, so a load between
-//! writes asks the store nothing except, once a minute, for the three windowed questions (`3A`).
-//! ⚠ A write to ANY ledger costs the next load all of them, for the reason [`crate::dashboard`]
-//! gives: a store read rests on the store's write thread, not on one ledger's. A panel's transform
-//! is keyed on its document, which holds the headers and not the rows, so it reruns only when a
-//! ledger starts or stops having agents (`tests/agents_2820.rs`). Measured on a release build with
-//! one ledger of 6,000 items, ten agents with 300 hand-backs each and one with 3,000: 109 ms between
-//! writes and 1.1 s after one, and no question over 60 ms, for the busiest agent.
+//! ★ **What one page costs**, with `L` ledgers: `15L` store queries, whatever the number of agents
+//! (ledger #3678): per ledger the agents, each of the seven questions once grouped by holder
+//! ([`grouped`]), and the seven again for the totals. A row's link still asks its own holder's text
+//! ([`filled`]), which `urn:iki:gonk:agent:holder:{holder}` serves for one agent's page. Each answer
+//! is cached under the store's write threads, so a load between writes asks the store nothing
+//! except, once a minute, for the windowed questions. ⚠ A write to ANY ledger costs the next load
+//! all of them, for the reason [`crate::dashboard`] gives.
+//!
+//! ★ **A panel lists the agents of the last [`ACTIVE_WINDOW_MS`]** (a claim in it, or an item in
+//! flight) and says in a sentence how many older ones the totals count. It stops at
+//! [`PANEL_DEADLINE`] and draws what finished, with a sentence that the rest did not.
 //!
 //! ★ **A total is the question asked once, never the column's sum** (ledger #3178). The set's own
 //! resource, `urn:iki:gonk:agent:question:name:{name}`, is the stored text with `?holder` left a
@@ -69,7 +71,12 @@ use ikigai_core::{
 use ikigai_fn::html::{attr, html_text, url_segment};
 use ikigai_ledger::Ledger;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use crate::dashboard::{agents_path, drawn_chart, live, of_one_ledger, Chart, ROWS_SLOT};
 use crate::holders::HolderAliases;
@@ -140,6 +147,9 @@ pub struct Question {
     /// Its text asked of every holder at once, where leaving `?holder` free in [`Question::text`]
     /// would cost too much ([`across`]); `None` asks that text with `?holder` free.
     pub total: Option<&'static str>,
+    /// Its text asked once of every holder, each row naming its `?holder`, so a panel asks it once
+    /// whatever the number of holders ([`grouped`], ledger #3678).
+    pub by_holder: &'static str,
 }
 
 /// Every question, in the panel's order.
@@ -152,6 +162,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: None,
         reads: Reads::Rows,
         total: None,
+        by_holder: include_str!("questions/by-holder/in-flight.rq"),
     },
     Question {
         name: "worked-on",
@@ -161,6 +172,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: None,
         reads: Reads::Rows,
         total: None,
+        by_holder: include_str!("questions/by-holder/worked-on.rq"),
     },
     Question {
         name: "completed-24h",
@@ -170,6 +182,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: Some(DAY_MS),
         reads: Reads::Rows,
         total: None,
+        by_holder: include_str!("questions/by-holder/completed-24h.rq"),
     },
     Question {
         name: "completed-7d",
@@ -179,6 +192,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: Some(7 * DAY_MS),
         reads: Reads::Rows,
         total: None,
+        by_holder: include_str!("questions/by-holder/completed-7d.rq"),
     },
     Question {
         name: "handed-back-24h",
@@ -188,6 +202,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: Some(DAY_MS),
         reads: Reads::Rows,
         total: None,
+        by_holder: include_str!("questions/by-holder/handed-back-24h.rq"),
     },
     Question {
         name: "released",
@@ -197,6 +212,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: None,
         reads: Reads::Rows,
         total: Some(include_str!("questions/released-all.rq")),
+        by_holder: include_str!("questions/by-holder/released.rq"),
     },
     Question {
         name: "median-claim-to-handback",
@@ -206,6 +222,7 @@ pub const QUESTIONS: [Question; 7] = [
         window_ms: None,
         reads: Reads::Median,
         total: Some(include_str!("questions/median-claim-to-handback-all.rq")),
+        by_holder: include_str!("questions/by-holder/median-claim-to-handback.rq"),
     },
 ];
 
@@ -255,6 +272,33 @@ pub fn filled(
 /// `?holder` first, every release to every claim of that holder, past the store's budget.
 pub fn across(question: &Question, since: Option<&str>) -> String {
     windowed(question.total.unwrap_or(question.text), since)
+}
+
+/// `question` asked once of every holder, each row naming its row's holder: [`Question::by_holder`]
+/// with the window written in and each `ROW(?signed, ?at)` the rules' row for that signature at that
+/// time, or the signature itself when there are no rules.
+///
+/// ★ **One query per question, whatever the number of holders** (ledger #3678). A holder's number
+/// is the count of its rows here (or the middle of them), the same rows [`filled`] asks for it, so
+/// its link still lists what it counted.
+pub fn grouped(question: &Question, since: Option<&str>, aliases: &HolderAliases) -> String {
+    let text = windowed(question.by_holder, since);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("ROW(") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + "ROW(".len()..];
+        let end = after
+            .find(')')
+            .unwrap_or_else(|| panic!("a ROW( with no end in: {after}"));
+        let (signed, time) = after[..end]
+            .split_once(',')
+            .unwrap_or_else(|| panic!("a ROW( without a time in: {after}"));
+        out.push_str(&aliases.row_expression(signed.trim(), time.trim()));
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `text` with the window written in where `?since` stands.
@@ -320,7 +364,7 @@ fn agents_query(aliases: &HolderAliases) -> String {
         return AGENTS_QUERY.to_string();
     }
     AGENTS_QUERY.replace(
-        "ledger:claimedBy ?holder .",
+        "ledger:claimedBy ?holder ;\n         dcterms:created ?at .",
         &format!(
             "ledger:claimedBy ?signed ;\n         dcterms:created ?at .\n  BIND({} AS ?holder)",
             aliases.row_expression("?signed", "?at")
@@ -703,7 +747,8 @@ impl Endpoint for Agent {
         let segment = binding(inv, "holder")?;
         let holder = decode_holder(&segment)?;
         let ledger = asked_ledger(inv)?;
-        let answers = answers(inv, &ledger, Some(&holder), &self.web.holder_aliases).await?;
+        let (answers, _) =
+            answers(inv, &ledger, Some(&holder), &self.web.holder_aliases, None).await?;
         let list = json!({ "holder": holder, "ledger": ledger.name(), "answers": answers });
         Ok(Representation::new(
             ReprType::new("application/json"),
@@ -741,8 +786,10 @@ async fn answers(
     ledger: &Ledger,
     holder: Option<&str>,
     aliases: &HolderAliases,
-) -> Result<Vec<Value>> {
+    deadline: Option<Instant>,
+) -> Result<(Vec<Value>, bool)> {
     let mut answers = Vec::with_capacity(QUESTIONS.len());
+    let mut late = false;
     for question in &QUESTIONS {
         let since = match question.window_ms {
             Some(window) => Some(since_of(now_ms(inv)?, window)),
@@ -760,10 +807,16 @@ async fn answers(
         if let Some(since) = &since {
             read = with(read, "since", since);
         }
-        let answer = match fetch(inv, read).await {
-            Err(denied @ Error::Denied(_)) => return Err(denied),
-            Err(error) => Err(error.to_string()),
-            Ok(bytes) => serde_json::from_slice(&bytes)
+        let fetched = match deadline {
+            Some(deadline) => within(deadline, fetch(inv, read)).await,
+            None => Some(fetch(inv, read).await),
+        };
+        late |= fetched.is_none();
+        let answer = match fetched {
+            None => Err("did not finish in time".to_string()),
+            Some(Err(denied @ Error::Denied(_))) => return Err(denied),
+            Some(Err(error)) => Err(error.to_string()),
+            Some(Ok(bytes)) => serde_json::from_slice(&bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|v| answered(question.reads, &v).map_err(|e| e.to_string())),
         };
@@ -778,7 +831,7 @@ async fn answers(
         }
         answers.push(row);
     }
-    Ok(answers)
+    Ok((answers, late))
 }
 
 /// An `xsd:dayTimeDuration` in words, its two largest units: `2 d 3 h`, `4 min 5 s`. `None` for
@@ -866,8 +919,8 @@ fn row(holder: &str, answers: &Value) -> Result<String> {
     ))
 }
 
-/// The holders in `ledger`, in the query's order.
-async fn holders(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<String>> {
+/// The holders in `ledger`, in the query's order, each with when it last took a claim.
+async fn holders(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<(String, Option<String>)>> {
     let read = with(request(Verb::Source, AGENTS_IRI)?, "ledger", ledger.name());
     let results: Value = serde_json::from_slice(&fetch(inv, read).await?)
         .map_err(|e| Error::Endpoint(format!("the agents were not JSON: {e}")))?;
@@ -876,37 +929,238 @@ async fn holders(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<String>> {
         .map(Vec::as_slice)
         .unwrap_or(&[])
         .iter()
-        .filter_map(|row| row["holder"]["value"].as_str())
-        .map(str::to_string)
+        .filter_map(|row| {
+            let holder = row["holder"]["value"].as_str()?;
+            let last = row["last"]["value"].as_str().map(str::to_string);
+            Some((holder.to_string(), last))
+        })
         .collect())
 }
 
-/// The body and foot of `ledger`'s table and whom its rows name, or `Denied` when this viewer may
-/// not read it. With no holder it is empty, and the panel says so in a sentence.
+/// How long one panel may take, all its questions together: what is done by then is drawn, and a
+/// sentence says the rest did not finish (ledger #3678). Each query also has the store's budget.
+pub const PANEL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A holder with no claim in this long and nothing in flight is not a row of its own; the totals
+/// still count it, and a sentence says how many there are (ledger #3678).
+pub const ACTIVE_WINDOW_MS: u64 = 30 * DAY_MS;
+
+/// What the panel says when its deadline passed before every question was answered.
+const UNFINISHED: &str = "Some numbers did not finish in time and show as unavailable; the next \
+                          refresh asks again.";
+
+/// `work`, or `None` once `deadline` has passed. Dropping the work leaves the store to finish what
+/// it began; the panel no longer waits on it.
+pub async fn within<T>(deadline: Instant, work: impl Future<Output = T>) -> Option<T> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() || passed_by_hook() {
+        return None;
+    }
+    let mut work = std::pin::pin!(work);
+    let mut timer = std::pin::pin!(futures_timer::Delay::new(left));
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(done) = work.as_mut().poll(cx) {
+            return Poll::Ready(Some(done));
+        }
+        timer.as_mut().poll(cx).map(|()| None)
+    })
+    .await
+}
+
+/// How many more pieces of work [`within`] starts before it treats every deadline as passed;
+/// `u64::MAX`, the default, never.
+static CHECKS_LEFT: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// ⚠ **A test's hook, never an operator's.** Every deadline passes once [`within`] has started
+/// `checks` more pieces of work, so a test can stop a panel at a known question instead of racing a
+/// clock. It is process-wide: a test that sets it runs in a binary of its own.
+#[doc(hidden)]
+pub fn deadline_passes_after(checks: u64) {
+    CHECKS_LEFT.store(checks, Ordering::SeqCst);
+}
+
+fn passed_by_hook() -> bool {
+    let mut left = CHECKS_LEFT.load(Ordering::SeqCst);
+    loop {
+        match left {
+            u64::MAX => return false,
+            0 => return true,
+            _ => match CHECKS_LEFT.compare_exchange(
+                left,
+                left - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return false,
+                Err(now) => left = now,
+            },
+        }
+    }
+}
+
+/// `query`'s result rows over `ledger`, as JSON whatever the view was asked for.
+async fn selected(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> Result<Vec<Value>> {
+    let read = with(request(Verb::Source, "urn:sparql:select")?, "query", query);
+    let read = with(with(read, "as", RESULTS_JSON), "graph", &ledger.graph());
+    let answer = inv.issue(read).await?;
+    let results: Value = serde_json::from_slice(&answer.bytes)
+        .map_err(|e| Error::Endpoint(format!("a question's answer was not JSON: {e}")))?;
+    results["results"]["bindings"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| Error::Endpoint("a question's answer carried no result rows".to_string()))
+}
+
+/// Each holder's number in one question's grouped rows, in the rows' order: a count, or the middle
+/// `?took` of each holder's, the lower of two. A holder with no row is absent.
+fn per_holder(reads: Reads, rows: &[Value]) -> HashMap<String, String> {
+    let mut each: HashMap<String, Vec<&Value>> = HashMap::new();
+    for row in rows {
+        if let Some(holder) = row["holder"]["value"].as_str() {
+            each.entry(holder.to_string()).or_default().push(row);
+        }
+    }
+    each.into_iter()
+        .filter_map(|(holder, rows)| {
+            let number = match reads {
+                Reads::Rows => Some(rows.len().to_string()),
+                Reads::Median => rows
+                    .get(rows.len().saturating_sub(1) / 2)
+                    .and_then(|row| row["took"]["value"].as_str())
+                    .map(str::to_string),
+            };
+            number.map(|n| (holder, n))
+        })
+        .collect()
+}
+
+/// One question's answer for every holder: each holder's number, or why there is none.
+type Grouped = std::result::Result<HashMap<String, String>, String>;
+
+/// What a panel has to draw.
+struct Drawn {
+    /// The `<tbody>` and `<tfoot>`, empty when no holder ever claimed.
+    rows: String,
+    /// Whom the rows name.
+    holders: Vec<String>,
+    /// How many holders are folded into the totals for being idle.
+    older: usize,
+    /// Whether the deadline passed before every number was answered.
+    unfinished: bool,
+}
+
+/// The body and foot of `ledger`'s table, or `Denied` when this viewer may not read it. With no
+/// holder it is empty, and the panel says so in a sentence.
+///
+/// ★ **What it costs is the same for ten holders or ten thousand**: the agents, each question once
+/// grouped by holder, and each once more for the totals, `1 + 7 + 7` store queries
+/// (`tests/agents_2820.rs`). The whole of it stops at `deadline`.
 async fn rows(
     inv: &Invocation<'_>,
     ledger: &Ledger,
     aliases: &HolderAliases,
-) -> Result<(String, Vec<String>)> {
-    let holders = holders(inv, ledger).await?;
+    deadline: Instant,
+) -> Result<Drawn> {
+    let mut drawn = Drawn {
+        rows: String::new(),
+        holders: Vec::new(),
+        older: 0,
+        unfinished: false,
+    };
+    let Some(holders) = within(deadline, holders(inv, ledger)).await else {
+        drawn.unfinished = true;
+        return Ok(drawn);
+    };
+    let holders = holders?;
     if holders.is_empty() {
-        return Ok((String::new(), holders));
+        return Ok(drawn);
+    }
+    let now = now_ms(inv).ok();
+    let mut grouped_answers: Vec<(Option<String>, Option<Grouped>)> = Vec::new();
+    for question in &QUESTIONS {
+        let since = match question.window_ms {
+            Some(window) => Some(since_of(now_ms(inv)?, window)),
+            None => None,
+        };
+        let query = grouped(question, since.as_deref(), aliases);
+        let answer = match within(deadline, selected(inv, ledger, &query)).await {
+            None => None,
+            Some(Err(denied @ Error::Denied(_))) => return Err(denied),
+            Some(Err(error)) => Some(Err(error.to_string())),
+            Some(Ok(rows)) => Some(Ok(per_holder(question.reads, &rows))),
+        };
+        drawn.unfinished |= answer.is_none();
+        grouped_answers.push((since, answer));
+    }
+    // ★ A row is a holder with a claim in the window or an item in flight; the rest are counted
+    // in the totals, and a sentence says how many.
+    let cutoff = now.map(|now| since_of(now, ACTIVE_WINDOW_MS));
+    let in_flight = match &grouped_answers[0].1 {
+        Some(Ok(numbers)) => Some(numbers),
+        _ => None,
+    };
+    for (holder, last) in &holders {
+        let recent = match (&cutoff, last) {
+            (Some(cutoff), Some(last)) => last.as_str() >= cutoff.as_str(),
+            _ => true,
+        };
+        let holding = in_flight.is_some_and(|n| n.get(holder).is_some_and(|n| n != "0"));
+        if recent || holding {
+            drawn.holders.push(holder.clone());
+        } else {
+            drawn.older += 1;
+        }
     }
     let mut out = String::from("<tbody>");
-    for holder in &holders {
-        let iri = format!("urn:iki:gonk:agent:holder:{}", url_segment(holder));
-        let read = with(request(Verb::Source, &iri)?, "ledger", ledger.name());
-        let answers: Value = serde_json::from_slice(&fetch(inv, read).await?)
-            .map_err(|e| Error::Endpoint(format!("the answers were not JSON: {e}")))?;
-        out.push_str(&row(holder, &answers)?);
+    for holder in &drawn.holders {
+        let answers: Vec<Value> = QUESTIONS
+            .iter()
+            .zip(&grouped_answers)
+            .map(|(question, (since, answer))| {
+                let query = filled(question, holder, since.as_deref(), aliases);
+                let mut cell =
+                    json!({ "question": question.name, "href": sparql_href(ledger, &query) });
+                match answer {
+                    None => cell["error"] = json!("did not finish in time"),
+                    Some(Err(error)) => cell["error"] = json!(error),
+                    Some(Ok(numbers)) => {
+                        let number = numbers
+                            .get(holder)
+                            .cloned()
+                            .or_else(|| (question.reads == Reads::Rows).then(|| "0".to_string()));
+                        cell["answer"] = json!(number);
+                    }
+                }
+                cell
+            })
+            .collect();
+        out.push_str(&row(holder, &json!({ "answers": answers }))?);
     }
     // ★ The totals: each question asked once over every holder, never the column's sum, which
     // would count an item two agents worked twice ([`across`]).
-    let totals = json!({ "answers": answers(inv, ledger, None, aliases).await? });
+    let (totals, late) = answers(inv, ledger, None, aliases, Some(deadline)).await?;
+    drawn.unfinished |= late;
     out.push_str("</tbody><tfoot>");
-    out.push_str(&row(ALL_AGENTS, &totals)?);
+    out.push_str(&row(ALL_AGENTS, &json!({ "answers": totals }))?);
     out.push_str("</tfoot>");
-    Ok((out, holders))
+    drawn.rows = out;
+    Ok(drawn)
+}
+
+/// The sentence for `older` holders folded into the totals, or `None` when there are none.
+fn older_sentence(older: usize) -> Option<String> {
+    let days = ACTIVE_WINDOW_MS / DAY_MS;
+    match older {
+        0 => None,
+        1 => Some(format!(
+            "1 more agent, with no claim in the last {days} days and nothing in flight, is \
+             counted in the All agents row but has no row of its own."
+        )),
+        n => Some(format!(
+            "{n} more agents, with no claim in the last {days} days and nothing in flight, are \
+             counted in the All agents row but have no row of their own."
+        )),
+    }
 }
 
 /// One ledger's panel, or `None` when this viewer may not read the ledger.
@@ -919,23 +1173,38 @@ async fn panel(inv: &Invocation<'_>, ledger: &Ledger, aliases: &HolderAliases) -
         ("href", href.as_str()),
     ];
     let mut applied = None;
-    let (note, rows) = match rows(inv, ledger, aliases).await {
+    let mut older = None;
+    let mut unfinished = false;
+    let deadline = Instant::now() + PANEL_DEADLINE;
+    let (note, rows) = match rows(inv, ledger, aliases, deadline).await {
         Err(Error::Denied(_)) => return None,
         Err(error) => (
             format!("The agents could not be read: {error}."),
             String::new(),
         ),
-        Ok((rows, _)) if rows.is_empty() => (
-            "No agent has claimed an item in this ledger yet.".to_string(),
-            rows,
+        Ok(drawn) if drawn.rows.is_empty() && drawn.unfinished => (
+            "The agents did not finish in time; the next refresh asks again.".to_string(),
+            String::new(),
         ),
-        Ok((rows, holders)) => {
-            applied = aliases.sentence(&holders);
-            (String::new(), rows)
+        Ok(drawn) if drawn.rows.is_empty() => (
+            "No agent has claimed an item in this ledger yet.".to_string(),
+            String::new(),
+        ),
+        Ok(drawn) => {
+            applied = aliases.sentence(&drawn.holders);
+            older = older_sentence(drawn.older);
+            unfinished = drawn.unfinished;
+            (String::new(), drawn.rows)
         }
     };
     if let Some(sentence) = &applied {
         attributes.push(("aliases", sentence.as_str()));
+    }
+    if let Some(sentence) = &older {
+        attributes.push(("older", sentence.as_str()));
+    }
+    if unfinished {
+        attributes.push(("unfinished", UNFINISHED));
     }
     let children = if note.is_empty() {
         let columns: String = QUESTIONS

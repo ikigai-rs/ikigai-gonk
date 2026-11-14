@@ -2132,6 +2132,7 @@ dependencies = [
  "flate2",
  "futures",
  "futures-core",
+ "futures-timer",
  "getrandom 0.3.4",
  "hmac",
  "ignore",

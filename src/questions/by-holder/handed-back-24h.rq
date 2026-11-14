@@ -1,0 +1,13 @@
+# handed-back-24h.rq asked once of every holder, each row naming its holder (ledger #3678).
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?holder ?number ?at ?handback WHERE {
+  ?handback ledger:handedBackBy ?signed ;
+            ledger:onItem ?item ;
+            dcterms:created ?at .
+  ?item ledger:number ?number .
+  FILTER(?at >= ?since)
+  BIND(ROW(?signed, ?at) AS ?holder)
+}
+ORDER BY ?holder DESC(?at)

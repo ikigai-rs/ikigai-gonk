@@ -1,0 +1,26 @@
+# completed-7d.rq asked once of every holder, each row naming its holder (ledger #3678).
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?holder ?number ?closedAt ?title WHERE {
+  ?item a ledger:Item ;
+        ledger:status ledger:closed ;
+        ledger:closedReason ledger:done ;
+        ledger:closedAt ?closedAt ;
+        ledger:number ?number ;
+        dcterms:title ?title .
+  FILTER(?closedAt >= ?since)
+  ?handback ledger:onItem ?item ;
+            ledger:handedBackBy ?signed ;
+            dcterms:created ?last .
+  {
+    SELECT ?item (MAX(?at) AS ?last) WHERE {
+      ?any ledger:handedBackBy ?anyone ;
+           ledger:onItem ?item ;
+           dcterms:created ?at .
+    }
+    GROUP BY ?item
+  }
+  BIND(ROW(?signed, ?last) AS ?holder)
+}
+ORDER BY ?holder DESC(?closedAt) ?number

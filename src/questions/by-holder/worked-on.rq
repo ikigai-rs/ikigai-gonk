@@ -1,0 +1,14 @@
+# worked-on.rq asked once of every holder, each row naming its holder (ledger #3678).
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?holder ?number ?title WHERE {
+  ?claim a ledger:ClaimEvent ;
+         ledger:claimedBy ?signed ;
+         ledger:onItem ?item ;
+         dcterms:created ?at .
+  ?item ledger:number ?number ;
+        dcterms:title ?title .
+  BIND(ROW(?signed, ?at) AS ?holder)
+}
+ORDER BY ?holder ?number
