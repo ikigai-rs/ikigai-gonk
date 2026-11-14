@@ -4199,8 +4199,8 @@ bounded at 100,000 rows and 16 MiB, and the backup's answer is every quad in the
 that backup was refused on bytes after 13.9–23.4 s (the `ORDER BY` sorts everything before the first
 row is written), so the list also carries `urn:cap:store:answer:10000000` and
 `urn:cap:store:answer:bytes:1073741824`, the store's ceilings, for the time grant's reason. A row
-grant raises rows and nothing else, so the job needs both. ⚠ The byte ceiling is about nine times
-today's answer, so it is the first bound a growing dataset will reach.
+grant raises rows and nothing else, so the job needs both. Since #3650 these bounds apply to
+individual segments of a backup; the complete snapshot can exceed 1 GiB.
 
 **A backup holds the scripts too** (ledger #1175). They are not in the dataset: they are plain
 files in `~/.ikigai/scripts` (`gonk.script.dir`, ledger #939). So every backup writes two archives
@@ -4238,20 +4238,44 @@ writes it with oxigraph's own N-Quads serializer — never string surgery, which
 ledger bodies contain newlines, quotation marks and trailing periods, and those are exactly the
 rows a hand-rolled writer corrupts.
 
-★ **The dump is streamed** (ledger #1699). It used to be `urn:iki:store:select` with
-`ORDER BY`, so the store sorted the whole dataset and answered it as SPARQL JSON, and the backup
-held the N-Quads parsed out of that plus a copy of them for `urn:compress:gzip`: about 517 MB
-of peak memory for 375,000 quads, 1.8 GB for 1.5 million, and at 3 million the sorted query ran
-past the store's 120 s ceiling, so no backup could be taken at all. Now each quad goes straight
-into a gzip encoder and what is held is the archive: 129 MB, 233 MB and 276 MB for the same three
-stores, in 2.8 s, 11–13 s and 20 s (`examples/backup-memory.rs`, synthetic RocksDB stores, release
-build, 2026-10-16). The encoder writes the level and the pinned header `urn:compress:gzip`
-writes, and a test pins that an archive is byte for byte what `urn:compress:gzip` gives for its
-N-Quads, so two backups of unchanged data are still byte-identical and "has anything changed" is
-still a digest comparison. The order is the store's own (a function of the contents on RocksDB),
-not the sorted one, so the first backup after this change differs from the one before it even
-over unchanged data. The store's time and answer bounds still apply, read from the caller's
-grants as the store reads them; the byte bound now counts the N-Quads, not SPARQL JSON.
+★ **The dump is streamed in bounded segments** (ledger #1699, #3650). One store iterator
+holds one snapshot for the entire backup, including across segment boundaries. A segment closes
+after 64 MiB of serialized N-Quads or 250,000 quads, whichever comes first; a single larger quad
+may occupy its own segment, up to the caller's byte bound (at most 1 GiB). The caller's time,
+row and byte budgets apply per segment. Smaller grants still refuse a segment that exceeds them.
+The complete snapshot is bounded at 64 GiB of quad data, one billion quads and 2 GiB compressed.
+An oversized backup fails before publication, leaving the previous rotation intact.
+
+Small backups remain byte-identical to the original single-member gzip format. Larger backups
+use **concatenated gzip members**, with an initial `# gonk-segmented/1` comment and a final
+`# gonk-end/1` JSON comment recording the quad count, quad-byte count, SHA-256 and per-graph counts.
+`gzip -dc` produces ordinary N-Quads: the framing consists entirely of comments. The sidecar's
+`store_format` distinguishes `n-quads` from `gonk-segmented/1`; `nquads_bytes` and
+`nquads_sha256` cover the serialized quad lines, excluding framing comments. Archive digests
+cover every compressed byte. Unchanged stores still produce identical archives.
+
+This is a complete snapshot with incremental loading, rather than a chain of deltas: deleted
+quads need no tombstone protocol and losing an older archive cannot break a newer one. Splitting
+only by graph would leave a dominant browse graph subject to the same size limit. Segments
+therefore cross graph boundaries while retaining graph names in every quad. Backup holds the
+compressed archive plus one segment and one quad; restore holds the compressed archive plus a
+bounded loader batch and one quad, never the entire expanded dataset or a dataset-sized set.
+
+Restore recognizes the segmented header automatically and uses **one parser** across all
+members, preserving shared blank nodes. It requires the completion record, validates its byte
+digest, drives gzip through every member's checksum and the actual EOF, then independently
+counts the staged store's graphs. Truncation at a member boundary, checksum errors, extra data,
+or mismatched counts all fail without publishing the store. Legacy gzip and plain N-Quads
+restores retain their 1 GiB expanded limit. Older gonk versions cannot restore a segmented
+archive past that limit; use this version or import the output of `gzip -dc` with another RDF tool.
+
+For a restore drill on a synthetic store, run `examples/backup-memory.rs` in release mode:
+
+```sh
+cargo run --release --example backup-memory -- seed target/drill/source 10000000
+cargo run --release --example backup-memory -- backup target/drill/source target/drill/backups
+cargo run --release --example backup-memory -- restore target/drill/backups/<archive>.nq.gz target/drill/restored
+```
 
 ### A merge is not a restore
 
@@ -4265,6 +4289,18 @@ ikigai --connect ~/.ikigai/gonk.sock -c \
   'source urn:iki:gonk:backup:archive:gonk-store-2026-09-16T172813Z.nq.gz \
    | sink urn:iki:gonk:restore into=/tmp/restored'
 ```
+
+For large archives already in the backup directory, restore by file name to avoid buffering the
+archive through the socket's pipe. This form also requires `urn:cap:gonk:backup` and accepts
+only a backup file name, with no path components:
+
+```
+ikigai --connect ~/.ikigai/gonk.sock -c \
+  'sink urn:iki:gonk:restore archive=gonk-store-2026-11-14T205859Z.nq.gz into=/tmp/restored'
+```
+
+Supply either `content` (the pipe) or `archive`, never both. The source archive stays in the
+rotation directory; a foreign archive can be copied there under a `gonk-store-*.nq.gz` name.
 
 That leaves a complete dataset beside the live one and tells you the graph set and the
 per-graph counts it verified. Adopting it is an operator's act, with the server stopped:

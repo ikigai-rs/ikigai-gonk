@@ -44,7 +44,15 @@
 //! { ?s ?p ?o } ORDER BY ?g ?s ?p ?o`: the store sorted the whole dataset and held the answer
 //! as SPARQL JSON (121 MB at 361,607 quads), and the backup held the N-Quads it parsed out of
 //! that and a copy of them for `urn:compress:gzip` beside it. Now what is held is the
-//! compressed archive and one quad at a time; `examples/backup-memory.rs` measures it.
+//! compressed archive and one bounded segment; `examples/backup-memory.rs` measures it.
+//!
+//! Since #3650, segments close after 64 MiB or 250,000 quads. The caller's bounds
+//! apply to each segment, rather than refusing the whole snapshot at 1 GiB. Large
+//! archives are concatenated gzip members with N-Quads comment framing and a required
+//! completion record (quad-byte digest and per-graph counts). Restore incrementally
+//! bulk-loads one parser stream into the private staging store, then independently
+//! counts its graphs. This keeps shared blank nodes intact across segments and detects
+//! truncation even at a complete member boundary. See [`segmented`] for the format.
 //!
 //! The order is the store's own index order, a function of the dataset's contents on RocksDB,
 //! so an unchanged dataset still dumps to identical bytes; the gzip header and level are the
@@ -109,6 +117,8 @@
 //! last run, time since the last SUCCESS, failures in a row). A job that has not fired
 //! shows as a growing `since_last`; a job that fires and fails shows as
 //! `failures_in_a_row`. Neither reads as "fine".
+
+mod segmented;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -184,7 +194,7 @@ pub const JOB_SCOPES: [&str; 6] = [
     crate::budget::STORE_RESERVE,
 ];
 
-/// How long the scheduled backup's dump may run, in milliseconds: **120 s**, which is also
+/// How long each segment of the scheduled backup's dump may run: **120 s**, which is also
 /// `ikigai-store`'s ceiling (ledger [#979](http://localhost:1060/l/default/item/979)). Since
 /// ledger #1699 the dump reads the store directly and applies the store's own rule to the grant
 /// ([`Dataset`]): the caller's largest `urn:cap:store:budget:<ms>`, never below the store's base
@@ -208,12 +218,15 @@ pub const JOB_SCOPES: [&str; 6] = [
 /// about five times the slowest measured run.
 pub const JOB_BUDGET_MS: u64 = 120_000;
 
+/// Since #3650, the dump applies this budget to each segment; the post-dump count
+/// query still has one budget of its own.
+///
 /// The store's budget grant for [`JOB_BUDGET_MS`]:
 /// `ikigai_store::budget::cap_budget(JOB_BUDGET_MS)`, spelled as a literal because a `const`
 /// cannot call it (a unit test pins that the two agree).
 pub const JOB_BUDGET: &str = "urn:cap:store:budget:120000";
 
-/// How many rows the scheduled backup's answer may hold: **10,000,000**, `ikigai-store`'s
+/// How many rows one segment of the scheduled backup may hold: **10,000,000**, `ikigai-store`'s
 /// ceiling (ledger [#993](http://localhost:1060/l/default/item/993)). Since ledger #1699 a row
 /// is a quad of the dump and the bytes are its N-Quads (no longer SPARQL JSON), counted as they
 /// are written and refused, never truncated, at the bound the store would set for the caller
@@ -228,6 +241,9 @@ pub const JOB_BUDGET: &str = "urn:cap:store:budget:120000";
 /// the refusal costs the whole sort — and the store arc measured the same answer at 121,625,465
 /// bytes (ledger #970). Over the row bound too: the dataset is 3.6 times it.
 ///
+/// Since #3650 these are per-segment bounds; the whole snapshot can exceed them.
+/// The measurements and whole-answer limits below describe the pre-segmentation path.
+///
 /// Why the ceilings and not a measured multiple, for [`JOB_BUDGET_MS`]'s reason: the dataset
 /// grows, the backup is the only export this dataset has, and a refused backup is a silent loss
 /// of the one guarantee it exists for. The store clamps every grant to its ceiling, so asking
@@ -236,7 +252,7 @@ pub const JOB_BUDGET: &str = "urn:cap:store:budget:120000";
 /// readout names the archive's N-Quads size, which is about two thirds of the answer's.
 pub const JOB_ANSWER_ROWS_MAX: u64 = 10_000_000;
 
-/// How many serialized bytes the scheduled backup's answer may hold: **1 GiB**,
+/// How many serialized bytes one segment of the scheduled backup may hold: **1 GiB**,
 /// `ikigai-store`'s ceiling. See [`JOB_ANSWER_ROWS_MAX`]: a row grant raises rows and nothing
 /// else, so a backup holding only it is still refused on bytes, and the job needs both.
 pub const JOB_ANSWER_BYTES_MAX: u64 = 1 << 30;
@@ -269,7 +285,9 @@ pub const SCRIPTS_SUFFIX: &str = ".json.gz";
 /// What a scripts archive's document says it is, under `format`.
 pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 
-/// The most bytes of N-Quads a restore takes: **1 GiB**. It is the ceiling handed to
+/// The most bytes of legacy N-Quads a restore takes: **1 GiB**. Segmented archives
+/// instead stream up to 64 GiB through the staging store (see [`segmented`]).
+/// This legacy cap is the ceiling handed to
 /// `urn:decompress:gzip` (`ikigai-compress`'s own maximum, `MAX_BYTES_CEILING`), AND the load
 /// cap of the store a restore builds, so one number bounds both halves (ledger
 /// [#1664](http://localhost:1062/l/default/item/1664)).
@@ -280,8 +298,8 @@ pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 /// `urn:iki:store:load`: a backup that could not be restored. Nothing failed at backup time,
 /// which is when it could have been noticed.
 ///
-/// ★ Why 1 GiB covers every archive a backup can write: since ledger #1699 the backup's byte
-/// bound is on the N-Quads themselves, at most [`JOB_ANSWER_BYTES_MAX`] (1 GiB), so every dump
+/// Before segmented archives (#3650), 1 GiB covered every archive a backup could write:
+/// since ledger #1699 the backup's byte bound is on the N-Quads themselves, at most [`JOB_ANSWER_BYTES_MAX`] (1 GiB), so every dump
 /// the backup writes is one this restore takes. (Before, it bounded the SPARQL JSON answer, and
 /// a quad's N-Quads line is always shorter than its JSON row.)
 /// The two assertions below are checked at COMPILE time: raising the backup's bound past this
@@ -293,13 +311,13 @@ pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 /// would be the only thing that noticed.
 const RESTORE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Maximum encoded archive size read or copied: **2 GiB**. This leaves room for gzip
-/// framing and incompressible data from a backup of at most 1 GiB of N-Quads.
-/// Expanded restore data still has the separate 1 GiB `RESTORE_MAX_BYTES` bound.
+/// Maximum encoded archive size read, written, or copied: **2 GiB**.
+/// Expanded legacy restores have the separate 1 GiB `RESTORE_MAX_BYTES` bound;
+/// segmented restores are independently bounded at 64 GiB and one billion quads.
 /// Oversized input is refused with `OverBudget`, never returned as a truncated document.
 pub const ARCHIVE_MAX_BYTES: u64 = 2 * RESTORE_MAX_BYTES;
 
-// Every archive a backup can write is one a restore takes (ledger #1664).
+// Every legacy archive allowed by the answer ceiling fits its restore (ledger #1664).
 const _: () = assert!(RESTORE_MAX_BYTES >= JOB_ANSWER_BYTES_MAX);
 // The decompressor refuses a `max-bytes` over its ceiling, so this cannot be larger, and a
 // smaller one would refuse archives the decompressor could expand.
@@ -431,7 +449,7 @@ impl Dump {
     }
 }
 
-/// The bounds one dump runs under: the caller's grants as the store reads them.
+/// The bounds each segment runs under: the caller's grants as the store reads them.
 #[derive(Clone, Copy)]
 struct Bounds {
     time: Duration,
@@ -450,21 +468,19 @@ impl Bounds {
     }
 }
 
-/// The N-Quads on their way into gzip: hashed, counted and bounded as they pass, never held.
-struct Tee<W: Write> {
+/// Bound compressed writes before the archive buffer grows past its cap.
+struct BoundedWriter<W: Write> {
     inner: W,
-    hasher: Sha256,
     bytes: u64,
     cap: u64,
 }
 
-impl<W: Write> Write for Tee<W> {
+impl<W: Write> Write for BoundedWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if self.bytes + buf.len() as u64 > self.cap {
             return Err(std::io::Error::other(PastBound));
         }
         let n = self.inner.write(buf)?;
-        self.hasher.update(&buf[..n]);
         self.bytes += n as u64;
         Ok(n)
     }
@@ -474,34 +490,27 @@ impl<W: Write> Write for Tee<W> {
     }
 }
 
-impl<W: Write> Tee<W> {
+impl<W: Write> BoundedWriter<W> {
     fn new(inner: W, cap: u64) -> Self {
-        Tee {
+        BoundedWriter {
             inner,
-            hasher: Sha256::new(),
             bytes: 0,
             cap,
         }
     }
 }
 
-/// What a [`Tee`] answers at its byte bound, so the dump can tell its own refusal from an
-/// encoder that failed.
+/// Distinguish the compressed archive's byte cap from an encoder failure.
 #[derive(Debug)]
 struct PastBound;
 
 impl std::fmt::Display for PastBound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the dump is past its byte bound")
+        f.write_str("the compressed archive is past its byte bound")
     }
 }
 
 impl std::error::Error for PastBound {}
-
-/// Whether `error` is a [`Tee`]'s refusal at its byte bound, passed on by the writers above it.
-fn is_past_bound(error: &std::io::Error) -> bool {
-    error.get_ref().is_some_and(|inner| inner.is::<PastBound>())
-}
 
 /// The refusal of a dump past its row or byte bound: the store's own answer-bound refusal
 /// (`ikigai_store::budget::too_large`, the shape a backup was refused with before ledger #1699),
@@ -535,67 +544,12 @@ fn graph_key(graph: &GraphName) -> String {
     }
 }
 
-/// The whole dataset, every graph, as gzipped N-Quads, within `bounds` (ledger #1699).
-///
-/// One snapshot: `Store::iter` reads every quad, default graph and named graphs alike, from the
-/// snapshot it opens, so a write landing meanwhile is wholly in the dump or wholly not. The
-/// N-Quads are never held: each quad is serialized into a small buffer that drains through a
-/// [`Tee`] (hash, count, byte bound) into the gzip encoder, and what is held is the archive.
-///
-/// The UNION the SPARQL dump needed is gone with it: `Store::iter` is every quad of every graph,
-/// the default graph included, where `{ ?s ?p ?o }` alone reads the default graph only and
-/// `GRAPH ?g { … }` alone never sees it.
-///
-/// Every bound REFUSES rather than truncates (a short archive that verifies against its own
-/// short sidecar is the failure a backup exists to prevent): past the rows, the bytes or the
-/// time, the dump stops and nothing is written.
+/// Every graph from ONE snapshot as gzipped N-Quads. Small dumps retain their original
+/// bytes; larger dumps use bounded segments, under the caller's time and answer bounds
+/// for EACH segment, with a mandatory completion record (ledger #3650).
+/// No segment is published until the complete snapshot succeeds.
 fn dump(dataset: &Dataset, bounds: Bounds) -> Result<Dump> {
-    use ikigai_store::budget::Measure;
-    let deadline = Instant::now() + bounds.time;
-    let encoder = flate2::GzBuilder::new()
-        .mtime(GZIP_MTIME)
-        .operating_system(GZIP_OS)
-        .write(Vec::new(), flate2::Compression::new(GZIP_LEVEL));
-    let buffered = std::io::BufWriter::with_capacity(64 << 10, Tee::new(encoder, bounds.bytes));
-    let mut writer = RdfSerializer::from_format(RdfFormat::NQuads).for_writer(buffered);
-    let failed = |e: std::io::Error| {
-        if is_past_bound(&e) {
-            past(Measure::Bytes, bounds.bytes)
-        } else {
-            Error::Endpoint(format!("writing the dump: {e}"))
-        }
-    };
-    let mut graphs: BTreeMap<String, u64> = BTreeMap::new();
-    let mut quads: u64 = 0;
-    for quad in dataset.handle.iter() {
-        let quad = quad.map_err(|e| Error::Endpoint(format!("reading the store: {e}")))?;
-        quads += 1;
-        if quads > bounds.rows {
-            return Err(past(Measure::Rows, bounds.rows));
-        }
-        if quads.is_multiple_of(CLOCK_EVERY) && Instant::now() >= deadline {
-            return Err(past_time(bounds.time));
-        }
-        *graphs.entry(graph_key(&quad.graph_name)).or_default() += 1;
-        writer.serialize_quad(&quad).map_err(failed)?;
-    }
-    let buffered = writer.finish().map_err(failed)?;
-    let tee = buffered.into_inner().map_err(|e| failed(e.into_error()))?;
-    if Instant::now() >= deadline {
-        return Err(past_time(bounds.time));
-    }
-    let nquads_bytes = tee.bytes;
-    let nquads_sha256 = hex(&tee.hasher.finalize());
-    let archive = tee
-        .inner
-        .finish()
-        .map_err(|e| Error::Endpoint(format!("finishing the archive: {e}")))?;
-    Ok(Dump {
-        archive,
-        nquads_bytes,
-        nquads_sha256,
-        graphs,
-    })
+    segmented::dump(dataset, bounds)
 }
 
 /// [`dump`] on a thread of its own: seconds of CPU at the live dataset's size, which the door
@@ -1012,8 +966,8 @@ impl Endpoint for TakeBackup {
             .title("Take a backup of the whole dataset")
             .summary(
                 "Streams EVERY graph as N-Quads from one snapshot of the store into a gzip \
-                 archive (the bytes `urn:compress:gzip` writes for them), within the store's \
-                 time and answer bounds for the caller, writes it into this server's backup \
+                 archive, with segments targeting 64 MiB or 250,000 quads under the store's \
+                 time and answer bounds for the caller per segment, writes it into this server's backup \
                  directory with a sidecar recording the per-graph counts and both digests, \
                  and prunes the rotation set oldest-first. Quad-shaped on purpose: a Turtle \
                  or N-Triples dump collapses every named graph into one and destroys the \
@@ -1047,8 +1001,8 @@ impl TakeBackup {
         }
         // ★ Streamed (ledger #1699): the N-Quads go straight into a gzip encoder with the
         // header `urn:compress:gzip` pins, rather than being held whole and handed to it. The
-        // archive is the same bytes either way (`tests/backup.rs` pins that); what is no longer
-        // held is the dataset, two or three times over.
+        // archive is the same bytes for small snapshots (`tests/backup.rs` pins that).
+        // Larger snapshots use bounded members and a completion record (#3650).
         let bounds = Bounds::for_caller(&self.backups.dataset, inv.capability);
         let dump = dump_off_thread(self.backups.dataset.clone(), bounds).await?;
         let quads = dump.quads();
@@ -1087,6 +1041,11 @@ impl TakeBackup {
 
         let meta = meta_json(&MetaFields {
             archive: &name,
+            store_format: if segmented::is_segmented(archive)? {
+                "gonk-segmented/1"
+            } else {
+                "n-quads"
+            },
             taken_at: &stamp_iso(now),
             taken_at_ms: now,
             quads,
@@ -1415,6 +1374,7 @@ impl Status {
                     Some(meta) => {
                         for key in [
                             "taken_at",
+                            "store_format",
                             "quads",
                             "nquads_bytes",
                             "archive_bytes",
@@ -1978,10 +1938,18 @@ impl Endpoint for Restore {
             .input(
                 ArgSpec::new("content")
                     .summary(
-                        "the archive: gzip (at most 2 GiB, expanding to at most 1 GiB) or \
-                         plain N-Quads (at most 1 GiB); filled from the pipe",
+                        "the archive from the pipe: gzip (at most 2 GiB; segmented archives \
+                         expand to at most 64 GiB, legacy archives to 1 GiB) or plain \
+                         N-Quads (at most 1 GiB); use archive instead for large local files",
                     )
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("archive")
+                    .summary("a file name in the backup directory, instead of content; also needs urn:cap:gonk:backup")
+                    .class(XSD_STRING)
+                    .optional(),
             )
             .input(
                 ArgSpec::new("into")
@@ -2009,8 +1977,43 @@ impl Restore {
     async fn restore(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let into = PathBuf::from(inv.inline_str("into")?);
         self.check_target(&into)?;
-        let content = inv.inline_arg("content")?;
-        check_restore_input(content)?;
+        let content = if inv.request.args.contains_key("archive") {
+            if inv.request.args.contains_key("content") {
+                return Err(Error::InvalidArgument {
+                    name: "archive".into(),
+                    detail: "supply either archive or content, not both".into(),
+                });
+            }
+            if !inv.capability.allows(CAP_BACKUP) {
+                return Err(Error::Denied(format!(
+                    "reading a backup archive needs {CAP_BACKUP}"
+                )));
+            }
+            let path = archive_path(&self.backups.settings.dir, inv.inline_str("archive")?)?;
+            std::borrow::Cow::Owned(read_archive_bytes(&path, ARCHIVE_MAX_BYTES)?)
+        } else {
+            std::borrow::Cow::Borrowed(inv.inline_arg("content")?)
+        };
+        check_restore_input(&content)?;
+        if segmented::is_segmented(&content)? {
+            let checksum = digest(&content);
+            let staging = Staging::begin(&into)?;
+            let (staging, actual) =
+                segmented::restore_off_thread(staging, content.into_owned()).await?;
+            staging.finish(&into)?;
+            let total: u64 = actual.values().sum();
+            let mut report = format!(
+                "restored {total} quads into {} (segmented gzip, sha256 {})\n",
+                into.display(),
+                checksum
+            );
+            for (graph, count) in &actual {
+                report.push_str(&format!("  {count:>8}  {}\n", shown(graph)));
+            }
+            report.push_str("  graph set and per-graph counts match the archive exactly\n  this server still holds the LIVE store; to adopt this one, stop gonk and swap the directories\n");
+            return Ok(plain(report));
+        }
+        let content = content.as_ref();
         let (nquads, how) = if content.starts_with(&[0x1f, 0x8b]) {
             let expanded = inv
                 .issue(
@@ -2821,6 +2824,7 @@ pub(crate) fn humanize(duration: Duration) -> String {
 /// The fields a sidecar records.
 struct MetaFields<'a> {
     archive: &'a str,
+    store_format: &'a str,
     taken_at: &'a str,
     taken_at_ms: u64,
     quads: u64,
@@ -2873,11 +2877,12 @@ fn meta_json(fields: &MetaFields<'_>) -> String {
         None => String::new(),
     };
     format!(
-        "{{\"archive\":{},\"taken_at\":{},\"taken_at_ms\":{},\"quads\":{},\
+        "{{\"archive\":{},\"store_format\":{},\"taken_at\":{},\"taken_at_ms\":{},\"quads\":{},\
          \"graphs\":{{{}}},\"nquads_bytes\":{},\"nquads_sha256\":{},\
          \"archive_bytes\":{},\"archive_sha256\":{},\"archive_content_id\":{},\
          \"store_quads_after_dump\":{}{}}}\n",
         quote(fields.archive),
+        quote(fields.store_format),
         quote(fields.taken_at),
         fields.taken_at_ms,
         fields.quads,
@@ -3414,6 +3419,7 @@ mod tests {
         graphs.insert(DEFAULT_GRAPH_KEY.to_string(), 0u64);
         let json = meta_json(&MetaFields {
             archive: "gonk-store-2026-09-16T172813Z.nq.gz",
+            store_format: "n-quads",
             taken_at: "2026-09-16T17:28:13Z",
             taken_at_ms: 1_789_579_693_000,
             quads: 2850,

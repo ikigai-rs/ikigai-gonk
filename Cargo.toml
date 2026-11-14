@@ -1287,7 +1287,9 @@ ikigai-passkey = "0.5.0"
 # the ENGINE'S OWN N-Quads serializer, never by string surgery on either end. That is what
 # keeps a literal containing ` .`, a language tag or a datatype from becoming a corrupt
 # line in the one file nobody reads until they need it.
-oxigraph = { version = "0.5", default-features = false }
+# 0.5.13 is an API floor: segmented restore bounds its private RocksDB store's
+# open files with StoreOptions, so it can share a process with the live store (#3650).
+oxigraph = { version = "0.5.13", default-features = false }
 # ★ The SPARQL query FORM (`web::query_form`, which picks `urn:sparql:{form}` and the editor's
 # `graph-{form}`) is read by the parser the store itself runs: `oxigraph` 0.5.11 pins
 # `spargebra = "=0.4.7"`, so this adds an edge to a crate already in the graph and no

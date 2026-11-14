@@ -11,6 +11,10 @@
 //! capability the timer fires under; `baseline` does everything `backup` does except the backup,
 //! so the difference between their peaks is the backup's. Nothing here opens `~/.ikigai/store`
 //! or reads a real archive.
+//!
+//! `restore <archive> <new-store-dir>` restores through gonk's resource, reading a local
+//! backup by name to avoid the socket's pipe budget. `verify <source> <restored>` reopens
+//! both synthetic stores and checks exact membership of every quad and the total count.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +26,7 @@ use ikigai_gonk::backup::{self, Backups};
 use ikigai_gonk::{compose, compose_with};
 use ikigai_store::{DurableStore, SharerWrites};
 
-const USAGE: &str = "usage: backup-memory seed <store-dir> <quads> | backup <store-dir> <rotation-dir> | baseline <store-dir> <rotation-dir>";
+const USAGE: &str = "usage: backup-memory seed <store-dir> <quads> | backup <store-dir> <rotation-dir> | baseline <store-dir> <rotation-dir> | restore <archive> <new-store-dir> | verify <source-store-dir> <restored-store-dir>";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -35,6 +39,8 @@ fn main() {
         ["seed", dir, quads] => seed(Path::new(dir), quads.parse().expect("a quad count")),
         ["backup", dir, rotation] => run(Path::new(dir), Path::new(rotation), true),
         ["baseline", dir, rotation] => run(Path::new(dir), Path::new(rotation), false),
+        ["restore", archive, into] => restore(Path::new(archive), Path::new(into)),
+        ["verify", source, restored] => verify(Path::new(source), Path::new(restored)),
         _ => panic!("{USAGE}"),
     }
 }
@@ -124,6 +130,89 @@ fn run(dir: &Path, rotation: &Path, take: bool) {
                 lines.next().unwrap_or("").trim()
             );
         }
-        Err(e) => println!("REFUSED in {elapsed:.2?}: {e}"),
+        Err(e) => {
+            eprintln!("REFUSED in {elapsed:.2?}: {e}");
+            std::process::exit(1);
+        }
     }
+}
+
+fn restore(archive: &Path, into: &Path) {
+    let (store, handle) = DurableStore::in_memory_shared().expect("a scratch live store");
+    let dataset = backup::Dataset::new(&store, handle);
+    let kernel = compose_with(
+        store,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Some(Backups {
+            settings: Arc::new(backup::Settings {
+                dir: archive.parent().unwrap().to_path_buf(),
+                keep: 100,
+                every: None,
+                store_path: PathBuf::from("/nonexistent/live/store"),
+                scripts: None,
+            }),
+            jobs: None,
+            next: Default::default(),
+            dataset,
+        }),
+        None,
+        None,
+    );
+    let started = Instant::now();
+    let answer = block_on(
+        kernel.issue(
+            Request::new(Verb::Sink, Iri::parse(backup::RESTORE).unwrap())
+                .with_arg(
+                    "archive",
+                    ArgRef::Inline(
+                        archive
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .as_bytes()
+                            .to_vec(),
+                    ),
+                )
+                .with_arg(
+                    "into",
+                    ArgRef::Inline(into.to_str().unwrap().as_bytes().to_vec()),
+                ),
+            &Capability::root(),
+        ),
+    )
+    .unwrap_or_else(|e| panic!("restore refused in {:.2?}: {e}", started.elapsed()));
+    println!(
+        "restore in {:.2?}: {}",
+        started.elapsed(),
+        String::from_utf8_lossy(&answer.bytes)
+    );
+}
+
+/// Independently reopen both synthetic stores and check every quad, not just counts.
+/// This fixture has no blank nodes (whose labels a general RDF import may rename).
+fn verify(source: &Path, restored: &Path) {
+    let open = |path| {
+        oxigraph::store::Store::open_with_options(
+            path,
+            oxigraph::store::StoreOptions::default().with_max_open_files(64),
+        )
+        .expect("the store reopens")
+    };
+    let source = open(source);
+    let restored = open(restored);
+    let started = Instant::now();
+    assert_eq!(source.len().unwrap(), restored.len().unwrap());
+    let mut graphs = std::collections::BTreeMap::<String, u64>::new();
+    for quad in source.iter() {
+        let quad = quad.unwrap();
+        assert!(restored.contains(&quad).unwrap(), "missing quad: {quad}");
+        *graphs.entry(quad.graph_name.to_string()).or_default() += 1;
+    }
+    println!(
+        "verified every quad in {:.2?}: {graphs:?}",
+        started.elapsed()
+    );
 }
