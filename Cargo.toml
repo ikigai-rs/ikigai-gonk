@@ -1195,6 +1195,9 @@ async-trait = "0.1"
 # `Stream`, the trait core's `ByteStream` is: the backup archive's download is a reader over the
 # file (`backup::ArchiveFile`, ledger #2730). Already in the graph through ikigai-core.
 futures-core = "0.3"
+# The Dashboard Agents panel's deadline (ledger #3678, `agents::within`): a runtime-agnostic timer,
+# already in the lock through `ikigai-throttle`.
+futures-timer = "3"
 # The HTTP door's accept loop. The QUIC door owns its own runtime (ikigai-quic). `sync` is the
 # Queue's one-read-per-root lock (`queue::Reads`, ledger #947): an async mutex, so a request
 # waiting for another's read parks instead of holding a worker thread.

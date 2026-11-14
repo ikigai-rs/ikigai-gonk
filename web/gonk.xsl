@@ -1253,6 +1253,9 @@
         <xsl:when test="@note"><p class="note"><xsl:value-of select="@note"/></p></xsl:when>
         <xsl:otherwise>
           <xsl:if test="@aliases"><p class="note"><xsl:value-of select="@aliases"/></p></xsl:if>
+          <!-- Ledger #3678: the idle holders folded into the totals, and a deadline that passed. -->
+          <xsl:if test="@older"><p class="note"><xsl:value-of select="@older"/></p></xsl:if>
+          <xsl:if test="@unfinished"><p class="note"><xsl:value-of select="@unfinished"/></p></xsl:if>
           <div class="table-wrap">
             <table class="agent-table">
               <caption class="sr-only">The agents of <xsl:value-of select="@title"/>, one row each</caption>

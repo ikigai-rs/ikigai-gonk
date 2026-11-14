@@ -36,7 +36,7 @@ is fixed.
 ### In scope
 
 - **gonk's own pages**, in every theme (auto, light, dark, high contrast) and at phone width: the header's
-  theme chooser, its ledger menu (its button, its links and its filter) and the `/l` ledgers index, the Dashboard and the ledger page's chart (the SVG, its sentence and its data table), the Dashboard's agent tables and the new-tab links in them, the Dashboard's tabs, its operator-only Cache and System panels, its polling and its pause control, the ledger
+  theme chooser, its ledger menu (its button, its links and its filter) and the `/l` ledgers index, the Dashboard and the ledger page's chart (the SVG, its sentence and its data table), the Dashboard's agent tables, the new-tab links in them and the plain sentences over a table naming the idle agents counted only in its totals and any numbers that did not finish in time (ledger #3678), the Dashboard's tabs, its operator-only Cache and System panels, its polling and its pause control, the ledger
   list and its filters and search (visibly labeled title, Labels and Without fields, comma-separated label help,
   plain-language active terms with remove/move/clear links, row label include/exclude links, and each row's state, claim, awaiting, deferred and blocked badges (the blocked one naming each open blocker); the whole-match label and priority counts beside the list,
   label include/exclude links, plain-text priority counts, the independent load's

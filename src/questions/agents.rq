@@ -1,9 +1,12 @@
-# Every holder that ever took a claim in this ledger.
+# Every holder that ever took a claim in this ledger, and when it last took one: the panel lists
+# the recent ones as rows and folds the rest into the totals (ledger #3678).
 PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
 PREFIX dcterms: <http://purl.org/dc/terms/>
 
-SELECT DISTINCT ?holder WHERE {
+SELECT ?holder (MAX(?at) AS ?last) WHERE {
   ?claim a ledger:ClaimEvent ;
-         ledger:claimedBy ?holder .
+         ledger:claimedBy ?holder ;
+         dcterms:created ?at .
 }
+GROUP BY ?holder
 ORDER BY ?holder

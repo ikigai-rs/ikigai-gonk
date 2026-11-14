@@ -1,0 +1,25 @@
+# median-claim-to-handback.rq asked once of every holder, each row naming its holder, shortest
+# first within each (ledger #3678). The claim is matched to the hand-back's holder in a filter, for
+# the reason released-all.rq gives.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT ?holder ?took ?number ?claimed ?back ?handback WHERE {
+  {
+    SELECT ?holder ?handback ?item ?back (MAX(?at) AS ?claimed) WHERE {
+      ?handback ledger:handedBackBy ?signed ;
+                ledger:onItem ?item ;
+                dcterms:created ?back .
+      ?claim a ledger:ClaimEvent ;
+             ledger:onItem ?item ;
+             ledger:claimedBy ?claimer ;
+             dcterms:created ?at .
+      BIND(ROW(?signed, ?back) AS ?holder)
+      FILTER(sameTerm(ROW(?claimer, ?at), ?holder) && ?at <= ?back)
+    }
+    GROUP BY ?holder ?handback ?item ?back
+  }
+  ?item ledger:number ?number .
+  BIND(?back - ?claimed AS ?took)
+}
+ORDER BY ?holder ?took ?handback

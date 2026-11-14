@@ -1,0 +1,43 @@
+# released.rq asked once of every holder, each row naming its holder (ledger #3678). The claim and
+# the hand-back are joined on the item and matched to the release's holder in a filter, for the
+# reason released-all.rq gives.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT DISTINCT ?holder ?number ?title WHERE {
+  {
+    SELECT ?item ?holder ?released (MAX(?at) AS ?claimed) WHERE {
+      ?release a ledger:ReleaseEvent ;
+               ledger:claimedBy ?signed ;
+               ledger:releaseReason ?reason ;
+               ledger:onItem ?item ;
+               dcterms:created ?released .
+      FILTER(?reason != "closed")
+      ?claim a ledger:ClaimEvent ;
+             ledger:onItem ?item ;
+             ledger:claimedBy ?claimer ;
+             dcterms:created ?at .
+      BIND(ROW(?signed, ?released) AS ?holder)
+      FILTER(sameTerm(ROW(?claimer, ?at), ?holder) && ?at <= ?released)
+    }
+    GROUP BY ?item ?holder ?released
+  }
+  ?item ledger:number ?number ;
+        dcterms:title ?title .
+  OPTIONAL {
+    SELECT ?item ?holder ?released (MAX(?at) AS ?back) WHERE {
+      ?release a ledger:ReleaseEvent ;
+               ledger:claimedBy ?signed ;
+               ledger:onItem ?item ;
+               dcterms:created ?released .
+      ?handback ledger:onItem ?item ;
+                ledger:handedBackBy ?giver ;
+                dcterms:created ?at .
+      BIND(ROW(?signed, ?released) AS ?holder)
+      FILTER(sameTerm(ROW(?giver, ?at), ?holder) && ?at <= ?released)
+    }
+    GROUP BY ?item ?holder ?released
+  }
+  FILTER(!BOUND(?back) || ?back <= ?claimed)
+}
+ORDER BY ?holder ?number
