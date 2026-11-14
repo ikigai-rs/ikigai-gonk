@@ -1967,6 +1967,10 @@ fn chunked_endpoints_restore_verify_report_status_and_rotate() {
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
+            std::fs::metadata(&into).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
             std::fs::metadata(rotation.path().join(newer))
                 .unwrap()
                 .permissions()

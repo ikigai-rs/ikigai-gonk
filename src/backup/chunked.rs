@@ -239,18 +239,24 @@ fn add_counts(to: &mut BTreeMap<String, u64>, from: &BTreeMap<String, u64>) -> R
     Ok(())
 }
 
-fn take(dataset: &Dataset, settings: &Settings, bounds: Bounds, now: u64) -> Result<String> {
-    create_private_dir(&settings.dir).map_err(|e| Error::Endpoint(e.to_string()))?;
-    let name = format!("{PREFIX}{}-{:03}", stamp_compact(now), now % 1000);
-    let into = settings.dir.join(&name);
-    let staging = Staging::begin(&into)?;
-    // Staging is also used by store restore; make the backup directory private before data.
+fn private_staging(into: &Path) -> Result<Staging> {
+    let staging = Staging::begin(into)?;
+    // Narrow the empty staging directory before opening either an archive file or
+    // RocksDB: the engine's files need the same privacy boundary as the backup.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(staging.path(), std::fs::Permissions::from_mode(0o700))
             .map_err(|e| Error::Endpoint(e.to_string()))?;
     }
+    Ok(staging)
+}
+
+fn take(dataset: &Dataset, settings: &Settings, bounds: Bounds, now: u64) -> Result<String> {
+    create_private_dir(&settings.dir).map_err(|e| Error::Endpoint(e.to_string()))?;
+    let name = format!("{PREFIX}{}-{:03}", stamp_compact(now), now % 1000);
+    let into = settings.dir.join(&name);
+    let staging = private_staging(&into)?;
     let scripts = settings
         .scripts
         .as_deref()
@@ -447,7 +453,7 @@ fn restore(from: &Path, into: &Path) -> Result<String> {
         return Err(invalid("manifest graph counts disagree"));
     }
     total(&manifest.graphs)?;
-    let staging = Staging::begin(into)?;
+    let staging = private_staging(into)?;
     let store =
         ikigai_store::Store::open(staging.path()).map_err(|e| Error::Endpoint(e.to_string()))?;
     let mut loader = store
