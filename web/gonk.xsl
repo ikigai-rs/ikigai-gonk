@@ -385,6 +385,7 @@
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
       <xsl:when test="@view = 'roots'"><xsl:call-template name="roots"/></xsl:when>
       <xsl:when test="@view = 'github'"><xsl:call-template name="github"/></xsl:when>
+      <xsl:when test="@view = 'file-items'"><xsl:apply-templates select="view:file-items"/></xsl:when>
       <xsl:when test="@view = 'ledgers'"><xsl:call-template name="ledgers"/></xsl:when>
       <xsl:when test="@view = 'dashboard'"><xsl:call-template name="dashboard"/></xsl:when>
       <xsl:when test="@view = 'queue'"><xsl:call-template name="queue"/></xsl:when>
@@ -1433,6 +1434,7 @@
       <xsl:choose>
         <xsl:when test="@start-url">
           <xsl:call-template name="github"/>
+          <xsl:call-template name="file-items"/>
           <div id="browse" class="browse" hx-trigger="load" hx-swap="innerHTML">
             <xsl:attribute name="hx-get"><xsl:value-of select="@start-url"/></xsl:attribute>
             <p class="note"><xsl:value-of select="@message"/></p>
@@ -1485,6 +1487,53 @@
         <span class="note github-note"><xsl:value-of select="@note"/></span>
       </xsl:if>
     </p>
+  </xsl:template>
+
+  <!--
+    The ledger items about the file a browse page shows (ledger #3667, src/file_items.rs),
+    above the region. The shell draws it for the file it opens on; web/gonk.js swaps in this
+    same template's fragment (urn:iki:gonk:fragment:file-items:…, as=text/html) whenever the
+    region moves to another file, and hides it on any other view. The rows arrive in the
+    order the server chose (findings first by severity) and are not re-sorted here. Each
+    finding's severity is said in words before its link; the link names the item and its
+    title. With no section the element is still drawn, hidden and empty, so the script has
+    one place to swap into.
+  -->
+  <xsl:template name="file-items">
+    <xsl:choose>
+      <xsl:when test="view:file-items"><xsl:apply-templates select="view:file-items"/></xsl:when>
+      <xsl:otherwise><section id="file-items" class="file-items" hidden="hidden"></section></xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template match="view:file-items">
+    <section id="file-items" class="file-items" aria-labelledby="file-items-heading">
+      <xsl:attribute name="data-view"><xsl:value-of select="@view"/></xsl:attribute>
+      <h2 id="file-items-heading">Ledger items about this file</h2>
+      <xsl:choose>
+        <xsl:when test="view:file-item">
+          <ul class="file-items-list">
+            <xsl:for-each select="view:file-item">
+              <li>
+                <xsl:if test="@kind != ''">
+                  <span class="file-item-kind"><xsl:value-of select="@kind"/></span>
+                  <xsl:text>: </xsl:text>
+                </xsl:if>
+                <a>
+                  <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+                  <xsl:value-of select="@display"/>
+                  <xsl:value-of select="' '"/>
+                  <xsl:value-of select="."/>
+                </a>
+              </li>
+            </xsl:for-each>
+          </ul>
+        </xsl:when>
+        <xsl:otherwise>
+          <p class="note">No open items in the ledgers you can read are about this file.</p>
+        </xsl:otherwise>
+      </xsl:choose>
+    </section>
   </xsl:template>
 
   <!-- ==================================================== the review queue -->

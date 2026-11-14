@@ -385,6 +385,13 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
                 web: Arc::clone(&web),
             },
         )
+        // The ledger items about the file a browse page shows (ledger #3667).
+        .bind(
+            template(crate::file_items::TEMPLATE),
+            crate::file_items::FileItems {
+                web: Arc::clone(&web),
+            },
+        )
         // The review queue — see [`crate::queue`]. A page of this face like the others: it
         // reads `ikigai-browse`'s findings and writes its decisions under the CALLER's
         // capability, and binds nothing of its own behind the socket or QUIC.

@@ -351,9 +351,11 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 44] = [
+const WEB_IDS: [&str; 45] = [
     "gonk-k",
     "gonk-browse-page",
+    // The ledger items about a browse file (ledger #3667).
+    "gonk-fragment-file-items",
     "gonk-browse-roots",
     "gonk-page-queue",
     "gonk-fragment-queue",
@@ -552,6 +554,10 @@ fn the_http_door_conforms() {
         )
         .fixture(
             Fixture::new("gonk-browse-page", Verb::Source).binding("start", "urn:repo:demo:tree"),
+        )
+        .fixture(
+            Fixture::new("gonk-fragment-file-items", Verb::Source)
+                .binding("view", "urn:repo:demo:file:src/lib.rs"),
         )
         // ★ The Queue's form adapter, walked in a composition that binds NO browse family
         // (this door has no root, by design — `the_http_door_adds_exactly_its_pages` pins

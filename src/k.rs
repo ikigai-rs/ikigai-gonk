@@ -775,13 +775,23 @@ impl Endpoint for BrowseShell {
             },
             _ => String::new(),
         };
+        // ★ The ledger items about the file this page opens on (ledger #3667,
+        // [`crate::file_items`]): read under the CALLER's capability, ledger by ledger, and
+        // drawn only beside a region this caller can load. `web/gonk.js` asks for the same
+        // section whenever the region moves to another file.
+        let file_items = match &lacking {
+            None => crate::file_items::section(&self.web, inv, &start)
+                .await
+                .unwrap_or_default(),
+            Some(_) => String::new(),
+        };
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let doc = envelope(
             "page",
             &attributes,
             &format!(
-                "{}{}{}{github}",
+                "{}{}{}{github}{file_items}",
                 web::nav(&self.web, inv.capability, &ledgers, None),
                 element("flash", &[], ""),
                 // The reason the region is empty, in `web::Lacking`'s words (ledger #739).

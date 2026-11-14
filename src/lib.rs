@@ -54,6 +54,7 @@ pub mod face;
 pub mod face_frame;
 pub mod feeds_join;
 pub mod file_iris;
+pub mod file_items;
 pub mod findings;
 pub mod findings_summary;
 pub mod git_env;
