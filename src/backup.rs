@@ -52,7 +52,7 @@
 //! completion record (quad-byte digest and per-graph counts). Restore incrementally
 //! bulk-loads one parser stream into the private staging store, then independently
 //! counts its graphs. This keeps shared blank nodes intact across segments and detects
-//! truncation even at a complete member boundary. See [`segmented`] for the format.
+//! truncation even at a complete member boundary. See `segmented` for the format.
 //!
 //! The order is the store's own index order, a function of the dataset's contents on RocksDB,
 //! so an unchanged dataset still dumps to identical bytes; the gzip header and level are the
@@ -286,7 +286,7 @@ pub const SCRIPTS_SUFFIX: &str = ".json.gz";
 pub const SCRIPTS_FORMAT: &str = "gonk-scripts/1";
 
 /// The most bytes of legacy N-Quads a restore takes: **1 GiB**. Segmented archives
-/// instead stream up to 64 GiB through the staging store (see [`segmented`]).
+/// instead stream up to 64 GiB through the staging store (see `segmented`).
 /// This legacy cap is the ceiling handed to
 /// `urn:decompress:gzip` (`ikigai-compress`'s own maximum, `MAX_BYTES_CEILING`), AND the load
 /// cap of the store a restore builds, so one number bounds both halves (ledger
