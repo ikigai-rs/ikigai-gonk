@@ -744,6 +744,29 @@ struct Guarded {
     rules: &'static [Rule],
 }
 
+/// Runs `call`, a store (or review-space) endpoint's answer, so that it does not hold an async
+/// worker while it waits: on a multi-thread tokio runtime it gives the worker's queue to another
+/// thread first ([`tokio::task::block_in_place`]), and anywhere else it is just awaited.
+///
+/// ★ Ledger [#3679](http://localhost:1062/l/default/item/3679): `ikigai-store`'s budgeted
+/// evaluation runs on a thread of its own, but its caller WAITS for it synchronously, for a read
+/// slot (at most `max(cores / 4, 2)` reads evaluate at once) and then for the answer
+/// (`recv_timeout`), inside an `async fn` that never yields. A request that runs store queries
+/// back to back therefore held its tokio worker for as long as it ran, and as many such
+/// requests as the HTTP door has workers (several Dashboard polls) held them all: no other
+/// request was answered, static files included, until they ended, at a few percent CPU.
+/// `tests/slow_requests_3679.rs` pins it. The store's call is synchronous by design, and gonk
+/// owns the runtime it is called from, so the hand-off is here, where every door's store call
+/// passes ([`bounded`] wraps the store and the review space in the hub).
+async fn off_the_worker<T>(call: impl std::future::Future<Output = T>) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(call))
+        }
+        _ => call.await,
+    }
+}
+
 #[async_trait]
 impl Endpoint for Guarded {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
@@ -776,7 +799,7 @@ impl Endpoint for Guarded {
                     .await;
             }
         }
-        self.endpoint.invoke(inv).await
+        off_the_worker(self.endpoint.invoke(inv)).await
     }
 
     fn name(&self) -> &str {
