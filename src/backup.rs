@@ -307,6 +307,9 @@ const _: () = assert!(RESTORE_MAX_BYTES >= JOB_ANSWER_BYTES_MAX);
 // The decompressor refuses a `max-bytes` over its ceiling, so this cannot be larger, and a
 // smaller one would refuse archives the decompressor could expand.
 const _: () = assert!(RESTORE_MAX_BYTES == ikigai_compress::MAX_BYTES_CEILING as u64);
+// The restore expands the archive into the run, under the kernel's byte budget, and root gets
+// its ceiling: a smaller ceiling refuses archives every bound above admits (ledger #3715).
+const _: () = assert!(crate::STREAM_MEMORY_CEILING >= RESTORE_MAX_BYTES);
 
 /// Where backups land, how many are kept, and how often one is taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2256,7 +2259,7 @@ async fn load_and_verify(
     // `urn:iki:store:load` — the same door a bulk load comes in by anywhere else —
     // rather than through a private back entrance, and it runs under exactly the write
     // token that door enforces.
-    let restored = Kernel::new(Arc::new(ikigai_store::space(store)));
+    let restored = crate::with_stream_budget(Kernel::new(Arc::new(ikigai_store::space(store))));
     let write = Capability::scoped([ikigai_store::CAP_WRITE]);
     // Moved, not cloned: nothing below reads the document again, and at the bound it is a
     // gibibyte held twice for nothing.

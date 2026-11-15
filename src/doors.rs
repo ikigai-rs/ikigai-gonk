@@ -444,9 +444,13 @@ fn over_with_space(
         Some(log) => Arc::new(log.over(space)) as Arc<dyn Space>,
         None => space,
     };
-    let kernel = Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(TurtleRenderer))
-        .with_clock(Arc::new(SystemClock))
-        .with_cache_policy(Arc::new(NoCache));
+    // The hub's byte budget at every door too (ledger #3715): a root restore through the
+    // socket expands its archive under this kernel's run.
+    let kernel = crate::with_stream_budget(
+        Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(TurtleRenderer))
+            .with_clock(Arc::new(SystemClock))
+            .with_cache_policy(Arc::new(NoCache)),
+    );
     (kernel, space)
 }
 

@@ -109,6 +109,26 @@ use ikigai_core::{Fallback, Kernel, Space, SystemClock};
 use ikigai_store::DurableStore;
 use ikigai_vocab::TurtleRenderer;
 
+/// A caller's byte budget for one run, without a grant: core's default,
+/// [`ikigai_core::DEFAULT_STREAM_MEMORY`] (64 MiB). Unchanged by ledger #3715.
+pub const STREAM_MEMORY_BASE: u64 = ikigai_core::DEFAULT_STREAM_MEMORY;
+
+/// The most bytes one run may buffer, for root and for a grant
+/// `urn:cap:stream:memory:<bytes>`: **1 GiB, the restore bound** (`backup::RESTORE_MAX_BYTES`).
+/// A restore has `urn:decompress:gzip` expand the whole archive into the run, so the run's
+/// ceiling has to hold every archive a backup can write (ledger
+/// [#3715](http://localhost:1062/l/default/item/3715)). Without it the ceiling was core's
+/// default, 64 MiB, and every backup past 64 MiB of N-Quads was refused by its own restore.
+/// `src/backup.rs` asserts at compile time that this is at least the restore bound.
+pub const STREAM_MEMORY_CEILING: u64 = 1024 * 1024 * 1024;
+
+/// `kernel` with gonk's byte budget: [`STREAM_MEMORY_BASE`] for a caller,
+/// [`STREAM_MEMORY_CEILING`] for root and the most a grant can raise it to. Every kernel gonk
+/// serves a door from, and the hub, is built through this.
+pub fn with_stream_budget(kernel: Kernel) -> Kernel {
+    kernel.with_stream_memory(STREAM_MEMORY_BASE, STREAM_MEMORY_CEILING)
+}
+
 /// The store's directory, made owner-only (`0700`) before the store opens it (ledger
 /// [#2801](http://localhost:1062/l/default/item/2801)).
 ///
@@ -470,8 +490,11 @@ pub fn compose_serving_with_lifecycles(
     // no space inside claims one — today none of the linked crates' spaces do.
     let hub = Fallback::new(spaces).named(self::spaces::iri(self::spaces::HUB));
     let space: Arc<dyn Space> = Arc::new(hub);
-    let kernel = Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(TurtleRenderer))
-        .with_clock(Arc::new(SystemClock));
+    // ★ The byte budget's ceiling is the restore bound (ledger #3715).
+    let kernel = with_stream_budget(
+        Kernel::with_meta_renderer(Arc::clone(&space), Arc::new(TurtleRenderer))
+            .with_clock(Arc::new(SystemClock)),
+    );
     // ★ The judge's verdict words, adopted from the browse family this hub composes (ledger
     // #702 item 1): the Queue orders, folds and hides by them, and spells none of them. An
     // error here is not swallowed so much as deferred — `main` adopts again at start and

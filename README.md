@@ -4334,6 +4334,17 @@ when nothing is writing.
 and per-graph counts against the archive it was built from and fails if they differ. A backup
 you have not restored is not a backup, so `tests/backup.rs` restores one on every run.
 
+**The byte budget's ceiling is the restore bound: 1 GiB.** A restore has `urn:decompress:gzip`
+expand the whole archive into the run, and a run buffers under the kernel's byte budget. gonk
+builds the hub and every door kernel with a base of 64 MiB (ikigai-core's default, what a caller
+gets with no grant) and a ceiling of **1 GiB** (`STREAM_MEMORY_CEILING`), which is what root gets
+and the most a grant `urn:cap:stream:memory:<bytes>` can raise a caller to. The ceiling is the
+restore bound, `RESTORE_MAX_BYTES`, and a compile-time assert in `src/backup.rs` keeps it at
+least that, so every archive a backup can write fits its own restore. Before (ledger #3715) the
+ceiling was core's 64 MiB, and a backup past 64 MiB of N-Quads was refused by its restore ("over
+budget ... at least 67125248 needed"); `tests/backup.rs` restores a gzip archive past 64 MiB on
+every run.
+
 The scripts archive has its own restore and verifier, `urn:iki:gonk:restore:scripts`, under the
 same `urn:cap:gonk:restore`:
 
