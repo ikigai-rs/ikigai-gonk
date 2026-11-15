@@ -283,6 +283,46 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
                 web: Arc::clone(&web),
             },
         )
+        // A repository's harness and its firings (ledger #3721) — see [`crate::harness`].
+        .bind(
+            template(crate::harness::CONTROL_TEMPLATE),
+            crate::harness::Thing {
+                web: Arc::clone(&web),
+                kind: crate::harness::Kind::Control,
+            },
+        )
+        .bind(
+            template(crate::harness::GUIDE_TEMPLATE),
+            crate::harness::Thing {
+                web: Arc::clone(&web),
+                kind: crate::harness::Kind::Guide,
+            },
+        )
+        .bind(
+            template(crate::harness::INCIDENT_TEMPLATE),
+            crate::harness::Thing {
+                web: Arc::clone(&web),
+                kind: crate::harness::Kind::Incident,
+            },
+        )
+        .bind(
+            template(crate::harness::COVERAGE_TEMPLATE),
+            crate::harness::Coverage {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            template(crate::harness::FIRING_TEMPLATE),
+            crate::harness::FiringDay {
+                web: Arc::clone(&web),
+            },
+        )
+        .bind(
+            Exact::new(crate::harness::PAGE_IRI),
+            crate::harness::HarnessPage {
+                web: Arc::clone(&web),
+            },
+        )
         .bind(
             template("urn:iki:gonk:page:ledger:{ledger}"),
             LedgerView {
@@ -675,6 +715,12 @@ fn nav_with(
     let reads_a_root = !crate::k::readable_roots(web, capability).is_empty();
     if reads_a_root {
         out.push_str(&element("browse", &[("href", crate::k::ROOTS_PATH)], ""));
+        // ★ The Harness page (ledger #3721), on the browse rule: it reads a repository.
+        out.push_str(&element(
+            "harness-link",
+            &[("href", crate::harness::PAGE_PATH)],
+            "",
+        ));
     }
     // ★ And the Queue, on the same rule one step stronger: a caller is offered it only when
     // it may read a repository AND may DECIDE. Ledger #444 settled the label and the gate —

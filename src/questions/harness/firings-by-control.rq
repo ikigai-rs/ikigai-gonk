@@ -1,0 +1,21 @@
+# QUESTION: How often has each control fired, refusing or warning, and when first and last?
+# EMPTY: Nothing has fired in the firing logs loaded.
+#
+# READING. One row per control and outcome, over every working tree's firing log loaded into
+# this graph. A control that fires often is doing its job, and says the rule it enforces is not
+# landing: agents keep making the move the rule warns against. `label` is empty for a control
+# the graph no longer describes (its firings outlive it, by design).
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+SELECT ?control ?label ?outcome (COUNT(DISTINCT ?firing) AS ?firings)
+     (MIN(?at) AS ?first) (MAX(?at) AS ?last) WHERE {
+  ?firing harness:firedControl ?control ;
+          a ?class ;
+          prov:startedAtTime ?at .
+  FILTER(?class IN (harness:Refusal, harness:Warning))
+  OPTIONAL { ?control rdfs:label ?label }
+  BIND(STRAFTER(STR(?class), "#") AS ?outcome)
+}
+GROUP BY ?control ?label ?outcome
+ORDER BY DESC(?firings) ?control

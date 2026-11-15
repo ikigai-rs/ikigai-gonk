@@ -1,0 +1,17 @@
+# QUESTION: Which incidents has the harness learned from only in prose?
+# EMPTY: Every incident is cited by at least one sensor.
+#
+# READING. An incident is something that went wrong, recorded so the harness learns from it. A
+# row is one no sensor says harness:existsFor: a guide may cite it, but nothing checks that it
+# does not happen again.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT DISTINCT ?incident ?label WHERE {
+  { ?incident a harness:Incident } UNION { ?cited harness:existsFor ?incident }
+  OPTIONAL { ?incident rdfs:label ?label }
+  FILTER NOT EXISTS {
+    ?sensor harness:existsFor ?incident ;
+            harness:direction harness:feedback .
+  }
+}
+ORDER BY ?incident

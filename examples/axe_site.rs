@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 23] = [
+const PAGES: [(&str, &str); 24] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -65,6 +65,8 @@ const PAGES: [(&str, &str); 23] = [
     ("doctor.html", "/l/default/doctor"),
     ("sparql.html", "/sparql"),
     ("browse.html", "/browse"),
+    // Ledger #3721: the fixture repository's harness, its gaps and its firings.
+    ("harness.html", "/harness"),
     ("queue.html", "/queue"),
     // Ledger #3285: the sign-in state only, since a static site has no passkey and the door's
     // feeds are live; the subscribed page with its checkbox tree is `tests/feeds_3285.rs`'s.
@@ -79,6 +81,48 @@ const FILES: [(&str, &str); 6] = [
     ("static/htmx.min.js", "text/javascript"),
     ("static/gonk.js", "text/javascript"),
 ];
+
+/// The fixture repository's harness (ledger #3721): a guide, two sensors and an incident, so
+/// the page draws a stage, a category, a proof, a code site and a gap of each kind.
+const HARNESS: &str = r#"@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ctl:     <urn:iki:harness:fixture:control:> .
+@prefix guide:   <urn:iki:harness:fixture:guide:> .
+@prefix inc:     <urn:iki:harness:fixture:incident:> .
+@prefix test:    <urn:iki:harness:fixture:test:> .
+guide:claim-before-write a harness:Guide ; rdfs:label "no claim, no write" ;
+    harness:statedIn "AGENTS.md" ; harness:section "1. Claim the item before you write" ;
+    harness:direction harness:feedforward ; harness:execution harness:inferential ;
+    harness:stage harness:toolCall ; harness:category harness:authoritySafety .
+inc:unclaimed-edit a harness:Incident ; rdfs:label "an edit landed with no claim" .
+inc:lost-lease a harness:Incident ; rdfs:label "a lease ran out mid-run" .
+ctl:require-claim a harness:Control ; rdfs:label "hook: no claim, no write" ;
+    harness:direction harness:feedback ; harness:execution harness:computational ;
+    harness:stage harness:toolCall ; harness:category harness:authoritySafety ;
+    harness:outcome harness:refuse ; harness:enforcedAt "tools/claim_hook.py#main" ;
+    harness:statedBy guide:claim-before-write ; harness:existsFor inc:unclaimed-edit ;
+    harness:firedBy test:test_harness:SensorsFire.test_require_claim .
+ctl:big-diff a harness:Control ; rdfs:label "gate: a diff too big to review" ;
+    harness:direction harness:feedback ; harness:execution harness:computational ;
+    harness:stage harness:preCommit ; harness:category harness:maintainability ;
+    harness:outcome harness:warn ; harness:enforcedAt "tools/gonk.py#check_diff" ;
+    harness:noFiringTest "a fixture's sensor" .
+"#;
+
+/// Its firing segment: a refusal and two warnings over two days.
+const FIRINGS: &str = "# ikigai-log v1
+@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
+@prefix log:     <https://ikigai-rs.dev/ns/log#> .
+@name     urn:log:harness:tree-fixture
+@instance urn:iki:harness:tree:fixture
+@level    log:info
+@started  2026-11-01T00:00:00.000Z
+@prev     genesis
+
+2026-11-01T01:00:00.000Z harness:Refusal urn:iki:harness:fixture:control:require-claim seq=1 cmd=sha256:000000000001
+2026-11-02T01:00:00.000Z harness:Warning urn:iki:harness:fixture:control:big-diff seq=2 cmd=sha256:000000000002
+2026-11-02T02:00:00.000Z harness:Warning urn:iki:harness:fixture:control:big-diff seq=3 cmd=sha256:000000000002
+";
 
 /// A browser's GET of `path`: its status and its body.
 fn get(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
@@ -160,8 +204,24 @@ fn main() {
     .unwrap();
     git(&["add", "example.rs"]);
     git(&["commit", "-qm", "Accessibility fixture"]);
+    // Ledger #3721: a harness in the shape a gonk-starter repository carries, and its firing log.
+    std::fs::create_dir_all(repository.join(".gonk/harness")).unwrap();
+    std::fs::create_dir_all(repository.join(".gonk/state/harness")).unwrap();
+    std::fs::write(repository.join(".gonk/harness/harness.ttl"), HARNESS).unwrap();
+    std::fs::write(repository.join(".gonk/state/harness/firings.log"), FIRINGS).unwrap();
     let commit = git(&["rev-parse", "HEAD"]);
     let blob = git(&["rev-parse", "HEAD:example.rs"]);
+    let graph = ikigai_gonk::browse::Graph::chosen();
+    let (store, _shared) =
+        DurableStore::in_memory_shared_declaring(graph.sharer_writes()).expect("a store");
+    let browsed = ikigai_gonk::browse::wire(
+        vec![("fixture".to_string(), repository.clone())],
+        store.shared_writer().expect("the store's writer"),
+        None,
+        None,
+        &graph,
+        None,
+    );
     let repositories = vec![git_object::Repository {
         name: "fixture".into(),
         dir: repository,
@@ -171,8 +231,8 @@ fn main() {
         browse: true,
     }];
     let hub = Arc::new(compose_with(
-        DurableStore::in_memory().expect("a store"),
-        None,
+        store,
+        Some(Arc::new(browsed.space)),
         Vec::new(),
         vec![Arc::new(git_object::space("configured", &repositories))],
         None,
@@ -325,7 +385,7 @@ fn main() {
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
         ledgers: vec!["default".to_string(), "crew".to_string()],
-        browse_roots: Vec::new().into(),
+        browse_roots: vec!["fixture".to_string()].into(),
         passkeys: Arc::clone(&passkeys),
         // Ledger #365: include deployment CURIE bindings in the browser fixture.
         rules: format!(

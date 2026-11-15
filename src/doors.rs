@@ -1417,6 +1417,12 @@ fn routes() -> Vec<Route> {
         },
     ]
     .into_iter()
+    // Ledger #3721: a repository's harness, and each of its resources at a path of its own.
+    .chain(
+        crate::harness::ROUTES
+            .iter()
+            .map(|(path, iri)| route(path, iri)),
+    )
     .chain(browse_routes())
     .collect()
 }
@@ -1429,7 +1435,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 24] = [
+pub const GONK_PATHS: [&str; 25] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
@@ -1440,6 +1446,7 @@ pub const GONK_PATHS: [&str; 24] = [
     "/view/",
     "/resolution/",
     crate::views_page::PAGE_PATH,
+    crate::harness::PAGE_PATH,
     "/auth/",
     "/static/",
     "/k",

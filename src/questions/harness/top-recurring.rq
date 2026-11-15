@@ -1,0 +1,16 @@
+# QUESTION: Which ten controls fire most, refusing or warning?
+# EMPTY: Nothing has fired in the firing logs loaded.
+#
+# READING. The controls with the most firings, refusals and warnings together. One that tops
+# the list is doing its job, and says the rule it enforces is not landing.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?control ?label (COUNT(DISTINCT ?firing) AS ?firings) WHERE {
+  ?firing harness:firedControl ?control ;
+          a ?class .
+  FILTER(?class IN (harness:Refusal, harness:Warning))
+  OPTIONAL { ?control rdfs:label ?label }
+}
+GROUP BY ?control ?label
+ORDER BY DESC(?firings) ?control
+LIMIT 10

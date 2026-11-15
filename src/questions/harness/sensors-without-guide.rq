@@ -1,0 +1,20 @@
+# QUESTION: Which sensors state no rule, so an agent meets them only by tripping them?
+# EMPTY: Every sensor cites the rule of AGENTS.md it mechanizes.
+#
+# READING. A sensor observes what was done and refuses, warns or reports. A row is one with no
+# harness:statedBy: no rule in AGENTS.md warned of it first, so the first an agent hears of it
+# is the refusal. The fix is a rule (or a link to the one that already says it), not another
+# sensor.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?sensor ?label ?execution (GROUP_CONCAT(DISTINCT ?name; separator=",") AS ?stages) WHERE {
+  ?sensor harness:direction harness:feedback ;
+          rdfs:label ?label ;
+          harness:execution ?how ;
+          harness:stage ?stage .
+  FILTER NOT EXISTS { ?sensor harness:statedBy ?guide }
+  BIND(STRAFTER(STR(?how), "#") AS ?execution)
+  BIND(STRAFTER(STR(?stage), "#") AS ?name)
+}
+GROUP BY ?sensor ?label ?execution
+ORDER BY ?execution ?sensor
