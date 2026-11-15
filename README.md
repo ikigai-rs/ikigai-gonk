@@ -1179,6 +1179,43 @@ summaries of the ledgers the caller may read: "In the last 7 days the harness re
 11 of them on 9 ledger items you may read." Counts only: no command digest, session or tool is
 served.
 
+### Query sensors: `harness-*` scripts on gonk's tick (ledger #3726)
+
+A query sensor is a published SPARQL script named `harness-{id}`: an ASK fires when it answers
+`true`, a SELECT when it has a row. gonk runs every published one on a tick of its own, as
+`urn:script:harness-{id}:result`, under what the script declares, what its publisher held at
+publish and the scripts' ceiling (the ledgers' reads), whichever is least. So a sensor a customer
+publishes never reads more than its publisher could. A sensor that compares against the clock
+declares `# @param now xsd:dateTime`, and the tick binds it to its own time.
+
+```toml
+# how often the sensors run (this IS the default; "off" for none)
+gonk.sensor.every = "15m"
+# file an item in this ledger when a sensor fires (unset: record the firing only)
+gonk.sensor.ledger = "default"
+```
+
+A sensor fires when its answer turns from quiet to firing. Each firing is one `gonk:SensorFired`
+line in gonk's sealed log segment, its subject the control (`urn:script:harness-{id}`), with the
+version digest and the row count, never a row. With `gonk.sensor.ledger` set, a firing also files
+one item labeled `sensor` and `harness-{id}`. Nothing more is filed while that item is open.
+
+Two refusals at publish: the library refuses a script that reads a graph its publisher cannot,
+and gonk refuses a `harness-*` script that is not a SPARQL ASK or SELECT, or that reads beyond the
+ceiling (a browse graph, `GRAPH ?g`), since no tick could run it.
+
+Three examples ship in `src/sensors/`, each over the default ledger:
+`closed-without-evidence.rq` (a done close naming no evidence), `merged-without-verdict.rq` (a
+close that names a pull request, with no `verdict:` line in the note written with it) and
+`lapsed-claim.rq` (an open item whose claim's lease lapsed over a day ago, nobody taking it
+over). Publish one as a person who reads that ledger and may publish it, signed in:
+
+```text
+$ ikigai-gonk passkey invite brian --ledger default=read --script harness-lapsed-claim=publish
+$ curl -X POST -b 'gonk_session=…' --data-binary @src/sensors/lapsed-claim.rq \
+    'http://localhost:1062/script/harness-lapsed-claim?language=sparql'
+```
+
 ### A root's git history as weekly series (ledger #1631)
 
 The delivery dashboard's git source (ledger [#1630](http://localhost:1062/l/default/item/1630)):

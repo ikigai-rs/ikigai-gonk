@@ -602,6 +602,31 @@ fn serve(flags: &config::Flags) -> ! {
         }
         _ => format!("off (no {} line)", ikigai_gonk::onboard::KEY),
     };
+    // ★ The query sensors (ledger #3726, `sensor`): every published `harness-*` script, run on
+    // a tick of its own, recording each firing in the one record and filing an item where
+    // `gonk.sensor.ledger` names a ledger.
+    let sensors = Arc::new(ikigai_gonk::sensor::Sensors::new(
+        scripts.backend(),
+        record.clone(),
+        settings.sensor_ledger.clone(),
+    ));
+    let sensor_line = match settings.sensor_every {
+        Some(every) => {
+            sensors.start(Arc::downgrade(&hub), every);
+            format!(
+                "every {} the published urn:script:{}* run as {} reads; a firing is a {} line{}",
+                humanize(every),
+                ikigai_gonk::sensor::PREFIX,
+                ikigai_gonk::script::CEILING.join(" and "),
+                ikigai_gonk::sensor::FIRED,
+                match &settings.sensor_ledger {
+                    Some(ledger) => format!(" and an item in `{ledger}`"),
+                    None => String::new(),
+                }
+            )
+        }
+        None => format!("off ({} = \"off\")", ikigai_gonk::sensor::EVERY_KEY),
+    };
     // Under ROOT, for the reason on `Views::start` (ledger #2048): a narrowed listener does not
     // hear a declaration it could not cache. The views' own reads stay the caller's.
     let views_line = match views.start(&hub, ikigai_core::Capability::root()) {
@@ -992,6 +1017,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  layer   {layer_line}");
         eprintln!("  layers  {layers_line}");
         eprintln!("  onboard {onboard_line}");
+        eprintln!("  sensors {sensor_line}");
         eprintln!("  review  {review_line}");
         eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");

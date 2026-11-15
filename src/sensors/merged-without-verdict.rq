@@ -1,0 +1,30 @@
+# QUESTION: Which items were closed on a merged pull request with no verdict line in the close note?
+# A query sensor (ledger #3726): it fires while one row stands. A close that names a pull
+# request (its evidence, or its note) says what the review decided on a line of its own,
+# `verdict: …`, in the note written with the close (the comment dated with it).
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT DISTINCT ?item ?number
+FROM <urn:iki:ledger:graph:default>
+WHERE {
+  ?item a ledger:Item ;
+        ledger:number ?number ;
+        ledger:status ledger:closed .
+  ?close a ledger:StatusEvent ;
+         ledger:onItem ?item ;
+         ledger:status ledger:closed ;
+         dcterms:created ?at .
+  OPTIONAL {
+    ?note a ledger:Comment ;
+          ledger:onItem ?item ;
+          dcterms:created ?at ;
+          ledger:body ?body .
+  }
+  OPTIONAL {
+    ?close ledger:evidence ?pull .
+    FILTER(CONTAINS(STR(?pull), "/pull/"))
+  }
+  FILTER(BOUND(?pull) || (BOUND(?body) && CONTAINS(?body, "/pull/")))
+  FILTER(!BOUND(?body) || !REGEX(?body, "^verdict:", "mi"))
+}
+ORDER BY ?number

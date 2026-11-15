@@ -92,6 +92,7 @@ pub mod roots;
 pub mod rows;
 pub mod rules;
 pub mod script;
+pub mod sensor;
 pub mod sparql;
 pub mod stack;
 pub mod system;
