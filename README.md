@@ -689,8 +689,9 @@ use only the identity and open status mirrored into the readable ledger, without
 foreign titles or bodies.
 
 Cursor snapshots contain hashes and live in the owner-only
-`dispatcher-cursors.json` beside the live dataset, outside RDF and its backups. They
-survive a server restart; unacknowledged tokens do not. Embedded kernels use memory
+`<data home>/dispatch/cursors.json`, in an owner-only directory outside the database,
+RDF and database backups. They survive a server restart; unacknowledged tokens do not.
+Embedded kernels use memory
 unless their host supplies a durable dispatcher space. Bounds: 128 reader/scope pairs,
 30 days idle retention, 262,144 hashes across snapshots and previews, and at most four
 pending previews per scope for 15 minutes. Capacity evicts the least recently used scopes

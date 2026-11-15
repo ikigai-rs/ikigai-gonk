@@ -21,6 +21,10 @@ use ikigai_gonk::{
 use ikigai_store::{DurableStore, StoreConfig};
 use ikigai_time::JobRegistry;
 
+fn dispatch_cursor_path(homes: &Homes) -> std::path::PathBuf {
+    homes.data.join("dispatch").join("cursors.json")
+}
+
 fn main() {
     // First, before any thread exists: the stack every request-serving thread gets, including
     // the ones the socket and QUIC transports spawn themselves (ledger #915, `stack`).
@@ -622,8 +626,12 @@ fn serve(flags: &config::Flags) -> ! {
     // started once the hub exists, and reads the ledgers out of the store each sweep.
     let lapses = ikigai_gonk::lapse::Lapses::new(settings.lapse_every, backup::NextRun::default());
     trigger_spaces.push(Arc::new(ikigai_gonk::lapse::space(lapses.clone())));
+    let dispatch_cursor_path = dispatch_cursor_path(&homes);
+    // Reader state belongs in the data home, outside the database and its backups.
+    ikigai_gonk::private_store_dir(dispatch_cursor_path.parent().expect("cursor directory"))
+        .unwrap_or_else(|e| fail(&format!("cannot create private dispatch directory: {e}")));
     trigger_spaces.push(Arc::new(
-        ikigai_gonk::dispatch::space(Some(store_path.join("dispatcher-cursors.json")))
+        ikigai_gonk::dispatch::space(Some(dispatch_cursor_path))
             .unwrap_or_else(|e| fail(&e.to_string())),
     ));
     if let Some(record) = &record {
@@ -2793,6 +2801,23 @@ fn read_display_rules(layout: &quic::Layout) -> Result<ikigai_gonk::display::Rul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_cursors_live_outside_the_database_directory() {
+        let homes = Homes {
+            home: "/tmp/owner".into(),
+            config: "/tmp/owner/config".into(),
+            data: "/tmp/owner/data".into(),
+        };
+        let store_path = homes.data.join("store");
+        let path = dispatch_cursor_path(&homes);
+        assert!(
+            !path.starts_with(&store_path),
+            "{} is inside the database",
+            path.display()
+        );
+        assert_eq!(path, homes.data.join("dispatch").join("cursors.json"));
+    }
 
     /// ★ The one message in this server that is itself a procedure: an operator reading it has
     /// an invisible archive and no other instructions. So the commands are checked — that they
