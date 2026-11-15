@@ -106,6 +106,7 @@ fn main() {
             }
         }
         Command::ClientList { flags } => client_list(&flags),
+        Command::ClientRefresh { write, flags } => client_refresh(write, &flags),
         Command::ClientRemove {
             key,
             by_name,
@@ -2044,6 +2045,19 @@ fn client_list(flags: &config::Flags) {
              served under it; a certificate with no entry is refused whatever it says"
         );
     }
+}
+
+/// `ikigai-gonk client refresh [--write]` ([`ikigai_gonk::refresh`], ledger #3776).
+fn client_refresh(write: bool, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let refreshed =
+        ikigai_gonk::refresh::refresh(&layout, write, now_ms).unwrap_or_else(|e| fail(&e));
+    print!("{}", ikigai_gonk::refresh::render(&refreshed));
 }
 
 /// `ikigai-gonk client remove <name> | --fingerprint <fp>`.

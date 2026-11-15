@@ -229,6 +229,17 @@ usage:
                                    fingerprint with no bundle). grants.json is left alone: a
                                    grant name may be shared. Effective at its next call;
                                    its certificate stays TLS-trusted until a restart
+  ikigai-gonk client refresh [--write] [--config PATH]
+                                   add to every grant in grants.json what its ledger roles mint
+                                   NOW, after a library upgrade widened a role: per ledger, the
+                                   roles are read back from the grant's own ledger tokens (purge,
+                                   delete, write, worker, audit, read) and grants_for's tokens it
+                                   lacks are added. Nothing is ever removed; hand-added scopes
+                                   stay; a ledger whose tokens match no role is listed and left
+                                   alone. A dry run unless --write, which backs grants.json up
+                                   beside itself (grants.json.bak-<UTC stamp>-refresh) and
+                                   writes it atomically. Effective at the next request (HTTP)
+                                   or connection (QUIC), with no restart
   ikigai-gonk passkey list [--config PATH]
                                    every enrolled passkey: its label, grants, credential id
                                    and IRI, each grant's scopes as grants.json stores them,
@@ -538,6 +549,14 @@ pub enum Command {
         key: String,
         /// Whether `key` is a bundle name (`true`) or a fingerprint.
         by_name: bool,
+        /// `--config`.
+        flags: Flags,
+    },
+    /// Add to every stored grant what its ledger roles mint now, never removing anything
+    /// ([`crate::refresh`], ledger #3776). A dry run unless `write`.
+    ClientRefresh {
+        /// `--write`: back `grants.json` up and write the additions.
+        write: bool,
         /// `--config`.
         flags: Flags,
     },
@@ -1572,12 +1591,31 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
                 flags,
             });
         }
+        Some("refresh") => {
+            let mut flags = Flags::default();
+            let mut write = false;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--write" => write = true,
+                    flag @ ("--config" | "--config-home" | "--data-home") => {
+                        home_flag(flag, &mut args, &mut flags)?
+                    }
+                    other => return Err(format!("client refresh: unknown argument `{other}`")),
+                }
+            }
+            return Ok(Command::ClientRefresh { write, flags });
+        }
         Some(other) => {
             return Err(format!(
-                "client: unknown subcommand `{other}` (expected `add`, `list` or `remove`)"
+                "client: unknown subcommand `{other}` (expected `add`, `list`, `remove` or \
+                 `refresh`)"
             ))
         }
-        None => return Err("client: expected `add <name>`, `list` or `remove <name>`".to_string()),
+        None => {
+            return Err(
+                "client: expected `add <name>`, `list`, `remove <name>` or `refresh`".to_string(),
+            )
+        }
     }
     let name = args
         .next()
@@ -3849,6 +3887,16 @@ mod tests {
         ));
         assert!(parse_args(args("client remove")).is_err());
         assert!(parse_args(args("client remove a --fingerprint b")).is_err());
+        // Ledger #3776: refresh is a dry run unless --write.
+        assert!(matches!(
+            parse_args(args("client refresh")).unwrap(),
+            Command::ClientRefresh { write: false, .. }
+        ));
+        assert!(matches!(
+            parse_args(args("client refresh --write --config-home /c")).unwrap(),
+            Command::ClientRefresh { write: true, flags } if flags.config_home == Some(PathBuf::from("/c"))
+        ));
+        assert!(parse_args(args("client refresh --force")).is_err());
         // Ledger #799: the homes and the store are flags, on serve and on the provisioning
         // commands alike.
         match parse_args(args("--config-home /c --data-home /d --store /s")).unwrap() {

@@ -2448,6 +2448,7 @@ ikigai-gonk client add laptop --ledger default=delete --force   # a NEW GRANT; t
 ikigai-gonk client add laptop --rotate       # a NEW IDENTITY under the SAME grant; the old fingerprint's enrolment moves to it
 ikigai-gonk client remove laptop             # the bundle and its enrolment (grants.json is left alone)
 ikigai-gonk client remove --fingerprint <fp> # an enrolment with no bundle
+ikigai-gonk client refresh [--write]         # every grant gains what its ledger roles mint now; nothing removed (ledger #3776)
 ```
 
 ⚠ `--force` replaces a client's GRANT and never its key pair. Until ledger #864 (R7) it did
@@ -2550,10 +2551,20 @@ and `audit` its store read token, `worker`, `write`, `delete` and `purge` its re
 tokens. A grant minted before then lacks them. A worker holding one still claims, comments and
 hands back, but its session summary is refused `Denied`, naming both tokens; a reader holding one
 reads every item and none of the sessions; a delete or purge is refused before anything moves.
-Re-mint it with `client add <name> … --force` (or a new passkey invite). Then, once per ledger,
-the owner moves the summaries 0.22.0 wrote into the ledger graph:
+Refresh every stored grant with `ikigai-gonk client refresh` (ledger #3776): a dry run that reads
+each grant's roles back from its own ledger tokens (purge, delete, write, worker, audit, read) and
+lists, per grant and ledger, the tokens `grants_for` mints now that it lacks. Then
+`client refresh --write` adds them, after backing `grants.json` up beside itself
+(`grants.json.bak-<UTC stamp>-refresh`). It never removes a token, so hand-added scopes stay, and a
+ledger whose tokens match no role (a raw `--ledger-graph` grant, a lone `--link-in` or
+`--mirror-to`) is listed and left alone; a second run adds nothing. Do not use
+`client add … --force` for this: it rebuilds a grant whole from its flags and drops every scope
+added by hand. A running gonk needs no restart: passkeys see the change at their next request,
+QUIC clients at their next connection (an open one is closed within 10 minutes). Then, once per
+ledger, the owner moves the summaries 0.22.0 wrote into the ledger graph:
 `sink urn:iki:ledger:<ledger>:sessions` with the content `plan` first (it lists them and writes
-nothing), then `move`. Until then the harness page joins no firing to those older summaries.
+nothing), then `move`; `client refresh` prints both lines for every ledger it saw. Until then the
+harness page joins no firing to those older summaries.
 
 #### Stopping gonk: the QUIC door drains (ledger #3326)
 
