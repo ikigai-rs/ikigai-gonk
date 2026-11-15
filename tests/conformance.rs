@@ -99,12 +99,13 @@ const LEDGER_IDS: [&str; 30] = [
     "ledger-sessions",
 ];
 
-/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Six:
+/// gonk's own resources in the HUB — behind every door, socket and QUIC included. Seven:
 /// the page renderer's chunk transform and a layer entry's Markdown, bound where the process's
 /// one cache is (`ikigai_gonk::render::rendered_chunks` says why), which read nothing and are
 /// gated by nothing; and the four `urn:sparql:*` forms (`ikigai_gonk::sparql`, ledger #836), each one
 /// hop onto the store's graph-scoped twin under the caller's capability.
-const HUB_IDS: [&str; 6] = [
+const HUB_IDS: [&str; 7] = [
+    "gonk-dispatch",
     "gonk-render",
     "gonk-render-markdown",
     "sparql-select",
@@ -201,6 +202,10 @@ fn fixtures() -> Suite {
         // nothing, so conformance 0.8 reports the registration as inert. A face that ever
         // carries the term again is a VOCABULARY finding naming it, not a silent pass.
         .namespace("https://ikigai-rs.dev/ns/ledger#")
+        .fixture(Fixture::new("gonk-dispatch", Verb::Source)
+            .binding("ledger", "default").binding("id", "1"))
+        .opt_out("gonk-dispatch", Some(Verb::Sink),
+            "acknowledgment consumes a private single-use preview token; dispatch_3712 tests the real Source/Sink lifecycle, isolation, races and persistence")
         // The chunk renderer wants a chunk document, which no ArgSpec can shape.
         .fixture(
             Fixture::new("gonk-render", Verb::Source)
@@ -217,6 +222,7 @@ fn fixtures() -> Suite {
 /// The fixtures plus what the reads PROMISE about caching — for a kernel that caches.
 fn suite() -> Suite {
     fixtures()
+        .live("gonk-dispatch")
         // FAILURES (conformance 0.10, ledger #1546): an action that states its failure classes
         // (`Description::fails`) is held to them. Opt-in for this one minor and the default from
         // 0.11.0, so opting in now means the flip changes nothing here. gonk's own actions
