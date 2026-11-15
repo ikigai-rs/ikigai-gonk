@@ -881,6 +881,15 @@ fn saved_filters_keep_other_bindings_and_use_the_declarations_write_gate() {
     assert_eq!(saved.status, 200, "{}", saved.body);
     assert!(saved.body.contains("Projects: work."));
 
+    let alias = gonk.save(&[
+        ("op", "add"),
+        ("base", &gonk.base()),
+        ("name", "alias"),
+        ("target", "urn:iki:gonk:view:triage"),
+    ]);
+    assert!(alias.body.contains("it is in force"), "{}", alias.body);
+    assert_eq!(gonk.page("/view/alias").status, 200);
+
     let reader = self::gonk(reader_plus(&[views::read_grant()]));
     reader.declare_as_root(&filter_declaration("work"));
     wait_for(&reader.views, |s| s.installs == 1);

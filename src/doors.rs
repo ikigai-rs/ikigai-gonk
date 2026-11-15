@@ -562,17 +562,17 @@ impl Space for PageViews {
             return Resolution::Miss;
         };
         let mut table = ikigai_core::AliasTable::new().with_max_hops(max_hops);
-        for rule in rules.into_iter().filter(|r| {
-            r.from.starts_with(crate::views::VIEW_PREFIX)
-                && r.to.starts_with("urn:iki:gonk:page:ledger:")
-                && r.at == ikigai_core::ResolveAt::Root
-        }) {
+        for rule in rules {
             let Ok(next) = table.with_rule(rule) else {
                 return Resolution::Miss;
             };
             table = next;
         }
-        if table.is_empty() {
+        if !table
+            .canonicalize(&request.target)
+            .canonical()
+            .is_some_and(|target| target.as_str().starts_with("urn:iki:gonk:page:ledger:"))
+        {
             return Resolution::Miss;
         }
         ikigai_core::Alias::new(Arc::new(table), Arc::new(EndpointSpace::new()))
