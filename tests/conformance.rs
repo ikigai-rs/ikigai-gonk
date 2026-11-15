@@ -436,6 +436,7 @@ fn http_door_with_space(hub: Arc<Kernel>, config: &std::path::Path) -> (Kernel, 
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });

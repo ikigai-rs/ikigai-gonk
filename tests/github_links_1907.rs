@@ -191,6 +191,7 @@ fn page(hub: &Arc<Kernel>, iri: &str, cap: &Capability) -> String {
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });
@@ -1095,6 +1096,7 @@ fn resolution(hub: &Arc<Kernel>, name: &str, cap: &Capability) -> Result<String,
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });

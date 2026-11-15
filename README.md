@@ -751,6 +751,33 @@ whatever no rule takes from it. No ledger's records change, and a raw question a
 was. A rule that cannot be read (no arrow, a date that is not a date, a row with a space in it) or
 that could never match stops the server at start, naming the line.
 
+### Projects: named sets of ledgers (ledger #3191)
+
+```toml
+gonk.project = "work default,crew"
+gonk.project = "work review"
+gonk.project = "release crew,shipping"
+```
+
+Each repeatable `gonk.project` line names a project followed by comma-separated ledger names.
+Names use the ledger naming rule (lowercase letters, digits, hyphens and underscores).
+Repeated project names add members; duplicate members count once. A ledger can belong to
+several projects or none. A bare project name declares an empty set.
+
+Open `/l/default?projects=work,release` to list the union, or add `&ledgers=another` to add
+explicit ledgers. The base page's ledger is included only if selected. Status, text, labels,
+exclusions, paging and counts apply to the whole set. Every member is read under the viewer's
+own capability; a project grants no access. The base page still requires its own read grant,
+and filing an item still targets that page's ledger.
+
+Project names stay in paging links, search and action forms. Membership is read from the
+config file on each request, so adding or removing a ledger updates every saved project URL
+without a restart. Unknown projects and invalid declarations are refused. An empty project
+shows no items. The ledger picker groups readable members under each project and links to
+its list; a project with no readable members is omitted, and other ledgers remain available.
+This implements the config declaration option; it adds no project management page or RDF
+write endpoint.
+
 ### A deployment's own pages at `/face/name/{name}/` (ledger #3199)
 
 A deployment can write its own HTML and scripts and have gonk serve them from gonk's origin, so

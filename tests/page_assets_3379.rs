@@ -105,6 +105,7 @@ impl Server {
             epochs: None,
             holder_aliases: Default::default(),
             page_assets: assets.clone(),
+            projects: Default::default(),
             toolbox: false,
             faces: vec!["site".to_string()],
         });

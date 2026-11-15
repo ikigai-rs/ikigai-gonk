@@ -88,6 +88,7 @@ impl Server {
             epochs: None,
             holder_aliases: Default::default(),
             page_assets: Default::default(),
+            projects: Default::default(),
             toolbox: true,
             faces: Vec::new(),
         });
