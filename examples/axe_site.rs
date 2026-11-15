@@ -215,7 +215,8 @@ fn main() {
             Verb::Sink,
             Iri::parse("urn:iki:ledger:crew:append").expect("an IRI"),
         )
-        .with_arg("content", ArgRef::Inline(b"A crew item".to_vec())),
+        .with_arg("content", ArgRef::Inline(b"A crew item".to_vec()))
+        .with_arg("labels", ArgRef::Inline(b"crew-label".to_vec())),
         &Capability::root(),
     ))
     .expect("the named-ledger scratch item");
@@ -279,7 +280,8 @@ fn main() {
     let record = block_on(Kernel::issue(
         &hub,
         Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
-            .with_arg("content", ArgRef::Inline(b"A live flight plan".to_vec())),
+            .with_arg("content", ArgRef::Inline(b"A live flight plan".to_vec()))
+            .with_arg("labels", ArgRef::Inline(b"flight-plan".to_vec())),
         &Capability::root(),
     ))
     .expect("the flight plan");

@@ -1802,6 +1802,32 @@ impl LabelFilters<'_> {
         )
     }
 
+    /// A label outside a listing opens its item's ledger with just that label required.
+    fn link_chips(graph: &Graph, item: &str, ledger: &Ledger) -> String {
+        graph
+            .values(item, &format!("{LEDGER_NS}label"))
+            .iter()
+            .map(|term| {
+                element(
+                    "label-chip",
+                    &[
+                        ("term", term),
+                        ("ledger", ledger.name()),
+                        (
+                            "include",
+                            &format!(
+                                "{}?labels={}",
+                                ledger_href(ledger),
+                                ikigai_fn::html::url_segment(term)
+                            ),
+                        ),
+                    ],
+                    "",
+                )
+            })
+            .collect()
+    }
+
     fn chips(&self, graph: &Graph, item: &str, listing: &Listing<'_>, page: &str) -> String {
         graph
             .values(item, &format!("{LEDGER_NS}label"))
@@ -1835,6 +1861,11 @@ fn listing_chips(
     listing: &Listing<'_>,
     page: &str,
 ) -> Result<String> {
+    item_chips(graph, |item| filters.chips(graph, item, listing, page))
+}
+
+/// Keep chip metadata local to each projected item, for cards and chunked rows alike.
+fn item_chips(graph: &Graph, chips: impl Fn(&str) -> String) -> Result<String> {
     use quick_xml::events::Event;
     let xml = graph.view_xml().map_err(render_err)?;
     let mut reader = quick_xml::Reader::from_str(&xml);
@@ -1855,9 +1886,7 @@ fn listing_chips(
                         let item = attribute
                             .unescape_value()
                             .map_err(|e| render_err(e.to_string()))?;
-                        writer.get_mut().extend_from_slice(
-                            filters.chips(graph, &item, listing, page).as_bytes(),
-                        );
+                        writer.get_mut().extend_from_slice(chips(&item).as_bytes());
                     }
                 }
             }
@@ -2909,6 +2938,7 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Resu
         };
         let mut states: BTreeMap<String, usize> = BTreeMap::new();
         let mut row_xml = Vec::new();
+        let row_ledger = Ledger::parse(&ledger)?;
         for (rank, member) in members.iter_mut().enumerate() {
             // The chunk stylesheet sorts its rows; this key keeps them in the order above.
             member
@@ -2919,7 +2949,9 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Resu
                 .value(&member.target, &format!("{}state", render::VIEW_NS))
                 .unwrap_or_default();
             *states.entry(state).or_default() += 1;
-            row_xml.push(member.graph.view_xml().map_err(render_err)?);
+            row_xml.push(item_chips(&member.graph, |item| {
+                LabelFilters::link_chips(&member.graph, item, &row_ledger)
+            })?);
         }
         let counts = states
             .iter()
@@ -3200,7 +3232,9 @@ async fn item_card(
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
-    let mut xml = graph.view_xml().map_err(render_err)?;
+    let mut xml = item_chips(&graph, |item| {
+        LabelFilters::link_chips(&graph, item, ledger)
+    })?;
     for (placeholder, fragment) in &rendered {
         // A literal's text is escaped in the XML, so this element can only be the one the
         // graph wrote: a body that spells it out arrives as `&lt;view:rendered&gt;`.
