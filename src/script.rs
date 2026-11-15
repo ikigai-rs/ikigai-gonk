@@ -325,6 +325,9 @@ pub struct Scripts {
     shacl: Arc<dyn Space>,
     /// The hub, once it exists: what the library's change hook cuts `urn:kernel:bindings` on.
     hub: Arc<OnceLock<Weak<Kernel>>>,
+    /// Where the atoms live: read by the query sensors' tick ([`crate::sensor`]) to find the
+    /// published `harness-*` scripts and their parameters. Never written here.
+    backend: Arc<dyn Backend>,
 }
 
 impl Scripts {
@@ -383,17 +386,20 @@ impl Scripts {
         // #1220, [`ceiling_over`]); the guard refreshes the set before a root run.
         let known = KnownLedgers::default();
         let policy = known.clone();
-        let config = SpaceConfig::new(backend, Arc::new(move |_name: &str| policy.ceiling()))
-            .sparql(SparqlDoor::store())
-            // ★ A published query or plan is its OWN catalog entry, with its parameters as
-            // arguments; the kernel caches descriptions under `urn:kernel:bindings`, which only
-            // the host can cut. Unwired, a new script runs at once but the catalog, MCP and the
-            // engine's argument routing describe the old set.
-            .on_change(Arc::new(move |_name| {
-                if let Some(hub) = cell.get().and_then(Weak::upgrade) {
-                    hub.cut(BINDINGS_THREAD);
-                }
-            }));
+        let config = SpaceConfig::new(
+            Arc::clone(&backend),
+            Arc::new(move |_name: &str| policy.ceiling()),
+        )
+        .sparql(SparqlDoor::store())
+        // ★ A published query or plan is its OWN catalog entry, with its parameters as
+        // arguments; the kernel caches descriptions under `urn:kernel:bindings`, which only
+        // the host can cut. Unwired, a new script runs at once but the catalog, MCP and the
+        // engine's argument routing describe the old set.
+        .on_change(Arc::new(move |_name| {
+            if let Some(hub) = cell.get().and_then(Weak::upgrade) {
+                hub.cut(BINDINGS_THREAD);
+            }
+        }));
         let library: Arc<dyn Space> = Arc::new(ikigai_script::space(config));
         // ★ The anonymous window is consulted from inside the run's endpoint, where the
         // caller's capability is known: a space overlay resolves before any capability exists.
@@ -412,6 +418,7 @@ impl Scripts {
             }),
             shacl: Arc::new(ikigai_shacl::space()),
             hub,
+            backend,
         }
     }
 
@@ -422,6 +429,12 @@ impl Scripts {
             Arc::clone(&self.plans),
             Arc::clone(&self.shacl),
         ]
+    }
+
+    /// Where the atoms live, for a reader that runs nothing itself: the query sensors' tick
+    /// ([`crate::sensor`]). A run still goes through the hub, under the library's authority.
+    pub fn backend(&self) -> Arc<dyn Backend> {
+        Arc::clone(&self.backend)
     }
 
     /// Hand the family the hub it is bound in, so a publish or a retire cuts
@@ -591,6 +604,16 @@ pub fn publish_refusal(endpoint: &str, request: &Request) -> Option<Error> {
     }
     let language = inline(request, "language").map_or("lisp", str::trim);
     let content = inline(request, "content").unwrap_or("");
+    // ★ A query sensor (ledger #3726) is a script named `harness-*`: held to more than any
+    // script, so a sensor that could never run on the tick is refused when it is published.
+    let name = request
+        .target
+        .as_str()
+        .strip_prefix(ikigai_script::name::PREFIX)
+        .unwrap_or("");
+    if let Some(refusal) = crate::sensor::publish_refusal(name, language, content) {
+        return Some(refusal);
+    }
     match language {
         "lisp" => Some(Error::InvalidArgument {
             name: "language".to_string(),

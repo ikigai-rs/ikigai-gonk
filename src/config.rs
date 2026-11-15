@@ -64,6 +64,9 @@
 //! # gonk.script.dir = "~/.ikigai/scripts"   # where the scripts live (this IS the default)
 //! # gonk.script.anonymous_runs_per_minute = 30   # anonymous runs, all together (this IS the
 //!                                       # default; 0 for none): scripts, plans, draft dry runs
+//! # gonk.sensor.every = "15m"         # how often the query sensors (`harness-*` scripts) run
+//!                                       # (this IS the default; "off" for none)
+//! # gonk.sensor.ledger = "default"     # file an item there when one fires (default: record only)
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
 //! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
@@ -129,7 +132,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 54] = [
+const KEYS: [&str; 56] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -172,6 +175,8 @@ const KEYS: [&str; 54] = [
     "gonk.backup.keep",
     "gonk.script.dir",
     "gonk.script.anonymous_runs_per_minute",
+    crate::sensor::EVERY_KEY,
+    crate::sensor::LEDGER_KEY,
     "gonk.nl.ask",
     "gonk.review.space",
     "gonk.review.grant",
@@ -816,6 +821,12 @@ pub struct Settings {
     /// [`crate::budget::DEFAULT_ANONYMOUS_RUNS_PER_MINUTE`]; `0` for none): a script's run, an
     /// ad hoc plan and a draft's dry run count alike — see [`crate::budget::AnonymousRuns`].
     pub anonymous_runs_per_minute: u32,
+    /// How often the query sensors run (`gonk.sensor.every`, default
+    /// [`crate::sensor::DEFAULT_EVERY`]), or `None` for `off` — see [`crate::sensor`].
+    pub sensor_every: Option<Duration>,
+    /// The ledger a sensor's firing files an item into (`gonk.sensor.ledger`), or `None` to
+    /// record the firing only.
+    pub sensor_ledger: Option<String>,
     /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
     /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
     pub nl_ask: String,
@@ -2331,6 +2342,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             .unwrap_or_else(|| homes.data.join(crate::script::DIR_NAME)),
         anonymous_runs_per_minute: crate::budget::anonymous_runs_per_minute(
             value_for(text, "gonk.script.anonymous_runs_per_minute").as_deref(),
+        )?,
+        sensor_every: crate::sensor::every(value_for(text, crate::sensor::EVERY_KEY).as_deref())?,
+        sensor_ledger: crate::sensor::ledger(
+            value_for(text, crate::sensor::LEDGER_KEY).as_deref(),
         )?,
         nl_ask: nl_ask(text)?,
         model_calls_per_hour: crate::budget::model_calls_per_hour(

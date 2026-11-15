@@ -1,0 +1,17 @@
+# QUESTION: Which open items hold a claim whose lease lapsed a day ago, with nobody taking it over?
+# A query sensor (ledger #3726): it fires while one row stands. An expired lease is not a
+# free item (`next` skips it until someone takes it over), so one nobody took for a day is
+# work that stalled. A takeover replaces the claim and its lease, so the row goes.
+# @param now xsd:dateTime -- the tick's time, which gonk binds
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+SELECT ?item ?number
+FROM <urn:iki:ledger:graph:default>
+WHERE {
+  ?item a ledger:Item ;
+        ledger:number ?number ;
+        ledger:status ledger:open ;
+        ledger:leaseExpires ?expires .
+  FILTER(?expires < ?now - "P1D"^^xsd:dayTimeDuration)
+}
+ORDER BY ?number
