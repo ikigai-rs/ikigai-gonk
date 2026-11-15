@@ -66,7 +66,7 @@ const STORE_IDS: [&str; 16] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 30] = [
+const LEDGER_IDS: [&str; 34] = [
     "alias",
     "alias-scheme",
     "ledger-append",
@@ -83,6 +83,11 @@ const LEDGER_IDS: [&str; 30] = [
     "ledger-item-about",
     "ledger-item-closed",
     "ledger-item-history",
+    // ikigai-ledger 0.23.0: dispatch notes (ledger #3718) and stalled claims (ledger #3709).
+    "ledger-item-notes",
+    "ledger-note",
+    "ledger-stalled",
+    "ledger-lapse",
     "ledger-item-sessions",
     "ledger-item-holder-is",
     "ledger-item-state",

@@ -39,7 +39,8 @@ use ikigai_ledger::Ledger;
 /// `--ledger L=delete --ledger L=audit` is delete with the graveyard visible and no purge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authority {
-    /// `items`, `item:{id}`, `next`, `ledgers`.
+    /// `items`, `item:{id}`, `next`, `ledgers`, and an item's or the ledger's session summaries
+    /// (their own graph since `ikigai-ledger` 0.23.0, ledger #3661).
     Read,
     /// …plus reading the ledger's graveyard (`urn:iki:ledger:graph:{name}:deleted`) through the
     /// store's per-graph read doors (`urn:sparql:*` with `graph=` names it). Writes nothing:
@@ -53,9 +54,11 @@ pub enum Authority {
     /// …plus `append`, `comment`, `close`, `reopen`, `claim`, `defer`, `link`, `label`, and
     /// editing an item.
     Write,
-    /// …plus `Delete` on an item, which moves it into the ledger's graveyard graph.
+    /// …plus `Delete` on an item, which moves it, and its session summaries, into the ledger's
+    /// graveyard graph.
     Delete,
-    /// …plus `purge`, which destroys the content in both graphs.
+    /// …plus `purge`, which destroys the content in the ledger graph, the graveyard and the
+    /// session graph.
     Purge,
 }
 
@@ -86,34 +89,61 @@ impl std::str::FromStr for Authority {
 ///     [
 ///         "urn:cap:ledger:read:acme",
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
 ///         "urn:cap:ledger:write:acme",
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:session",
 ///         "urn:cap:store:read:graph:urn:collab:participants",
 ///     ]
 /// );
+/// // A READER: the ledger, and its session graph (ikigai-ledger 0.23.0, ledger #3661).
+/// assert_eq!(
+///     grants_for("acme", Authority::Read).unwrap(),
+///     [
+///         "urn:cap:ledger:read:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
+///     ]
+/// );
 /// // A WORKER: claim, comment and record its session, never close or `about` (ikigai-ledger's
-/// // published worker grant; the session line since 0.22.0, ledger #3561).
+/// // published worker grant; the session line since 0.22.0, ledger #3561, and the session
+/// // graph's read and write since 0.23.0, ledger #3661).
 /// assert_eq!(
 ///     grants_for("acme", Authority::Worker).unwrap(),
 ///     [
 ///         "urn:cap:ledger:read:acme",
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
 ///         "urn:cap:ledger:claim:acme",
 ///         "urn:cap:ledger:comment:acme",
 ///         "urn:cap:ledger:session:acme",
 ///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:session",
 ///         "urn:cap:store:read:graph:urn:collab:participants",
 ///     ]
 /// );
 /// // An AUDITOR: read, plus the graveyard's read token, and nothing that writes (ledger #1611).
+/// // Reading sessions comes with read; the graveyard holds deleted items' summaries too.
 /// assert_eq!(
 ///     grants_for("acme", Authority::Audit).unwrap(),
 ///     [
 ///         "urn:cap:ledger:read:acme",
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:deleted",
 ///     ]
 /// );
+/// // DELETE and PURGE hold the session graph's read and write: a delete moves the item's
+/// // summaries into the graveyard, and a purge destroys them (0.23.0).
+/// let purge = grants_for("acme", Authority::Purge).unwrap();
+/// for token in [
+///     "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
+///     "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:session",
+///     "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:deleted",
+///     "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:deleted",
+/// ] {
+///     assert!(purge.iter().any(|t| t == token), "{token}");
+/// }
 /// ```
 ///
 /// ★ **Every authority that writes also READS the participants graph** (ledger #2836,
@@ -137,7 +167,15 @@ impl std::str::FromStr for Authority {
 pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, String> {
     let ledger = Ledger::parse(ledger).map_err(|e| e.to_string())?;
     let graph = ledger.graph();
-    let mut grants = vec![ledger.cap_read(), ikigai_store::cap_read_graph(&graph)];
+    // ★ The session graph (ikigai-ledger 0.23.0, ledger #3661): a ledger's session summaries
+    // live in a graph of their own, and reading an item's or the ledger's sessions under
+    // `read:{L}` needs that graph's store read token. Every role reads, so every role holds it.
+    let sessions = ledger.session_graph();
+    let mut grants = vec![
+        ledger.cap_read(),
+        ikigai_store::cap_read_graph(&graph),
+        ikigai_store::cap_read_graph(&sessions),
+    ];
     if authority == Authority::Read {
         return Ok(grants);
     }
@@ -152,11 +190,18 @@ pub fn grants_for(ledger: &str, authority: Authority) -> Result<Vec<String>, Str
         grants.push(ledger.cap_comment());
         grants.push(ledger.cap_session());
         grants.push(ikigai_store::cap_write_graph(&graph));
+        // Recording a summary writes the session graph (0.23.0): without this the summary is
+        // refused `Denied` while the hand-back itself succeeds.
+        grants.push(ikigai_store::cap_write_graph(&sessions));
         grants.push(ikigai_store::cap_read_graph(crate::participants::GRAPH));
         return Ok(grants);
     }
     grants.push(ledger.cap_write());
     grants.push(ikigai_store::cap_write_graph(&graph));
+    // `write:{L}` covers `session`, and the `sessions` Sink that moves 0.22.0's summaries out of
+    // the ledger graph writes this one; delete moves an item's summaries to the graveyard and
+    // purge destroys them, so every role from here on holds it (0.23.0).
+    grants.push(ikigai_store::cap_write_graph(&sessions));
     grants.push(ikigai_store::cap_read_graph(crate::participants::GRAPH));
     if authority == Authority::Write {
         return Ok(grants);
@@ -212,8 +257,9 @@ pub fn implied_by(token: &str, held: &[String]) -> bool {
         })
 }
 
-/// The prefix every ledger's graphs share: `urn:iki:ledger:graph:{name}` and its graveyard
-/// `urn:iki:ledger:graph:{name}:deleted` (`ikigai_ledger::Ledger::graph`, `deleted_graph`).
+/// The prefix every ledger's graphs share: `urn:iki:ledger:graph:{name}`, its graveyard
+/// `urn:iki:ledger:graph:{name}:deleted` and its session graph `urn:iki:ledger:graph:{name}:session`
+/// (`ikigai_ledger::Ledger::graph`, `deleted_graph`, `session_graph`).
 /// A test pins it against both, so a change in how the ledger names its graphs fails here.
 pub const LEDGER_GRAPH_PREFIX: &str = "urn:iki:ledger:graph:";
 
@@ -273,8 +319,9 @@ pub const AUDIT_IS_A_LEDGER_AUTHORITY: &str =
 /// last token here is what says "raw" — the door refuses a raw write to a ledger graph
 /// without it, and nothing else requires it, so it adds no authority anywhere else.
 ///
-/// ⚠ **One graph, not the graveyard.** A raw repair of a deleted item's archive is rare enough
-/// to belong to the owner's socket, whose root reaches every graph.
+/// ⚠ **One graph, not the graveyard nor the session graph.** A raw repair of a deleted item's
+/// archive or of a session summary is rare enough to belong to the owner's socket, whose root
+/// reaches every graph.
 ///
 /// # Errors
 ///
@@ -838,6 +885,10 @@ pub fn nl_draft_grants(net_host: Option<&str>) -> Result<Vec<String>, String> {
 /// ledgers in `gonk.http.ledger`, and [`crate::script::ANONYMOUS`] (run and read a PUBLIC
 /// script). Signing in (a passkey session) or a client certificate is what writes.
 ///
+/// The read tokens include the session graph's (`ikigai-ledger` 0.23.0, ledger #3661), so an
+/// anonymous reader sees an item's content-free session summaries as it did under 0.22.0, when
+/// they sat in the ledger graph its read token already covered: parity, not a widening.
+///
 /// ★ Ledger [#1687](http://localhost:1062/l/default/item/1687): this was `Authority::Write`, so
 /// any process on this machine, and on every machine a reverse tunnel puts this door on, could
 /// file, comment and label items, and an unattended worker that selects by label and reads
@@ -851,6 +902,7 @@ pub fn nl_draft_grants(net_host: Option<&str>) -> Result<Vec<String>, String> {
 ///     [
 ///         "urn:cap:ledger:read:default",
 ///         "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+///         "urn:cap:store:read:graph:urn:iki:ledger:graph:default:session",
 ///         "urn:cap:script:run:public",
 ///         "urn:cap:script:read:public",
 ///     ]
@@ -1023,8 +1075,12 @@ mod tests {
             [
                 "urn:cap:ledger:read:acme",
                 "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+                // ikigai-ledger 0.23.0 (ledger #3661): a delete moves the item's session
+                // summaries into the graveyard, so it reads and writes the session graph.
+                "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
                 "urn:cap:ledger:write:acme",
                 "urn:cap:store:write:graph:urn:iki:ledger:graph:acme",
+                "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:session",
                 "urn:cap:store:read:graph:urn:collab:participants",
                 "urn:cap:ledger:delete:acme",
                 "urn:cap:store:write:graph:urn:iki:ledger:graph:acme:deleted",
@@ -1052,6 +1108,8 @@ mod tests {
             [
                 "urn:cap:ledger:read:acme",
                 "urn:cap:store:read:graph:urn:iki:ledger:graph:acme",
+                // Read's own since ikigai-ledger 0.23.0 (ledger #3661), so audit's too.
+                "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:session",
                 "urn:cap:store:read:graph:urn:iki:ledger:graph:acme:deleted",
             ]
         );
@@ -1072,7 +1130,7 @@ mod tests {
         let purge = grants_for("acme", Authority::Purge).unwrap();
         assert!(audit.iter().all(|t| purge.contains(t)), "{purge:?}");
         let delete = grants_for("acme", Authority::Delete).unwrap();
-        assert!(!delete.contains(&audit[2]), "{delete:?}");
+        assert!(!delete.contains(&audit[3]), "{delete:?}");
         // And it is a ledger authority: the browse graph has no graveyard.
         assert_eq!(
             browse_graph_grants(Authority::Audit),
@@ -1279,14 +1337,15 @@ mod tests {
         assert!(refused.contains("no gonk.browse.root"), "{refused}");
     }
 
-    /// ★ The prefix the door's raw-write rule reads is the ledger's own spelling of both its
-    /// graphs, and no authority of a LEDGER grant carries the raw token — that is the whole
+    /// ★ The prefix the door's raw-write rule reads is the ledger's own spelling of all three of
+    /// its graphs, and no authority of a LEDGER grant carries the raw token — that is the whole
     /// difference between the two kinds of grant (ledger #878).
     #[test]
     fn the_ledger_graph_prefix_is_the_ledgers_own_and_no_ledger_grant_is_raw() {
         let acme = Ledger::parse("acme").unwrap();
         assert!(acme.graph().starts_with(LEDGER_GRAPH_PREFIX));
         assert!(acme.deleted_graph().starts_with(LEDGER_GRAPH_PREFIX));
+        assert!(acme.session_graph().starts_with(LEDGER_GRAPH_PREFIX));
         for authority in [
             Authority::Read,
             Authority::Audit,
@@ -1358,6 +1417,7 @@ mod tests {
             "default".to_string(),
         ];
         let union = grants_for_all(&ledgers, Authority::Read).unwrap();
-        assert_eq!(union.len(), 4, "{union:?}");
+        // Three per ledger (the ledger, its graph, its session graph), each once.
+        assert_eq!(union.len(), 6, "{union:?}");
     }
 }

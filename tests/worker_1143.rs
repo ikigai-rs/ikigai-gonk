@@ -150,11 +150,14 @@ fn client_add_worker_mints_the_published_worker_grant() {
         [
             "urn:cap:ledger:read:default",
             "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+            // ikigai-ledger 0.23.0 (ledger #3661): summaries live in their own graph.
+            "urn:cap:store:read:graph:urn:iki:ledger:graph:default:session",
             "urn:cap:ledger:claim:default",
             "urn:cap:ledger:comment:default",
             // ikigai-ledger 0.22.0 (ledger #3561): a worker records its session's summary.
             "urn:cap:ledger:session:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
+            "urn:cap:store:write:graph:urn:iki:ledger:graph:default:session",
             // Gonk's own line (ledger #2836): an enrolled worker claims its author.
             "urn:cap:store:read:graph:urn:collab:participants",
         ]
@@ -427,6 +430,18 @@ fn a_worker_records_its_session_summary_on_its_hand_back_and_nothing_more() {
             &[("as", "application/json")],
         ))
         .expect("the owner reads item 1's sessions");
+    assert!(text(&read).contains("0b5e41aa"), "{}", text(&read));
+    // The worker's read grant reaches the session graph too (ikigai-ledger 0.23.0, ledger #3661).
+    let read = gonk
+        .as_worker(
+            "w1",
+            request(
+                Verb::Source,
+                "urn:iki:ledger:item:1:sessions",
+                &[("as", "application/json")],
+            ),
+        )
+        .expect("a worker reads item 1's sessions");
     assert!(text(&read).contains("0b5e41aa"), "{}", text(&read));
     // An item with no hand-back has nothing to record a session on: a Conflict, not a Denied.
     match gonk.as_worker(

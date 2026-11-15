@@ -163,7 +163,7 @@ fn a_review_files_one_item_per_finding_once() {
         .iter()
         .find(|l| l.contains("[roborev severity:critical]"))
         .unwrap_or_else(|| panic!("{retry}"));
-    assert!(critical.contains(" p0 "), "{critical}");
+    assert!(critical.contains(" priority 0 "), "{critical}");
     assert!(
         critical.contains("`write_with_retry` loops while the store"),
         "{critical}"
@@ -172,9 +172,9 @@ fn a_review_files_one_item_per_finding_once() {
         .iter()
         .find(|l| l.contains("[roborev severity:major]"))
         .unwrap();
-    assert!(high.contains(" p1 "), "{high}");
+    assert!(high.contains(" priority 1 "), "{high}");
     let medium = items(&hub, "reviews", &[("labels", "severity:minor")]);
-    assert!(item_lines(&medium)[0].contains(" p2 "), "{medium}");
+    assert!(item_lines(&medium)[0].contains(" priority 2 "), "{medium}");
 
     // One item, in full: body, revision, both about IRIs.
     let number = critical.split_whitespace().next().unwrap();
@@ -210,7 +210,7 @@ fn a_review_files_one_item_per_finding_once() {
     let all = items(&hub, "reviews", &[]);
     assert_eq!(item_lines(&all).len(), 4, "{all}");
     assert!(
-        all.contains("[roborev severity:trivial]") && all.contains(" p3 "),
+        all.contains("[roborev severity:trivial]") && all.contains(" priority 3 "),
         "{all}"
     );
 }

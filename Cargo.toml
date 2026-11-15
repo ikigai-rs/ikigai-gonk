@@ -297,7 +297,14 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # dated history as claimed. Answer shapes are unchanged. `"0.20.0"` was `<0.21.0`.
 # 0.21.1: Counts follow their own ledger graph thread on store 0.5 (ledger #3375).
 # `"0.21.1"` is `<0.22.0`.
-ikigai-ledger = "0.22.0"
+# ★ 0.23.0 (ledger #3661), a GRANT floor: session summaries live in their own named graph,
+# `urn:iki:ledger:graph:{L}:session` (`Ledger::session_graph`), so `crate::grants` mints that
+# graph's store read for every role and its write for worker, write, delete and purge, and the
+# harness page reads summaries there. Also: stalled claims (#3709), dispatch notes (#3718), write
+# shapes (#3724), plain priorities and groups in words, and removing a label the item does not
+# hold is refused (NotFound) instead of answering success. `"0.22.0"` was `<0.23.0`;
+# `"0.23.0"` is `<0.24.0`.
+ikigai-ledger = "0.23.0"
 
 # The door line and its hash-chained segments (ledger #383): every request a door serves is one
 # `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under

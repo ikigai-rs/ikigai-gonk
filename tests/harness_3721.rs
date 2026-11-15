@@ -198,9 +198,12 @@ impl Served {
         .map(|r| String::from_utf8_lossy(&r.bytes).into_owned())
     }
 
-    /// A session summary in `default`: the session `id` worked on item `item`.
+    /// A session summary in `default`'s session graph (where `ikigai-ledger` 0.23.0 records one,
+    /// ledger #3661): the session `id` worked on item `item`.
     fn summarize(&self, id: &str, item: u64) {
-        let graph = ikigai_ledger::Ledger::parse("default").unwrap().graph();
+        let graph = ikigai_ledger::Ledger::parse("default")
+            .unwrap()
+            .session_graph();
         let update = format!(
             "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>\n\
              INSERT DATA {{ GRAPH <{graph}> {{ <urn:agent:session:id:{id}> a ledger:SessionSummary ; \
@@ -494,6 +497,32 @@ fn firings_join_to_ledger_items_through_session_summaries() {
     let sentence = "In the last 7 days the harness refused 4 actions, 3 of them on 2 ledger items you may read.";
     assert!(page.contains(sentence), "{page}");
     assert!(!page.contains("urn:agents:session"), "{page}");
+    // A reader whose grant was minted before ikigai-ledger 0.23.0 lacks the session graph's
+    // token: the page still renders with the counts, joining nothing it may not read.
+    let session_token = ikigai_store::cap_read_graph(
+        &ikigai_ledger::Ledger::parse("default")
+            .unwrap()
+            .session_graph(),
+    );
+    let mut older: Vec<String> = grants_for("default", Authority::Read)
+        .unwrap()
+        .into_iter()
+        .filter(|t| *t != session_token)
+        .collect();
+    older.push(format!("{}demo", ikigai_browse::CAP_PREFIX));
+    let page = s
+        .read(
+            "urn:iki:gonk:page:harness",
+            "text/html",
+            &Capability::scoped(older),
+        )
+        .unwrap();
+    assert!(
+        page.contains(
+            "refused 4 actions, none of them in a session a ledger you may read has a summary of."
+        ),
+        "{page}"
+    );
     // A caller who reads the repository and no ledger has the counts and no join.
     let browse_only = Capability::scoped(vec![format!("{}demo", ikigai_browse::CAP_PREFIX)]);
     let page = s

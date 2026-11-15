@@ -295,18 +295,20 @@ usage:
 
   --ledger <ledger>=<authority>, repeatable; each authority holds the one before, except audit
   and worker:
-    read     items, an item, next, the ledger list
+    read     items, an item, next, the ledger list, and the session summaries (their own graph,
+             urn:iki:ledger:graph:<ledger>:session)
     audit    read, plus READ the ledger's graveyard (urn:iki:ledger:graph:<ledger>:deleted, through
              urn:sparql:* graph=…): see what was deleted without writing, deleting or purging
              anything. Purge holds it too; with delete (two --ledger lines) it is delete that can
              see the graveyard and cannot purge
-    worker   read, plus claim (take, renew, release) and comment (a hand-back too): NOT close or
+    worker   read, plus claim (take, renew, release), comment (a hand-back too) and recording
+             its session's summary on that hand-back: NOT close or
              reopen, filing, labeling, linking, deferring or editing. For a remote worker whose
              dispatcher closes; `--worker <ledger>` is the same. A claim it takes is its own
              (the ledger records this client's principal), so another worker cannot release it
     write    every ledger write: file, comment, claim, close, reopen, label, link, defer, edit
     delete   write, plus Delete an item (into the ledger's graveyard)
-    purge    delete, plus purge an item's content from both graphs
+    purge    delete, plus purge an item's content from the ledger, graveyard and session graphs
 
   --script names ONE script (urn:script:<name>) or a NAMESPACE of them (<namespace>-*: every
   name beginning <namespace>-, e.g. team-* covers team-report, not teammate), repeatable; each

@@ -195,7 +195,7 @@ fn an_export_becomes_items_comments_closes_and_links_once() {
         one.lines()
             .next()
             .unwrap()
-            .contains("open    p1  Stop the loop on an empty queue"),
+            .contains("open    priority 1  Stop the loop on an empty queue"),
         "{one}"
     );
     assert!(
@@ -226,16 +226,24 @@ fn an_export_becomes_items_comments_closes_and_links_once() {
     assert!(one.contains(&format!("related:  {}", iri(&two))), "{one}");
 
     // Closed with kata's reason, and kata's close time as the note.
-    assert!(two.lines().next().unwrap().contains("closed  p3"), "{two}");
+    assert!(
+        two.lines().next().unwrap().contains("closed  priority 3"),
+        "{two}"
+    );
     assert!(two.contains("(wontfix)"), "{two}");
     assert!(
         two.contains("Closed in kata at 2026-09-04T08:00:00.000Z (wontfix)."),
         "{two}"
     );
 
-    // No priority in kata is no priority here; the links keep their direction.
+    // No priority in kata is no priority here (ledger 0.23.0 says so in words); the links keep
+    // their direction.
     assert!(
-        three.lines().next().unwrap().contains("open    p-"),
+        three
+            .lines()
+            .next()
+            .unwrap()
+            .contains("open    no priority set"),
         "{three}"
     );
     assert!(
