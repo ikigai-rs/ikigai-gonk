@@ -80,6 +80,8 @@ pub struct HubSpace {
     /// Whether this door names no principal, so a `principal` argument a caller sent must
     /// not reach the hub ([`HubSpace::naming_nobody`]).
     nobody: bool,
+    /// HTTP may resolve saved ledger-page views from its own root.
+    page_views: bool,
 }
 
 impl HubSpace {
@@ -92,6 +94,7 @@ impl HubSpace {
             id,
             wire: false,
             nobody: false,
+            page_views: false,
         }
     }
 
@@ -157,7 +160,13 @@ pub fn not_served(target: &str) -> bool {
 const NOT_SERVED: [&str; 1] = ["urn:shacl:"];
 
 impl Space for HubSpace {
-    fn resolve(&self, request: &Request, _scope: &Scope) -> Resolution {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        if self.page_views {
+            let page_view = resolve_page_view(&self.hub, request, scope);
+            if !matches!(page_view, Resolution::Miss) {
+                return page_view;
+            }
+        }
         // ★ What the hub binds for its own sub-requests and serves to no caller (ledger #939):
         // a miss at every door, exactly as if it were not linked.
         if not_served(request.target.as_str()) {
@@ -517,7 +526,9 @@ pub fn http_kernel_serving_with_space(
     // hub and the other doors have no page to link them from.
     let mut layers: Vec<Arc<dyn Space>> = vec![Arc::new(pages), Arc::new(ikigai_ui::space())];
     layers.extend(faces);
-    layers.push(Arc::new(HubSpace::new(hub)));
+    let mut forwarding = HubSpace::new(hub);
+    forwarding.page_views = true;
+    layers.push(Arc::new(forwarding));
     let space = Fallback::new(layers).named(spaces::iri(spaces::HTTP_DOOR));
     over_with_space(
         Arc::new(space),
@@ -525,6 +536,37 @@ pub fn http_kernel_serving_with_space(
         None,
         access,
     )
+}
+
+/// Resolve the live named views from the HTTP root too, where page targets live.
+/// Core performs the rewrite, fixed-argument checks and contract projection. The door
+/// caches nothing; each resolution uses the arrangement currently in force in the hub.
+fn resolve_page_view(hub: &Kernel, request: &Request, scope: &Scope) -> Resolution {
+    if !request
+        .target
+        .as_str()
+        .starts_with(crate::views::VIEW_PREFIX)
+    {
+        return Resolution::Miss;
+    }
+    let Some(topology) = crate::views::in_force(hub) else {
+        return Resolution::Miss;
+    };
+    let ikigai_core::SpaceKind::Alias { rules, max_hops } = topology.kind else {
+        return Resolution::Miss;
+    };
+    let mut table = ikigai_core::AliasTable::new().with_max_hops(max_hops);
+    for rule in rules {
+        // HTTP adds only page views; other views retain the hub's resolution and cache.
+        if !crate::views_page::saved_filter(&rule) {
+            continue;
+        }
+        let Ok(next) = table.with_rule(rule) else {
+            return Resolution::Miss;
+        };
+        table = next;
+    }
+    ikigai_core::Alias::new(Arc::new(table), Arc::new(EndpointSpace::new())).resolve(request, scope)
 }
 
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —

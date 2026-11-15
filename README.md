@@ -3861,7 +3861,7 @@ grant reads the declaration (`urn:cap:store:read:graph:urn:iki:gonk:views:declar
 else is not shown the link, and `/views` answers them a `403` naming that token.
 
 With the write token as well (`urn:cap:store:write:graph:urn:iki:gonk:views:declaration`) the
-page has a form per view (its name after `urn:iki:gonk:view:`, its target, exact or prefix; Save
+page has a form per editable view (its name after `urn:iki:gonk:view:`, its target, exact or prefix; Save
 and Remove) and one to add a view. Without it the page has no forms at all, and a post made
 anyway is refused by the declaration's own contract and the store beneath it. Neither token is
 in any grant the commands write: add them to a passkey's grant in `gonk/grants.json` by hand.
@@ -3877,11 +3877,37 @@ in any grant the commands write: add them to a passkey's grant in `gonk/grants.j
   changed since (another tab, another person, the socket), nothing is written and the page says
   so.
 - **The page never edits what it cannot show.** An arrangement other than one alias over an empty
-  endpoint space, or one containing named requests with templates, fixed arguments, bound verbs
-  or declared inputs, is listed without forms. The page says to change it over the socket.
+  endpoint space is listed without forms. Saved ledger-page filters can be edited with their
+  literal arguments intact. Other named requests (templates, reference arguments, bound verbs
+  or declared inputs) are preserved verbatim when another view changes; their rows say to
+  change them over the socket and have no edit form.
 - Through the page every name is under `urn:iki:gonk:view:`, so gonk's check cannot refuse a
   save; a refusal the page reports comes from core (a declaration it cannot build).
   `tests/views_page_2099.rs` holds all of it.
+
+### Saved page filters
+
+On a ledger or project listing, **Save this filter** names the current `projects`, `ledgers`,
+`labels`, `without`, `priority`, `status`, `text` and `sort` arguments. It appears when the
+viewer holds both the views declaration's read and write tokens and the declaration has a
+shape the Views page can safely edit. The form posts without JavaScript and reports the views
+space's verdict on the Views page. A duplicate name or a stale declaration refuses the save.
+
+A saved filter is an ordinary exact named request under `urn:iki:gonk:view:{name}`, with
+literal fixed arguments and `Source`, targeting `urn:iki:gonk:page:ledger:{ledger}`. Its
+`/view/{name}` URL serves the ledger page through the HTTP door. Paging and theme stay the
+viewer's choices; changing a fixed argument at that URL is refused. To explore another
+filter, use the page's ordinary search and status links. The Views page shows the saved
+arguments and lets a declaration writer change or remove the view while retaining other
+views and their filters.
+
+Each selected project's listing links the saved views that name it, for viewers who can
+read the declaration. Project names are saved, so membership is resolved from the current
+`gonk.project` declarations each time. Opening a saved URL requires the viewer's own ledger
+and graph grants, even if its author held broader grants; knowing a URL grants no data access.
+A viewer need not read the declaration to open a known saved URL. Ledger-page targets live
+in the HTTP door; machine views targeting ledger resources continue to work through every
+door as described above.
 
 ## The three doors
 

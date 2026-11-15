@@ -598,7 +598,7 @@ fn listing_facets_count_the_whole_match_without_blocking_the_list() {
 }
 
 #[test]
-fn priority_counts_are_text_and_list_uses_ledger_resources() {
+fn priority_counts_stay_text_while_the_list_filters_through_ledger_resources() {
     use ikigai_core::{Capability, Iri, Request, Verb};
     let server = Server::start();
     seed(&server);
@@ -626,7 +626,14 @@ fn priority_counts_are_text_and_list_uses_ledger_resources() {
         ))
         .unwrap();
         let body = String::from_utf8_lossy(&response.bytes);
-        assert!(!body.contains("search-priority"), "priority form remains");
+        assert!(
+            body.contains("<label for='search-priority'>Priority (any may match)</label>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("id='search-priority' name='priority' type='text' value='1'"),
+            "{body}"
+        );
         let events = std::mem::take(&mut *trace.0.lock().unwrap());
         for suffix in ["count", "items"] {
             assert!(

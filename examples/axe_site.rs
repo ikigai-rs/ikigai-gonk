@@ -19,10 +19,10 @@ use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::grants::anonymous_http_grants;
 use ikigai_gonk::identity::Passkeys;
-use ikigai_gonk::{compose_with, doors, git_object, quic, web};
+use ikigai_gonk::{compose_serving, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 24] = [
+const PAGES: [(&str, &str); 27] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -60,6 +60,12 @@ const PAGES: [(&str, &str); 24] = [
         "/l/default?projects=work,overlap&labels=needs-person",
     ),
     ("project-empty.html", "/l/default?projects=empty"),
+    (
+        "saved-filter.html",
+        "/l/default?projects=work,overlap&priority=1,none&sort=priority,-number",
+    ),
+    ("saved-view.html", "/view/triage"),
+    ("views.html", "/views"),
     ("named-item.html", "/l/crew/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
     ("doctor.html", "/l/default/doctor"),
@@ -230,7 +236,8 @@ fn main() {
         file: None,
         browse: true,
     }];
-    let hub = Arc::new(compose_with(
+    let views = ikigai_gonk::views::Views::new();
+    let hub = Arc::new(compose_serving(
         store,
         Some(Arc::new(browsed.space)),
         Vec::new(),
@@ -238,7 +245,51 @@ fn main() {
         None,
         None,
         None,
+        Some(&views),
     ));
+    views.start(&hub, Capability::root()).unwrap();
+    let saved = ikigai_gonk::views_page::declaration(
+        &[ikigai_gonk::views_page::Rule {
+            kind: "exact",
+            name: "urn:iki:gonk:view:triage".into(),
+            target: "urn:iki:gonk:page:ledger:default".into(),
+            at: "root",
+            original: None,
+            filters: [
+                ("projects", "work,overlap"),
+                ("ledgers", "default"),
+                ("labels", "needs-person"),
+                ("without", "blocked"),
+                ("priority", "1,none"),
+                ("status", "open"),
+                ("text", ""),
+                ("sort", "priority,-number"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect(),
+        }],
+        8,
+    );
+    block_on(
+        hub.issue(
+            Request::new(
+                Verb::Sink,
+                Iri::parse(ikigai_gonk::views::DECLARATION).unwrap(),
+            )
+            .with_arg("content", ArgRef::Inline(saved.into_bytes())),
+            &Capability::root(),
+        ),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while views.dynamic().status().installs == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "saved fixture did not bind"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let object_html = block_on(Kernel::issue(
         &hub,
         Request::new(
@@ -432,6 +483,8 @@ fn main() {
         .expect("the anonymous grant")
         .into_iter()
         .chain([
+            ikigai_gonk::views::read_grant(),
+            ikigai_gonk::views::write_grant(),
             "urn:cap:exec:git".to_string(),
             "urn:cap:browse:read:fixture".to_string(),
         ])
