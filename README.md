@@ -4199,8 +4199,8 @@ bounded at 100,000 rows and 16 MiB, and the backup's answer is every quad in the
 that backup was refused on bytes after 13.9–23.4 s (the `ORDER BY` sorts everything before the first
 row is written), so the list also carries `urn:cap:store:answer:10000000` and
 `urn:cap:store:answer:bytes:1073741824`, the store's ceilings, for the time grant's reason. A row
-grant raises rows and nothing else, so the job needs both. ⚠ The byte ceiling is about nine times
-today's answer, so it is the first bound a growing dataset will reach.
+grant raises rows and nothing else, so the job needs both. At the single-file ceilings the
+backup now retries as per-graph pieces, described below.
 
 **A backup holds the scripts too** (ledger #1175). They are not in the dataset: they are plain
 files in `~/.ikigai/scripts` (`gonk.script.dir`, ledger #939). So every backup writes two archives
@@ -4221,6 +4221,65 @@ it is asked for. A door that serves byte ranges, such as ikigai-web's, can there
 interrupted download with `Range` and `If-Range`. Who may download is unchanged: the endpoint still
 requires `urn:cap:gonk:backup`, and gonk's HTTP door grants it to no one. An archive changed or
 removed while it is being read ends the read with `Conflict`, never with a short or mixed body.
+
+### Per-graph backups past 1 GiB
+
+The single-file format is limited to 1 GiB of expanded N-Quads and 10 million quads.
+When a scheduled or owner backup reaches those full answer ceilings (or its time ceiling),
+`urn:iki:gonk:backup` automatically retries using **bounded per-graph pieces**. Call the
+piecewise path directly to avoid first attempting the single-file export:
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:backup:chunks'
+# Prints: backup gonk-chunks-2026-11-14T200109Z-123
+ikigai --connect ~/.ikigai/gonk.sock -c \
+  'sink urn:iki:gonk:restore:chunks content=gonk-chunks-2026-11-14T200109Z-123 into=/tmp/restored'
+```
+
+This is a full snapshot split by graph and bounded windows, rather than a change log.
+It needs no previous backup and captures deletions naturally. One store iterator holds one
+consistent snapshot while serialization groups each bounded window by graph. Every gzip
+piece belongs to one graph, is at most **64 MiB of N-Quads and 100,000 quads**, and may be
+smaller to honor the caller's answer grants. A large graph spans as many pieces as it needs;
+the combined window, rather than every graph separately, is bounded in memory. The caller's
+time grant applies to each window, including serialization and compression. A single quad
+larger than the window is refused. The legacy path still refuses smaller caller limits;
+automatic fallback requires both full answer grants.
+
+A snapshot is a private `gonk-chunks-<timestamp>-<milliseconds>/` directory under
+`gonk.backup.dir`, containing `manifest.json`, numbered `00000000.nq.gz` pieces, and
+`scripts.json.gz` when scripts are configured. The `gonk-chunks/1` manifest records each
+piece's expanded size, compressed SHA-256 and graph count, and the complete graph counts.
+Files are synced before the completed directory is renamed into place. Failed exports remove
+their temporary directories. The configured `gonk.backup.keep` retains that many chunked
+snapshots independently of the single-file rotation. Status and startup scheduling recognize
+the newest completed snapshot in either format. Copy the **whole directory**, including its
+manifest, off the host; these pieces are not individual independently restorable stores.
+To restore a copied snapshot, place its directory under the destination server's backup directory.
+The single-file archive download endpoint continues to serve single-file archives.
+
+Restore expands and verifies one piece at a time, independently parses its graph counts,
+loads its quads into a fresh staged store, and finally compares the restored graph set and
+per-graph counts with the manifest. Blank-node labels are preserved across all pieces;
+renaming them independently would corrupt shared nodes. Missing pieces, digest/length/count
+mismatches, invalid gzip and repeated quads across pieces all prevent publication, leave the
+target absent or empty, and permit a retry. Metadata is bounded to 16 MiB and 100,000 pieces;
+there is no 1 GiB bound on the complete snapshot. Store-loader working memory is configured
+at 128 MB across two threads, in addition to the bounded piece and the store's own caches.
+The optional scripts archive's digest is checked during the store drill. Restore and verify
+scripts separately with `urn:iki:gonk:restore:scripts`, piping that snapshot's `scripts.json.gz`
+from the local filesystem; the existing scripts size limits still apply.
+
+The reproducible large-store drill is:
+
+```sh
+cargo build --release --example backup-memory
+target/release/examples/backup-memory seed ./target/drill/source 10000000
+target/release/examples/backup-memory chunks ./target/drill/source ./target/drill/backups
+# Substitute the snapshot name printed above:
+target/release/examples/backup-memory restore-chunks ./target/drill/backups <name> ./target/drill/restored
+target/release/examples/backup-memory compare ./target/drill/source ./target/drill/restored
+```
 
 ### The format is N-Quads, and the easy mistake is Turtle
 
