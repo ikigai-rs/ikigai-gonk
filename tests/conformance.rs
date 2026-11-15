@@ -351,7 +351,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 44] = [
+const WEB_IDS: [&str; 50] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -401,6 +401,13 @@ const WEB_IDS: [&str; 44] = [
     // The Views page and its form adapter (ledger #2099).
     "gonk-page-views",
     "gonk-views-save",
+    // A repository's harness and its page (ledger #3721).
+    "gonk-harness-control",
+    "gonk-harness-guide",
+    "gonk-harness-incident",
+    "gonk-harness-coverage",
+    "gonk-harness-firing-date",
+    "gonk-harness-page",
 ];
 
 /// `ikigai_ui::space()` in the HTTP door (ledger #2834): the shared UI artifacts, inherited like
@@ -561,6 +568,82 @@ fn the_http_door_conforms() {
         // the ENFORCED check sees the kernel refuse it under an empty capability before the
         // target is ever consulted. What it could not observe — the face a successful
         // decision serves — the report lists as unprobed, which is the honest word for it.
+        // A repository's harness (ledger #3721): read through the browse family, which this
+        // composition does not bind, so each answers a typed NotFound. Its faces are exercised
+        // where a root exists, by `tests/harness_3721.rs`.
+        .fixture(
+            Fixture::new("gonk-harness-firing-date", Verb::Source).binding("date", "2026-11-15"),
+        )
+        .opt_out_check(
+            "gonk-harness-control",
+            Check::Resolves,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so it answers a typed NotFound; `tests/harness_3721.rs` resolves it \
+             where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-control",
+            Check::Outputs,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so the minimal resolution is a typed NotFound rather than a face; \
+             `tests/harness_3721.rs` reads every face where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-guide",
+            Check::Resolves,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so it answers a typed NotFound; `tests/harness_3721.rs` resolves it \
+             where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-guide",
+            Check::Outputs,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so the minimal resolution is a typed NotFound rather than a face; \
+             `tests/harness_3721.rs` reads every face where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-incident",
+            Check::Resolves,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so it answers a typed NotFound; `tests/harness_3721.rs` resolves it \
+             where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-incident",
+            Check::Outputs,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so the minimal resolution is a typed NotFound rather than a face; \
+             `tests/harness_3721.rs` reads every face where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-coverage",
+            Check::Resolves,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so it answers a typed NotFound; `tests/harness_3721.rs` resolves it \
+             where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-coverage",
+            Check::Outputs,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so the minimal resolution is a typed NotFound rather than a face; \
+             `tests/harness_3721.rs` reads every face where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-firing-date",
+            Check::Resolves,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so it answers a typed NotFound; `tests/harness_3721.rs` resolves it \
+             where a root exists",
+        )
+        .opt_out_check(
+            "gonk-harness-firing-date",
+            Check::Outputs,
+            "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
+             browse root, so the minimal resolution is a typed NotFound rather than a face; \
+             `tests/harness_3721.rs` reads every face where a root exists",
+        )
         .fixture(Fixture::new("gonk-queue-decide", Verb::Sink).arg(
             "content",
             "id=0123456789abcdef01234567&decision=publish&severity=minor",

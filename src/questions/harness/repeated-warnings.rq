@@ -1,0 +1,22 @@
+# QUESTION: Which warnings did one command earn more than once?
+# EMPTY: No command was warned about twice in the firing logs loaded.
+#
+# READING. A warning lets the action go on. A row is a control whose warning the same command
+# (the same harness:commandDigest) drew again: the warning was read and the move made anyway,
+# so the rule may need to refuse. Counts only: neither the digest nor the command is shown.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?control ?label (COUNT(DISTINCT ?cmd) AS ?commands) (SUM(?times) AS ?firings) WHERE {
+  {
+    SELECT ?control ?cmd (COUNT(DISTINCT ?firing) AS ?times) WHERE {
+      ?firing a harness:Warning ;
+              harness:firedControl ?control ;
+              harness:commandDigest ?cmd .
+    }
+    GROUP BY ?control ?cmd
+    HAVING (COUNT(DISTINCT ?firing) > 1)
+  }
+  OPTIONAL { ?control rdfs:label ?label }
+}
+GROUP BY ?control ?label
+ORDER BY DESC(?firings) ?control

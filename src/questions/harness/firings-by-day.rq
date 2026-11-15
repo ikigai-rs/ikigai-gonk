@@ -1,0 +1,17 @@
+# QUESTION: How many times did the harness refuse and warn, day by day?
+# EMPTY: Nothing has fired in the firing logs loaded.
+#
+# READING. One row per UTC day and outcome. A day's controls are its own resource,
+# urn:iki:harness:firing:date:{day}.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+SELECT ?day ?outcome (COUNT(DISTINCT ?firing) AS ?firings) WHERE {
+  ?firing harness:firedControl ?control ;
+          a ?class ;
+          prov:startedAtTime ?at .
+  FILTER(?class IN (harness:Refusal, harness:Warning))
+  BIND(SUBSTR(STR(?at), 1, 10) AS ?day)
+  BIND(STRAFTER(STR(?class), "#") AS ?outcome)
+}
+GROUP BY ?day ?outcome
+ORDER BY DESC(?day) ?outcome

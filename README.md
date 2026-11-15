@@ -621,6 +621,7 @@ there.
 | `/static/tokens.css`, `/static/shell.js`, `/static/htmx.min.js` | `urn:iki:ui:tokens.css`, `urn:iki:ui:shell.js`, `urn:iki:ui:htmx` | `ikigai-ui`'s tokens, shell script and htmx, by their own names (ledger #2834) |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js` |
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
+| `/harness` · `/harness/{control,guide,incident}/{id}` · `/harness/coverage/{name}` · `/harness/firing/{date}` | `urn:iki:gonk:page:harness` · `urn:iki:harness:{control,guide,incident}:id:{id}` · `urn:iki:harness:coverage:query:{name}` · `urn:iki:harness:firing:date:{date}` | a repository's harness and its firings, below |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, one annotation, or one finding decision (stamped `made=single`) |
 | `/queue` · `/queue/rows` | `urn:iki:gonk:page:queue` · `…:fragment:queue` | the review queue, and the section it swaps |
@@ -1151,6 +1152,32 @@ The same facts are resources, under the root's browse grant like every browse ro
 ikigai --mount "urn:gk:=$HOME/.ikigai/gonk.sock" \
   -c 'source urn:gk:iki:gonk:github:ikigai-gonk:file:src/github.rs'
 ```
+
+### A repository's harness at `/harness` (ledger #3721)
+
+A gonk-starter repository describes the rules its agents follow as a harness graph,
+`.gonk/harness/harness.ttl` (vocabulary `https://ikigai-rs.dev/ns/harness#`): each control is a
+guide (a rule in AGENTS.md) or a sensor (a hook, gate or review that refuses, warns or
+reports), at a stage, regulating a category. Every refusal or warning a sensor makes is one line
+of the working tree's ikigai-log segment, `.gonk/state/harness/firings.log`, with a command
+digest and never the command. gonk reads both from a browse root, through the browse family
+under the caller's capability: with no `urn:cap:browse:read:{root}`, nothing is shown. An edit to
+`harness.ttl` shows on the next read, with no restart.
+
+| resource | faces | |
+| --- | --- | --- |
+| `urn:iki:harness:control:id:{id}` | Turtle, JSON, text | one control, and how often it fired (`harness:entryCount`) |
+| `urn:iki:harness:guide:id:{id}` · `urn:iki:harness:incident:id:{id}` | Turtle, JSON, text | one guide or incident, and the controls that cite it |
+| `urn:iki:harness:coverage:query:{name}` | SPARQL JSON, an `rs:ResultSet` in Turtle, text, or the question (`application/sparql-query`) | `sensors-never-fired`, `guides-without-sensor`, `sensors-without-guide`, `incidents-without-sensor`, `repeated-warnings`, `top-recurring`, `firings-by-day`, `firings-by-control` |
+| `urn:iki:harness:firing:date:{date}` | Turtle, JSON, text | a CONSTRUCT over the firings: each control that fired that UTC day, its outcome and its count |
+
+Each takes `root=`. Without it, they read the first root this grant reads that has a harness.
+The page draws the controls by stage and category, each with its guide, incident, proof and code
+site, the coverage questions' row counts, and the firings per day and per control. Every number
+links to the resource that answers it. A refusal is joined to a ledger item through the session
+summaries of the ledgers the caller may read: "In the last 7 days the harness refused 14 actions,
+11 of them on 9 ledger items you may read." Counts only: no command digest, session or tool is
+served.
 
 ### A root's git history as weekly series (ledger #1631)
 

@@ -61,6 +61,7 @@ pub mod git_env;
 pub mod git_object;
 pub mod github;
 pub mod grants;
+pub mod harness;
 pub mod history;
 pub mod holders;
 pub mod identity;

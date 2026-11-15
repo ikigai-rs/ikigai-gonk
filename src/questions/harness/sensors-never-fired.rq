@@ -1,0 +1,45 @@
+# QUESTION: Which sensors of this repository's tools have never fired, and has a test shown each one can?
+# EMPTY: Every sensor that records firings has fired at least once in the firing logs loaded.
+#
+# READING. Only the computational sensors whose code is in this repository's tools/ or hooks/,
+# and that refuse or warn, record firings: CI, a review, an audit and the dispatcher's check
+# record theirs elsewhere, so they are not asked about. A row is a sensor with no firing in any
+# working tree's log loaded into this graph (`gonk's /harness page` loads one).
+# `wired` is whether this sensor is turned on in the working tree that loaded the graph: a
+# sensor that is not wired is silent because nothing runs it, which is not the same as a rule
+# landing. `-` is a sensor whose fragment states no harness:wiredBy, so it is on wherever its
+# code is. `proof` says what the silence means:
+#   "not wired"              the sensor is off here (harness:wired false): its silence says
+#                            nothing about whether its rule is landing, so turn it on and ask
+#                            again rather than reading it as a rule that has landed.
+#   "fired by a test"        a test drove it and saw the firing recorded (harness:firedBy):
+#                            quiet, not blind. The rule may be landing, or may no longer
+#                            match how anyone works.
+#   "cannot fire (stated)"   it says why no test can (harness:noFiringTest).
+#   "NO TEST: may be blind"  nothing shows it can fire. `python3 tools/harness.py check`
+#                            refuses this state, so a row here means the graph and the tests
+#                            have drifted.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT DISTINCT ?control ?label ?wired ?proof WHERE {
+  ?control harness:direction harness:feedback ;
+           harness:execution harness:computational ;
+           rdfs:label ?label .
+  FILTER EXISTS {
+    ?control harness:outcome ?outcome .
+    FILTER(?outcome IN (harness:refuse, harness:warn))
+  }
+  FILTER EXISTS {
+    ?control harness:enforcedAt ?at .
+    FILTER(STRSTARTS(?at, "tools/") || STRSTARTS(?at, "hooks/"))
+  }
+  FILTER NOT EXISTS { ?firing harness:firedControl ?control }
+  OPTIONAL { ?control harness:wired ?on }
+  OPTIONAL { ?control harness:firedBy ?test }
+  OPTIONAL { ?control harness:noFiringTest ?why }
+  BIND(IF(!BOUND(?on), "-", IF(?on, "yes", "no")) AS ?wired)
+  BIND(IF(BOUND(?on) && !?on, "not wired",
+          IF(BOUND(?test), "fired by a test",
+             IF(BOUND(?why), "cannot fire (stated)", "NO TEST: may be blind"))) AS ?proof)
+}
+ORDER BY ?proof ?control

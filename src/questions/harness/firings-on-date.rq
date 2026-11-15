@@ -1,0 +1,28 @@
+# The firings of one UTC day, control by control and outcome by outcome: what
+# urn:iki:harness:firing:date:{day} answers. `DAY` is replaced by the day, checked to be
+# YYYY-MM-DD first. Counts only: no session, tool or command digest is carried.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+CONSTRUCT {
+  ?row harness:firedControl ?control ;
+       harness:outcome ?outcome ;
+       harness:entryCount ?firings ;
+       dcterms:date ?date .
+} WHERE {
+  {
+    SELECT ?control ?class (COUNT(DISTINCT ?firing) AS ?firings) WHERE {
+      ?firing harness:firedControl ?control ;
+              a ?class ;
+              prov:startedAtTime ?at .
+      FILTER(?class IN (harness:Refusal, harness:Warning))
+      FILTER(STRSTARTS(STR(?at), "DAY"))
+    }
+    GROUP BY ?control ?class
+  }
+  BIND(IF(?class = harness:Refusal, harness:refuse, harness:warn) AS ?outcome)
+  BIND(STRAFTER(STR(?outcome), "#") AS ?word)
+  BIND(IRI(CONCAT("urn:iki:harness:firing:date:DAY:control:", ENCODE_FOR_URI(STR(?control)), ":outcome:", ?word)) AS ?row)
+  BIND("DAY"^^xsd:date AS ?date)
+}
