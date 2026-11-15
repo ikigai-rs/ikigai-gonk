@@ -2651,8 +2651,8 @@
 
   <xsl:template match="view:label-chip">
     <span class="label-actions">
-      <a class="badge label"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:value-of select="@term"/></a><xsl:value-of select="' '"/>
-      <a class="note"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@term"/></a>
+      <a class="badge label"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:if test="@ledger"><span class="sr-only">label </span></xsl:if><xsl:value-of select="@term"/><xsl:if test="@ledger"><span class="sr-only">: show items in ledger <xsl:value-of select="@ledger"/> with this label</span></xsl:if></a>
+      <xsl:if test="@exclude"><xsl:value-of select="' '"/><a class="note"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@term"/></a></xsl:if>
     </span>
   </xsl:template>
 

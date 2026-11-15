@@ -30,7 +30,7 @@ try {
           // Playwright evaluation also works when the page's own scripts are disabled.
           await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
           const panel = page.getByRole("region", { name: "Links", exact: true });
-          assert.equal(await panel.locator("li.row").count(), 4);
+          assert.equal(await panel.locator("li.row").count(), 5);
           assert.equal(await page.getByRole("heading", { level: 1 }).innerText(), "A live flight plan");
           assert.equal(await panel.getByRole("heading", { name: "related · default", exact: true }).count(), 1);
           assert.equal(await panel.getByRole("heading", { name: "related · crew", exact: true }).count(), 1);
@@ -42,14 +42,23 @@ try {
           assert.equal(await privateIri.count(), 1);
           assert.equal(await panel.locator("a[href*='/l/private/']").count(), 0);
           assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no page overflow");
-          // Reach each member title using the keyboard, including the other ledger.
+          const chips = page.locator(".label-actions a.badge.label");
+          assert.ok(await chips.count() >= 3, "card and linked rows have label links");
+          assert.equal(await panel.getByRole("link", { name: /^label crew-label\s*: show items in ledger crew with this label$/ }).count(), 1);
+          assert.equal(await page.locator(".label-actions a.note").count(), 0, "no exclude links on an item");
+          const expectedChips = new Set(Array.from({ length: await chips.count() }, (_, index) => index));
+          const reachedChips = new Set();
+          // Reach each member title and label using the keyboard, including the other ledger.
           const visited = new Set();
-          for (let step = 0; step < 100 && visited.size < 4; step++) {
+          for (let step = 0; step < 160 && (visited.size < 4 || reachedChips.size < expectedChips.size); step++) {
             await page.keyboard.press("Tab");
             const href = await page.evaluate(() => document.activeElement?.matches(".links a.title") ? document.activeElement.getAttribute("href") : null);
             if (href) visited.add(href);
+            const chip = await page.evaluate(() => [...document.querySelectorAll(".label-actions a.badge.label")].indexOf(document.activeElement));
+            if (chip >= 0) reachedChips.add(chip);
           }
           assert.equal(visited.size, 4, "every linked title is a keyboard stop");
+          assert.deepEqual(reachedChips, expectedChips, "every label link is keyboard reachable");
           if (javaScriptEnabled) {
             const result = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
             assert.deepEqual(result.violations, [], JSON.stringify(result.violations));

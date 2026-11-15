@@ -4066,6 +4066,63 @@ fn links_panel(html: &str) -> &str {
 }
 
 #[test]
+fn item_label_chips_link_to_each_rows_ledger() {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew"],
+    );
+    let (record, id) = linked_fixture(&server, "default", "Label card");
+    let (local, _) = linked_fixture(&server, "default", "Local row");
+    let (other, _) = linked_fixture(&server, "crew", "Cross-ledger row");
+    load(
+        &server,
+        "urn:iki:ledger:graph:default",
+        &format!(
+            r#"@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+        <{record}> ledger:label "card:&<" ; ledger:related <{local}>, <{other}> .
+        <{local}> ledger:label "local label" ."#
+        ),
+    );
+    load(
+        &server,
+        "urn:iki:ledger:graph:crew",
+        &format!(
+            r#"@prefix ledger: <https://ikigai-rs.dev/ns/ledger#> .
+        <{other}> ledger:label "cross:&<" ; ledger:related <{record}> ."#
+        ),
+    );
+    link_fixture(&server, "crew", &other, &record, "blocks");
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let card = page.body.split("id='links-title'").next().unwrap();
+        let outgoing = links_panel(&page.body);
+        let inbound = page
+            .body
+            .split("id='inbound-title'")
+            .nth(1)
+            .expect("inbound panel");
+        for (html, ledger, term, encoded) in [
+            (card, "default", "card:&amp;&lt;", "card%3A%26%3C"),
+            (outgoing, "default", "local label", "local%20label"),
+            (outgoing, "crew", "cross:&amp;&lt;", "cross%3A%26%3C"),
+            (inbound, "crew", "cross:&amp;&lt;", "cross%3A%26%3C"),
+        ] {
+            assert!(
+                html.contains(&format!("href='/l/{ledger}?labels={encoded}'")),
+                "{html}"
+            );
+            assert!(html.contains(&format!("label </span>{term}<span class='sr-only'>: show items in ledger {ledger} with this label")), "{html}");
+            assert!(!html.contains("class='note'>Exclude "), "{html}");
+        }
+    }
+}
+
+#[test]
 fn outgoing_links_respect_the_viewers_grant_and_partition_by_relation_and_ledger() {
     let mut grants = grants_for("default", Authority::Write).unwrap();
     grants.extend(grants_for("crew", Authority::Read).unwrap());
