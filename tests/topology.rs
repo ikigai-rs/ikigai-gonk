@@ -172,7 +172,7 @@ impl Graph {
     }
 }
 
-/// ★ The hub names itself, and everything it composes is structured: three layers, each
+/// ★ The hub names itself, and everything it composes is structured: six layers, each
 /// an `ik:EndpointSpace` with its patterns, and not one `ik:OpaqueSpace` in the graph.
 #[test]
 fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
@@ -186,8 +186,8 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
     let layers = g.layers(spaces::HUB);
     assert_eq!(
         layers.len(),
-        5,
-        "store, ledger, render, sparql, aliases: {layers:?}"
+        6,
+        "store, ledger, render, sparql, aliases, dispatch: {layers:?}"
     );
     for layer in &layers {
         assert_eq!(g.kind(layer), "EndpointSpace", "{layer}");
@@ -234,6 +234,16 @@ fn the_hub_is_a_named_fallback_over_structured_layers_and_nothing_is_opaque() {
         ]
     );
     assert_eq!(layers[4], ikigai_ledger::alias::SPACE_ID);
+    assert_eq!(layers[5], spaces::DISPATCH);
+    let mut dispatcher = g.strs(spaces::DISPATCH, &pattern);
+    dispatcher.sort();
+    assert_eq!(
+        dispatcher,
+        [
+            "urn:iki:gonk:dispatch:{ledger}",
+            "urn:iki:gonk:dispatch:{ledger}:item:{id}"
+        ]
+    );
 
     assert!(
         g.of_kind("OpaqueSpace").is_empty(),
@@ -292,7 +302,7 @@ fn the_http_door_is_pages_then_the_hub() {
 
     // The hub inside the door is the hub: same node, same layers as it reports for itself.
     assert_eq!(g.kind(spaces::HUB), "Fallback");
-    assert_eq!(g.layers(spaces::HUB).len(), 5);
+    assert_eq!(g.layers(spaces::HUB).len(), 6);
 
     assert!(
         g.of_kind("Limit").is_empty(),

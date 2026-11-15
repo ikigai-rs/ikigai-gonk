@@ -204,6 +204,8 @@ pub mod spaces {
     pub const PAGES: &str = "urn:iki:gonk:space:pages";
     /// The page renderer's chunk transform ([`render::space`](crate::render::space)).
     pub const RENDER: &str = "urn:iki:gonk:space:render";
+    /// Private acknowledged dispatcher views ([`dispatch::space`](crate::dispatch::space)).
+    pub const DISPATCH: &str = "urn:iki:gonk:space:dispatch";
     /// The backup family ([`backup::space`](crate::backup::space)).
     pub const BACKUP: &str = "urn:iki:gonk:space:backup";
     /// The `urn:sparql:*` query face over the store ([`sparql::space`](crate::sparql::space)).
