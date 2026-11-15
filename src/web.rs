@@ -1698,6 +1698,8 @@ struct Listing<'a> {
     /// a decision here: the ledger chooses which of them the viewer may read.
     ledgers: Option<&'a str>,
     projects: Option<&'a str>,
+    priority: Option<&'a str>,
+    sort: Option<&'a str>,
 }
 
 /// URL and presentation state only. Matching stays in the ledger and `facet::pattern`.
@@ -1707,6 +1709,8 @@ struct LabelFilters<'a> {
     /// Not a label filter, but every link a label filter builds keeps it (ledger #3216).
     ledgers: Option<&'a str>,
     projects: Option<&'a str>,
+    priority: Option<&'a str>,
+    sort: Option<&'a str>,
 }
 
 enum LabelChange<'a> {
@@ -1725,6 +1729,8 @@ impl LabelFilters<'_> {
             ("without", self.without),
             ("ledgers", self.ledgers),
             ("projects", self.projects),
+            ("priority", self.priority),
+            ("sort", self.sort),
         ] {
             if let Some(value) = value.filter(|v| !v.is_empty()) {
                 query.push_str(&format!("&{name}={}", ikigai_fn::html::url_segment(value)));
@@ -1780,6 +1786,8 @@ impl LabelFilters<'_> {
             without: Some(&without),
             ledgers: self.ledgers,
             projects: self.projects,
+            priority: self.priority,
+            sort: self.sort,
         };
         let mut query = format!("?status={}", listing.status);
         if let Some(limit) = listing.limit {
@@ -1957,6 +1965,8 @@ async fn ledger_listing(
         offset,
         ledgers: explicit,
         projects,
+        priority,
+        sort,
     } = *listing;
     // The page is still this ledger's (its header, its filing form), so it reads this
     // ledger even when `ledgers=` lists others; the union's own grants are the ledger's call.
@@ -1987,9 +1997,19 @@ async fn ledger_listing(
         if let Some(text) = text {
             read = with(read, "text", text);
         }
-        for (name, value) in [("labels", labels), ("without", without), ("ledgers", union)] {
+        for (name, value) in [
+            ("labels", labels),
+            ("without", without),
+            ("priority", priority),
+            ("ledgers", union),
+        ] {
             if let Some(value) = value {
                 read = with(read, name, value);
+            }
+        }
+        if name == "items" {
+            if let Some(sort) = sort {
+                read = with(read, "sort", sort);
             }
         }
         Ok(read)
@@ -2028,10 +2048,19 @@ async fn ledger_listing(
     let bytes = if empty_project {
         Vec::new()
     } else {
-        fetch(inv, rows_read).await?
+        fetch(inv, rows_read.clone()).await?
     };
     let mut graph = Graph::from_turtle(&bytes).map_err(render_err)?;
-    let (shown, order) = newest_rows(&mut graph, wanted);
+    let (shown, mut order) = newest_rows(&mut graph, wanted);
+    if sort.is_some() && !empty_project {
+        let ordered = fetch(inv, with(rows_read, "as", "application/json")).await?;
+        let ordered: ikigai_ledger::json::ItemsDocument =
+            serde_json::from_slice(&ordered).map_err(|e| render_err(e.to_string()))?;
+        order = ordered.items.into_iter().map(|item| item.iri).collect();
+        for (rank, item) in order.iter().enumerate() {
+            graph.view(item, "landing", &format!("{rank:020}"));
+        }
+    }
     let count = Count {
         shown,
         total,
@@ -2045,6 +2074,8 @@ async fn ledger_listing(
             ("listLedger", Some(ledger.name())),
             ("listLedgers", explicit),
             ("listProjects", projects),
+            ("listPriority", priority),
+            ("listSort", sort),
             ("listLabels", labels),
             ("listWithout", without),
             ("listText", text),
@@ -2068,7 +2099,7 @@ async fn ledger_listing(
     // The chart over the list (ledger #2542): one more cached read and one more keyed render.
     // ⚠ It is one ledger's, so a union page draws none rather than one that is not the list's.
     children.push_str(&render::slot(CHART_SLOT));
-    let chart: Vec<_> = if selected.is_none() {
+    let chart: Vec<_> = if selected.is_none() && priority.is_none() {
         let lines = crate::dashboard::Lines::for_status(status);
         crate::dashboard::chart_chunk(inv, ledger, lines, None)
             .await
@@ -2087,6 +2118,8 @@ async fn ledger_listing(
         without,
         ledgers: explicit,
         projects,
+        priority,
+        sort,
     };
     let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
@@ -2100,11 +2133,33 @@ async fn ledger_listing(
         None if ledger.is_default() => "Ledger".to_string(),
         None => format!("Ledger {}", ledger.name()),
     };
+    children.push_str(
+        &crate::views_page::listing_elements(
+            web,
+            inv,
+            ledger.name(),
+            &[
+                ("projects", projects.unwrap_or("")),
+                ("ledgers", explicit.unwrap_or("")),
+                ("labels", labels.unwrap_or("")),
+                ("without", without.unwrap_or("")),
+                ("priority", priority.unwrap_or("")),
+                ("status", status),
+                ("text", text.unwrap_or("")),
+                ("sort", sort.unwrap_or("")),
+            ],
+        )
+        .await?,
+    );
     let page_url = ledger_href(ledger);
     let items_url = format!("{}/items", ledger_href(ledger));
     let query = count.more_query(status, text).map(|q| filters.append(q));
     let next = count.next_query(status, text).map(|q| filters.append(q));
-    children.push_str(&filters.active(listing, &page_url, selected.is_none()));
+    children.push_str(&filters.active(
+        listing,
+        &page_url,
+        selected.is_none() && priority.is_none(),
+    ));
     let facet_url = format!(
         "{page_url}/facet{}",
         filters.url(listing, "", LabelChange::Keep)
@@ -2141,12 +2196,24 @@ async fn ledger_listing(
             ("without", without.unwrap_or("")),
             ("ledgers", explicit.unwrap_or("")),
             ("projects", projects.unwrap_or("")),
+            ("priority", priority.unwrap_or("")),
+            ("sort", sort.unwrap_or("")),
             ("limit", &wanted.to_string()),
             ("status-tail", &status_tail),
             ("page-url", &page_url),
             ("items-url", &items_url),
             ("facet-url", &facet_url),
-            ("count", &count.sentence(status)),
+            (
+                "count",
+                &if let Some(sort) = sort {
+                    format!(
+                        "Showing {} of {} {status} items. Sort: {sort}.",
+                        count.shown, count.total
+                    )
+                } else {
+                    count.sentence(status)
+                },
+            ),
             ("more", flag(query.is_some())),
             ("more-label", &count.more_label()),
             (
@@ -2380,6 +2447,8 @@ impl Endpoint for LedgerView {
         let offset = optional(inv, "offset");
         let ledgers = optional(inv, "ledgers");
         let projects = optional(inv, "projects");
+        let priority = optional(inv, "priority");
+        let sort = optional(inv, "sort");
         let ledger = match self.shape {
             Shape::Home => match readable_ledgers(&self.web, inv.capability)
                 .into_iter()
@@ -2426,6 +2495,8 @@ impl Endpoint for LedgerView {
                 offset: offset.as_deref(),
                 ledgers: ledgers.as_deref(),
                 projects: projects.as_deref(),
+                priority: priority.as_deref(),
+                sort: sort.as_deref(),
             },
             self.shape != Shape::Fragment,
             None,
@@ -2489,6 +2560,8 @@ impl Endpoint for LedgerView {
             )
             .optional(),
         )
+        .input(arg("priority", "Comma-separated 0, 1, 2, 3, 4 or none; any may match.").optional())
+        .input(arg("sort", "Comma-separated priority, created, modified, number or landing; prefix - for descending.").optional())
         .input(arg("text", "A case-insensitive substring of the title.").optional())
         .input(arg("labels", "Comma-separated labels: every label must match.").optional())
         .input(arg("without", "Comma-separated labels: none may match.").optional())
@@ -3512,6 +3585,8 @@ impl Endpoint for Act {
         let list_limit = take("_limit");
         let list_ledgers = take("_ledgers");
         let list_projects = take("_projects");
+        let list_priority = take("_priority");
+        let list_sort = take("_sort");
         // A union page's row names its OWN ledger in `_ledger`, the action's target; the page
         // it re-renders is the listing's (ledger #3216).
         let list_ledger = take("_listLedger")
@@ -3622,6 +3697,8 @@ impl Endpoint for Act {
                     offset: None,
                     ledgers: list_ledgers.as_deref(),
                     projects: list_projects.as_deref(),
+                    priority: list_priority.as_deref(),
+                    sort: list_sort.as_deref(),
                 };
                 let page = list_ledger.as_ref().unwrap_or(&ledger);
                 ledger_listing(&self.web, inv, page, &listing, false, flash).await
@@ -4997,6 +5074,8 @@ mod tests {
             without: Some("same,skip"),
             ledgers: None,
             projects: None,
+            priority: None,
+            sort: None,
         };
         let listing = Listing {
             status: "all",
@@ -5007,6 +5086,8 @@ mod tests {
             offset: Some("50"),
             ledgers: None,
             projects: None,
+            priority: None,
+            sort: None,
         };
         assert_eq!(
             filters.url(&listing, "/l/default", LabelChange::RemoveRequired("same")),
@@ -5030,6 +5111,8 @@ mod tests {
             without: Some("blocked,decide"),
             ledgers: None,
             projects: None,
+            priority: None,
+            sort: None,
         };
         let query = filters.append(count.next_query("closed", Some("queue & review")).unwrap());
         assert_eq!(query, format!("?status=closed&limit={0}&offset={0}&text=queue%20%26%20review&labels=book%3Aikigai%2Cc%2B%2B%20%26%20caf%C3%A9&without=blocked%2Cdecide", rows::MAX_ROWS));
@@ -5048,6 +5131,8 @@ mod tests {
             without: None,
             ledgers: Some("default,crew"),
             projects: None,
+            priority: None,
+            sort: None,
         };
         let query = filters.append(count.next_query("open", None).unwrap());
         assert_eq!(
@@ -5066,6 +5151,8 @@ mod tests {
             offset: None,
             ledgers: filters.ledgers,
             projects: filters.projects,
+            priority: None,
+            sort: None,
         };
         for change in [
             LabelChange::Clear,

@@ -26,7 +26,8 @@
 //!   `ik:EndpointSpace`. The page never assembles Turtle by hand, so a target cannot inject a
 //!   triple. An arrangement of another shape (an operator's own, over the socket) is listed
 //!   and never rewritten: the page says it cannot change it without losing what it does not
-//!   understand.
+//!   understand. Saved ledger-page filters retain their literal arguments when edited;
+//!   other named requests are preserved verbatim and remain read-only here.
 //! - **A save carries the digest of the declaration it was drawn from** (`base`); if the
 //!   store's has changed since, nothing is written and the page says so, so two people editing
 //!   cannot silently undo each other.
@@ -34,6 +35,7 @@
 //!   save watches the status door until it reports the new declaration's digest as in force
 //!   or as refused ([`VERDICT_WAIT`]), and renders the page with that verdict.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -81,6 +83,102 @@ pub struct SaveView {
     pub web: Arc<Web>,
 }
 
+/// The URL arguments captured by a saved filter. Paging and face negotiation stay the viewer's.
+pub const FILTER_ARGUMENTS: [&str; 8] = [
+    "projects", "ledgers", "labels", "without", "priority", "status", "text", "sort",
+];
+
+pub(crate) fn saved_filter(rule: &TopologyRule) -> bool {
+    rule.kind == RuleKind::Exact
+        && !rule.template
+        && rule.at == ResolveAt::Root
+        && rule.verb == Some(Verb::Source)
+        && rule.inputs.is_empty()
+        && rule
+            .to
+            .strip_prefix("urn:iki:gonk:page:ledger:")
+            .is_some_and(|name| ikigai_ledger::Ledger::parse(name).is_ok())
+        && !rule.fixes.is_empty()
+        && rule.fixes.iter().all(|arg| {
+            FILTER_ARGUMENTS.contains(&arg.name.as_str())
+                && matches!(&arg.value, ikigai_core::FixedValue::Value(_))
+        })
+}
+
+/// Native controls and project lists, read with the same grant as the listing.
+pub(crate) async fn listing_elements(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledger: &str,
+    fields: &[(&str, &str)],
+) -> Result<String> {
+    if !inv.capability.allows(&read_grant()) {
+        return Ok(String::new());
+    }
+    let Some(status) = status(inv).await else {
+        return Ok(String::new());
+    };
+    let in_force = crate::views::in_force(&web.hub)
+        .filter(|_| status.installs > 0)
+        .map(|topology| rules_of(&topology))
+        .unwrap_or(InForce {
+            rewritable: true,
+            ..InForce::default()
+        });
+    let mut out = String::new();
+    let selected = fields
+        .iter()
+        .find(|(key, _)| *key == "projects")
+        .map(|(_, value)| *value)
+        .unwrap_or_default();
+    for project in selected
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let mut links = String::new();
+        for rule in &in_force.rules {
+            if rule.kind == "exact"
+                && rule.at == "root"
+                && rule.target.starts_with("urn:iki:gonk:page:ledger:")
+                && rule
+                    .filters
+                    .get("projects")
+                    .is_some_and(|names| names.split(',').any(|name| name.trim() == project))
+            {
+                if let Some(href) = view_href(&rule.name) {
+                    links.push_str(&element(
+                        "saved-view",
+                        &[("href", &href), ("name", local(&rule.name))],
+                        "",
+                    ));
+                }
+            }
+        }
+        out.push_str(&render::wrap(
+            "project-views",
+            &[
+                ("project", project),
+                ("empty", if links.is_empty() { "true" } else { "false" }),
+            ],
+            &links,
+        ));
+    }
+    if inv.capability.allows(&write_grant()) && in_force.rewritable {
+        let base = stored(inv).await?.unwrap_or_else(|| NO_DECLARATION.into());
+        let hidden = fields
+            .iter()
+            .map(|(key, value)| element("filter-input", &[("name", key), ("value", value)], ""))
+            .collect::<String>();
+        out.push_str(&render::wrap(
+            "save-filter",
+            &[("action", SAVE_PATH), ("base", &base), ("ledger", ledger)],
+            &hidden,
+        ));
+    }
+    Ok(out)
+}
+
 // ------------------------------------------------------------------------- the model
 
 /// One rule as the page shows and edits it.
@@ -94,6 +192,10 @@ pub struct Rule {
     pub target: String,
     /// `root` or `child`.
     pub at: &'static str,
+    /// Literal filter arguments of a saved ledger page.
+    pub filters: BTreeMap<String, String>,
+    /// An unedited rule with fields the forms do not support, retained verbatim.
+    pub original: Option<TopologyRule>,
 }
 
 /// The views in force, as far as the page can say.
@@ -120,12 +222,11 @@ pub fn rules_of(topology: &Topology) -> InForce {
     let SpaceKind::Alias { rules, max_hops } = &topology.kind else {
         return InForce::default();
     };
-    let rewritable = rules.iter().all(|rule| !rule.is_named_request())
-        && matches!(
-            topology.children.as_slice(),
-            [child] if child.children.is_empty()
-                && matches!(&child.kind, SpaceKind::EndpointSpace { doors } if doors.is_empty())
-        );
+    let rewritable = matches!(
+        topology.children.as_slice(),
+        [child] if child.children.is_empty()
+            && matches!(&child.kind, SpaceKind::EndpointSpace { doors } if doors.is_empty())
+    );
     InForce {
         rules: rules
             .iter()
@@ -134,6 +235,17 @@ pub fn rules_of(topology: &Topology) -> InForce {
                 name: rule.from.clone(),
                 target: rule.to.clone(),
                 at: at_word(rule.at),
+                original: (rule.is_named_request() && !saved_filter(rule)).then(|| rule.clone()),
+                filters: rule
+                    .fixes
+                    .iter()
+                    .filter_map(|arg| match &arg.value {
+                        ikigai_core::FixedValue::Value(value) => {
+                            Some((arg.name.clone(), value.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
             })
             .collect(),
         max_hops: Some(*max_hops),
@@ -153,6 +265,8 @@ pub fn rules_of(topology: &Topology) -> InForce {
 ///         name: "urn:iki:gonk:view:open".to_string(),
 ///         target: "urn:iki:ledger:default:items".to_string(),
 ///         at: "root",
+///         filters: Default::default(),
+///         original: None,
 ///     }],
 ///     8,
 /// );
@@ -163,6 +277,9 @@ pub fn declaration(rules: &[Rule], max_hops: usize) -> String {
     let rules = rules
         .iter()
         .map(|rule| {
+            if let Some(original) = &rule.original {
+                return original.clone();
+            }
             let kind = if rule.kind == "prefix" {
                 RuleKind::Prefix
             } else {
@@ -173,7 +290,17 @@ pub fn declaration(rules: &[Rule], max_hops: usize) -> String {
             } else {
                 ResolveAt::Root
             };
-            TopologyRule::new(kind, rule.name.clone(), rule.target.clone()).resolving_at(at)
+            let mut bound =
+                TopologyRule::new(kind, rule.name.clone(), rule.target.clone()).resolving_at(at);
+            if !rule.filters.is_empty() {
+                bound.verb = Some(Verb::Source);
+                bound.fixes = rule
+                    .filters
+                    .iter()
+                    .map(|(key, value)| ikigai_core::FixedArgument::value(key, value))
+                    .collect();
+            }
+            bound
         })
         .collect();
     Topology::new(SpaceKind::Alias { rules, max_hops })
@@ -301,7 +428,7 @@ fn local(name: &str) -> &str {
 
 /// `/view/{local}`, when one path segment can carry the name: the route's `{name}` refuses
 /// `: / ? # [ ] @`, so only a name of unreserved characters gets a link.
-fn view_href(name: &str) -> Option<String> {
+pub(crate) fn view_href(name: &str) -> Option<String> {
     let local = name.strip_prefix(VIEW_PREFIX)?;
     let plain = !local.is_empty()
         && local
@@ -399,12 +526,25 @@ impl ViewsPage {
                 ("at", rule.at),
                 ("action", SAVE_PATH),
                 ("base", base.as_str()),
+                (
+                    "editable",
+                    if rule.original.is_none() {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
             ];
             let href = view_href(&rule.name);
             if let (Some(href), "exact") = (href.as_deref(), rule.kind) {
                 row.push(("href", href));
             }
-            children.push_str(&element("view-rule", &row, ""));
+            let fields = rule
+                .filters
+                .iter()
+                .map(|(key, value)| element("view-filter", &[("name", key), ("value", value)], ""))
+                .collect::<String>();
+            children.push_str(&render::wrap("view-rule", &row, &fields));
         }
         if editable {
             children.push_str(&element(
@@ -539,6 +679,53 @@ fn refused(detail: impl Into<String>) -> Error {
 /// assert_eq!(rule.name, "urn:iki:gonk:view:open");
 /// ```
 pub fn change_of(mut fields: std::collections::BTreeMap<String, String>) -> Result<Change> {
+    if fields.get("op").is_some_and(|op| op == "save-filter") {
+        let name = fields
+            .get("name")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        ikigai_ledger::Ledger::parse(&name).map_err(|_| {
+            refused(
+                "Use a view name of lowercase letters, digits, hyphens or underscores, starting and ending with a letter or digit.",
+            )
+        })?;
+        let ledger = ikigai_ledger::Ledger::parse(
+            fields
+                .get("ledger")
+                .map(String::as_str)
+                .unwrap_or("default"),
+        )?;
+        let mut filters = BTreeMap::new();
+        for key in FILTER_ARGUMENTS {
+            let value = fields.remove(key).unwrap_or_else(|| match key {
+                "status" => "open".into(),
+                _ => String::new(),
+            });
+            filters.insert(key.to_string(), value);
+        }
+        return Ok(Change::Add(Rule {
+            kind: "exact",
+            name: format!("{VIEW_PREFIX}{name}"),
+            target: format!("urn:iki:gonk:page:ledger:{}", ledger.name()),
+            at: "root",
+            filters,
+            original: None,
+        }));
+    }
+    let filters: BTreeMap<String, String> = fields
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("filter-")
+                .map(|key| (key.to_string(), value.clone()))
+        })
+        .collect();
+    if filters
+        .keys()
+        .any(|key| !FILTER_ARGUMENTS.contains(&key.as_str()))
+    {
+        return Err(refused("Unknown saved filter argument."));
+    }
+
     let mut take = |name: &str| {
         fields
             .remove(name)
@@ -572,7 +759,17 @@ pub fn change_of(mut fields: std::collections::BTreeMap<String, String>) -> Resu
         name,
         target,
         at: "root",
+        filters,
+        original: None,
     };
+    if !rule.filters.is_empty() && ikigai_ledger::Ledger::parse(local(&rule.name)).is_err() {
+        return Err(refused("A saved filter needs a path-safe view name."));
+    }
+    if !rule.filters.is_empty()
+        && (rule.kind != "exact" || !rule.target.starts_with("urn:iki:gonk:page:ledger:"))
+    {
+        return Err(refused("A saved filter must be an exact ledger page view."));
+    }
     match op.as_str() {
         "add" => Ok(Change::Add(rule)),
         "change" => {
@@ -653,6 +850,20 @@ impl SaveView {
         let mut fields = web::form(inv.inline_str("content")?);
         let base = fields.remove("base").unwrap_or_default();
         let change = change_of(fields)?;
+        let candidate = match &change {
+            Change::Add(rule) | Change::Change { to: rule, .. } => Some(rule),
+            _ => None,
+        };
+        if let Some(rule) = candidate.filter(|rule| !rule.filters.is_empty()) {
+            let mut check = Request::new(
+                Verb::Source,
+                Iri::parse(&rule.target).map_err(|e| refused(e.to_string()))?,
+            );
+            for (key, value) in &rule.filters {
+                check = check.with_arg(key, ArgRef::Inline(value.as_bytes().to_vec()));
+            }
+            inv.issue(check).await?;
+        }
         // Read first, under the caller's capability: a caller who may not read the
         // declaration is refused here, before anything is written.
         let current = stored(inv).await?;
@@ -791,6 +1002,8 @@ mod tests {
             name: format!("{VIEW_PREFIX}{name}"),
             target: target.to_string(),
             at: "root",
+            filters: Default::default(),
+            original: None,
         }
     }
 
@@ -824,7 +1037,11 @@ mod tests {
         rules[0]
             .fixes
             .push(ikigai_core::FixedArgument::value("status", "open"));
-        assert!(!rules_of(&topology).rewritable);
+        let read = rules_of(&topology);
+        assert!(read.rewritable);
+        assert!(read.rules[0].original.is_some());
+        let round_trip = Topology::from_turtle(&declaration(&read.rules, 8)).unwrap();
+        assert_eq!(round_trip.kind, topology.kind);
         let SpaceKind::Alias { rules, .. } = &mut topology.kind else {
             panic!("an alias")
         };
@@ -834,7 +1051,8 @@ mod tests {
         );
         let read = rules_of(&topology);
         assert_eq!(read.rules[0].kind, "template");
-        assert!(!read.rewritable);
+        assert!(read.rewritable);
+        assert!(read.rules[0].original.is_some());
     }
 
     #[test]

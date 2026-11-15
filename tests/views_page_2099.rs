@@ -71,7 +71,11 @@ fn gonk(anonymous: Vec<String>) -> Gonk {
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
-        projects: Default::default(),
+        projects: ikigai_gonk::projects::Projects::parse(&[
+            "work default".into(),
+            "other default".into(),
+        ])
+        .unwrap(),
         toolbox: false,
         faces: Vec::new(),
     });
@@ -294,10 +298,10 @@ fn the_page_lists_the_readmes_declaration_with_links_and_the_status() {
     assert!(body.contains("none since the last bind"), "{body}");
     assert_eq!(
         forms(body),
-        0,
-        "fixed bindings cannot be edited by this form"
+        3,
+        "two plain views and add; the existing fixed binding stays read-only"
     );
-    assert!(body.contains("fields this page does not show"), "{body}");
+    assert!(body.contains("Change this view over the socket."), "{body}");
     // The header's Views link marks this page as the current one.
     assert!(
         body.contains("<a aria-current='page' class='navlink' href='/views'>Views</a>"),
@@ -707,4 +711,291 @@ fn the_declaration_sink_compares_the_base_before_replacing() {
     let current = ikigai_core::ContentId::of(changed.as_bytes()).to_string();
     conditional(&current, &empty).unwrap();
     assert_eq!(gonk.stored(), before);
+}
+
+#[test]
+fn a_filter_can_be_saved_from_its_listing() {
+    let g = gonk(operator());
+    let page = g.page("/l/default?labels=bug&without=blocked&text=needle&status=all");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("Save this filter"), "{}", page.body);
+}
+
+#[test]
+fn saving_a_filter_round_trips_arguments_and_preserves_other_views() {
+    let g = gonk(operator());
+    let added = g.save(&[
+        ("op", "save-filter"),
+        ("base", &g.base()),
+        ("name", "triage"),
+        ("ledger", "default"),
+        ("projects", "work,other"),
+        ("ledgers", "default"),
+        ("labels", "bug,help"),
+        ("without", "blocked"),
+        ("priority", "1,none"),
+        ("status", "all"),
+        ("text", "needle & <tag>"),
+        ("sort", "priority,-number"),
+    ]);
+    assert_eq!(added.status, 200, "{}", added.body);
+    assert!(added.body.contains("it is in force"), "{}", added.body);
+    let stored = g.stored();
+    let topology = ikigai_core::Topology::from_turtle(&stored).unwrap();
+    let ikigai_core::SpaceKind::Alias { rules, .. } = topology.kind else {
+        panic!()
+    };
+    assert_eq!(rules.len(), 1);
+    for (key, value) in [
+        ("projects", "work,other"),
+        ("ledgers", "default"),
+        ("labels", "bug,help"),
+        ("without", "blocked"),
+        ("priority", "1,none"),
+        ("status", "all"),
+        ("text", "needle & <tag>"),
+        ("sort", "priority,-number"),
+    ] {
+        assert!(
+            rules[0]
+                .fixes
+                .contains(&ikigai_core::FixedArgument::value(key, value)),
+            "{rules:?}"
+        );
+    }
+    let page = g.page("/view/triage");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("Projects: work,other."), "{}", page.body);
+    assert!(g
+        .page("/l/default?projects=work")
+        .body
+        .contains("href='/view/triage'"));
+    let other = g.save(&[
+        ("op", "add"),
+        ("base", &g.base()),
+        ("name", "rule"),
+        ("target", CHECK),
+    ]);
+    assert!(other.body.contains("it is in force"), "{}", other.body);
+    let after = ikigai_core::Topology::from_turtle(&g.stored()).unwrap();
+    let ikigai_core::SpaceKind::Alias { rules: after, .. } = after.kind else {
+        panic!()
+    };
+    let kept = after.iter().find(|r| r.from.ends_with(":triage")).unwrap();
+    assert_eq!(kept.fixes, rules[0].fixes);
+    let override_attempt = g.page("/view/triage?status=open");
+    assert_eq!(override_attempt.status, 400, "{}", override_attempt.body);
+    let unchanged = g.stored();
+    let duplicate = g.save(&[
+        ("op", "save-filter"),
+        ("base", &g.base()),
+        ("name", "triage"),
+        ("ledger", "default"),
+    ]);
+    assert!(
+        duplicate.body.contains("already declared"),
+        "{}",
+        duplicate.body
+    );
+    assert_eq!(g.stored(), unchanged);
+    let mut edited: Vec<(String, String)> = kept
+        .fixes
+        .iter()
+        .map(|arg| {
+            let ikigai_core::FixedValue::Value(value) = &arg.value else {
+                panic!()
+            };
+            (
+                format!("filter-{}", arg.name),
+                if arg.name == "projects" {
+                    "other".into()
+                } else {
+                    value.clone()
+                },
+            )
+        })
+        .collect();
+    edited.extend([
+        ("op".into(), "change".into()),
+        ("base".into(), g.base()),
+        ("was".into(), "urn:iki:gonk:view:triage".into()),
+        ("was-kind".into(), "exact".into()),
+        ("name".into(), "triage".into()),
+        ("target".into(), kept.to.clone()),
+    ]);
+    let refs: Vec<(&str, &str)> = edited
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let changed = g.save(&refs);
+    assert!(changed.body.contains("it is in force"), "{}", changed.body);
+    assert!(!g
+        .page("/l/default?projects=work")
+        .body
+        .contains("href='/view/triage'"));
+    assert!(g
+        .page("/l/default?projects=other")
+        .body
+        .contains("href='/view/triage'"));
+    let removed = g.save(&[
+        ("op", "remove"),
+        ("base", &g.base()),
+        ("was", "urn:iki:gonk:view:triage"),
+        ("was-kind", "exact"),
+    ]);
+    assert!(removed.body.contains("it is in force"), "{}", removed.body);
+    assert_eq!(g.page("/view/triage").status, 404);
+    assert_eq!(
+        g.get("urn:iki:gonk:view:rule").unwrap(),
+        CHECK_QUERY.as_bytes()
+    );
+}
+
+#[test]
+fn saving_a_filter_requires_the_declarations_write_token() {
+    let g = gonk(reader_plus(&[views::read_grant()]));
+    assert!(!g.page("/l/default").body.contains("Save this filter"));
+    let result = g.save(&[
+        ("op", "save-filter"),
+        ("base", "none"),
+        ("name", "triage"),
+        ("ledger", "default"),
+    ]);
+    assert_eq!(result.status, 403, "{}", result.body);
+    assert!(g.stored().is_empty());
+}
+
+fn page_filter_declaration(projects: &str, ledgers: &str) -> String {
+    ikigai_gonk::views_page::declaration(
+        &[ikigai_gonk::views_page::Rule {
+            kind: "exact",
+            name: "urn:iki:gonk:view:triage".into(),
+            target: "urn:iki:gonk:page:ledger:default".into(),
+            at: "root",
+            original: None,
+            filters: [
+                ("projects", projects),
+                ("ledgers", ledgers),
+                ("status", "open"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect(),
+        }],
+        8,
+    )
+}
+
+#[test]
+fn a_saved_page_view_uses_the_viewers_ledger_grants_without_a_declaration_grant() {
+    let g = gonk(reader_plus(&[]));
+    g.declare_as_root(&page_filter_declaration("work", "crew"));
+    wait_for(&g.views, |status| status.installs == 1);
+    for (ledger, title) in [("default", "Visible task"), ("crew", "Private task title")] {
+        block_on(
+            g.hub.issue(
+                Request::new(Verb::Sink, iri(&format!("urn:iki:ledger:{ledger}:append")))
+                    .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec())),
+                &Capability::root(),
+            ),
+        )
+        .unwrap();
+    }
+    let page = g.page("/view/triage");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("Visible task"), "{}", page.body);
+    assert!(!page.body.contains("Private task title"), "{}", page.body);
+    assert!(
+        page.body
+            .contains("Left out, because this grant cannot read it: crew."),
+        "{}",
+        page.body
+    );
+    assert!(!page.body.contains("Save this filter"));
+    let denied = gonk(Vec::new());
+    denied.declare_as_root(&page_filter_declaration("work", ""));
+    wait_for(&denied.views, |status| status.installs == 1);
+    assert_eq!(denied.page("/view/triage").status, 403);
+}
+
+#[test]
+fn priority_and_sort_affect_rows_counts_and_survive_navigation() {
+    let g = gonk(operator());
+    for (title, priority) in [
+        ("First priority", "1"),
+        ("Second priority", "1"),
+        ("Excluded priority", "3"),
+    ] {
+        block_on(
+            g.hub.issue(
+                Request::new(Verb::Sink, iri("urn:iki:ledger:default:append"))
+                    .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec()))
+                    .with_arg("priority", ArgRef::Inline(priority.as_bytes().to_vec())),
+                &Capability::root(),
+            ),
+        )
+        .unwrap();
+    }
+    let page = g.page("/l/default?priority=1&sort=number");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(!page.body.contains("Excluded priority"), "{}", page.body);
+    assert!(page.body.find("First priority").unwrap() < page.body.find("Second priority").unwrap());
+    assert!(
+        page.body
+            .contains("Showing 2 of 2 open items. Sort: number."),
+        "{}",
+        page.body
+    );
+    assert!(
+        page.body.contains("priority=1&amp;sort=number"),
+        "{}",
+        page.body
+    );
+    let reverse = g.page("/l/default?priority=1&sort=-number&limit=1");
+    assert!(reverse.body.contains("Second priority"));
+    assert!(!reverse.body.contains("First priority"));
+    assert!(
+        reverse
+            .body
+            .contains("offset=1&amp;priority=1&amp;sort=-number"),
+        "{}",
+        reverse.body
+    );
+    let facet = g.page("/l/default/facet?priority=1&sort=number&page=true");
+    assert_eq!(facet.status, 200, "{}", facet.body);
+    assert!(facet.body.contains("p1"), "{}", facet.body);
+    assert!(!facet.body.contains("p3"), "{}", facet.body);
+}
+
+#[test]
+fn saving_beside_an_existing_named_request_retains_its_complete_rule() {
+    let g = gonk(operator());
+    g.declare_as_root(&readme_declaration());
+    wait_for(&g.views, |status| status.installs == 1);
+    let before = ikigai_core::Topology::from_turtle(&g.stored()).unwrap();
+    assert!(g
+        .page("/l/default?projects=work")
+        .body
+        .contains("Save this filter"));
+    let saved = g.save(&[
+        ("op", "save-filter"),
+        ("base", &g.base()),
+        ("name", "triage"),
+        ("ledger", "default"),
+        ("projects", "work"),
+    ]);
+    assert!(saved.body.contains("it is in force"), "{}", saved.body);
+    let after = ikigai_core::Topology::from_turtle(&g.stored()).unwrap();
+    let ikigai_core::SpaceKind::Alias { rules: before, .. } = before.kind else {
+        panic!()
+    };
+    let ikigai_core::SpaceKind::Alias { rules: after, .. } = after.kind else {
+        panic!()
+    };
+    for rule in before {
+        assert!(
+            after.contains(&rule),
+            "{rule:?} was not preserved in {after:?}"
+        );
+    }
 }
