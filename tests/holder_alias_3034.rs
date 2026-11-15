@@ -71,6 +71,7 @@ impl Server {
             epochs: None,
             holder_aliases: HolderAliases::parse(&rules).unwrap(),
             page_assets: Default::default(),
+            projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
         });

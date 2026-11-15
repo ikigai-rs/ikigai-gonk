@@ -80,6 +80,7 @@ pub mod onboard_init;
 pub mod operator;
 pub mod page_assets;
 pub mod participants;
+pub mod projects;
 pub mod queue;
 pub mod quic;
 pub mod refusal;

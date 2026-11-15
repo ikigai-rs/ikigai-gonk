@@ -347,6 +347,7 @@ fn over_http_an_anonymous_plan_and_check_stop_at_the_door_budget() {
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });

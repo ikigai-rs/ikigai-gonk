@@ -99,6 +99,24 @@ impl Server {
         ledgers: &[&str],
         lifecycles: ikigai_ledger::Lifecycles,
     ) -> Server {
+        Self::start_with_projects(
+            rules,
+            anonymous,
+            browse_roots,
+            ledgers,
+            lifecycles,
+            Default::default(),
+        )
+    }
+
+    fn start_with_projects(
+        rules: &str,
+        anonymous: Vec<String>,
+        browse_roots: Vec<String>,
+        ledgers: &[&str],
+        lifecycles: ikigai_ledger::Lifecycles,
+        projects: ikigai_gonk::projects::Projects,
+    ) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -131,6 +149,7 @@ impl Server {
             epochs: None,
             holder_aliases: Default::default(),
             page_assets: Default::default(),
+            projects,
             toolbox: false,
             faces: Vec::new(),
         });
@@ -4933,4 +4952,199 @@ fn an_item_page_lists_inbound_links_across_ledgers_and_an_unreadable_linker_as_i
         None,
     );
     assert!(!page.body.contains("inbound-title"), "{page:?}");
+}
+
+#[test]
+fn an_unknown_project_is_refused_instead_of_silently_listing_the_base_ledger() {
+    let server = Server::start();
+    let response = server.page("/l/default?projects=missing", None);
+    assert_eq!(response.status, 400, "{response:?}");
+}
+
+fn project_server() -> Server {
+    let mut grants = grants_for("default", Authority::Write).unwrap();
+    grants.extend(grants_for("crew", Authority::Write).unwrap());
+    grants.extend(grants_for("extra", Authority::Read).unwrap());
+    // A ledger token without its graph token must not admit a member.
+    grants.push("urn:cap:ledger:read:ghost".into());
+    let projects = ikigai_gonk::projects::Projects::parse(&[
+        "work crew,private,ghost".into(),
+        "overlap crew,default".into(),
+        "hidden private".into(),
+        "empty".into(),
+    ])
+    .unwrap();
+    Server::start_with_projects(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "extra", "private", "ghost"],
+        Default::default(),
+        projects,
+    )
+}
+
+#[test]
+fn projects_select_a_capability_scoped_union_and_keep_names_in_every_control() {
+    let server = project_server();
+    append_as_root(&server, "default", "Base team", "team");
+    let crew = append_as_root(&server, "crew", "Crew team", "team,shared");
+    append_as_root(&server, "crew", "Crew excluded", "team,skip");
+    append_as_root(&server, "extra", "Extra team", "team");
+    append_as_root(&server, "private", "Private secret", "team,secret");
+    append_as_root(&server, "ghost", "Ghost secret", "team,secret");
+    let query = "projects=work,overlap&ledgers=extra,crew&labels=team&without=skip&text=team";
+    let page = server.page(&format!("/l/default?{query}&limit=1"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.body.contains("3 open items"), "{page:?}");
+    assert!(page.body.contains("Projects: work,overlap."), "{page:?}");
+    assert!(!page.body.contains("Private secret"));
+    assert!(!page.body.contains("Ghost secret"));
+    assert!(!page.body.contains("Crew excluded"));
+    assert!(
+        page.body
+            .contains("name='projects' type='hidden' value='work,overlap'"),
+        "{page:?}"
+    );
+    assert!(
+        page.body
+            .contains("name='ledgers' type='hidden' value='extra,crew'"),
+        "{page:?}"
+    );
+    assert!(
+        page.body
+            .contains("name='_projects' type='hidden' value='work,overlap'"),
+        "{page:?}"
+    );
+    assert!(
+        page.body
+            .contains("name='_ledgers' type='hidden' value='extra,crew'"),
+        "{page:?}"
+    );
+    // No link freezes the expanded set into ledgers=; it keeps both original terms.
+    assert!(
+        page.body
+            .contains("ledgers=extra%2Ccrew&amp;projects=work%2Coverlap"),
+        "{page:?}"
+    );
+    let mut seen = Vec::new();
+    for offset in 0..3 {
+        let page = server.page(
+            &format!("/l/default/items?{query}&limit=1&offset={offset}"),
+            None,
+        );
+        assert_eq!(page.status, 200, "{page:?}");
+        seen.extend(row_titles(&page.body));
+    }
+    seen.sort();
+    assert_eq!(seen, ["Base team", "Crew team", "Extra team"]);
+    let facet = server.page(&format!("/l/default/facet?{query}"), None);
+    assert_eq!(facet.status, 200, "{facet:?}");
+    assert!(facet.body.contains(&facet_row("team", 3)), "{facet:?}");
+    assert!(!facet.body.contains("secret"));
+    assert!(facet.body.contains("projects=work%2Coverlap"));
+    // Close from a member ledger, then render the same named selection on its base page.
+    let closed = server.form(
+        &[
+            ("_ledger", "crew"),
+            ("_listLedger", "default"),
+            ("_projects", "work,overlap"),
+            ("_ledgers", "extra,crew"),
+            ("_labels", "team"),
+            ("_without", "skip"),
+            ("_action", "close"),
+            ("_then", "items"),
+            ("item", &format!("urn:iki:ledger:crew:item:{crew}")),
+        ],
+        None,
+    );
+    assert_eq!(closed.status, 200, "{closed:?}");
+    assert!(closed.body.contains("2 open items"), "{closed:?}");
+    assert!(
+        closed.body.contains("projects=work%2Coverlap"),
+        "{closed:?}"
+    );
+    let closed = server.page("/l/default?projects=work&status=closed", None);
+    assert_eq!(row_titles(&closed.body), ["Crew team"]);
+    // projects= replaces the base selection; ledgers= is additive.
+    let only = server.page("/l/default?projects=work", None);
+    assert_eq!(row_titles(&only.body), ["Crew excluded"]);
+    for path in [
+        "/l/default?projects=empty",
+        "/l/default/items?projects=hidden",
+    ] {
+        let empty = server.page(path, None);
+        assert_eq!(empty.status, 200, "{empty:?}");
+        assert!(row_titles(&empty.body).is_empty());
+        assert!(empty.body.contains("No items match."), "{empty:?}");
+    }
+    let empty = server.page("/l/default/facet?projects=empty", None);
+    assert_eq!(empty.status, 200, "{empty:?}");
+    assert!(empty.body.contains("No labels or priorities match."));
+    for path in [
+        "/l/default/items?projects=missing",
+        "/l/default/facet?projects=missing",
+    ] {
+        assert_eq!(server.page(path, None).status, 400);
+    }
+    assert_eq!(server.page("/l/private?projects=overlap", None).status, 403);
+}
+
+#[test]
+fn the_picker_groups_only_readable_members_and_links_to_each_project() {
+    let server = project_server();
+    let page = server.page("/l/default", None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.body.contains("Project: work</a>"), "{page:?}");
+    assert!(
+        page.body.contains("href='/l/crew?projects=work'"),
+        "{page:?}"
+    );
+    assert!(page.body.contains("href='/l/default?projects=overlap'"));
+    assert!(!page.body.contains("Project: hidden"));
+    assert!(!page.body.contains("Project: empty"));
+    assert!(!page.body.contains("data-ledger-name='private'"));
+    assert!(!page.body.contains("data-ledger-name='ghost'"));
+    assert_eq!(page.body.matches("data-ledger-name='crew'").count(), 2);
+    assert_eq!(page.body.matches("data-ledger-name='default'").count(), 1);
+    assert_eq!(page.body.matches("data-ledger-name='extra'").count(), 1);
+}
+
+#[test]
+fn project_membership_is_resolved_again_when_the_config_changes() {
+    let dir = tempfile::tempdir_in(".").unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "gonk.project = \"work crew\"\n").unwrap();
+    let projects = ikigai_gonk::projects::Projects::default().with_config(path.clone());
+    let mut grants = grants_for("default", Authority::Read).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_projects(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default"],
+        Default::default(),
+        projects,
+    );
+    append_as_root(&server, "default", "Base live", "base");
+    append_as_root(&server, "crew", "Crew live", "crew");
+    let url = "/l/default?projects=work";
+    let first = server.page(url, None);
+    assert_eq!(row_titles(&first.body), ["Crew live"]);
+    std::fs::write(&path, "gonk.project = \"work crew,default\"\n").unwrap();
+    let next = server.page(url, None);
+    let mut titles = row_titles(&next.body);
+    titles.sort();
+    assert_eq!(titles, ["Base live", "Crew live"]);
+    let facet = server.page("/l/default/facet?projects=work", None);
+    assert!(facet.body.contains(&facet_row("base", 1)), "{facet:?}");
+    assert!(facet.body.contains(&facet_row("crew", 1)), "{facet:?}");
+    assert!(next.body.contains("href='/l/default?projects=work'"));
+    std::fs::write(&path, "gonk.project = \"work default\"\n").unwrap();
+    assert_eq!(row_titles(&server.page(url, None).body), ["Base live"]);
+    // An invalid edit refuses the selection rather than using stale or base membership.
+    std::fs::write(&path, "gonk.project = \"work ../private\"\n").unwrap();
+    assert_eq!(server.page(url, None).status, 400);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(server.page(url, None).status, 400);
 }

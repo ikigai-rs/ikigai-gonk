@@ -175,6 +175,8 @@ pub struct Web {
     /// from every page drawn through the shared head unless the page is asked for in safe mode.
     /// Empty for none, and every page is as it was.
     pub page_assets: crate::page_assets::PageAssets,
+    /// Named sets of ledgers declared with `gonk.project`.
+    pub projects: crate::projects::Projects,
 }
 
 /// Bind the face.
@@ -535,6 +537,15 @@ pub(crate) fn require_read(capability: &Capability, ledger: &Ledger) -> Result<(
 /// only those with both read grants required by [`require_read`].
 pub(crate) fn readable_ledgers(web: &Web, capability: &Capability) -> Vec<Ledger> {
     let mut names: Vec<String> = web.ledgers.clone();
+    if let Ok(projects) = web.projects.snapshot() {
+        for (_, members) in projects.iter() {
+            for name in members {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+    }
     if let Some(scopes) = capability.scopes() {
         for scope in scopes {
             if let Some(name) = scope.strip_prefix("urn:cap:ledger:read:") {
@@ -630,7 +641,7 @@ fn nav_with(
     // ★ The header's picker (ledger #1888), FIRST: the stylesheet draws it where the one link
     // per ledger used to be. The `view:ledger` elements below stay for the SPARQL page's
     // `<select>`, which is a form value and keeps its own order.
-    let mut out = ledger_menu(ledgers, here);
+    let mut out = ledger_menu(ledgers, here, &web.projects);
     // ★ The Dashboard (ledger #2542), on the browse rule: a chart per readable ledger, so it is
     // offered to a caller who reads one.
     if !ledgers.is_empty() {
@@ -861,25 +872,55 @@ pub const MENU_FILTER_PAST: usize = 8;
 /// 42 ms. The counts were a cost every page paid per ledger, which is the thing that does not
 /// scale, so they are on `/l` only. What remains (about half a millisecond per ledger) is the
 /// stylesheet drawing the menu's markup.
-fn ledger_menu(ledgers: &[Ledger], here: Here<'_>) -> String {
+fn ledger_menu(ledgers: &[Ledger], here: Here<'_>, projects: &crate::projects::Projects) -> String {
     let ordered = menu_order(ledgers);
     if ordered.is_empty() {
         return String::new();
     }
-    let links: String = ordered
+    let link = |ledger: &&Ledger| {
+        element(
+            "menu-ledger",
+            &[
+                ("name", ledger.name()),
+                ("href", &ledger_href(ledger)),
+                ("current", flag(here == Here::Ledger(ledger.name()))),
+            ],
+            "",
+        )
+    };
+    let projects = projects.snapshot().unwrap_or_default();
+    let mut grouped = HashSet::new();
+    let mut groups = String::new();
+    for (name, members) in projects.iter() {
+        let readable: Vec<_> = ordered
+            .iter()
+            .filter(|l| members.iter().any(|m| m == l.name()))
+            .collect();
+        let Some(first) = readable.first() else {
+            continue;
+        };
+        for ledger in &readable {
+            grouped.insert(ledger.name());
+        }
+        let href = format!(
+            "{}?projects={}",
+            ledger_href(first),
+            ikigai_fn::html::url_segment(name)
+        );
+        let links: String = readable.into_iter().map(link).collect();
+        groups.push_str(&render::wrap(
+            "menu-project",
+            &[("name", name), ("href", &href)],
+            &links,
+        ));
+    }
+    let ungrouped: String = ordered
         .iter()
-        .map(|ledger| {
-            element(
-                "menu-ledger",
-                &[
-                    ("name", ledger.name()),
-                    ("href", &ledger_href(ledger)),
-                    ("current", flag(here == Here::Ledger(ledger.name()))),
-                ],
-                "",
-            )
-        })
+        .filter(|l| !grouped.contains(l.name()))
+        .map(link)
         .collect();
+    let has_projects = !groups.is_empty();
+    let links = format!("{groups}{ungrouped}");
     let label = match here {
         Here::Ledger(name) | Here::Sparql(name) => format!("Ledger: {name}"),
         _ => "Ledgers".to_string(),
@@ -888,7 +929,7 @@ fn ledger_menu(ledgers: &[Ledger], here: Here<'_>) -> String {
         "ledger-menu",
         &[
             ("label", &label),
-            ("single", flag(ordered.len() == 1)),
+            ("single", flag(ordered.len() == 1 && !has_projects)),
             ("filter", flag(ordered.len() > MENU_FILTER_PAST)),
             ("all-href", LEDGERS_PATH),
             ("all-current", flag(here == Here::Index)),
@@ -1656,6 +1697,7 @@ struct Listing<'a> {
     /// of the page's one (ikigai-ledger 0.20, ledger #3216). Passed through, never parsed for
     /// a decision here: the ledger chooses which of them the viewer may read.
     ledgers: Option<&'a str>,
+    projects: Option<&'a str>,
 }
 
 /// URL and presentation state only. Matching stays in the ledger and `facet::pattern`.
@@ -1664,6 +1706,7 @@ struct LabelFilters<'a> {
     without: Option<&'a str>,
     /// Not a label filter, but every link a label filter builds keeps it (ledger #3216).
     ledgers: Option<&'a str>,
+    projects: Option<&'a str>,
 }
 
 enum LabelChange<'a> {
@@ -1681,6 +1724,7 @@ impl LabelFilters<'_> {
             ("labels", self.labels),
             ("without", self.without),
             ("ledgers", self.ledgers),
+            ("projects", self.projects),
         ] {
             if let Some(value) = value.filter(|v| !v.is_empty()) {
                 query.push_str(&format!("&{name}={}", ikigai_fn::html::url_segment(value)));
@@ -1735,6 +1779,7 @@ impl LabelFilters<'_> {
             labels: Some(&labels),
             without: Some(&without),
             ledgers: self.ledgers,
+            projects: self.projects,
         };
         let mut query = format!("?status={}", listing.status);
         if let Some(limit) = listing.limit {
@@ -1910,7 +1955,8 @@ async fn ledger_listing(
         without,
         limit,
         offset,
-        ledgers: union,
+        ledgers: explicit,
+        projects,
     } = *listing;
     // The page is still this ledger's (its header, its filing form), so it reads this
     // ledger even when `ledgers=` lists others; the union's own grants are the ledger's call.
@@ -1921,6 +1967,9 @@ async fn ledger_listing(
             detail: format!("`{status}` is not one of open, closed, all"),
         });
     }
+    let expanded = web.projects.resolve(projects, explicit)?;
+    let union = expanded.as_deref();
+    let empty_project = union == Some("") && projects.is_some_and(|p| !p.trim().is_empty());
     let wanted = rows::rows_wanted(limit)?;
     let offset = rows::offset_wanted(offset)?;
     // `count` and `items` take the same filter, so the number is the listing's for the same
@@ -1946,11 +1995,17 @@ async fn ledger_listing(
         Ok(read)
     };
     // The total first: an offset past it is refused before anything is drawn.
-    let counted = ledger_count_document(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
-    let total = counted.total;
+    // The ledger's comma-list grammar cannot spell an empty set. An empty project
+    // therefore has no graph reads, rather than falling back to the page's base ledger.
+    let (total, read_names) = if empty_project {
+        (0, Vec::new())
+    } else {
+        let counted = ledger_count_document(&fetch(inv, filtered("count", TOTAL_FACE)?).await?)?;
+        (counted.total, counted.ledgers.unwrap_or_default())
+    };
     // ★ The ledgers the union READ, as the ledger says (ledger #3216): the viewer's grants
     // decided, under the viewer's capability, and an unreadable one was never queried.
-    let selected = union.map(|_| counted.ledgers.clone().unwrap_or_default());
+    let selected = union.map(|_| read_names);
     if offset > 0 && offset >= total {
         return Err(Error::InvalidArgument {
             name: "offset".to_string(),
@@ -1970,7 +2025,12 @@ async fn ledger_listing(
         "offset",
         &offset.to_string(),
     );
-    let mut graph = Graph::from_turtle(&fetch(inv, rows_read).await?).map_err(render_err)?;
+    let bytes = if empty_project {
+        Vec::new()
+    } else {
+        fetch(inv, rows_read).await?
+    };
+    let mut graph = Graph::from_turtle(&bytes).map_err(render_err)?;
     let (shown, order) = newest_rows(&mut graph, wanted);
     let count = Count {
         shown,
@@ -1983,7 +2043,8 @@ async fn ledger_listing(
     for item in &order {
         for (name, value) in [
             ("listLedger", Some(ledger.name())),
-            ("listLedgers", union),
+            ("listLedgers", explicit),
+            ("listProjects", projects),
             ("listLabels", labels),
             ("listWithout", without),
             ("listText", text),
@@ -1997,6 +2058,9 @@ async fn ledger_listing(
     let mut children = nav(web, inv.capability, &ledgers, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
+    }
+    if let Some(names) = projects.filter(|p| !p.trim().is_empty()) {
+        children.push_str(&element("union", &[], &format!("Projects: {names}.")));
     }
     if let Some(selected) = &selected {
         children.push_str(&union_note(union.unwrap_or_default(), selected));
@@ -2021,7 +2085,8 @@ async fn ledger_listing(
     let filters = LabelFilters {
         labels,
         without,
-        ledgers: union,
+        ledgers: explicit,
+        projects,
     };
     let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
@@ -2074,7 +2139,8 @@ async fn ledger_listing(
             ("text", text.unwrap_or("")),
             ("labels", labels.unwrap_or("")),
             ("without", without.unwrap_or("")),
-            ("ledgers", union.unwrap_or("")),
+            ("ledgers", explicit.unwrap_or("")),
+            ("projects", projects.unwrap_or("")),
             ("limit", &wanted.to_string()),
             ("status-tail", &status_tail),
             ("page-url", &page_url),
@@ -2313,6 +2379,7 @@ impl Endpoint for LedgerView {
         let limit = optional(inv, "limit");
         let offset = optional(inv, "offset");
         let ledgers = optional(inv, "ledgers");
+        let projects = optional(inv, "projects");
         let ledger = match self.shape {
             Shape::Home => match readable_ledgers(&self.web, inv.capability)
                 .into_iter()
@@ -2358,6 +2425,7 @@ impl Endpoint for LedgerView {
                 limit: limit.as_deref(),
                 offset: offset.as_deref(),
                 ledgers: ledgers.as_deref(),
+                projects: projects.as_deref(),
             },
             self.shape != Shape::Fragment,
             None,
@@ -2413,6 +2481,13 @@ impl Endpoint for LedgerView {
                 .one_of(["open", "closed", "all"])
                 .default_value("open")
                 .optional(),
+        )
+        .input(
+            arg(
+                "projects",
+                "Comma-separated project names; their ledgers plus ledgers= form the selection.",
+            )
+            .optional(),
         )
         .input(arg("text", "A case-insensitive substring of the title.").optional())
         .input(arg("labels", "Comma-separated labels: every label must match.").optional())
@@ -3436,6 +3511,7 @@ impl Endpoint for Act {
         let list_text = take("_text");
         let list_limit = take("_limit");
         let list_ledgers = take("_ledgers");
+        let list_projects = take("_projects");
         // A union page's row names its OWN ledger in `_ledger`, the action's target; the page
         // it re-renders is the listing's (ledger #3216).
         let list_ledger = take("_listLedger")
@@ -3545,6 +3621,7 @@ impl Endpoint for Act {
                     limit: list_limit.as_deref(),
                     offset: None,
                     ledgers: list_ledgers.as_deref(),
+                    projects: list_projects.as_deref(),
                 };
                 let page = list_ledger.as_ref().unwrap_or(&ledger);
                 ledger_listing(&self.web, inv, page, &listing, false, flash).await
@@ -4887,6 +4964,7 @@ mod tests {
             epochs: None,
             holder_aliases: Default::default(),
             page_assets: Default::default(),
+            projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
         };
@@ -4918,6 +4996,7 @@ mod tests {
             labels: Some("same,keep"),
             without: Some("same,skip"),
             ledgers: None,
+            projects: None,
         };
         let listing = Listing {
             status: "all",
@@ -4927,6 +5006,7 @@ mod tests {
             limit: None,
             offset: Some("50"),
             ledgers: None,
+            projects: None,
         };
         assert_eq!(
             filters.url(&listing, "/l/default", LabelChange::RemoveRequired("same")),
@@ -4949,6 +5029,7 @@ mod tests {
             labels: Some("book:ikigai,c++ & café"),
             without: Some("blocked,decide"),
             ledgers: None,
+            projects: None,
         };
         let query = filters.append(count.next_query("closed", Some("queue & review")).unwrap());
         assert_eq!(query, format!("?status=closed&limit={0}&offset={0}&text=queue%20%26%20review&labels=book%3Aikigai%2Cc%2B%2B%20%26%20caf%C3%A9&without=blocked%2Cdecide", rows::MAX_ROWS));
@@ -4966,6 +5047,7 @@ mod tests {
             labels: Some("team"),
             without: None,
             ledgers: Some("default,crew"),
+            projects: None,
         };
         let query = filters.append(count.next_query("open", None).unwrap());
         assert_eq!(
@@ -4983,6 +5065,7 @@ mod tests {
             limit: None,
             offset: None,
             ledgers: filters.ledgers,
+            projects: filters.projects,
         };
         for change in [
             LabelChange::Clear,

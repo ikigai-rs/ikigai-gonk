@@ -3343,6 +3343,7 @@ impl HttpDoorHarness {
             epochs: None,
             holder_aliases: Default::default(),
             page_assets: Default::default(),
+            projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
         });

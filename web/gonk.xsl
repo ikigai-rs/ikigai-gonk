@@ -216,7 +216,7 @@
                 </div>
               </xsl:if>
               <ul class="ledger-list">
-                <xsl:apply-templates select="view:menu-ledger"/>
+                <xsl:apply-templates select="view:menu-project | view:menu-ledger"/>
               </ul>
               <a class="all-ledgers">
                 <xsl:attribute name="href"><xsl:value-of select="@all-href"/></xsl:attribute>
@@ -228,6 +228,13 @@
         </xsl:otherwise>
       </xsl:choose>
     </nav>
+  </xsl:template>
+
+  <xsl:template match="view:menu-project">
+    <li class="ledger-project" data-ledger-project="true">
+      <a class="project-link"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Project: <xsl:value-of select="@name"/></a>
+      <ul class="ledger-list project-members"><xsl:apply-templates select="view:menu-ledger"/></ul>
+    </li>
   </xsl:template>
 
   <xsl:template match="view:menu-ledger">
@@ -2470,6 +2477,9 @@
           <input type="hidden" name="status"><xsl:attribute name="value"><xsl:value-of select="@status"/></xsl:attribute></input>
           <input type="hidden" name="limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <!-- A union page (ledger #3216): a search keeps the ledgers it lists. -->
+          <xsl:if test="@projects != ''">
+            <input type="hidden" name="projects"><xsl:attribute name="value"><xsl:value-of select="@projects"/></xsl:attribute></input>
+          </xsl:if>
           <xsl:if test="@ledgers != ''">
             <input type="hidden" name="ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
           </xsl:if>
@@ -2509,7 +2519,8 @@
           <input type="hidden" name="_text"><xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute></input>
           <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
-          <label for="file-content">File an item<xsl:if test="@ledgers != ''"> in <xsl:value-of select="@ledger"/></xsl:if> — first line is the title, then a blank line, then the body</label>
+          <input type="hidden" name="_projects"><xsl:attribute name="value"><xsl:value-of select="@projects"/></xsl:attribute></input>
+          <label for="file-content">File an item<xsl:if test="@ledgers != '' or @projects != ''"> in <xsl:value-of select="@ledger"/></xsl:if> — first line is the title, then a blank line, then the body</label>
           <textarea id="file-content" name="content" rows="3" required="required"></textarea>
           <details>
             <summary>More fields</summary>
@@ -2692,6 +2703,7 @@
             <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="view:listLimit"/></xsl:attribute></input>
             <input type="hidden" name="_listLedger"><xsl:attribute name="value"><xsl:value-of select="view:listLedger"/></xsl:attribute></input>
             <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="view:listLedgers"/></xsl:attribute></input>
+            <input type="hidden" name="_projects"><xsl:attribute name="value"><xsl:value-of select="view:listProjects"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
             <button type="submit" class="quiet small">
               <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> with the ledger's default reason</xsl:attribute>

@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_with, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 20] = [
+const PAGES: [(&str, &str); 23] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -51,6 +51,15 @@ const PAGES: [(&str, &str); 20] = [
         "union-filter.html",
         "/l/default?ledgers=default,crew&labels=needs-person",
     ),
+    (
+        "project-ledger.html",
+        "/l/default?projects=work&ledgers=default",
+    ),
+    (
+        "project-filter.html",
+        "/l/default?projects=work,overlap&labels=needs-person",
+    ),
+    ("project-empty.html", "/l/default?projects=empty"),
     ("named-item.html", "/l/crew/item/1"),
     ("lifecycle.html", "/l/default/lifecycle"),
     ("doctor.html", "/l/default/doctor"),
@@ -338,6 +347,10 @@ fn main() {
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: ikigai_gonk::projects::Projects::parse(&[
+            "work crew,private".into(), "overlap default,crew".into(), "empty".into(),
+            "catalog sample-1,sample-2,sample-3,sample-4,sample-5,sample-6,sample-7".into(),
+        ]).expect("fixture projects"),
         toolbox: false,
         // The add-on row (ledger #3279) on every page below.
         faces: vec!["demo".to_string(), "intake".to_string()],
@@ -349,14 +362,20 @@ fn main() {
         None,
     ));
     let door = doors::HttpDoor {
-        anonymous: anonymous_http_grants(&["default".to_string(), "crew".to_string()])
-            .expect("the anonymous grant")
-            .into_iter()
-            .chain([
-                "urn:cap:exec:git".to_string(),
-                "urn:cap:browse:read:fixture".to_string(),
-            ])
-            .collect(),
+        anonymous: anonymous_http_grants(
+            &[
+                "default", "crew", "sample-1", "sample-2", "sample-3", "sample-4", "sample-5",
+                "sample-6", "sample-7",
+            ]
+            .map(str::to_string),
+        )
+        .expect("the anonymous grant")
+        .into_iter()
+        .chain([
+            "urn:cap:exec:git".to_string(),
+            "urn:cap:browse:read:fixture".to_string(),
+        ])
+        .collect(),
         bind: addr,
         passkeys: Some(passkeys),
         public: Vec::new(),

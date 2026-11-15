@@ -166,6 +166,7 @@ fn main() {
         faces: Vec::new(),
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: Default::default(),
     });
     let door = doors::http_kernel(Arc::clone(&hub), web::space(face));
 

@@ -73,10 +73,15 @@ async fn union(
     inv: &Invocation<'_>,
     ledger: &Ledger,
     listing: &Listing<'_>,
+    projects: &crate::projects::Projects,
 ) -> Result<Vec<Ledger>> {
-    let Some(names) = listing.ledgers else {
+    let expanded = projects.resolve(listing.projects, listing.ledgers)?;
+    let Some(names) = expanded.as_deref() else {
         return Ok(vec![ledger.clone()]);
     };
+    if names.is_empty() && listing.projects.is_some_and(|p| !p.trim().is_empty()) {
+        return Ok(Vec::new());
+    }
     let read = with(
         with(
             with(
@@ -135,6 +140,7 @@ impl Endpoint for Facet {
         let without = optional(inv, "without");
         let limit = optional(inv, "limit");
         let ledgers = optional(inv, "ledgers");
+        let projects = optional(inv, "projects");
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
@@ -143,6 +149,7 @@ impl Endpoint for Facet {
             limit: limit.as_deref(),
             offset: None,
             ledgers: ledgers.as_deref(),
+            projects: projects.as_deref(),
         };
         // Expand each match into label/priority buckets, including an absent priority.
         // The OPTIONALs join the matched items before expansion: an OPTIONAL standing
@@ -159,7 +166,7 @@ impl Endpoint for Facet {
             pattern(&listing)?
         );
         let mut counted: BTreeMap<(String, String), u64> = BTreeMap::new();
-        for graph in union(inv, &ledger, &listing).await? {
+        for graph in union(inv, &ledger, &listing, &self.web.projects).await? {
             for row in bindings(&query(inv, &graph, &q).await?)? {
                 let kind = row["kind"]["value"]
                     .as_str()
@@ -180,6 +187,7 @@ impl Endpoint for Facet {
             labels: listing.labels,
             without: listing.without,
             ledgers: listing.ledgers,
+            projects: listing.projects,
         };
         let page = ledger_href(&ledger);
         // Two lists under their own headings, so a row starts with its term and count and
@@ -302,6 +310,7 @@ impl Endpoint for Facet {
             .input(arg("labels", "Comma-separated required labels.").optional())
             .input(arg("without", "Comma-separated excluded labels.").optional())
             .input(arg("text", "Case-insensitive title substring.").optional())
+            .input(arg("projects", "Comma-separated project names, resolved as on the list.").optional())
             .input(arg("ledgers", "Comma-separated ledger names: count over the ledger's own union of them, as the list does.").optional())
             .input(arg("limit", "Preserve this list page size in filter links; counts are unbounded.").optional())
             .input(arg("page", "A whole page for a browser without scripts.").one_of(["true", "false"]).optional())

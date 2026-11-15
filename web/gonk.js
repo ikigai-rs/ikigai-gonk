@@ -1544,7 +1544,12 @@
         item.hidden = !match;
         if (match) shown++;
       }
-      const total = items.length;
+      for (const group of panel.querySelectorAll("[data-ledger-project]")) {
+        group.hidden = !Array.from(group.querySelectorAll("li[data-ledger-name]")).some((item) => !item.hidden);
+      }
+      // Membership can overlap: count distinct ledger names, not repeated links.
+      shown = new Set(items.filter((item) => !item.hidden).map((item) => item.getAttribute("data-ledger-name"))).size;
+      const total = new Set(items.map((item) => item.getAttribute("data-ledger-name"))).size;
       const sentence = !want
         ? total + " ledgers."
         : shown === 0

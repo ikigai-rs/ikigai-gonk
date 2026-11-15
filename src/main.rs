@@ -891,6 +891,7 @@ fn serve(flags: &config::Flags) -> ! {
             epochs: Some(Arc::clone(&epochs)),
             holder_aliases: settings.holder_aliases.clone(),
             page_assets: settings.page_assets.clone(),
+            projects: settings.projects.clone().with_config(config_path.clone()),
             // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
             // (ledger #2021).
             toolbox: settings.toolbox.is_some(),

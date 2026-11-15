@@ -129,7 +129,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 53] = [
+const KEYS: [&str; 54] = [
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -181,6 +181,7 @@ const KEYS: [&str; 53] = [
     "gonk.review.judge_max_tokens",
     crate::toolbox::KEY,
     crate::face::KEY,
+    crate::projects::KEY,
     crate::page_assets::STYLE_KEY,
     crate::page_assets::SCRIPT_KEY,
 ];
@@ -831,6 +832,8 @@ pub struct Settings {
     /// A deployment's own stylesheets and scripts on gonk's pages (`gonk.page.style`,
     /// `gonk.page.script`, [`crate::page_assets`], ledger #3379); empty for none.
     pub page_assets: crate::page_assets::PageAssets,
+    /// Named sets of ledgers (`gonk.project`), expanded by each listing request.
+    pub projects: crate::projects::Projects,
     /// The onboarding controller's door and files (`gonk.onboard`, [`crate::onboard`]), or
     /// `None`: no `urn:iki:onboard:*`, and nothing else changes.
     pub onboard: Option<crate::onboard::Config>,
@@ -2317,6 +2320,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         backup,
         review,
         queue: queue_policy(text)?,
+        projects: crate::projects::Projects::parse(&values_for(text, crate::projects::KEY))?,
         holder_aliases: crate::holders::HolderAliases::parse(&values_for(
             text,
             crate::holders::KEY,
@@ -3122,6 +3126,24 @@ mod tests {
         assert_eq!(
             repository.file.as_deref(),
             Some("https://github.com/ikigai-rs/ikigai-core/blob/HEAD/{path}")
+        );
+    }
+
+    #[test]
+    fn project_lines_declare_membership_and_refuse_bad_names() {
+        let text = "gonk.project = \"work default,crew\"\ngonk.project = \"work review\"\n";
+        let read = settings(&Flags::default(), text, &homes()).unwrap();
+        assert_eq!(
+            read.projects
+                .resolve(Some("work"), None)
+                .unwrap()
+                .as_deref(),
+            Some("default,crew,review")
+        );
+        assert!(
+            settings(&Flags::default(), "gonk.project = \"Bad crew\"", &homes())
+                .unwrap_err()
+                .contains("gonk.project")
         );
     }
 

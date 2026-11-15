@@ -1026,6 +1026,7 @@ fn onboard_page(a: &Gonk, cap: &Capability) -> String {
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
+        projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
     });
