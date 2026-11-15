@@ -957,10 +957,13 @@ fn priority_and_sort_affect_rows_counts_and_survive_navigation() {
     assert!(
         reverse
             .body
-            .contains("offset=1&amp;priority=1&amp;sort=-number"),
+            .contains("limit=2&amp;priority=1&amp;sort=-number"),
         "{}",
         reverse.body
     );
+    let offset = g.page("/l/default?priority=1&sort=-number&limit=1&offset=1");
+    assert!(offset.body.contains("First priority"));
+    assert!(!offset.body.contains("Second priority"));
     let facet = g.page("/l/default/facet?priority=1&sort=number&page=true");
     assert_eq!(facet.status, 200, "{}", facet.body);
     assert!(facet.body.contains("p1"), "{}", facet.body);
