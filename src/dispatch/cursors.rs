@@ -40,6 +40,32 @@ pub(super) struct Cursors {
 }
 impl Cursors {
     pub(super) fn open(path: Option<PathBuf>) -> Result<Self> {
+        // One fixed temporary name bounds crash leftovers as well as live state. It is
+        // uncommitted, so a restart discards it and keeps the acknowledged sidecar.
+        if let Some(path) = &path {
+            let temp = path.with_extension("tmp");
+            match std::fs::symlink_metadata(&temp) {
+                Ok(meta) => {
+                    if !meta.is_file() {
+                        return Err(Error::Endpoint(
+                            "dispatch: invalid cursor temporary file".into(),
+                        ));
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if meta.permissions().mode() & 0o077 != 0 {
+                            return Err(Error::Endpoint(
+                                "dispatch: cursor temporary file must be owner-only".into(),
+                            ));
+                        }
+                    }
+                    std::fs::remove_file(temp).map_err(io_error)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
+            }
+        }
         let entries: BTreeMap<String, Entry> = match path.as_ref() {
             Some(path) if path.try_exists().map_err(io_error)? => {
                 let meta = std::fs::symlink_metadata(path).map_err(io_error)?;
@@ -156,7 +182,7 @@ impl Cursors {
             if bytes.len() as u64 > MAX_FILE {
                 return Err(over_budget());
             }
-            let temp = path.with_extension(format!("{}.tmp", pending.token));
+            let temp = path.with_extension("tmp");
             let result = (|| {
                 let mut options = std::fs::OpenOptions::new();
                 options.write(true).create_new(true);
@@ -255,7 +281,18 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("private text"));
         assert!(!String::from_utf8_lossy(&bytes).contains(&token));
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, b"partial uncommitted snapshot").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let mut reopened = Cursors::open(Some(path.clone())).unwrap();
+        assert!(
+            !temp.exists(),
+            "a restart discards the bounded uncommitted crash file"
+        );
         assert_eq!(reopened.baseline(&key, 1003), Some(seen));
         assert!(matches!(
             reopened.acknowledge(&key, &pending, 1004),
