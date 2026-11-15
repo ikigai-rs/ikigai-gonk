@@ -47,6 +47,13 @@ is fixed.
   "Reconnecting" status and the unreachable-door banner), the unread count on the header's Layers link, the Feeds page (the Join and Leave the public feeds buttons and the sentence each carries, its Subscribe and Unsubscribe buttons, each feed's concept filter as a labeled group of checkboxes nested by broader concept, its status sentence) and a feed's read-only page with each entry's "Ask a question about this" disclosure and form, the Views page (its table of views, saved filter arguments, its status, and the add, change and remove forms), the ledger listing's Priority and Sort fields and their help, its native "Save this filter" disclosure and labeled name form, and the saved-view links grouped under each selected project, the Onboard page (its pending requests, their approve commands and the entitlements' verdicts), an item's comment order control (`#comment-order`, [PR 343](https://github.com/ikigai-rs/ikigai-gonk/pull/343): "oldest first" and "newest first" as plain links, the current one marked with `aria-current` and weight, reordered in place with a script and said once in the status region), the passkey sign-in and enrollment controls (signed in, an invite panel's two choices, [PR 347](https://github.com/ikigai-rs/ikigai-gonk/pull/347): a `fieldset` with a `legend` and two native radio buttons, "Add its grant to the passkey you are signed in with" checked by default and "Create a new passkey", the Label field shown only for the second and the button's words following the choice), the sentence every page shows while no passkey is enrolled, the notice every page shows once the server has restarted since it loaded (`#moved`, [PR 356](https://github.com/ikigai-rs/ikigai-gonk/pull/356): a sentence and a "Reload this page" link, hidden with no script, said once in the status region, focus left where it is), and the empty and
   refusal states each one can show.
   All of it is rendered by `web/gonk.xsl` and styled by `web/gonk.css` over `ikigai-ui`'s tokens.
+- **Deployment display rules on native pages** (ledger #3196): label, ledger, level and
+  state chips use existing measured theme tokens with words, weight or a dashed border.
+  Label facet visibility changes no item totals. Prefix groups have named Active groups
+  and Closed groups sections, native links, state counts in words and a page for each full
+  label, read under the viewer's grant. Counts are as of the request and the page says so.
+  Group pages have a heading, status navigation, a count sentence and a bounded item list;
+  links keep their ordinary focus ring and groups wrap at 320 px in every theme.
 - **The page scripts**: `ikigai-ui`'s `shell.js` as gonk uses it (refusals, the one status region, focus after a swap, the theme), and `web/gonk-safe.js` (safe mode's per-browser gate, [PR 343](https://github.com/ikigai-rs/ikigai-gonk/pull/343)), and `web/gonk.js` (the footer's safe-mode links and toggle, an item's comment order, the header's ledger menu and its filter, gonk's own status sentences, sample-query toggles, the
   passkey ceremonies, the Queue's held refresh, the Layers page's re-armed poll, the Dashboard's tabs, its polling and its pause control, the independently loaded list counts' success and failure sentences, and every page's once-a-minute `/instance` check, [PR 356](https://github.com/ikigai-rs/ikigai-gonk/pull/356)) and the htmx swaps they drive, with and without
   JavaScript.
@@ -118,6 +125,7 @@ Blocked, never omitted.
 
 | Check | Result | Evidence |
 |---|---|---|
+| Display-rule chips and group pages (`tests/browser/display_rules_3196.mjs`, local Chromium) | Pass | 2026-11-15: Playwright 1.64.0, Chromium 156.0.8078.4, axe-core 4.13.0; 96 checks (ledger, item and group × auto/light/dark/high contrast × light/dark system settings × 1280/320 px × with/without scripts). All looks, active/closed group sections, keyboard focus on group links, no overflow or page/console errors. The 48 scripted cases pass axe WCAG A/AA. CI axe includes these fixtures in every theme. Automated only; no manual zoom or assistive technology assessment |
 | Saved filter controls, project links and Views editor (`tests/browser/saved_views_3194.mjs`, local Chromium) | Pass | 2026-11-15: Playwright 1.64.0, Chromium 156.0.8078.4, axe-core 4.13.0; 96 checks (3 pages × auto/light/dark/high contrast × light/dark system settings × 1280/320 px × with/without scripts). Keyboard opens the native disclosure; the labeled name and button can receive focus; captured arguments and project links are checked; no overflow, page errors or console errors. The 48 scripted cases pass axe WCAG A/AA with the form open. CI axe includes all three fixtures in every theme. Automated only: no manual zoom or assistive technology assessment |
 | Project picker and project listings (`tests/browser/projects_3191.mjs`, local Chromium) | Pass | 2026-11-15: Playwright 1.64.0, Chromium 156.0.8078.4, axe-core 4.13.0; 96 page checks (3 project states × auto/light/dark/high contrast × light/dark system settings × 1280/320 px × with/without scripts), including keyboard opening, scripted Escape/focus return, overlapping-member filter counts and no page overflow. 48 scripted checks run axe WCAG A/AA with the picker open. Script-free fixtures receive each theme before navigation. Automated only: no manual zoom or assistive technology assessment. CI also reads the three project fixtures |
 | `tests/page_assets_3379.rs` (`cargo test`, every pull request), and its `#[ignore]`d browser test run locally against a headless Chromium ([PR 343](https://github.com/ikigai-rs/ikigai-gonk/pull/343)): the `cargo test` part | Pass | `cargo test --locked` on main `dfd985e`, rustc 1.99.1 on macOS, 2026-11-12, and the `ci / fmt · clippy · test` job of [CI on main](https://github.com/ikigai-rs/ikigai-gonk/actions/runs/43305010030) runs `tests/page_assets_3379.rs`. Covers the HTTP and page-shape assertions in those tests (and the axe rules over the fixtures); no browser interaction, keyboard, zoom or assistive technology |
@@ -385,6 +393,19 @@ before any conformance claim.
 | 2026-11-10 | The system passkey picker can tell passkeys apart: each is created with its label and host as its name and its label and grant as its display name, within 64 bytes, and each sign-in signals the current label and grant where `PublicKeyCredential.signalCurrentUserDetails` exists. Grant names become visible in the device's passkey manager | `tests/browser/passkey_names_3387.mjs` (a fixture in Chromium, not the system picker) and `tests/passkey_names_3387.rs` ([PR 345](https://github.com/ikigai-rs/ikigai-gonk/pull/345)) |
 | 2026-11-10 | Signed in, an invite link offers to add its grant to the passkey signed in with (the default, a native radio group with a legend) or to create a new passkey; adding asks that passkey to confirm, and the reloaded page says in the status region which grant was added | `tests/browser/add_grant_3388.mjs` (a fixture in Chromium, not the system sheet) and `tests/passkey_grants_3388.rs` ([PR 347](https://github.com/ikigai-rs/ikigai-gonk/pull/347)) |
 | 2026-10-17 | A task layer's tuple or take that this gonk tracks as an item links to it with the item's ledger and number as the link's visible text ("tracked here as crew #1"), never a bare number | `tests/layer_links_1856.rs` (page shape only; no browser run) ([PR 191](https://github.com/ikigai-rs/ikigai-gonk/pull/191)) |
+
+## Display-rule verification (ledger #3196)
+
+The HTTP regression tests in `tests/web.rs` cover the served table, chip looks and order,
+label facet visibility, whole-ledger state rollups despite filtering/pagination, closed
+section movement and a refused private-ledger group. `src/display.rs` tests unsupported
+tables and deterministic precedence; `tests/restart.rs` checks refusal before serving.
+The `examples/axe_site.rs` fixtures exercise all three looks and active/closed groups.
+`tests/browser/display_rules_3196.mjs` checks the ledger, item and group page in auto, light,
+dark and high contrast, light/dark system settings, 1280/320 px, with/without scripts,
+including keyboard focus on group links, axe WCAG A/AA, overflow and console/page errors.
+Current run results are recorded in the pull request. Manual keyboard/zoom, assistive
+technology, Firefox and Safari are Blocked: not run.
 
 ## References
 

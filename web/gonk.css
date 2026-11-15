@@ -653,3 +653,9 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 @media (max-width: 50rem) {
   .listing-body { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Deployment display rules: no custom colors; the same measured tokens in every theme. */
+.badge.display-strong { font-weight: 700; }
+.badge.display-outline { border-color: currentColor; border-style: dashed; }
+.label-groups { overflow-wrap: anywhere; }
+.label-groups a { display: inline-block; min-height: 24px; }

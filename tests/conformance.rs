@@ -351,7 +351,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 50] = [
+const WEB_IDS: [&str; 52] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -398,6 +398,8 @@ const WEB_IDS: [&str; 50] = [
     // This process's instance id (ledger #375).
     "gonk-instance",
     "gonk-render-rules",
+    "gonk-display-rule",
+    "gonk-page-group",
     // The Views page and its form adapter (ledger #2099).
     "gonk-page-views",
     "gonk-views-save",
@@ -442,6 +444,7 @@ fn http_door_with_space(hub: Arc<Kernel>, config: &std::path::Path) -> (Kernel, 
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        display: ikigai_gonk::display::Rules::parse("@prefix d: <urn:iki:gonk:display#> . <urn:iki:gonk:display-rule:test> a d:Rule; d:prefix \"test:\"; d:group true .").unwrap(),
         page_assets: Default::default(),
         projects: Default::default(),
         toolbox: false,
@@ -708,6 +711,12 @@ fn the_http_door_conforms() {
         // this face renders a result cell, and a published vocabulary is a promise to
         // everyone rather than to one server's stylesheet.
         .namespace(ikigai_gonk::rules::RENDER_NS)
+        .namespace(ikigai_gonk::display::NS)
+        .fixture(
+            Fixture::new("gonk-page-group", Verb::Source)
+                .binding("ledger", "default")
+                .binding("label", ikigai_gonk::display::group_key("test:group")),
+        )
         .opt_out_check(
             "gonk-passkey",
             Check::Authority,

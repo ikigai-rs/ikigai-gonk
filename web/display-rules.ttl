@@ -1,0 +1,25 @@
+# Display rules are data, served at urn:iki:gonk:display-rule (/display-rules).
+# Replace this whole table with <config home>/gonk/display-rules.ttl; an empty table
+# retains native badges and counts. Invalid or unsupported tables stop startup.
+# This vocabulary is local to gonk; it is not published.
+@prefix display: <urn:iki:gonk:display#> .
+# Every named subject must be a display:Rule. Select exactly one of:
+# display:label "bug"; display:prefix "repo:"; display:ledger "default";
+# display:level "urn:example:Task" (an absolute item class IRI); display:state "filed".
+# A ledger selector can also scope a label, prefix, level or state rule.
+# Lowest display:priority (integer, default 100), then rule IRI wins per chip.
+# display:badge "plain" | "strong" | "outline" (default plain): measured theme
+# tokens only; words remain visible, never a color-only meaning.
+# display:order (integer, default 100) orders these chips, ties by kind/text.
+# display:counts true | false (default true) controls label facets only, not totals.
+# display:group true (prefix only, default false) gives each complete label a group
+# with live state counts, its own page, and a closed section when all items close.
+# Group pages use /l/{ledger}/group/label/{key}, where key is the complete label
+# encoded as URL-safe base64 without padding. The resource is
+# urn:iki:gonk:page:group:ledger:{ledger}:label:{key}; arbitrary text stays data.
+# Counts and grouping read all items of each readable ledger, under the viewer's
+# own capability; group rolls are as of the request, independent of row pagination.
+# Example (uncomment to enable):
+# <urn:iki:gonk:display-rule:label:repo>
+#     a display:Rule; display:prefix "repo:"; display:badge "outline";
+#     display:order 10; display:counts false; display:group true .

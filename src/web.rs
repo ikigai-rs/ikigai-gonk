@@ -83,6 +83,7 @@ use crate::rows;
 use crate::rules::{self, Rules};
 
 mod facet;
+mod group;
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
@@ -146,6 +147,8 @@ pub struct Web {
     /// text is what `urn:iki:gonk:render-rules` serves and what the renderer resolves back.
     /// [`crate::rules::DEFAULT_RULES`] unless this deployment named its own file.
     pub rules: Arc<str>,
+    /// Validated deployment display rules and the exact Turtle served as a resource.
+    pub display: crate::display::Rules,
     /// Which severities the Queue page asks a human about (`gonk.queue.serious`), and what
     /// the header badge counts as serious. Ledger
     /// [#496](http://localhost:1060/l/default/item/496).
@@ -399,6 +402,18 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             Exact::new(rules::RULES_IRI),
             RenderRules {
                 turtle: Arc::clone(&web.rules),
+            },
+        )
+        .bind(
+            Exact::new(crate::display::IRI),
+            DisplayRules {
+                turtle: Arc::clone(&web.display.turtle),
+            },
+        )
+        .bind(
+            template(group::TEMPLATE),
+            group::Group {
+                web: Arc::clone(&web),
             },
         )
         .bind(template("urn:iki:gonk:asset:{name}"), Asset)
@@ -1959,12 +1974,19 @@ fn listing_chips(
     filters: &LabelFilters<'_>,
     listing: &Listing<'_>,
     page: &str,
+    display: &crate::display::Rules,
 ) -> Result<String> {
-    item_chips(graph, |item| filters.chips(graph, item, listing, page))
+    item_chips(graph, display, |item| {
+        filters.chips(graph, item, listing, page)
+    })
 }
 
 /// Keep chip metadata local to each projected item, for cards and chunked rows alike.
-fn item_chips(graph: &Graph, chips: impl Fn(&str) -> String) -> Result<String> {
+fn item_chips(
+    graph: &Graph,
+    display: &crate::display::Rules,
+    chips: impl Fn(&str) -> String,
+) -> Result<String> {
     use quick_xml::events::Event;
     let xml = graph.view_xml().map_err(render_err)?;
     let mut reader = quick_xml::Reader::from_str(&xml);
@@ -1985,7 +2007,9 @@ fn item_chips(graph: &Graph, chips: impl Fn(&str) -> String) -> Result<String> {
                         let item = attribute
                             .unescape_value()
                             .map_err(|e| render_err(e.to_string()))?;
-                        writer.get_mut().extend_from_slice(chips(&item).as_bytes());
+                        writer.get_mut().extend_from_slice(
+                            display.chips(graph, &item, &chips(&item)).as_bytes(),
+                        );
                     }
                 }
             }
@@ -2142,6 +2166,14 @@ async fn ledger_listing(
     if let Some(selected) = &selected {
         children.push_str(&union_note(union.unwrap_or_default(), selected));
     }
+    let group_ledgers = match &selected {
+        Some(names) => names
+            .iter()
+            .map(|name| Ledger::parse(name))
+            .collect::<Result<Vec<_>>>()?,
+        None => vec![ledger.clone()],
+    };
+    children.push_str(&group::elements(web, inv, &group_ledgers, None).await?);
     // The chart over the list (ledger #2542): one more cached read and one more keyed render.
     // ⚠ It is one ledger's, so a union page draws none rather than one that is not the list's.
     children.push_str(&render::slot(CHART_SLOT));
@@ -2170,7 +2202,7 @@ async fn ledger_listing(
     let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
     for window in graph.windows(&order, render::CHUNK_ROWS) {
-        let xml = listing_chips(&window, &filters, listing, &page_url)?;
+        let xml = listing_chips(&window, &filters, listing, &page_url, &web.display)?;
         chunks.push(render::chunk(&xml));
     }
     let title = match &selected {
@@ -3020,7 +3052,12 @@ struct LinkedItems {
     slots: Vec<(String, String)>,
 }
 
-async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Result<LinkedItems> {
+async fn outgoing_links(
+    display: &crate::display::Rules,
+    graph: &Graph,
+    inv: &Invocation<'_>,
+    kind: &str,
+) -> Result<LinkedItems> {
     let mut cache: BTreeMap<String, Option<Graph>> = BTreeMap::new();
     let links = graph.subjects_of_type(&format!("{}Link", render::VIEW_NS));
     for link in &links {
@@ -3143,7 +3180,7 @@ async fn outgoing_links(graph: &Graph, inv: &Invocation<'_>, kind: &str) -> Resu
                 .value(&member.target, &format!("{}state", render::VIEW_NS))
                 .unwrap_or_default();
             *states.entry(state).or_default() += 1;
-            row_xml.push(item_chips(&member.graph, |item| {
+            row_xml.push(item_chips(&member.graph, display, |item| {
                 LabelFilters::link_chips(&member.graph, item, &row_ledger)
             })?);
         }
@@ -3278,6 +3315,7 @@ fn inbound_phrase(rel: &str) -> &'static str {
 /// IRI. A `parent` edge from this ledger is left to the Children panel, which already lists it
 /// ([`enrich_children`]). Nothing here unlinks: an edge belongs to the item that holds it.
 async fn inbound_links(
+    web: &Web,
     graph: &Graph,
     inv: &Invocation<'_>,
     ledger: &Ledger,
@@ -3318,7 +3356,7 @@ async fn inbound_links(
             slots: Vec::new(),
         });
     }
-    outgoing_links(&links, inv, "inbound").await
+    outgoing_links(&web.display, &links, inv, "inbound").await
 }
 
 /// Resolve only recognized Git IRIs and working-tree file IRIs, through the viewer's own
@@ -3426,7 +3464,7 @@ async fn item_card(
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
     }
-    let mut xml = item_chips(&graph, |item| {
+    let mut xml = item_chips(&graph, &web.display, |item| {
         LabelFilters::link_chips(&graph, item, ledger)
     })?;
     for (placeholder, fragment) in &rendered {
@@ -3445,9 +3483,9 @@ async fn item_card(
         );
     }
     children.push_str(&xml);
-    let mut linked = outgoing_links(&graph, inv, "link").await?;
+    let mut linked = outgoing_links(&web.display, &graph, inv, "link").await?;
     children.push_str(&linked.xml);
-    let inbound = inbound_links(&graph, inv, ledger).await?;
+    let inbound = inbound_links(web, &graph, inv, ledger).await?;
     if !inbound.xml.is_empty() {
         children.push_str(&render::wrap("inbound", &[], &inbound.xml));
     }
@@ -5064,6 +5102,30 @@ impl Endpoint for Asset {
     }
 }
 
+struct DisplayRules {
+    turtle: Arc<str>,
+}
+#[async_trait]
+impl Endpoint for DisplayRules {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        RenderRules {
+            turtle: Arc::clone(&self.turtle),
+        }
+        .invoke(inv)
+        .await
+    }
+    fn name(&self) -> &str {
+        "gonk-display-rule"
+    }
+    fn describe(&self) -> Description {
+        Description::new(self.name()).title("Deployment display rules")
+            .summary("The validated display-rule table in effect, as Turtle. Public presentation data; contains no ledger reads. Replace gonk/display-rules.ttl in the configuration home.")
+            .verb(Verb::Source).verb(Verb::Meta)
+            .input(arg("as", "Turtle or plain text.").one_of(["text/turtle", "text/plain"]).default_value("text/turtle").optional())
+            .output("text/turtle")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5086,6 +5148,7 @@ mod tests {
             queue: crate::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            display: Default::default(),
             page_assets: Default::default(),
             projects: Default::default(),
             toolbox: false,

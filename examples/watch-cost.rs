@@ -165,6 +165,7 @@ fn main() {
         toolbox: false,
         faces: Vec::new(),
         holder_aliases: Default::default(),
+        display: Default::default(),
         page_assets: Default::default(),
         projects: Default::default(),
     });

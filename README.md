@@ -615,6 +615,8 @@ there.
 | `POST /act` | `urn:iki:gonk:act` | a form, as one ledger action |
 | `/sparql` · `/sparql/results` | `urn:iki:gonk:sparql` · `…:fragment:sparql` | the editor page and its results; with a results `Accept`, the SPARQL 1.1 Protocol (GET, and POST as a read) over `urn:sparql:*` |
 | `POST /auth/{op}` | `urn:iki:gonk:passkey:{op}` | passkey ceremonies and sessions |
+| `/display-rules` | `urn:iki:gonk:display-rule` | the deployment display-rule table, as Turtle |
+| `/l/{ledger}/group/label/{key}` | `urn:iki:gonk:page:group:ledger:{ledger}:label:{key}` | one label group, with state counts under the viewer’s grant |
 | `/render-rules` | `urn:iki:gonk:render-rules` | result controls and IRI abbreviation rules, as Turtle |
 | `/view/{name}` | `urn:iki:gonk:view:{name}` | a named view: whatever its target answers, under your own grant (see "Named views") |
 | `/views` · `POST /views/save` | `urn:iki:gonk:page:views` · `urn:iki:gonk:views:save` | the Views page: the named views in force and the views space's status, and with the declaration's write token a form to add, change or remove each (see "The Views page") |
@@ -1579,6 +1581,47 @@ worth naming: the depth lives behind `Source urn:space:{name}`, which requires
 capability any page could run under that would be allowed to ask. Either the depth becomes a
 resource of gonk's own with its own floor, or the space's read token becomes mintable; until
 one of those, the page counts files the way the startup banner already does.
+
+## Display rules for native pages
+
+A deployment can replace `<config home>/gonk/display-rules.ttl` to style label, ledger,
+item-level and lifecycle-state chips. The validated table is served at `/display-rules`
+(`urn:iki:gonk:display-rule`). The shipped table is empty and documents the vocabulary;
+[web/display-rules.ttl](web/display-rules.ttl) lists every supported field. Unknown fields,
+unsupported looks, duplicate scalar values and invalid combinations stop startup.
+
+```turtle
+@prefix display: <urn:iki:gonk:display#> .
+<urn:iki:gonk:display-rule:label:repo>
+    a display:Rule;
+    display:prefix "repo:";
+    display:badge "outline";
+    display:order 10;
+    display:counts false;
+    display:group true .
+```
+
+Each rule selects an exact `display:label`, a `display:prefix`, a `display:ledger` name,
+a `display:level` (the full item class IRI as a string), or a `display:state` name.
+A ledger can also scope another selector. Lowest integer `display:priority` wins, with ties
+broken by rule IRI; integer `display:order` orders the chips. Both default to 100.
+Looks are `plain`, `strong` and `outline`: existing theme colors with words, weight or a
+border. Rules cannot supply CSS, markup or colors that bypass the contrast floor.
+
+`display:counts false` removes matched labels from label facets while retaining item and
+priority totals, chips and filters. Prefix grouping gives each complete label a page and a
+rollup by lifecycle state, including closed items. Groups whose members are all closed move
+to **Closed groups** and move back when reopened. Counts refresh on each page request and
+form redraw; the page says when they were read. They cover the whole readable ledger,
+independently of list filters and pagination. Union/project listings keep each ledger's
+groups separate and omit unreadable ledgers.
+
+A group page uses `/l/{ledger}/group/label/{key}` and
+`urn:iki:gonk:page:group:ledger:{ledger}:label:{key}`. The key is the complete label encoded
+as URL-safe base64 without padding, so punctuation and spaces cannot become resource syntax.
+Page text shows the original label; queries use escaped literals. Every read uses the
+viewer's own capability. These rules enrich gonk's native pages alongside the deployment's
+optional add-on pages; they do not publish a vocabulary or a site.
 
 ## The render rules are a resource
 
@@ -4802,6 +4845,7 @@ root at that worktree by hand if that is what you want to read.
 | `gonk/grants.json` | grant name → capability scopes (the same shape as the cli's `grants.json`) |
 | `gonk/invites.json` | outstanding passkey invites, by the SHA-256 of their codes |
 | `gonk/passkeys.log` | one `gonk:PasskeyRevoked` line per `passkey revoke` and one `gonk:PasskeySessionsEnded` line per `passkey logout --all`, append-only, owner-only; the running server reads what is appended |
+| `gonk/display-rules.ttl` | this deployment’s display-rule table; invalid or unsupported rules stop startup |
 | `gonk/render-rules.ttl` | this deployment's render rules, replacing the shipped table wholesale |
 | `gonk/quic/` | `server.crt`, `server.key`, and one `clients/<name>/` bundle per client |
 | `~/.ikigai/backups/` | the rotation: `gonk-store-<stamp>.nq.gz` and a `.meta.json` sidecar each, owner-only; any other file there is never listed or pruned |

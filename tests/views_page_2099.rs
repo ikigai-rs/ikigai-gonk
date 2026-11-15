@@ -70,6 +70,7 @@ fn gonk(anonymous: Vec<String>) -> Gonk {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        display: Default::default(),
         page_assets: Default::default(),
         projects: ikigai_gonk::projects::Projects::parse(&[
             "work default".into(),
