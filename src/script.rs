@@ -122,7 +122,8 @@ pub const DIR_NAME: &str = "scripts";
 ///
 /// The graveyards (`urn:iki:ledger:graph:{name}:deleted`) match the prefix too; a run reaches
 /// one only when its runner could read it directly, which only an audit or a purge grant does
-/// (ledger #1611).
+/// (ledger #1611). So do the session graphs (`…:{name}:session`, `ikigai-ledger` 0.23.0), which
+/// every ledger read grant reaches.
 pub const CEILING: [&str; 2] = [
     "urn:cap:ledger:read:*",
     "urn:cap:store:read:graph:urn:iki:ledger:graph:*",
@@ -134,20 +135,25 @@ pub fn ceiling() -> Ceiling {
 }
 
 /// [`CEILING`] plus the EXACT read members for each of `ledgers`:
-/// `urn:cap:ledger:read:{L}` and `urn:cap:store:read:graph:urn:iki:ledger:graph:{L}` (ledger
-/// [#1220](http://localhost:1060/l/default/item/1220)). A name that is not a ledger is skipped.
+/// `urn:cap:ledger:read:{L}`, `urn:cap:store:read:graph:urn:iki:ledger:graph:{L}` (ledger
+/// [#1220](http://localhost:1060/l/default/item/1220)) and, since `ikigai-ledger` 0.23.0 (ledger
+/// #3661), the session graph's `…:graph:{L}:session`, which reading an item's or the ledger's
+/// sessions under `read:{L}` needs, so a root run reads what a reader may. A name that is not a
+/// ledger is skipped.
 ///
 /// ```
 /// use ikigai_gonk::script::ceiling_over;
 /// let ceiling = ceiling_over(["default", "library", "Not A Ledger"]);
 /// assert!(ceiling.allows("urn:cap:ledger:read:library"));
 /// assert!(ceiling.allows("urn:cap:store:read:graph:urn:iki:ledger:graph:library"));
+/// assert!(ceiling.allows("urn:cap:store:read:graph:urn:iki:ledger:graph:library:session"));
 /// // The families stay, so a non-root runner's exact grants are admitted as before.
 /// assert!(ceiling.allows("urn:cap:ledger:read:elsewhere"));
 /// // Still the ledgers' reads, and nothing else.
 /// assert!(!ceiling.allows("urn:cap:ledger:write:library"));
 /// assert!(!ceiling.allows("urn:cap:ledger:claim:library"));
 /// assert!(!ceiling.allows("urn:cap:store:write:graph:urn:iki:ledger:graph:library"));
+/// assert!(!ceiling.allows("urn:cap:store:write:graph:urn:iki:ledger:graph:library:session"));
 /// assert!(!ceiling.allows("urn:cap:store:read:graph:urn:iki:browse:graph:default"));
 /// assert!(!ceiling.allows("urn:cap:store:read"));
 /// assert!(!ceiling.allows("urn:cap:lisp"));
@@ -172,6 +178,7 @@ pub fn ceiling_over<'a>(ledgers: impl IntoIterator<Item = &'a str>) -> Ceiling {
         };
         scopes.push(ledger.cap_read());
         scopes.push(ikigai_store::cap_read_graph(&ledger.graph()));
+        scopes.push(ikigai_store::cap_read_graph(&ledger.session_graph()));
     }
     Ceiling::scoped(scopes)
 }
@@ -226,7 +233,7 @@ impl KnownLedgers {
 
 /// The ledger names in a newline-separated list of graph IRIs: each
 /// `urn:iki:ledger:graph:{name}` whose `{name}` is a ledger. A graveyard
-/// (`…:{name}:deleted`) and every other graph are skipped.
+/// (`…:{name}:deleted`), a session graph (`…:{name}:session`) and every other graph are skipped.
 ///
 /// ```
 /// use ikigai_gonk::script::ledgers_in;
@@ -234,6 +241,7 @@ impl KnownLedgers {
 ///     "urn:iki:browse:graph:default\n\
 ///      urn:iki:ledger:graph:default\n\
 ///      urn:iki:ledger:graph:default:deleted\n\
+///      urn:iki:ledger:graph:default:session\n\
 ///      urn:iki:ledger:graph:library\n",
 /// );
 /// assert_eq!(names.into_iter().collect::<Vec<_>>(), ["default", "library"]);

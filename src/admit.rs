@@ -505,6 +505,12 @@ pub const RAW_WRITE_IDS: [&str; 3] = ["store-update", "store-graph-update", "sto
 /// // A ledger writer may not write its ledger's graph raw...
 /// assert!(admit::raw_write_refusal(&update(ledger_graph), "store-graph-update", &writer)
 ///     .is_some());
+/// // ...nor its session graph, whose store write token a writer holds since ikigai-ledger
+/// // 0.23.0 for the ledger's own session writes (ledger #3661)...
+/// let session_graph = "urn:iki:ledger:graph:default:session";
+/// assert!(writer.allows(&format!("urn:cap:store:write:graph:{session_graph}")));
+/// assert!(admit::raw_write_refusal(&update(session_graph), "store-graph-update", &writer)
+///     .is_some());
 /// // ...an operator's raw grant may...
 /// let raw = ledger.into_iter().chain(grants::ledger_graph_grants("default").unwrap());
 /// assert!(admit::raw_write_refusal(&update(ledger_graph), "store-graph-update",
@@ -604,7 +610,7 @@ pub fn is_raw_read(id: &str) -> bool {
 ///
 /// ```text
 /// root                                            → yes
-/// a ledger's graph, or its graveyard              → with urn:cap:ledger:read:{ledger}, or with
+/// a ledger's graph, graveyard or session graph   → with urn:cap:ledger:read:{ledger}, or with
 ///                                                   the graph's own raw grant (--ledger-graph)
 /// the aliases graph, the participants graph       → no: root only
 /// any other graph                                 → not this rule's: the store decides
@@ -704,6 +710,9 @@ pub fn raw_read_scopes(capability: &Capability) -> Option<Vec<String>> {
 /// // A reader of the ledger, the owner, and a door that takes no `graph` pass.
 /// let reader = Capability::scoped(grants_for("acme", Authority::Read).unwrap());
 /// assert!(raw_read_refusal(&select(acme), "sparql-select", &reader).is_none());
+/// // The session graph (ikigai-ledger 0.23.0) goes by the same ledger's read.
+/// let sessions = "urn:iki:ledger:graph:acme:session";
+/// assert!(raw_read_refusal(&select(sessions), "sparql-select", &reader).is_none());
 /// assert!(raw_read_refusal(&select(acme), "sparql-select", &Capability::root()).is_none());
 /// assert!(raw_read_refusal(&select(acme), "gonk-ledger", &closer).is_none());
 /// ```

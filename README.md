@@ -2520,26 +2520,40 @@ The grant is the ledger's published worker grant and nothing more:
 ```text
 urn:cap:ledger:read:default
 urn:cap:store:read:graph:urn:iki:ledger:graph:default
+urn:cap:store:read:graph:urn:iki:ledger:graph:default:session
 urn:cap:ledger:claim:default
 urn:cap:ledger:comment:default
 urn:cap:ledger:session:default
 urn:cap:store:write:graph:urn:iki:ledger:graph:default
+urn:cap:store:write:graph:urn:iki:ledger:graph:default:session
 urn:cap:store:read:graph:urn:collab:participants
 ```
 
 It may read items, claim one (`sink urn:iki:ledger:claim item=N`), renew its lease
 (`renew=true`), comment (`comment handback=true` hands the item back to its dispatcher, and
 `next` stops offering it), record its session's content-free summary on that hand-back
-(`sink urn:iki:ledger:item:N:sessions`, ikigai-ledger 0.22.0, ledger #3561), and release its
+(`sink urn:iki:ledger:item:N:sessions`, ikigai-ledger 0.22.0, ledger #3561), into the ledger's
+session graph (`urn:iki:ledger:graph:default:session`, ikigai-ledger 0.23.0, ledger #3661), and
+release its
 claim (`delete urn:iki:ledger:claim item=N`). It may not add an `about` edge, close or reopen
 an item (the dispatcher's verdict, `urn:cap:ledger:close:{L}` or `write`),
 file, label, link, defer or edit one: each is a `Denied` naming the grant that would do. A claim
 is recorded with the client's principal (`urn:iki:host:gonk:client:<fingerprint>`), so another
-worker holding the same seven lines cannot release it, whatever holder name it spells.
+worker holding the same nine lines cannot release it, whatever holder name it spells.
 ⚠ The store write token is raw quad authority on a bare kernel; behind this server's doors a raw
 `urn:iki:store:graph-update` against a ledger graph is refused without the `--ledger-graph`
 grant, which `--worker` never mints (see "Raw store writes"). `tests/worker_1143.rs` drives all of
 this through the QUIC door of a real gonk.
+
+⚠ **Since ikigai-ledger 0.23.0 every ledger grant names the session graph** (ledger #3661): `read`
+and `audit` its store read token, `worker`, `write`, `delete` and `purge` its read and write
+tokens. A grant minted before then lacks them. A worker holding one still claims, comments and
+hands back, but its session summary is refused `Denied`, naming both tokens; a reader holding one
+reads every item and none of the sessions; a delete or purge is refused before anything moves.
+Re-mint it with `client add <name> … --force` (or a new passkey invite). Then, once per ledger,
+the owner moves the summaries 0.22.0 wrote into the ledger graph:
+`sink urn:iki:ledger:<ledger>:sessions` with the content `plan` first (it lists them and writes
+nothing), then `move`. Until then the harness page joins no firing to those older summaries.
 
 #### Stopping gonk: the QUIC door drains (ledger #3326)
 
@@ -2606,6 +2620,7 @@ ikigai-gonk client add box --ledger default=audit      # passkey invite takes th
 ```text
 urn:cap:ledger:read:default
 urn:cap:store:read:graph:urn:iki:ledger:graph:default
+urn:cap:store:read:graph:urn:iki:ledger:graph:default:session
 urn:cap:store:read:graph:urn:iki:ledger:graph:default:deleted
 ```
 
@@ -2621,12 +2636,12 @@ The ledger roles, and what each adds:
 
 | `--ledger <ledger>=` | holds | adds |
 | --- | --- | --- |
-| `read` | — | items, an item, `next`, the ledger list |
+| `read` | — | items, an item, `next`, the ledger list, and the sessions (`urn:iki:ledger:graph:<ledger>:session`) |
 | `audit` | `read` | READ the graveyard (`urn:iki:ledger:graph:<ledger>:deleted`); writes nothing |
-| `worker` | `read` | claim (take, renew, release) and comment, a hand-back included; not close |
+| `worker` | `read` | claim (take, renew, release), comment (a hand-back included) and its session's summary; not close |
 | `write` | `worker` | every ledger write: file, close, reopen, label, link, defer, edit |
-| `delete` | `write` | Delete an item: its quads move into the graveyard (written, not read) |
-| `purge` | `delete` and `audit` | purge an item's content from both graphs, leaving its tombstone |
+| `delete` | `write` | Delete an item: its quads and its session summaries move into the graveyard (written, not read) |
+| `purge` | `delete` and `audit` | purge an item's content from the ledger, graveyard and session graphs, leaving its tombstone |
 
 Two lines combine: `--ledger default=delete --ledger default=audit` deletes and sees the
 graveyard, and cannot purge.

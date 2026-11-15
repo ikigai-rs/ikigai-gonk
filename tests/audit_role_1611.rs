@@ -26,9 +26,11 @@ const LEDGER_GRAPH: &str = "urn:iki:ledger:graph:default";
 const GRAVEYARD: &str = "urn:iki:ledger:graph:default:deleted";
 
 /// The audit grant on `default`, as literals: these go into an operator's `grants.json`.
-const AUDIT: [&str; 3] = [
+const AUDIT: [&str; 4] = [
     "urn:cap:ledger:read:default",
     "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+    // Read's own since ikigai-ledger 0.23.0 (ledger #3661): the sessions live there.
+    "urn:cap:store:read:graph:urn:iki:ledger:graph:default:session",
     "urn:cap:store:read:graph:urn:iki:ledger:graph:default:deleted",
 ];
 
@@ -352,5 +354,5 @@ fn an_auditor_reads_the_graveyard_and_writes_nothing() {
         gonk.as_client("reader", select(GRAVEYARD, "SELECT ?s WHERE { ?s ?p ?o }")),
         "a read holder reading the graveyard",
     );
-    assert!(why.contains(AUDIT[2]), "{why}");
+    assert!(why.contains(AUDIT[3]), "{why}");
 }

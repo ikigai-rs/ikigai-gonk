@@ -58,16 +58,16 @@ library's own spelling ([src/grants.rs:1](../../src/grants.rs#L1)).
 
 | Flag | Proposed role id | Parameters | Tokens (ledger `L`, …) | Code |
 | --- | --- | --- | --- | --- |
-| `--ledger L=read` | `ledger-read` | `ledger` | `urn:cap:ledger:read:L`, `urn:cap:store:read:graph:urn:iki:ledger:graph:L` (2) | [src/grants.rs:137](../../src/grants.rs#L137) |
-| `--ledger L=audit` | `ledger-audit` | `ledger` | read's 2, plus `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` (3) | same |
-| `--ledger L=worker`, `--worker L` | `ledger-worker` | `ledger` | read's 2, plus `urn:cap:ledger:claim:L`, `urn:cap:ledger:comment:L`, `urn:cap:ledger:session:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L`, `urn:cap:store:read:graph:urn:collab:participants` (7) | same |
-| `--ledger L=write` | `ledger-write` | `ledger` | read's 2, plus `urn:cap:ledger:write:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L`, `urn:cap:store:read:graph:urn:collab:participants` (5) | same |
-| `--ledger L=delete` | `ledger-delete` | `ledger` | write's 5, plus `urn:cap:ledger:delete:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` (7) | same |
-| `--ledger L=purge` | `ledger-purge` | `ledger` | delete's 7, plus `urn:cap:ledger:purge:L`, `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` (9) | same |
+| `--ledger L=read` | `ledger-read` | `ledger` | `urn:cap:ledger:read:L`, `urn:cap:store:read:graph:urn:iki:ledger:graph:L`, `urn:cap:store:read:graph:urn:iki:ledger:graph:L:session` (3; the session graph since ikigai-ledger 0.23.0) | [src/grants.rs:137](../../src/grants.rs#L137) |
+| `--ledger L=audit` | `ledger-audit` | `ledger` | read's 3, plus `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` (4) | same |
+| `--ledger L=worker`, `--worker L` | `ledger-worker` | `ledger` | read's 3, plus `urn:cap:ledger:claim:L`, `urn:cap:ledger:comment:L`, `urn:cap:ledger:session:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L:session`, `urn:cap:store:read:graph:urn:collab:participants` (9) | same |
+| `--ledger L=write` | `ledger-write` | `ledger` | read's 3, plus `urn:cap:ledger:write:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L:session`, `urn:cap:store:read:graph:urn:collab:participants` (7) | same |
+| `--ledger L=delete` | `ledger-delete` | `ledger` | write's 7, plus `urn:cap:ledger:delete:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L:deleted` (9) | same |
+| `--ledger L=purge` | `ledger-purge` | `ledger` | delete's 9, plus `urn:cap:ledger:purge:L`, `urn:cap:store:read:graph:urn:iki:ledger:graph:L:deleted` (11) | same |
 | `--browse-graph read` | `browse-graph-read` | none | `urn:cap:store:read:graph:urn:iki:browse:graph:default` (1) | [src/grants.rs:475](../../src/grants.rs#L475) |
 | `--browse-graph write` (also `delete`, `purge`) | `browse-graph-write` | none | read's 1, plus `urn:cap:store:write:graph:urn:iki:browse:graph:default` (2). `worker` and `audit` are refused. | same |
 | `--ledger-graph L` | `ledger-graph` | `ledger` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L`, `urn:cap:store:write:graph:…:L`, `urn:cap:gonk:raw-write:graph:urn:iki:ledger:graph:L` (3) | [src/grants.rs:283](../../src/grants.rs#L283) |
-| `--alias L=S` | `alias` | `ledger`, `scheme` | read's 2, plus `urn:cap:ledger:alias:L`, `urn:cap:alias:scheme:S`, `urn:cap:store:read:graph:urn:iki:alias:graph`, `urn:cap:store:write:graph:urn:iki:alias:graph` (6) | [src/grants.rs:354](../../src/grants.rs#L354) |
+| `--alias L=S` | `alias` | `ledger`, `scheme` | `urn:cap:ledger:read:L`, `urn:cap:store:read:graph:urn:iki:ledger:graph:L` (not the session graph), plus `urn:cap:ledger:alias:L`, `urn:cap:alias:scheme:S`, `urn:cap:store:read:graph:urn:iki:alias:graph`, `urn:cap:store:write:graph:urn:iki:alias:graph` (6) | [src/grants.rs:354](../../src/grants.rs#L354) |
 | `--link-in L` | `link-in` | `ledger` | `urn:cap:ledger:link-in:L`, plus mirror's 2 (3) | [src/grants.rs:387](../../src/grants.rs#L387) |
 | `--mirror-to L` | `mirror-to` | `ledger` | `urn:cap:store:read:graph:urn:iki:ledger:graph:L`, `urn:cap:store:write:graph:urn:iki:ledger:graph:L` (2) | [src/grants.rs:419](../../src/grants.rs#L419) |
 | `--browse read [--root R]…` | `browse-read` | `roots` (empty = all) | `urn:cap:browse:read:*`, or one `urn:cap:browse:read:R` per root; plus `urn:cap:store:read:graph:urn:iki:browse:graph:default` | [src/grants.rs:584](../../src/grants.rs#L584), [src/grants.rs:634](../../src/grants.rs#L634) |

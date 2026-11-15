@@ -56,7 +56,7 @@ const STORE_IDS: [&str; 16] = [
     "store-load",
 ];
 
-const LEDGER_IDS: [&str; 30] = [
+const LEDGER_IDS: [&str; 34] = [
     "alias",
     "alias-scheme",
     "ledger-append",
@@ -73,6 +73,11 @@ const LEDGER_IDS: [&str; 30] = [
     "ledger-item-about",
     "ledger-item-closed",
     "ledger-item-history",
+    // ikigai-ledger 0.23.0: dispatch notes (ledger #3718) and stalled claims (ledger #3709).
+    "ledger-item-notes",
+    "ledger-note",
+    "ledger-stalled",
+    "ledger-lapse",
     "ledger-item-sessions",
     "ledger-item-holder-is",
     "ledger-item-state",
@@ -256,7 +261,8 @@ fn two_backups_at_once_leave_an_archive() {
     }
 }
 
-/// Three named graphs and the default graph, so every comparison below has a partition to
+/// Four named graphs (a ledger's own, another tenant's, a graveyard and, since ikigai-ledger
+/// 0.23.0, a session graph) and the default graph, so every comparison below has a partition to
 /// lose. A single-graph dataset — which is what this store holds today — would pass a
 /// Turtle round trip by luck.
 const SEED: &str = "\
@@ -265,6 +271,7 @@ const SEED: &str = "\
 <urn:item:3> <urn:ik:title> \"tenant a\" <urn:iki:ledger:graph:acme> .
 <urn:item:4> <urn:ik:title> \"he said \\\"stop\\\".\\nThen .\" <urn:iki:ledger:graph:acme> .
 <urn:item:5> <urn:ik:title> \"gone\" <urn:iki:ledger:graph:default:deleted> .
+<urn:session:1> <urn:ik:item> <urn:item:1> <urn:iki:ledger:graph:default:session> .
 <urn:note:1> <urn:ik:body> \"in the default graph\" .
 ";
 
@@ -280,12 +287,13 @@ fn seed(kernel: &Kernel) {
     );
 }
 
-/// The expected partition of [`SEED`] — four graphs, the unnamed one included.
+/// The expected partition of [`SEED`] — five graphs, the unnamed one included.
 fn seeded_counts() -> BTreeMap<String, u64> {
     BTreeMap::from([
         ("urn:iki:ledger:graph:default".to_string(), 2),
         ("urn:iki:ledger:graph:acme".to_string(), 2),
         ("urn:iki:ledger:graph:default:deleted".to_string(), 1),
+        ("urn:iki:ledger:graph:default:session".to_string(), 1),
         (String::new(), 1),
     ])
 }
@@ -497,7 +505,7 @@ fn a_backup_restores_to_the_same_graphs_and_per_graph_counts() {
     seed(&hub);
 
     let report = issue(&hub, Verb::Source, backup::BACKUP, &[]);
-    assert!(report.contains("6 quads in 4 graph(s)"), "{report}");
+    assert!(report.contains("7 quads in 5 graph(s)"), "{report}");
     assert!(report.contains("urn:iki:ledger:graph:acme"), "{report}");
     assert!(report.contains("(default graph)"), "{report}");
 
@@ -515,7 +523,7 @@ fn a_backup_restores_to_the_same_graphs_and_per_graph_counts() {
             ("into", restored.to_string_lossy().as_bytes()),
         ],
     );
-    assert!(answer.contains("restored 6 quads"), "{answer}");
+    assert!(answer.contains("restored 7 quads"), "{answer}");
     assert!(
         answer.contains("graph set and per-graph counts match"),
         "{answer}"
@@ -966,7 +974,7 @@ fn the_status_answers_from_what_is_actually_on_disk() {
     seed(&hub);
     issue(&hub, Verb::Source, backup::BACKUP, &[]);
     let after = issue(&hub, Verb::Source, backup::STATUS, &[]);
-    assert!(after.contains("quads          6"), "{after}");
+    assert!(after.contains("quads          7"), "{after}");
     assert!(after.contains("urn:iki:ledger:graph:acme"), "{after}");
     assert!(after.contains("nquads_sha256"), "{after}");
 
@@ -977,7 +985,7 @@ fn the_status_answers_from_what_is_actually_on_disk() {
         &[("as", b"application/json")],
     );
     let value: serde_json::Value = serde_json::from_str(&json).expect("the JSON face parses");
-    assert_eq!(value["newest"]["quads"], 6);
+    assert_eq!(value["newest"]["quads"], 7);
     assert_eq!(value["rotation"].as_array().expect("rotation").len(), 1);
     assert_eq!(value["keep"], 5);
     // The timer half is null here because these tests bind no registry; `main` builds one.
@@ -1966,7 +1974,7 @@ fn chunked_endpoints_restore_verify_report_status_and_rotate() {
     ))
     .unwrap();
     assert_eq!(json["newest"]["archive"], name);
-    assert_eq!(json["newest"]["quads"], 6);
+    assert_eq!(json["newest"]["quads"], 7);
     assert!(json["newest"]["taken_at_ms"].as_u64().is_some());
     assert_eq!(json["newest"]["graphs"]["urn:iki:ledger:graph:default"], 2);
     assert!(backup::newest_taken_at_ms(rotation.path()).is_some());
@@ -1981,7 +1989,7 @@ fn chunked_endpoints_restore_verify_report_status_and_rotate() {
             ("into", into.to_str().unwrap().as_bytes()),
         ],
     );
-    assert!(restored.contains("restored 6 quads"), "{restored}");
+    assert!(restored.contains("restored 7 quads"), "{restored}");
     assert_eq!(counts_on_disk(&into), seeded_counts());
     assert!(
         try_issue(

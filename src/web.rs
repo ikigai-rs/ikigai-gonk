@@ -2966,7 +2966,7 @@ struct LinkedRow {
 
 /// One ledger's own landing order (#3226): its open items' short numbers, each blocker before
 /// what it blocks, as `items sort=landing` answers under the page's capability. The plain face
-/// is the ledger's fixed, greppable line (`#12  open  p1  title`), so only the first word of
+/// is the ledger's fixed, greppable line (`#12  open  priority 1  title`), so only the first word of
 /// each line before the footer is read. A refusal, such as a blocks cycle naming its items, is
 /// the ledger's own sentence.
 async fn landing_order(

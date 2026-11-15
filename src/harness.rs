@@ -1173,9 +1173,16 @@ async fn joined(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Option<St
         .filter_map(|s| s.strip_prefix("urn:agents:session:"))
         .collect();
     let mut items: BTreeMap<String, String> = BTreeMap::new();
-    let ledgers = web::readable_ledgers(web, inv.capability);
-    if !sessions.is_empty() && !ledgers.is_empty() {
-        let graphs: Vec<String> = ledgers.iter().map(|l| l.graph()).collect();
+    // ★ Summaries live in each ledger's SESSION graph since `ikigai-ledger` 0.23.0 (ledger
+    // #3661), never in the ledger graph. A grant minted before then carries the ledger's read and
+    // not that graph's, and one graph the caller cannot read refuses the whole query, so only the
+    // session graphs this caller holds the token for are asked.
+    let graphs: Vec<String> = web::readable_ledgers(web, inv.capability)
+        .iter()
+        .map(|l| l.session_graph())
+        .filter(|g| inv.capability.allows(&ikigai_store::cap_read_graph(g)))
+        .collect();
+    if !sessions.is_empty() && !graphs.is_empty() {
         let query = "PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>\n\
                      SELECT ?id ?item WHERE { ?s a ledger:SessionSummary ; \
                      ledger:sessionId ?id ; ledger:sessionItem ?item }";

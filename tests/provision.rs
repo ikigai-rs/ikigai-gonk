@@ -190,8 +190,11 @@ fn re_enrolling_a_hand_widened_grant_names_what_it_would_drop() {
         serde_json::json!([
             "urn:cap:ledger:read:default",
             "urn:cap:store:read:graph:urn:iki:ledger:graph:default",
+            // The session graph (ikigai-ledger 0.23.0, ledger #3661).
+            "urn:cap:store:read:graph:urn:iki:ledger:graph:default:session",
             "urn:cap:ledger:write:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default",
+            "urn:cap:store:write:graph:urn:iki:ledger:graph:default:session",
             "urn:cap:store:read:graph:urn:collab:participants",
             "urn:cap:ledger:delete:default",
             "urn:cap:store:write:graph:urn:iki:ledger:graph:default:deleted",

@@ -164,12 +164,17 @@ pub(crate) fn require(capability: &Capability) -> Result<()> {
     }
 }
 
-/// The ledger a graph is part of: the ledger's own graph or its graveyard, and nothing else under
-/// that prefix, however it begins.
+/// The ledger a graph is part of: the ledger's own graph, its graveyard or its session graph
+/// (`ikigai-ledger` 0.23.0, ledger #3661), and nothing else under that prefix, however it begins.
 fn ledger_of_graph(graph: &str) -> Option<Ledger> {
     let rest = graph.strip_prefix(crate::grants::LEDGER_GRAPH_PREFIX)?;
-    let ledger = Ledger::parse(rest.strip_suffix(":deleted").unwrap_or(rest)).ok()?;
-    (ledger.graph() == graph || ledger.deleted_graph() == graph).then_some(ledger)
+    let name = rest
+        .strip_suffix(":deleted")
+        .or_else(|| rest.strip_suffix(":session"))
+        .unwrap_or(rest);
+    let ledger = Ledger::parse(name).ok()?;
+    (ledger.graph() == graph || ledger.deleted_graph() == graph || ledger.session_graph() == graph)
+        .then_some(ledger)
 }
 
 /// Whether [`STORE`] names `graph` to this holder: a ledger's graphs by the test every ledger list
@@ -494,12 +499,15 @@ mod tests {
         for graph in [
             "urn:iki:ledger:graph:sample",
             "urn:iki:ledger:graph:sample:deleted",
+            "urn:iki:ledger:graph:sample:session",
         ] {
             assert!(may_see_graph(&reader, graph), "{graph}");
         }
         for graph in [
             "urn:iki:ledger:graph:other",
             "urn:iki:ledger:graph:other:deleted",
+            "urn:iki:ledger:graph:other:session",
+            "urn:iki:ledger:graph:sample:session:deleted",
             // Under the prefix and no ledger's: the sample's name does not open it.
             "urn:iki:ledger:graph:sample:other",
             "urn:iki:ledger:graph:sample:deleted:deleted",
