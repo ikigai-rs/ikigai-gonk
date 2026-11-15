@@ -106,6 +106,7 @@
               <xsl:apply-templates select="view:ledger-menu"/>
               <xsl:apply-templates select="view:dashboard-link"/>
               <xsl:apply-templates select="view:browse"/>
+              <xsl:apply-templates select="view:harness-link"/>
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
               <xsl:apply-templates select="view:feeds-link"/>
@@ -262,6 +263,11 @@
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Browse</a>
   </xsl:template>
 
+  <!-- The Harness page (ledger #3721, src/harness.rs), offered beside Browse on its rule. -->
+  <xsl:template match="view:harness-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>Harness</a>
+  </xsl:template>
+
   <!-- The review queue, present only when this caller may read a root AND may decide
        (src/queue.rs::offers_queue). Ledger #444 settled the label: it names the THING,
        because the page shows the whole pipeline and "Review" is already the file face's
@@ -406,6 +412,7 @@
       <xsl:when test="@view = 'layers-ask'"><xsl:call-template name="layers-ask"/></xsl:when>
       <xsl:when test="@view = 'feed'"><xsl:call-template name="feed"/></xsl:when>
       <xsl:when test="@view = 'views'"><xsl:call-template name="views"/></xsl:when>
+      <xsl:when test="@view = 'harness'"><xsl:call-template name="harness"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
            only its own element, which is what makes a chunk's rows render as the page's. -->
@@ -1408,6 +1415,19 @@
         </xsl:choose>
       </td>
     </tr>
+  </xsl:template>
+
+  <!-- A repository's harness (ledger #3721, src/harness.rs): the intro, a sign-in for a caller
+       whose grant reads no repository, and the body src/harness.rs draws into the slot. -->
+  <xsl:template name="harness">
+    <section class="panel harness" aria-labelledby="harness-title">
+      <h1 id="harness-title"><xsl:value-of select="@title"/></h1>
+      <xsl:if test="@message != ''">
+        <p class="note"><xsl:value-of select="@message"/></p>
+      </xsl:if>
+      <xsl:apply-templates select="view:signin"/>
+      <xsl:apply-templates select="view:slot"/>
+    </section>
   </xsl:template>
 
   <xsl:template name="roots">

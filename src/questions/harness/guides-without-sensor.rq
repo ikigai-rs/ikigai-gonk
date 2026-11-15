@@ -1,0 +1,21 @@
+# QUESTION: Which rules does no computational control check?
+# EMPTY: Every rule in AGENTS.md is mechanized by at least one computational control.
+#
+# READING. A guide is one rule of AGENTS.md. A row is a guide that no computational control
+# (a refusal in a tool, a hook, CI, or a program that shapes the work, such as seed's task
+# order) says harness:statedBy: the rule exists only as text an agent has to apply. Some rules
+# can only be applied by a reader (reproduce before you fix); a row is a candidate for a
+# sensor, not a defect. A rule cited only by an INFERENTIAL control (the dispatcher's check, a
+# review) is still a row: someone reads, and nothing stops the next miss.
+PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?guide ?label ?section WHERE {
+  ?guide a harness:Guide ;
+         rdfs:label ?label ;
+         harness:section ?section .
+  FILTER NOT EXISTS {
+    ?control harness:statedBy ?guide ;
+             harness:execution harness:computational .
+  }
+}
+ORDER BY ?section ?guide
