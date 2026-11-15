@@ -1558,6 +1558,65 @@ fn a_dump_past_the_stores_default_load_cap_restores() {
     assert_eq!(counts_on_disk(&restored), past_the_load_cap_counts());
 }
 
+/// ★ Ledger [#3715](http://localhost:1062/l/default/item/3715): a gzip archive whose N-Quads are
+/// past ikigai-core's default stream budget (`DEFAULT_STREAM_MEMORY`, 64 MiB) restores. The
+/// restore has `urn:decompress:gzip` expand the whole archive into the run, and the run's byte
+/// budget is the kernel's stream memory; gonk never raised it, so root got core's 64 MiB ceiling
+/// and every backup past 64 MiB of N-Quads was refused by its own restore: "over budget ... at
+/// least 67125248 needed". The hub's ceiling is the restore bound now
+/// (`ikigai_gonk::STREAM_MEMORY_CEILING`).
+///
+/// 1,100 quads carrying one 64 KiB literal: about 70 MiB of N-Quads that gzip to well under
+/// 1 MiB, so the archive is cheap and the expansion is what is measured.
+#[test]
+fn a_gzip_backup_past_the_default_stream_budget_restores() {
+    use std::io::Write as _;
+    let filler = "x".repeat(64 * 1024);
+    let mut doc = String::with_capacity(1_100 * (64 * 1024 + 96));
+    for n in 0..1_100u32 {
+        let graph = if n % 2 == 0 {
+            "urn:iki:ledger:graph:default"
+        } else {
+            "urn:iki:ledger:graph:acme"
+        };
+        doc.push_str(&format!(
+            "<urn:item:{n}> <urn:ik:body> \"{filler}\" <{graph}> .\n"
+        ));
+    }
+    assert!(
+        doc.len() as u64 > ikigai_core::DEFAULT_STREAM_MEMORY,
+        "the fixture must be past core's default stream budget: {} bytes",
+        doc.len()
+    );
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(doc.as_bytes()).expect("gzip");
+    let archive = gz.finish().expect("gzip");
+    drop(doc);
+
+    let backups = tempfile::tempdir().expect("tempdir");
+    let hub = hub(backups.path(), 5);
+    let into = tempfile::tempdir().expect("tempdir");
+    let restored = into.path().join("store");
+    let answer = issue(
+        &hub,
+        Verb::Sink,
+        backup::RESTORE,
+        &[
+            ("content", &archive),
+            ("into", restored.to_string_lossy().as_bytes()),
+        ],
+    );
+    assert!(answer.contains("restored 1100 quads"), "{answer}");
+    assert!(answer.contains("(gzip,"), "{answer}");
+    assert_eq!(
+        counts_on_disk(&restored),
+        BTreeMap::from([
+            ("urn:iki:ledger:graph:default".to_string(), 550),
+            ("urn:iki:ledger:graph:acme".to_string(), 550),
+        ])
+    );
+}
+
 /// ★ Ledger [#1664](http://localhost:1062/l/default/item/1664), the whole path: a dataset that
 /// grew past 256 MiB of N-Quads by many small writes, backed up through the scheduled job's own
 /// resource, read back as its gzip archive and restored. The claim is about what a backup can
