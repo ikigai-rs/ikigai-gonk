@@ -3834,7 +3834,7 @@ grant reads the declaration (`urn:cap:store:read:graph:urn:iki:gonk:views:declar
 else is not shown the link, and `/views` answers them a `403` naming that token.
 
 With the write token as well (`urn:cap:store:write:graph:urn:iki:gonk:views:declaration`) the
-page has a form per view (its name after `urn:iki:gonk:view:`, its target, exact or prefix; Save
+page has a form per editable view (its name after `urn:iki:gonk:view:`, its target, exact or prefix; Save
 and Remove) and one to add a view. Without it the page has no forms at all, and a post made
 anyway is refused by the declaration's own contract and the store beneath it. Neither token is
 in any grant the commands write: add them to a passkey's grant in `gonk/grants.json` by hand.

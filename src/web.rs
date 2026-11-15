@@ -2058,7 +2058,7 @@ async fn ledger_listing(
             serde_json::from_slice(&ordered).map_err(|e| render_err(e.to_string()))?;
         order = ordered.items.into_iter().map(|item| item.iri).collect();
         for (rank, item) in order.iter().enumerate() {
-            graph.view(item, "landing", &format!("{rank:020}"));
+            graph.view(item, "landing", format!("{rank:020}"));
         }
     }
     let count = Count {
