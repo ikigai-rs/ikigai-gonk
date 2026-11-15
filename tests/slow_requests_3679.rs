@@ -112,6 +112,7 @@ fn start() -> (SocketAddr, tempfile::TempDir) {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        display: Default::default(),
         page_assets: Default::default(),
         projects: Default::default(),
         toolbox: false,

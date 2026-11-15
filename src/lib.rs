@@ -48,6 +48,7 @@ pub mod budget;
 pub mod checkout;
 pub mod config;
 pub mod dashboard;
+pub mod display;
 pub mod doors;
 pub mod egress;
 pub mod face;

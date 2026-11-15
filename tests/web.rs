@@ -117,6 +117,26 @@ impl Server {
         lifecycles: ikigai_ledger::Lifecycles,
         projects: ikigai_gonk::projects::Projects,
     ) -> Server {
+        Self::start_with_display(
+            rules,
+            anonymous,
+            browse_roots,
+            ledgers,
+            lifecycles,
+            projects,
+            Default::default(),
+        )
+    }
+
+    fn start_with_display(
+        rules: &str,
+        anonymous: Vec<String>,
+        browse_roots: Vec<String>,
+        ledgers: &[&str],
+        lifecycles: ikigai_ledger::Lifecycles,
+        projects: ikigai_gonk::projects::Projects,
+        display: ikigai_gonk::display::Rules,
+    ) -> Server {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -148,6 +168,7 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            display,
             page_assets: Default::default(),
             projects,
             toolbox: false,
@@ -5154,4 +5175,166 @@ fn project_membership_is_resolved_again_when_the_config_changes() {
     assert_eq!(server.page(url, None).status, 400);
     std::fs::remove_file(&path).unwrap();
     assert_eq!(server.page(url, None).status, 400);
+}
+
+#[test]
+fn display_rule_table_is_a_readable_resource() {
+    let server = Server::start();
+    let response = server.raw(
+        "GET",
+        "/display-rules",
+        &[("Accept", "text/turtle".into())],
+        "",
+    );
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert!(response.body.contains("urn:iki:gonk:display#"));
+}
+
+const DISPLAY_RULES_3196: &str = r#"
+@prefix d: <urn:iki:gonk:display#> .
+<urn:iki:gonk:display-rule:label:repo> a d:Rule; d:prefix "repo:"; d:badge "outline"; d:order 1; d:counts false; d:group true .
+<urn:iki:gonk:display-rule:label:urgent> a d:Rule; d:label "urgent"; d:badge "strong"; d:order -5 .
+<urn:iki:gonk:display-rule:ledger:default> a d:Rule; d:ledger "default"; d:badge "strong"; d:order 2 .
+<urn:iki:gonk:display-rule:state:filed> a d:Rule; d:state "filed"; d:badge "outline"; d:order 3 .
+<urn:iki:gonk:display-rule:level:task> a d:Rule; d:level "urn:example:Task"; d:badge "strong"; d:order 4 .
+"#;
+fn display_server_3196() -> Server {
+    Server::start_with_display(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants_for("default", Authority::Write).unwrap(),
+        Vec::new(),
+        &["default", "private"],
+        Default::default(),
+        Default::default(),
+        ikigai_gonk::display::Rules::parse(DISPLAY_RULES_3196).unwrap(),
+    )
+}
+#[test]
+fn display_rules_style_and_order_chips_but_hide_only_label_counts() {
+    let server = display_server_3196();
+    let id = append_as_root(&server, "default", "Visible member", "repo:one,urgent");
+    let page = server.page("/l/default?limit=1", None);
+    assert_eq!(page.status, 200, "{}", page.body);
+    let row = page.body.split("<ol class='items'>").nth(1).unwrap();
+    assert!(row.contains("badge label display-strong"), "{row}");
+    assert!(row.contains("badge label display-outline"), "{row}");
+    assert!(row.contains("badge ledger display-strong"), "{row}");
+    assert!(row.contains("badge state display-outline"), "{row}");
+    assert!(
+        row.find(">urgent</a>").unwrap() < row.find(">repo:one</a>").unwrap(),
+        "{row}"
+    );
+    let card = server.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(card.status, 200, "{}", card.body);
+    assert!(card.body.contains("badge label display-outline"));
+    let facet = server.page("/l/default/facet?page=true", None);
+    assert_eq!(facet.status, 200, "{}", facet.body);
+    assert!(facet.body.contains(&facet_row("urgent", 1)));
+    assert!(!facet.body.contains(&facet_row("repo:one", 1)));
+    let resource = server.raw(
+        "GET",
+        "/display-rules",
+        &[("Accept", "text/turtle".into())],
+        "",
+    );
+    assert_eq!(resource.body, DISPLAY_RULES_3196);
+}
+#[test]
+fn display_groups_count_all_members_and_move_to_closed_without_leaking_other_ledgers() {
+    let server = display_server_3196();
+    let first = append_as_root(&server, "default", "First group member", "repo:one");
+    let second = append_as_root(&server, "default", "Second group member", "repo:one");
+    append_as_root(&server, "private", "Private title", "repo:secret");
+    let before = server.page("/l/default?limit=1&text=First", None);
+    assert_eq!(before.status, 200, "{}", before.body);
+    assert!(
+        before.body.contains("2 items; 0 closed; filed: 2"),
+        "{}",
+        before.body
+    );
+    assert!(!before.body.contains("repo:secret"));
+    let group = server.page("/l/default/group/label/cmVwbzpvbmU", None);
+    assert_eq!(group.status, 200, "{}", group.body);
+    assert_eq!(row_titles(&group.body).len(), 2);
+    for id in [first, second] {
+        let result = server.form(
+            &[
+                ("_action", "close"),
+                ("_then", "items"),
+                ("_ledger", "default"),
+                ("item", &format!("urn:iki:ledger:default:item:{id}")),
+            ],
+            None,
+        );
+        assert_eq!(result.status, 200, "{}", result.body);
+    }
+    let after = server.page("/l/default?status=all", None);
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert!(after.body.contains("2 items; 2 closed;"), "{}", after.body);
+    assert!(
+        after.body.find("Closed groups</h3>").unwrap()
+            < after.body.find("repo:one (default)</a>").unwrap(),
+        "{}",
+        after.body
+    );
+    let reopened = server.form(
+        &[
+            ("_action", "reopen"),
+            ("_then", "items"),
+            ("_ledger", "default"),
+            ("item", "1"),
+        ],
+        None,
+    );
+    assert_eq!(reopened.status, 200, "{}", reopened.body);
+    assert!(
+        reopened.body.contains("2 items; 1 closed;"),
+        "{}",
+        reopened.body
+    );
+    assert!(
+        reopened.body.find("repo:one (default)</a>").unwrap()
+            < reopened.body.find("Closed groups</h3>").unwrap()
+    );
+    let union = server.page("/l/default?ledgers=default,private", None);
+    assert_eq!(union.status, 200, "{}", union.body);
+    assert!(!union.body.contains("repo:secret"));
+    let denied = server.page("/l/private/group/label/cmVwbzpzZWNyZXQ", None);
+    assert_ne!(denied.status, 200);
+    assert!(!denied.body.contains("Private title"));
+}
+
+#[test]
+fn display_group_labels_are_data_in_paths_queries_and_markup() {
+    use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
+    let server = display_server_3196();
+    let id = append_as_root(&server, "default", "Literal group member", "urgent");
+    let label = "repo:a/b, c\" <x>?#é";
+    let turtle = format!("<urn:iki:ledger:default:item:{id}> <https://ikigai-rs.dev/ns/ledger#label> {} ; a <urn:example:Task> .", ikigai_ledger::sparql::literal(label));
+    futures::executor::block_on(
+        server.hub.issue(
+            Request::new(Verb::Sink, Iri::parse("urn:iki:store:load").unwrap())
+                .with_arg("content", ArgRef::Inline(turtle.into_bytes()))
+                .with_arg("format", ArgRef::Inline(b"text/turtle".to_vec()))
+                .with_arg(
+                    "graph",
+                    ArgRef::Inline(b"urn:iki:ledger:graph:default".to_vec()),
+                ),
+            &Capability::root(),
+        ),
+    )
+    .unwrap();
+    let path = format!(
+        "/l/default/group/label/{}",
+        ikigai_gonk::display::group_key(label)
+    );
+    let group = server.page(&path, None);
+    assert_eq!(group.status, 200, "{}", group.body);
+    assert_eq!(row_titles(&group.body), ["Literal group member"]);
+    assert!(!group.body.contains("<x>"));
+    assert!(
+        group.body.contains("badge level display-strong"),
+        "{}",
+        group.body
+    );
 }

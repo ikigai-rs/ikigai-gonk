@@ -202,6 +202,15 @@ impl Endpoint for Facet {
                     .as_str()
                     .and_then(|v| v.parse::<u64>().ok())
                     .ok_or_else(|| Error::Endpoint("facet count is not an integer".into()))?;
+                if kind == "label"
+                    && self
+                        .web
+                        .display
+                        .matching("label", &term, graph.name())
+                        .is_some_and(|r| !r.counts)
+                {
+                    continue;
+                }
                 *counted.entry((kind, term)).or_default() += count;
             }
         }

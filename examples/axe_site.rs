@@ -22,11 +22,15 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_serving, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 27] = [
+const PAGES: [(&str, &str); 28] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
     ("ledger.html", "/l/default"),
+    (
+        "display-group.html",
+        "/l/default/group/label/Ym9vazppa2lnYWk",
+    ),
     (
         "label-filter.html",
         "/l/default?labels=needs-person&without=blocked",
@@ -325,7 +329,8 @@ fn main() {
         .with_arg(
             "labels",
             ArgRef::Inline(b"needs-person,book:ikigai".to_vec()),
-        ),
+        )
+        .with_arg("kind", ArgRef::Inline(b"urn:example:Task".to_vec())),
         &Capability::root(),
     ))
     .expect("the scratch item");
@@ -432,6 +437,22 @@ fn main() {
         &Capability::root(),
     ))
     .expect("the outgoing flight-plan links");
+    let closed = block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:append").unwrap())
+            .with_arg("content", ArgRef::Inline(b"A finished book group".to_vec()))
+            .with_arg("labels", ArgRef::Inline(b"book:closed".to_vec())),
+        &Capability::root(),
+    ))
+    .unwrap();
+    let closed = appended_iri(&closed.bytes, "default");
+    block_on(Kernel::issue(
+        &hub,
+        Request::new(Verb::Sink, Iri::parse("urn:iki:ledger:close").unwrap())
+            .with_arg("item", ArgRef::Inline(closed.into_bytes())),
+        &Capability::root(),
+    ))
+    .unwrap();
     let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
     let face = Arc::new(web::Web {
         hub: Arc::clone(&hub),
@@ -457,6 +478,14 @@ fn main() {
         queue: ikigai_gonk::config::QueuePolicy::default(),
         epochs: None,
         holder_aliases: Default::default(),
+        display: ikigai_gonk::display::Rules::parse(r#"
+@prefix d: <urn:iki:gonk:display#> .
+<urn:iki:gonk:display-rule:label:book> a d:Rule; d:prefix "book:"; d:badge "outline"; d:order 1; d:counts false; d:group true .
+<urn:iki:gonk:display-rule:label:person> a d:Rule; d:label "needs-person"; d:badge "strong"; d:order -5 .
+<urn:iki:gonk:display-rule:level:task> a d:Rule; d:level "urn:example:Task"; d:badge "strong" .
+<urn:iki:gonk:display-rule:state:filed> a d:Rule; d:state "filed"; d:badge "outline" .
+<urn:iki:gonk:display-rule:ledger:default> a d:Rule; d:ledger "default"; d:badge "strong" .
+"#).unwrap(),
         page_assets: Default::default(),
         projects: ikigai_gonk::projects::Projects::parse(&[
             "work crew,private".into(), "overlap default,crew".into(), "empty".into(),

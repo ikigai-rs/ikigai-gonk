@@ -257,6 +257,7 @@ fn serve(flags: &config::Flags) -> ! {
     // SERVED — `urn:iki:gonk:render-rules` is what the renderer resolves, so what a page
     // acted on is what a person can read back.
     let render_rules = read_render_rules(&layout).unwrap_or_else(|e| fail(&e));
+    let display_rules = read_display_rules(&layout).unwrap_or_else(|e| fail(&e));
 
     // The browse roots' watchers start BEFORE the space is built, and the set they actually
     // got decides which roots' reads may be cached. Fail closed, in that order: a root whose
@@ -890,6 +891,7 @@ fn serve(flags: &config::Flags) -> ! {
             queue: settings.queue.clone(),
             epochs: Some(Arc::clone(&epochs)),
             holder_aliases: settings.holder_aliases.clone(),
+            display: display_rules,
             page_assets: settings.page_assets.clone(),
             projects: settings.projects.clone().with_config(config_path.clone()),
             // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
@@ -2484,6 +2486,16 @@ fn review_line(settings: &config::Settings, layout: &quic::Layout) -> String {
         queue.space,
         trigger::DRAIN_ONE.replace("{space}", &queue.space),
     )
+}
+
+fn read_display_rules(layout: &quic::Layout) -> Result<ikigai_gonk::display::Rules, String> {
+    let path = layout.display_rules_ttl();
+    let turtle = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    ikigai_gonk::display::Rules::parse(&turtle).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]

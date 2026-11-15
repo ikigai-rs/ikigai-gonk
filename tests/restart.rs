@@ -378,6 +378,15 @@ fn the_refusals_that_are_right_still_stop_the_server() {
     let said = broad.refused(&[]);
     assert!(said.contains("urn:cap:store:read"), "{said}");
 
+    let display = Scratch::new();
+    display.write("clients.json", "{\"passkeys\": {}}");
+    display.write("display-rules.ttl", "@prefix d: <urn:iki:gonk:display#> . <urn:iki:gonk:display-rule:test> a d:Rule; d:label \"bug\"; d:badge \"red\" .");
+    let said = display.refused(&[]);
+    assert!(
+        said.contains("display-rules.ttl") && said.contains("badge must be"),
+        "{said}"
+    );
+
     // ★ And a render-rules table the renderer could not obey. A rule that silently did
     // nothing would look exactly like one in effect, so it is read and parsed at startup
     // rather than at the first result set — see `read_render_rules` in main.

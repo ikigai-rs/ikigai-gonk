@@ -380,6 +380,7 @@
 
   <xsl:template name="body">
     <xsl:choose>
+      <xsl:when test="@view = 'group'"><xsl:call-template name="group-page"/></xsl:when>
       <xsl:when test="@view = 'ledger'"><xsl:call-template name="ledger"/></xsl:when>
       <xsl:when test="@view = 'facet'">
         <xsl:if test="@full = 'true'">
@@ -2584,6 +2585,7 @@
       <xsl:apply-templates select="view:project-views"/>
       <xsl:apply-templates select="view:save-filter"/>
       <xsl:apply-templates select="view:label-filters"/>
+      <xsl:apply-templates select="view:groups"/>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
@@ -2741,9 +2743,43 @@
     </li>
   </xsl:template>
 
+  <xsl:template match="view:display-chip">
+    <span><xsl:attribute name="class">badge <xsl:value-of select="@kind"/><xsl:if test="@in-flight = 'true'"> in-flight</xsl:if><xsl:if test="@look != 'plain'"> display-<xsl:value-of select="@look"/></xsl:if></xsl:attribute><xsl:value-of select="."/></span>
+  </xsl:template>
+
+  <xsl:template name="group-page">
+    <section class="panel" id="group-page" tabindex="-1">
+      <h1><xsl:value-of select="@title"/></h1>
+      <p><a><xsl:attribute name="href"><xsl:value-of select="@ledger-url"/></xsl:attribute>Back to ledger</a></p>
+      <p><xsl:value-of select="@count"/></p>
+      <nav aria-label="Group item status">
+        <a><xsl:attribute name="href"><xsl:value-of select="@group-url"/>?status=all</xsl:attribute>All items</a><xsl:text> · </xsl:text>
+        <a><xsl:attribute name="href"><xsl:value-of select="@group-url"/>?status=open</xsl:attribute>Open items</a><xsl:text> · </xsl:text>
+        <a><xsl:attribute name="href"><xsl:value-of select="@group-url"/>?status=closed</xsl:attribute>Closed items</a>
+      </nav>
+      <xsl:apply-templates select="view:groups"/>
+      <ol class="items"><xsl:apply-templates select="view:slot[@name = 'items']"/></ol>
+      <xsl:if test="@next != ''"><p><a><xsl:attribute name="href"><xsl:value-of select="@next"/></xsl:attribute>Next items</a></p></xsl:if>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:groups">
+    <section class="panel label-groups" aria-labelledby="label-groups-title">
+      <h2 id="label-groups-title">Label groups</h2>
+      <p>All members in each readable ledger, including closed items, as of this page load. Reload for current counts.</p>
+      <h3>Active groups</h3>
+      <xsl:choose><xsl:when test="view:group-open/view:label-group"><ul><xsl:apply-templates select="view:group-open/view:label-group"/></ul></xsl:when><xsl:otherwise><p>No active groups.</p></xsl:otherwise></xsl:choose>
+      <h3>Closed groups</h3>
+      <xsl:choose><xsl:when test="view:group-closed/view:label-group"><ul><xsl:apply-templates select="view:group-closed/view:label-group"/></ul></xsl:when><xsl:otherwise><p>No closed groups.</p></xsl:otherwise></xsl:choose>
+    </section>
+  </xsl:template>
+  <xsl:template match="view:label-group">
+    <li><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@label"/><xsl:text> (</xsl:text><xsl:value-of select="@ledger"/>)</a><xsl:text>: </xsl:text><xsl:value-of select="@counts"/></li>
+  </xsl:template>
+
   <xsl:template match="view:label-chip">
     <span class="label-actions">
-      <a class="badge label"><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:if test="@ledger"><span class="sr-only">label </span></xsl:if><xsl:value-of select="@term"/><xsl:if test="@ledger"><span class="sr-only">: show items in ledger <xsl:value-of select="@ledger"/> with this label</span></xsl:if></a>
+      <a><xsl:attribute name="class">badge label<xsl:if test="@look != 'plain'"> display-<xsl:value-of select="@look"/></xsl:if></xsl:attribute><xsl:attribute name="href"><xsl:value-of select="@include"/></xsl:attribute><xsl:if test="@ledger"><span class="sr-only">label </span></xsl:if><xsl:value-of select="@term"/><xsl:if test="@ledger"><span class="sr-only">: show items in ledger <xsl:value-of select="@ledger"/> with this label</span></xsl:if></a>
       <xsl:if test="@exclude"><xsl:value-of select="' '"/><a class="note"><xsl:attribute name="href"><xsl:value-of select="@exclude"/></xsl:attribute>Exclude <xsl:value-of select="@term"/></a></xsl:if>
     </span>
   </xsl:template>
@@ -2830,11 +2866,6 @@
     <!-- Ledger #3195: the hub's own facts, each one badge whose words carry it (color is only
          emphasis): the lifecycle state, in flight when the lifecycle document says so; the
          claim's holder, an expired lease said in words; and whom a handed-back item awaits. -->
-    <span>
-      <xsl:attribute name="class">badge state<xsl:if test="view:stateInFlight = 'true'"> in-flight</xsl:if></xsl:attribute>
-      <xsl:text>state: </xsl:text><xsl:value-of select="view:state"/>
-      <xsl:if test="view:stateInFlight = 'true'"> · in flight</xsl:if>
-    </span>
     <xsl:if test="view:deferred = 'true'"><span class="badge deferred">deferred</span></xsl:if>
     <xsl:if test="ledger:claimedBy">
       <span>
@@ -2848,7 +2879,7 @@
          a number in this ledger, `ledger id` in another, an IRI where the viewer cannot read. -->
     <xsl:if test="view:blockedBy"><span class="badge blocked">blocked by <xsl:value-of select="view:blockedBy"/></span></xsl:if>
     <xsl:choose>
-      <xsl:when test="view:label-chip"><xsl:apply-templates select="view:label-chip"/></xsl:when>
+      <xsl:when test="view:label-chip or view:display-chip"><xsl:apply-templates select="view:label-chip | view:display-chip"><xsl:sort select="@order" data-type="number"/><xsl:sort select="@kind"/><xsl:sort select="@term"/></xsl:apply-templates></xsl:when>
       <xsl:otherwise><xsl:for-each select="ledger:label"><span class="badge label"><xsl:value-of select="."/></span></xsl:for-each></xsl:otherwise>
     </xsl:choose>
   </xsl:template>

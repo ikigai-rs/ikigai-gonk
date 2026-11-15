@@ -104,6 +104,7 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: Default::default(),
+            display: Default::default(),
             page_assets: assets.clone(),
             projects: Default::default(),
             toolbox: false,

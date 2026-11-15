@@ -70,6 +70,7 @@ impl Server {
             queue: ikigai_gonk::config::QueuePolicy::default(),
             epochs: None,
             holder_aliases: HolderAliases::parse(&rules).unwrap(),
+            display: Default::default(),
             page_assets: Default::default(),
             projects: Default::default(),
             toolbox: false,
