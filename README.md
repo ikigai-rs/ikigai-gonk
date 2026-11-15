@@ -662,6 +662,51 @@ nested a few hundred levels deep overflowed the worker's stack and **aborted gon
 (`render::MAX_CHUNK_DEPTH`) or carrying any `<!` (a declaration can nest what a tag count
 cannot see); gonk's own chunks nest a handful of levels and carry neither.
 
+**The dispatcher can read changes since its last acknowledged look** (ledger #3712).
+`urn:iki:gonk:dispatch:{ledger}` covers a ledger, and
+`urn:iki:gonk:dispatch:{ledger}:item:{number}` covers one item. Both are served by the
+socket and QUIC doors and at `/l/{ledger}/dispatch` and
+`/l/{ledger}/item/{number}/dispatch` over HTTP. Source returns text by default;
+`as=application/json` returns `{schema, ledger, item, cursor_reset, items, note, cursor}`.
+Each changed item has its current status, claim, awaiting value and open blocker IRIs,
+then `attention`, `events` and `routine`. Attention holds hand-backs, stored hand-back
+rejections, expired current claims and blocking links; routine claims are counts.
+An unchanged comment tail and body are omitted. A changed body's digest signals the
+change; the full item remains the place to read that body.
+
+Reading does not mark anything read. After processing a successful answer, send Sink to
+the same resource with `cursor=` set to its opaque token (HTTP POST with form field
+`cursor`, or send the token as `content` for a pipeline). That acknowledges exactly the returned snapshot: comments or events arriving
+later remain unread. A token works only for its reader and scope, once; acknowledging
+one preview supersedes other outstanding previews of that scope. Item and ledger
+cursors are independent. Polling can consume the JSON face without advancing either.
+
+The reader comes from the capability's authenticated principal, never an argument or a
+cookie; an unnamed root uses the local owner's cursor, and unnamed scoped readers are
+refused. Both faces require the ledger and its graph read grants. Acknowledgment needs
+only that ledger's read grant because it changes private reader state. Foreign blockers
+use only the identity and open status mirrored into the readable ledger, without reading
+foreign titles or bodies.
+
+Cursor snapshots contain hashes and live in the owner-only
+`dispatcher-cursors.json` beside the live dataset, outside RDF and its backups. They
+survive a server restart; unacknowledged tokens do not. Embedded kernels use memory
+unless their host supplies a durable dispatcher space. Bounds: 128 reader/scope pairs,
+30 days idle retention, 262,144 hashes across snapshots and previews, and at most four
+pending previews per scope for 15 minutes. Capacity evicts the least recently used scopes
+or oldest previews. A missing, expired or evicted baseline explicitly returns
+`cursor_reset=true` and a full look; an expired or superseded token returns a conflict.
+Deleting the sidecar likewise causes a full reread.
+
+A look refuses rather than silently truncating above 10,000 items, 262,144 event-fact
+rows, 65,536 records or 8 MiB of output, or when the ledger reports unreadable items;
+the store's own refusal propagates. Use individual item views when a whole ledger
+exceeds a bound. This reduces what the dispatcher reads, while the server still scans
+the selected scope. It is a snapshot difference, not an audit stream of deleted items.
+The ledger does not record individual renewals: `routine.claim` counts recorded grants,
+and `routine.claim_update` counts observed changes of a current claim, not renew calls.
+“Refusal” here means a recorded hand-back rejection, not a failed HTTP or QUIC request.
+
 **The header picks a ledger from a menu of links** (ledger #1888). A button names the current
 ledger ("Ledger: default") and opens a panel with one link per ledger the caller may read,
 `default` first and then by name, and "All ledgers" last, which goes to `/l`. Without a script it is a `<details>`, and it works the same. Past eight ledgers the

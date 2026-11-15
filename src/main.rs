@@ -622,6 +622,10 @@ fn serve(flags: &config::Flags) -> ! {
     // started once the hub exists, and reads the ledgers out of the store each sweep.
     let lapses = ikigai_gonk::lapse::Lapses::new(settings.lapse_every, backup::NextRun::default());
     trigger_spaces.push(Arc::new(ikigai_gonk::lapse::space(lapses.clone())));
+    trigger_spaces.push(Arc::new(
+        ikigai_gonk::dispatch::space(Some(store_path.join("dispatcher-cursors.json")))
+            .unwrap_or_else(|e| fail(&e.to_string())),
+    ));
     if let Some(record) = &record {
         trigger_spaces.push(record.space());
         // ★ The activity graph over the closed segments (ledger #4104), owner only like them.
