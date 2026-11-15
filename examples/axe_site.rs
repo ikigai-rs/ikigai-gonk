@@ -19,11 +19,13 @@ use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::grants::anonymous_http_grants;
 use ikigai_gonk::identity::Passkeys;
-use ikigai_gonk::{compose_with, doors, git_object, quic, web};
+use ikigai_gonk::{compose_serving, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 23] = [
+const PAGES: [(&str, &str); 25] = [
     ("home.html", "/"),
+    ("saved-filter.html", "/view/triage"),
+    ("views.html", "/views"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
     ("ledger.html", "/l/default"),
@@ -170,7 +172,8 @@ fn main() {
         file: None,
         browse: true,
     }];
-    let hub = Arc::new(compose_with(
+    let views = ikigai_gonk::views::Views::new();
+    let hub = Arc::new(compose_serving(
         DurableStore::in_memory().expect("a store"),
         None,
         Vec::new(),
@@ -178,7 +181,45 @@ fn main() {
         None,
         None,
         None,
+        Some(&views),
     ));
+    views.start(&hub, Capability::root()).unwrap();
+    let ikigai_gonk::views_page::Change::Add(rule) = ikigai_gonk::views_page::change_of(
+        [
+            ("op", "filter"),
+            ("name", "triage"),
+            ("ledger", "default"),
+            ("projects", "work,overlap"),
+            ("status", "open"),
+            ("sort", "priority"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+    )
+    .unwrap() else {
+        panic!("a saved filter")
+    };
+    block_on(
+        hub.issue(
+            Request::new(
+                Verb::Sink,
+                Iri::parse(ikigai_gonk::views::DECLARATION).unwrap(),
+            )
+            .with_arg(
+                "content",
+                ArgRef::Inline(ikigai_gonk::views_page::declaration(&[rule], 8).into_bytes()),
+            ),
+            &Capability::root(),
+        ),
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while views.dynamic().status().installs == 0 {
+        assert!(std::time::Instant::now() < deadline, "fixture view bound");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
     let object_html = block_on(Kernel::issue(
         &hub,
         Request::new(
@@ -373,6 +414,8 @@ fn main() {
         .into_iter()
         .chain([
             "urn:cap:exec:git".to_string(),
+            ikigai_gonk::views::read_grant(),
+            ikigai_gonk::views::write_grant(),
             "urn:cap:browse:read:fixture".to_string(),
         ])
         .collect(),

@@ -3850,11 +3850,33 @@ in any grant the commands write: add them to a passkey's grant in `gonk/grants.j
   changed since (another tab, another person, the socket), nothing is written and the page says
   so.
 - **The page never edits what it cannot show.** An arrangement other than one alias over an empty
-  endpoint space, or one containing named requests with templates, fixed arguments, bound verbs
+  endpoint space, or one containing templates, reference/captured arguments, verbs other than Source
   or declared inputs, is listed without forms. The page says to change it over the socket.
 - Through the page every name is under `urn:iki:gonk:view:`, so gonk's check cannot refuse a
   save; a refusal the page reports comes from core (a declaration it cannot build).
   `tests/views_page_2099.rs` holds all of it.
+
+### Saved filters (ledger #3194)
+
+On a ledger listing, **Save this filter** offers a name when your grant reads and writes the
+views declaration. It saves `projects`, `ledgers`, `labels`, `without`, `priority`, `status`,
+`text` and `sort` as a named view at `/view/{name}`; it leaves out paging, theme and safe mode.
+Names follow the ledger naming rule. The declaration uses the existing singular, type-first
+`urn:iki:gonk:view:{name}` partition, with fixed literal arguments targeting
+`urn:iki:gonk:page:ledger:{ledger}`. No separate saved-view store or authority is added.
+
+Each selected project's listing has a **Saved views for …** section, including an empty
+sentence when none exist. Listing these declarations requires their read token. A view itself
+runs under its viewer's grant, and project membership is resolved on each request. It grants no
+ledger access. The HTTP door resolves page targets where its pages are bound; machine-target
+views keep their existing behavior on all doors. Fixed inputs cannot be overridden in the URL.
+Navigation and search from a saved view go to ordinary filtered ledger URLs.
+
+The Views page shows fixed arguments and retains them when renaming, retargeting or removing
+views. More complex arrangements stay read-only. Saves keep the existing digest conflict
+check and wait for the views space's verdict. Priority accepts comma-separated `0` through `4`
+and `none`; sort accepts `priority`, `created`, `modified`, `number` and `landing`, with commas
+for tie-break keys and `-` for descending order. Sorting and matching remain the ledger's.
 
 ## The three doors
 

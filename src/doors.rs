@@ -171,6 +171,18 @@ impl Space for HubSpace {
             // Nothing is rewritten here — no `.with_canonical` — because the hub
             // canonicalizes, caches and cuts under its own names.
             Some(description) => {
+                // Pages are bound at the HTTP root, outside the hub. Reuse core's alias
+                // endpoint here for page views so its sub-request reaches that root.
+                // An actual hub endpoint still wins over a declaration with its name.
+                if !self.wire && description.id == "alias-view" {
+                    let page = PageViews {
+                        hub: Arc::clone(&self.hub),
+                    }
+                    .resolve(request, _scope);
+                    if matches!(page, Resolution::Hit(_)) {
+                        return page;
+                    }
+                }
                 let resolved = Resolved::new(
                     Arc::new(Forward {
                         hub: Arc::clone(&self.hub),
@@ -525,6 +537,47 @@ pub fn http_kernel_serving_with_space(
         None,
         access,
     )
+}
+
+/// Page-targeting named views resolve from the HTTP root, where the pages live.
+/// Other views still pass through the hub. Core applies fixed-argument contracts and
+/// the target's capability floor; the door keeps no cache of this arrangement.
+struct PageViews {
+    hub: Arc<Kernel>,
+}
+
+impl Space for PageViews {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        if !request
+            .target
+            .as_str()
+            .starts_with(crate::views::VIEW_PREFIX)
+        {
+            return Resolution::Miss;
+        }
+        let Some(topology) = crate::views::in_force(&self.hub) else {
+            return Resolution::Miss;
+        };
+        let ikigai_core::SpaceKind::Alias { rules, max_hops } = topology.kind else {
+            return Resolution::Miss;
+        };
+        let mut table = ikigai_core::AliasTable::new().with_max_hops(max_hops);
+        for rule in rules {
+            let Ok(next) = table.with_rule(rule) else {
+                return Resolution::Miss;
+            };
+            table = next;
+        }
+        if !table
+            .canonicalize(&request.target)
+            .canonical()
+            .is_some_and(|target| target.as_str().starts_with("urn:iki:gonk:page:ledger:"))
+        {
+            return Resolution::Miss;
+        }
+        ikigai_core::Alias::new(Arc::new(table), Arc::new(EndpointSpace::new()))
+            .resolve(request, scope)
+    }
 }
 
 /// Whether `ip` is loopback, counting an IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) —

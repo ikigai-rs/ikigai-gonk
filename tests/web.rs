@@ -626,7 +626,10 @@ fn priority_counts_are_text_and_list_uses_ledger_resources() {
         ))
         .unwrap();
         let body = String::from_utf8_lossy(&response.bytes);
-        assert!(!body.contains("search-priority"), "priority form remains");
+        assert!(
+            body.contains("search-priority"),
+            "priority filter is labeled: {body}"
+        );
         let events = std::mem::take(&mut *trace.0.lock().unwrap());
         for suffix in ["count", "items"] {
             assert!(
@@ -5147,4 +5150,56 @@ fn project_membership_is_resolved_again_when_the_config_changes() {
     assert_eq!(server.page(url, None).status, 400);
     std::fs::remove_file(&path).unwrap();
     assert_eq!(server.page(url, None).status, 400);
+}
+
+#[test]
+fn priority_and_sort_filter_the_whole_listing_and_survive_navigation() {
+    use ikigai_core::{ArgRef, Capability, Iri, Request, Verb};
+    let server = Server::start();
+    for (title, priority) in [
+        ("First p3", "3"),
+        ("Second p1", "1"),
+        ("Third p1", "1"),
+        ("Fourth unset", ""),
+    ] {
+        let mut append = Request::new(
+            Verb::Sink,
+            Iri::parse("urn:iki:ledger:default:append").unwrap(),
+        )
+        .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec()))
+        .with_arg("labels", ArgRef::Inline(b"shared".to_vec()));
+        if !priority.is_empty() {
+            append = append.with_arg("priority", ArgRef::Inline(priority.as_bytes().to_vec()));
+        }
+        futures::executor::block_on(server.hub.issue(append, &Capability::root())).unwrap();
+    }
+    let first = server.page("/l/default?priority=1,none&sort=number&limit=2", None);
+    assert_eq!(first.status, 200, "{first:?}");
+    assert_eq!(row_titles(&first.body), ["Second p1", "Third p1"]);
+    assert!(
+        first.body.contains("priority=1%2Cnone&amp;sort=number"),
+        "{first:?}"
+    );
+    let second = server.page(
+        "/l/default?priority=1,none&sort=number&limit=2&offset=2",
+        None,
+    );
+    assert_eq!(row_titles(&second.body), ["Fourth unset"]);
+    let descending = server.page("/l/default?sort=-number", None);
+    assert_eq!(
+        row_titles(&descending.body),
+        ["Fourth unset", "Third p1", "Second p1", "First p3"]
+    );
+    let facets = server.page("/l/default/facet?priority=1,none&sort=number", None);
+    assert_eq!(facets.status, 200, "{facets:?}");
+    assert!(facets.body.contains(&facet_row("shared", 3)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("p1", 2)), "{facets:?}");
+    assert!(facets.body.contains(&facet_row("unset", 1)), "{facets:?}");
+    assert!(!facets.body.contains(&facet_row("p3", 1)), "{facets:?}");
+    for query in ["priority=9", "sort=unknown"] {
+        assert_eq!(
+            server.page(&format!("/l/default?{query}"), None).status,
+            400
+        );
+    }
 }

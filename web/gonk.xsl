@@ -1113,7 +1113,7 @@
         </xsl:choose>
       </th>
       <td><xsl:value-of select="@kind"/></td>
-      <td class="iri"><xsl:value-of select="@target"/></td>
+      <td class="iri"><xsl:value-of select="@target"/><xsl:for-each select="view:view-fixed"><br/><xsl:value-of select="@name"/>: <xsl:value-of select="@value"/></xsl:for-each></td>
       <td><xsl:value-of select="@at"/></td>
     </tr>
   </xsl:template>
@@ -1127,6 +1127,8 @@
       <fieldset>
         <legend><xsl:attribute name="id">view-<xsl:value-of select="@index"/></xsl:attribute><xsl:value-of select="@name"/></legend>
         <input type="hidden" name="base"><xsl:attribute name="value"><xsl:value-of select="@base"/></xsl:attribute></input>
+        <input type="hidden" name="verb"><xsl:attribute name="value"><xsl:value-of select="@verb"/></xsl:attribute></input>
+        <xsl:for-each select="view:view-fixed"><input type="hidden"><xsl:attribute name="name">fixed-<xsl:value-of select="@name"/></xsl:attribute><xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute></input></xsl:for-each>
         <input type="hidden" name="was"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
         <input type="hidden" name="was-kind"><xsl:attribute name="value"><xsl:value-of select="@kind"/></xsl:attribute></input>
         <div class="grid">
@@ -2458,6 +2460,28 @@
 
   <!-- ============================================================ a ledger -->
 
+  <xsl:template match="view:project-views">
+    <section class="panel"><xsl:attribute name="aria-label">Saved views for <xsl:value-of select="@project"/></xsl:attribute>
+      <h2>Saved views for <xsl:value-of select="@project"/></h2>
+      <xsl:choose><xsl:when test="view:saved-view"><ul><xsl:for-each select="view:saved-view"><li><a><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:value-of select="@name"/></a></li></xsl:for-each></ul></xsl:when><xsl:otherwise><p>No saved views for this project.</p></xsl:otherwise></xsl:choose>
+    </section>
+  </xsl:template>
+
+  <xsl:template match="view:filter-save">
+    <details class="panel">
+      <summary>Save this filter</summary>
+      <form class="view-form" method="post" action="/views/save" aria-label="Save this filter">
+        <input type="hidden" name="op" value="filter"/>
+        <input type="hidden" name="base"><xsl:attribute name="value"><xsl:value-of select="@base"/></xsl:attribute></input>
+        <input type="hidden" name="ledger"><xsl:attribute name="value"><xsl:value-of select="@ledger"/></xsl:attribute></input>
+        <xsl:for-each select="view:view-fixed"><input type="hidden"><xsl:attribute name="name"><xsl:value-of select="@name"/></xsl:attribute><xsl:attribute name="value"><xsl:value-of select="@value"/></xsl:attribute></input></xsl:for-each>
+        <label>View name <input type="text" name="name" required="required" pattern="[a-z0-9]([a-z0-9_-]*[a-z0-9])?" maxlength="64" autocomplete="off" aria-describedby="filter-save-help"/></label>
+        <p class="note" id="filter-save-help">Use up to 64 lowercase letters, digits, hyphens or underscores, starting and ending with a letter or digit. The view saves this page's filters and sort, and runs under each viewer's own grant.</p>
+        <p><button type="submit">Save filter</button></p>
+      </form>
+    </details>
+  </xsl:template>
+
   <xsl:template name="ledger">
     <section id="ledger" class="ledger">
       <header class="ledger-head">
@@ -2501,10 +2525,14 @@
               <xsl:attribute name="value"><xsl:value-of select="@without"/></xsl:attribute>
             </input>
           </div>
+          <div class="search-field"><label for="search-priority">Priority</label><input id="search-priority" name="priority" type="text" aria-describedby="priority-sort-help"><xsl:attribute name="value"><xsl:value-of select="@priority"/></xsl:attribute></input></div>
+          <div class="search-field"><label for="search-sort">Sort</label><input id="search-sort" name="sort" type="text" aria-describedby="priority-sort-help"><xsl:attribute name="value"><xsl:value-of select="@sort"/></xsl:attribute></input></div>
           <button type="submit" class="quiet">Search</button>
+          <p class="note" id="priority-sort-help">Priorities: 0, 1, 2, 3, 4, none; separate with commas. Sort: priority, created, modified, number, landing; separate with commas and prefix a key with - for descending.</p>
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
         </form>
       </header>
+      <xsl:apply-templates select="view:project-views | view:filter-save"/>
       <xsl:apply-templates select="view:label-filters"/>
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
@@ -2520,6 +2548,8 @@
           <input type="hidden" name="_limit"><xsl:attribute name="value"><xsl:value-of select="@limit"/></xsl:attribute></input>
           <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
           <input type="hidden" name="_projects"><xsl:attribute name="value"><xsl:value-of select="@projects"/></xsl:attribute></input>
+          <input type="hidden" name="_sort"><xsl:attribute name="value"><xsl:value-of select="@sort"/></xsl:attribute></input>
+          <input type="hidden" name="_priority"><xsl:attribute name="value"><xsl:value-of select="@priority"/></xsl:attribute></input>
           <label for="file-content">File an item<xsl:if test="@ledgers != '' or @projects != ''"> in <xsl:value-of select="@ledger"/></xsl:if> — first line is the title, then a blank line, then the body</label>
           <textarea id="file-content" name="content" rows="3" required="required"></textarea>
           <details>
@@ -2579,6 +2609,7 @@
         </p>
         <ol class="items">
           <xsl:apply-templates select="rdf:RDF/ledger:Item">
+            <xsl:sort select="view:landing"/>
             <xsl:sort select="dcterms:modified" order="descending"/>
           </xsl:apply-templates>
           <xsl:apply-templates select="view:slot[@name = 'items']"/>
@@ -2704,6 +2735,8 @@
             <input type="hidden" name="_listLedger"><xsl:attribute name="value"><xsl:value-of select="view:listLedger"/></xsl:attribute></input>
             <input type="hidden" name="_ledgers"><xsl:attribute name="value"><xsl:value-of select="view:listLedgers"/></xsl:attribute></input>
             <input type="hidden" name="_projects"><xsl:attribute name="value"><xsl:value-of select="view:listProjects"/></xsl:attribute></input>
+          <input type="hidden" name="_sort"><xsl:attribute name="value"><xsl:value-of select="view:listSort"/></xsl:attribute></input>
+          <input type="hidden" name="_priority"><xsl:attribute name="value"><xsl:value-of select="view:listPriority"/></xsl:attribute></input>
             <input type="hidden" name="item"><xsl:attribute name="value"><xsl:value-of select="view:iri"/></xsl:attribute></input>
             <button type="submit" class="quiet small">
               <xsl:attribute name="aria-label">Close <xsl:value-of select="view:short"/> with the ledger's default reason</xsl:attribute>
