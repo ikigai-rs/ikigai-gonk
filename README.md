@@ -1168,15 +1168,19 @@ under the caller's capability: with no `urn:cap:browse:read:{root}`, nothing is 
 
 | resource | faces | |
 | --- | --- | --- |
-| `urn:iki:harness:control:id:{id}` | Turtle, JSON, text | one control, and how often it fired (`harness:entryCount`) |
-| `urn:iki:harness:guide:id:{id}` · `urn:iki:harness:incident:id:{id}` | Turtle, JSON, text | one guide or incident, and the controls that cite it |
-| `urn:iki:harness:coverage:query:{name}` | SPARQL JSON, an `rs:ResultSet` in Turtle, text, or the question (`application/sparql-query`) | `sensors-never-fired`, `guides-without-sensor`, `sensors-without-guide`, `incidents-without-sensor`, `repeated-warnings`, `top-recurring`, `firings-by-day`, `firings-by-control` |
-| `urn:iki:harness:firing:date:{date}` | Turtle, JSON, text | a CONSTRUCT over the firings: each control that fired that UTC day, its outcome and its count |
+| `urn:iki:harness:control:id:{id}` | Turtle, JSON, text, HTML | one control, and how often it fired (`harness:entryCount`) |
+| `urn:iki:harness:guide:id:{id}` · `urn:iki:harness:incident:id:{id}` | Turtle, JSON, text, HTML | one guide or incident, and the controls that cite it |
+| `urn:iki:harness:coverage:query:{name}` | SPARQL JSON, an `rs:ResultSet` in Turtle, text, HTML, or the question (`application/sparql-query`) | `sensors-never-fired`, `guides-without-sensor`, `sensors-without-guide`, `incidents-without-sensor`, `repeated-warnings`, `top-recurring`, `firings-by-day`, `firings-by-control` |
+| `urn:iki:harness:firing:date:{date}` | Turtle, JSON, text, HTML | a CONSTRUCT over the firings: each control that fired that UTC day, its outcome and its count |
 
 Each takes `root=`. Without it, they read the first root this grant reads that has a harness.
-The page draws the controls by stage and category, each with its guide, incident, proof and code
-site, the coverage questions' row counts, and the firings per day and per control. Every number
-links to the resource that answers it. A refusal is joined to a ledger item through the session
+The page draws the coverage questions' answers as counts in words ("2 sensors"), each guide as a
+heading with the controls that state it listed under it (then the controls no guide states), and
+the firings per day. Every count and name links to the page of the resource that answers it, at
+its route with no `as`: the HTTP door hands a browser the HTML face, in gonk's page chrome, and
+any other client the resource's own default. Each detail page offers its other faces under
+"Other formats". A guide's page links to browse's view of the file that states it, at the
+section's line, when the caller may read it there. A refusal is joined to a ledger item through the session
 summaries of the ledgers the caller may read: "In the last 7 days the harness refused 14 actions,
 11 of them on 9 ledger items you may read." Counts only: no command digest, session or tool is
 served.

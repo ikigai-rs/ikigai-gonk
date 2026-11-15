@@ -659,3 +659,22 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .badge.display-outline { border-color: currentColor; border-style: dashed; }
 .label-groups { overflow-wrap: anywhere; }
 .label-groups a { display: inline-block; min-height: 24px; }
+
+/* The Harness page and its detail pages (ledger #3777): headed sections of plain lists, and
+   tables of two or three short columns, so nothing is wider than a phone. Words carry every
+   count and outcome; no color is invented here. */
+.harness h2 { margin-top: 1.5rem; }
+.harness h3 { font-size: 1rem; margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+.harness-group { border-top: 1px solid var(--rule); padding-top: 0.75rem; margin: 0 0 1rem; }
+.harness-list, .harness-links { padding-left: 1.25rem; margin: 0.5rem 0 0; }
+.harness-list > li { margin: 0 0 0.6rem; overflow-wrap: anywhere; }
+.harness-links > li { margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+.harness-facts { margin: 0.15rem 0 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+.harness-back, .harness-formats { margin: 0 0 var(--gap); }
+.harness-formats { margin-top: 1.5rem; }
+.harness-table caption { text-align: left; font-weight: 600; padding: 0.4rem 0.6rem; }
+/* `break-word`, never `anywhere` (see #368 above): a word is not split; a table wider than a
+   phone scrolls inside its `.table-wrap`, never the page. */
+.harness-table tbody th { background: transparent; white-space: normal; overflow-wrap: break-word; }
+.harness-meta code { overflow-wrap: anywhere; }
+.harness-list > li > a, .harness-links a { display: inline-block; min-height: 24px; }
