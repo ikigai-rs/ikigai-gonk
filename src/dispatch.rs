@@ -43,7 +43,8 @@ pub fn space(path: Option<PathBuf>) -> Result<EndpointSpace> {
         .bind(
             UriTemplate::parse("urn:iki:gonk:dispatch:{ledger}").expect("static template"),
             Dispatch { cursors },
-        ))
+        )
+        .named(crate::spaces::iri(crate::spaces::DISPATCH)))
 }
 struct Dispatch {
     cursors: Arc<Mutex<Cursors>>,
