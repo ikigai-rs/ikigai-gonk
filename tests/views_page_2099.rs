@@ -59,6 +59,11 @@ fn gonk(anonymous: Vec<String>) -> Gonk {
         .unwrap();
     let addr = listener.local_addr().unwrap();
     let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("projects.toml"),
+        "gonk.project = \"work default\"\n",
+    )
+    .unwrap();
     let layout = quic::Layout::in_config_home(config.path());
     let passkeys = Arc::new(Passkeys::new(layout, addr.port()));
     let face = Arc::new(web::Web {
@@ -71,7 +76,8 @@ fn gonk(anonymous: Vec<String>) -> Gonk {
         epochs: None,
         holder_aliases: Default::default(),
         page_assets: Default::default(),
-        projects: Default::default(),
+        projects: ikigai_gonk::projects::Projects::default()
+            .with_config(config.path().join("projects.toml")),
         toolbox: false,
         faces: Vec::new(),
     });
@@ -292,12 +298,14 @@ fn the_page_lists_the_readmes_declaration_with_links_and_the_status() {
         "{body}"
     );
     assert!(body.contains("none since the last bind"), "{body}");
-    assert_eq!(
-        forms(body),
-        0,
-        "fixed bindings cannot be edited by this form"
+    assert!(
+        forms(body) > 0,
+        "literal fixed bindings can now be retained by edits: {body}"
     );
-    assert!(body.contains("fields this page does not show"), "{body}");
+    assert!(
+        body.contains("name='fixed-status' type='hidden' value='closed'"),
+        "{body}"
+    );
     // The header's Views link marks this page as the current one.
     assert!(
         body.contains("<a aria-current='page' class='navlink' href='/views'>Views</a>"),
@@ -707,4 +715,188 @@ fn the_declaration_sink_compares_the_base_before_replacing() {
     let current = ikigai_core::ContentId::of(changed.as_bytes()).to_string();
     conditional(&current, &empty).unwrap();
     assert_eq!(gonk.stored(), before);
+}
+
+#[test]
+fn a_filter_can_be_saved_and_listed_on_its_project() {
+    let gonk = gonk(operator());
+    for (title, labels, priority) in [
+        ("hello matching", "bug", "1"),
+        ("hello wrong label", "feature", "1"),
+        ("hello wrong priority", "bug", "2"),
+        ("hello excluded", "bug,later", "1"),
+        ("other title", "bug", "1"),
+    ] {
+        block_on(
+            gonk.hub.issue(
+                Request::new(Verb::Sink, iri("urn:iki:ledger:default:append"))
+                    .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec()))
+                    .with_arg("labels", ArgRef::Inline(labels.as_bytes().to_vec()))
+                    .with_arg("priority", ArgRef::Inline(priority.as_bytes().to_vec())),
+                &Capability::root(),
+            ),
+        )
+        .unwrap();
+    }
+    let listing = gonk.page("/l/default?projects=work&labels=bug&without=later&text=hello");
+    assert!(
+        listing.body.contains("Save this filter"),
+        "{}",
+        listing.body
+    );
+    let answer = gonk.save(&[
+        ("op", "filter"),
+        ("base", &gonk.base()),
+        ("name", "triage"),
+        ("ledger", "default"),
+        ("projects", "work"),
+        ("labels", "bug"),
+        ("without", "later"),
+        ("text", "hello"),
+        ("status", "open"),
+        ("priority", "1"),
+        ("sort", "priority"),
+    ]);
+    assert!(answer.body.contains("it is in force"), "{}", answer.body);
+    let project = gonk.page("/l/default?projects=work");
+    assert!(
+        project.body.contains("href='/view/triage'"),
+        "{}",
+        project.body
+    );
+    let saved = gonk.page("/view/triage");
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    assert!(saved.body.contains("Projects: work."), "{}", saved.body);
+    assert!(saved.body.contains("hello matching"), "{}", saved.body);
+    for excluded in [
+        "hello wrong label",
+        "hello wrong priority",
+        "hello excluded",
+        "other title",
+    ] {
+        assert!(!saved.body.contains(excluded), "{excluded}: {}", saved.body);
+    }
+    assert!(
+        saved.body.contains("name='priority' type='text' value='1'"),
+        "{}",
+        saved.body
+    );
+}
+
+fn filter_declaration(projects: &str) -> String {
+    let ikigai_gonk::views_page::Change::Add(rule) = ikigai_gonk::views_page::change_of(
+        [
+            ("op", "filter"),
+            ("name", "triage"),
+            ("ledger", "default"),
+            ("projects", projects),
+            ("status", "open"),
+            ("sort", "number"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    ikigai_gonk::views_page::declaration(&[rule], 8)
+}
+
+fn append(gonk: &Gonk, ledger: &str, title: &str) {
+    block_on(
+        gonk.hub.issue(
+            Request::new(Verb::Sink, iri(&format!("urn:iki:ledger:{ledger}:append")))
+                .with_arg("content", ArgRef::Inline(title.as_bytes().to_vec())),
+            &Capability::root(),
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_saved_filter_reads_only_the_viewers_ledgers_and_resolves_live_projects() {
+    let gonk = gonk(reader_plus(&[]));
+    append(&gonk, "default", "Visible default");
+    append(&gonk, "crew", "Hidden crew");
+    gonk.declare_as_root(&filter_declaration("work"));
+    wait_for(&gonk.views, |s| s.installs == 1);
+    let first = gonk.page("/view/triage");
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert!(first.body.contains("Visible default"), "{}", first.body);
+    assert!(!first.body.contains("Hidden crew"));
+    assert!(!first.body.contains("Save this filter"));
+    // No declaration read token is needed to use the view; it conveys no ledger token.
+    std::fs::write(
+        gonk._config.path().join("projects.toml"),
+        "gonk.project = \"work crew\"\n",
+    )
+    .unwrap();
+    let changed = gonk.page("/view/triage");
+    assert_eq!(changed.status, 200, "{}", changed.body);
+    assert!(!changed.body.contains("Visible default"));
+    assert!(!changed.body.contains("Hidden crew"));
+    assert!(
+        changed.body.contains("None of the ledgers asked for"),
+        "{}",
+        changed.body
+    );
+    let override_filter = gonk.page("/view/triage?projects=work");
+    assert_eq!(override_filter.status, 400, "{}", override_filter.body);
+    std::fs::write(
+        gonk._config.path().join("projects.toml"),
+        "gonk.project = \"work default\"\n",
+    )
+    .unwrap();
+    assert!(gonk.page("/view/triage").body.contains("Visible default"));
+
+    let stranger = self::gonk(Vec::new());
+    stranger.declare_as_root(&filter_declaration("work"));
+    wait_for(&stranger.views, |s| s.installs == 1);
+    assert_eq!(stranger.page("/view/triage").status, 403);
+}
+
+#[test]
+fn saved_filters_keep_other_bindings_and_use_the_declarations_write_gate() {
+    let gonk = gonk(operator());
+    gonk.declare_as_root(&filter_declaration("work"));
+    wait_for(&gonk.views, |s| s.installs == 1);
+    let before = gonk.stored();
+    let duplicate = gonk.save(&[
+        ("op", "filter"),
+        ("base", &gonk.base()),
+        ("name", "triage"),
+        ("ledger", "default"),
+    ]);
+    assert!(duplicate.body.contains("already declared"));
+    assert_eq!(gonk.stored(), before);
+    let added = gonk.save(&[
+        ("op", "add"),
+        ("base", &gonk.base()),
+        ("name", "rule"),
+        ("target", CHECK),
+    ]);
+    assert!(added.body.contains("it is in force"), "{}", added.body);
+    let saved = gonk.page("/view/triage");
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    assert!(saved.body.contains("Projects: work."));
+
+    let reader = self::gonk(reader_plus(&[views::read_grant()]));
+    reader.declare_as_root(&filter_declaration("work"));
+    wait_for(&reader.views, |s| s.installs == 1);
+    let listing = reader.page("/l/default?projects=work");
+    assert!(listing.body.contains("href='/view/triage'"));
+    assert!(!listing.body.contains("Save this filter"));
+    let before = reader.stored();
+    let refused = reader.save(&[
+        ("op", "filter"),
+        (
+            "base",
+            &ikigai_core::ContentId::of(before.as_bytes()).to_string(),
+        ),
+        ("name", "new"),
+        ("ledger", "default"),
+    ]);
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert_eq!(reader.stored(), before);
 }

@@ -38,8 +38,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, ContentId, Description, Endpoint, Error, Invocation, Iri,
-    Representation, Request, ResolveAt, Result, RuleKind, SpaceKind, Topology, TopologyRule, Verb,
+    ActionSpec, ArgRef, ArgSpec, ContentId, Description, Endpoint, Error, FixedArgument,
+    FixedValue, Invocation, Iri, Representation, Request, ResolveAt, Result, RuleKind, SpaceKind,
+    Topology, TopologyRule, Verb,
 };
 
 use std::sync::Arc;
@@ -68,6 +69,11 @@ const STALE_DECLARATION: &str =
 /// What a declaration the page writes uses for `ik:maxHops` when nothing is in force.
 const MAX_HOPS: usize = 8;
 
+/// The filter identity; paging, theme and safe mode are deliberately not saved.
+pub const FILTER_ARGS: &[&str] = &[
+    "projects", "ledgers", "labels", "without", "priority", "status", "text", "sort",
+];
+
 const HTML: &str = "text/html";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
@@ -94,6 +100,10 @@ pub struct Rule {
     pub target: String,
     /// `root` or `child`.
     pub at: &'static str,
+    /// Fixed literal arguments, retained by page edits.
+    pub fixes: Vec<FixedArgument>,
+    /// The binding's optional verb.
+    pub verb: Option<Verb>,
 }
 
 /// The views in force, as far as the page can say.
@@ -120,12 +130,19 @@ pub fn rules_of(topology: &Topology) -> InForce {
     let SpaceKind::Alias { rules, max_hops } = &topology.kind else {
         return InForce::default();
     };
-    let rewritable = rules.iter().all(|rule| !rule.is_named_request())
-        && matches!(
-            topology.children.as_slice(),
-            [child] if child.children.is_empty()
-                && matches!(&child.kind, SpaceKind::EndpointSpace { doors } if doors.is_empty())
-        );
+    let rewritable = rules.iter().all(|rule| {
+        !rule.template
+            && rule.inputs.is_empty()
+            && matches!(rule.verb, None | Some(Verb::Source))
+            && rule
+                .fixes
+                .iter()
+                .all(|arg| matches!(arg.value, FixedValue::Value(_)))
+    }) && matches!(
+        topology.children.as_slice(),
+        [child] if child.children.is_empty()
+            && matches!(&child.kind, SpaceKind::EndpointSpace { doors } if doors.is_empty())
+    );
     InForce {
         rules: rules
             .iter()
@@ -134,6 +151,8 @@ pub fn rules_of(topology: &Topology) -> InForce {
                 name: rule.from.clone(),
                 target: rule.to.clone(),
                 at: at_word(rule.at),
+                fixes: rule.fixes.clone(),
+                verb: rule.verb,
             })
             .collect(),
         max_hops: Some(*max_hops),
@@ -153,6 +172,8 @@ pub fn rules_of(topology: &Topology) -> InForce {
 ///         name: "urn:iki:gonk:view:open".to_string(),
 ///         target: "urn:iki:ledger:default:items".to_string(),
 ///         at: "root",
+///         fixes: Vec::new(),
+///         verb: None,
 ///     }],
 ///     8,
 /// );
@@ -173,7 +194,11 @@ pub fn declaration(rules: &[Rule], max_hops: usize) -> String {
             } else {
                 ResolveAt::Root
             };
-            TopologyRule::new(kind, rule.name.clone(), rule.target.clone()).resolving_at(at)
+            let mut binding =
+                TopologyRule::new(kind, rule.name.clone(), rule.target.clone()).resolving_at(at);
+            binding.fixes = rule.fixes.clone();
+            binding.verb = rule.verb;
+            binding
         })
         .collect();
     Topology::new(SpaceKind::Alias { rules, max_hops })
@@ -404,7 +429,23 @@ impl ViewsPage {
             if let (Some(href), "exact") = (href.as_deref(), rule.kind) {
                 row.push(("href", href));
             }
-            children.push_str(&element("view-rule", &row, ""));
+            let fixed = rule
+                .fixes
+                .iter()
+                .map(|arg| {
+                    element(
+                        "view-fixed",
+                        &[
+                            ("name", arg.name.as_str()),
+                            ("value", &arg.value.to_string()),
+                        ],
+                        "",
+                    )
+                })
+                .collect::<String>();
+            let verb = rule.verb.map(|v| format!("{v:?}")).unwrap_or_default();
+            row.push(("verb", &verb));
+            children.push_str(&render::wrap("view-rule", &row, &fixed));
         }
         if editable {
             children.push_str(&element(
@@ -419,6 +460,78 @@ impl ViewsPage {
         }
         page(&attributes, &children)
     }
+}
+
+/// Saved views for the selected projects, plus the plain POST save form when authorized.
+pub(crate) async fn filter_controls(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledger: &str,
+    filters: &[(&str, &str)],
+) -> Result<String> {
+    if !inv.capability.allows(&read_grant()) {
+        return Ok(String::new());
+    }
+    let Some(status) = status(inv).await else {
+        return Ok(String::new());
+    };
+    let model = crate::views::in_force(&web.hub)
+        .filter(|_| status.installs > 0)
+        .map(|t| rules_of(&t))
+        .unwrap_or(InForce {
+            rewritable: true,
+            ..InForce::default()
+        });
+    let mut out = String::new();
+    let selected = filters
+        .iter()
+        .find(|(k, _)| *k == "projects")
+        .map(|(_, v)| *v)
+        .unwrap_or("");
+    let selected: std::collections::BTreeSet<_> = selected
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    for project in selected {
+        let mut links = String::new();
+        for rule in &model.rules {
+            if rule.kind != "exact" || !rule.target.starts_with("urn:iki:gonk:page:ledger:") {
+                continue;
+            }
+            let belongs = rule.fixes.iter().any(|arg| arg.name == "projects" &&
+                matches!(&arg.value, FixedValue::Value(v) if v.split(',').any(|p| p.trim() == project)));
+            if belongs {
+                if let Some(href) = view_href(&rule.name) {
+                    links.push_str(&element(
+                        "saved-view",
+                        &[("href", &href), ("name", local(&rule.name))],
+                        "",
+                    ));
+                }
+            }
+        }
+        out.push_str(&render::wrap(
+            "project-views",
+            &[("project", project)],
+            &links,
+        ));
+    }
+    if model.rewritable && inv.capability.allows(&write_grant()) {
+        let base = stored(inv)
+            .await?
+            .unwrap_or_else(|| NO_DECLARATION.to_string());
+        let fields = filters
+            .iter()
+            .map(|(name, value)| element("view-fixed", &[("name", name), ("value", value)], ""))
+            .collect::<String>();
+        out.push_str(&render::wrap(
+            "filter-save",
+            &[("base", &base), ("ledger", ledger)],
+            &fields,
+        ));
+    }
+    Ok(out)
 }
 
 fn page(attributes: &[(&str, String)], children: &str) -> Result<String> {
@@ -539,6 +652,45 @@ fn refused(detail: impl Into<String>) -> Error {
 /// assert_eq!(rule.name, "urn:iki:gonk:view:open");
 /// ```
 pub fn change_of(mut fields: std::collections::BTreeMap<String, String>) -> Result<Change> {
+    if fields.get("op").is_some_and(|op| op == "filter") {
+        let name = fields
+            .get("name")
+            .ok_or_else(|| refused("a view needs a name"))?;
+        ikigai_ledger::Ledger::parse(name)?;
+        let ledger = fields
+            .get("ledger")
+            .ok_or_else(|| refused("a filter needs a base ledger"))?;
+        ikigai_ledger::Ledger::parse(ledger)?;
+        let fixes = FILTER_ARGS
+            .iter()
+            .filter_map(|key| {
+                fields
+                    .get(*key)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| FixedArgument::value(*key, v))
+            })
+            .collect();
+        return Ok(Change::Add(Rule {
+            kind: "exact",
+            name: format!("{VIEW_PREFIX}{name}"),
+            target: format!("urn:iki:gonk:page:ledger:{ledger}"),
+            at: "root",
+            fixes,
+            verb: Some(Verb::Source),
+        }));
+    }
+    let fixes = fields
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("fixed-")
+                .map(|key| FixedArgument::value(key, value))
+        })
+        .collect();
+    let verb = match fields.remove("verb").as_deref() {
+        None | Some("") => None,
+        Some("Source") => Some(Verb::Source),
+        Some(_) => return Err(refused("this form cannot change that verb")),
+    };
     let mut take = |name: &str| {
         fields
             .remove(name)
@@ -572,6 +724,8 @@ pub fn change_of(mut fields: std::collections::BTreeMap<String, String>) -> Resu
         name,
         target,
         at: "root",
+        fixes,
+        verb,
     };
     match op.as_str() {
         "add" => Ok(Change::Add(rule)),
@@ -791,6 +945,8 @@ mod tests {
             name: format!("{VIEW_PREFIX}{name}"),
             target: target.to_string(),
             at: "root",
+            fixes: Vec::new(),
+            verb: None,
         }
     }
 
@@ -824,7 +980,11 @@ mod tests {
         rules[0]
             .fixes
             .push(ikigai_core::FixedArgument::value("status", "open"));
-        assert!(!rules_of(&topology).rewritable);
+        assert!(rules_of(&topology).rewritable);
+        assert_eq!(
+            Topology::from_turtle(&declaration(&rules_of(&topology).rules, 8)).unwrap(),
+            topology
+        );
         let SpaceKind::Alias { rules, .. } = &mut topology.kind else {
             panic!("an alias")
         };

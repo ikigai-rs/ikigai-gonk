@@ -64,6 +64,24 @@ fn pattern(listing: &Listing<'_>) -> Result<String> {
             literal(text)
         ));
     }
+    if let Some(priority) = listing.priority.filter(|v| !v.is_empty()) {
+        let mut choices = Vec::new();
+        for value in priority.split(',').map(str::trim) {
+            choices.push(match value {
+                "none" => format!("NOT EXISTS {{ ?item <{LEDGER_NS}priority> ?anyPriority }}"),
+                "0" | "1" | "2" | "3" | "4" => {
+                    format!("EXISTS {{ ?item <{LEDGER_NS}priority> {value} }}")
+                }
+                _ => {
+                    return Err(Error::InvalidArgument {
+                        name: "priority".into(),
+                        detail: "Priorities are 0, 1, 2, 3, 4, none.".into(),
+                    })
+                }
+            });
+        }
+        body.push_str(&format!("FILTER({})\n", choices.join(" || ")));
+    }
     Ok(body)
 }
 
@@ -141,6 +159,8 @@ impl Endpoint for Facet {
         let limit = optional(inv, "limit");
         let ledgers = optional(inv, "ledgers");
         let projects = optional(inv, "projects");
+        let priority = optional(inv, "priority");
+        let sort = optional(inv, "sort");
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
@@ -150,6 +170,8 @@ impl Endpoint for Facet {
             offset: None,
             ledgers: ledgers.as_deref(),
             projects: projects.as_deref(),
+            priority: priority.as_deref(),
+            sort: sort.as_deref(),
         };
         // Expand each match into label/priority buckets, including an absent priority.
         // The OPTIONALs join the matched items before expansion: an OPTIONAL standing
@@ -188,6 +210,8 @@ impl Endpoint for Facet {
             without: listing.without,
             ledgers: listing.ledgers,
             projects: listing.projects,
+            priority: listing.priority,
+            sort: listing.sort,
         };
         let page = ledger_href(&ledger);
         // Two lists under their own headings, so a row starts with its term and count and
@@ -309,6 +333,8 @@ impl Endpoint for Facet {
             .input(arg("status", "open, closed, or all.").one_of(["open", "closed", "all"]).default_value("open").optional())
             .input(arg("labels", "Comma-separated required labels.").optional())
             .input(arg("without", "Comma-separated excluded labels.").optional())
+            .input(arg("priority", "Comma-separated priorities: 0, 1, 2, 3, 4, none.").optional())
+            .input(arg("sort", "Preserve the list ordering in filter links.").optional())
             .input(arg("text", "Case-insensitive title substring.").optional())
             .input(arg("projects", "Comma-separated project names, resolved as on the list.").optional())
             .input(arg("ledgers", "Comma-separated ledger names: count over the ledger's own union of them, as the list does.").optional())
