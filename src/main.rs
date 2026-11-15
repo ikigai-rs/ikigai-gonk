@@ -552,6 +552,10 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    trigger_spaces.push(Arc::new(
+        ikigai_gonk::dispatch::space(Some(store_path.join("dispatcher-cursors.json")))
+            .unwrap_or_else(|e| fail(&e.to_string())),
+    ));
     if let Some(record) = &record {
         trigger_spaces.push(Arc::new(ikigai_log::endpoints::space(record.handle())));
     }

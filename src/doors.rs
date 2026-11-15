@@ -1239,6 +1239,11 @@ fn routes() -> Vec<Route> {
     };
     vec![
         route("/", "urn:iki:gonk:page:home"),
+        route("/l/{ledger}/dispatch", "urn:iki:gonk:dispatch:{ledger}"),
+        route(
+            "/l/{ledger}/item/{id}/dispatch",
+            "urn:iki:gonk:dispatch:{ledger}:item:{id}",
+        ),
         // Ledger #1888: every readable ledger, the header menu's "All ledgers".
         route(crate::web::LEDGERS_PATH, crate::web::LEDGERS_IRI),
         // Ledger #2542: a chart per readable ledger.
