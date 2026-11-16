@@ -304,7 +304,10 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # shapes (#3724), plain priorities and groups in words, and removing a label the item does not
 # hold is refused (NotFound) instead of answering success. `"0.22.0"` was `<0.23.0`;
 # `"0.23.0"` is `<0.24.0`.
-ikigai-ledger = "0.23.0"
+# 0.23.1 (ledger #3781), a BEHAVIOR floor: `items` and `next` take `omit=` and `comments=`, so a
+# list row can leave out bodies, comments and attribution (each row says what in `omitted`), and
+# `comments=none` runs no comments query. `"0.23.1"` is `<0.24.0`.
+ikigai-ledger = "0.23.1"
 
 # The door line and its hash-chained segments (ledger #383): every request a door serves is one
 # `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under
