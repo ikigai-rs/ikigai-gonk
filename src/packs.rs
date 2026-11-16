@@ -395,8 +395,9 @@ fn words_of(p: &str) -> String {
 }
 
 /// The closed SHACL shape the declared facts of `targets` are checked against: only the
-/// properties [`properties`] admits (and `rdf:type`, `rdfs:label`, `rdfs:comment`), at most one
-/// value of a single-valued one, each value an IRI, and a team a `foaf:Group`.
+/// properties gonk knows and the operator declares (and `rdf:type`, `rdfs:label`,
+/// `rdfs:comment`), at most one value of a single-valued one, each value an IRI, and a team a
+/// `foaf:Group`.
 pub fn declared_shape(vocab: &[Triple], targets: &[String]) -> String {
     let mut out = format!(
         "@prefix sh: <{SH}> .\n<urn:iki:gonk:shape:root-description> a sh:NodeShape ;\n  \
