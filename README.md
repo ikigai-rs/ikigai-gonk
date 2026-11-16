@@ -623,6 +623,7 @@ there.
 | `/static/tokens.css`, `/static/shell.js`, `/static/htmx.min.js` | `urn:iki:ui:tokens.css`, `urn:iki:ui:shell.js`, `urn:iki:ui:htmx` | `ikigai-ui`'s tokens, shell script and htmx, by their own names (ledger #2834) |
 | `/static/{name}` | `urn:iki:gonk:asset:{name}` | `gonk.css`, `gonk.js` |
 | `/browse` | `urn:iki:gonk:page:browse` | the repositories this grant may read |
+| `/urn:repo:{root}:description` | `urn:repo:{root}:description` | a browse root's description, which harness packs' shapes are checked against (see "Harness packs") |
 | `/harness` · `/harness/{control,guide,incident}/{id}` · `/harness/coverage/{name}` · `/harness/firing/{date}` | `urn:iki:gonk:page:harness` · `urn:iki:harness:{control,guide,incident}:id:{id}` · `urn:iki:harness:coverage:query:{name}` · `urn:iki:harness:firing:date:{date}` | a repository's harness and its firings, below |
 | `/browse/{iri}` | `urn:iki:gonk:page:browse:{iri}` | the page a browse face renders inside |
 | `/k?c={command}` | `urn:iki:gonk:k` | the adapter those faces call — one read, one annotation, or one finding decision (stamped `made=single`) |
@@ -1190,6 +1191,165 @@ section's line, when the caller may read it there. A refusal is joined to a ledg
 summaries of the ledgers the caller may read: "In the last 7 days the harness refused 14 actions,
 11 of them on 9 ledger items you may read." Counts only: no command digest, session or tool is
 served.
+
+### Harness packs, root descriptions and firings from outside the tree (ledger #3786)
+
+A **pack** is a harness graph that applies to many repositories at once: an operator's rules,
+enforced by hooks in every repository its agents work in. It lives in one file in one browse root,
+and its firings live outside any tree. A root's page loads its own `harness.ttl` (if it has one)
+plus every pack that applies to it, and asks the coverage questions of that union. A root with no
+pack reads exactly as it did before.
+
+```toml
+gonk.browse.description = "~/.config/ikigai/gonk/roots.ttl"
+gonk.harness.pack       = "iki ops:claude/harness/harness.ttl"
+gonk.harness.firings    = "iki ~/.local/state/iki/harness"
+```
+
+- `gonk.browse.description = "<path>"`: the operator's file of declared facts and taxonomies,
+  read once at start. Once at most.
+- `gonk.harness.pack = "<pack> <root>:<path>"`: binds a pack name to a file, read through
+  `urn:repo:{root}:file:{path}` under the caller's capability, so an edit shows on the next read.
+  A root gonk does not browse, a path outside the root or a missing file is refused at start.
+- `gonk.harness.firings = "<pack> <directory>"`: a directory of ikigai-log v1 segments
+  (`{session}.log`, rotated as `{session}.N.log`) belonging to a pack. Read-only, and only the
+  directory's own regular `*.log` files: no subdirectory, hidden name or symbolic link, the rules
+  a face's jail keeps. A line for a pack no `gonk.harness.pack` binds, or a directory that is not
+  there, is refused at start.
+
+**A root's description**, `urn:repo:{root}:description` (Turtle, JSON; HTTP door), is what a
+shape is checked against, under `urn:cap:browse:read:{root}`. A caller without it learns nothing,
+not even whether the root exists. It never holds a path. It has two parts:
+
+- *derived facts* gonk computes: `browse:rootName`, `browse:githubOwner` and
+  `browse:githubRepository` (from a `gonk.browse.github` line), and a `browse:topLevelFile` for
+  each of `Cargo.toml`, `package.json`, `pyproject.toml`, `ACCESSIBILITY.md` and `.gonk/` the
+  root holds at its top;
+- *declared facts* a person writes on `<urn:repo:{root}:description>`: `browse:team` (a
+  `foaf:Group`), `browse:rootClass`, `browse:osTarget` (several allowed), `browse:targetType` and
+  `browse:targetCustomer`. A property the operator's file types `browse:DescriptionProperty` is
+  allowed too, with no code change, and is single-valued when also an `owl:FunctionalProperty`.
+
+Declared facts come from the operator's file and from the repository's own `.gonk/root.ttl`
+(where `<>` is the description), and are unioned. On a single-valued property where the two
+disagree, the operator's value is kept and the description says so (`browse:override`). A
+property the operator gives `browse:valuesFrom <scheme>` takes concepts of that SKOS scheme
+(`skos:inScheme` or `skos:topConceptOf`). **The subset validator has no property paths, so each
+declared concept's `skos:broader` ancestors are materialized into the description as values of
+the same property**, with the `skos:broader` pairs that justify them: a shape's
+`sh:hasValue os:unix` matches a root declared `os:linux`. The operator's file is checked at
+start with a closed SHACL shape and refused in words, naming its line: a value that names no
+concept of its scheme, a property no description takes, two values of a single-valued property,
+a team that is not a `foaf:Group`, or a description of a root gonk does not browse. A target
+customer may be confidential, which is why the whole description sits under browse read.
+
+A sample operator's file: two teams, a small class scheme, and one root described fully.
+
+```turtle
+@prefix browse: <https://ikigai-rs.dev/ns/browse#> .
+@prefix skos:   <http://www.w3.org/2004/02/skos/core#> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix class:  <urn:iki:class:> .
+@prefix os:     <urn:iki:os:> .
+@prefix type:   <urn:iki:type:> .
+@prefix cust:   <urn:iki:customer:> .
+
+<urn:iki:team:core> a foaf:Group ; rdfs:label "Core" .
+<urn:iki:team:web>  a foaf:Group ; rdfs:label "Web" .
+
+<urn:iki:scheme:class> a skos:ConceptScheme ; skos:prefLabel "root class" .
+class:module      a skos:Concept ; skos:inScheme <urn:iki:scheme:class> ; skos:prefLabel "module" .
+class:client-face a skos:Concept ; skos:inScheme <urn:iki:scheme:class> ; skos:prefLabel "client face" .
+class:tooling     a skos:Concept ; skos:inScheme <urn:iki:scheme:class> ; skos:prefLabel "tooling" .
+
+<urn:iki:scheme:os> a skos:ConceptScheme .
+os:unix  a skos:Concept ; skos:inScheme <urn:iki:scheme:os> ; skos:prefLabel "Unix" .
+os:linux a skos:Concept ; skos:inScheme <urn:iki:scheme:os> ; skos:prefLabel "Linux" ; skos:broader os:unix .
+os:macos a skos:Concept ; skos:inScheme <urn:iki:scheme:os> ; skos:prefLabel "macOS" ; skos:broader os:unix .
+
+<urn:iki:scheme:type> a skos:ConceptScheme .
+type:library a skos:Concept ; skos:inScheme <urn:iki:scheme:type> ; skos:prefLabel "library" .
+
+<urn:iki:scheme:customer> a skos:ConceptScheme .
+cust:paying a skos:Concept ; skos:inScheme <urn:iki:scheme:customer> ; skos:prefLabel "paying" .
+cust:public a skos:Concept ; skos:inScheme <urn:iki:scheme:customer> ; skos:prefLabel "public" .
+
+browse:rootClass      browse:valuesFrom <urn:iki:scheme:class> .
+browse:osTarget       browse:valuesFrom <urn:iki:scheme:os> .
+browse:targetType     browse:valuesFrom <urn:iki:scheme:type> .
+browse:targetCustomer browse:valuesFrom <urn:iki:scheme:customer> .
+
+<urn:repo:core:description>
+    browse:team <urn:iki:team:core> ; browse:rootClass class:module ;
+    browse:osTarget os:linux, os:macos ; browse:targetType type:library ;
+    browse:targetCustomer cust:public .
+```
+
+**A pack names itself** with `<urn:iki:harness:pack:name:{pack}> a harness:Pack`, an
+`rdfs:label` and an `owl:versionInfo`; its guides, controls and incidents keep their own IRIs. It
+**applies by shape**: `<pack> harness:appliesTo <shape>`, a SHACL node shape in the pack's own
+file, over root descriptions. It applies to every root whose description conforms, checked with
+ikigai-shacl's subset validator (`ikigai_shacl::core_shacl`, which gonk never serves). The shape's
+own targets are ignored; it is aimed at one description at a time. A shape the subset validator
+refuses (`sh:or`, a property path) is stated on the page in words, and the pack is not loaded
+there. **A rule can narrow further** with its own `harness:appliesTo <shape>`: it stays only on
+the roots that match that shape too. The motivating pack, and two narrower rules:
+
+```turtle
+@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
+@prefix browse:  <https://ikigai-rs.dev/ns/browse#> .
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+
+<urn:iki:harness:pack:name:iki> a harness:Pack ; rdfs:label "iki rules" ; owl:versionInfo "1.4" ;
+    harness:appliesTo <urn:iki:harness:shape:ikigai-rs> .
+
+<urn:iki:harness:shape:ikigai-rs> a sh:NodeShape ; rdfs:label "are owned by ikigai-rs on GitHub" ;
+    sh:property [ sh:path browse:githubOwner ; sh:hasValue "ikigai-rs" ] .
+
+<urn:iki:harness:shape:public-library> a sh:NodeShape ;
+    rdfs:label "are libraries whose target customer is public" ;
+    sh:property [ sh:path browse:targetType ; sh:hasValue <urn:iki:type:library> ] ;
+    sh:property [ sh:path browse:targetCustomer ; sh:hasValue <urn:iki:customer:public> ] .
+
+<urn:iki:harness:shape:rust> a sh:NodeShape ; rdfs:label "hold a Cargo.toml" ;
+    sh:property [ sh:path browse:topLevelFile ; sh:hasValue "Cargo.toml" ] .
+
+<urn:iki:harness:control:rust-ci> a harness:Control ; rdfs:label "gate: Rust CI is green" ;
+    harness:appliesTo <urn:iki:harness:shape:rust> .
+<urn:iki:harness:control:axe-in-ci> a harness:Control ; rdfs:label "gate: axe runs in CI" ;
+    harness:appliesTo <urn:iki:harness:shape:public-library> .
+```
+
+**Explicit adoption still works**: a root's own `.gonk/harness/harness.ttl` may write
+`<> harness:adopts <urn:iki:harness:pack:name:{pack}>` for a pack whose shape does not reach it. A
+root gets a pack if its shape matches or it adopts it. Adopting a pack no line binds is stated on
+the page. Each guide, control and incident from a pack says so ("From the pack “iki rules” 1.4,
+which applies to roots that are owned by ikigai-rs on GitHub", from the shape's `rdfs:label`, else
+its `sh:message`), on the page, on its own page, and as `pack` in its JSON. Resources keep their
+names (`urn:iki:harness:{kind}:id:{id}` with `root=`, `id` the IRI's last segment). If two
+loaded graphs give one kind and id to different IRIs, the page is refused with a message naming
+both IRIs. gonk does not guess which one you meant.
+
+**Firings from outside the tree** count on a root's page when their `repo=` names that root,
+unioned with the tree's own `firings.log`. The rest (`repo=-`, a root the caller cannot read, a
+root gonk does not browse) count only on the pack's line under "Packs": "3 firings outside any
+repository you may read". What is served is unchanged: counts per control and day; a session is
+read only to join a firing to ledger items through session summaries; never a command or a
+session. The directory grows, so nothing that reads it is cached. A page read over 3,510 lines in
+15 segments took about 0.18 s in a release build and 0.67 s in a debug one
+(`tests/harness_packs_3786.rs` measures it), so v1 keeps no index.
+
+**Not in v1**, and where each would attach. *Pinning a pack version* would be a third word on the
+`gonk.harness.pack` line, checked against the pack's `owl:versionInfo` when it is read.
+*Fetching packs from a URL or a registry* would replace the `<root>:<path>` source with a fetched
+copy held in gonk's store, read through the same per-request assembly (`packs::assemble`).
+*Private or paid packs* would put the pack's read behind a capability of its own beside the
+source root's browse read. *Editing packs or shapes from the page* would be a write through
+browse's file family, which gonk does not offer today. Filters and a harness picker on the page
+are a separate item.
 
 ### Query sensors: `harness-*` scripts on gonk's tick (ledger #3726)
 

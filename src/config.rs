@@ -132,7 +132,10 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 56] = [
+const KEYS: [&str; 59] = [
+    crate::packs::DESCRIPTION_KEY,
+    crate::packs::PACK_KEY,
+    crate::packs::FIRINGS_KEY,
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
     "gonk.log.access",
@@ -869,6 +872,10 @@ pub struct Settings {
     /// The onboarding controller's door and files (`gonk.onboard`, [`crate::onboard`]), or
     /// `None`: no `urn:iki:onboard:*`, and nothing else changes.
     pub onboard: Option<crate::onboard::Config>,
+    /// Harness packs, the root descriptions their shapes are checked against, and the firings
+    /// they keep outside any tree (`gonk.browse.description`, `gonk.harness.pack`,
+    /// `gonk.harness.firings`, [`crate::packs`], ledger #3786). The default binds none.
+    pub harness: crate::packs::Config,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -2235,6 +2242,14 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     };
     let browse_roots = browse_roots(flags, text, homes)?;
     let browse_github = browse_github(text, &browse_roots)?;
+    let harness = crate::packs::Config::parse(
+        &values_for(text, crate::packs::DESCRIPTION_KEY),
+        &values_for(text, crate::packs::PACK_KEY),
+        &values_for(text, crate::packs::FIRINGS_KEY),
+        &browse_roots,
+        &browse_github,
+        &homes.home,
+    )?;
     let repositories = crate::git_object::configured(text, &homes.home, &browse_roots)?;
     let mounts = mounts(flags, text, homes)?;
     let mut layers = crate::layer::parse_all(&values_for(text, "gonk.layer"), &homes.home)?;
@@ -2362,6 +2377,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         session_max_seconds,
         browse_roots,
         browse_github,
+        harness,
         repositories,
         mounts,
         layers,

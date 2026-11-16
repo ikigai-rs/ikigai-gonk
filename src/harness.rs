@@ -88,6 +88,9 @@ const TEXT: &str = "text/plain";
 const QUERY_TEXT: &str = "application/sparql-query";
 const HTML: &str = web::HTML;
 
+/// How a refused id collision begins (ledger #3786).
+const COLLISION: &str = "two harness graphs";
+
 /// How far back the page's join reads: "this week".
 const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -199,6 +202,9 @@ pub struct Firing {
     pub session: Option<String>,
     pub tool: Option<String>,
     pub cmd: Option<String>,
+    /// The browse root the firing names (`repo=`), when it names one: a pack's firings live
+    /// outside any tree ([`crate::packs`]). `repo=-` names none.
+    pub repo: Option<String>,
 }
 
 /// The firings in one ikigai-log v1 segment, in the line grammar `tools/harness.py` writes.
@@ -264,6 +270,10 @@ pub fn parse_segment(text: &str) -> std::result::Result<Vec<Firing>, String> {
             session: fields.get("session").map(|s| s.to_string()),
             tool: fields.get("tool").map(|s| s.to_string()),
             cmd: fields.get("cmd").map(|s| s.to_string()),
+            repo: fields
+                .get("repo")
+                .filter(|r| **r != "-")
+                .map(|s| s.to_string()),
         });
     }
     Ok(firings)
@@ -337,6 +347,12 @@ pub struct Harness {
     pub root: String,
     store: Store,
     pub firings: Vec<Firing>,
+    /// The packs loaded beside the root's own graph (ledger #3786), in config order.
+    pub packs: Vec<crate::packs::Applied>,
+    /// Which pack each guide, control and incident came from: its index in [`Harness::packs`].
+    pub origins: BTreeMap<String, usize>,
+    /// What the page states in words about the packs: unbound adoption, a refused shape.
+    pub notes: Vec<String>,
 }
 
 fn store_err(e: impl std::fmt::Display) -> Error {
@@ -345,7 +361,11 @@ fn store_err(e: impl std::fmt::Display) -> Error {
 
 /// `urn:repo:{root}:file:{path}`, read under the caller's capability. `Ok(None)` when the file
 /// is not there.
-async fn read_file(inv: &Invocation<'_>, root: &str, path: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn read_file(
+    inv: &Invocation<'_>,
+    root: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>> {
     let iri = format!("urn:repo:{root}:file:{path}");
     match fetch(inv, request(Verb::Source, &iri)?).await {
         Ok(bytes) => Ok(Some(bytes)),
@@ -355,8 +375,19 @@ async fn read_file(inv: &Invocation<'_>, root: &str, path: &str) -> Result<Optio
 }
 
 impl Harness {
-    /// The harness `root=` names, or the first readable root that carries one.
+    /// The harness `root=` names, or the first readable root that carries one, with no packs.
     pub async fn load(web: &Web, inv: &Invocation<'_>) -> Result<Harness> {
+        Harness::load_with(web, &crate::packs::Config::default(), inv).await
+    }
+
+    /// The harness `root=` names, or the first readable root that carries one: its own graph
+    /// and every pack that applies to it ([`crate::packs::assemble`]). A root with no graph of
+    /// its own carries a harness when a pack applies to it.
+    pub async fn load_with(
+        web: &Web,
+        packs: &crate::packs::Config,
+        inv: &Invocation<'_>,
+    ) -> Result<Harness> {
         let asked = inv
             .inline_str("root")
             .ok()
@@ -378,13 +409,23 @@ impl Harness {
             return Err(Error::Denied(web::Lacking::repositories().plain(signed_in)));
         }
         for root in roots {
-            if let Some(turtle) = read_file(inv, &root, GRAPH_FILE).await? {
-                return Harness::from_bytes(
-                    &root,
-                    &turtle,
-                    read_file(inv, &root, FIRINGS_FILE).await?,
-                );
+            let own = read_file(inv, &root, GRAPH_FILE).await?;
+            if packs.is_empty() {
+                if let Some(turtle) = own {
+                    return Harness::from_bytes(
+                        &root,
+                        &turtle,
+                        read_file(inv, &root, FIRINGS_FILE).await?,
+                    );
+                }
+                continue;
             }
+            let assembly = crate::packs::assemble(web, packs, inv, &root, own.as_deref()).await?;
+            if own.is_none() && assembly.packs.is_empty() {
+                continue;
+            }
+            let segment = read_file(inv, &root, FIRINGS_FILE).await?;
+            return Harness::from_parts(&root, own.as_deref(), segment, assembly);
         }
         Err(Error::NotFound(format!(
             "no repository this grant may read carries a harness (`{GRAPH_FILE}`)"
@@ -393,27 +434,120 @@ impl Harness {
 
     /// A harness from its two files' bytes.
     pub fn from_bytes(root: &str, turtle: &[u8], segment: Option<Vec<u8>>) -> Result<Harness> {
+        Harness::from_parts(
+            root,
+            Some(turtle),
+            segment,
+            crate::packs::Assembly::default(),
+        )
+    }
+
+    /// A harness from the root's own graph (if any), its tree's firing segment, and the packs
+    /// that apply to it. Two graphs that give the same kind and id to different IRIs are refused,
+    /// naming both.
+    pub fn from_parts(
+        root: &str,
+        turtle: Option<&[u8]>,
+        segment: Option<Vec<u8>>,
+        assembly: crate::packs::Assembly,
+    ) -> Result<Harness> {
         let store = Store::new().map_err(store_err)?;
-        store
-            .load_from_slice(RdfParser::from_format(RdfFormat::Turtle), turtle)
-            .map_err(|e| {
-                Error::Endpoint(format!("`{GRAPH_FILE}` in `{root}` is not Turtle: {e}"))
-            })?;
-        let firings = match segment {
+        if let Some(turtle) = turtle {
+            let base = format!("urn:repo:{root}:file:{GRAPH_FILE}");
+            store
+                .load_from_slice(
+                    RdfParser::from_format(RdfFormat::Turtle)
+                        .with_base_iri(&base)
+                        .map_err(store_err)?,
+                    turtle,
+                )
+                .map_err(|e| {
+                    Error::Endpoint(format!("`{GRAPH_FILE}` in `{root}` is not Turtle: {e}"))
+                })?;
+        }
+        let mut origins = BTreeMap::new();
+        for (at, pack) in assembly.packs.iter().enumerate() {
+            for t in &pack.triples {
+                store
+                    .insert(&Quad::new(
+                        t.subject.clone(),
+                        t.predicate.clone(),
+                        t.object.clone(),
+                        GraphName::DefaultGraph,
+                    ))
+                    .map_err(store_err)?;
+                let typed = t.predicate.as_str() == RDF_TYPE
+                    && ["Guide", "Control", "Incident"]
+                        .iter()
+                        .any(|c| value(&t.object) == format!("{H}{c}"));
+                if typed {
+                    if let oxigraph::model::NamedOrBlankNode::NamedNode(n) = &t.subject {
+                        origins.entry(n.as_str().to_string()).or_insert(at);
+                    }
+                }
+            }
+        }
+        let mut firings = match segment {
             Some(bytes) => parse_segment(&String::from_utf8_lossy(&bytes))
                 .map_err(|e| Error::Endpoint(format!("`{FIRINGS_FILE}` in `{root}`: {e}")))?,
             None => Vec::new(),
         };
+        firings.extend(assembly.firings);
         for firing in &firings {
             for quad in firing_quads(firing) {
                 store.insert(&quad).map_err(store_err)?;
             }
         }
-        Ok(Harness {
+        let harness = Harness {
             root: root.to_string(),
             store,
             firings,
-        })
+            packs: assembly.packs,
+            origins,
+            notes: assembly.notes,
+        };
+        harness.refuse_collisions()?;
+        Ok(harness)
+    }
+
+    /// Refuse two IRIs of one kind that share an id: the resource names would be ambiguous.
+    fn refuse_collisions(&self) -> Result<()> {
+        let mut seen: BTreeMap<(&str, String), String> = BTreeMap::new();
+        for (s, props) in self.described()? {
+            for kind in [Kind::Control, Kind::Guide, Kind::Incident] {
+                if !is_a(&props, kind.class()) {
+                    continue;
+                }
+                let id = local(&s).to_string();
+                match seen.get(&(kind.word(), id.clone())) {
+                    Some(other) if *other != s => {
+                        return Err(Error::Endpoint(format!(
+                            "{COLLISION} loaded for `{}` give the {} id `{id}` to \
+                             different IRIs, <{other}> and <{s}>, so neither can be named",
+                            self.root,
+                            kind.word()
+                        )))
+                    }
+                    _ => {
+                        seen.insert((kind.word(), id), s.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The pack `iri` came from, and how: `None` for the root's own graph.
+    pub fn origin(&self, iri: &str) -> Option<(&crate::packs::Applied, Option<&str>)> {
+        let pack = self.packs.get(*self.origins.get(iri)?)?;
+        let words = match pack.narrowed.get(iri) {
+            Some(words) => words.as_deref(),
+            None => match &pack.how {
+                crate::packs::How::Shape(words) => words.as_deref(),
+                crate::packs::How::Adopted => None,
+            },
+        };
+        Some((pack, words))
     }
 
     fn query(&self, text: &str) -> Result<QueryResults<'_>> {
@@ -646,6 +780,8 @@ impl Kind {
 /// `urn:iki:harness:{control,guide,incident}:id:{id}`.
 pub struct Thing {
     pub web: Arc<Web>,
+    /// The packs this server binds (ledger #3786); the default binds none.
+    pub packs: Arc<crate::packs::Config>,
     pub kind: Kind,
 }
 
@@ -658,7 +794,7 @@ impl Endpoint for Thing {
         if ![TURTLE, JSON, TEXT, HTML].contains(&asked.as_str()) {
             return Err(refuse_face(&asked, &[TURTLE, JSON, TEXT, HTML]));
         }
-        let harness = Harness::load(&self.web, inv).await?;
+        let harness = Harness::load_with(&self.web, &self.packs, inv).await?;
         let Some(subject) = harness.find(self.kind.class(), id)? else {
             return Err(Error::NotFound(format!(
                 "the harness of `{}` has no {} `{id}`",
@@ -682,8 +818,11 @@ impl Endpoint for Thing {
                 harness.root
             );
             let iri = format!("urn:iki:harness:{}:id:{id}", self.kind.word());
+            let from = from_pack(&harness, &subject)
+                .map(|f| format!("<p class=\"harness-facts\">{}</p>", html_text(&f)))
+                .unwrap_or_default();
             let html = format!(
-                "{}{html}{}",
+                "{}{from}{html}{}",
                 back(&harness.root),
                 other_formats(
                     &iri,
@@ -744,6 +883,14 @@ impl Endpoint for Thing {
                 if matches!(self.kind, Kind::Control) {
                     doc["firings"] = json!(fired);
                 }
+                if let Some((pack, words)) = harness.origin(&subject) {
+                    doc["pack"] = json!({
+                        "name": pack.name,
+                        "label": pack.label,
+                        "version": pack.version,
+                        "appliesTo": words,
+                    });
+                }
                 if let Some(p) = self.kind.cited_by() {
                     doc[format!("{p}By")] = json!(citing);
                 }
@@ -764,6 +911,9 @@ impl Endpoint for Thing {
                 }
                 if matches!(self.kind, Kind::Control) {
                     let _ = writeln!(out, "firings: {fired}");
+                }
+                if let Some(from) = from_pack(&harness, &subject) {
+                    let _ = writeln!(out, "{from}");
                 }
                 if let Some(p) = self.kind.cited_by() {
                     for c in &citing {
@@ -810,6 +960,8 @@ impl Endpoint for Thing {
 /// `urn:iki:harness:coverage:query:{name}`.
 pub struct Coverage {
     pub web: Arc<Web>,
+    /// The packs this server binds (ledger #3786); the default binds none.
+    pub packs: Arc<crate::packs::Config>,
 }
 
 fn result_json(rows: &Rows) -> Value {
@@ -919,7 +1071,7 @@ impl Endpoint for Coverage {
         if asked == QUERY_TEXT {
             return Ok(answer(QUERY_TEXT, q.text.as_bytes().to_vec()));
         }
-        let harness = Harness::load(&self.web, inv).await?;
+        let harness = Harness::load_with(&self.web, &self.packs, inv).await?;
         let rows = harness.select(q.text)?;
         let iri = format!("urn:iki:harness:coverage:query:{}", q.name);
         if asked == HTML {
@@ -1006,6 +1158,8 @@ fn checked_date(date: &str) -> Result<&str> {
 /// `urn:iki:harness:firing:date:{date}`.
 pub struct FiringDay {
     pub web: Arc<Web>,
+    /// The packs this server binds (ledger #3786); the default binds none.
+    pub packs: Arc<crate::packs::Config>,
 }
 
 /// One day's rows: `(control, outcome word, count)`.
@@ -1035,7 +1189,7 @@ impl Endpoint for FiringDay {
         if ![TURTLE, JSON, TEXT, HTML].contains(&asked.as_str()) {
             return Err(refuse_face(&asked, &[TURTLE, JSON, TEXT, HTML]));
         }
-        let harness = Harness::load(&self.web, inv).await?;
+        let harness = Harness::load_with(&self.web, &self.packs, inv).await?;
         let triples = harness.construct(&FIRINGS_ON_DATE.replace("DAY", date))?;
         let rows = day_rows(&triples);
         if asked == HTML {
@@ -1453,6 +1607,7 @@ fn citing<'a>(
 
 /// One control as a list item: its name, linked, then a line of what it is and how often it fired.
 fn control_item(
+    harness: &Harness,
     all: &BTreeMap<String, Props>,
     root: &str,
     fired: &BTreeMap<&str, usize>,
@@ -1500,8 +1655,11 @@ fn control_item(
             incidents.join(", ")
         )
     };
+    let from = from_pack(harness, iri)
+        .map(|f| format!("<p class=\"harness-facts\">{}</p>", html_text(&f)))
+        .unwrap_or_default();
     format!(
-        "<li>{}<p class=\"harness-facts\">{}</p>{incidents}</li>",
+        "<li>{}<p class=\"harness-facts\">{}</p>{incidents}{from}</li>",
         link(&href, &label_of(all, iri)),
         line.join(" · ")
     )
@@ -1527,6 +1685,69 @@ fn section_line(text: &str, section: &str) -> Option<usize> {
         .map(|at| at + 1)
 }
 
+/// "From the pack “…” 1.0, which applies to roots that …": where a rule came from, or `None` for
+/// the root's own.
+fn from_pack(harness: &Harness, iri: &str) -> Option<String> {
+    let (pack, words) = harness.origin(iri)?;
+    let mut out = format!("From the pack \u{201c}{}\u{201d}", pack.label);
+    if let Some(version) = &pack.version {
+        let _ = write!(out, " {version}");
+    }
+    match (words, &pack.how) {
+        (Some(words), _) => {
+            let _ = write!(out, ", which applies to roots that {words}");
+        }
+        (None, crate::packs::How::Adopted) => out.push_str(", adopted by this repository"),
+        (None, _) => {}
+    }
+    Some(out)
+}
+
+/// The packs loaded for this root, one line each with its firings outside any root, and what
+/// could not be loaded, in words. Empty when no pack is configured.
+fn packs_html(harness: &Harness) -> String {
+    if harness.packs.is_empty() && harness.notes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "<h2 id=\"harness-packs\">Packs</h2><p>A pack is a harness that applies to many \
+         repositories: by the shape of their description, or because a repository adopts it.</p>",
+    );
+    if harness.packs.is_empty() {
+        out.push_str("<p>No pack applies to this repository.</p>");
+    } else {
+        out.push_str("<ul class=\"harness-list\">");
+        for pack in &harness.packs {
+            let mut name = format!("\u{201c}{}\u{201d}", pack.label);
+            if let Some(version) = &pack.version {
+                let _ = write!(name, " {version}");
+            }
+            let how = match &pack.how {
+                crate::packs::How::Shape(Some(words)) => format!("applies to roots that {words}"),
+                crate::packs::How::Shape(None) => "applies to this repository by its shape".into(),
+                crate::packs::How::Adopted => "adopted by this repository".into(),
+            };
+            let _ = write!(
+                out,
+                "<li>{}<p class=\"harness-facts\">{} · {} outside any repository you may \
+                 read</p></li>",
+                html_text(&name),
+                html_text(&how),
+                html_text(&plural(pack.outside, "firing", "firings")),
+            );
+        }
+        out.push_str("</ul>");
+    }
+    if !harness.notes.is_empty() {
+        out.push_str("<ul class=\"harness-links harness-notes\">");
+        for note in &harness.notes {
+            let _ = write!(out, "<li>{}</li>", html_text(note));
+        }
+        out.push_str("</ul>");
+    }
+    out
+}
+
 /// The page's body, as HTML: the join, the coverage, the guides with the controls that check
 /// them, and the days.
 async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<String> {
@@ -1540,6 +1761,8 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
             html_text(&sentence)
         );
     }
+
+    out.push_str(&packs_html(harness));
 
     // Coverage: each answer its question's row count, in words, linked to the answer's page.
     out.push_str(
@@ -1594,13 +1817,16 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
                 html_text(&at)
             );
         }
+        if let Some(from) = from_pack(harness, guide) {
+            let _ = write!(out, "<p class=\"harness-facts\">{}</p>", html_text(&from));
+        }
         let controls = citing(&all, "statedBy", guide);
         if controls.is_empty() {
             out.push_str("<p>No control checks this guide.</p>");
         } else {
             out.push_str("<ul class=\"harness-list\">");
             for (c, _) in controls {
-                out.push_str(&control_item(&all, root, &fired, c));
+                out.push_str(&control_item(harness, &all, root, &fired, c));
             }
             out.push_str("</ul>");
         }
@@ -1631,7 +1857,7 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
              id=\"harness-unstated\">Controls no guide states</h3><ul class=\"harness-list\">",
         );
         for c in unstated {
-            out.push_str(&control_item(&all, root, &fired, c));
+            out.push_str(&control_item(harness, &all, root, &fired, c));
         }
         out.push_str("</ul></section>");
     }
@@ -2052,6 +2278,8 @@ fn page_with(
 /// `urn:iki:gonk:page:harness`, at `/harness`.
 pub struct HarnessPage {
     pub web: Arc<Web>,
+    /// The packs this server binds (ledger #3786); the default binds none.
+    pub packs: Arc<crate::packs::Config>,
 }
 
 #[async_trait]
@@ -2061,15 +2289,25 @@ impl Endpoint for HarnessPage {
             return Err(Error::Endpoint("a page answers Source only".to_string()));
         }
         web::html_only(inv)?;
-        match Harness::load(&self.web, inv).await {
+        match Harness::load_with(&self.web, &self.packs, inv).await {
             Ok(harness) => {
                 let html = body(&self.web, inv, &harness).await?;
-                let message = format!(
-                    "The rules the agents in the repository \"{}\" follow: its \
-                     .gonk/harness/harness.ttl and its firing log, read under your grant. Each \
-                     guide, control, incident, question and day has a page of its own.",
-                    harness.root
-                );
+                let message = if harness.packs.is_empty() {
+                    format!(
+                        "The rules the agents in the repository \"{}\" follow: its \
+                         .gonk/harness/harness.ttl and its firing log, read under your grant. \
+                         Each guide, control, incident, question and day has a page of its own.",
+                        harness.root
+                    )
+                } else {
+                    format!(
+                        "The rules the agents in the repository \"{}\" follow: its own harness, \
+                         if it has one, the packs that apply to it, and their firings, read under \
+                         your grant. Each guide, control, incident, question and day has a page of \
+                         its own.",
+                        harness.root
+                    )
+                };
                 harness_page(&self.web, inv, "Harness", &message, Some(html))
             }
             Err(Error::Denied(_)) => page_with(
@@ -2081,6 +2319,10 @@ impl Endpoint for HarnessPage {
                 None,
             ),
             Err(Error::NotFound(why)) => {
+                harness_page(&self.web, inv, "Harness", &format!("{why}."), None)
+            }
+            // Two graphs that name one thing twice: the page is refused, in words.
+            Err(Error::Endpoint(why)) if why.starts_with(COLLISION) => {
                 harness_page(&self.web, inv, "Harness", &format!("{why}."), None)
             }
             Err(e) => Err(e),
