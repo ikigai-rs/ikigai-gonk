@@ -4,12 +4,14 @@
 //! The repository is a scratch one in the shape every gonk-starter repository has:
 //! `.gonk/harness/harness.ttl` and a git-ignored `.gonk/state/harness/firings.log`.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
-use ikigai_gonk::grants::{grants_for, Authority};
+use ikigai_gonk::grants::{anonymous_http_grants, grants_for, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::watch::RootWatch;
 use ikigai_gonk::{browse, compose_with, doors, quic, web};
@@ -125,12 +127,18 @@ fn scratch(firings: &str) -> TempDir {
     std::fs::write(dir.path().join(".gitignore"), "/.gonk/state/\n").unwrap();
     std::fs::write(dir.path().join(".gonk/harness/harness.ttl"), HARNESS).unwrap();
     std::fs::write(dir.path().join(".gonk/state/harness/firings.log"), firings).unwrap();
+    // Where the guides are stated: `1. Claim …` is the heading on line 3.
+    std::fs::write(
+        dir.path().join("AGENTS.md"),
+        "# Agents\n\n## 1. Claim the item before you write\n\nClaim it.\n",
+    )
+    .unwrap();
     dir
 }
 
 struct Served {
     hub: Arc<Kernel>,
-    http: Kernel,
+    http: Arc<Kernel>,
     _watch: RootWatch,
 }
 
@@ -175,7 +183,7 @@ fn served(dir: &TempDir) -> Served {
         faces: Vec::new(),
     });
     Served {
-        http: doors::http_kernel(Arc::clone(&hub), web::space(face)),
+        http: Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face))),
         hub,
         _watch: watch,
     }
@@ -186,7 +194,7 @@ impl Served {
         let request = Request::new(Verb::Source, Iri::parse(iri).unwrap())
             .with_arg("as", ArgRef::Inline(face.as_bytes().to_vec()));
         // A composition nests further than a debug build fits in a test thread's stack.
-        let (http, cap) = (&self.http, cap.clone());
+        let (http, cap) = (&*self.http, cap.clone());
         std::thread::scope(|s| {
             std::thread::Builder::new()
                 .stack_size(ikigai_gonk::stack::THREAD_STACK_BYTES)
@@ -219,6 +227,37 @@ impl Served {
         block_on(Kernel::issue(&self.hub, request, &Capability::root())).unwrap();
     }
 
+    /// The HTTP door wired as `main` wires it, over this composition, for an anonymous loopback
+    /// caller that reads the `default` ledger and the `demo` root: the door that negotiates a
+    /// face from a browser's `Accept`.
+    fn door(&self) -> std::net::SocketAddr {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut anonymous = anonymous_http_grants(&["default".to_string()]).unwrap();
+        anonymous.push(format!("{}demo", ikigai_browse::CAP_PREFIX));
+        let door = doors::HttpDoor {
+            anonymous,
+            bind: addr,
+            passkeys: None,
+            public: Vec::new(),
+            anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        };
+        let edge = doors::edge_config(door.clone());
+        let http = Arc::clone(&self.http);
+        std::thread::spawn(move || {
+            runtime.block_on(ikigai_web::serve_with_listener(
+                http,
+                doors::http_cap(door),
+                listener,
+                edge,
+            ))
+        });
+        addr
+    }
+
     fn json(&self, iri: &str, cap: &Capability) -> Value {
         serde_json::from_str(&self.read(iri, "application/json", cap).unwrap()).unwrap()
     }
@@ -240,8 +279,9 @@ fn rows(answer: &Value) -> usize {
     answer["results"]["bindings"].as_array().unwrap().len()
 }
 
-/// ★ The page draws every control under its stage and category, with its guide, incident,
-/// proof and code site, and the coverage gaps, each a link to the question that answers it.
+/// ★ The page reads as a page: each guide a heading, with the controls that state it listed under
+/// it, then the controls no guide states; every count is words linked to the page that answers
+/// it, and no link lands on plain text.
 #[test]
 fn a_repository_harness_renders_with_its_controls_and_gaps() {
     let now = now_ms();
@@ -255,29 +295,35 @@ fn a_repository_harness_renders_with_its_controls_and_gaps() {
         .unwrap();
     for needle in [
         "<h1 id=\"harness-title\">Harness</h1>",
-        "Stage: tool-call",
-        "Stage: pre-commit",
-        "<caption>authority/safety, at tool-call</caption>",
-        "hook: no claim, no write",
+        "<h2 id=\"harness-coverage\">Coverage</h2>",
+        "<h2 id=\"harness-guides\">Guides and the controls that check them</h2>",
+        // A guide is a heading, linked to its page, and its control is listed under it.
+        "<h3 id=\"harness-guide-claim-before-write\"><a href=\"/harness/guide/claim-before-write?root=demo\">no claim, no write</a></h3>",
+        "<p class=\"harness-facts\">Stated in AGENTS.md, section \u{201c}1. Claim the item before you write\u{201d}</p><ul class=\"harness-list\"><li><a href=\"/harness/control/require-claim?root=demo\">hook: no claim, no write</a>",
+        "sensor · computational · at tool-call · refuses · <a href=\"/harness/control/require-claim?root=demo#harness-firings\">1 firing</a>",
+        "Exists for <a href=\"/harness/incident/unclaimed-edit?root=demo\">an edit landed with no claim</a>",
+        // A guide no control checks says so.
+        "<h3 id=\"harness-guide-reproduce-first\"><a href=\"/harness/guide/reproduce-first?root=demo\">reproduce before you fix</a></h3>",
+        "No control checks this guide.",
+        // The controls no guide states, under a heading of their own.
+        "<h3 id=\"harness-unstated\">Controls no guide states</h3>",
         "gate: secrets in a commit",
-        // Its guide, its incident, its proof, its code site.
-        ">no claim, no write</a>",
-        ">an edit landed with no claim</a>",
-        "fired by a test: SensorsFire.test_require_claim",
-        "<code>tools/claim_hook.py#main</code>",
-        "cannot fire in a test: the scanner is a third party&#39;s",
-        // A gap is a number, linked to its question's answer.
-        "<th scope=\"row\">Sensors without a guide</th><td><a href=\"/harness/coverage/sensors-without-guide?root=demo&amp;as=text%2Fplain\">2</a>",
-        "<th scope=\"row\">Guides without a check</th><td><a href=\"/harness/coverage/guides-without-sensor?root=demo&amp;as=text%2Fplain\">1</a>",
-        "<th scope=\"row\">Incidents without a sensor</th><td><a href=\"/harness/coverage/incidents-without-sensor?root=demo&amp;as=text%2Fplain\">1</a>",
-        "<th scope=\"row\">Sensors never fired</th><td><a href=\"/harness/coverage/sensors-never-fired?root=demo&amp;as=text%2Fplain\">1</a>",
+        "never fired",
+        // A gap is a count in words, linked to its question's page.
+        "<caption>Each coverage question, and how many answers it has</caption>",
+        "<th scope=\"row\">Sensors without a guide</th><td><a href=\"/harness/coverage/sensors-without-guide?root=demo\">2 sensors</a>",
+        "<th scope=\"row\">Guides without a check</th><td><a href=\"/harness/coverage/guides-without-sensor?root=demo\">1 guide</a>",
+        "<th scope=\"row\">Incidents without a sensor</th><td><a href=\"/harness/coverage/incidents-without-sensor?root=demo\">1 incident</a>",
+        "<th scope=\"row\">Sensors never fired</th><td><a href=\"/harness/coverage/sensors-never-fired?root=demo\">1 sensor</a>",
         "In the last 7 days the harness refused 1 action",
     ] {
         // The shell is written with single quotes, the body with double ones.
         let at = page.replace('\'', "\"");
         assert!(at.contains(needle), "`{needle}` is not on the page:\n{page}");
     }
-    // Each gap's number is its question's row count.
+    // No link on the page lands on a face a browser shows as plain text.
+    assert!(!page.contains("as=text%2Fplain"), "{page}");
+    // Each gap's count is its question's row count.
     for (name, expected) in [
         ("sensors-without-guide", 2),
         ("guides-without-sensor", 1),
@@ -385,13 +431,28 @@ fn firings_aggregate_per_day() {
     let page = s
         .read("urn:iki:gonk:page:harness", "text/html", &reader())
         .unwrap();
-    let href = "/harness/firing/2026-11-15?root=demo&amp;as=text%2Fplain";
     assert!(
-        page.contains(&format!(
-            "<th scope=\"row\">2026-11-15</th><td><a href=\"{href}\">2</a></td><td><a href=\"{href}\">2</a></td>"
-        )),
+        page.contains(
+            "<th scope=\"row\">2026-11-15</th><td><a href=\"/harness/firing/2026-11-15?root=demo\">2 refusals, 2 warnings</a></td>"
+        ),
         "{page}"
     );
+    // The day's own page: each control linked, its outcome and its count in words.
+    let day = s
+        .read(
+            "urn:iki:harness:firing:date:2026-11-15",
+            "text/html",
+            &reader(),
+        )
+        .unwrap()
+        .replace('\'', "\"");
+    for needle in [
+        "<h1 id=\"harness-title\">Harness firings on 2026-11-15</h1>",
+        "<p>On 2026-11-15 (UTC): 2 refusals, 2 warnings.</p>",
+        "<th scope=\"row\"><a href=\"/harness/control/require-claim?root=demo\">hook: no claim, no write</a></th><td>refused</td><td>2 times</td>",
+    ] {
+        assert!(day.contains(needle), "`{needle}` is not on the day's page:\n{day}");
+    }
     assert!(s
         .read(
             "urn:iki:harness:firing:date:2026-1-15",
@@ -399,6 +460,115 @@ fn firings_aggregate_per_day() {
             &reader()
         )
         .is_err());
+}
+
+/// ★ Ledger #3777: a control, guide, incident or coverage page answers HTML in gonk's chrome,
+/// each thing it names linked to its own page, its other faces offered as links, and the HTTP
+/// door hands a browser that page by default.
+#[test]
+fn a_detail_page_answers_html_with_its_guides_linked() {
+    let dir = scratch(&segment(&[(
+        1_794_700_800_000 + 1_000,
+        "Refusal",
+        "require-claim",
+        "a",
+    )]));
+    let s = served(&dir);
+    let read = |iri: &str| {
+        s.read(iri, "text/html", &reader())
+            .unwrap()
+            .replace('\'', "\"")
+    };
+    let control = read("urn:iki:harness:control:id:require-claim");
+    for needle in [
+        // gonk's chrome: the header's Harness link, and the label as the page's one h1.
+        "href=\"/harness\"",
+        "<h1 id=\"harness-title\">hook: no claim, no write</h1>",
+        "A sensor in the harness of the repository &quot;demo&quot;.",
+        "<a href=\"/harness?root=demo\">Back to the harness of &quot;demo&quot;</a>",
+        "<dt>Direction</dt><dd>sensor</dd><dt>Execution</dt><dd>computational</dd>",
+        "<dt>Lifecycle stage</dt><dd>tool-call</dd><dt>Category</dt><dd>authority/safety</dd>",
+        "<dt>When it fires</dt><dd>refuses the action</dd>",
+        "<dt>Enforced at</dt><dd><code>tools/claim_hook.py#main</code></dd>",
+        "<dt>Proof it can fire</dt><dd>fired by a test: SensorsFire.test_require_claim</dd>",
+        // Its guide and its incident, each linked to its page.
+        "<h2 id=\"harness-guides\">Guides that state it</h2><ul class=\"harness-links\"><li><a href=\"/harness/guide/claim-before-write?root=demo\">no claim, no write</a></li></ul>",
+        "<h2 id=\"harness-incidents\">Incidents it exists for</h2><ul class=\"harness-links\"><li><a href=\"/harness/incident/unclaimed-edit?root=demo\">an edit landed with no claim</a></li></ul>",
+        // Its firings by day, each day linked.
+        "<h2 id=\"harness-firings\">Firings by day</h2>",
+        "<th scope=\"row\">2026-11-15</th><td><a href=\"/harness/firing/2026-11-15?root=demo\">1 refusal</a></td>",
+        // The other faces, offered and not the default.
+        "Other formats: <a href=\"/harness/control/require-claim?root=demo&amp;as=text%2Fplain\">Text</a>, <a href=\"/harness/control/require-claim?root=demo&amp;as=text%2Fturtle\">Turtle</a>",
+    ] {
+        assert!(control.contains(needle), "`{needle}` is not on the control's page:\n{control}");
+    }
+    let guide = read("urn:iki:harness:guide:id:claim-before-write");
+    for needle in [
+        "<h1 id=\"harness-title\">no claim, no write</h1>",
+        "<dt>What it says</dt><dd>no claim, no write</dd>",
+        // Where it is stated: browse's view of the file, at the section's heading.
+        "<dt>Where it is stated</dt><dd><a href=\"/browse/urn:repo:demo:file:AGENTS.md#L3\">AGENTS.md, section \u{201c}1. Claim the item before you write\u{201d}</a></dd>",
+        "<h2 id=\"harness-controls\">Controls that enforce it</h2><ul class=\"harness-links\"><li><a href=\"/harness/control/require-claim?root=demo\">hook: no claim, no write</a></li></ul>",
+    ] {
+        assert!(guide.contains(needle), "`{needle}` is not on the guide's page:\n{guide}");
+    }
+    let incident = read("urn:iki:harness:incident:id:lost-lease");
+    for needle in [
+        "<h1 id=\"harness-title\">a lease ran out mid-run</h1>",
+        "No control exists for this incident",
+    ] {
+        assert!(
+            incident.contains(needle),
+            "`{needle}` is not on the incident's page:\n{incident}"
+        );
+    }
+    let coverage = read("urn:iki:harness:coverage:query:sensors-without-guide");
+    for needle in [
+        "<h1 id=\"harness-title\">Sensors without a guide</h1>",
+        "<p>2 sensors.</p>",
+        "<a href=\"/harness/control/big-diff?root=demo\">gate: a diff too big to review</a>",
+        "as=application%2Fsparql-query\">The SPARQL query</a>",
+    ] {
+        assert!(
+            coverage.contains(needle),
+            "`{needle}` is not on the question's page:\n{coverage}"
+        );
+    }
+    for page in [&control, &guide, &incident, &coverage] {
+        assert!(!page.contains("sha256:"), "{page}");
+    }
+    // The door: a browser's GET of the link, with no `as`, is answered the page; a client that
+    // names no face is answered the resource's own default, Turtle, as before.
+    let addr = s.door();
+    let get = |accept: &str| {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "GET /harness/control/require-claim?root=demo HTTP/1.1\r\nHost: localhost:{}\r\n\
+             Accept: {accept}\r\nConnection: close\r\n\r\n",
+            addr.port()
+        )
+        .unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        answer
+    };
+    let browser = get("text/html,application/xhtml+xml,*/*;q=0.8");
+    assert!(browser.starts_with("HTTP/1.1 200"), "{browser}");
+    assert!(
+        browser
+            .to_ascii_lowercase()
+            .contains("content-type: text/html"),
+        "{browser}"
+    );
+    assert!(browser.contains("Guides that state it"), "{browser}");
+    let script = get("*/*");
+    assert!(
+        script
+            .to_ascii_lowercase()
+            .contains("content-type: text/turtle"),
+        "{script}"
+    );
 }
 
 /// ★ A caller whose grant reads no repository sees no control, no count and no gap: the page

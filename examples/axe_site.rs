@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_serving, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 28] = [
+const PAGES: [(&str, &str); 33] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -77,6 +77,27 @@ const PAGES: [(&str, &str); 28] = [
     ("browse.html", "/browse"),
     // Ledger #3721: the fixture repository's harness, its gaps and its firings.
     ("harness.html", "/harness"),
+    // Ledger #3777: its detail pages, as a browser is answered them (no `as`, `Accept` HTML).
+    (
+        "harness-control.html",
+        "/harness/control/require-claim?root=fixture",
+    ),
+    (
+        "harness-guide.html",
+        "/harness/guide/claim-before-write?root=fixture",
+    ),
+    (
+        "harness-incident.html",
+        "/harness/incident/unclaimed-edit?root=fixture",
+    ),
+    (
+        "harness-day.html",
+        "/harness/firing/2026-11-02?root=fixture",
+    ),
+    (
+        "harness-coverage.html",
+        "/harness/coverage/sensors-without-guide?root=fixture",
+    ),
     ("queue.html", "/queue"),
     // Ledger #3285: the sign-in state only, since a static site has no passkey and the door's
     // feeds are live; the subscribed page with its checkbox tree is `tests/feeds_3285.rs`'s.
@@ -92,8 +113,9 @@ const FILES: [(&str, &str); 6] = [
     ("static/gonk.js", "text/javascript"),
 ];
 
-/// The fixture repository's harness (ledger #3721): a guide, two sensors and an incident, so
-/// the page draws a stage, a category, a proof, a code site and a gap of each kind.
+/// The fixture repository's harness (ledger #3721), the one `tests/harness_3721.rs` builds: two
+/// guides (one no control checks), three sensors (one no guide states, one never fired) and two
+/// incidents (one no control exists for), so the page draws each grouping and a gap of each kind.
 const HARNESS: &str = r#"@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix ctl:     <urn:iki:harness:fixture:control:> .
@@ -104,6 +126,10 @@ guide:claim-before-write a harness:Guide ; rdfs:label "no claim, no write" ;
     harness:statedIn "AGENTS.md" ; harness:section "1. Claim the item before you write" ;
     harness:direction harness:feedforward ; harness:execution harness:inferential ;
     harness:stage harness:toolCall ; harness:category harness:authoritySafety .
+guide:reproduce-first a harness:Guide ; rdfs:label "reproduce before you fix" ;
+    harness:statedIn "AGENTS.md" ; harness:section "3. Reproduce first" ;
+    harness:direction harness:feedforward ; harness:execution harness:inferential ;
+    harness:stage harness:toolCall ; harness:category harness:behavior .
 inc:unclaimed-edit a harness:Incident ; rdfs:label "an edit landed with no claim" .
 inc:lost-lease a harness:Incident ; rdfs:label "a lease ran out mid-run" .
 ctl:require-claim a harness:Control ; rdfs:label "hook: no claim, no write" ;
@@ -116,7 +142,12 @@ ctl:big-diff a harness:Control ; rdfs:label "gate: a diff too big to review" ;
     harness:direction harness:feedback ; harness:execution harness:computational ;
     harness:stage harness:preCommit ; harness:category harness:maintainability ;
     harness:outcome harness:warn ; harness:enforcedAt "tools/gonk.py#check_diff" ;
-    harness:noFiringTest "a fixture's sensor" .
+    harness:firedBy test:test_harness:SensorsFire.test_big_diff .
+ctl:never-fires a harness:Control ; rdfs:label "gate: secrets in a commit" ;
+    harness:direction harness:feedback ; harness:execution harness:computational ;
+    harness:stage harness:preCommit ; harness:category harness:authoritySafety ;
+    harness:outcome harness:refuse ; harness:enforcedAt "hooks/pre-commit#secrets" ;
+    harness:noFiringTest "the scanner is a third party's" .
 "#;
 
 /// Its firing segment: a refusal and two warnings over two days.
@@ -219,6 +250,12 @@ fn main() {
     std::fs::create_dir_all(repository.join(".gonk/state/harness")).unwrap();
     std::fs::write(repository.join(".gonk/harness/harness.ttl"), HARNESS).unwrap();
     std::fs::write(repository.join(".gonk/state/harness/firings.log"), FIRINGS).unwrap();
+    // Where the guides are stated, so a guide's page links into browse at its section.
+    std::fs::write(
+        repository.join("AGENTS.md"),
+        "# Agents\n\n## 1. Claim the item before you write\n\nClaim it.\n\n## 3. Reproduce first\n",
+    )
+    .unwrap();
     let commit = git(&["rev-parse", "HEAD"]);
     let blob = git(&["rev-parse", "HEAD:example.rs"]);
     let graph = ikigai_gonk::browse::Graph::chosen();
