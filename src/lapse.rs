@@ -17,7 +17,7 @@
 //!   the tokens the Sink requires ([`scopes`]) and gonk's own recorder principal
 //!   ([`PRINCIPAL`]), which is the committer on every `LapseEvent` it writes. The tick itself
 //!   fires under [`job_capability`], which holds no scope at all, and its one target is resolved
-//!   only by [`Sweeper`], which no door reaches.
+//!   only by the registry's own resolver (`Sweeper`), which no door reaches.
 //! - **Failures are contained.** A ledger whose sweep fails is logged in words and recorded in
 //!   [`STATUS`]; the other ledgers and the next run go on. Nothing logged names an item's title:
 //!   ledger names, item numbers and counts only.
@@ -42,7 +42,8 @@ use crate::backup::{humanize, stamp_iso, BackupTimer, NextRun, CATCH_UP};
 /// (or `off`) means no sweep.
 pub const EVERY_KEY: &str = "gonk.ledger.lapse.every";
 
-/// The job's one target, resolved only by [`Sweeper`]: bound in no space, so no door reaches it.
+/// The job's one target, resolved only by the registry's own resolver (`Sweeper`): bound in no
+/// space, so no door reaches it.
 pub const SWEEP: &str = "urn:iki:gonk:lapse";
 
 /// What the sweep did, per ledger, and when it runs next: `Source urn:iki:gonk:lapse:status`.
@@ -139,8 +140,8 @@ pub fn capability(ledger: &Ledger) -> Capability {
 }
 
 /// What the tick fires under, and the registry's ceiling: no scope at all, as [`PRINCIPAL`].
-/// A tick reaches [`Sweeper`] and nothing else; were it ever forwarded to the hub, it could
-/// read and write nothing.
+/// A tick reaches the registry's own resolver (`Sweeper`) and nothing else; were it ever
+/// forwarded to the hub, it could read and write nothing.
 pub fn job_capability() -> Capability {
     Capability::scoped(Vec::<String>::new())
         .with_principal(PRINCIPAL)
@@ -162,7 +163,8 @@ pub struct Swept {
     pub error: Option<String>,
 }
 
-/// The sweep as configured and as it went: shared by the timer's [`Sweeper`] and [`STATUS`].
+/// The sweep as configured and as it went: shared by the timer's resolver (`Sweeper`) and
+/// [`STATUS`].
 #[derive(Clone)]
 pub struct Lapses {
     /// The cadence, or `None` when no [`EVERY_KEY`] line is set.
