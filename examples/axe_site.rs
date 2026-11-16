@@ -165,6 +165,35 @@ const FIRINGS: &str = "# ikigai-log v1
 2026-11-02T02:00:00.000Z harness:Warning urn:iki:harness:fixture:control:big-diff seq=3 cmd=sha256:000000000002
 ";
 
+/// A pack (ledger #3786) whose shape matches the fixture root by name, and one rule of its own.
+const PACK: &str = r#"@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix browse:  <https://ikigai-rs.dev/ns/browse#> .
+<urn:iki:harness:pack:name:ops> a harness:Pack ; rdfs:label "operator rules" ;
+    owl:versionInfo "1.0" ; harness:appliesTo <urn:iki:harness:shape:fixture> .
+<urn:iki:harness:shape:fixture> a sh:NodeShape ; rdfs:label "are the fixture" ;
+    sh:property [ sh:path browse:rootName ; sh:hasValue "fixture" ] .
+<urn:iki:harness:ops:control:one-gate> a harness:Control ; rdfs:label "hook: one gate per command" ;
+    harness:direction harness:feedback ; harness:outcome harness:warn ;
+    harness:statedBy <urn:iki:harness:fixture:guide:claim-before-write> .
+"#;
+
+/// The pack's firings: one on the fixture, one outside any root.
+const PACK_FIRINGS: &str = "# ikigai-log v1
+@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
+@prefix log:     <https://ikigai-rs.dev/ns/log#> .
+@name     urn:log:harness:ops-s1
+@instance urn:iki:harness:ops:s1
+@level    log:info
+@started  2026-11-01T00:00:00.000Z
+@prev     genesis
+
+2026-11-02T03:00:00.000Z harness:Warning urn:iki:harness:ops:control:one-gate seq=1 repo=fixture cmd=sha256:000000000003
+2026-11-02T04:00:00.000Z harness:Warning urn:iki:harness:ops:control:one-gate seq=2 repo=- cmd=sha256:000000000004
+";
+
 /// A browser's GET of `path`: its status and its body.
 fn get(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
     let mut stream = TcpStream::connect(addr).expect("connect");
@@ -250,6 +279,27 @@ fn main() {
     std::fs::create_dir_all(repository.join(".gonk/state/harness")).unwrap();
     std::fs::write(repository.join(".gonk/harness/harness.ttl"), HARNESS).unwrap();
     std::fs::write(repository.join(".gonk/state/harness/firings.log"), FIRINGS).unwrap();
+    // Ledger #3786: a pack that applies to the fixture by its shape, with firings kept outside
+    // the tree, and an adoption no line binds, so the page states it.
+    std::fs::create_dir_all(repository.join("packs")).unwrap();
+    std::fs::write(repository.join("packs/ops.ttl"), PACK).unwrap();
+    std::fs::write(
+        repository.join(".gonk/harness/harness.ttl"),
+        format!("{HARNESS}<> harness:adopts <urn:iki:harness:pack:name:unbound> .\n"),
+    )
+    .unwrap();
+    let pack_firings = config.path().join("pack-firings");
+    std::fs::create_dir_all(&pack_firings).unwrap();
+    std::fs::write(pack_firings.join("s1.log"), PACK_FIRINGS).unwrap();
+    let packs = ikigai_gonk::packs::Config::parse(
+        &[],
+        &["ops fixture:packs/ops.ttl".to_string()],
+        &[format!("ops {}", pack_firings.display())],
+        &[("fixture".to_string(), repository.clone())],
+        &[],
+        config.path(),
+    )
+    .expect("the fixture's pack");
     // Where the guides are stated, so a guide's page links into browse at its section.
     std::fs::write(
         repository.join("AGENTS.md"),
@@ -534,7 +584,11 @@ fn main() {
     });
     let http = Arc::new(doors::http_kernel_serving(
         hub,
-        ikigai_gonk::layers_view::bind(web::space(Arc::clone(&face)), &face, None),
+        ikigai_gonk::layers_view::bind(
+            web::space_with(Arc::clone(&face), Arc::new(packs)),
+            &face,
+            None,
+        ),
         Vec::new(),
         None,
     ));

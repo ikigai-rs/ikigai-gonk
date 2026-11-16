@@ -80,6 +80,7 @@ pub mod nl;
 pub mod onboard;
 pub mod onboard_init;
 pub mod operator;
+pub mod packs;
 pub mod page_assets;
 pub mod participants;
 pub mod projects;

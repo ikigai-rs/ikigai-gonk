@@ -184,6 +184,12 @@ pub struct Web {
 
 /// Bind the face.
 pub fn space(web: Arc<Web>) -> EndpointSpace {
+    space_with(web, Arc::default())
+}
+
+/// [`space`], its Harness page and resources reading the harness packs `packs` binds, and the
+/// root descriptions they are matched against (ledger #3786, [`crate::packs`]).
+pub fn space_with(web: Arc<Web>, packs: Arc<crate::packs::Config>) -> EndpointSpace {
     let operator_web = Arc::clone(&web);
     let template = |t: &str| UriTemplate::parse(t).expect("a constant template");
     let space = EndpointSpace::new()
@@ -291,6 +297,7 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             template(crate::harness::CONTROL_TEMPLATE),
             crate::harness::Thing {
                 web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
                 kind: crate::harness::Kind::Control,
             },
         )
@@ -298,6 +305,7 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             template(crate::harness::GUIDE_TEMPLATE),
             crate::harness::Thing {
                 web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
                 kind: crate::harness::Kind::Guide,
             },
         )
@@ -305,6 +313,7 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             template(crate::harness::INCIDENT_TEMPLATE),
             crate::harness::Thing {
                 web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
                 kind: crate::harness::Kind::Incident,
             },
         )
@@ -312,18 +321,28 @@ pub fn space(web: Arc<Web>) -> EndpointSpace {
             template(crate::harness::COVERAGE_TEMPLATE),
             crate::harness::Coverage {
                 web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
             },
         )
         .bind(
             template(crate::harness::FIRING_TEMPLATE),
             crate::harness::FiringDay {
                 web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
+            },
+        )
+        .bind(
+            crate::packs::DescriptionGrammar,
+            crate::packs::DescriptionEndpoint {
+                web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
             },
         )
         .bind(
             Exact::new(crate::harness::PAGE_IRI),
             crate::harness::HarnessPage {
                 web: Arc::clone(&web),
+                packs: Arc::clone(&packs),
             },
         )
         .bind(
@@ -508,8 +527,21 @@ pub fn door_space(
     web: Arc<Web>,
     layers_view: impl Into<crate::layers_view::Views>,
 ) -> EndpointSpace {
+    door_space_with(web, layers_view, Arc::default())
+}
+
+/// [`door_space`], the Harness reading the packs `packs` binds ([`space_with`]).
+pub fn door_space_with(
+    web: Arc<Web>,
+    layers_view: impl Into<crate::layers_view::Views>,
+    packs: Arc<crate::packs::Config>,
+) -> EndpointSpace {
     let layers_view = layers_view.into();
-    let pages = crate::resolution::bind(space(Arc::clone(&web)), &web, layers_view.clone());
+    let pages = crate::resolution::bind(
+        space_with(Arc::clone(&web), packs),
+        &web,
+        layers_view.clone(),
+    );
     let pages = crate::layers_view::bind(pages, &web, layers_view);
     crate::onboard::bind_page(pages, &web).named(crate::spaces::iri(crate::spaces::PAGES))
 }

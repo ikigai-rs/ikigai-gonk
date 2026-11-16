@@ -356,7 +356,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 52] = [
+const WEB_IDS: [&str; 53] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -415,6 +415,8 @@ const WEB_IDS: [&str; 52] = [
     "gonk-harness-coverage",
     "gonk-harness-firing-date",
     "gonk-harness-page",
+    // A browse root's description, which harness packs' shapes are checked against (#3786).
+    "gonk-root-description",
 ];
 
 /// `ikigai_ui::space()` in the HTTP door (ledger #2834): the shared UI artifacts, inherited like
@@ -609,6 +611,24 @@ fn the_http_door_conforms() {
             "it reads `.gonk/harness/` through the browse family, and this composition binds NO \
              browse root, so the minimal resolution is a typed NotFound rather than a face; \
              `tests/harness_3721.rs` reads every face where a root exists",
+        )
+        .opt_out_check(
+            "gonk-root-description",
+            Check::Resolves,
+            "a root's description is refused as `Denied` for any root the caller cannot read, \
+             and for a root this server does not browse alike, so a caller learns nothing of a \
+             root it may not read, not even that it exists (ledger #3786); this composition binds \
+             NO browse root, so every probe is that refusal. `tests/harness_packs_3786.rs` \
+             resolves it where roots exist",
+        )
+        .opt_out_check(
+            "gonk-root-description",
+            Check::Enforced,
+            "the gate is `urn:cap:browse:read:{root}`, a capability keyed by the binding, which an \
+             action cannot declare as one fixed token; it answers `Denied` alike for an unread \
+             and an unbrowsed root so that existence does not leak (ledger #3786). \
+             `tests/harness_packs_3786.rs::a_caller_without_read_on_a_root_sees_nothing_of_it` \
+             checks the gate",
         )
         .opt_out_check(
             "gonk-harness-incident",

@@ -927,9 +927,10 @@ fn serve(flags: &config::Flags) -> ! {
             // which only holds code other faces import (ledger #3778).
             faces: ikigai_gonk::face::listed(&settings.faces),
         });
-        let pages = web::door_space(
+        let pages = web::door_space_with(
             Arc::clone(&face),
             ikigai_gonk::layers_view::Views::new(layers_view, Some(public_feeds)),
+            Arc::new(settings.harness.clone()),
         );
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
         let mut faces = settings
