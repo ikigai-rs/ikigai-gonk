@@ -32,11 +32,11 @@
 //!
 //! The client holds no authority of its own: each view and action works by sub-requests to
 //! `urn:layer:{layer}:…`. Those resolve in a kernel of this module's own, whose only other space
-//! is [`DoorSpace`] over the Layers page's confined door ([`crate::layers_view::confined`]), so
+//! is `DoorSpace` over the Layers page's confined door ([`crate::layers_view::confined`]), so
 //! they reach the configured identity's door and nowhere else. That kernel is mounted into
 //! nothing: no `urn:layer:` name resolves through gonk's hub from the socket, QUIC, a script or
 //! the model, and neither do the client's `urn:iki:inquiry:` names. A write leaves only when
-//! `urn:layers:me` says the identity is a PERSON ([`PersonWrites`]), so what an action writes is
+//! `urn:layers:me` says the identity is a PERSON (`PersonWrites`), so what an action writes is
 //! stamped as that person, never as this server.
 //!
 //! # ★ Who may use it: a signed-in passkey holding the owner's inquiry tokens
