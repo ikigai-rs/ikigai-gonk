@@ -78,6 +78,9 @@ is fixed.
   scripts and styles are the deployment's; gonk does not check them, and a barrier in them is
   the deployment's to fix. gonk's part is in scope ([PR 327](https://github.com/ikigai-rs/ikigai-gonk/pull/327)): the "Add-ons" row under the
   header of every native page, and the slim bar gonk writes after a face page's `<body>` tag.
+  A library face (`gonk.face = "<name> <directory> library"`, ledger #3778) is served but listed
+  in neither; when every face is a library, the row and the bar's Add-ons nav are left out, never
+  shown as a heading over an empty list.
   Each is a labeled `<nav>`; the bar links gonk's home, names the face and says "add-on" in
   text, and marks the current face with `aria-current="page"` and weight, not color. Both are
   quieter than the main navigation (smaller, `--muted`) and draw only tokens already held to the

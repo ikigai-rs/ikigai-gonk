@@ -923,8 +923,9 @@ fn serve(flags: &config::Flags) -> ! {
             // The header offers the RDF Toolbox only when `gonk.toolbox.dist` names a build
             // (ledger #2021).
             toolbox: settings.toolbox.is_some(),
-            // The header offers each `gonk.face` by name (ledger #3199).
-            faces: settings.faces.iter().map(|f| f.name().to_string()).collect(),
+            // The header offers each `gonk.face` by name (ledger #3199), except a library face,
+            // which only holds code other faces import (ledger #3778).
+            faces: ikigai_gonk::face::listed(&settings.faces),
         });
         let pages = web::door_space(
             Arc::clone(&face),
