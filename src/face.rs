@@ -6,11 +6,20 @@
 //! ```toml
 //! gonk.face = "ops ~/.local/share/ops-face"
 //! gonk.face = "intake /srv/intake-face"
+//! gonk.face = "graph ~/.local/share/graph-face library"
 //! ```
 //!
 //! One line per face, `<name> <directory>`, repeatable. No line, no face: nothing is bound, no
 //! route is added, no grant is minted. A line naming something that is not a directory stops the
 //! server at start, naming the key ([`Face::at`]), as does a name given twice.
+//!
+//! A third word, `library`, makes a **library face** (ledger
+//! [#3778](http://localhost:1062/l/default/item/3778)): one that holds shared code other faces
+//! import (`import … from "/face/name/graph/graph.js"`), so two faces share one copy without
+//! depending on each other. It is served exactly like any face (the same spaces, jail, media
+//! types, read grant and route, and its own HTML pages are still framed), but it is listed in no
+//! "Add-ons" row: not in a face's frame ([`listed`]) and not under gonk's own header. Any other
+//! third word, or a fourth, stops the server at start.
 //!
 //! ```text
 //! /face/name/{name}/                urn:face:name:{name}:index.html   the face's front page
@@ -72,7 +81,7 @@ use ikigai_web::{EdgeConfig, ReadRedirect, Route};
 use crate::face_frame::Frame;
 use crate::page_assets::PageAssets;
 
-/// The config key: one `<name> <directory>` line per face.
+/// The config key: one `<name> <directory>` (or `<name> <directory> library`) line per face.
 pub const KEY: &str = "gonk.face";
 
 /// Where faces are served: `/face/name/{name}/…`.
@@ -125,11 +134,16 @@ pub fn media_type(path: &str) -> Option<&'static str> {
         .map(|(_, media)| *media)
 }
 
-/// A configured face: its name and its directory, checked to exist.
+/// The third word that makes a face a library: served, but listed in no Add-ons row.
+pub const LIBRARY: &str = "library";
+
+/// A configured face: its name and its directory, checked to exist, and whether it is a library
+/// (served like any face, listed nowhere).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Face {
     name: String,
     dir: PathBuf,
+    library: bool,
 }
 
 impl Face {
@@ -169,7 +183,26 @@ impl Face {
         Ok(Face {
             name: name.to_string(),
             dir,
+            library: false,
         })
+    }
+
+    /// This face as a library face: served exactly as before, listed in no Add-ons row.
+    ///
+    /// ```
+    /// let face = ikigai_gonk::face::Face::at("graph", std::env::temp_dir()).unwrap();
+    /// assert!(!face.is_library());
+    /// assert!(face.as_library().is_library());
+    /// ```
+    pub fn as_library(mut self) -> Face {
+        self.library = true;
+        self
+    }
+
+    /// Whether the face is a library (`gonk.face = "<name> <directory> library"`): one that
+    /// holds code other faces import and is listed in no Add-ons row.
+    pub fn is_library(&self) -> bool {
+        self.library
     }
 
     /// The face's name.
@@ -193,7 +226,7 @@ impl Face {
     }
 
     /// The spaces the HTTP door binds for this face: [`FaceFile`] at
-    /// `urn:face:name:{name}:{path}`, framed with `roster` (every face, in config order), and
+    /// `urn:face:name:{name}:{path}`, framed with `roster` ([`listed`]), and
     /// the directory at `urn:iki:face:name:{name}:dir:{path}`.
     fn spaces(&self, roster: &[String], page_assets: &PageAssets) -> Vec<Arc<dyn Space>> {
         let files = EndpointSpace::new().bind(
@@ -229,24 +262,31 @@ impl Face {
     }
 }
 
-/// Every `gonk.face` line, parsed: `<name> <directory>`, the directory `~/`-expanded against
-/// `home`.
+/// Every `gonk.face` line, parsed: `<name> <directory>`, or `<name> <directory> library` for a
+/// library face, the directory `~/`-expanded against `home`.
 ///
 /// # Errors
 ///
-/// A line that is not two words, a name or directory [`Face::at`] refuses, or a name given
-/// twice.
+/// A line that is neither of those shapes (a third word other than exactly `library`, or more
+/// than three words), a name or directory [`Face::at`] refuses, or a name given twice.
 pub fn parse_all(lines: &[String], home: &Path) -> Result<Vec<Face>, String> {
     let mut faces: Vec<Face> = Vec::new();
     for line in lines {
         let words: Vec<&str> = line.split_whitespace().collect();
-        let [name, dir] = words.as_slice() else {
-            return Err(format!(
-                "{KEY} = \"{line}\" is not `<name> <directory>` (for example \
-                 `{KEY} = \"ops ~/ops-face\"`)"
-            ));
+        let (name, dir, library) = match words.as_slice() {
+            [name, dir] => (name, dir, false),
+            [name, dir, LIBRARY] => (name, dir, true),
+            _ => {
+                return Err(format!(
+                    "{KEY} = \"{line}\" is not `<name> <directory>` or \
+                     `<name> <directory> {LIBRARY}` (for example `{KEY} = \"ops ~/ops-face\"`, \
+                     or `{KEY} = \"graph ~/graph-face {LIBRARY}\"` for a face that only holds \
+                     code other faces import)"
+                ));
+            }
         };
         let face = Face::at(name, crate::config::expand_home(dir, home))?;
+        let face = if library { face.as_library() } else { face };
         if faces.iter().any(|seen| seen.name == face.name) {
             return Err(format!(
                 "{KEY}: face `{name}` is given twice: one line per face"
@@ -257,14 +297,24 @@ pub fn parse_all(lines: &[String], home: &Path) -> Result<Vec<Face>, String> {
     Ok(faces)
 }
 
-/// Every face's spaces, for the HTTP door, each framed with the whole roster.
+/// The names of the faces an Add-ons row lists: every face that is not a library, in config
+/// order. Both a face's frame ([`spaces_with`]) and gonk's own pages (`main`) list exactly these.
+pub fn listed(faces: &[Face]) -> Vec<String> {
+    faces
+        .iter()
+        .filter(|face| !face.library)
+        .map(|face| face.name.clone())
+        .collect()
+}
+
+/// Every face's spaces, for the HTTP door, each framed with the [`listed`] roster.
 pub fn spaces(faces: &[Face]) -> Vec<Arc<dyn Space>> {
     spaces_with(faces, &PageAssets::default())
 }
 
 /// [`spaces`], with the deployment's own stylesheets and scripts in every frame (ledger #3379).
 pub fn spaces_with(faces: &[Face], page_assets: &PageAssets) -> Vec<Arc<dyn Space>> {
-    let roster: Vec<String> = faces.iter().map(|face| face.name.clone()).collect();
+    let roster = listed(faces);
     faces
         .iter()
         .flat_map(|face| face.spaces(&roster, page_assets))
@@ -432,4 +482,60 @@ pub fn route(mut config: EdgeConfig) -> EdgeConfig {
             .expect("the face prefix is an absolute path ending in /"),
     );
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★ Ledger #3778: two words are a listed face, a third word of exactly `library` a library
+    /// face; any other third word, or a fourth, is refused, naming the line and both forms.
+    #[test]
+    fn a_line_is_two_words_or_a_library() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("x")).unwrap();
+        let parse = |lines: &[&str]| {
+            let lines: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+            parse_all(&lines, home.path())
+        };
+
+        let faces = parse(&["ops ~/x", "graph ~/x library"]).unwrap();
+        assert_eq!(faces.len(), 2);
+        assert_eq!(faces[0].name(), "ops");
+        assert!(!faces[0].is_library());
+        assert_eq!(faces[1].name(), "graph");
+        assert!(faces[1].is_library());
+        assert_eq!(faces[1].dir(), home.path().join("x"));
+        assert_eq!(listed(&faces), ["ops"]);
+
+        for line in [
+            "graph ~/x hidden",
+            "graph ~/x library extra",
+            "graph ~/x Library",
+        ] {
+            let refused = parse(&[line]).unwrap_err();
+            assert!(refused.contains(&format!("\"{line}\"")), "{refused}");
+            assert!(refused.contains("`<name> <directory>`"), "{refused}");
+            assert!(
+                refused.contains("`<name> <directory> library`"),
+                "{refused}"
+            );
+        }
+
+        // The name and duplicate checks hold for a library line too.
+        assert!(parse(&["Graph ~/x library"])
+            .unwrap_err()
+            .contains("not a face name"));
+        assert!(parse(&["graph ~/x", "graph ~/x library"])
+            .unwrap_err()
+            .contains("given twice"));
+    }
+
+    /// Only libraries: nothing is listed.
+    #[test]
+    fn only_libraries_list_nothing() {
+        let dir = std::env::temp_dir();
+        let faces = [Face::at("graph", dir.clone()).unwrap().as_library()];
+        assert!(listed(&faces).is_empty());
+    }
 }

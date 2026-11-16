@@ -788,23 +788,29 @@ they read and write through gonk's existing routes with the viewer's own passkey
 
 ```toml
 gonk.face = "ops ~/.local/share/ops-face"
+gonk.face = "graph ~/.local/share/graph-face library"
 ```
 
-One `<name> <directory>` line per face, repeatable. `/face/name/ops/` serves `index.html`, and
+One `<name> <directory>` line per face, repeatable. A third word, `library`, marks a face that
+only holds code other faces import (`import … from "/face/name/graph/graph.js"`), so two faces
+share one copy without depending on each other (ledger #3778). A library face is served exactly
+like any other (the same jail, media types, read and route, and any HTML page of its own is
+still framed), but no "Add-ons" row lists it: not under gonk's header and not in a face's bar.
+Any other third word, or a fourth, stops the server at start. `/face/name/ops/` serves `index.html`, and
 `/face/name/ops/js/app.js` serves `js/app.js`. The directory is jailed (no `..`, no symbolic
 link, no hidden name, only the extensions in `face::MEDIA_TYPES`), read-only, and served under
 the door's default CSP (`script-src 'self'`, no inline script). Every fetch a face makes is
 judged under the viewer's capability, so a face reaches nothing its viewer could not reach by
-hand. A line naming something that is not a directory stops the server at start. Each face gets
-a header link, named by its name. Like the toolbox, the directory's read
+hand. A line naming something that is not a directory stops the server at start. Each face but
+a library gets a link in the add-on row, named by its name. Like the toolbox, the directory's read
 (`urn:cap:fs:read:{directory}`) is one of the door's public reads: the anonymous loopback caller
 and every live passkey session hold it, from this machine or another (ledger #3202), so a viewer
 signed in from another machine loads the face with no token copied into their grant. A caller
 from another machine with no session gets nothing.
 
 gonk owns the frame and a face stays plain static pages (ledger #3279). Every native page shows
-the configured faces, in config order, in an "Add-ons" row directly below the main header; with
-no face there is no row. When gonk serves a face's `text/html` file it writes three things into
+the configured faces but the libraries, in config order, in an "Add-ons" row directly below the
+main header; with no such face there is no row, and a face's bar then has no Add-ons list either. When gonk serves a face's `text/html` file it writes three things into
 the copy it sends: `data-theme='auto'` on `<html>` when the face set none, gonk's
 `/static/gonk-frame.css` and ikigai-ui's `/static/shell.js` at the start of `<head>` (after any
 leading `<meta>`), and a slim bar right after the opening `<body>` tag. The bar links gonk's

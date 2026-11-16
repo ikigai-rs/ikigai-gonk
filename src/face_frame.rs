@@ -82,7 +82,10 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// The frame for the face `current`, listing `roster` (every face, in config order).
+    /// The frame for the face `current`, listing `roster` (every face that is not a library, in
+    /// config order: [`crate::face::listed`]). An empty roster (every face a library) leaves the
+    /// Add-ons nav out altogether, as gonk's own pages leave out their row: no heading over an
+    /// empty list.
     pub fn new(current: &str, roster: &[String]) -> Frame {
         let links: String = roster
             .iter()
@@ -95,6 +98,11 @@ impl Frame {
                 format!("<li><a href=\"{PATH}/{name}/\"{mark}>{name}</a></li>")
             })
             .collect();
+        let addons = if links.is_empty() {
+            String::new()
+        } else {
+            format!("<nav aria-label=\"Add-ons\"><span>Add-ons</span> <ul>{links}</ul></nav>")
+        };
         Frame {
             head: format!(
                 "<link rel=\"stylesheet\" href=\"/static/{SHEET}\">\
@@ -105,8 +113,7 @@ impl Frame {
                  <a class=\"gonk-frame-home\" href=\"/\">gonk</a> \
                  <span class=\"gonk-frame-face\">{current}</span> \
                  <span class=\"gonk-frame-mark\">add-on</span> \
-                 <nav aria-label=\"Add-ons\"><span>Add-ons</span> <ul>{links}</ul></nav>\
-                 </nav>"
+                 {addons}</nav>"
             ),
             assets: String::new(),
             safe_link: String::new(),
