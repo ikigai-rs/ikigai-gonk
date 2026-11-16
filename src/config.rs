@@ -67,6 +67,8 @@
 //! # gonk.sensor.every = "15m"         # how often the query sensors (`harness-*` scripts) run
 //!                                       # (this IS the default; "off" for none)
 //! # gonk.sensor.ledger = "default"     # file an item there when one fires (default: record only)
+//! # gonk.ledger.lapse.every = "5m"   # record every ledger's lapsed leases on a timer; records,
+//!                                       # never releases (default: no line, no sweep)
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
 //! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
@@ -132,7 +134,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 59] = [
+const KEYS: [&str; 60] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -180,6 +182,7 @@ const KEYS: [&str; 59] = [
     "gonk.script.anonymous_runs_per_minute",
     crate::sensor::EVERY_KEY,
     crate::sensor::LEDGER_KEY,
+    crate::lapse::EVERY_KEY,
     "gonk.nl.ask",
     "gonk.review.space",
     "gonk.review.grant",
@@ -851,6 +854,10 @@ pub struct Settings {
     /// The ledger a sensor's firing files an item into (`gonk.sensor.ledger`), or `None` to
     /// record the firing only.
     pub sensor_ledger: Option<String>,
+    /// How often the lapse sweep records every ledger's lapsed leases
+    /// (`gonk.ledger.lapse.every`), or `None` when the line is absent: off, as before ledger
+    /// #3790 — see [`crate::lapse`].
+    pub lapse_every: Option<Duration>,
     /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
     /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
     pub nl_ask: String,
@@ -2403,6 +2410,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         sensor_ledger: crate::sensor::ledger(
             value_for(text, crate::sensor::LEDGER_KEY).as_deref(),
         )?,
+        lapse_every: crate::lapse::every(value_for(text, crate::lapse::EVERY_KEY).as_deref())?,
         nl_ask: nl_ask(text)?,
         model_calls_per_hour: crate::budget::model_calls_per_hour(
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),

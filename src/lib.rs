@@ -71,6 +71,7 @@ pub mod instance;
 pub mod k;
 pub mod kata;
 pub mod keys;
+pub mod lapse;
 pub mod layer;
 pub mod layers_view;
 pub mod logfile;
