@@ -554,6 +554,11 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    // ★ The lapse sweep (ledger #3790, `lapse`): off unless `gonk.ledger.lapse.every` is set.
+    // Its registry is built here, over the backup's timer, so its status can be bound; it is
+    // started once the hub exists, and reads the ledgers out of the store each sweep.
+    let lapses = ikigai_gonk::lapse::Lapses::new(settings.lapse_every, backup::NextRun::default());
+    trigger_spaces.push(Arc::new(ikigai_gonk::lapse::space(lapses.clone())));
     if let Some(record) = &record {
         trigger_spaces.push(Arc::new(ikigai_log::endpoints::space(record.handle())));
     }
@@ -746,6 +751,7 @@ fn serve(flags: &config::Flags) -> ! {
         &backup_settings,
         &settings.socket,
     );
+    let lapse_line = start_lapses(&hub, &lapses, &handle, &settings.socket);
 
     // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
     // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
@@ -1023,6 +1029,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  layers  {layers_line}");
         eprintln!("  onboard {onboard_line}");
         eprintln!("  sensors {sensor_line}");
+        eprintln!("  lapses  {lapse_line}");
         eprintln!("  review  {review_line}");
         eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");
@@ -1135,6 +1142,41 @@ fn start_backups(
     }
     let first_line = format!(", the first in {}", humanize(first));
     scheduled_line(every, &settings.dir, settings.keep, &first_line, socket)
+}
+
+/// Schedule the lapse sweep on `hub`, returning the banner's lapse line. Not fatal when the
+/// job cannot be scheduled: the ledgers are served either way, and the line says so loudly.
+fn start_lapses(
+    hub: &Arc<ikigai_core::Kernel>,
+    lapses: &ikigai_gonk::lapse::Lapses,
+    store: &Arc<ikigai_store::Store>,
+    socket: &std::path::Path,
+) -> String {
+    use ikigai_gonk::lapse;
+    let Some(every) = lapses.every else {
+        return format!(
+            "off (no {} line): a lapsed lease is recorded only when someone asks",
+            lapse::EVERY_KEY
+        );
+    };
+    match lapses.start(
+        Arc::clone(hub) as Arc<dyn ikigai_resolve::Resolver>,
+        Arc::clone(store),
+    ) {
+        Ok(_) => format!(
+            "every {}, the first in {}: records each lapsed lease once in every ledger, as {}, \
+             and never releases one. `ikigai --connect {} -c 'source {}'` says what it recorded",
+            backup::humanize(every),
+            backup::humanize(lapse::first_delay(every)),
+            lapse::PRINCIPAL,
+            socket.display(),
+            lapse::STATUS,
+        ),
+        Err(e) => {
+            eprintln!("ikigai-gonk: THE LAPSE SWEEP IS NOT SCHEDULED: {e}");
+            format!("NOT SCHEDULED: {e}")
+        }
+    }
 }
 
 /// The banner's backup line once the schedule is in — separate so a test can read it,

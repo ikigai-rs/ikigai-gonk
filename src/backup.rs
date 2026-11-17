@@ -871,6 +871,11 @@ impl NextRun {
         *self.due.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The clock it stamps and reads on, for a registry built over the same one.
+    pub fn clock(&self) -> Arc<dyn ikigai_core::Clock> {
+        Arc::clone(&self.clock)
+    }
+
     /// The clock's reading now, in milliseconds since the epoch.
     pub fn now_ms(&self) -> u64 {
         self.clock.now().0
@@ -893,7 +898,9 @@ impl NextRun {
 ///
 /// ⚠ `first` applies to every job started on this backend. The backup registry holds one job
 /// (`urn:iki:gonk:backup`, scheduled by [`start`]), which is the only reason that is right;
-/// do not schedule a second job on a registry built over it.
+/// do not schedule a second job on a registry built over it. The lapse sweep's registry
+/// ([`crate::lapse::Lapses`], ledger #3790) is a second registry over a second instance, with
+/// one job of its own, for the same reason.
 pub struct BackupTimer {
     first: Duration,
     next: NextRun,
@@ -2853,7 +2860,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// A duration as an operator reads it.
-pub(crate) fn humanize(duration: Duration) -> String {
+pub fn humanize(duration: Duration) -> String {
     let seconds = duration.as_secs();
     match seconds {
         0 => "less than a second".to_string(),

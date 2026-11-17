@@ -4769,6 +4769,38 @@ Two things make the schedule trustworthy rather than merely present:
   "failures in a row". `as=application/json` gives
   the same thing to a machine.
 
+### Lapsed leases, recorded on a timer
+
+A worker that stops renewing leaves its claim behind: the lease runs out, the item stays held,
+and until someone sent `sink urn:iki:ledger:{ledger}:lapse` its history said nothing about it
+(ledger #3790). One config line has this server send it for every ledger in the store, on the
+same timer machinery as the backup:
+
+```toml
+gonk.ledger.lapse.every = "5m"
+```
+
+- **It records and never releases.** Each sweep writes one `ledger:LapseEvent` per lapsed lease
+  not recorded yet, and a lapse already recorded is left alone, so a sweep every minute still
+  records each lapse once. No claim is released, reaped or relabeled: the holder can still
+  renew, and another worker can still take it over.
+- **Off unless the line is there.** With no line nothing is scheduled and gonk behaves as before.
+  A duration this server cannot parse, zero, or one under a second stops it at start, naming the
+  line. The first sweep runs one cadence after start, a minute out at the latest.
+- **Its own narrow authority.** Each ledger's sweep is sent under exactly what that Sink requires:
+  `urn:cap:ledger:close:{ledger}` and the read and write grants of the ledger's graph at the
+  store, as the principal `urn:iki:gonk:recorder:lapse`. That principal is the committer on
+  every lapse event it records, so the history says this server noticed it, not a person.
+- **What it did:** `ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:lapse:status'`
+  (it needs `urn:cap:gonk:system:read`) says when the next sweep is due and, per ledger, when it
+  was last swept, how many lapses it recorded and how many were already recorded, or why it
+  failed. A ledger whose sweep fails is logged in words, and the other ledgers and the next run
+  go on. The log names ledgers, item numbers and counts, never a title.
+- **Cheap when there is nothing to do:** over 5 ledgers of 800 items each (400 on running leases,
+  10 lapses already recorded), a sweep that recorded nothing took a median of 33 ms (22.7 to
+  39.2 ms over 10 runs, release build, RocksDB). To measure it again:
+  `cargo run --release --example lapse-cost -- <scratch-dir> [ledgers] [items-per-ledger] [runs]`.
+
 ## Configuration
 
 Flags override config wholesale; there is no environment-variable channel. The config home
@@ -4803,6 +4835,8 @@ gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/p
 gonk.backup.every = "24h"
 # gonk.backup.keep = 5                # how many archives the rotation keeps
 # gonk.backup.dir = "~/.ikigai/backups"
+# gonk.ledger.lapse.every = "5m"      # record lapsed leases in every ledger on a timer; never
+                                      # releases one (no line: no sweep, as before)
 # gonk.script.dir = "~/.ikigai/scripts"   # where published scripts and their runs live
 # gonk.script.anonymous_runs_per_minute = 30  # anonymous runs, all together (0 for none)
 # gonk.nl.ask = "urn:llm:coder:ask"   # the model door urn:nl:sparql drafts through (default urn:llm:ask)
