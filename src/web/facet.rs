@@ -8,10 +8,91 @@
 //! the ledger itself says which those are: its `count` face lists the ledgers it read under
 //! the viewer's grants, so the counts cover exactly the listing's rows. An item is in one
 //! graph only, so the per-graph counts add up.
+//!
+//! # The JSON face (ledger #3782)
+//!
+//! `as=application/json`, or an `Accept` that names it, answers the same counts as a
+//! [`FacetDocument`], for a deployment that draws its own pages and would otherwise parse the
+//! `.facet-term` markup. It is built from the very map the HTML is drawn from, after the same
+//! query and the same display rules, so it can say no count the HTML does not; a browser
+//! still gets HTML. Field order is fixed (the order below), absent values are `null`, never
+//! missing, and `"schema": 1` versions it as [`ikigai_ledger::json`] versions its documents:
+//! adding a field keeps the number, renaming, removing or retyping one changes it.
+//!
+//! - `ledger`: the resource's bound ledger, even under `ledgers=`;
+//! - `ledgers`: under `ledgers=` or `projects=`, the ledgers the counts read (the ledger's
+//!   own union for this viewer, as its `count` face lists them); `null` for one ledger;
+//! - `labels`: `{"label", "count"}` in the HTML's order;
+//! - `priorities`: `{"priority", "count"}` in the HTML's order, `null` for items with none
+//!   (the HTML's `unset`).
+//!
+//! The HTML shows no total (an item has any number of labels, so the label counts do not add
+//! up to one), and neither does this face.
+//!
+//! ```
+//! use ikigai_gonk::web::FacetDocument;
+//! // `/l/default/facet?ledgers=default,crew&as=application/json`, formatted.
+//! let served = r#"{
+//!   "schema": 1,
+//!   "ledger": "default",
+//!   "ledgers": ["crew", "default"],
+//!   "labels": [{"label": "shared", "count": 1}, {"label": "team", "count": 3}],
+//!   "priorities": [{"priority": 1, "count": 1}, {"priority": null, "count": 2}]
+//! }"#;
+//! let doc: FacetDocument = serde_json::from_str(served).unwrap();
+//! assert_eq!(doc.schema, 1);
+//! assert_eq!(doc.labels[1].label, "team");
+//! assert_eq!(doc.priorities[1].priority, None);
+//! // Absent is `null`, never missing, and the fields keep their order.
+//! let one = FacetDocument { ledgers: None, labels: Vec::new(), priorities: Vec::new(), ..doc };
+//! assert_eq!(
+//!     serde_json::to_string(&one).unwrap(),
+//!     r#"{"schema":1,"ledger":"default","ledgers":null,"labels":[],"priorities":[]}"#
+//! );
+//! ```
 use super::*;
 use ikigai_ledger::sparql::literal;
+use serde::{Deserialize, Serialize};
 
 pub(super) const TEMPLATE: &str = "urn:iki:gonk:fragment:facet:ledger:{ledger}";
+
+const JSON: &str = "application/json";
+
+/// The JSON face's version.
+pub const FACET_SCHEMA: u32 = 1;
+
+/// The JSON face of `/l/{ledger}/facet`: the counts the HTML shows, in its order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FacetDocument {
+    /// [`FACET_SCHEMA`].
+    pub schema: u32,
+    /// The resource's bound ledger name, even when `ledgers=` selects a union.
+    pub ledger: String,
+    /// The ledgers counted under `ledgers=` or `projects=`; `None` for one ledger.
+    pub ledgers: Option<Vec<String>>,
+    /// Each label of the match with how many items carry it.
+    pub labels: Vec<LabelCount>,
+    /// Each priority of the match with how many items have it.
+    pub priorities: Vec<PriorityCount>,
+}
+
+/// One label's count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelCount {
+    /// The label.
+    pub label: String,
+    /// How many matching items carry it.
+    pub count: u64,
+}
+
+/// One priority's count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityCount {
+    /// 0 to 4, or `None` for the items with no priority.
+    pub priority: Option<u8>,
+    /// How many matching items have it.
+    pub count: u64,
+}
 
 pub(super) struct Facet {
     pub(super) web: Arc<Web>,
@@ -87,18 +168,19 @@ fn pattern(listing: &Listing<'_>) -> Result<String> {
 
 /// The ledgers whose graphs the counts read: the page's own, or under `ledgers=` the ones
 /// the ledger's union read for this viewer, from its own `count` face (never chosen here).
+/// `None` when no union was asked for.
 async fn union(
     inv: &Invocation<'_>,
     ledger: &Ledger,
     listing: &Listing<'_>,
     projects: &crate::projects::Projects,
-) -> Result<Vec<Ledger>> {
+) -> Result<Option<Vec<Ledger>>> {
     let expanded = projects.resolve(listing.projects, listing.ledgers)?;
     let Some(names) = expanded.as_deref() else {
-        return Ok(vec![ledger.clone()]);
+        return Ok(None);
     };
     if names.is_empty() && listing.projects.is_some_and(|p| !p.trim().is_empty()) {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     let read = with(
         with(
@@ -118,7 +200,8 @@ async fn union(
         .unwrap_or_default()
         .iter()
         .map(|name| Ledger::parse(name))
-        .collect()
+        .collect::<Result<_>>()
+        .map(Some)
 }
 
 async fn query(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> Result<Vec<u8>> {
@@ -149,7 +232,16 @@ fn bindings(bytes: &[u8]) -> Result<Vec<Value>> {
 #[async_trait]
 impl Endpoint for Facet {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        html_only(inv)?;
+        let json = match inv.inline_str("as").map(bare) {
+            Ok(JSON) => true,
+            Ok(HTML) | Err(_) => false,
+            Ok(asked) => {
+                return Err(Error::InvalidArgument {
+                    name: "as".to_string(),
+                    detail: format!("`{asked}` is not a face this resource serves: {HTML}, {JSON}"),
+                })
+            }
+        };
         let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
         require_read(inv.capability, &ledger)?;
         let status = optional(inv, "status").unwrap_or_else(|| "open".into());
@@ -188,7 +280,9 @@ impl Endpoint for Facet {
             pattern(&listing)?
         );
         let mut counted: BTreeMap<(String, String), u64> = BTreeMap::new();
-        for graph in union(inv, &ledger, &listing, &self.web.projects).await? {
+        let selected = union(inv, &ledger, &listing, &self.web.projects).await?;
+        let graphs = selected.clone().unwrap_or_else(|| vec![ledger.clone()]);
+        for graph in graphs {
             for row in bindings(&query(inv, &graph, &q).await?)? {
                 let kind = row["kind"]["value"]
                     .as_str()
@@ -213,6 +307,9 @@ impl Endpoint for Facet {
                 }
                 *counted.entry((kind, term)).or_default() += count;
             }
+        }
+        if json {
+            return document(&ledger, selected.as_deref(), &counted);
         }
         let filters = LabelFilters {
             labels: listing.labels,
@@ -349,6 +446,41 @@ impl Endpoint for Facet {
             .input(arg("ledgers", "Comma-separated ledger names: count over the ledger's own union of them, as the list does.").optional())
             .input(arg("limit", "Preserve this list page size in filter links; counts are unbounded.").optional())
             .input(arg("page", "A whole page for a browser without scripts.").one_of(["true", "false"]).optional())
-            .input(as_html_arg()).output(HTML)
+            .input(arg("as", "The face: text/html, or application/json for the same counts as a document.").one_of([HTML, JSON]).default_value(HTML).optional())
+            .output(HTML).output(JSON)
     }
+}
+
+/// The JSON face, from the map the HTML would be drawn from: no second query.
+fn document(
+    ledger: &Ledger,
+    selected: Option<&[Ledger]>,
+    counted: &BTreeMap<(String, String), u64>,
+) -> Result<Representation> {
+    let (mut labels, mut priorities) = (Vec::new(), Vec::new());
+    for ((kind, term), &count) in counted {
+        if kind == "priority" {
+            let priority = match term.as_str() {
+                "unset" => None,
+                n => Some(n.parse::<u8>().map_err(|_| {
+                    Error::Endpoint(format!("facet priority `{n}` is not a number"))
+                })?),
+            };
+            priorities.push(PriorityCount { priority, count });
+        } else {
+            labels.push(LabelCount {
+                label: term.clone(),
+                count,
+            });
+        }
+    }
+    let doc = FacetDocument {
+        schema: FACET_SCHEMA,
+        ledger: ledger.name().to_string(),
+        ledgers: selected.map(|s| s.iter().map(|l| l.name().to_string()).collect()),
+        labels,
+        priorities,
+    };
+    let bytes = serde_json::to_vec(&doc).map_err(|e| Error::Endpoint(format!("facet: {e}")))?;
+    Ok(Representation::new(ReprType::new(JSON), bytes))
 }

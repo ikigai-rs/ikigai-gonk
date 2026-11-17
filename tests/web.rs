@@ -5338,3 +5338,247 @@ fn display_group_labels_are_data_in_paths_queries_and_markup() {
         group.body
     );
 }
+
+/// A facet fragment's label rows and priority rows, as [`html_facets`] reads them.
+type HtmlFacets = (Vec<(String, u64)>, Vec<(Option<u64>, u64)>);
+
+/// The `(kind, term, count)` rows of a facet fragment as the HTML shows them: labels under
+/// their heading, then priorities under theirs, each in the page's order, with a priority's
+/// `pN` read back as `N` and `unset` as none.
+fn html_facets(body: &str) -> HtmlFacets {
+    fn rows(part: &str) -> Vec<(String, u64)> {
+        part.split("<span class='facet-term'>")
+            .skip(1)
+            .map(|row| {
+                let (term, rest) = row
+                    .split_once("</span> <span class='facet-count'>(")
+                    .unwrap();
+                let count = rest.split(')').next().unwrap().parse().unwrap();
+                let term = term
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&#39;", "'")
+                    .replace("&amp;", "&");
+                (term, count)
+            })
+            .collect()
+    }
+    let (labels, priorities) = body.split_once("<h3>Priorities</h3>").unwrap_or((body, ""));
+    let priorities = rows(priorities)
+        .into_iter()
+        .map(|(term, count)| {
+            let priority = match term.as_str() {
+                "unset" => None,
+                p => Some(p.strip_prefix('p').unwrap().parse().unwrap()),
+            };
+            (priority, count)
+        })
+        .collect();
+    (rows(labels), priorities)
+}
+
+/// Ledger #3782: the facet fragment's JSON face carries exactly the counts its HTML shows,
+/// under every filter the HTML honors and over a `ledgers=` union, and reveals nothing from
+/// a ledger the viewer cannot read. A browser still gets HTML.
+#[test]
+fn the_facet_json_face_carries_the_counts_the_html_shows() {
+    let mut grants = grants_for("default", Authority::Read).unwrap();
+    grants.extend(grants_for("crew", Authority::Read).unwrap());
+    let server = Server::start_with_ledgers(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        grants,
+        Vec::new(),
+        &["default", "crew", "private"],
+    );
+    let ttl = r#"@prefix l: <https://ikigai-rs.dev/ns/ledger#> .
+        @prefix d: <http://purl.org/dc/terms/> .
+        <urn:facet-json:NAME:1> a l:Item; l:number 1; d:title "NAME team one"; l:status l:open;
+          l:label "team", "shared", "c++ & café <x>"; l:priority 1 .
+        <urn:facet-json:NAME:2> a l:Item; l:number 2; d:title "NAME team two"; l:status l:open;
+          l:label "team"; l:priority 0 .
+        <urn:facet-json:NAME:3> a l:Item; l:number 3; d:title "NAME unset"; l:status l:open;
+          l:label "other" .
+        <urn:facet-json:NAME:4> a l:Item; l:number 4; d:title "NAME closed"; l:status l:closed;
+          l:label "team", "done"; l:priority 2 ."#;
+    for name in ["default", "crew"] {
+        load(
+            &server,
+            &format!("urn:iki:ledger:graph:{name}"),
+            &ttl.replace("NAME", name),
+        );
+    }
+    load(
+        &server,
+        "urn:iki:ledger:graph:private",
+        &ttl.replace("NAME", "private")
+            .replace("\"shared\"", "\"secret\""),
+    );
+    let json = |query: &str| -> serde_json::Value {
+        let response = server.raw(
+            "GET",
+            &format!("/l/default/facet?{query}"),
+            &[("Accept", "application/json".to_string())],
+            "",
+        );
+        assert_eq!(response.status, 200, "{query}: {response:?}");
+        assert!(
+            response
+                .head
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{query}: {response:?}"
+        );
+        serde_json::from_str(&response.body).unwrap_or_else(|e| panic!("{e}: {response:?}"))
+    };
+    let union = "ledgers=default,crew,private";
+    let mut nonempty = 0;
+    for scope in ["", union] {
+        for filter in [
+            "",
+            "labels=team",
+            "labels=team,shared",
+            "labels=team&without=shared",
+            "text=TEAM",
+            "priority=1",
+            "priority=0,none",
+            "status=closed",
+            "status=all&labels=team",
+            "labels=missing",
+        ] {
+            let query = [scope, filter]
+                .iter()
+                .filter(|q| !q.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join("&");
+            let html = server.page(&format!("/l/default/facet?{query}"), None);
+            assert_eq!(html.status, 200, "{query}: {html:?}");
+            let (labels, priorities) = html_facets(&html.body);
+            let doc = json(&query);
+            let keys: Vec<&str> = doc
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(
+                sorted,
+                ["labels", "ledger", "ledgers", "priorities", "schema"],
+                "{query}: {doc}"
+            );
+            assert_eq!(doc["schema"], 1, "{query}");
+            assert_eq!(doc["ledger"], "default", "{query}");
+            if scope.is_empty() {
+                assert_eq!(doc["ledgers"], serde_json::Value::Null, "{query}");
+            } else {
+                assert_eq!(doc["ledgers"], serde_json::json!(["crew", "default"]));
+            }
+            let json_labels: Vec<(String, u64)> = doc["labels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.as_object().unwrap().len(), 2, "{row}");
+                    (
+                        row["label"].as_str().unwrap().to_string(),
+                        row["count"].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            let json_priorities: Vec<(Option<u64>, u64)> = doc["priorities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.as_object().unwrap().len(), 2, "{row}");
+                    (row["priority"].as_u64(), row["count"].as_u64().unwrap())
+                })
+                .collect();
+            assert_eq!(json_labels, labels, "{query}: {html:?}");
+            assert_eq!(json_priorities, priorities, "{query}: {html:?}");
+            if !labels.is_empty() {
+                nonempty += 1;
+            }
+            // What the viewer cannot read is in neither face.
+            assert!(!html.body.contains("secret"), "{query}: {html:?}");
+            assert!(!doc.to_string().contains("secret"), "{query}: {doc}");
+        }
+    }
+    assert!(nonempty >= 16, "the filters must mostly match something");
+    // The union counts the two readable ledgers and nothing from the third.
+    let doc = json(&format!("{union}&labels=team"));
+    assert_eq!(
+        doc["labels"],
+        serde_json::json!([
+            {"label": "c++ & café <x>", "count": 2},
+            {"label": "shared", "count": 2},
+            {"label": "team", "count": 4},
+        ])
+    );
+    assert_eq!(
+        doc["priorities"],
+        serde_json::json!([{"priority": 0, "count": 2}, {"priority": 1, "count": 2}])
+    );
+    let single = json("priority=none");
+    assert_eq!(
+        single["priorities"],
+        serde_json::json!([{"priority": null, "count": 1}])
+    );
+    // The fields are in the documented order.
+    let raw = server.raw(
+        "GET",
+        "/l/default/facet?as=application/json",
+        &[("Accept", CHROME_ACCEPT.to_string())],
+        "",
+    );
+    assert_eq!(raw.status, 200, "{raw:?}");
+    let at = |field: &str| raw.body.find(&format!("\"{field}\":")).unwrap();
+    assert!(
+        at("schema") < at("ledger")
+            && at("ledger") < at("ledgers")
+            && at("ledgers") < at("labels")
+            && at("labels") < at("priorities"),
+        "{raw:?}"
+    );
+    // `?as=` beats a browser's Accept; a browser alone gets the unchanged HTML.
+    assert!(
+        raw.head
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{raw:?}"
+    );
+    let browser = server.page("/l/default/facet", None);
+    assert!(
+        browser
+            .head
+            .to_ascii_lowercase()
+            .contains("content-type: text/html"),
+        "{browser:?}"
+    );
+    assert!(browser.body.contains("id='listing-facet'"), "{browser:?}");
+    // A ledger the viewer cannot read is refused in either face.
+    for accept in ["application/json", CHROME_ACCEPT] {
+        let refused = server.raw(
+            "GET",
+            "/l/private/facet?ledgers=default",
+            &[("Accept", accept.to_string())],
+            "",
+        );
+        assert_eq!(refused.status, 403, "{refused:?}");
+        assert!(!refused.body.contains("secret"), "{refused:?}");
+    }
+    assert_eq!(
+        server
+            .raw(
+                "GET",
+                "/l/default/facet?as=text/plain",
+                &[("Accept", CHROME_ACCEPT.to_string())],
+                "",
+            )
+            .status,
+        406
+    );
+}

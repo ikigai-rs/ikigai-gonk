@@ -16,7 +16,7 @@
 //! /l/{ledger}                urn:iki:gonk:page:ledger:{ledger}      Source  a ledger, filtered
 //! /l/{ledger}/lifecycle      urn:iki:gonk:page:lifecycle:{ledger}   Source  ordered states and item counts
 //! /l/{ledger}/items          urn:iki:gonk:fragment:items:{ledger}   Source  the same, as a fragment
-//! /l/{ledger}/facet          urn:iki:gonk:fragment:facet:ledger:{ledger} Source  whole-match label/priority counts
+//! /l/{ledger}/facet          urn:iki:gonk:fragment:facet:ledger:{ledger} Source  whole-match label/priority counts, HTML or JSON
 //! /l/{ledger}/item/{id}      urn:iki:gonk:page:item:{ledger}:{id}   Source  one item
 //! /l/{ledger}/item/{id}/card urn:iki:gonk:fragment:item:{…}:{id}    Source  the same, as a fragment
 //! /act                       urn:iki:gonk:act                       Sink    a form → one ledger action
@@ -83,6 +83,7 @@ use crate::rows;
 use crate::rules::{self, Rules};
 
 mod facet;
+pub use facet::{FacetDocument, LabelCount, PriorityCount, FACET_SCHEMA};
 mod group;
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
