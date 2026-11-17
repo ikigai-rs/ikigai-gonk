@@ -29,13 +29,12 @@
 // pull request's page, #2117). (12) a page asks the server, now and then, whether it is still
 // the process that served it, and says so when it is not (ledger #375).
 //
-// ⚠ The session cookie is set HERE, not by the server — the HTTP transport cannot add a
-// Set-Cookie header — so it is SameSite=Strict but not HttpOnly. The CSP forbids inline and
-// third-party script, which is what that leaves as the defense.
+// ★ The session cookie is set by the SERVER, HttpOnly (ledger #1591): this script never sees the
+// token. It asks the server whether it is signed in (/auth/session), and the server reads the
+// cookie; signing out is a POST the server answers by clearing it.
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const COOKIE = "gonk_session";
 
   // A sentence of gonk's own (a sample loaded, a passkey made), in the page's one status region
   // (D13). A failure with no control to sit beside is an alert; anything else the region's
@@ -1168,16 +1167,6 @@
     return text ? JSON.parse(text) : {};
   }
 
-  function token() {
-    const hit = document.cookie.split("; ").find((c) => c.startsWith(COOKIE + "="));
-    return hit ? decodeURIComponent(hit.slice(COOKIE.length + 1)) : "";
-  }
-
-  function setToken(value, seconds) {
-    document.cookie =
-      COOKIE + "=" + encodeURIComponent(value) + "; Path=/; SameSite=Strict; Max-Age=" + seconds;
-  }
-
   // ------------------------------------------------------------------ ceremonies
 
   // A WebAuthn call the browser refuses rejects with NotAllowedError whatever the cause — a
@@ -1254,7 +1243,6 @@
         clientDataJSON: toB64(r.clientDataJSON),
         signature: toB64(r.signature),
       });
-      setToken(done.session, done.seconds);
       await signalNames(cred, done);
       location.reload();
     } catch (err) {
@@ -1265,12 +1253,10 @@
   }
 
   async function signOut() {
-    const t = token();
-    setToken("", 0);
     try {
-      if (t) await post("/auth/logout", t);
+      await post("/auth/logout", "");
     } catch (_) {
-      // Signed out locally either way; the server session expires on its own.
+      // The server session expires on its own.
     }
     location.reload();
   }
@@ -1319,12 +1305,10 @@
       // the signed-out case.
       let ended = "";
       if (!$("auth-logout").hidden) {
-        const t = token();
-        setToken("", 0);
         try {
-          if (t) await post("/auth/logout", t);
+          await post("/auth/logout", "");
         } catch (_) {
-          // Signed out locally either way; the server session expires on its own.
+          // The server session expires on its own.
         }
         ended = $("auth-who").textContent.replace(/^Signed in as /, "") + " is signed out. ";
         $("auth-who").textContent = "";
@@ -1358,8 +1342,7 @@
   // opens, and the sentence is said after the reload.
   async function addGrant(invite) {
     try {
-      const t = token();
-      const { challenge, credential } = await post("/auth/add-grant-options", { session: t, invite });
+      const { challenge, credential } = await post("/auth/add-grant-options", { invite });
       const cred = await navigator.credentials.get({
         publicKey: {
           challenge: fromB64(challenge),
@@ -1371,7 +1354,6 @@
       });
       const r = cred.response;
       const done = await post("/auth/add-grant", {
-        session: t,
         invite,
         challenge,
         id: cred.id,
@@ -1379,7 +1361,6 @@
         clientDataJSON: toB64(r.clientDataJSON),
         signature: toB64(r.signature),
       });
-      setToken(done.session, done.seconds);
       await signalNames(cred, done);
       later("Grant " + done.added + " added to the passkey " + done.label + ", which now holds " + done.grant + ". You are signed in again with it.");
       history.replaceState(null, "", location.pathname + location.search);
@@ -1735,19 +1716,13 @@
     $("auth-logout").addEventListener("click", signOut);
     canSignIn = true;
 
-    const t = token();
-    if (t) {
-      try {
-        const who = await post("/auth/session", t);
-        $("auth-who").textContent = "Signed in as " + who.label + " (grant " + who.grant + ")";
-        $("auth-who").hidden = false;
-        $("auth-logout").hidden = false;
-        signedIn = true;
-      } catch (_) {
-        setToken("", 0);
-        login.hidden = false;
-      }
-    } else {
+    try {
+      const who = await post("/auth/session", "");
+      $("auth-who").textContent = "Signed in as " + who.label + " (grant " + who.grant + ")";
+      $("auth-who").hidden = false;
+      $("auth-logout").hidden = false;
+      signedIn = true;
+    } catch (_) {
       login.hidden = false;
     }
     drawNotices(document);

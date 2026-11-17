@@ -76,7 +76,7 @@ use ikigai_ledger::Ledger;
 use oxigraph::model::NamedOrBlankNode;
 use serde_json::{json, Value};
 
-use crate::identity::{self, Passkeys, Purpose};
+use crate::identity::{self, Passkeys, Purpose, SignedIn};
 use crate::quic;
 use crate::render::{self, element, envelope, Graph};
 use crate::rows;
@@ -4808,6 +4808,13 @@ struct PasskeyDoor {
     passkeys: Arc<Passkeys>,
 }
 
+/// `repr` with a `Set-Cookie` for the session ([`identity::session_cookie`]). A passkey answer
+/// is to a Sink, a write, so the door lets the cookie ride (ledger #1591).
+fn with_cookie(repr: Representation, cookie: &str) -> Result<Representation> {
+    ikigai_web::with_headers(repr, &[("Set-Cookie", cookie)])
+        .map_err(|e| Error::Endpoint(format!("the session cookie: {e}")))
+}
+
 fn json_repr(value: Value) -> Representation {
     Representation::new(
         ReprType::new("application/json"),
@@ -4830,6 +4837,9 @@ impl Endpoint for PasskeyDoor {
             detail,
         };
         let content = inv.inline_str("content").unwrap_or("");
+        // The passkey the door's capability names, from the HttpOnly session cookie.
+        let principal = inv.capability.principal();
+        let credential = principal.and_then(|p| p.strip_prefix(identity::PASSKEY_IRI_PREFIX));
         match op.as_str() {
             "register-options" | "login-options" => {
                 let purpose = if op == "login-options" {
@@ -4888,9 +4898,14 @@ impl Endpoint for PasskeyDoor {
                         .map(str::to_string)
                         .ok_or_else(|| refused(format!("`{name}` is missing")))
                 };
+                let token = field("session").ok();
+                let signed_in = match token.as_deref() {
+                    Some(token) => SignedIn::Token(token.trim()),
+                    None => SignedIn::Principal(principal),
+                };
                 let (grant, credential) = self
                     .passkeys
-                    .add_grant_preview(field("session")?.trim(), &field("invite")?, now)
+                    .add_grant_preview_as(signed_in, &field("invite")?, now)
                     .map_err(refused)?;
                 let challenge = self
                     .passkeys
@@ -4906,43 +4921,78 @@ impl Endpoint for PasskeyDoor {
             "add-grant" => {
                 let (token, who, added) = self
                     .passkeys
-                    .add_grant(content.as_bytes(), now)
+                    .add_grant_as(content.as_bytes(), principal, now)
                     .map_err(Error::Denied)?;
-                Ok(json_repr(json!({
-                    "session": token,
-                    "seconds": who.expires.saturating_sub(now),
-                    "label": who.enrolled.label,
-                    "grant": who.enrolled.grant_names(),
-                    "grants": who.enrolled.grants,
-                    "added": added,
-                })))
+                let seconds = who.expires.saturating_sub(now);
+                with_cookie(
+                    json_repr(json!({
+                        "session": token,
+                        "seconds": who.expires.saturating_sub(now),
+                        "label": who.enrolled.label,
+                        "grant": who.enrolled.grant_names(),
+                        "grants": who.enrolled.grants,
+                        "added": added,
+                    })),
+                    &identity::session_cookie(&token, seconds),
+                )
             }
             "login" => {
                 let (token, who) = self
                     .passkeys
                     .login(content.as_bytes(), now)
                     .map_err(Error::Denied)?;
-                Ok(json_repr(json!({
-                    "session": token,
-                    "seconds": who.expires.saturating_sub(now),
-                    "label": who.enrolled.label,
-                    "grant": who.enrolled.grant_names(),
-                    "grants": who.enrolled.grants,
-                })))
+                let seconds = who.expires.saturating_sub(now);
+                with_cookie(
+                    json_repr(json!({
+                        "session": token,
+                        "seconds": seconds,
+                        "label": who.enrolled.label,
+                        "grant": who.enrolled.grant_names(),
+                        "grants": who.enrolled.grants,
+                    })),
+                    &identity::session_cookie(&token, seconds),
+                )
             }
+            // ★ A page cannot read its HttpOnly cookie (ledger #1591), so it names no token:
+            // the door's principal, derived from that cookie, says whose sessions end, and
+            // every one of them does. A token in the body (the socket, a script) still ends
+            // that one session.
             "logout" => {
-                self.passkeys.logout(content.trim());
-                Ok(json_repr(json!({ "signedOut": true })))
+                match (content.trim(), credential) {
+                    ("", Some(credential)) => {
+                        self.passkeys.logout_credential(credential, "logout");
+                    }
+                    (token, _) => self.passkeys.logout(token),
+                }
+                with_cookie(
+                    json_repr(json!({ "signedOut": true })),
+                    identity::CLEAR_SESSION_COOKIE,
+                )
             }
             // Every session of the caller's own passkey, this one included (ledger #1824).
             // The token is the proof of whose: a token that is no live session ends nothing.
-            "logout-all" => match self.passkeys.logout_all(content.trim(), now) {
-                Some(ended) => Ok(json_repr(json!({ "signedOut": true, "sessions": ended }))),
-                None => Err(Error::NotFound(
-                    "no live session for that token".to_string(),
-                )),
-            },
-            "session" => match self.passkeys.identity(content.trim(), now) {
+            "logout-all" => {
+                let ended = match (content.trim(), credential) {
+                    ("", Some(credential)) => self
+                        .passkeys
+                        .identity_of(credential, now)
+                        .map(|_| self.passkeys.logout_credential(credential, "logout-all")),
+                    (token, _) => self.passkeys.logout_all(token, now),
+                };
+                match ended {
+                    Some(ended) => with_cookie(
+                        json_repr(json!({ "signedOut": true, "sessions": ended })),
+                        identity::CLEAR_SESSION_COOKIE,
+                    ),
+                    None => Err(Error::NotFound(
+                        "no live session for that token".to_string(),
+                    )),
+                }
+            }
+            "session" => match match content.trim() {
+                "" => self.passkeys.signed_in(SignedIn::Principal(principal), now),
+                token => self.passkeys.identity(token, now),
+            } {
                 Some(who) => Ok(json_repr(json!({
                     "label": who.enrolled.label,
                     "grant": who.enrolled.grant_names(),
