@@ -42,8 +42,8 @@ use ikigai_core::{
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{
-    AdmitFn, CapFn, EdgeConfig, HttpRequest, PrincipalFn, Refusal, Route, RouteTable,
-    SecurityHeaders,
+    AdmitFn, CapFn, EdgeConfig, EndpointHeader, HttpRequest, PrincipalFn, Refusal, Route,
+    RouteTable, SecurityHeaders,
 };
 
 use crate::access::AccessLog;
@@ -1265,6 +1265,10 @@ pub fn edge_config_with(door: HttpDoor, access: Option<AccessLog>) -> EdgeConfig
         admit_fn: Some(http_admit_with(door.clone(), access)),
         principal_fn: Some(http_principal(door)),
         security: Some(SecurityHeaders::html_door()),
+        // The defaults plus `Set-Cookie` (ledger #1591): the passkey sign-in sets the
+        // HttpOnly session cookie itself. A `Set-Cookie` rides only a write's answer or an
+        // uncacheable read's (ikigai-web), and only gonk's own passkey resource sets one.
+        endpoint_headers: EndpointHeader::ALL.to_vec(),
         ..EdgeConfig::default()
     }
 }

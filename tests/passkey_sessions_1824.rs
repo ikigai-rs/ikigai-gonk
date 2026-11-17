@@ -579,3 +579,82 @@ fn a_local_process_minting_challenges_cannot_lock_out_sign_in() {
     let token = server.login(&authenticator, 1);
     assert_eq!(server.session_status(&token), 200);
 }
+
+impl Server {
+    /// A same-origin JSON post carrying `token` as the session cookie, as a browser sends it.
+    fn json_signed_in(&self, path: &str, body: &str, token: &str) -> Response {
+        self.raw(
+            "POST",
+            path,
+            &[
+                ("Accept", "application/json".to_string()),
+                ("Content-Type", "application/json".to_string()),
+                ("Origin", self.origin()),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+                ("Cookie", format!("{}={token}", identity::SESSION_COOKIE)),
+            ],
+            body,
+        )
+    }
+}
+
+/// The `Set-Cookie` lines of `response`, lowercased names.
+fn set_cookies(response: &Response) -> Vec<String> {
+    response
+        .head
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("set-cookie")
+                .then(|| value.trim().to_string())
+        })
+        .collect()
+}
+
+/// ★ **The server sets the session cookie, HttpOnly** (ledger #1591). Before this change the
+/// page's script wrote `gonk_session` with `document.cookie`, so any script on any
+/// `http://localhost:*` page could read it (cookies are scoped by host, not port) and replay
+/// it. Now the sign-in answers a `Set-Cookie` no script can read, and the page, holding no
+/// token, asks the server who it is and signs out by cookie alone.
+#[test]
+fn the_sign_in_sets_an_http_only_cookie_and_the_page_needs_no_token() {
+    let server = Server::start();
+    let scopes = grants_for("default", Authority::Write).unwrap();
+    let authenticator = Authenticator::new();
+    server.enroll(&authenticator, "brian", &scopes);
+
+    let c = server.challenge("login-options");
+    let login = server.json(
+        "/auth/login",
+        &authenticator.login_body(&c, &server.origin(), 1),
+    );
+    assert_eq!(login.status, 200, "{login:?}");
+    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
+    let token = v["session"].as_str().unwrap().to_string();
+    assert_eq!(
+        set_cookies(&login),
+        vec![format!(
+            "gonk_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+            v["seconds"]
+        )],
+        "{login:?}"
+    );
+
+    // Who am I, with the cookie and no token in the body: what gonk.js asks on every page.
+    let who = server.json_signed_in("/auth/session", "", &token);
+    assert_eq!(who.status, 200, "{who:?}");
+    let who: serde_json::Value = serde_json::from_str(&who.body).unwrap();
+    assert_eq!(who["label"], v["label"]);
+    // No cookie, no session.
+    assert_eq!(server.json("/auth/session", "").status, 404);
+
+    // Sign out by cookie alone: the session ends and the cookie is cleared.
+    let out = server.json_signed_in("/auth/logout", "", &token);
+    assert_eq!(out.status, 200, "{out:?}");
+    assert_eq!(
+        set_cookies(&out),
+        vec!["gonk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0".to_string()],
+        "{out:?}"
+    );
+    assert_eq!(server.session_status(&token), 404, "the session ended");
+}

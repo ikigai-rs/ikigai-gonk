@@ -544,11 +544,12 @@ fn the_page_offers_to_add_the_grant_when_signed_in() {
         // Shown only signed in; the submit follows the choice.
         "const adding = signedIn ? wireEnrolChoice() : () => false;",
         "if (adding()) addGrant(m[1]);",
-        // A fresh assertion by the signed-in passkey only, then the new session replaces the old.
-        r#"post("/auth/add-grant-options", { session: t, invite })"#,
+        // A fresh assertion by the signed-in passkey only; the server's Set-Cookie replaces the
+        // old session.
+        // The page names no token: the cookie is HttpOnly (ledger #1591).
+        r#"post("/auth/add-grant-options", { invite })"#,
         r#"allowCredentials: [{ type: "public-key", id: fromB64(credential) }],"#,
         r#"userVerification: "required","#,
-        "setToken(done.session, done.seconds);",
     ] {
         assert!(JS.contains(wired), "web/gonk.js: {wired}");
     }

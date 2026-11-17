@@ -102,13 +102,13 @@
 //! - **`gonk/sessions.json` stays**: it is STATE, the live session table a restart reloads,
 //!   rewritten whole; a session that ended is gone from it, and its ending is in the segment.
 //!
-//! ⚠ **The cookie is set by the page's script, not by the server, so it is not HttpOnly**
-//! ([#1591](http://localhost:1062/l/default/item/1591)). The `ikigai-web` release this server
-//! builds on (0.1.63) builds every response from a kernel representation and has no way to
-//! add a `Set-Cookie` header; `ikigai_web::with_headers` (ikigai-rs/ikigai-cli PR 516) is the
-//! seam, and it is not in a published release yet. The mitigations are the ones that remain:
-//! `SameSite=Strict`, a strict same-origin CSP with no inline script, and a token whose
-//! lifetime is bounded (12 h for any grant that can write).
+//! ★ **The server sets the session cookie, `HttpOnly`** ([#1591](http://localhost:1062/l/default/item/1591)):
+//! `login` and `add-grant` answer through `ikigai_web::with_headers` with a `Set-Cookie`
+//! ([`session_cookie`]), and the HTTP door accepts that header from an endpoint
+//! (`EndpointHeader::SetCookie`, `crate::doors::edge_config_with`). No script on any
+//! `http://localhost:*` page (cookies are scoped by host, not port) can read the token. The page
+//! names no token: `session`, `logout`, `logout-all` and `add-grant` read the passkey from the
+//! capability's principal, which the door derives from the cookie.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -127,8 +127,32 @@ use crate::quic::{self, Layout};
 /// to create or use a credential at all.
 pub const RP_ID: &str = "localhost";
 
-/// The cookie the page stores its session token in.
+/// The cookie the session token rides in. The SERVER sets it (`HttpOnly`, so no script on
+/// any `localhost` page can read it), with [`session_cookie`], and clears it with
+/// [`CLEAR_SESSION_COOKIE`].
 pub const SESSION_COOKIE: &str = "gonk_session";
+
+/// The `Set-Cookie` value that opens a session: `HttpOnly`, `SameSite=Strict`, for the whole
+/// origin, for `seconds`. ⚠ No `Secure`: the HTTP door serves plain `http://localhost`; add it
+/// once the door is served over TLS.
+pub fn session_cookie(token: &str, seconds: u64) -> String {
+    format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}")
+}
+
+/// The `Set-Cookie` value that ends the session in this browser.
+pub const CLEAR_SESSION_COOKIE: &str =
+    "gonk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
+
+/// Who a passkey request says is signed in: a session token a caller holds (the socket, a
+/// test, an older page), or the door's principal, which the HTTP door derives from the
+/// HttpOnly cookie a page cannot read.
+#[derive(Clone, Copy, Debug)]
+pub enum SignedIn<'a> {
+    /// A session token.
+    Token(&'a str),
+    /// The capability's principal ([`passkey_iri`]), if any.
+    Principal(Option<&'a str>),
+}
 
 /// How long a session whose grant can WRITE (anything beyond read) lasts at most, however
 /// busy it is and whatever `gonk.http.session_max_hours` says; also that setting's default.
@@ -1733,7 +1757,17 @@ impl Passkeys {
         invite: &str,
         now: u64,
     ) -> Result<(String, String), String> {
-        let who = self.identity(token, now).ok_or(
+        self.add_grant_preview_as(SignedIn::Token(token), invite, now)
+    }
+
+    /// [`Passkeys::add_grant_preview`] for whoever [`SignedIn`] names.
+    pub fn add_grant_preview_as(
+        &self,
+        signed_in: SignedIn<'_>,
+        invite: &str,
+        now: u64,
+    ) -> Result<(String, String), String> {
+        let who = self.signed_in(signed_in, now).ok_or(
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
         let grant = invite_grant(&self.layout, invite)?;
@@ -1768,7 +1802,18 @@ impl Passkeys {
     /// grant and the invite (by its hash), under the clients lock with the change: if the line
     /// cannot be written the change is undone and refused, so no widening is unrecorded.
     pub fn add_grant(&self, body: &[u8], now: u64) -> Result<(String, Identity, String), String> {
-        let answer = self.widen(body, now);
+        self.add_grant_as(body, None, now)
+    }
+
+    /// [`Passkeys::add_grant`], where a body with no `session` is signed in as `principal`
+    /// (the HTTP door's, from the HttpOnly cookie the page cannot read).
+    pub fn add_grant_as(
+        &self,
+        body: &[u8],
+        principal: Option<&str>,
+        now: u64,
+    ) -> Result<(String, Identity, String), String> {
+        let answer = self.widen(body, principal, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -1787,7 +1832,12 @@ impl Passkeys {
         answer
     }
 
-    fn widen(&self, body: &[u8], now: u64) -> Result<(String, Identity, String), String> {
+    fn widen(
+        &self,
+        body: &[u8],
+        principal: Option<&str>,
+        now: u64,
+    ) -> Result<(String, Identity, String), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
         let text = |name: &str| {
             v.get(name)
@@ -1795,9 +1845,13 @@ impl Passkeys {
                 .map(str::to_string)
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
-        let token = text("session")?;
+        let token = text("session").ok();
         let invite = text("invite")?;
-        let who = self.identity(token.trim(), now).ok_or(
+        let signed_in = match token.as_deref() {
+            Some(token) => SignedIn::Token(token.trim()),
+            None => SignedIn::Principal(principal),
+        };
+        let who = self.signed_in(signed_in, now).ok_or(
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
         let verified = self.verify_assertion(&v, Purpose::AddGrant, now)?;
@@ -1918,6 +1972,16 @@ impl Passkeys {
         Some(ended)
     }
 
+    /// The identity [`SignedIn`] names, re-resolved now.
+    pub fn signed_in(&self, who: SignedIn<'_>, now: u64) -> Option<Identity> {
+        match who {
+            SignedIn::Token(token) => self.identity(token, now),
+            SignedIn::Principal(principal) => {
+                self.identity_of(principal?.strip_prefix(PASSKEY_IRI_PREFIX)?, now)
+            }
+        }
+    }
+
     /// The identity behind a session token, re-resolved NOW: a session whose passkey was
     /// removed from `clients.json`, or whose grant no longer resolves, is no identity.
     ///
@@ -1927,7 +1991,58 @@ impl Passkeys {
     /// resolves only refuses: a grant is authority, re-read on every request, and a session
     /// holds authentication only.) A live session's idle clock restarts.
     pub fn identity(&self, token: &str, now: u64) -> Option<Identity> {
-        let key = sha256_hex(token.as_bytes());
+        self.identity_at(sha256_hex(token.as_bytes()), now)
+    }
+
+    /// The identity of the passkey `credential_id` through its newest live session, or `None`
+    /// when it has none: [`Passkeys::identity`] for a caller who holds no token, because the
+    /// cookie is HttpOnly and the door has already named the passkey from it (the
+    /// capability's principal, [`passkey_iri`]).
+    pub fn identity_of(&self, credential_id: &str, now: u64) -> Option<Identity> {
+        let mut keys: Vec<(u64, String)> = {
+            let mut state = self.state.lock().ok()?;
+            self.read_log(&mut state);
+            state
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.credential_id == credential_id)
+                .map(|(key, s)| (s.issued, key.clone()))
+                .collect()
+        };
+        keys.sort_unstable_by(|a, b| b.cmp(a));
+        keys.into_iter()
+            .find_map(|(_, key)| self.identity_at(key, now))
+    }
+
+    /// End EVERY session of the passkey `credential_id` — what signing out does now that the
+    /// page cannot read its own token (the cookie is HttpOnly), so it cannot name the one
+    /// session to end. Returns how many ended; writes one `gonk:Logout` line.
+    pub fn logout_credential(&self, credential_id: &str, op: &'static str) -> usize {
+        let ended = self
+            .state
+            .lock()
+            .map(|mut state| {
+                let ended = state.end_sessions(credential_id);
+                self.save(&mut state);
+                ended
+            })
+            .unwrap_or(0);
+        self.audit(
+            LOGOUT_CLASS,
+            AuditLine {
+                op,
+                door: "http",
+                outcome: "ok",
+                credential: Some(credential_id),
+                authenticated: true,
+                sessions: ended,
+                why: Some(op),
+            },
+        );
+        ended
+    }
+
+    fn identity_at(&self, key: String, now: u64) -> Option<Identity> {
         let (credential_id, issued, expires) = {
             let mut state = self.state.lock().ok()?;
             self.read_log(&mut state);
