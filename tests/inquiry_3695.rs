@@ -323,9 +323,14 @@ fn a_reader_sees_both_views() {
     );
     // The header offers the client to a holder of the read token, as the current page.
     assert!(pending.body.contains(">Inquiries</a>"), "{pending:?}");
-    // The full message keeps its line breaks by gonk's stylesheet, never an inline style, which
-    // the page's CSP (`style-src 'self'`) refuses.
+    // The full message keeps its line breaks by gonk's stylesheet (`.inquiry-message`), never an
+    // inline style, which the page's CSP (`style-src 'self'`) refuses: ikigai-inquiry 0.1.1
+    // writes none, and gonk strips none.
     assert!(pending.body.contains("<details>"), "{pending:?}");
+    assert!(
+        pending.body.contains("class=\"inquiry-message\""),
+        "{pending:?}"
+    );
     no_inline_style(&pending);
 
     let spam = gonk.page(&spam_path(), Some(&session));
