@@ -3322,6 +3322,57 @@ identity directory. The host is not told: it lets the identity expire when it st
 an expired identity may join again. Your subscriptions are this server's own and stay. If the host
 has expired the identity, `/feed` says so and offers Join again beside Leave.
 
+### The inquiry client (ledger #3695)
+
+[ikigai-inquiry](https://crates.io/crates/ikigai-inquiry)'s layers client, mounted here for
+convenience: the views and actions a person uses on the inquiries a contact form's edge drops
+into one owner's layers (`inquiry-{owner}`, `inquiry-spam-{owner}`, `inquiry-hold-{owner}`,
+`inquiry-example-{owner}`, `inquiry-intent-{owner}`). gonk holds no inquiry logic: the views,
+the moves and the intents are the crate's.
+
+```toml
+gonk.inquiry.owner = "brian"
+```
+
+One line, read at start: the owner. The client reaches that owner's layers **through the Layers
+page's door, as the identity its `gonk.layers.view` line names**, so that line is required too; an
+owner the crate refuses (1 to 12 of `a-z`, `0-9` and `-`) or a missing `gonk.layers.view` stops
+gonk at start. Without the line the pages say the client is not configured and show it.
+
+| path | what |
+|---|---|
+| `/inquiry/view/name/pending` | the pending inquiries, by site, newest first, each with a reply link and its buttons |
+| `/inquiry/view/name/spam` | one day's spam (`?day=YYYY-MM-DD`, today in UTC by default) |
+| `/inquiry/view/name/{view}/action/name/{action}` | a view's button (`POST`, `inquiry=<id>`): remove, not-spam, confirm-spam, flag-spam, block, unblock or respond, then the same view with the action's sentence (or its Conflict, naming who took the inquiry first) in the status region (a spam view's buttons carry its `day`, so the answer is that day's page) |
+
+- **It reaches the layers and nothing else, and nothing else reaches it.** The client's
+  `urn:layer:` sub-requests resolve in a kernel of its own whose only other space is the Layers
+  page's confined door (names under `urn:layer:`, `urn:layers:` and `urn:collab:` only), on a
+  QUIC connection of its own. That kernel is mounted into nothing: no socket, QUIC, script or
+  model request reaches the door or the client's `urn:iki:inquiry:` names. It writes only when
+  the door's `urn:layers:me` says the identity is a person, so an action is stamped as that
+  person.
+- **Who may use it: a signed-in passkey holding the owner's inquiry tokens**, which gonk mints
+  for no anonymous caller and no role (`client add` and the invite roles never write them). Put
+  the ones you need in YOUR passkey's grant in `grants.json`:
+
+  | use | token |
+  |---|---|
+  | both views | `urn:cap:inquiry:read:{owner}` |
+  | remove | `urn:cap:inquiry:triage:{owner}` |
+  | not-spam and flag-spam | `urn:cap:inquiry:triage:{owner}` and `urn:cap:inquiry:curate:{owner}` |
+  | confirm-spam | `urn:cap:inquiry:curate:{owner}` |
+  | block and unblock | `urn:cap:inquiry:block:{owner}` |
+  | respond | `urn:cap:inquiry:respond:{owner}` |
+
+  A caller without the token is answered the door's Denied page, and nothing reaches the layer
+  host. The header shows **Inquiries** to a caller holding the read token. An action is a `POST`
+  held to the door's same-origin rule, and another page's navigations keep none of the tokens.
+  What the identity may then do at the host is its own grant there: `read`, `out` and `take` on
+  the inquiry and spam layers, `say` on the examples channel, `out` on the intents layer.
+- **Nothing is stored.** Inquiry text is a stranger's text: the crate escapes it onto the page,
+  and gonk keeps no copy (no cache, no file, no log line with text, no ledger write).
+
 ## Onboarding a node (ledger #2009)
 
 A node enrolls itself: it makes its own certificate, posts one request on the layer host's

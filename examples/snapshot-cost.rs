@@ -129,6 +129,7 @@ fn main() {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     let door = doors::http_kernel(Arc::clone(&hub), web::space(face));
 

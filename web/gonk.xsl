@@ -110,6 +110,7 @@
               <xsl:apply-templates select="view:queue"/>
               <xsl:apply-templates select="view:layers-link"/>
               <xsl:apply-templates select="view:feeds-link"/>
+              <xsl:apply-templates select="view:inquiry-link"/>
               <xsl:apply-templates select="view:views-link"/>
               <xsl:apply-templates select="view:onboard-link"/>
               <a class="navlink" href="/sparql">SPARQL</a>
@@ -159,8 +160,9 @@
               </form>
             </section>
             <!-- A page may state what it shows in the one live region (`@page-status`): the
-                 Harness page's filtered rules (ledger #3787). Empty otherwise, as always. -->
-            <div id="status" class="flash-area" role="status" aria-live="polite"><xsl:if test="@page-status != ''"><p class="flash"><xsl:value-of select="@page-status"/></p></xsl:if></div>
+                 Harness page's filtered rules (ledger #3787). Or what a form's POST did, when the
+                 page it answers with says (an inquiry action, ledger #3695). Empty otherwise. -->
+            <div id="status" class="flash-area" role="status" aria-live="polite"><xsl:choose><xsl:when test="@status-message"><p><xsl:attribute name="class">flash <xsl:value-of select="@status-kind"/></xsl:attribute><xsl:value-of select="@status-message"/></p></xsl:when><xsl:when test="@page-status != ''"><p class="flash"><xsl:value-of select="@page-status"/></p></xsl:when></xsl:choose></div>
             <main id="main">
               <xsl:call-template name="body"/>
             </main>
@@ -416,6 +418,7 @@
       <xsl:when test="@view = 'feed'"><xsl:call-template name="feed"/></xsl:when>
       <xsl:when test="@view = 'views'"><xsl:call-template name="views"/></xsl:when>
       <xsl:when test="@view = 'harness'"><xsl:call-template name="harness"/></xsl:when>
+      <xsl:when test="@view = 'inquiry'"><xsl:call-template name="inquiry"/></xsl:when>
       <!-- A CHUNK (ledger #519): rows and nothing else, rendered apart from the shell that
            holds their slot and spliced in by src/render.rs. Every row template below reads
            only its own element, which is what makes a chunk's rows render as the page's. -->
@@ -599,6 +602,11 @@
   <!-- Feeds (ledger #3285, src/layers_view.rs), on the Layers link's rule (src/web.rs::nav_with). -->
   <xsl:template match="view:feeds-link">
     <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Feeds</a>
+  </xsl:template>
+
+  <!-- The inquiry client (ledger #3695, src/inquiry.rs), offered to a holder of its read token. -->
+  <xsl:template match="view:inquiry-link">
+    <a class="navlink"><xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute><xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Inquiries</a>
   </xsl:template>
 
   <xsl:template match="view:views-link">
@@ -1475,6 +1483,40 @@
         <p class="note"><xsl:value-of select="@message"/></p>
       </xsl:if>
       <xsl:apply-templates select="view:signin"/>
+      <xsl:apply-templates select="view:slot"/>
+    </section>
+  </xsl:template>
+
+  <!-- The inquiry client's views (ledger #3695, src/inquiry.rs): the two views as links, the
+       spam view's day, and the view's body, which ikigai-inquiry draws and src/inquiry.rs
+       splices into the slot. Unconfigured, the line to add instead. -->
+  <xsl:template name="inquiry">
+    <section class="panel inquiry" aria-labelledby="inquiry-title">
+      <h1 id="inquiry-title"><xsl:value-of select="@title"/></h1>
+      <xsl:if test="@message">
+        <p class="note"><xsl:value-of select="@message"/></p>
+      </xsl:if>
+      <xsl:if test="@config">
+        <pre><code><xsl:value-of select="@config"/></code></pre>
+      </xsl:if>
+      <xsl:if test="not(@config)">
+        <nav class="inquiry-views" aria-label="Inquiry views">
+          <ul>
+            <li><a><xsl:attribute name="href"><xsl:value-of select="@pending-href"/></xsl:attribute><xsl:if test="@inquiry-view = 'pending'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Pending</a></li>
+            <li><a><xsl:attribute name="href"><xsl:value-of select="@spam-href"/></xsl:attribute><xsl:if test="@inquiry-view = 'spam'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>Spam</a></li>
+          </ul>
+        </nav>
+        <xsl:if test="@inquiry-view = 'spam'">
+          <form method="get" class="row wrap">
+            <xsl:attribute name="action"><xsl:value-of select="@spam-href"/></xsl:attribute>
+            <label for="inquiry-day">Day</label>
+            <input id="inquiry-day" name="day" type="date">
+              <xsl:if test="@day"><xsl:attribute name="value"><xsl:value-of select="@day"/></xsl:attribute></xsl:if>
+            </input>
+            <button type="submit">Show this day</button>
+          </form>
+        </xsl:if>
+      </xsl:if>
       <xsl:apply-templates select="view:slot"/>
     </section>
   </xsl:template>

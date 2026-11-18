@@ -195,6 +195,7 @@ fn page(hub: &Arc<Kernel>, iri: &str, cap: &Capability) -> String {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     let http = doors::http_kernel(Arc::clone(hub), web::space(face));
     read(&http, iri, &[("as", "text/html")], cap).unwrap_or_else(|e| panic!("the page {iri}: {e}"))
@@ -1101,8 +1102,9 @@ fn resolution(hub: &Arc<Kernel>, name: &str, cap: &Capability) -> Result<String,
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
-    let http = doors::http_kernel(Arc::clone(hub), web::door_space(face, None));
+    let http = doors::http_kernel(Arc::clone(hub), web::door_space(face, None, None));
     read(
         &http,
         &format!("urn:iki:gonk:resolution:iri:{name}"),

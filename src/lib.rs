@@ -67,6 +67,7 @@ pub mod history;
 pub mod holders;
 pub mod identity;
 mod inbound;
+pub mod inquiry;
 pub mod instance;
 pub mod k;
 pub mod kata;

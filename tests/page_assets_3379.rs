@@ -109,6 +109,7 @@ impl Server {
             projects: Default::default(),
             toolbox: false,
             faces: vec!["site".to_string()],
+            inquiry: None,
         });
         let faces = vec![Face::at("site", dist.path().to_path_buf()).unwrap()];
         let public: Vec<String> = faces.iter().flat_map(Face::grants).collect();

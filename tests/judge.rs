@@ -137,6 +137,7 @@ fn door_with(
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),

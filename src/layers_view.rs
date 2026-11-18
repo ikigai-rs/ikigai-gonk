@@ -416,6 +416,21 @@ impl Door for Confined {
     }
 }
 
+/// `door`, confined to [`PREFIXES`] as this page's own door is: what another client of the same
+/// door and identity (the inquiry client, [`crate::inquiry`]) sends through, so nothing outside
+/// those names leaves through it either.
+pub fn confined(door: Arc<dyn Door>) -> Arc<dyn Door> {
+    Arc::new(Confined(door))
+}
+
+/// A door on `config`'s target, presenting its certificates: a [`LazyMount`], uncacheable, under
+/// the layer bindings' short call deadline, that nothing dials until it is first called. The
+/// Layers page dials two ([`LayersView::connect`]); the inquiry client ([`crate::inquiry`]) one
+/// of its own, so a view's reads never queue behind the page's.
+pub fn dial(config: &ViewConfig) -> Arc<dyn Door> {
+    Arc::new(LazyMount::fresh(config.target.clone()).with_call_timeout(crate::layer::CALL_TIMEOUT))
+}
+
 /// The layer a name under `urn:layer:` is about.
 fn layer_of(target: &str) -> Option<&str> {
     let rest = target.strip_prefix("urn:layer:")?;
@@ -1015,15 +1030,9 @@ impl LayersView {
     /// follower's long poll, one for everything else), uncacheable, under the layer bindings'
     /// short call deadline, that nothing dials until the page is first used.
     pub fn connect(config: &ViewConfig, cursors: Option<PathBuf>) -> Arc<LayersView> {
-        let door = || {
-            Arc::new(
-                LazyMount::fresh(config.target.clone())
-                    .with_call_timeout(crate::layer::CALL_TIMEOUT),
-            ) as Arc<dyn Door>
-        };
         let view = LayersView::with_feed_door(
-            door(),
-            door(),
+            dial(config),
+            dial(config),
             config.target.to_string(),
             cursors,
             Waits::default(),
@@ -2735,7 +2744,9 @@ fn watch(url: String, down: bool) -> String {
     element("watch", &[("url", &url), ("trigger", &trigger)], "")
 }
 
-async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+pub(crate) async fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("gonk-layers-call".to_string())

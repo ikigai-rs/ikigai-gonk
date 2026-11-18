@@ -102,6 +102,7 @@ impl Server {
             projects: Default::default(),
             toolbox: with_toolbox,
             faces: Vec::new(),
+            inquiry: None,
         });
         let toolbox = with_toolbox.then(|| Toolbox::at(dist.path().to_path_buf()).unwrap());
         let anonymous = anonymous_http_grants(readable).unwrap();

@@ -144,6 +144,7 @@ fn door(root: &str, path: &Path) -> Kernel {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     // ⚠ The watcher is dropped with this function, so the previewed pages are a SNAPSHOT.
     // That is what a file on disk is anyway.

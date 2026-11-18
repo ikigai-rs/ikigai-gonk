@@ -108,6 +108,7 @@ fn page(hub: &Arc<Kernel>, iri: &str, cap: &Capability) -> String {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     let http = doors::http_kernel(Arc::clone(hub), web::space(face));
     let request = Request::new(Verb::Source, Iri::parse(iri).expect("a page IRI"))

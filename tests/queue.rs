@@ -149,6 +149,7 @@ fn door_and_hub(
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     (
         doors::http_kernel(Arc::clone(&hub), web::space(face)),
@@ -2195,6 +2196,7 @@ fn door_counting(dir: &TempDir, review: Trigger) -> Counting {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     Counting {
         door: doors::http_kernel(Arc::clone(&hub), web::space(face)),

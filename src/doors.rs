@@ -1455,6 +1455,11 @@ fn routes() -> Vec<Route> {
         // `urn:cap:gonk:feeds:join` for either.
         route(crate::feeds_join::JOIN_PATH, crate::feeds_join::JOIN_IRI),
         route(crate::feeds_join::LEAVE_PATH, crate::feeds_join::LEAVE_IRI),
+        // Ledger #3695: the inquiry client's views, and each view's actions under its own base,
+        // so an action returns to the page its button was on. No per-route `cap`, for the reason
+        // `/queue/decide` takes none: the pages check the caller's inquiry tokens themselves.
+        route(crate::inquiry::VIEW_PATH, crate::inquiry::VIEW_TEMPLATE),
+        route(crate::inquiry::ACTION_PATH, crate::inquiry::ACTION_TEMPLATE),
         route("/layers/{layer}", crate::layers_view::LAYER_PAGE_TEMPLATE),
         route("/layers/{layer}/say", crate::layers_view::SAY_TEMPLATE),
         // ★ A layer file is someone else's bytes: served as `application/octet-stream`, and
@@ -1486,7 +1491,7 @@ fn routes() -> Vec<Route> {
 /// It exists for [`crate::render::rehome`]: a stored link at gonk's old origin is rewritten only
 /// when its path is one of these, so a link to anything else on that port is left alone. `tests/doors.rs` holds it to the route table, so a route added there and
 /// forgotten here fails a test rather than leaving its old links pointing at the old port.
-pub const GONK_PATHS: [&str; 26] = [
+pub const GONK_PATHS: [&str; 27] = [
     "/",
     "/l",
     crate::dashboard::PAGE_PATH,
@@ -1506,6 +1511,7 @@ pub const GONK_PATHS: [&str; 26] = [
     "/browse",
     "/layers",
     crate::layers_view::FEEDS_PATH,
+    crate::inquiry::PATH,
     crate::onboard::PAGE_PATH,
     // The RDF Toolbox's rows ([`crate::toolbox::routes`]), when `gonk.toolbox.dist` adds them.
     crate::toolbox::PATH,

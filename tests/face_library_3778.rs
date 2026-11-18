@@ -65,6 +65,7 @@ impl Server {
             projects: Default::default(),
             toolbox: false,
             faces: face::listed(&faces),
+            inquiry: None,
         });
         let public: Vec<String> = faces.iter().flat_map(Face::grants).collect();
         let http = Arc::new(doors::http_kernel_serving(

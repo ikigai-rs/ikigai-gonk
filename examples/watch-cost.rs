@@ -164,6 +164,7 @@ fn main() {
         epochs: Some(epochs),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
         holder_aliases: Default::default(),
         display: Default::default(),
         page_assets: Default::default(),

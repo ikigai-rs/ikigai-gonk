@@ -73,6 +73,7 @@ fn main() {
             projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
+            inquiry: None,
         })
     };
     let anonymous = Capability::scoped(grants_for("default", Authority::Write).unwrap());

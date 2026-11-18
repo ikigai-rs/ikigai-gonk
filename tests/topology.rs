@@ -63,8 +63,9 @@ fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
-    doors::http_kernel(hub, ikigai_gonk::web::door_space(face, None))
+    doors::http_kernel(hub, ikigai_gonk::web::door_space(face, None, None))
 }
 
 /// `Source urn:kernel:topology` under exactly the capability it declares.

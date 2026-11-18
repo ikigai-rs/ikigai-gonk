@@ -181,6 +181,10 @@ pub struct Web {
     pub page_assets: crate::page_assets::PageAssets,
     /// Named sets of ledgers declared with `gonk.project`.
     pub projects: crate::projects::Projects,
+    /// The owner whose inquiry client this server mounts (`gonk.inquiry.owner`,
+    /// [`crate::inquiry`], ledger [#3695](http://localhost:1062/l/default/item/3695)), so the
+    /// header offers it to a caller holding that owner's read token. `None`: no client, no link.
+    pub inquiry: Option<String>,
 }
 
 /// Bind the face.
@@ -518,7 +522,8 @@ pub fn space_with(web: Arc<Web>, packs: Arc<crate::packs::Config>) -> EndpointSp
         .named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
-/// The page space the live HTTP door serves: [`space`], the layers pages and `/onboard`.
+/// The page space the live HTTP door serves: [`space`], the layers pages, the inquiry client's
+/// pages and `/onboard`.
 ///
 /// `main` and `tests/topology.rs` both build it here, so the name the test reads is the name the
 /// door has. It is named again after the last bind, because a bind clears a space's name
@@ -527,8 +532,9 @@ pub fn space_with(web: Arc<Web>, packs: Arc<crate::packs::Config>) -> EndpointSp
 pub fn door_space(
     web: Arc<Web>,
     layers_view: impl Into<crate::layers_view::Views>,
+    inquiry: Option<Arc<crate::inquiry::Inquiry>>,
 ) -> EndpointSpace {
-    door_space_with(web, layers_view, Arc::default())
+    door_space_with(web, layers_view, Arc::default(), inquiry)
 }
 
 /// [`door_space`], the Harness reading the packs `packs` binds ([`space_with`]).
@@ -536,6 +542,7 @@ pub fn door_space_with(
     web: Arc<Web>,
     layers_view: impl Into<crate::layers_view::Views>,
     packs: Arc<crate::packs::Config>,
+    inquiry: Option<Arc<crate::inquiry::Inquiry>>,
 ) -> EndpointSpace {
     let layers_view = layers_view.into();
     let pages = crate::resolution::bind(
@@ -544,6 +551,8 @@ pub fn door_space_with(
         layers_view.clone(),
     );
     let pages = crate::layers_view::bind(pages, &web, layers_view);
+    // The inquiry client's pages (ledger #3695): bound unconfigured too, to say so.
+    let pages = crate::inquiry::bind(pages, &web, inquiry);
     crate::onboard::bind_page(pages, &web).named(crate::spaces::iri(crate::spaces::PAGES))
 }
 
@@ -687,6 +696,11 @@ pub(crate) fn nav_on_feeds(web: &Web, capability: &Capability, ledgers: &[Ledger
     nav_with(web, capability, ledgers, Here::Feeds, None)
 }
 
+/// [`nav`] on an inquiry view, whose header link carries `aria-current`.
+pub(crate) fn nav_on_inquiry(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
+    nav_with(web, capability, ledgers, Here::Inquiry, None)
+}
+
 /// [`nav`] on the Dashboard, whose header link carries `aria-current`.
 pub(crate) fn nav_on_dashboard(web: &Web, capability: &Capability, ledgers: &[Ledger]) -> String {
     nav_with(web, capability, ledgers, Here::Dashboard, None)
@@ -706,6 +720,8 @@ enum Here<'a> {
     Dashboard,
     /// The Feeds page: its header link is the current page's.
     Feeds,
+    /// An inquiry view: its header link is the current page's.
+    Inquiry,
     Elsewhere,
 }
 
@@ -819,6 +835,18 @@ fn nav_with(
             feeds.push(("current", "true"));
         }
         out.push_str(&element("feeds-link", &feeds, ""));
+    }
+    // ★ The inquiry client (ledger [#3695](http://localhost:1062/l/default/item/3695)), beside
+    // Layers: offered only when this server mounts it, and only to a caller holding the owner's
+    // read token, which no anonymous caller holds.
+    if let Some(owner) = &web.inquiry {
+        if capability.allows(&crate::inquiry::Token::Read.iri(owner)) {
+            let mut attributes = vec![("href", crate::inquiry::PENDING_PATH)];
+            if here == Here::Inquiry {
+                attributes.push(("current", "true"));
+            }
+            out.push_str(&element("inquiry-link", &attributes, ""));
+        }
     }
     // ★ The Views page (ledger [#2099](http://localhost:1062/l/default/item/2099)), beside
     // Layers, on the browse rule: offered only to a caller whose grant reads the views
@@ -5236,6 +5264,7 @@ mod tests {
             projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
+            inquiry: None,
         };
         let root = Capability::root();
         let ledgers = readable_ledgers(&web, &root);
