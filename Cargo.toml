@@ -306,8 +306,12 @@ ikigai-store = { version = "0.5.0", features = ["persistent"] }
 # `"0.23.0"` is `<0.24.0`.
 # 0.23.1 (ledger #3781), a BEHAVIOR floor: `items` and `next` take `omit=` and `comments=`, so a
 # list row can leave out bodies, comments and attribution (each row says what in `omitted`), and
-# `comments=none` runs no comments query. `"0.23.1"` is `<0.24.0`.
-ikigai-ledger = "0.23.1"
+# `comments=none` runs no comments query. `"0.23.1"` was `<0.24.0`.
+# 0.24.0 (ledger #3803), a BEHAVIOR floor: `items`, `count` and `next` search titles, bodies and
+# comments (`match=`), several words at once (`search=`, `search_mode=all|any`) and whole words
+# (`whole_word=`), and a JSON row says where it matched (`matches`, absent when empty), which is
+# what gonk's callers get from this release. `"0.24.0"` is `<0.25.0`.
+ikigai-ledger = "0.24.0"
 
 # The door line and its hash-chained segments (ledger #383): every request a door serves is one
 # `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under
