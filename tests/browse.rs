@@ -3347,6 +3347,7 @@ impl HttpDoorHarness {
             projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
+            inquiry: None,
         });
         let http = Arc::new(doors::http_kernel(hub, web::space(face)));
         // ★ The anonymous grant this server ships: the configured ledgers, read and write.

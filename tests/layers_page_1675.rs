@@ -370,6 +370,7 @@ impl Gonk {
             projects: Default::default(),
             toolbox: false,
             faces: Vec::new(),
+            inquiry: None,
         });
         let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, view);
         let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, access));

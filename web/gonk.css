@@ -694,3 +694,20 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
 .harness-facet input { margin: 0 0.35rem 0 0; width: 1.25rem; text-indent: 0; }
 .harness-filter > .note { margin: 0 0 0.5rem; }
 .harness-shown, .harness-clear { overflow-wrap: anywhere; }
+
+/* The inquiry client's views (ledger #3695): ikigai-inquiry draws the body, a section per site
+   and an article per inquiry, each with its actions in a group. The crate asks for a full
+   message's line breaks with an inline style, which this page's CSP (style-src 'self') refuses,
+   so the rule is here and the page drops the attribute. Inquiry text is a stranger's: it wraps,
+   and never widens the page. */
+.inquiry h2 { margin-top: 1.5rem; overflow-wrap: anywhere; }
+.inquiry h3 { font-size: 1rem; margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+.inquiry ol { list-style: none; margin: 0; padding: 0; }
+.inquiry article { border-top: 1px solid var(--rule); padding: 0.75rem 0; overflow-wrap: anywhere; }
+.inquiry article p { margin: 0.25rem 0; }
+.inquiry details p { white-space: pre-line; }
+.inquiry [role="group"] { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.inquiry [role="group"] form { margin: 0; }
+.inquiry a { display: inline-block; min-height: 24px; }
+.inquiry-views ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0 var(--gap); margin: 0 0 var(--gap); padding: 0; }
+.inquiry-views a[aria-current="page"] { font-weight: 700; }

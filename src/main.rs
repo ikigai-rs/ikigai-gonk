@@ -666,6 +666,29 @@ fn serve(flags: &config::Flags) -> ! {
         Some(homes.data.join("layers-view").join("cursors.json")),
         ikigai_gonk::layers_view::Waits::default(),
     );
+    // ★ The inquiry client (ledger #3695): the Layers page's door and identity, on a door of its
+    // own, in a kernel mounted into nothing, and dialled by nothing until a view is first opened.
+    let inquiry = match (&settings.inquiry, &settings.layers_view) {
+        (Some(owner), Some(view)) => Some(
+            ikigai_gonk::inquiry::Inquiry::new(owner, ikigai_gonk::layers_view::dial(view))
+                .unwrap_or_else(|e| fail(&e)),
+        ),
+        _ => None,
+    };
+    let inquiry_line = match &inquiry {
+        Some(inquiry) => format!(
+            "{} shows the inquiry layers of `{}` through the /layers door and identity; a \
+             passkey grant needs {} (and the triage, curate, block or respond token to act)",
+            ikigai_gonk::inquiry::PENDING_PATH,
+            inquiry.owner(),
+            ikigai_gonk::inquiry::Token::Read.iri(inquiry.owner())
+        ),
+        None => format!(
+            "no {} line, so {} says it is not configured",
+            ikigai_gonk::inquiry::KEY,
+            ikigai_gonk::inquiry::PENDING_PATH
+        ),
+    };
     let layers_line = match (&settings.layers_view, &layers_view) {
         (Some(_), Some(view)) => format!(
             "/layers reads and posts at {} as the identity its certificates name (asked of the              door on first use); a passkey grant needs {} (and {} to post)",
@@ -932,11 +955,14 @@ fn serve(flags: &config::Flags) -> ! {
             // The header offers each `gonk.face` by name (ledger #3199), except a library face,
             // which only holds code other faces import (ledger #3778).
             faces: ikigai_gonk::face::listed(&settings.faces),
+            // The header offers the inquiry client to a holder of its read token (ledger #3695).
+            inquiry: settings.inquiry.clone(),
         });
         let pages = web::door_space_with(
             Arc::clone(&face),
             ikigai_gonk::layers_view::Views::new(layers_view, Some(public_feeds)),
             Arc::new(settings.harness.clone()),
+            inquiry,
         );
         // The RDF Toolbox (ledger #1933), in this door alone and only when configured.
         let mut faces = settings
@@ -1027,6 +1053,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  llm     {mount_line}");
         eprintln!("  layer   {layer_line}");
         eprintln!("  layers  {layers_line}");
+        eprintln!("  inquiry {inquiry_line}");
         eprintln!("  onboard {onboard_line}");
         eprintln!("  sensors {sensor_line}");
         eprintln!("  lapses  {lapse_line}");

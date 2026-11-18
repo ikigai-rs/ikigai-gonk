@@ -22,7 +22,12 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_serving, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 35] = [
+// Ledger #3695: the inquiry client's views over a scratch layer host on the layer files
+// `ikigai-inquiry` ships, the one `tests/inquiry_3695.rs` reads.
+#[path = "../tests/inquiry_host/mod.rs"]
+mod inquiry_host;
+
+const PAGES: [(&str, &str); 38] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -112,6 +117,19 @@ const PAGES: [(&str, &str); 35] = [
     // Ledger #3285: the sign-in state only, since a static site has no passkey and the door's
     // feeds are live; the subscribed page with its checkbox tree is `tests/feeds_3285.rs`'s.
     ("feed.html", "/feed"),
+    // Ledger #3695: the inquiry client's two views, one inquiry and one day's spam in each; the
+    // spam view of a day with none; and (below) an action's answer, a Conflict's, and an
+    // unconfigured server's page. The anonymous caller here is handed the inquiry tokens, which
+    // the real server never does.
+    ("inquiry-pending.html", "/inquiry/view/name/pending"),
+    (
+        "inquiry-spam.html",
+        "/inquiry/view/name/spam?day=2026-11-14",
+    ),
+    (
+        "inquiry-spam-empty.html",
+        "/inquiry/view/name/spam?day=2026-11-13",
+    ),
 ];
 
 const FILES: [(&str, &str); 6] = [
@@ -231,6 +249,84 @@ fn get(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
         .and_then(|code| code.parse().ok())
         .expect("a status line");
     (status, response[split + 4..].to_vec())
+}
+
+/// A same-origin form post of `body`, as a view's button sends it.
+fn post(addr: SocketAddr, path: &str, body: &str) -> (u16, Vec<u8>) {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: text/html,*/*;q=0.8\r\n\
+         Origin: http://localhost:{port}\r\nSec-Fetch-Site: same-origin\r\n\
+         Sec-Fetch-Mode: navigate\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+         Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        port = addr.port(),
+        len = body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("write");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read");
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("a head");
+    let status = String::from_utf8_lossy(&response[..split])
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    (status, response[split + 4..].to_vec())
+}
+
+/// The inquiry client's page on a server without `gonk.inquiry.owner` (ledger #3695): its own
+/// door over `face`'s hub, answering the one path.
+fn unconfigured_inquiry(face: &web::Web) -> Vec<u8> {
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("its address");
+    let face = Arc::new(web::Web {
+        hub: Arc::clone(&face.hub),
+        ledgers: face.ledgers.clone(),
+        browse_roots: Vec::new().into(),
+        passkeys: Arc::clone(&face.passkeys),
+        rules: Arc::clone(&face.rules),
+        queue: face.queue.clone(),
+        epochs: None,
+        holder_aliases: Default::default(),
+        display: Default::default(),
+        page_assets: Default::default(),
+        projects: Default::default(),
+        toolbox: false,
+        faces: Vec::new(),
+        inquiry: None,
+    });
+    let pages = ikigai_gonk::inquiry::bind(web::space(Arc::clone(&face)), &face, None);
+    let http = Arc::new(doors::http_kernel_serving(
+        Arc::clone(&face.hub),
+        pages,
+        Vec::new(),
+        None,
+    ));
+    let door = doors::HttpDoor {
+        anonymous: anonymous_http_grants(&face.ledgers).expect("the anonymous grant"),
+        bind: addr,
+        passkeys: Some(Arc::clone(&face.passkeys)),
+        public: Vec::new(),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+    };
+    let edge = doors::edge_config(door.clone());
+    std::thread::spawn(move || {
+        runtime.block_on(ikigai_web::serve_with_listener(
+            http,
+            doors::http_cap(door),
+            listener,
+            edge,
+        ))
+    });
+    let (status, body) = get(addr, "/inquiry/view/name/pending");
+    assert_eq!(status, 200, "the unconfigured inquiry page");
+    body
 }
 
 fn appended_iri(bytes: &[u8], ledger: &str) -> String {
@@ -597,13 +693,48 @@ fn main() {
         toolbox: false,
         // The add-on row (ledger #3279) on every page below.
         faces: vec!["demo".to_string(), "intake".to_string()],
+        // The inquiry client's header link, for the fixture's anonymous holder of its token.
+        inquiry: Some(inquiry_host::OWNER.to_string()),
     });
+    let inquiry_host = inquiry_host::Host::open();
+    for (layer, id, site, text, received) in [
+        (
+            inquiry_host::INQUIRY,
+            "q1",
+            "a.example",
+            "Could you speak at our meetup next spring?\nWe are a small group.",
+            "2026-11-14T10:00:00.000Z",
+        ),
+        (
+            inquiry_host::SPAM,
+            "s1",
+            "b.example",
+            "Cheap watches, today only",
+            "2026-11-14T09:00:00.000Z",
+        ),
+        (
+            inquiry_host::SPAM,
+            "s2",
+            "a.example",
+            "You have won a prize",
+            "2026-11-14T08:00:00.000Z",
+        ),
+    ] {
+        inquiry_host.arrive(layer, id, site, text, received);
+    }
+    let inquiry =
+        ikigai_gonk::inquiry::Inquiry::new(inquiry_host::OWNER, inquiry_host.door("brian"))
+            .expect("the inquiry client");
     let http = Arc::new(doors::http_kernel_serving(
-        hub,
-        ikigai_gonk::layers_view::bind(
-            web::space_with(Arc::clone(&face), Arc::new(packs)),
+        Arc::clone(&hub),
+        ikigai_gonk::inquiry::bind(
+            ikigai_gonk::layers_view::bind(
+                web::space_with(Arc::clone(&face), Arc::new(packs)),
+                &face,
+                None,
+            ),
             &face,
-            None,
+            Some(inquiry),
         ),
         Vec::new(),
         None,
@@ -624,6 +755,14 @@ fn main() {
             "urn:cap:exec:git".to_string(),
             "urn:cap:browse:read:fixture".to_string(),
         ])
+        // ⚠ The fixture: the real server mints the inquiry tokens for NO anonymous caller.
+        .chain(
+            [
+                ikigai_gonk::inquiry::Token::Read,
+                ikigai_gonk::inquiry::Token::Triage,
+            ]
+            .map(|t| t.iri(inquiry_host::OWNER)),
+        )
         .collect(),
         bind: addr,
         passkeys: Some(passkeys),
@@ -646,6 +785,22 @@ fn main() {
         assert_eq!(status, 200, "{path}");
         bodies.push((name.to_string(), "text/html; charset=utf-8", body));
     }
+    // Ledger #3695: an action's answer (the view again, the crate's sentence in the status
+    // region), then the same press again, answered with the Conflict naming who took it.
+    for name in ["inquiry-action.html", "inquiry-conflict.html"] {
+        let (status, body) = post(
+            addr,
+            "/inquiry/view/name/spam/action/name/remove?day=2026-11-14",
+            "inquiry=s2",
+        );
+        assert_eq!(status, 200, "{name}");
+        bodies.push((name.to_string(), "text/html; charset=utf-8", body));
+    }
+    bodies.push((
+        "inquiry-unconfigured.html".to_string(),
+        "text/html; charset=utf-8",
+        unconfigured_inquiry(&face),
+    ));
     // Used bindings are visible once each, including a linked CURIE; the long namespace
     // exercises legend wrapping at phone width in the CI axe job.
     let query = "SELECT ?value WHERE { VALUES ?value { <https://example.org/vocab#open> <https://example.org/vocab#closed> <https://example.org/a-deployment-with-a-long-namespace/another-long-segment/vocabulary#ready> <https://ikigai-rs.dev/ns/ledger#open> } }";

@@ -2144,6 +2144,7 @@ dependencies = [
  "ikigai-engine",
  "ikigai-fn 0.11.0",
  "ikigai-fs",
+ "ikigai-inquiry",
  "ikigai-intray",
  "ikigai-ipc",
  "ikigai-jsonld",
@@ -2200,6 +2201,23 @@ dependencies = [
  "httpdate",
  "ikigai-core",
  "url",
+]
+
+[[package]]
+name = "ikigai-inquiry"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5bb170cf521453eb82b584221dab0dedd6d19413146e5c4434b22bfe3887eed"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "getrandom 0.3.4",
+ "ikigai-core",
+ "ikigai-fn 0.11.0",
+ "oxrdf",
+ "oxttl",
+ "serde_json",
 ]
 
 [[package]]

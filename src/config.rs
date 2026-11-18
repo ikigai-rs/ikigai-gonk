@@ -134,7 +134,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 60] = [
+const KEYS: [&str; 61] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -147,6 +147,7 @@ const KEYS: [&str; 60] = [
     "gonk.layer.deny",
     "gonk.layers.view",
     "gonk.layers.local",
+    crate::inquiry::KEY,
     "gonk.feeds.door",
     "gonk.queue.serious",
     "gonk.bind",
@@ -823,6 +824,10 @@ pub struct Settings {
     /// The Layers page's door and identity (`gonk.layers.view`, [`crate::layers_view`]), or
     /// `None`: the page says it is not configured.
     pub layers_view: Option<crate::layers_view::ViewConfig>,
+    /// The owner whose inquiry layers client this server mounts (`gonk.inquiry.owner`,
+    /// [`crate::inquiry`]), through the Layers page's door and identity, or `None`: the client's
+    /// pages say it is not configured.
+    pub inquiry: Option<String>,
     /// The host whose public feeds this server may join (`gonk.feeds.door`, ledger #3291).
     pub feeds_door: String,
     /// The per-kind providers and spend ceilings the explanation families derive under.
@@ -2304,6 +2309,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             Some(view)
         }
     };
+    let inquiry = crate::inquiry::parse_config(
+        &values_for(text, crate::inquiry::KEY),
+        layers_view.is_some(),
+    )?;
     let feeds_door = match values_for(text, crate::feeds_join::DOOR_KEY).as_slice() {
         [] => crate::feeds_join::DEFAULT_DOOR.to_string(),
         [line] => crate::feeds_join::parse_door(line)?,
@@ -2389,6 +2398,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         mounts,
         layers,
         layers_view,
+        inquiry,
         feeds_door,
         explain,
         backup,
@@ -4301,6 +4311,53 @@ mod tests {
         assert!(parse(&["subscribe"]).is_err());
         assert!(parse(&[]).is_err());
         assert!(parse(&["join", "--force"]).is_err());
+    }
+
+    /// Ledger #3695: `gonk.inquiry.owner` reaches the settings beside a Layers page, and a bad
+    /// line stops gonk at start: an owner the crate refuses, no Layers page to reach it through,
+    /// a missing certificate directory, or the key twice. Without it, gonk starts unconfigured.
+    #[test]
+    fn the_inquiry_owner_needs_the_layers_view_and_a_good_name() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["client.crt", "client.key", "server.crt"] {
+            std::fs::write(dir.path().join(file), "pem").unwrap();
+        }
+        let view = format!(
+            "gonk.layers.view = \"quic://h:1 {}\"\n",
+            dir.path().display()
+        );
+        let owner = "gonk.inquiry.owner = \"brian\"\n";
+        let got = settings(&Flags::default(), &format!("{view}{owner}"), &homes()).unwrap();
+        assert_eq!(got.inquiry.as_deref(), Some("brian"));
+        assert_eq!(
+            settings(&Flags::default(), &view, &homes())
+                .unwrap()
+                .inquiry,
+            None
+        );
+        assert_eq!(
+            settings(&Flags::default(), "", &homes()).unwrap().inquiry,
+            None
+        );
+
+        let refused = |text: String, says: &str| {
+            let e = settings(&Flags::default(), &text, &homes()).unwrap_err();
+            assert!(e.contains(says), "{text}: {e}");
+        };
+        refused(owner.to_string(), "gonk.layers.view");
+        refused(
+            format!("{view}gonk.inquiry.owner = \"Brian\"\n"),
+            "lowercase",
+        );
+        refused(
+            format!("{view}gonk.inquiry.owner = \"\"\n"),
+            "gonk.inquiry.owner",
+        );
+        refused(format!("{view}{owner}{owner}"), "2 times");
+        refused(
+            format!("gonk.layers.view = \"quic://h:1 /nowhere/at/all\"\n{owner}"),
+            "not a directory",
+        );
     }
 
     #[test]

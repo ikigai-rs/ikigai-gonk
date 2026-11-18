@@ -1030,6 +1030,7 @@ fn onboard_page(a: &Gonk, cap: &Capability) -> String {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     let pages = onboard::bind_page(ikigai_gonk::web::space(Arc::clone(&face)), &face);
     let http = ikigai_gonk::doors::http_kernel_serving(Arc::clone(&a.hub), pages, Vec::new(), None);

@@ -105,6 +105,7 @@ impl Server {
             } else {
                 Vec::new()
             },
+            inquiry: None,
         });
         let faces: Vec<Face> = if with_face {
             vec![

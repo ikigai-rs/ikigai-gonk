@@ -56,6 +56,7 @@ fn web_face(hub: &Arc<Kernel>, config: &tempfile::TempDir, port: u16) -> Arc<web
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     })
 }
 

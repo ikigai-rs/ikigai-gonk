@@ -117,6 +117,7 @@ fn start() -> (SocketAddr, tempfile::TempDir) {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     let slow: Arc<dyn Space> = Arc::new(EndpointSpace::new().bind(Exact::new(SLOW_IRI), Slow));
     let http = Arc::new(doors::http_kernel_serving(

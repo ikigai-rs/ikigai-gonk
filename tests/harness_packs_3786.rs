@@ -328,6 +328,7 @@ fn served(scene: &Scene, packs: Config) -> Served {
         projects: Default::default(),
         toolbox: false,
         faces: Vec::new(),
+        inquiry: None,
     });
     Served {
         http: Arc::new(doors::http_kernel(
