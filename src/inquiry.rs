@@ -490,6 +490,30 @@ fn with_day(body: String, day: &str) -> String {
     })
 }
 
+/// The crate's body without its `style="…"` attributes. ★ gonk's pages allow no inline style
+/// (`style-src 'self'`, attributes included), so a browser refuses each one and logs the refusal;
+/// what the crate asks for with one (a full message's line breaks, `white-space: pre-line`) is a
+/// rule in `web/gonk.css` instead. Only an attribute the crate writes can match: visitor text
+/// reaches the body escaped, its `"` as `&quot;`.
+fn without_inline_style(body: String) -> String {
+    const OPEN: &str = " style=\"";
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body.as_str();
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        let value = &rest[at + OPEN.len()..];
+        match value.find('"') {
+            Some(close) => rest = &value[close + 1..],
+            None => {
+                rest = &rest[at..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What a page says in its status region after an action.
 struct Status {
     ok: bool,
@@ -636,6 +660,7 @@ impl Endpoint for ViewPage {
         };
         let html = inquiry.view(view, day.as_deref(), inv.capability).await?;
         let (title, body) = parts(&html)?;
+        let body = without_inline_style(body);
         let body = match day_of(&title) {
             Some(day) => with_day(body, day),
             None => body,
@@ -712,6 +737,7 @@ impl Endpoint for ActionPost {
         };
         let html = inquiry.view(view, day.as_deref(), inv.capability).await?;
         let (title, body) = parts(&html)?;
+        let body = without_inline_style(body);
         let body = match day_of(&title) {
             Some(day) => with_day(body, day),
             None => body,
@@ -778,6 +804,21 @@ mod tests {
             got.contains("<p>action=&quot;/inquiry/view/name/spam/action/name/remove&quot;</p>")
         );
         assert_eq!(with_day(body.clone(), "x\" onclick=\"y"), body);
+    }
+
+    #[test]
+    fn the_crate_asks_for_no_inline_style_this_page_refuses() {
+        let body = "<details><summary>Full message</summary>\
+                    <p dir=\"auto\" style=\"white-space: pre-line\">a style=&quot;x&quot;</p>\
+                    </details>"
+            .to_string();
+        assert_eq!(
+            without_inline_style(body),
+            "<details><summary>Full message</summary>\
+             <p dir=\"auto\">a style=&quot;x&quot;</p></details>"
+        );
+        let unclosed = "<p style=\"x</p>".to_string();
+        assert_eq!(without_inline_style(unclosed.clone()), unclosed);
     }
 
     #[test]

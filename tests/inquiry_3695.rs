@@ -284,6 +284,11 @@ impl std::fmt::Debug for Response {
     }
 }
 
+/// No `style` attribute anywhere on a page: gonk's CSP (`style-src 'self'`) refuses each one.
+fn no_inline_style(page: &Response) {
+    assert!(!page.body.contains(" style="), "{page:?}");
+}
+
 fn spam_path() -> String {
     format!("/inquiry/view/name/spam?day={DAY}")
 }
@@ -318,6 +323,10 @@ fn a_reader_sees_both_views() {
     );
     // The header offers the client to a holder of the read token, as the current page.
     assert!(pending.body.contains(">Inquiries</a>"), "{pending:?}");
+    // The full message keeps its line breaks by gonk's stylesheet, never an inline style, which
+    // the page's CSP (`style-src 'self'`) refuses.
+    assert!(pending.body.contains("<details>"), "{pending:?}");
+    no_inline_style(&pending);
 
     let spam = gonk.page(&spam_path(), Some(&session));
     assert_eq!(spam.status, 200, "{spam:?}");
@@ -334,6 +343,7 @@ fn a_reader_sees_both_views() {
             || spam.body.contains(&format!("value=\"{DAY}\"")),
         "{spam:?}"
     );
+    no_inline_style(&spam);
     // Reading moved nothing.
     assert_eq!(host.ids(SPAM), ["s1"]);
     assert_eq!(host.ids(INQUIRY), ["q1"]);
@@ -407,6 +417,7 @@ fn not_spam_needs_triage_and_curate_then_moves_and_leaves_an_intent() {
             .contains(&format!("<title>Spam for {DAY} · gonk</title>")),
         "{moved:?}"
     );
+    no_inline_style(&moved);
     assert!(host.ids(SPAM).is_empty());
     let mut ids = host.ids(INQUIRY);
     ids.sort();
