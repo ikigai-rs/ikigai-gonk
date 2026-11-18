@@ -158,7 +158,9 @@
                 <button type="submit" id="enrol-submit">Create passkey</button>
               </form>
             </section>
-            <div id="status" class="flash-area" role="status" aria-live="polite"></div>
+            <!-- A page may state what it shows in the one live region (`@page-status`): the
+                 Harness page's filtered rules (ledger #3787). Empty otherwise, as always. -->
+            <div id="status" class="flash-area" role="status" aria-live="polite"><xsl:if test="@page-status != ''"><p class="flash"><xsl:value-of select="@page-status"/></p></xsl:if></div>
             <main id="main">
               <xsl:call-template name="body"/>
             </main>

@@ -577,7 +577,7 @@ pub(crate) fn readable_roots(web: &Web, capability: &Capability) -> Vec<String> 
 
 /// Whether this caller may read `root` — `ikigai-browse`'s own two exact tests, as
 /// [`readable_roots`] states them.
-fn reads_root(capability: &Capability, root: &str) -> bool {
+pub(crate) fn reads_root(capability: &Capability, root: &str) -> bool {
     capability.allows(&format!("{BROWSE_READ_PREFIX}{root}"))
         || capability.allows(ikigai_browse::CAP_WILDCARD)
 }

@@ -6,13 +6,17 @@
 # order) says harness:statedBy: the rule exists only as text an agent has to apply. Some rules
 # can only be applied by a reader (reproduce before you fix); a row is a candidate for a
 # sensor, not a defect. A rule cited only by an INFERENTIAL control (the dispatcher's check, a
-# review) is still a row: someone reads, and nothing stops the next miss.
+# review) is still a row: someone reads, and nothing stops the next miss. ?reason is the
+# guide's harness:uncheckedBecause when it has one: why it is left unchecked on purpose (a
+# judgment no program can make, or a rule optional by design), so a view can show the reason
+# in place of "no control checks this guide". Unbound for a gap nobody has explained.
 PREFIX harness: <https://ikigai-rs.dev/ns/harness#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-SELECT ?guide ?label ?section WHERE {
+SELECT ?guide ?label ?section ?reason WHERE {
   ?guide a harness:Guide ;
          rdfs:label ?label ;
          harness:section ?section .
+  OPTIONAL { ?guide harness:uncheckedBecause ?reason }
   FILTER NOT EXISTS {
     ?control harness:statedBy ?guide ;
              harness:execution harness:computational .

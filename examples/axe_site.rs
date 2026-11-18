@@ -22,7 +22,7 @@ use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{compose_serving, doors, git_object, quic, web};
 use ikigai_store::DurableStore;
 
-const PAGES: [(&str, &str); 33] = [
+const PAGES: [(&str, &str); 35] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -77,6 +77,16 @@ const PAGES: [(&str, &str); 33] = [
     ("browse.html", "/browse"),
     // Ledger #3721: the fixture repository's harness, its gaps and its firings.
     ("harness.html", "/harness"),
+    // Ledger #3787: the index filtered, its status sentence and its counts, and the view of the
+    // unchecked guides, one with its reason and one without.
+    (
+        "harness-filtered.html",
+        "/harness?root=fixture&category=authoritySafety&category=behavior&stage=toolCall&fired=fired",
+    ),
+    (
+        "harness-unchecked.html",
+        "/harness?root=fixture&gap=unchecked-guide",
+    ),
     // Ledger #3777: its detail pages, as a browser is answered them (no `as`, `Accept` HTML).
     (
         "harness-control.html",
@@ -115,7 +125,8 @@ const FILES: [(&str, &str); 6] = [
 
 /// The fixture repository's harness (ledger #3721), the one `tests/harness_3721.rs` builds: two
 /// guides (one no control checks), three sensors (one no guide states, one never fired) and two
-/// incidents (one no control exists for), so the page draws each grouping and a gap of each kind.
+/// incidents (one no control exists for), so the page draws each grouping and a gap of each kind;
+/// and a third guide left unchecked on purpose, with its reason (ledger #3787).
 const HARNESS: &str = r#"@prefix harness: <https://ikigai-rs.dev/ns/harness#> .
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix ctl:     <urn:iki:harness:fixture:control:> .
@@ -130,6 +141,11 @@ guide:reproduce-first a harness:Guide ; rdfs:label "reproduce before you fix" ;
     harness:statedIn "AGENTS.md" ; harness:section "3. Reproduce first" ;
     harness:direction harness:feedforward ; harness:execution harness:inferential ;
     harness:stage harness:toolCall ; harness:category harness:behavior .
+guide:small-commits a harness:Guide ; rdfs:label "small commits" ;
+    harness:statedIn "AGENTS.md" ; harness:section "4. Commit small" ;
+    harness:direction harness:feedforward ; harness:execution harness:inferential ;
+    harness:stage harness:preCommit ; harness:category harness:maintainability ;
+    harness:uncheckedBecause "a reviewer judges what small means" .
 inc:unclaimed-edit a harness:Incident ; rdfs:label "an edit landed with no claim" .
 inc:lost-lease a harness:Incident ; rdfs:label "a lease ran out mid-run" .
 ctl:require-claim a harness:Control ; rdfs:label "hook: no claim, no write" ;
