@@ -1390,8 +1390,10 @@ ikigai-layers = { version = "0.10.0", default-features = false }
 # door, so its `urn:layer:` sub-requests reach that door and nothing else. gonk holds no inquiry
 # logic: the views, the actions and their layer writes are the crate's. Light: ikigai-core,
 # ikigai-fn, oxrdf/oxttl, blake3 and base64, all but the last two already in this graph.
-# `"0.1.0"` is `<0.2.0`.
-ikigai-inquiry = "0.1.0"
+# ★ 0.1.1 (ledger #3809): a BEHAVIOR floor. A full message is `class="inquiry-message"`, not
+# an inline style the page's CSP refuses, so gonk splices the crate's body as it is.
+# `"0.1.1"` is `<0.2.0`.
+ikigai-inquiry = "0.1.1"
 # ★ Ledger #3291: the one outbound HTTPS read this server makes, a host's
 # `/.well-known/ikigai/layers.json` and the certificate it names (`crate::feeds_join`), and only
 # when the owner presses Join or runs `ikigai-gonk feeds join`. `rustls` over the ring provider
