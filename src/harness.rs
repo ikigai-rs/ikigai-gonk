@@ -59,6 +59,8 @@ use serde_json::{json, Value};
 use crate::render::{self, envelope};
 use crate::web::{self, fetch, request, with, Web};
 
+pub mod filter;
+
 /// The harness vocabulary.
 pub const H: &str = "https://ikigai-rs.dev/ns/harness#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -353,6 +355,11 @@ pub struct Harness {
     pub origins: BTreeMap<String, usize>,
     /// What the page states in words about the packs: unbound adoption, a refused shape.
     pub notes: Vec<String>,
+    /// Whether the root has a graph of its own, beside its packs.
+    pub own: bool,
+    /// The rules the request asked to see (ledger #3787): the page draws them, and every link
+    /// of a page carries them.
+    pub filters: filter::Filters,
 }
 
 fn store_err(e: impl std::fmt::Display) -> Error {
@@ -388,11 +395,20 @@ impl Harness {
         packs: &crate::packs::Config,
         inv: &Invocation<'_>,
     ) -> Result<Harness> {
+        let filters = filter::Filters::from_inv(inv)?;
         let asked = inv
             .inline_str("root")
             .ok()
             .map(str::trim)
             .filter(|r| !r.is_empty());
+        if let Some(root) = asked {
+            // A root this caller may not read is refused before anything of it is read, so
+            // `root=` cannot reach one the picker does not offer.
+            if !crate::k::reads_root(inv.capability, root) {
+                let signed_in = inv.capability.principal().is_some();
+                return Err(Error::Denied(web::Lacking::repositories().plain(signed_in)));
+            }
+        }
         let roots = match asked {
             Some(root) => vec![root.to_string()],
             None => crate::k::readable_roots(web, inv.capability),
@@ -412,11 +428,13 @@ impl Harness {
             let own = read_file(inv, &root, GRAPH_FILE).await?;
             if packs.is_empty() {
                 if let Some(turtle) = own {
-                    return Harness::from_bytes(
+                    let mut harness = Harness::from_bytes(
                         &root,
                         &turtle,
                         read_file(inv, &root, FIRINGS_FILE).await?,
-                    );
+                    )?;
+                    harness.filters = filters;
+                    return Ok(harness);
                 }
                 continue;
             }
@@ -425,7 +443,9 @@ impl Harness {
                 continue;
             }
             let segment = read_file(inv, &root, FIRINGS_FILE).await?;
-            return Harness::from_parts(&root, own.as_deref(), segment, assembly);
+            let mut harness = Harness::from_parts(&root, own.as_deref(), segment, assembly)?;
+            harness.filters = filters;
+            return Ok(harness);
         }
         Err(Error::NotFound(format!(
             "no repository this grant may read carries a harness (`{GRAPH_FILE}`)"
@@ -505,9 +525,16 @@ impl Harness {
             packs: assembly.packs,
             origins,
             notes: assembly.notes,
+            own: turtle.is_some(),
+            filters: filter::Filters::default(),
         };
         harness.refuse_collisions()?;
         Ok(harness)
+    }
+
+    /// The query each link of a page of this harness carries: the root and the filters.
+    pub fn here(&self) -> String {
+        self.filters.query(&self.root)
     }
 
     /// Refuse two IRIs of one kind that share an id: the resource names would be ambiguous.
@@ -823,7 +850,7 @@ impl Endpoint for Thing {
                 .unwrap_or_default();
             let html = format!(
                 "{}{from}{html}{}",
-                back(&harness.root),
+                back(&harness),
                 other_formats(
                     &iri,
                     &harness.root,
@@ -936,7 +963,7 @@ impl Endpoint for Thing {
 
     fn describe(&self) -> Description {
         let [root, face] = args();
-        Description::new(self.name())
+        filter::described(Description::new(self.name()), false)
             .title(format!("One harness {}", self.kind.word()))
             .summary(
                 "Its triples in the repository's `.gonk/harness/harness.ttl`, read through the \
@@ -1075,9 +1102,18 @@ impl Endpoint for Coverage {
         let rows = harness.select(q.text)?;
         let iri = format!("urn:iki:harness:coverage:query:{}", q.name);
         if asked == HTML {
+            // The page a filtered index links to answers over the same rules (ledger #3787).
+            let all = harness.described()?;
+            let sel = filter::Selection::new(&harness, &all)?;
+            let status = if sel.filtered() && !sel.whole(q) {
+                sel.summary()
+            } else {
+                String::new()
+            };
+            let rows = sel.restrict(&harness, q, rows);
             let html = format!(
                 "{}{}{}",
-                back(&harness.root),
+                back(&harness),
                 coverage_html(&harness, q, &rows)?,
                 other_formats(
                     &iri,
@@ -1090,7 +1126,7 @@ impl Endpoint for Coverage {
                     ]
                 )
             );
-            return harness_page(&self.web, inv, q.heading, asks(q), Some(html));
+            return page_with(&self.web, inv, q.heading, asks(q), "", &status, Some(html));
         }
         let bytes = match asked.as_str() {
             JSON => serde_json::to_vec_pretty(&result_json(&rows)).map_err(store_err)?,
@@ -1106,7 +1142,7 @@ impl Endpoint for Coverage {
 
     fn describe(&self) -> Description {
         let [root, _] = args();
-        Description::new(self.name())
+        filter::described(Description::new(self.name()), false)
             .title("One harness coverage question")
             .summary(
                 "A stored SPARQL question asked of a repository's harness and its firings: its \
@@ -1196,7 +1232,7 @@ impl Endpoint for FiringDay {
             let iri = format!("urn:iki:harness:firing:date:{date}");
             let html = format!(
                 "{}{}{}",
-                back(&harness.root),
+                back(&harness),
                 day_html(&harness, date, &rows)?,
                 other_formats(
                     &iri,
@@ -1238,7 +1274,7 @@ impl Endpoint for FiringDay {
 
     fn describe(&self) -> Description {
         let [root, face] = args();
-        Description::new(self.name())
+        filter::described(Description::new(self.name()), false)
             .title("A day's harness firings")
             .summary(
                 "A CONSTRUCT over the repository's firing segment: for each control that fired \
@@ -1287,15 +1323,21 @@ fn route_path(iri: &str) -> String {
         .unwrap_or_else(|| PAGE_PATH.to_string())
 }
 
-/// The link to `iri` with the root as the query and no face, so a browser is answered its page
-/// (its `Accept` names `text/html`) and any other client the resource's own default.
-fn page_href(iri: &str, root: &str) -> String {
-    format!("{}?root={}", route_path(iri), url_segment(root))
+/// The link to `iri` with `here` as the query (the root and the filters, [`Harness::here`]) and
+/// no face, so a browser is answered its page (its `Accept` names `text/html`) and any other
+/// client the resource's own default.
+fn page_href(iri: &str, here: &str) -> String {
+    format!("{}?{here}", route_path(iri))
 }
 
 /// The link to `iri`'s `face`: its route, with the root and the face as the query.
 fn k_href(iri: &str, root: &str, face: &str) -> String {
-    format!("{}&as={}", page_href(iri, root), url_segment(face))
+    format!(
+        "{}?root={}&as={}",
+        route_path(iri),
+        url_segment(root),
+        url_segment(face)
+    )
 }
 
 /// The resource of the control, guide or incident `iri` names: `urn:iki:harness:{kind}:id:{id}`.
@@ -1456,14 +1498,16 @@ fn firing_words(refused: usize, warned: usize) -> String {
     }
 }
 
-/// The link back to the Harness page of `root`.
-fn back(root: &str) -> String {
+/// The link back to the Harness page of the root, with the filters this page came from.
+fn back(harness: &Harness) -> String {
+    let words = if harness.filters.is_empty() {
+        format!("Back to the harness of \"{}\"", harness.root)
+    } else {
+        format!("Back to the filtered harness of \"{}\"", harness.root)
+    };
     format!(
         "<p class=\"harness-back\">{}</p>",
-        link(
-            &page_href(PAGE_IRI, root),
-            &format!("Back to the harness of \"{root}\"")
-        )
+        link(&page_href(PAGE_IRI, &harness.here()), &words)
     )
 }
 
@@ -1609,12 +1653,12 @@ fn citing<'a>(
 fn control_item(
     harness: &Harness,
     all: &BTreeMap<String, Props>,
-    root: &str,
+    here: &str,
     fired: &BTreeMap<&str, usize>,
     iri: &str,
 ) -> String {
     let props = &all[iri];
-    let href = page_href(&thing_iri(Kind::Control, iri), root);
+    let href = page_href(&thing_iri(Kind::Control, iri), here);
     let mut line: Vec<String> = vec![html_text(direction_word(Some(props)))];
     if let Some(execution) = words(props, "execution") {
         line.push(html_text(&execution));
@@ -1642,7 +1686,7 @@ fn control_item(
         .iter()
         .map(|i| {
             link(
-                &page_href(&thing_iri(Kind::Incident, i), root),
+                &page_href(&thing_iri(Kind::Incident, i), here),
                 &label_of(all, i),
             )
         })
@@ -1748,11 +1792,19 @@ fn packs_html(harness: &Harness) -> String {
     out
 }
 
-/// The page's body, as HTML: the join, the coverage, the guides with the controls that check
-/// them, and the days.
-async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<String> {
-    let root = harness.root.as_str();
+/// The page's body, as HTML, and the sentence for #status when it is filtered: the join, the
+/// repository picker and the filters, the coverage, the guides with the controls that check
+/// them, and the days, each of the last three over the rules the filters show (ledger #3787).
+async fn body(
+    web: &Web,
+    packs: &crate::packs::Config,
+    inv: &Invocation<'_>,
+    harness: &Harness,
+) -> Result<(String, String)> {
+    let here = harness.here();
     let all = harness.described()?;
+    let sel = filter::Selection::new(harness, &all)?;
+    let filtered = sel.filtered();
     let mut out = String::new();
     if let Some(sentence) = joined(web, inv, harness).await {
         let _ = write!(
@@ -1762,28 +1814,44 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
         );
     }
 
+    let roots = filter::roots(web, packs, inv, &harness.root).await;
+    out.push_str(&sel.form_html(harness, &roots));
+
     out.push_str(&packs_html(harness));
 
     // Coverage: each answer its question's row count, in words, linked to the answer's page.
-    out.push_str(
+    let _ = write!(
+        out,
         "<h2 id=\"harness-coverage\">Coverage</h2><div class=\"table-wrap\"><table \
          class=\"harness-table\"><caption>Each coverage question, and how many answers it \
-         has</caption><thead><tr><th scope=\"col\">Question</th><th \
+         has{}</caption><thead><tr><th scope=\"col\">Question</th><th \
          scope=\"col\">Answers</th></tr></thead><tbody>",
+        if filtered {
+            " among the filtered rules"
+        } else {
+            ""
+        }
     );
     for q in &QUESTIONS {
-        let n = harness.select(q.text)?.rows.len();
+        let n = sel.restrict(harness, q, harness.select(q.text)?).rows.len();
         let iri = format!("urn:iki:harness:coverage:query:{}", q.name);
+        let whole = if sel.whole(q) {
+            " (incidents are not rules: not filtered)"
+        } else {
+            ""
+        };
         let _ = write!(
             out,
-            "<tr><th scope=\"row\">{}</th><td>{}</td></tr>",
+            "<tr><th scope=\"row\">{}{}</th><td>{}</td></tr>",
             html_text(q.heading),
-            link(&page_href(&iri, root), &plural(n, q.rows[0], q.rows[1])),
+            whole,
+            link(&page_href(&iri, &here), &plural(n, q.rows[0], q.rows[1])),
         );
     }
     out.push_str("</tbody></table></div>");
 
     // The guides, each with the controls that state it; then the controls no guide states.
+    // Filtered, a guide is drawn when it is shown or a control under it is.
     let mut fired: BTreeMap<&str, usize> = BTreeMap::new();
     for f in &harness.firings {
         *fired.entry(f.control.as_str()).or_default() += 1;
@@ -1792,15 +1860,36 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
         .iter()
         .filter(|(_, p)| is_a(p, "Guide"))
         .map(|(g, _)| g)
+        .filter(|g| {
+            sel.shows(g)
+                || citing(&all, "statedBy", g)
+                    .iter()
+                    .any(|(c, _)| sel.shows(c))
+        })
         .collect();
     guides.sort_by_key(|g| label_of(&all, g));
-    out.push_str(
+    let _ = write!(
+        out,
         "<h2 id=\"harness-guides\">Guides and the controls that check them</h2><p>A guide is a \
-         rule the agents are told; under each are the controls that state it.</p>",
+         rule the agents are told; under each are the controls that state it.{}</p>",
+        if filtered {
+            " Only the filtered rules are listed."
+        } else {
+            ""
+        }
     );
     if guides.is_empty() {
-        out.push_str("<p>The harness states no guide.</p>");
+        out.push_str(if filtered {
+            "<p>No guide is in the filtered rules.</p>"
+        } else {
+            "<p>The harness states no guide.</p>"
+        });
     }
+    let reasons_asked = sel
+        .filters
+        .values(filter::Facet::Gap)
+        .iter()
+        .any(|g| g == "unchecked-guide");
     for guide in &guides {
         let props = &all[guide.as_str()];
         let gid = format!("harness-guide-{}", local(guide));
@@ -1808,8 +1897,14 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
             write!(
             out,
             "<section class=\"harness-group\" aria-labelledby=\"{gid}\"><h3 id=\"{gid}\">{}</h3>",
-            link(&page_href(&thing_iri(Kind::Guide, guide), root), &label_of(&all, guide)),
+            link(&page_href(&thing_iri(Kind::Guide, guide), &here), &label_of(&all, guide)),
         );
+        if !sel.shows(guide) {
+            out.push_str(
+                "<p class=\"harness-facts\">This guide is not in the filtered rules; it is shown \
+                 for the controls under it that are.</p>",
+            );
+        }
         if let Some(at) = stated_at(props) {
             let _ = write!(
                 out,
@@ -1820,13 +1915,37 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
         if let Some(from) = from_pack(harness, guide) {
             let _ = write!(out, "<p class=\"harness-facts\">{}</p>", html_text(&from));
         }
-        let controls = citing(&all, "statedBy", guide);
-        if controls.is_empty() {
-            out.push_str("<p>No control checks this guide.</p>");
-        } else {
+        let every = citing(&all, "statedBy", guide);
+        let reason = unchecked_because(props);
+        match &reason {
+            Some(reason) => {
+                let _ = write!(out, "<p>Unchecked because: {}</p>", html_text(reason));
+            }
+            None if every.is_empty() => out.push_str("<p>No control checks this guide.</p>"),
+            None => {}
+        }
+        // In the view of the unchecked guides, a gap nobody explained says so.
+        if reason.is_none() && reasons_asked && sel.unchecked(guide) {
+            out.push_str(
+                "<p class=\"harness-facts\">No reason is stated for leaving it unchecked.</p>",
+            );
+        }
+        let controls: Vec<&String> = every
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| sel.shows(c))
+            .collect();
+        if controls.is_empty() && !every.is_empty() {
+            let _ = write!(
+                out,
+                "<p>No control in the filtered rules checks this guide; {} outside them {}.</p>",
+                plural(every.len(), "control", "controls"),
+                if every.len() == 1 { "does" } else { "do" }
+            );
+        } else if !controls.is_empty() {
             out.push_str("<ul class=\"harness-list\">");
-            for (c, _) in controls {
-                out.push_str(&control_item(harness, &all, root, &fired, c));
+            for c in controls {
+                out.push_str(&control_item(harness, &all, &here, &fired, c));
             }
             out.push_str("</ul>");
         }
@@ -1834,8 +1953,9 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
     }
     let mut unstated: Vec<&String> = all
         .iter()
-        .filter(|(_, p)| {
+        .filter(|(c, p)| {
             is_a(p, "Control")
+                && sel.shows(c)
                 && !vals(p, "statedBy")
                     .iter()
                     .any(|g| all.get(g).is_some_and(|gp| is_a(gp, "Guide")))
@@ -1857,13 +1977,14 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
              id=\"harness-unstated\">Controls no guide states</h3><ul class=\"harness-list\">",
         );
         for c in unstated {
-            out.push_str(&control_item(harness, &all, root, &fired, c));
+            out.push_str(&control_item(harness, &all, &here, &fired, c));
         }
         out.push_str("</ul></section>");
     }
 
     // Firings per day, newest first.
-    let days = harness.select(question("firings-by-day")?.text)?;
+    let by_day = question("firings-by-day")?;
+    let days = sel.restrict(harness, by_day, harness.select(by_day.text)?);
     let mut per_day: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for row in &days.rows {
         let (Some(day), Some(outcome)) = (
@@ -1884,26 +2005,47 @@ async fn body(web: &Web, inv: &Invocation<'_>, harness: &Harness) -> Result<Stri
     }
     out.push_str("<h2 id=\"harness-days\">Firings by day</h2>");
     if per_day.is_empty() {
-        out.push_str("<p>Nothing has fired in this repository's firing log.</p>");
+        out.push_str(if filtered {
+            "<p>No filtered rule has fired in this repository's firing log.</p>"
+        } else {
+            "<p>Nothing has fired in this repository's firing log.</p>"
+        });
     } else {
         out.push_str(&days_table(
-            root,
-            "Refusals and warnings per day (UTC), newest first",
+            &here,
+            if filtered {
+                "Refusals and warnings of the filtered rules per day (UTC), newest first"
+            } else {
+                "Refusals and warnings per day (UTC), newest first"
+            },
             &per_day,
         ));
     }
-    Ok(out)
+    let status = if filtered {
+        sel.summary()
+    } else {
+        String::new()
+    };
+    Ok((out, status))
+}
+
+/// Why a guide is left unchecked on purpose (`harness:uncheckedBecause`, vocabulary 0.5.0).
+fn unchecked_because(props: &Props) -> Option<String> {
+    vals(props, "uncheckedBecause")
+        .into_iter()
+        .next()
+        .filter(|r| !r.trim().is_empty())
 }
 
 /// A table of days, each a row whose count links to that day's page.
-fn days_table(root: &str, caption: &str, per_day: &BTreeMap<String, (usize, usize)>) -> String {
+fn days_table(here: &str, caption: &str, per_day: &BTreeMap<String, (usize, usize)>) -> String {
     let mut out = format!(
         "<div class=\"table-wrap\"><table class=\"harness-table\"><caption>{}</caption><thead><tr><th \
          scope=\"col\">Day (UTC)</th><th scope=\"col\">Firings</th></tr></thead><tbody>",
         html_text(caption)
     );
     for (day, (refused, warned)) in per_day.iter().rev() {
-        let href = page_href(&format!("urn:iki:harness:firing:date:{day}"), root);
+        let href = page_href(&format!("urn:iki:harness:firing:date:{day}"), here);
         let _ = write!(
             out,
             "<tr><th scope=\"row\">{}</th><td>{}</td></tr>",
@@ -1921,7 +2063,7 @@ fn control_html(
     all: &BTreeMap<String, Props>,
     subject: &str,
 ) -> (String, String) {
-    let root = harness.root.as_str();
+    let here = harness.here();
     let empty = Props::new();
     let props = all.get(subject).unwrap_or(&empty);
     let none = || "<span class=\"note\">none stated</span>".to_string();
@@ -1977,7 +2119,7 @@ fn control_html(
         .iter()
         .map(|g| {
             (
-                page_href(&thing_iri(Kind::Guide, g), root),
+                page_href(&thing_iri(Kind::Guide, g), &here),
                 label_of(all, g),
             )
         })
@@ -1986,7 +2128,7 @@ fn control_html(
         .iter()
         .map(|i| {
             (
-                page_href(&thing_iri(Kind::Incident, i), root),
+                page_href(&thing_iri(Kind::Incident, i), &here),
                 label_of(all, i),
             )
         })
@@ -2003,7 +2145,7 @@ fn control_html(
         out.push_str("<p>It has not fired in this repository's firing log.</p>");
     } else {
         out.push_str(&days_table(
-            root,
+            &here,
             "This control's refusals and warnings per day (UTC), newest first",
             &per_day,
         ));
@@ -2019,6 +2161,7 @@ async fn guide_html(
     subject: &str,
 ) -> (String, String) {
     let root = harness.root.as_str();
+    let here = harness.here();
     let empty = Props::new();
     let props = all.get(subject).unwrap_or(&empty);
     let says = props
@@ -2079,16 +2222,25 @@ async fn guide_html(
         .into_iter()
         .map(|(c, _)| {
             (
-                page_href(&thing_iri(Kind::Control, c), root),
+                page_href(&thing_iri(Kind::Control, c), &here),
                 label_of(all, c),
             )
         })
         .collect();
+    // A deliberate gap says why (`harness:uncheckedBecause`); without one the sentence stays.
+    let reason = unchecked_because(props);
+    let none = match &reason {
+        Some(reason) => format!("Unchecked because: {reason}"),
+        None => "No control checks this guide.".to_string(),
+    };
     let _ = write!(
         out,
         "<h2 id=\"harness-controls\">Controls that enforce it</h2>{}",
-        link_list(&controls, "No control checks this guide.")
+        link_list(&controls, &none)
     );
+    if let (Some(reason), false) = (&reason, controls.is_empty()) {
+        let _ = write!(out, "<p>Unchecked because: {}</p>", html_text(reason));
+    }
     (label_of(all, subject), out)
 }
 
@@ -2098,7 +2250,7 @@ fn incident_html(
     all: &BTreeMap<String, Props>,
     subject: &str,
 ) -> (String, String) {
-    let root = harness.root.as_str();
+    let here = harness.here();
     let empty = Props::new();
     let props = all.get(subject).unwrap_or(&empty);
     let mut rows = vec![("What happened", html_text(&label_of(all, subject)))];
@@ -2110,7 +2262,7 @@ fn incident_html(
         .into_iter()
         .map(|(c, _)| {
             (
-                page_href(&thing_iri(Kind::Control, c), root),
+                page_href(&thing_iri(Kind::Control, c), &here),
                 label_of(all, c),
             )
         })
@@ -2128,7 +2280,7 @@ fn incident_html(
 
 /// A day's page: each control that fired, linked, its outcome and how many times.
 fn day_html(harness: &Harness, date: &str, rows: &[(String, String, i64)]) -> Result<String> {
-    let root = harness.root.as_str();
+    let here = harness.here();
     let all = harness.described()?;
     let (mut refused, mut warned) = (0, 0);
     for (_, outcome, n) in rows {
@@ -2157,7 +2309,7 @@ fn day_html(harness: &Harness, date: &str, rows: &[(String, String, i64)]) -> Re
             out,
             "<tr><th scope=\"row\">{}</th><td>{}</td><td>{}</td></tr>",
             link(
-                &page_href(&thing_iri(Kind::Control, control), root),
+                &page_href(&thing_iri(Kind::Control, control), &here),
                 &label_of(&all, control)
             ),
             match outcome.as_str() {
@@ -2174,7 +2326,7 @@ fn day_html(harness: &Harness, date: &str, rows: &[(String, String, i64)]) -> Re
 
 /// A coverage question's page: its answer as a table, each control, guide or incident linked.
 fn coverage_html(harness: &Harness, q: &Question, rows: &Rows) -> Result<String> {
-    let root = harness.root.as_str();
+    let here = harness.here();
     let all = harness.described()?;
     let mut out = format!(
         "<p>{}.</p>",
@@ -2207,7 +2359,7 @@ fn coverage_html(harness: &Harness, q: &Question, rows: &Rows) -> Result<String>
             });
             let html = match kind {
                 Some(kind) => link(
-                    &page_href(&thing_iri(kind, &text), root),
+                    &page_href(&thing_iri(kind, &text), &here),
                     &label_of(&all, &text),
                 ),
                 None => html_text(&term_word(&text)),
@@ -2233,7 +2385,7 @@ fn harness_page(
     message: &str,
     html: Option<String>,
 ) -> Result<Representation> {
-    page_with(web, inv, title, message, "", html)
+    page_with(web, inv, title, message, "", "", html)
 }
 
 fn page_with(
@@ -2242,6 +2394,7 @@ fn page_with(
     title: &str,
     message: &str,
     extra: &str,
+    status: &str,
     html: Option<String>,
 ) -> Result<Representation> {
     let mut children = web::nav(
@@ -2266,6 +2419,8 @@ fn page_with(
             ),
             ("title", title),
             ("message", message),
+            // What a filtered page shows, in #status, the page's one live region (ledger #3787).
+            ("page-status", status),
         ],
         &children,
     );
@@ -2291,7 +2446,7 @@ impl Endpoint for HarnessPage {
         web::html_only(inv)?;
         match Harness::load_with(&self.web, &self.packs, inv).await {
             Ok(harness) => {
-                let html = body(&self.web, inv, &harness).await?;
+                let (html, status) = body(&self.web, &self.packs, inv, &harness).await?;
                 let message = if harness.packs.is_empty() {
                     format!(
                         "The rules the agents in the repository \"{}\" follow: its \
@@ -2308,7 +2463,7 @@ impl Endpoint for HarnessPage {
                         harness.root
                     )
                 };
-                harness_page(&self.web, inv, "Harness", &message, Some(html))
+                page_with(&self.web, inv, "Harness", &message, "", &status, Some(html))
             }
             Err(Error::Denied(_)) => page_with(
                 &self.web,
@@ -2316,6 +2471,7 @@ impl Endpoint for HarnessPage {
                 "Harness",
                 "",
                 &web::Lacking::repositories().element(),
+                "",
                 None,
             ),
             Err(Error::NotFound(why)) => {
@@ -2335,13 +2491,14 @@ impl Endpoint for HarnessPage {
 
     fn describe(&self) -> Description {
         let [root, _] = args();
-        Description::new(self.name())
+        filter::described(Description::new(self.name()), true)
             .title("Harness")
             .summary(
                 "A repository's harness: the coverage questions' answers, each guide with the \
                  controls that state it, and the firings per day, each count a link to the page \
-                 of the resource that answers it. Read under the caller's capability; counts \
-                 only.",
+                 of the resource that answers it, over the rules the filters choose (all of them \
+                 when none is given), each choice with how many rules it would match. Read under \
+                 the caller's capability; counts only.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
