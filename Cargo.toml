@@ -736,7 +736,11 @@ ikigai-nl = "0.6.0"
 # GitHub roots; browse also hides them from viewers without urn:cap:exec:gh.
 # 0.22.0: `Mount::annotations_through` takes store 0.5's `SharedWriter` (ledger #3375).
 # `"0.22.0"` is `<0.23.0`.
-ikigai-browse = "0.22.0"
+# ★ 0.23.0 is the floor now (ledger #3819, ikigai-rs/ikigai-browse PR 158): the tree page's PR panels
+# check `urn:cap:exec:read:gh`, the grant ikigai-repo 0.6.0's pr facades require and the one gonk's
+# grants carry since the exec split (ledger #3820). Under 0.22 a passkey saw no PR panels. `"0.23.0"`
+# is `<0.24.0`.
+ikigai-browse = "0.23.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
