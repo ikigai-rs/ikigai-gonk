@@ -71,6 +71,10 @@
 //!                                       # never releases (default: no line, no sweep)
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
+//! # gonk.ui.retry.limit = "90s"       # how long a page and a framed face ride out a restart
+//!                                       # before showing the error (this IS the default; "off")
+//! # gonk.ui.retry.base = "1s"          # the first wait before a retry, doubled each time
+//!                                       # (this IS the default)
 //! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
 //! # gonk.log.access = true
 //! ```
@@ -134,7 +138,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 61] = [
+const KEYS: [&str; 63] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -196,6 +200,8 @@ const KEYS: [&str; 61] = [
     crate::projects::KEY,
     crate::page_assets::STYLE_KEY,
     crate::page_assets::SCRIPT_KEY,
+    crate::ui_retry::LIMIT_KEY,
+    crate::ui_retry::BASE_KEY,
 ];
 
 /// How to invoke the binary.
@@ -863,6 +869,9 @@ pub struct Settings {
     /// (`gonk.ledger.lapse.every`), or `None` when the line is absent: off, as before ledger
     /// #3790 — see [`crate::lapse`].
     pub lapse_every: Option<Duration>,
+    /// How long a page and a framed face ride out a failure (`gonk.ui.retry.limit`,
+    /// `gonk.ui.retry.base`; ledger #3811): see [`crate::ui_retry`].
+    pub ui_retry: crate::ui_retry::UiRetry,
     /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
     /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
     pub nl_ask: String,
@@ -2421,6 +2430,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, crate::sensor::LEDGER_KEY).as_deref(),
         )?,
         lapse_every: crate::lapse::every(value_for(text, crate::lapse::EVERY_KEY).as_deref())?,
+        ui_retry: crate::ui_retry::UiRetry::parse(
+            value_for(text, crate::ui_retry::LIMIT_KEY).as_deref(),
+            value_for(text, crate::ui_retry::BASE_KEY).as_deref(),
+        )?,
         nl_ask: nl_ask(text)?,
         model_calls_per_hour: crate::budget::model_calls_per_hour(
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),
@@ -3119,6 +3132,35 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    /// ★ Ledger #3811: `gonk.ui.retry.*` set how long pages and faces ride out a restart, and an
+    /// unknown or malformed one stops the start.
+    #[test]
+    fn the_ui_retry_lines_are_read_and_a_wrong_one_is_refused() {
+        let with = |text: &str| settings(&Flags::default(), text, &homes());
+        let default = with("").unwrap().ui_retry;
+        assert_eq!(default, crate::ui_retry::UiRetry::default());
+        let set = with("gonk.ui.retry.limit = \"45s\"\ngonk.ui.retry.base = \"250ms\"\n")
+            .unwrap()
+            .ui_retry;
+        assert_eq!(set.limit, Duration::from_secs(45));
+        assert_eq!(set.base, Duration::from_millis(250));
+        assert_eq!(
+            crate::ui_retry::attributes_of(set),
+            " data-ui-retry-limit='45000' data-ui-retry-base='250'"
+        );
+        for wrong in [
+            "gonk.ui.retry.limit = \"soon\"",
+            "gonk.ui.retry.limit = \"90\"",
+            "gonk.ui.retry.limit = \"2h\"",
+            "gonk.ui.retry.base = \"0s\"",
+            "gonk.ui.retry.base = \"1m\"",
+            "gonk.ui.retry.cap = \"30s\"",
+        ] {
+            let refused = with(&format!("{wrong}\n")).unwrap_err();
+            assert!(refused.contains("gonk.ui.retry."), "{wrong}: {refused}");
+        }
     }
 
     /// Ledger #1907: a `gonk.browse.github` line names a SERVED root's repository on GitHub,

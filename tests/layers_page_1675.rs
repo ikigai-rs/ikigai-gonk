@@ -1290,7 +1290,8 @@ fn the_page_poll_does_not_clear_the_flash() {
         .expect("the clearing listener");
     let body = &shell[at..at + shell[at..].find("\n  });").expect("the listener ends")];
     assert!(
-        body.contains("if (!quiet(d.elt)) status(\"\", false);"),
+        // ikigai-ui 0.5.1 also keeps a "Reconnecting…" it is showing (ledger #3811).
+        body.contains("if (!quiet(d.elt) && ") && body.contains("status(\"\", false);"),
         "{body}"
     );
     assert!(shell.contains("elt.closest(\"[data-ui-quiet]\")"));

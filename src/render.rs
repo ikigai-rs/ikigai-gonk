@@ -888,16 +888,22 @@ fn themed(document: &str, page: String) -> String {
         .and_then(|(asked, _)| ikigai_ui::THEMES.iter().find(|t| **t == asked).copied())
         .unwrap_or("auto");
     let chooser = ikigai_ui::theme_chooser(theme).unwrap_or_default();
-    page.replacen("data-theme='auto'", &format!("data-theme='{theme}'"), 1)
-        .replacen(THEME_CHOOSER_MARKER, &chooser, 1)
-        .replacen(
-            INSTANCE_MARKER,
-            &format!(
-                "<meta name='gonk-instance' content='{}'>",
-                crate::instance::id()
-            ),
-            1,
-        )
+    // ikigai-ui's shell reads how long to ride out a failure from `<html>` (ledger #3811).
+    let retry = crate::ui_retry::attributes();
+    page.replacen(
+        "data-theme='auto'",
+        &format!("data-theme='{theme}'{retry}"),
+        1,
+    )
+    .replacen(THEME_CHOOSER_MARKER, &chooser, 1)
+    .replacen(
+        INSTANCE_MARKER,
+        &format!(
+            "<meta name='gonk-instance' content='{}'>",
+            crate::instance::id()
+        ),
+        1,
+    )
 }
 
 /// The theme a page renders in: `theme=` when it is one ikigai-ui knows, else `auto`, so an
@@ -1706,7 +1712,10 @@ mod tests {
         );
         let page = render(&doc, true).expect("the stylesheet renders");
         assert!(
-            page.starts_with("<!DOCTYPE html>\n<html data-theme='auto' lang='en'>"),
+            page.starts_with(
+                "<!DOCTYPE html>\n<html data-theme='auto' data-ui-retry-limit='90000' \
+                 data-ui-retry-base='1000' lang='en'>"
+            ),
             "{page}"
         );
         assert!(

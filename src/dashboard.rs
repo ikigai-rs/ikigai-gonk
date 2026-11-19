@@ -680,7 +680,9 @@ pub(crate) async fn chart_chunk(
     }
     let mut rows = String::new();
     let mut live = true;
-    let chart = match counts(inv, ledger).await {
+    // A store restarting answers `Unavailable` for a moment: ask again before drawing the note
+    // (ledger #3811).
+    let chart = match crate::ui_retry::reread(inv.time_left(), || counts(inv, ledger)).await {
         Err(Error::Denied(_)) => return None,
         Err(error) => {
             live = !refused_for_good(&error);

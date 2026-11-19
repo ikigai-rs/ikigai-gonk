@@ -268,7 +268,7 @@ fn the_page_lists_the_readmes_declaration_with_links_and_the_status() {
     let body = &page.body;
     assert!(body.starts_with("<!DOCTYPE html>"), "{body}");
     assert!(
-        body.contains("<html data-theme='auto' lang='en'>"),
+        body.contains("<html data-theme='auto' data-ui-retry-limit='90000' data-ui-retry-base='1000' lang='en'>"),
         "{body}"
     );
     assert!(body.contains("<h1 id='views-title'>Views</h1>"), "{body}");

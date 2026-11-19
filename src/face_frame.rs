@@ -177,10 +177,14 @@ impl Frame {
             Some(open) if !note.is_empty() => format!("{open}{note}</nav>"),
             _ => self.bar.clone(),
         };
+        // The theme when the face named none, and always gonk's retry settings, so a face and a
+        // gonk page give up at the same moment (ledger #3811). Written just after the tag's
+        // name, they come before any the face wrote, and the first of two attributes wins.
+        let retry = crate::ui_retry::attributes();
         let theme = match seams.theme {
-            Theme::Attribute(_) => " data-theme='auto'",
-            Theme::Element(_) => "<html data-theme='auto'>",
-            Theme::Named => "",
+            Theme::Attribute(_) => format!(" data-theme='auto'{retry}"),
+            Theme::Element(_) => format!("<html data-theme='auto'{retry}>"),
+            Theme::Named(_) => retry,
         };
         let extra = theme.len() + head.len() + bar.len();
         let mut out = Vec::with_capacity(page.len() + extra);
@@ -190,9 +194,8 @@ impl Frame {
             out.extend_from_slice(text.as_bytes());
             from = at;
         };
-        if let Theme::Attribute(at) | Theme::Element(at) = seams.theme {
-            write(at, theme);
-        }
+        let (Theme::Attribute(at) | Theme::Element(at) | Theme::Named(at)) = seams.theme;
+        write(at, &theme);
         write(seams.head, &head);
         write(seams.body, &bar);
         out.extend_from_slice(&page[from..]);
@@ -207,8 +210,9 @@ enum Theme {
     Attribute(usize),
     /// It has no `<html>` tag: the offset of its first element.
     Element(usize),
-    /// Its `<html>` names one already, which is the face's to keep.
-    Named,
+    /// Its `<html>` names one already, which is the face's to keep: the offset just after the
+    /// tag's name, for the retry settings.
+    Named(usize),
 }
 
 /// The three places a page is written into, in page order.
@@ -355,7 +359,7 @@ fn seams(page: &[u8]) -> Option<Seams> {
         match found.name.as_str() {
             "html" if start == first => {
                 theme = Some(if found.has_theme {
-                    Theme::Named
+                    Theme::Named(found.name_end)
                 } else {
                     Theme::Attribute(found.name_end)
                 });
@@ -399,7 +403,7 @@ mod tests {
                     <title>T</title><link rel=\"stylesheet\" href=\"a.css\"></head>\
                     <body class=\"x\"><p>hi</p></body></html>";
         let framed = text(&frame().apply(page.as_bytes()).unwrap());
-        assert!(framed.starts_with("<!doctype html>\n<html data-theme='auto' lang=\"en\"><head>"));
+        assert!(framed.starts_with("<!doctype html>\n<html data-theme='auto' data-ui-retry-limit='90000' data-ui-retry-base='1000' lang=\"en\"><head>"));
         let sheet = framed.find("gonk-frame.css").unwrap();
         assert!(framed.find("<meta charset").unwrap() < sheet);
         assert!(sheet < framed.find("shell.js").unwrap());
@@ -452,14 +456,19 @@ mod tests {
     fn the_theme_seam() {
         let named = "<html DATA-THEME=dark><body>";
         let framed = text(&frame().apply(named.as_bytes()).unwrap());
-        assert!(framed.starts_with("<html DATA-THEME=dark>"), "{framed}");
+        assert!(
+            framed.starts_with(
+                "<html data-ui-retry-limit='90000' data-ui-retry-base='1000' DATA-THEME=dark>"
+            ),
+            "{framed}"
+        );
         assert_eq!(framed.matches("data-theme").count(), 0, "{framed}");
 
         // A value that only mentions the attribute does not count.
         let mention = "<html title=\"data-theme\"><body>";
         let framed = text(&frame().apply(mention.as_bytes()).unwrap());
         assert!(
-            framed.starts_with("<html data-theme='auto' title="),
+            framed.starts_with("<html data-theme='auto' data-ui-retry-limit='90000' data-ui-retry-base='1000' title="),
             "{framed}"
         );
 
@@ -467,7 +476,7 @@ mod tests {
         let bare = "<!doctype html><!-- c --><meta charset=utf-8><body>";
         let framed = text(&frame().apply(bare.as_bytes()).unwrap());
         assert!(
-            framed.starts_with("<!doctype html><!-- c --><html data-theme='auto'><meta charset"),
+            framed.starts_with("<!doctype html><!-- c --><html data-theme='auto' data-ui-retry-limit='90000' data-ui-retry-base='1000'><meta charset"),
             "{framed}"
         );
     }
@@ -477,7 +486,7 @@ mod tests {
         let mut page = b"\xef\xbb\xbf<head><title>caf\xe9</title></head><body>".to_vec();
         page.extend_from_slice(b"\xff");
         let framed = frame().apply(&page).unwrap();
-        assert!(framed.starts_with(b"\xef\xbb\xbf<html data-theme='auto'><head>"));
+        assert!(framed.starts_with(b"\xef\xbb\xbf<html data-theme='auto' data-ui-retry-limit='90000' data-ui-retry-base='1000'><head>"));
         assert!(framed.windows(5).any(|w| w == b"caf\xe9<"));
         assert!(framed.ends_with(b"</nav></nav>\xff"));
     }
