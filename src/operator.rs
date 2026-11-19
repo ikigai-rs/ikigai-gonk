@@ -48,6 +48,7 @@ use serde_json::{json, Value};
 use crate::backup::{humanize, stamp_iso};
 use crate::dashboard::{live, Tab};
 use crate::system;
+use crate::ui_retry::{self, Via};
 use crate::web::{
     as_html_arg, fetch, html, html_only, ledger_href, menu_order, readable_ledgers, request, with,
     Web, HTML,
@@ -408,9 +409,11 @@ fn unread_lines(unread: usize) -> String {
 }
 
 /// A readout of the HUB, under the viewer's capability. See the module's note.
+/// A part's read of the hub, tried again while the store is briefly unavailable
+/// ([`crate::ui_retry::read`], ledger #3811) before the part says it could not be read.
 async fn hub_read(web: &Web, inv: &Invocation<'_>, target: &str) -> Result<String> {
     let read = request(Verb::Source, target)?;
-    let answer = web.hub.issue(read, inv.capability).await?;
+    let answer = ui_retry::read(inv, read, Via::Hub(Arc::clone(&web.hub))).await?;
     Ok(String::from_utf8_lossy(&answer.bytes).into_owned())
 }
 
@@ -826,8 +829,11 @@ fn claimed_html(workers: &Value) -> String {
     out
 }
 
+/// A part's JSON read, tried again as [`hub_read`] is.
 async fn json_of(inv: &Invocation<'_>, target: &str) -> Result<Value> {
-    let bytes = fetch(inv, request(Verb::Source, target)?).await?;
+    let bytes = ui_retry::read(inv, request(Verb::Source, target)?, Via::Run)
+        .await?
+        .bytes;
     serde_json::from_slice(&bytes).map_err(|e| Error::Endpoint(format!("{target}: {e}")))
 }
 

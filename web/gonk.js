@@ -27,7 +27,8 @@
 // page's "On GitHub" link follows the region to the view it now shows, which htmx swaps in
 // without changing the page's URL, and carries a selected line onto it (ledger #1907, and a
 // pull request's page, #2117). (12) a page asks the server, now and then, whether it is still
-// the process that served it, and says so when it is not (ledger #375).
+// the process that served it, and says so when it is not (ledger #375). (13) a page that is gonk
+// restarting (a 502, 503 or 504) loads itself again with backoff and says so (ledger #3811).
 //
 // ★ The session cookie is set by the SERVER, HttpOnly (ledger #1591): this script never sees the
 // token. It asks the server whether it is signed in (/auth/session), and the server reads the
@@ -1642,6 +1643,91 @@
   // A swap that re-renders the item (a comment posted, an edit) draws it in written order.
   document.addEventListener("htmx:afterSwap", wireCommentOrder);
 
+  // ------------------------------------- an outage page loads itself again (ledger #3811)
+  //
+  // A 502, 503 or 504 a GET navigated to is gonk restarting or its store briefly down, and the
+  // server marks its page (`data-reload`, src/refusal.rs). It is loaded again with the backoff
+  // ikigai-ui's shell gives an htmx request (each wait a random part of base x 2^n, capped at
+  // 30 s, never sooner than the error's Retry-After) until the limit has passed since the first
+  // failure, both read from <html> (`data-ui-retry-limit`, `data-ui-retry-base`, from
+  // gonk.ui.retry.*), so a page and a request give up at the same moment. When the first failure
+  // was and how many loads followed are kept for the address in sessionStorage, and any gonk page
+  // that is not an outage clears them. #status says it is waiting, politely, focus stays where it
+  // is, and a button stops it. Without sessionStorage nothing reloads: the page could not tell
+  // when to stop. ⚠ Only the address is loaded again, as a GET: nothing resends a write.
+  const OUTAGE_KEY = "gonk:outage:";
+  const OUTAGE_CAP_MS = 30000;
+  function retrySetting(name, fallback) {
+    const raw = document.documentElement.getAttribute(name);
+    return raw !== null && /^\s*\d+\s*$/.test(raw) ? parseInt(raw, 10) : fallback;
+  }
+  function reloadAfterOutage() {
+    let store = null;
+    try {
+      store = window.sessionStorage;
+      const key = OUTAGE_KEY + location.pathname + location.search;
+      const page = document.querySelector("[data-refusal][data-reload]");
+      if (!page) {
+        store.removeItem(key);
+        return;
+      }
+      let state = null;
+      try {
+        state = JSON.parse(store.getItem(key) || "null");
+      } catch (_) {
+        state = null;
+      }
+      if (!state || typeof state.first !== "number" || typeof state.attempt !== "number") {
+        state = { first: Date.now(), attempt: 0 };
+      }
+      const limit = retrySetting("data-ui-retry-limit", 90000);
+      const base = retrySetting("data-ui-retry-base", 1000);
+      const waited = Date.now() - state.first;
+      const remaining = limit - waited;
+      const floor = Number(page.getAttribute("data-retry-after-ms")) || 0;
+      if (remaining <= 0 || floor > remaining) {
+        store.removeItem(key);
+        if (state.attempt > 0) {
+          flash(
+            "gonk has not answered this page for " + Math.round(waited / 1000) +
+              " seconds, so it stopped trying. Reload the page to try again.",
+            "error"
+          );
+        }
+        return;
+      }
+      const ceiling = Math.min(OUTAGE_CAP_MS, base * Math.pow(2, state.attempt));
+      const wait = Math.min(remaining, Math.max(floor, Math.random() * ceiling));
+      state.attempt += 1;
+      store.setItem(key, JSON.stringify(state));
+      flash(
+        "Reconnecting\u2026 gonk did not answer this page, so it loads it again on its own " +
+          "until it does, waiting longer each time.",
+        "ok"
+      );
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = "quiet";
+      stop.textContent = "Stop trying";
+      const holder = document.createElement("p");
+      holder.appendChild(stop);
+      page.appendChild(holder);
+      // reload(), not replace(href): an address with a #fragment would only scroll. The server
+      // marks only a GET's page, so a reload sends a GET.
+      const timer = window.setTimeout(() => location.reload(), wait);
+      stop.addEventListener("click", () => {
+        window.clearTimeout(timer);
+        store.removeItem(key);
+        const heading = page.querySelector("h1");
+        holder.remove();
+        if (heading) heading.focus();
+        flash("Stopped trying. Reload the page to try again.", "ok");
+      });
+    } catch (_) {
+      // No sessionStorage (blocked, or full): the page stays as it is.
+    }
+  }
+
   // ------------------------------------------------ the server moved (ledger #375)
   //
   // Every full page carries the instance id of the process that served it
@@ -1695,6 +1781,7 @@
     wireDashboard();
     checkAllWords();
     focusRefusal();
+    reloadAfterOutage();
     // A whole page that came back with a verdict (a Views save): a live region says nothing
     // about what it was parsed with, so the sentence is said now.
     const verdict = document.querySelector("main [data-announce]");

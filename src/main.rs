@@ -223,6 +223,9 @@ fn serve(flags: &config::Flags) -> ! {
             config_path.display()
         ))
     });
+    // Ledger #3811: how long every page and framed face keeps trying through a restart, before
+    // anything can render one.
+    ikigai_gonk::ui_retry::install(settings.ui_retry);
     // Before the store is opened: a socket the kernel cannot bind stops the server here.
     config::check_socket_path(&settings.socket).unwrap_or_else(|e| fail(&e));
     // The anonymous loopback caller: its ledgers' READ tokens (ledger #1687), and the right to run

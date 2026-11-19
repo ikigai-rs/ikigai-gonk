@@ -717,7 +717,11 @@ async fn counts(inv: &Invocation<'_>, ledger: &Ledger) -> Result<Vec<Day>> {
         "days",
         CHART_DAYS,
     );
-    let csv = fetch(inv, read).await?;
+    // Tried again while the store is briefly unavailable, before the chart says it could not
+    // be read (ledger #3811).
+    let csv = crate::ui_retry::read(inv, read, crate::ui_retry::Via::Run)
+        .await?
+        .bytes;
     parse_counts(&String::from_utf8_lossy(&csv))
         .map_err(|row| Error::Endpoint(format!("the ledger's counts carry {row}")))
 }
@@ -1103,6 +1107,53 @@ mod tests {
             Error::Endpoint(format!("the ledger's counts carry the row `{secret}`")),
             failed,
         );
+    }
+
+    /// A chart, drawn from whatever the kernel's `urn:ledger:default:counts` answers.
+    struct Chart;
+
+    #[async_trait]
+    impl Endpoint for Chart {
+        async fn invoke(&self, inv: &Invocation<'_>) -> Result<ikigai_core::Representation> {
+            let ledger = Ledger::parse("default")?;
+            let chart = chart_chunk(inv, &ledger, Lines::Both, None).await.unwrap();
+            Ok(ikigai_core::Representation::new(
+                ikigai_core::ReprType::new("text/html"),
+                chart.document.into_bytes(),
+            ))
+        }
+    }
+
+    /// ★ Ledger #3811: a store that is briefly unavailable (gonk's own restart, a short outage)
+    /// is asked again inside the request, so the panel draws its chart, not "the store is
+    /// unavailable right now". Before, the first failure was the note.
+    #[test]
+    fn a_chart_whose_counts_fail_once_draws_the_chart_not_the_note() {
+        use ikigai_core::{Capability, EndpointSpace, Exact, FnEndpoint, Iri, Kernel, ReprType};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let ledger = Ledger::parse("default").unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&calls);
+        let counts = FnEndpoint::new("counts", move |_| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(Error::Unavailable("the store is restarting".into()));
+            }
+            Ok(ikigai_core::Representation::new(
+                ReprType::new("text/csv"),
+                b"date,open,closed\n2026-11-17,4,1\n2026-11-18,3,2\n".to_vec(),
+            ))
+        });
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new()
+                .bind(Exact::new(format!("{}counts", ledger.prefix())), counts)
+                .bind(Exact::new("urn:test:chart"), Chart),
+        ));
+        let ask = ikigai_core::Request::new(Verb::Source, Iri::parse("urn:test:chart").unwrap());
+        let answer = futures::executor::block_on(kernel.issue(ask, &Capability::root())).unwrap();
+        let chart = String::from_utf8(answer.bytes).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "asked again once");
+        assert!(!chart.contains("could not be read"), "{chart}");
+        assert!(chart.contains("3 open, 2 closed"), "{chart}");
     }
 
     #[test]

@@ -6,6 +6,11 @@
 //!   theme chosen in gonk's header (`ikigai-ui:theme`) reaches this page's `<html data-theme>`;
 //! - on `<html>`, `data-theme='auto'` when the face set none, since `shell.js` applies a
 //!   remembered theme only over `auto`. A face that names its own theme keeps it;
+//! - on `<html>`, always, how long `shell.js` keeps retrying through a restart
+//!   (`data-ui-retry-limit`, `data-ui-retry-base`, [`crate::ui_retry`], ledger #3811), so a face
+//!   and gonk's own pages give up at the same moment. They are written first, right after the
+//!   tag's name, and the first of two same-named attributes is the one a browser keeps, so a
+//!   face's own pair cannot make it give up at another moment;
 //! - right after `<body …>`: the bar, a link home, the face's name marked "add-on", and the
 //!   add-on row with this face `aria-current="page"`.
 //!
@@ -79,6 +84,8 @@ pub struct Frame {
     assets: String,
     safe_link: String,
     safe_note: String,
+    /// What `<html>` says about retrying: [`crate::ui_retry::settings`] when built.
+    retry: crate::ui_retry::Settings,
 }
 
 impl Frame {
@@ -118,7 +125,14 @@ impl Frame {
             assets: String::new(),
             safe_link: String::new(),
             safe_note: String::new(),
+            retry: crate::ui_retry::settings(),
         }
+    }
+
+    /// This frame with `retry` on every page's `<html>` in place of the installed settings.
+    pub fn with_retry(mut self, retry: crate::ui_retry::Settings) -> Frame {
+        self.retry = retry;
+        self
     }
 
     /// This frame with the deployment's own stylesheets and scripts written after gonk's head
@@ -177,10 +191,11 @@ impl Frame {
             Some(open) if !note.is_empty() => format!("{open}{note}</nav>"),
             _ => self.bar.clone(),
         };
+        let retry = self.retry.attributes();
         let theme = match seams.theme {
-            Theme::Attribute(_) => " data-theme='auto'",
-            Theme::Element(_) => "<html data-theme='auto'>",
-            Theme::Named => "",
+            Theme::Attribute(_) => format!("{retry} data-theme='auto'"),
+            Theme::Element(_) => format!("<html{retry} data-theme='auto'>"),
+            Theme::Named(_) => retry,
         };
         let extra = theme.len() + head.len() + bar.len();
         let mut out = Vec::with_capacity(page.len() + extra);
@@ -190,9 +205,8 @@ impl Frame {
             out.extend_from_slice(text.as_bytes());
             from = at;
         };
-        if let Theme::Attribute(at) | Theme::Element(at) = seams.theme {
-            write(at, theme);
-        }
+        let (Theme::Attribute(at) | Theme::Element(at) | Theme::Named(at)) = seams.theme;
+        write(at, &theme);
         write(seams.head, &head);
         write(seams.body, &bar);
         out.extend_from_slice(&page[from..]);
@@ -207,8 +221,9 @@ enum Theme {
     Attribute(usize),
     /// It has no `<html>` tag: the offset of its first element.
     Element(usize),
-    /// Its `<html>` names one already, which is the face's to keep.
-    Named,
+    /// Its `<html>` names one already, which is the face's to keep: the offset just after the
+    /// tag's name, where the retry settings go.
+    Named(usize),
 }
 
 /// The three places a page is written into, in page order.
@@ -355,7 +370,7 @@ fn seams(page: &[u8]) -> Option<Seams> {
         match found.name.as_str() {
             "html" if start == first => {
                 theme = Some(if found.has_theme {
-                    Theme::Named
+                    Theme::Named(found.name_end)
                 } else {
                     Theme::Attribute(found.name_end)
                 });
@@ -389,6 +404,9 @@ mod tests {
         Frame::new("ops", &["ops".to_string(), "intake".to_string()])
     }
 
+    /// What every framed page's `<html>` gets first: the defaults, since no test installs any.
+    const RETRY: &str = " data-ui-retry-limit='90000' data-ui-retry-base='1000'";
+
     fn text(page: &[u8]) -> String {
         String::from_utf8(page.to_vec()).unwrap()
     }
@@ -399,7 +417,9 @@ mod tests {
                     <title>T</title><link rel=\"stylesheet\" href=\"a.css\"></head>\
                     <body class=\"x\"><p>hi</p></body></html>";
         let framed = text(&frame().apply(page.as_bytes()).unwrap());
-        assert!(framed.starts_with("<!doctype html>\n<html data-theme='auto' lang=\"en\"><head>"));
+        assert!(framed.starts_with(&format!(
+            "<!doctype html>\n<html{RETRY} data-theme='auto' lang=\"en\"><head>"
+        )));
         let sheet = framed.find("gonk-frame.css").unwrap();
         assert!(framed.find("<meta charset").unwrap() < sheet);
         assert!(sheet < framed.find("shell.js").unwrap());
@@ -452,14 +472,17 @@ mod tests {
     fn the_theme_seam() {
         let named = "<html DATA-THEME=dark><body>";
         let framed = text(&frame().apply(named.as_bytes()).unwrap());
-        assert!(framed.starts_with("<html DATA-THEME=dark>"), "{framed}");
+        assert!(
+            framed.starts_with(&format!("<html{RETRY} DATA-THEME=dark>")),
+            "{framed}"
+        );
         assert_eq!(framed.matches("data-theme").count(), 0, "{framed}");
 
         // A value that only mentions the attribute does not count.
         let mention = "<html title=\"data-theme\"><body>";
         let framed = text(&frame().apply(mention.as_bytes()).unwrap());
         assert!(
-            framed.starts_with("<html data-theme='auto' title="),
+            framed.starts_with(&format!("<html{RETRY} data-theme='auto' title=")),
             "{framed}"
         );
 
@@ -467,7 +490,9 @@ mod tests {
         let bare = "<!doctype html><!-- c --><meta charset=utf-8><body>";
         let framed = text(&frame().apply(bare.as_bytes()).unwrap());
         assert!(
-            framed.starts_with("<!doctype html><!-- c --><html data-theme='auto'><meta charset"),
+            framed.starts_with(&format!(
+                "<!doctype html><!-- c --><html{RETRY} data-theme='auto'><meta charset"
+            )),
             "{framed}"
         );
     }
@@ -477,7 +502,8 @@ mod tests {
         let mut page = b"\xef\xbb\xbf<head><title>caf\xe9</title></head><body>".to_vec();
         page.extend_from_slice(b"\xff");
         let framed = frame().apply(&page).unwrap();
-        assert!(framed.starts_with(b"\xef\xbb\xbf<html data-theme='auto'><head>"));
+        let html = format!("<html{RETRY} data-theme='auto'><head>");
+        assert!(framed.starts_with(&[b"\xef\xbb\xbf", html.as_bytes()].concat()));
         assert!(framed.windows(5).any(|w| w == b"caf\xe9<"));
         assert!(framed.ends_with(b"</nav></nav>\xff"));
     }
@@ -518,6 +544,31 @@ mod tests {
                 .apply(page.as_bytes()),
             frame().apply(page.as_bytes())
         );
+    }
+
+    /// ★ Ledger #3811: a face gives up at the moment gonk's pages do, its own pair or not.
+    #[test]
+    fn every_framed_page_carries_the_configured_retry_settings_first() {
+        let retry = crate::ui_retry::Settings::parse(Some("45s"), Some("250ms")).unwrap();
+        let ours = " data-ui-retry-limit='45000' data-ui-retry-base='250'";
+        for (page, starts) in [
+            (
+                "<html lang=\"en\"><body>",
+                format!("<html{ours} data-theme='auto' lang="),
+            ),
+            (
+                "<html data-theme=dark><body>",
+                format!("<html{ours} data-theme=dark>"),
+            ),
+            ("<body>", format!("<html{ours} data-theme='auto'><link")),
+            (
+                "<html data-ui-retry-limit='1'><body>",
+                format!("<html{ours} data-theme='auto' data-ui-retry-limit='1'>"),
+            ),
+        ] {
+            let framed = text(&frame().with_retry(retry).apply(page.as_bytes()).unwrap());
+            assert!(framed.starts_with(&starts), "{framed}");
+        }
     }
 
     #[test]

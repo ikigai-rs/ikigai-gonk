@@ -501,6 +501,12 @@
   <xsl:template match="view:refusal">
     <section class="panel refusal" data-refusal="true" aria-labelledby="refusal-title">
       <xsl:attribute name="data-kind"><xsl:value-of select="@kind"/></xsl:attribute>
+      <!-- Ledger #3811: a 502, 503 or 504 a GET navigated to (src/refusal.rs::reloads), which
+           web/gonk.js loads again with ikigai-ui's backoff, saying so in #status. Not on a 500. -->
+      <xsl:if test="@reload = 'true'">
+        <xsl:attribute name="data-reload">true</xsl:attribute>
+        <xsl:attribute name="data-retry-after-ms"><xsl:value-of select="@retry-after-ms"/></xsl:attribute>
+      </xsl:if>
       <h1 id="refusal-title" tabindex="-1" autofocus="autofocus">
         <xsl:if test="@sentence"><xsl:attribute name="aria-describedby">refusal-sentence</xsl:attribute></xsl:if>
         <xsl:value-of select="@heading"/>
