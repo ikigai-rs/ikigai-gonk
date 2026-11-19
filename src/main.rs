@@ -1027,7 +1027,7 @@ fn serve(flags: &config::Flags) -> ! {
             passkeys.enrolled_count(),
             if passkeys.max_seconds() > identity::SESSION_SECONDS {
                 format!(
-                    "{} h when read-only, {} h when the grant can write,",
+                    "{} h, writing for the first {} h,",
                     passkeys.max_seconds() / 3600,
                     identity::SESSION_SECONDS / 3600
                 )
