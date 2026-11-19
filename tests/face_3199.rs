@@ -626,7 +626,10 @@ fn a_face_page_gets_the_bar() {
             .unwrap_or_else(|| panic!("no `{needle}` in {html}"))
     };
     assert!(
-        html.contains("<html data-theme='auto' lang=\"en\">"),
+        html.contains(
+            "<html data-ui-retry-limit='90000' data-ui-retry-base='1000' data-theme='auto' \
+             lang=\"en\">"
+        ),
         "{html}"
     );
     assert!(at("href=\"/static/gonk-frame.css\"") < at("src=\"/static/shell.js\""));

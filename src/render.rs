@@ -878,8 +878,9 @@ const THEME_CHOOSER_MARKER: &str = "<!--theme-chooser-->";
 /// Give a full page its theme and ikigai-ui's chooser (ledger #2834, UI conventions D12), and
 /// this process's instance id (ledger #375, [`crate::instance`]): the
 /// envelope's `ui-theme` ([`theme_of`]) on `<html>`, and the chooser's markup, whole, where the
-/// header asks for it, so gonk holds no copy for it to drift from. The shell moves into
-/// `urn:iki:ui:template:shell` in phase 2.
+/// header asks for it, so gonk holds no copy for it to drift from. Beside the theme, how long
+/// ikigai-ui's shell keeps retrying (`data-ui-retry-*`, [`crate::ui_retry`], ledger #3811). The
+/// shell moves into `urn:iki:ui:template:shell` in phase 2.
 fn themed(document: &str, page: String) -> String {
     let head = document.split('>').next().unwrap_or_default();
     let theme = head
@@ -888,16 +889,21 @@ fn themed(document: &str, page: String) -> String {
         .and_then(|(asked, _)| ikigai_ui::THEMES.iter().find(|t| **t == asked).copied())
         .unwrap_or("auto");
     let chooser = ikigai_ui::theme_chooser(theme).unwrap_or_default();
-    page.replacen("data-theme='auto'", &format!("data-theme='{theme}'"), 1)
-        .replacen(THEME_CHOOSER_MARKER, &chooser, 1)
-        .replacen(
-            INSTANCE_MARKER,
-            &format!(
-                "<meta name='gonk-instance' content='{}'>",
-                crate::instance::id()
-            ),
-            1,
-        )
+    let retry = crate::ui_retry::settings().attributes();
+    page.replacen(
+        "data-theme='auto'",
+        &format!("data-theme='{theme}'{retry}"),
+        1,
+    )
+    .replacen(THEME_CHOOSER_MARKER, &chooser, 1)
+    .replacen(
+        INSTANCE_MARKER,
+        &format!(
+            "<meta name='gonk-instance' content='{}'>",
+            crate::instance::id()
+        ),
+        1,
+    )
 }
 
 /// The theme a page renders in: `theme=` when it is one ikigai-ui knows, else `auto`, so an
@@ -1706,7 +1712,10 @@ mod tests {
         );
         let page = render(&doc, true).expect("the stylesheet renders");
         assert!(
-            page.starts_with("<!DOCTYPE html>\n<html data-theme='auto' lang='en'>"),
+            page.starts_with(
+                "<!DOCTYPE html>\n<html data-theme='auto' data-ui-retry-limit='90000' \
+                 data-ui-retry-base='1000' lang='en'>"
+            ),
             "{page}"
         );
         assert!(

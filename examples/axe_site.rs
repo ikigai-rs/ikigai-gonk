@@ -329,6 +329,83 @@ fn unconfigured_inquiry(face: &web::Web) -> Vec<u8> {
     body
 }
 
+/// The page a browser lands on while gonk's store is briefly down (ledger #3811): a `503` in
+/// gonk's error shell, marked to load itself again, from its own door over `face`'s hub whose
+/// front page answers `Unavailable`, with gonk's error page installed as `main` installs it.
+///
+/// ⚠ A static page cannot fail again, so the fixture is held at its waiting state: the limit is
+/// an hour and the error's `Retry-After` 50 minutes, so `web/gonk.js` says it is waiting in
+/// `#status` and offers "Stop trying", and the checker never sees it reload.
+fn outage(face: &web::Web) -> Vec<u8> {
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("its address");
+    let face = Arc::new(web::Web {
+        hub: Arc::clone(&face.hub),
+        ledgers: face.ledgers.clone(),
+        browse_roots: Vec::new().into(),
+        passkeys: Arc::clone(&face.passkeys),
+        rules: Arc::clone(&face.rules),
+        queue: face.queue.clone(),
+        epochs: None,
+        holder_aliases: Default::default(),
+        display: Default::default(),
+        page_assets: Default::default(),
+        projects: Default::default(),
+        toolbox: false,
+        faces: Vec::new(),
+        inquiry: None,
+    });
+    let down = ikigai_core::FnEndpoint::new("down", |_| {
+        Err(ikigai_core::Error::Unavailable(
+            "the store is restarting".into(),
+        ))
+    })
+    .with_description(ikigai_core::Description::new("down").verb(Verb::Source));
+    let pages = ikigai_core::EndpointSpace::new()
+        .bind(ikigai_core::Exact::new("urn:iki:gonk:page:home"), down);
+    let http = Arc::new(doors::http_kernel(Arc::clone(&face.hub), pages));
+    let door = doors::HttpDoor {
+        anonymous: anonymous_http_grants(&face.ledgers).expect("the anonymous grant"),
+        bind: addr,
+        passkeys: Some(Arc::clone(&face.passkeys)),
+        public: Vec::new(),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+    };
+    let edge = ikigai_gonk::refusal::install(doors::edge_config(door.clone()), door.clone(), face);
+    std::thread::spawn(move || {
+        runtime.block_on(ikigai_web::serve_with_listener(
+            http,
+            doors::http_cap(door),
+            listener,
+            edge,
+        ))
+    });
+    let (status, body) = get(addr, "/");
+    assert_eq!(status, 503, "the outage page");
+    let page = String::from_utf8(body).expect("the page is text");
+    for marker in [
+        "data-reload='true'",
+        "data-retry-after-ms='0'",
+        "data-ui-retry-limit='90000'",
+    ] {
+        assert!(page.contains(marker), "the outage page carries {marker}");
+    }
+    page.replacen(
+        "data-retry-after-ms='0'",
+        "data-retry-after-ms='3000000'",
+        1,
+    )
+    .replacen(
+        "data-ui-retry-limit='90000'",
+        "data-ui-retry-limit='3600000'",
+        1,
+    )
+    .into_bytes()
+}
+
 fn appended_iri(bytes: &[u8], ledger: &str) -> String {
     let text = String::from_utf8_lossy(bytes);
     let prefix = format!("urn:iki:ledger:{ledger}:item:");
@@ -800,6 +877,11 @@ fn main() {
         "inquiry-unconfigured.html".to_string(),
         "text/html; charset=utf-8",
         unconfigured_inquiry(&face),
+    ));
+    bodies.push((
+        "outage.html".to_string(),
+        "text/html; charset=utf-8",
+        outage(&face),
     ));
     // Used bindings are visible once each, including a linked CURIE; the long namespace
     // exercises legend wrapping at phone width in the CI axe job.

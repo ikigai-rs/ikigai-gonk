@@ -16,6 +16,15 @@
 //! everything else (curl, a script's fetch, htmx)      → the library's answer, unchanged
 //! ```
 //!
+//! ★ **A `502`, `503` or `504` page a GET navigated to reloads itself** (ledger
+//! [#3811](http://localhost:1062/l/default/item/3811)): it is gonk restarting or its store briefly
+//! down, so the page is marked ([`reloads`]) and `web/gonk.js` loads it again with ikigai-ui's
+//! backoff, never sooner than the error's `Retry-After`, until `gonk.ui.retry.limit` has passed
+//! since the first failure ([`crate::ui_retry`]), saying in `#status` that it is waiting. A `500`
+//! is not marked, nor is anything a write answered: reloading cannot cure the one and must not
+//! resend the other. Answers gonk does not draw are not marked either; the connection-limit
+//! `503` is `ikigai-web`'s own plain text, written before any request reaches this hook.
+//!
 //! **The status and every header are the library's**: the hook writes only the body. The two
 //! sentences are `web::Lacking`'s, read back from the refusal's text, so the page and the
 //! plain-text refusal an agent reads say the same words. Signing in reloads the page
@@ -98,8 +107,24 @@ pub fn error_page(door: HttpDoor, web: Arc<Web>) -> ErrorPageFn {
         // An edge refusal was written before any authority was computed: no header to draw.
         let capability = view.refusal.is_none().then(|| cap(request));
         let safe = crate::page_assets::safe_in_target(&request.raw_target);
-        page(&web, capability.as_ref(), passkeys, safe, view).ok()
+        let reload = reloads(&request.method, view.status);
+        page(&web, capability.as_ref(), passkeys, safe, reload, view).ok()
     })
+}
+
+/// Whether the error page for a `method` answered `status` reloads itself: a GET's (or a HEAD's)
+/// `502`, `503` or `504`, the statuses ikigai-ui's shell retries an htmx request on. Never a
+/// `500`, which a reload cannot cure, and never a write's, which a reload would send again.
+///
+/// ```
+/// use ikigai_gonk::refusal::reloads;
+/// assert!(reloads("GET", 503) && reloads("GET", 502) && reloads("get", 504));
+/// assert!(!reloads("GET", 500) && !reloads("GET", 429) && !reloads("GET", 404));
+/// assert!(!reloads("POST", 503));
+/// ```
+pub fn reloads(method: &str, status: u16) -> bool {
+    let read = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+    read && matches!(status, 502..=504)
 }
 
 /// Which [`Kind`] of page `view` gets, for a caller holding `capability` (`None` for an edge
@@ -121,12 +146,14 @@ pub fn kind(capability: Option<&Capability>, passkeys: bool, view: &ErrorView<'_
 /// The whole page, through the one stylesheet every gonk page is drawn with: in safe mode
 /// (`safe`, `?safe=1`, ledger #3379) without the deployment's own stylesheets and scripts. Its
 /// footer says safe mode exists whenever the deployment adds any, so a refusal that looks broken
-/// has a one-click way to tell gonk's part from the deployment's.
+/// has a one-click way to tell gonk's part from the deployment's. With `reload` ([`reloads`]) an
+/// error page is marked for `web/gonk.js` to load again, with the error's `Retry-After` delay.
 pub fn page(
     web: &Web,
     capability: Option<&Capability>,
     passkeys: bool,
     safe: bool,
+    reload: bool,
     view: &ErrorView<'_>,
 ) -> Result<String, String> {
     let kind = kind(capability, passkeys, view);
@@ -149,6 +176,14 @@ pub fn page(
     }
     if let Some(grant) = grant.as_deref() {
         attributes.push(("grant", grant));
+    }
+    let retry_after = view
+        .error
+        .and_then(Error::retry_after_millis)
+        .unwrap_or(0)
+        .to_string();
+    if reload && kind == Kind::Error {
+        attributes.extend([("reload", "true"), ("retry-after-ms", retry_after.as_str())]);
     }
     // An edge refusal draws no navigation, and still the deployment's assets and the footer.
     let mut children = capability

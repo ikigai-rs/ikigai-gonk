@@ -73,6 +73,10 @@
 //!                                       # (default urn:llm:ask, the peer's default backend)
 //! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
 //! # gonk.log.access = true
+//! # how long a page (and a framed face) keeps trying through a restart before it shows the
+//! # error, and its first wait (these ARE the defaults; the limit may be "off")
+//! # gonk.ui.retry.limit = "90s"
+//! # gonk.ui.retry.base = "1s"
 //! ```
 //!
 //! With no `gonk.browse.root` line this server composes exactly what it composed before: the
@@ -134,7 +138,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 61] = [
+const KEYS: [&str; 63] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -196,6 +200,8 @@ const KEYS: [&str; 61] = [
     crate::projects::KEY,
     crate::page_assets::STYLE_KEY,
     crate::page_assets::SCRIPT_KEY,
+    crate::ui_retry::LIMIT_KEY,
+    crate::ui_retry::BASE_KEY,
 ];
 
 /// How to invoke the binary.
@@ -888,6 +894,10 @@ pub struct Settings {
     /// they keep outside any tree (`gonk.browse.description`, `gonk.harness.pack`,
     /// `gonk.harness.firings`, [`crate::packs`], ledger #3786). The default binds none.
     pub harness: crate::packs::Config,
+    /// How long a page keeps trying through a restart or a short outage (`gonk.ui.retry.limit`,
+    /// `gonk.ui.retry.base`, [`crate::ui_retry`], ledger #3811): its own pages and the faces it
+    /// frames, the same.
+    pub ui_retry: crate::ui_retry::Settings,
 }
 
 /// What the Queue page asks a human about, from `gonk.queue.serious` — the SERIOUS set.
@@ -2430,6 +2440,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         page_assets: crate::page_assets::PageAssets::parse(
             &values_for(text, crate::page_assets::STYLE_KEY),
             &values_for(text, crate::page_assets::SCRIPT_KEY),
+        )?,
+        ui_retry: crate::ui_retry::Settings::parse(
+            value_for(text, crate::ui_retry::LIMIT_KEY).as_deref(),
+            value_for(text, crate::ui_retry::BASE_KEY).as_deref(),
         )?,
         onboard,
     })

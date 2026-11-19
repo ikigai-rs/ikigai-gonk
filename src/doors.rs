@@ -523,8 +523,10 @@ pub fn http_kernel_serving_with_space(
     access: Option<AccessLog>,
 ) -> (Kernel, Arc<dyn Space>) {
     // The shared UI artifacts (ledger #2834) answer this door only: the pages link them, and the
-    // hub and the other doors have no page to link them from.
-    let mut layers: Vec<Arc<dyn Space>> = vec![Arc::new(pages), Arc::new(ikigai_ui::space())];
+    // hub and the other doors have no page to link them from. Only the ones gonk's pages use
+    // ([`UiShared`]).
+    let mut layers: Vec<Arc<dyn Space>> =
+        vec![Arc::new(pages), Arc::new(UiShared(ikigai_ui::space()))];
     layers.extend(faces);
     let mut forwarding = HubSpace::new(hub);
     forwarding.page_views = true;
@@ -536,6 +538,57 @@ pub fn http_kernel_serving_with_space(
         None,
         access,
     )
+}
+
+/// The ikigai-ui resources this door serves, by endpoint name: the ones gonk's pages link
+/// (`/static/shell.js`, `/static/tokens.css`, htmx) or draw (the theme chooser, its templates and
+/// palettes). `tests/conformance.rs::the_http_door_adds_exactly_its_pages` pins the set.
+pub const UI_SERVED: [&str; 8] = [
+    "ui-chooser",
+    "ui-htmx",
+    "ui-shell-js",
+    "ui-template-shell",
+    "ui-template-tokens",
+    "ui-tokens-css",
+    "ui-palette",
+    "ui-theme-chooser",
+];
+
+/// `ikigai_ui::space()` narrowed to [`UI_SERVED`]. ★ ikigai-ui 0.5.1 (ledger #3811) binds 58 more
+/// resources in the same space (screens, lenses, forms, and the `outline`, `sexpr` and `lisp`
+/// compilers). This door maps a path to any name it can resolve, so binding the space whole would
+/// have opened all of them to every caller of the HTTP door, anonymous ones included, in a pin
+/// taken for the shell's retry. gonk's pages use none of them; anything else misses here and
+/// falls through to the next layer, as it did under 0.5.0.
+struct UiShared(EndpointSpace);
+
+impl Space for UiShared {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        match self.0.resolve(request, scope) {
+            Resolution::Hit(hit) if UI_SERVED.contains(&hit.endpoint.name()) => {
+                Resolution::Hit(hit)
+            }
+            _ => Resolution::Miss,
+        }
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        let entries = self.0.entries()?;
+        Some(
+            entries
+                .into_iter()
+                .filter(|entry| UI_SERVED.contains(&entry.endpoint.as_str()))
+                .collect(),
+        )
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.0.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.0.topology()
+    }
 }
 
 /// Resolve the live named views from the HTTP root too, where page targets live.
