@@ -42,7 +42,7 @@ await Deno.writeTextFile(
       "urn:cap:net:localhost",
       "urn:cap:store:read:graph:urn:iki:browse:graph:default",
       "urn:cap:store:write:graph:urn:iki:browse:graph:default",
-      "urn:cap:exec:gh",
+      "urn:cap:exec:read:gh",
     ],
   }),
 );

@@ -156,12 +156,13 @@ pub const PASS: &str = "urn:iki:gonk:review:pass";
 /// mintable; [#466](http://localhost:1060/l/default/item/466) chose the first, and this is it.
 pub const DEPTH: &str = "urn:iki:gonk:review:depth";
 
-/// `urn:cap:exec:gh` — the PR review tier shells out through `ikigai-repo`'s `gh` facade.
+/// `urn:cap:exec:read:gh` — the PR review tier shells out through `ikigai-repo`'s `gh` facade,
+/// which since 0.6.0 (the exec split, ledger #3820) requires the read spelling.
 ///
-/// ⚠ The per-tool spelling, never `urn:cap:exec:*`: that is the OFFERING wildcard, and
-/// [`crate::quic::check_grants`] refuses it as a grant. A reviewer that may run `gh` may not
+/// ⚠ The per-tool spelling, never `urn:cap:exec:*` or `urn:cap:exec:read:*`: those are
+/// wildcards, and [`crate::quic::check_grants`] refuses them as grants. A reviewer that may run `gh` may not
 /// run anything else.
-pub const CAP_EXEC_GH: &str = "urn:cap:exec:gh";
+pub const CAP_EXEC_GH: &str = crate::grants::CAP_EXEC_READ_GH;
 
 /// The file `SpaceReactor` reads to decide what a dropped tuple fires — see the module doc.
 pub const HANDLER_FILE: &str = "handler";

@@ -182,9 +182,9 @@ fn granted(inv: &Invocation<'_>, name: &str) -> Result<()> {
             "Git object: repository is not readable".into(),
         ));
     }
-    if !inv.capability.allows("urn:cap:exec:git") {
+    if !inv.capability.allows(crate::grants::CAP_EXEC_READ_GIT) {
         return Err(Error::Denied(
-            "Git object: urn:cap:exec:git is required".into(),
+            "Git object: urn:cap:exec:read:git is required".into(),
         ));
     }
     Ok(())
@@ -327,7 +327,7 @@ impl Endpoint for Object {
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .requires(ikigai_browse::CAP_WILDCARD)
-            .requires("urn:cap:exec:git")
+            .requires(crate::grants::CAP_EXEC_READ_GIT)
             .input(ArgSpec::new("sha").binding().class(STRING))
             .input(
                 ArgSpec::new("as")

@@ -829,7 +829,7 @@ fn main() {
         .chain([
             ikigai_gonk::views::read_grant(),
             ikigai_gonk::views::write_grant(),
-            "urn:cap:exec:git".to_string(),
+            "urn:cap:exec:read:git".to_string(),
             "urn:cap:browse:read:fixture".to_string(),
         ])
         // ⚠ The fixture: the real server mints the inquiry tokens for NO anonymous caller.

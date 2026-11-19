@@ -1471,7 +1471,7 @@ ikigai-gonk client add box --browse read --root ikigai-core
   grant that can publish (below). Since no role mints one without the other, nothing these
   commands write can arm the trigger.
 - **Not in either role:** the browse graph's WRITE door (raw quads, `--browse-graph write`;
-  `ikigai-browse` writes its own archive and annotations without it), and `urn:cap:exec:gh`,
+  `ikigai-browse` writes its own archive and annotations without it), and `urn:cap:exec:read:gh`,
   which the pull-request layers need. A grant that should reach those still names them in
   `grants.json` by hand, and the file is re-read on every request and checked fail-closed
   either way: the whole-dataset store tokens and the `urn:cap:net:*` / `urn:cap:exec:*`
@@ -1487,7 +1487,7 @@ narrow it silently, which turned a feature off with no signal (ledger
 ```text
 ikigai-gonk: grant `brian` already exists in …/gonk/grants.json with different scopes — nothing was written. Replacing it would NARROW it and widen it:
     removes  urn:cap:net:localhost
-    removes  urn:cap:exec:gh
+    removes  urn:cap:exec:read:gh
     adds     urn:cap:net:127.0.0.1
 Use --force to replace it, which changes every identity enrolled under it
 ```
@@ -1496,13 +1496,13 @@ A reordering of the same scopes is no change, and is written without `--force`.
 
 **`--force` writes the grant whole, narrowing included, by design**: a ledger or root that
 leaves the flags leaves the grant, so a script can keep a grant in step with what it serves. A
-scope no flag names (`urn:cap:exec:git` for ikigai-repo's code links, say) is kept by naming it
+scope no flag names (`urn:cap:exec:read:git` for ikigai-repo's code links, say) is kept by naming it
 with `passkey invite --scope <urn>`, repeatable, which goes into the same grant in the same
 write as every other flag, so no session under the grant ever sees it missing (ledger
 [#3401](http://localhost:1060/l/default/item/3401)):
 
 ```sh
-ikigai-gonk passkey invite chris --ledger default=write --scope urn:cap:exec:git --force
+ikigai-gonk passkey invite chris --ledger default=write --scope urn:cap:exec:read:git --force
 ```
 
 Each value must be a `urn:cap:` scope with no empty segment and no whitespace, and it is held to
@@ -1519,7 +1519,7 @@ and says whether it would be refused without `--force`. It mints no bundle and w
 `--force` or not:
 
 ```sh
-ikigai-gonk client add chris --ledger default=purge --scope urn:cap:exec:git --print
+ikigai-gonk client add chris --ledger default=purge --scope urn:cap:exec:read:git --print
 ```
 
 ⚠ **A click on Explain spends inference.** The per-face token ceilings
@@ -2736,6 +2736,20 @@ ledger, the owner moves the summaries 0.22.0 wrote into the ledger graph:
 nothing), then `move`; `client refresh` prints both lines for every ledger it saw. Until then the
 harness page joins no firing to those older summaries.
 
+⚠ **The exec split (ikigai-repo 0.6.0, ledger #3820).** The git facades and gonk's Git object
+read require `urn:cap:exec:read:git`, the pull-request facades `urn:cap:exec:read:gh`; the old
+`urn:cap:exec:git` and `urn:cap:exec:gh` grant nothing. At its first start on this version gonk
+rewrites every stored grant naming an old spelling in place, at the same position, after backing
+`grants.json` up beside itself (`grants.json.bak-<UTC stamp>-exec-split`), and says so on
+stderr; a later start finds nothing to do. `client refresh` lists the same rewrite and `--write`
+makes it. From then on the old spelling is refused, with a sentence naming the new one, by
+`passkey grant add`, `--scope`, the startup check and every QUIC connection. A grant of reads
+plus `urn:cap:exec:read:git` only reads, so its passkey session gets the
+`gonk.http.session_max_hours` lifetime. ⚠ ikigai-browse 0.22.0 still shows a root's
+pull-request panels only to a caller allowed `urn:cap:exec:gh`, so after the switch they are
+hidden until a browse release moves to `urn:cap:exec:read:gh`; the PR facades themselves answer
+whoever holds the read spelling.
+
 #### Stopping gonk: the QUIC door drains (ledger #3326)
 
 SIGTERM or SIGINT drains the QUIC door and exits 0. Calls in progress finish and their clients
@@ -3563,7 +3577,7 @@ The grant is exactly:
   "urn:cap:net:127.0.0.1",
   "urn:cap:store:read:graph:urn:iki:browse:graph:default",
   "urn:cap:store:write:graph:urn:iki:browse:graph:default",
-  "urn:cap:exec:gh"
+  "urn:cap:exec:read:gh"
 ]
 ```
 
@@ -4260,7 +4274,7 @@ compiled in.** `urn:repo:*` reads files off the disk and runs `git` and `gh`;
 | the configured ledgers | read + write | + the passkey's grant | all | per grant |
 | `urn:repo:{root}:*` (`urn:cap:browse:read:{root}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:annotation` (`urn:cap:annotate`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
-| `urn:repo:{status,log,…}` (`urn:cap:exec:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
+| `urn:repo:{status,log,…}` (`urn:cap:exec:read:{tool}`) | **no** | only if the grant names it | yes (root) | only if the grant names it |
 | `urn:iki:store:graph-*` over the BROWSE graph (`urn:cap:store:read:graph:urn:iki:browse:graph:default`) | **no** | only if the grant names it — `--browse read`, or `--browse-graph read` alone | yes (root) | only if the grant names it |
 | `urn:iki:store:select` and the other broad doors (`urn:cap:store:read`) | **no** | **no** — this server hands the broad tokens to nobody | yes (root) | **no** — refused in `grants.json` |
 | RAW writes to a LEDGER graph — `urn:iki:store:graph-update` naming `urn:iki:ledger:graph:*` (`urn:cap:gonk:raw-write:graph:<graph>`, ledger #878) | **no** — `403`, though its ledgers' own writes work | only if the grant names it — `--ledger-graph <ledger>` | yes (root) | only if the grant names it — `--ledger-graph <ledger>` |
@@ -4355,8 +4369,9 @@ per-ledger and per-graph tokens only, so nothing this server writes into a grant
 (the family), exec or the whole dataset. `grants.json` is refused at startup if any grant names a whole-dataset store
 token **or the exec wildcard `urn:cap:exec:*`** — which `ikigai-repo` declares as an
 *offering* ("holds some grant under this prefix") and which as a *grant* means every program
-on the machine; the per-tool spelling `urn:cap:exec:git` is what that crate enforces at
-dispatch and what an operator means. And `urn:kernel:actions` is capability-scoped by
+on the machine; the per-tool read spelling `urn:cap:exec:read:git` is what that crate enforces at
+dispatch (since ikigai-repo 0.6.0) and what an operator means; `urn:cap:exec:read:*` and
+`urn:cap:exec:write:*` are refused the same way. And `urn:kernel:actions` is capability-scoped by
 construction, so an anonymous caller asking "what can I do?" is offered no browse row, no
 facade, no broad store door and no derivation — `tests/browse.rs` asserts both halves, the
 offer and the typed `Denied`, for a caller with per-ledger tokens, for one with a browse
@@ -4551,8 +4566,13 @@ Until then, other machines use the QUIC door.
   another family** (`pr`, `style`, or a name containing `:`, `/`, `{`, `}`). A missing
   directory looks exactly like an unconfigured root once the server is up — a resolution
   miss — so it is refused while there is still somewhere to print the reason.
-- **A grant naming `urn:cap:exec:*`**, the offering wildcard, which as a grant is every
-  program on this machine. Name the tools: `urn:cap:exec:git`, `urn:cap:exec:gh`.
+- **A grant naming `urn:cap:exec:*`, `urn:cap:exec:read:*` or `urn:cap:exec:write:*`**, exec
+  wildcards, which as a grant are every program (or every reading or writing program) on this
+  machine. Name the tools: `urn:cap:exec:read:git`, `urn:cap:exec:read:gh`.
+- **A grant naming `urn:cap:exec:git` or `urn:cap:exec:gh`**, the spellings ikigai-repo 0.6.0
+  retired (the exec split, ledger #3820); they grant nothing there. The refusal names the read
+  spelling that replaced each. gonk rewrites them at startup (below), so one met here was
+  written after the switch.
 - **A grant naming `urn:cap:net:*`**, the offering wildcard `ikigai-browse` declares on every
   derivation, which as a grant is every host this kernel could dial. Name the host:
   `urn:cap:net:localhost`. Both wildcards are checked at startup and again per connection,
@@ -5537,7 +5557,7 @@ may not use one affordance sees.
 
 ⚠ **A refusal from one affordance is not a page failure.** Every browse page fetches its
 parts through affordances of its own, including a recent-pull-requests block that loads
-itself; a caller without `urn:cap:exec:gh` gets a typed 403 there while the tree underneath
+itself; a caller without `urn:cap:exec:read:gh` gets a typed 403 there while the tree underneath
 is fine. `ikigai-ui`'s shell script writes such a message where the request came FROM — in place of that
 block's "loading…", or beside the control that issued it — and only a 403 disables the
 control, because an authority refusal is permanent for that grant while a 404 or a 503 is
@@ -5858,7 +5878,7 @@ may not read get the same `404`.
 An external blob template using only `{sha}` can link such an object directly.
 
 Resolution requires the viewer's `urn:cap:browse:read:<name>` (or the all-roots grant)
-**and** `urn:cap:exec:git`, which ikigai-repo requires. No grant is minted or widened by
+**and** `urn:cap:exec:read:git`, which ikigai-repo requires. No grant is minted or widened by
 rendering a page. Clones are queried through ikigai-repo, with no network fetch. Positive
 lookups are cached by full SHA; missing objects can be retried after they arrive. Wrong
 object types, unreadable clones, invalid IRIs and unresolved objects remain plain text.

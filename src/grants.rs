@@ -970,20 +970,73 @@ pub fn broad_store_scopes(scopes: &[String]) -> Vec<String> {
 /// as a GRANT means "run any program".
 pub const CAP_EXEC_ANY: &str = "urn:cap:exec:*";
 
-/// The scopes in `scopes` that grant unbounded process execution.
+/// `urn:cap:exec:read:*` — every READ exec scope, which as a GRANT means "every tool that
+/// reads", today and whatever a later `ikigai-repo` adds under it (ledger #3820).
+pub const CAP_EXEC_READ_ANY: &str = "urn:cap:exec:read:*";
+
+/// `urn:cap:exec:write:*` — every WRITE exec scope, refused as a grant like the other two
+/// (ledger #3820). `ikigai-repo` reserves `urn:cap:exec:write:git` and declares nothing under it.
+pub const CAP_EXEC_WRITE_ANY: &str = "urn:cap:exec:write:*";
+
+/// `urn:cap:exec:read:git` — what `ikigai-repo` 0.6.0's git facades (`urn:repo:status`, `log`,
+/// `show`, `branch`, the object lookup) and gonk's own Git object read ([`crate::git_object`])
+/// require. It does not let a caller choose what git runs.
+pub const CAP_EXEC_READ_GIT: &str = "urn:cap:exec:read:git";
+
+/// `urn:cap:exec:read:gh` — what `ikigai-repo` 0.6.0's `urn:repo:pr:*` facades require.
+pub const CAP_EXEC_READ_GH: &str = "urn:cap:exec:read:gh";
+
+/// The exec scopes `ikigai-repo` 0.6.0 retired (ledger #3818), each with the spelling that
+/// replaced it. A grant naming the old one grants nothing there, so gonk rewrites stored grants
+/// at startup ([`crate::refresh::respell_exec`]) and refuses the old spelling afterwards
+/// (`quic::grant_refusal`).
+pub const RETIRED_EXEC: [(&str, &str); 2] = [
+    ("urn:cap:exec:git", CAP_EXEC_READ_GIT),
+    ("urn:cap:exec:gh", CAP_EXEC_READ_GH),
+];
+
+/// The spelling that replaced `scope`, if `scope` is one [`RETIRED_EXEC`] names.
+///
+/// ```
+/// use ikigai_gonk::grants::exec_respelling;
+/// assert_eq!(exec_respelling("urn:cap:exec:git"), Some("urn:cap:exec:read:git"));
+/// assert_eq!(exec_respelling("urn:cap:exec:gh"), Some("urn:cap:exec:read:gh"));
+/// assert_eq!(exec_respelling("urn:cap:exec:read:git"), None);
+/// ```
+pub fn exec_respelling(scope: &str) -> Option<&'static str> {
+    RETIRED_EXEC
+        .iter()
+        .find(|(old, _)| *old == scope)
+        .map(|(_, new)| *new)
+}
+
+/// The scopes in `scopes` that are a retired exec spelling ([`RETIRED_EXEC`]).
+pub fn retired_exec_scopes(scopes: &[String]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| exec_respelling(scope).is_some())
+        .cloned()
+        .collect()
+}
+
+/// The scopes in `scopes` that grant unbounded process execution: [`CAP_EXEC_ANY`],
+/// [`CAP_EXEC_READ_ANY`] and [`CAP_EXEC_WRITE_ANY`].
 ///
 /// ★ **A wildcard is an offering form, not a grant form, and the two look identical in a
 /// JSON file.** `ikigai-repo` declared `urn:cap:exec:*` on `urn:system:exec` (served through
 /// 0.2.x, gone since 0.3.0, ledger #1706) to say "holds some grant under this prefix"; the
 /// same string written into `grants.json` says "may run
 /// anything on this machine", over a network door. The per-tool spelling
-/// (`urn:cap:exec:git`) is what that crate enforces at dispatch and what an operator means,
-/// so the wildcard is refused the way the broad store tokens are — a grant a reader could
-/// mistake for a narrowing must not be silently the opposite.
+/// (`urn:cap:exec:read:git`) is what that crate enforces at dispatch and what an operator means,
+/// so the wildcards are refused the way the broad store tokens are — a grant a reader could
+/// mistake for a narrowing must not be silently the opposite. `urn:cap:exec:read:*` is the same
+/// footgun one level down: every tool a later release files under "read".
 pub fn unbounded_exec_scopes(scopes: &[String]) -> Vec<String> {
     scopes
         .iter()
-        .filter(|scope| *scope == CAP_EXEC_ANY)
+        .filter(|scope| {
+            [CAP_EXEC_ANY, CAP_EXEC_READ_ANY, CAP_EXEC_WRITE_ANY].contains(&scope.as_str())
+        })
         .cloned()
         .collect()
 }
@@ -1394,6 +1447,25 @@ mod tests {
         ];
         assert!(unbounded_net_scopes(&narrow).is_empty(), "{narrow:?}");
         assert!(unbounded_exec_scopes(&narrow).is_empty());
+    }
+
+    /// ★ Ledger #3820: both new prefixes' wildcards are refused beside `urn:cap:exec:*`, and a
+    /// per-tool read spelling is not.
+    #[test]
+    fn every_exec_wildcard_is_unbounded_and_a_tool_is_not() {
+        let wild: Vec<String> = [CAP_EXEC_ANY, CAP_EXEC_READ_ANY, CAP_EXEC_WRITE_ANY]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(unbounded_exec_scopes(&wild), wild);
+        let tools = vec![CAP_EXEC_READ_GIT.to_string(), CAP_EXEC_READ_GH.to_string()];
+        assert!(unbounded_exec_scopes(&tools).is_empty(), "{tools:?}");
+        assert!(retired_exec_scopes(&tools).is_empty(), "{tools:?}");
+        let old = vec![
+            "urn:cap:exec:git".to_string(),
+            "urn:cap:exec:gh".to_string(),
+        ];
+        assert_eq!(retired_exec_scopes(&old), old);
+        assert!(unbounded_exec_scopes(&old).is_empty());
     }
 
     #[test]

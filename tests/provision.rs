@@ -137,7 +137,7 @@ fn re_enrolling_a_hand_widened_grant_names_what_it_would_drop() {
             "urn:cap:browse:read:*",
             "urn:cap:annotate",
             "urn:cap:net:localhost",
-            "urn:cap:exec:gh",
+            "urn:cap:exec:read:gh",
         ]
     });
     std::fs::write(
@@ -161,7 +161,7 @@ fn re_enrolling_a_hand_widened_grant_names_what_it_would_drop() {
     for line in [
         "would NARROW it and widen it",
         "    removes  urn:cap:net:localhost",
-        "    removes  urn:cap:exec:gh",
+        "    removes  urn:cap:exec:read:gh",
         "    adds     urn:cap:store:read:graph:urn:iki:browse:graph:default",
         "    adds     urn:cap:net:127.0.0.1",
         "--force",
@@ -180,7 +180,7 @@ fn re_enrolling_a_hand_widened_grant_names_what_it_would_drop() {
     for line in [
         "REPLACED     grant `brian` (--force), NARROWING it",
         "    removes  urn:cap:net:localhost",
-        "    removes  urn:cap:exec:gh",
+        "    removes  urn:cap:exec:read:gh",
         "    adds     urn:cap:net:127.0.0.1",
     ] {
         assert!(said.contains(line), "`{line}` in: {said}");

@@ -2482,6 +2482,34 @@ mod tests {
         assert!(rp.identity(&reader, 1_000 + 240 * 3_600).is_none());
     }
 
+    /// ★ **The point of the exec split** (ledger #3820): a passkey whose grant is a ledger's
+    /// reads plus `urn:cap:exec:read:git` (what a Git object read and ikigai-repo 0.6.0's git
+    /// facades require) only reads, so under `gonk.http.session_max_hours = 240` its session
+    /// runs to 240 h. The retired spelling `urn:cap:exec:git` never passed [`read_only`], which
+    /// held every reader of code links to 12 h.
+    #[test]
+    fn reads_and_git_reads_get_the_read_only_session() {
+        let mut git_reader = grants_for("default", Authority::Read).unwrap();
+        git_reader.push(crate::grants::CAP_EXEC_READ_GIT.to_string());
+        assert!(read_only(&git_reader), "{git_reader:?}");
+        let mut retired = grants_for("default", Authority::Read).unwrap();
+        retired.push("urn:cap:exec:git".to_string());
+        assert!(!read_only(&retired), "the old spelling was never a read");
+
+        let dir = tempfile::tempdir().unwrap();
+        let hours = crate::config::session_max_seconds(Some("240")).unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000)
+            .with_idle_seconds(hours)
+            .with_max_seconds(hours);
+        quic::put_grant(&rp.layout, "code-reader", &git_reader, false).unwrap();
+        let token = session_as(&rp, "Y29kZQ", "code-reader", Authority::Read, 1_000);
+        assert_eq!(rp.lifetime(&git_reader), hours);
+        let who = rp
+            .identity(&token, 1_000 + SESSION_SECONDS + 3_600)
+            .expect("a git reader's session outlives 12 h");
+        assert_eq!(who.expires, 1_000 + 240 * 3_600);
+    }
+
     /// ★ The idle bound ends a session no request has carried for that long, and a request
     /// restarts its clock; the absolute bound ends it however busy it is. Either way the
     /// session is DELETED, so a later request inside the window cannot find it again.

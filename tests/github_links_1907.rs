@@ -841,15 +841,15 @@ fn object_map_searches_each_readable_clone_and_checks_authority_on_cache_hits() 
     let mut b = mapped(second.path());
     b.name = "second".into();
     let hub = object_hub(&[a, b]);
-    let reader = Capability::scoped(["urn:cap:exec:git", "urn:cap:browse:read:second"]);
+    let reader = Capability::scoped(["urn:cap:exec:read:git", "urn:cap:browse:read:second"]);
     assert_eq!(
         object_link(&hub, "commit", &head, &reader),
         format!("https://code.example/commit/{head}")
     );
     for scopes in [
-        vec!["urn:cap:exec:git"],
+        vec!["urn:cap:exec:read:git"],
         vec!["urn:cap:browse:read:second"],
-        vec!["urn:cap:exec:git", "urn:cap:browse:read:first"],
+        vec!["urn:cap:exec:read:git", "urn:cap:browse:read:first"],
     ] {
         let stranger = Capability::scoped(scopes);
         assert_eq!(object_link(&hub, "commit", &head, &stranger), "");
@@ -920,7 +920,7 @@ fn local_blob_view_reads_historical_bytes_and_escapes_code() {
         &hub,
         &iri,
         &[("as", "text/html")],
-        &Capability::scoped(["urn:cap:exec:git"])
+        &Capability::scoped(["urn:cap:exec:read:git"])
     )
     .is_err());
 }
@@ -985,7 +985,7 @@ fn local_commit_view_shows_message_author_date_and_linked_files() {
         &hub,
         &iri,
         &[("as", "text/html")],
-        &Capability::scoped(["urn:cap:exec:git"])
+        &Capability::scoped(["urn:cap:exec:read:git"])
     )
     .is_err());
 }

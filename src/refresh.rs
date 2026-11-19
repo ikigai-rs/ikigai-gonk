@@ -37,6 +37,16 @@
 //! the session graph's read). That is the authority it already held: the alias tokens grant
 //! `read:L` outright.
 //!
+//! # The exec split: a rename, not an addition (ledger #3820)
+//!
+//! `ikigai-repo` 0.6.0 retired `urn:cap:exec:git` and `urn:cap:exec:gh` for
+//! `urn:cap:exec:read:git` and `urn:cap:exec:read:gh` ([`crate::grants::RETIRED_EXEC`]). A grant
+//! naming an old spelling grants nothing there, and every check refuses it, so the token is
+//! REWRITTEN in place, at its position in the list ([`respell_exec`]). That is the one change
+//! here that takes a token away, and only for the token that replaces it. The server runs it at
+//! startup, before its grants check, so the switch needs no operator step; `client refresh`
+//! lists the same rewrites and `--write` makes them too.
+//!
 //! # Where stored token lists live
 //!
 //! `gonk/grants.json` is the only file that stores a token list for an identity: `clients.json`
@@ -54,7 +64,9 @@ use std::path::{Path, PathBuf};
 use ikigai_ledger::Ledger;
 use serde_json::Value;
 
-use crate::grants::{grants_for, implied_by, Authority, CAP_RAW_WRITE_PREFIX, LEDGER_GRAPH_PREFIX};
+use crate::grants::{
+    exec_respelling, grants_for, implied_by, Authority, CAP_RAW_WRITE_PREFIX, LEDGER_GRAPH_PREFIX,
+};
 use crate::quic::{self, Layout};
 
 /// Every ledger role, highest first: the order a grant's roles are listed in.
@@ -197,6 +209,9 @@ pub struct GrantPlan {
     pub ledgers: Vec<LedgerPlan>,
     /// Each ledger the grant names whose tokens match no role, with those tokens: left alone.
     pub unmatched: Vec<(String, Vec<String>)>,
+    /// Each retired exec spelling the grant names, with the one that replaces it in place
+    /// ([`respell_exec`]), in the grant's order.
+    pub respells: Vec<(String, String)>,
 }
 
 impl GrantPlan {
@@ -233,6 +248,10 @@ pub fn plan_grant(grant: &str, held: &[String]) -> GrantPlan {
         grant: grant.to_string(),
         ledgers: Vec::new(),
         unmatched: Vec::new(),
+        respells: held
+            .iter()
+            .filter_map(|old| exec_respelling(old).map(|new| (old.clone(), new.to_string())))
+            .collect(),
     };
     for ledger in ledgers_named(held) {
         let roles = roles_held(held, &ledger);
@@ -293,6 +312,11 @@ impl Refreshed {
         self.plans.iter().map(|p| p.adds().len()).sum()
     }
 
+    /// Every retired exec spelling rewritten (or, on a dry run, to be), over every grant.
+    pub fn respelled(&self) -> usize {
+        self.plans.iter().map(|p| p.respells.len()).sum()
+    }
+
     /// Every ledger any grant names, in name order: the ledgers whose summaries may need moving.
     pub fn ledgers(&self) -> BTreeSet<String> {
         self.plans
@@ -350,7 +374,7 @@ pub fn refresh(layout: &Layout, write: bool, now_millis: u64) -> Result<Refreshe
         wrote: false,
         backup: None,
     };
-    if !write || refreshed.added() == 0 {
+    if !write || (refreshed.added() == 0 && refreshed.respelled() == 0) {
         return Ok(refreshed);
     }
 
@@ -362,6 +386,7 @@ pub fn refresh(layout: &Layout, write: bool, now_millis: u64) -> Result<Refreshe
             refreshed.file.display()
         ));
     };
+    respell_doc(&mut doc)?;
     for plan in &refreshed.plans {
         let adds = plan.adds();
         if adds.is_empty() {
@@ -370,21 +395,13 @@ pub fn refresh(layout: &Layout, write: bool, now_millis: u64) -> Result<Refreshe
         let entry = doc
             .get_mut(&plan.grant)
             .ok_or_else(|| format!("grant `{}` vanished while it was planned", plan.grant))?;
-        let list = match entry {
-            Value::Array(list) => list,
-            Value::Object(fields) => match fields.get_mut("scopes") {
-                Some(Value::Array(list)) => list,
-                _ => return Err(format!("grant `{}`: `scopes` must be an array", plan.grant)),
-            },
-            _ => return Err(format!("grant `{}` must be an array of scopes", plan.grant)),
-        };
-        list.extend(adds.into_iter().map(Value::String));
+        scopes_of(&plan.grant, entry)?.extend(adds.into_iter().map(Value::String));
     }
     let written = quic::pretty(&Value::Object(doc))?;
     // What is written must be what the server will read, and start on.
     quic::check_grants(&quic::parse_grants(&written)?)?;
 
-    let backup = backup_path(&refreshed.file, now_millis);
+    let backup = backup_path(&refreshed.file, now_millis, "refresh");
     quic::write_private(&backup, &text)?;
     quic::write_private(&refreshed.file, &written)?;
     refreshed.wrote = true;
@@ -392,15 +409,121 @@ pub fn refresh(layout: &Layout, write: bool, now_millis: u64) -> Result<Refreshe
     Ok(refreshed)
 }
 
-/// `grants.json.bak-2026-11-15T231500Z-refresh` beside `file`, or with `-2`, `-3`, … when a run
+/// The scope list of one grant's entry in `grants.json`: the entry itself, or its `scopes`.
+fn scopes_of<'a>(grant: &str, entry: &'a mut Value) -> Result<&'a mut Vec<Value>, String> {
+    match entry {
+        Value::Array(list) => Ok(list),
+        Value::Object(fields) => match fields.get_mut("scopes") {
+            Some(Value::Array(list)) => Ok(list),
+            _ => Err(format!("grant `{grant}`: `scopes` must be an array")),
+        },
+        _ => Err(format!("grant `{grant}` must be an array of scopes")),
+    }
+}
+
+/// One retired exec spelling rewritten in one grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Respelling {
+    /// The grant's name, a key of `grants.json`.
+    pub grant: String,
+    /// The retired spelling, which is gone from the grant.
+    pub from: String,
+    /// The spelling that replaced it, at its position (or already there, then kept once).
+    pub to: String,
+}
+
+/// Rewrite every retired exec spelling in a parsed `grants.json` to the one that replaced it, at
+/// the same position; a grant already holding the new spelling just loses the old one, so it is
+/// held once. Every other field and token is untouched. Returns what moved, in grant order.
+fn respell_doc(doc: &mut serde_json::Map<String, Value>) -> Result<Vec<Respelling>, String> {
+    let mut moved = Vec::new();
+    for (grant, entry) in doc.iter_mut() {
+        let list = scopes_of(grant, entry)?;
+        let mut kept: Vec<Value> = Vec::with_capacity(list.len());
+        for token in list.drain(..) {
+            let respelled = token.as_str().and_then(exec_respelling);
+            if let (Some(old), Some(new)) = (token.as_str(), respelled) {
+                moved.push(Respelling {
+                    grant: grant.clone(),
+                    from: old.to_string(),
+                    to: new.to_string(),
+                });
+            }
+            let token = respelled.map_or(token, |new| Value::String(new.to_string()));
+            // The new spelling held twice (beside the old, or already respelled): keep the first.
+            let new_spelling = token
+                .as_str()
+                .is_some_and(|t| crate::grants::RETIRED_EXEC.iter().any(|(_, new)| *new == t));
+            if !(new_spelling && kept.contains(&token)) {
+                kept.push(token);
+            }
+        }
+        *list = kept;
+    }
+    Ok(moved)
+}
+
+/// ★ **The exec split's switch** (ledger #3820): rewrite every stored grant naming
+/// `urn:cap:exec:git` or `urn:cap:exec:gh` to `urn:cap:exec:read:git` / `urn:cap:exec:read:gh`,
+/// in place, before anything reads the grants as authority. The server calls it at startup,
+/// before [`quic::check_grants`], which refuses the old spellings from then on.
+///
+/// Under the grants lock: the file is read, rewritten, backed up beside itself as
+/// `grants.json.bak-{stamp}-exec-split` (`stamp` from `now_millis`, UTC) and written whole
+/// through a temporary renamed over it. A file with no old spelling, or none at all, is not
+/// touched and makes no backup, so every later start is a no-op. `Ok(None)` then; otherwise what
+/// moved and the backup.
+///
+/// # Errors
+///
+/// An unreadable file, one that is not a JSON object of grants, or a failed write. On any error
+/// nothing is written, and the startup check that follows refuses what it finds.
+pub fn respell_exec(
+    layout: &Layout,
+    now_millis: u64,
+) -> Result<Option<(Vec<Respelling>, PathBuf)>, String> {
+    let file = layout.grants_json();
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", file.display())),
+    };
+    // The cheap test first, so an ordinary start takes no lock and parses nothing twice.
+    if !crate::grants::RETIRED_EXEC
+        .iter()
+        .any(|(old, _)| text.contains(&format!("\"{old}\"")))
+    {
+        return Ok(None);
+    }
+    let _lock = layout.lock_grants()?;
+    // Read again under the lock: a writer may have finished between the two reads.
+    let text =
+        std::fs::read_to_string(&file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+    let Value::Object(mut doc) = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: not valid JSON: {e}", file.display()))?
+    else {
+        return Err(format!("{}: must be a JSON object", file.display()));
+    };
+    let moved = respell_doc(&mut doc).map_err(|e| format!("{}: {e}", file.display()))?;
+    if moved.is_empty() {
+        return Ok(None);
+    }
+    let written = quic::pretty(&Value::Object(doc))?;
+    let backup = backup_path(&file, now_millis, "exec-split");
+    quic::write_private(&backup, &text)?;
+    quic::write_private(&file, &written)?;
+    Ok(Some((moved, backup)))
+}
+
+/// `grants.json.bak-2026-11-15T231500Z-{why}` beside `file`, or with `-2`, `-3`, … when a run
 /// in the same second already made one.
-fn backup_path(file: &Path, now_millis: u64) -> PathBuf {
+fn backup_path(file: &Path, now_millis: u64, why: &str) -> PathBuf {
     let name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "grants.json".to_string());
     let stem = format!(
-        "{name}.bak-{}-refresh",
+        "{name}.bak-{}-{why}",
         crate::backup::stamp_compact(now_millis)
     );
     let mut candidate = file.with_file_name(&stem);
@@ -427,8 +550,13 @@ pub fn render(refreshed: &Refreshed) -> String {
     out.push_str(&format!("grants: {file}\n"));
     for plan in &refreshed.plans {
         let adds = plan.adds().len();
+        let respells = match plan.respells.len() {
+            0 => String::new(),
+            1 => ", 1 exec spelling to rewrite".to_string(),
+            n => format!(", {n} exec spellings to rewrite"),
+        };
         out.push_str(&format!(
-            "\ngrant `{}`: {}\n",
+            "\ngrant `{}`: {}{respells}\n",
             plan.grant,
             match adds {
                 0 => "nothing to add".to_string(),
@@ -436,6 +564,9 @@ pub fn render(refreshed: &Refreshed) -> String {
                 n => format!("{n} tokens to add"),
             }
         ));
+        for (old, new) in &plan.respells {
+            out.push_str(&format!("  rewrites {old} -> {new}\n"));
+        }
         for ledger in &plan.ledgers {
             let roles: Vec<&str> = ledger.roles.iter().map(|r| role_name(*r)).collect();
             out.push_str(&format!(
@@ -463,22 +594,44 @@ pub fn render(refreshed: &Refreshed) -> String {
         .filter(|p| !p.adds().is_empty())
         .count();
     let added = refreshed.added();
+    let respelled = refreshed.respelled();
+    let removed = if respelled > 0 {
+        "nothing removed but the retired spellings"
+    } else {
+        "nothing removed"
+    };
     out.push('\n');
     let grants = refreshed.plans.len();
+    if respelled > 0 {
+        out.push_str(&format!(
+            "exec split (ikigai-repo 0.6.0): {} {respelled} retired exec spelling(s) to the \
+             read spelling, in place\n",
+            if refreshed.wrote {
+                "rewrote"
+            } else {
+                "would rewrite"
+            }
+        ));
+    }
     if refreshed.wrote {
         out.push_str(&format!(
-            "total: added {added} token(s) to {changing} of {grants} grant(s); nothing removed\n"
+            "total: added {added} token(s) to {changing} of {grants} grant(s); {removed}\n"
         ));
         if let Some(backup) = &refreshed.backup {
             out.push_str(&format!("wrote {file}\nbackup {}\n", backup.display()));
         }
-    } else if added == 0 {
+    } else if added == 0 && respelled == 0 {
         out.push_str(&format!(
             "total: {grants} grant(s), nothing to add; nothing written\n"
         ));
+    } else if added == 0 {
+        out.push_str(&format!(
+            "total: {grants} grant(s), nothing to add. Dry run: nothing written. Run again \
+             with --write to rewrite them (a restart of ikigai-gonk does too)\n"
+        ));
     } else {
         out.push_str(&format!(
-            "total: {added} token(s) to add to {changing} of {grants} grant(s); nothing removed. \
+            "total: {added} token(s) to add to {changing} of {grants} grant(s); {removed}. \
              Dry run: nothing written. Run again with --write to add them\n"
         ));
     }
