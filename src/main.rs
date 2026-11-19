@@ -249,6 +249,28 @@ fn serve(flags: &config::Flags) -> ! {
     // instead of degrading it. `grants.json` feeds BOTH identity doors (certificates and
     // passkeys), so its broad-token check runs whether or not QUIC opens.
     let layout = quic::Layout::in_config_home(&homes.config);
+    // ★ The exec split's switch (ledger #3820): stored grants naming `urn:cap:exec:git` or
+    // `urn:cap:exec:gh` are rewritten to the read spelling ikigai-repo 0.6.0 enforces, before
+    // the check below refuses the old one.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Some((moved, backup)) =
+        ikigai_gonk::refresh::respell_exec(&layout, now_ms).unwrap_or_else(|e| fail(&e))
+    {
+        for m in &moved {
+            eprintln!(
+                "ikigai-gonk: grant `{}`: rewrote {} to {} (the exec split, ikigai-repo 0.6.0)",
+                m.grant, m.from, m.to
+            );
+        }
+        eprintln!(
+            "ikigai-gonk: wrote {}; the file as it was is {}",
+            layout.grants_json().display(),
+            backup.display()
+        );
+    }
     quic::read_grants(&layout.grants_json())
         .and_then(|grants| quic::check_grants(&grants))
         .unwrap_or_else(|e| fail(&e));

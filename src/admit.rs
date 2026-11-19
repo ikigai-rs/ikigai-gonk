@@ -175,7 +175,7 @@ pub const FOREIGN_PAGE_KEEPS: [&str; 4] = [
 ///     "urn:cap:browse:read:*",
 ///     "urn:cap:annotate",
 ///     "urn:cap:net:localhost",
-///     "urn:cap:exec:git",
+///     "urn:cap:exec:read:git",
 /// ]
 /// .map(String::from);
 /// assert_eq!(

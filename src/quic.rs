@@ -989,6 +989,8 @@ pub fn check_grants(grants: &BTreeMap<String, Vec<String>>) -> Result<(), String
 ///
 /// - the store's broad tokens ([`broad_store_scopes`]): every graph, or `DROP ALL`;
 /// - the offering wildcards (`wildcard_refusal`): every program, or every host;
+/// - the exec spellings `ikigai-repo` 0.6.0 retired (`retired_exec_refusal`, ledger #3820),
+///   which grant nothing there: the refusal names the spelling that replaced each;
 /// - a door's markers and an identity's name, which only a door computes;
 /// - the owner's administrative tokens ([`crate::grants::gonk_admin_scopes`]): backup,
 ///   restore, onboarding, and browse root administration. Reachable from the owner-only
@@ -1008,6 +1010,9 @@ pub fn grant_refusal(name: &str, scopes: &[String]) -> Option<String> {
         return Some(broad_refusal(name, &broad));
     }
     if let Some(refusal) = wildcard_refusal(name, scopes) {
+        return Some(refusal);
+    }
+    if let Some(refusal) = retired_exec_refusal(name, scopes) {
         return Some(refusal);
     }
     let markers: Vec<&str> = scopes
@@ -1081,10 +1086,12 @@ fn wildcard_refusal(name: &str, scopes: &[String]) -> Option<String> {
     let exec = crate::grants::unbounded_exec_scopes(scopes);
     if !exec.is_empty() {
         return Some(format!(
-            "grant `{name}` names {} — the OFFERING wildcard `ikigai-repo` declares, which \
-             as a grant is every program on this machine. Name the tools instead: \
-             `urn:cap:exec:git`, `urn:cap:exec:gh`",
-            exec.join(" and ")
+            "grant `{name}` names {} — an exec WILDCARD, which as a grant is every program \
+             (or every reading or writing program) on this machine. Name the tools instead: \
+             `{}`, `{}`",
+            exec.join(" and "),
+            crate::grants::CAP_EXEC_READ_GIT,
+            crate::grants::CAP_EXEC_READ_GH,
         ));
     }
     let net = crate::grants::unbounded_net_scopes(scopes);
@@ -1097,6 +1104,33 @@ fn wildcard_refusal(name: &str, scopes: &[String]) -> Option<String> {
         ));
     }
     None
+}
+
+/// The exec spellings `ikigai-repo` 0.6.0 retired (ledger #3818), refused with the spelling
+/// that replaced each.
+///
+/// ★ **At the switch they were rewritten, so one here was written after it.** gonk rewrites
+/// every stored grant to the read spelling before this check first runs
+/// ([`crate::refresh::respell_exec`]); a retired spelling met later came from a hand edit, a
+/// `--scope`, or a script still minting the old name. It grants nothing against
+/// `ikigai-repo` 0.6.0, so admitting it would be a grant that reads as authority and is none.
+fn retired_exec_refusal(name: &str, scopes: &[String]) -> Option<String> {
+    let retired = crate::grants::retired_exec_scopes(scopes);
+    if retired.is_empty() {
+        return None;
+    }
+    let instead: Vec<String> = retired
+        .iter()
+        .filter_map(|old| crate::grants::exec_respelling(old))
+        .map(|new| format!("`{new}`"))
+        .collect();
+    Some(format!(
+        "grant `{name}` names {} — an exec spelling ikigai-repo 0.6.0 retired, which grants \
+         nothing now. Name {} instead (a restart of ikigai-gonk, or `ikigai-gonk client \
+         refresh --write`, rewrites grants.json to it)",
+        retired.join(" and "),
+        instead.join(" and ")
+    ))
 }
 
 fn broad_refusal(grant: &str, broad: &[String]) -> String {
@@ -1701,19 +1735,52 @@ mod tests {
         let refused = check_grants(&wildcard).unwrap_err();
         assert!(refused.contains("urn:cap:exec:*"), "{refused}");
         assert!(
-            refused.contains("urn:cap:exec:git"),
+            refused.contains("urn:cap:exec:read:git"),
             "names the fix: {refused}"
         );
+        for wild in [
+            crate::grants::CAP_EXEC_READ_ANY,
+            crate::grants::CAP_EXEC_WRITE_ANY,
+        ] {
+            let refused = grant_refusal("shell", &[wild.to_string()]).expect(wild);
+            assert!(refused.contains(wild), "{refused}");
+            assert!(refused.contains("urn:cap:exec:read:git"), "{refused}");
+        }
 
         let mut narrow = BTreeMap::new();
         narrow.insert(
             "builder".to_string(),
             vec![
-                "urn:cap:exec:git".to_string(),
+                "urn:cap:exec:read:git".to_string(),
+                "urn:cap:exec:read:gh".to_string(),
                 "urn:cap:browse:read:core".to_string(),
             ],
         );
         assert!(check_grants(&narrow).is_ok(), "a tool grant is legitimate");
+    }
+
+    /// ★ Ledger #3820: the exec spellings ikigai-repo 0.6.0 retired are refused at every
+    /// check (startup, per connection through [`scopes_for_grant`], every writer), with a
+    /// sentence naming the spelling that replaced each.
+    #[test]
+    fn a_retired_exec_spelling_is_refused_naming_the_new_one() {
+        for (old, new) in crate::grants::RETIRED_EXEC {
+            let mut grants = BTreeMap::new();
+            grants.insert(
+                "builder".to_string(),
+                vec!["urn:cap:ledger:read:default".to_string(), old.to_string()],
+            );
+            let refused = check_grants(&grants).unwrap_err();
+            assert!(refused.contains(old), "{refused}");
+            assert!(refused.contains(&format!("`{new}`")), "{refused}");
+            let per_use = scopes_for_grant(&grants, "builder").unwrap_err();
+            assert_eq!(per_use, refused);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let old = vec!["urn:cap:exec:git".to_string()];
+        assert!(put_grant(&layout, "builder", &old, true).is_err());
+        assert!(!layout.grants_json().exists(), "nothing was written");
     }
 
     /// ★ A store BUDGET grant (`urn:cap:store:budget:<ms>`, ledger #979) is accepted in
@@ -1843,7 +1910,7 @@ mod tests {
             "urn:cap:browse:read:*",
             "urn:cap:annotate",
             "urn:cap:net:localhost",
-            "urn:cap:exec:gh",
+            "urn:cap:exec:read:gh",
         ]);
         put_grant(&layout, "brian", &hand_widened, false).unwrap();
         // A new grant is no change, and a reordering of the same set is none either.
@@ -1863,14 +1930,17 @@ mod tests {
         let change = grant_change(&layout, "brian", &reenrolled).unwrap();
         assert!(change.changes() && change.narrows());
         // In the file's order — which the reorder above reversed.
-        assert_eq!(change.removed, ["urn:cap:exec:gh", "urn:cap:net:localhost"]);
+        assert_eq!(
+            change.removed,
+            ["urn:cap:exec:read:gh", "urn:cap:net:localhost"]
+        );
         assert_eq!(change.added, ["urn:cap:net:127.0.0.1"]);
 
         let refused = put_grant(&layout, "brian", &reenrolled, false).unwrap_err();
         assert!(refused.contains("NARROW it and widen it"), "{refused}");
         for line in [
             "    removes  urn:cap:net:localhost",
-            "    removes  urn:cap:exec:gh",
+            "    removes  urn:cap:exec:read:gh",
             "    adds     urn:cap:net:127.0.0.1",
         ] {
             assert!(refused.contains(line), "`{line}` in: {refused}");
@@ -1885,7 +1955,7 @@ mod tests {
         let bundle = add_client(&layout, "brian", None, false).unwrap();
         let by_cert = enrol(&layout, "brian", &bundle.fingerprint, &reenrolled, false).unwrap_err();
         assert!(
-            by_cert.contains("    removes  urn:cap:exec:gh"),
+            by_cert.contains("    removes  urn:cap:exec:read:gh"),
             "{by_cert}"
         );
 

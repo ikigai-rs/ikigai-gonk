@@ -740,9 +740,9 @@ ikigai-browse = "0.22.0"
 # The dev-tooling facades browse's PR family resolves THROUGH THE KERNEL (`urn:repo:pr:list`,
 # `:view`, `:diff`) plus `urn:repo:{status,log,branch,list}`. browse
 # does not depend on this crate: without it the PR rows answer a typed `NotFound`, so linking
-# it is what makes those rows work. Every resource here enforces `urn:cap:exec:{tool}`, per
+# it is what makes those rows work. Every resource here enforces `urn:cap:exec:read:{tool}`, per
 # tool, not under the offering wildcard — so a grant naming
-# `urn:cap:exec:git` cannot run `gh`, and `grants.rs` refuses the wildcard as a GRANT.
+# `urn:cap:exec:read:git` cannot run `gh`, and `grants.rs` refuses the wildcards as GRANTS.
 # 0.2.0 (ledger #987): the space names itself `urn:iki:space:repo`; nothing else changed, and
 # `^0.1.6` was `<0.2.0`, a ceiling.
 # ★ 0.3.1 (ledger #2364, the core 0.2.0 sweep): the published head, and a release on ikigai-core
@@ -751,7 +751,11 @@ ikigai-browse = "0.22.0"
 # run anything), and the hub answers that name `Unresolved`. The catalog pins in
 # `tests/browse.rs` drop `system-exec` accordingly. `"0.3.1"` is `<0.4.0`.
 # Object lookup by full SHA (ledger #3204), used by git_object's repository map.
-ikigai-repo = "0.5.0"
+# ★ 0.6.0 is the exec split (ledger #3818, #3820): the git facades enforce
+# `urn:cap:exec:read:git` and the `pr:*` facades `urn:cap:exec:read:gh`; the old spellings
+# `urn:cap:exec:git` and `urn:cap:exec:gh` grant nothing. gonk rewrites stored grants at startup
+# (`crate::refresh::respell_exec`) and refuses the old spelling afterwards. `"0.6.0"` is `<0.7.0`.
+ikigai-repo = "0.6.0"
 # URL-template validation; already present transitively through the HTTP stack.
 url = "2"
 # The tuplespace behind the git-event review trigger (`crate::trigger`, ledger #261):

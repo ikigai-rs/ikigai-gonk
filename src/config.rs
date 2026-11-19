@@ -292,7 +292,7 @@ usage:
                                    http://localhost:<port>/#invite=… link; the browser that
                                    opens it enrolls a passkey under that grant. Refused on a
                                    bind localhost cannot reach (127.0.0.2); warned on [::1].
-                                   --scope adds a scope no other flag names (urn:cap:exec:git),
+                                   --scope adds a scope no other flag names (urn:cap:exec:read:git),
                                    in the same write; a repeat, or one a flag already grants, is
                                    stored once
 
@@ -315,7 +315,7 @@ usage:
                                               quic://127.0.0.1:4433, localhost for a
                                               socket); with no gonk.mount, derive is refused
   It reads config.toml (or --config) for the roots and the mount. Not covered: the PR
-  layers' `gh` (urn:cap:exec:gh) and the browse graph's WRITE door (--browse-graph write)
+  layers' `gh` (urn:cap:exec:read:gh) and the browse graph's WRITE door (--browse-graph write)
 
   --ledger <ledger>=<authority>, repeatable; each authority holds the one before, except audit
   and worker:
@@ -2042,7 +2042,7 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
 }
 
 /// One `passkey invite --scope <urn>` (ledger #3401) or `client add --scope <urn>` (ledger
-/// #3652): a scope no other flag names, such as `urn:cap:exec:git` for ikigai-repo's code
+/// #3652): a scope no other flag names, such as `urn:cap:exec:read:git` for ikigai-repo's code
 /// links.
 ///
 /// It must be a `urn:cap:` scope with no empty segment and nothing but visible ASCII, and
@@ -2056,9 +2056,10 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
 ///
 /// ```
 /// use ikigai_gonk::config::scope_spec;
-/// assert_eq!(scope_spec("chris", "urn:cap:exec:git").unwrap(), "urn:cap:exec:git");
+/// assert_eq!(scope_spec("chris", "urn:cap:exec:read:git").unwrap(), "urn:cap:exec:read:git");
 /// assert!(scope_spec("chris", "exec:git").unwrap_err().contains("`exec:git`"));
 /// assert!(scope_spec("chris", "urn:cap:exec:*").unwrap_err().contains("`urn:cap:exec:*`"));
+/// assert!(scope_spec("chris", "urn:cap:exec:git").unwrap_err().contains("`urn:cap:exec:read:git`"));
 /// ```
 ///
 /// # Errors
@@ -2070,7 +2071,7 @@ pub fn scope_spec(grant: &str, spec: &str) -> Result<String, String> {
     let Some(rest) = spec.strip_prefix(PREFIX) else {
         return Err(malformed(
             "a grant's scopes are capability URNs, so this must start with `urn:cap:` \
-             (for example `urn:cap:exec:git`)",
+             (for example `urn:cap:exec:read:git`)",
         ));
     };
     if !spec.chars().all(|c| c.is_ascii_graphic()) {

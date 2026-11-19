@@ -82,7 +82,7 @@ fn ok(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-const GIT: &str = "urn:cap:exec:git";
+const GIT: &str = "urn:cap:exec:read:git";
 
 #[test]
 fn scope_round_trips_and_force_keeps_it_while_dropping_a_ledger() {
@@ -151,6 +151,11 @@ fn a_malformed_or_refused_scope_is_refused_with_nothing_written() {
         "urn:cap:exec git",
         "urn:cap::git",
         "urn:cap:exec:*",
+        "urn:cap:exec:read:*",
+        "urn:cap:exec:write:*",
+        // The spellings ikigai-repo 0.6.0 retired (ledger #3820).
+        "urn:cap:exec:git",
+        "urn:cap:exec:gh",
         "urn:iki:gonk:door:refused",
     ] {
         let out = homes.run(&[

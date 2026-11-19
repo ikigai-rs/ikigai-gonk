@@ -1,5 +1,5 @@
 //! Ledger [#3401](http://localhost:1060/l/default/item/3401): `passkey invite <grant> … --force`
-//! writes the grant WHOLE from its flags, by design. A scope no flag names (`urn:cap:exec:git`,
+//! writes the grant WHOLE from its flags, by design. A scope no flag names (`urn:cap:exec:read:git`,
 //! for ikigai-repo's code links) was dropped, and restoring it with a second `grants.json`
 //! write left a window where a live session under the grant was missing it. A repeatable
 //! `--scope <urn>` goes into the same grant in the same write.
@@ -76,10 +76,13 @@ fn force_with_scope_keeps_the_scope_and_still_drops_a_ledger_that_left_the_flags
         "--ledger",
         "notes=write",
         "--scope",
-        "urn:cap:exec:git",
+        "urn:cap:exec:read:git",
     ]));
     let first = homes.grant("chris");
-    assert!(first.contains(&"urn:cap:exec:git".to_string()), "{first:?}");
+    assert!(
+        first.contains(&"urn:cap:exec:read:git".to_string()),
+        "{first:?}"
+    );
     assert!(first.iter().any(|s| s.contains("notes")), "{first:?}");
 
     // `notes` leaves the flags; the scope no flag names stays, in the same write.
@@ -90,12 +93,12 @@ fn force_with_scope_keeps_the_scope_and_still_drops_a_ledger_that_left_the_flags
         "--ledger",
         "default=write",
         "--scope",
-        "urn:cap:exec:git",
+        "urn:cap:exec:read:git",
         "--force",
     ]));
     let second = homes.grant("chris");
     assert!(
-        second.contains(&"urn:cap:exec:git".to_string()),
+        second.contains(&"urn:cap:exec:read:git".to_string()),
         "{second:?}"
     );
     assert!(
@@ -103,7 +106,7 @@ fn force_with_scope_keeps_the_scope_and_still_drops_a_ledger_that_left_the_flags
         "a ledger that left the flags leaves the grant: {second:?}"
     );
     assert!(
-        !stdout.contains("- urn:cap:exec:git"),
+        !stdout.contains("- urn:cap:exec:read:git"),
         "the kept scope is not reported removed: {stdout}"
     );
 
@@ -118,7 +121,7 @@ fn force_with_scope_keeps_the_scope_and_still_drops_a_ledger_that_left_the_flags
     ]));
     assert!(!homes
         .grant("chris")
-        .contains(&"urn:cap:exec:git".to_string()));
+        .contains(&"urn:cap:exec:read:git".to_string()));
 }
 
 #[test]
@@ -132,6 +135,11 @@ fn a_malformed_or_refused_scope_is_refused_with_nothing_written() {
         "urn:cap:exec git",
         "urn:cap::git",
         "urn:cap:exec:*",
+        "urn:cap:exec:read:*",
+        "urn:cap:exec:write:*",
+        // The spellings ikigai-repo 0.6.0 retired (ledger #3820).
+        "urn:cap:exec:git",
+        "urn:cap:exec:gh",
         "urn:iki:gonk:door:refused",
     ] {
         let out = homes.run(&[
@@ -168,13 +176,16 @@ fn a_repeated_scope_and_one_a_flag_already_grants_are_stored_once() {
         "--ledger",
         "default=write",
         "--scope",
-        "urn:cap:exec:git",
+        "urn:cap:exec:read:git",
         "--scope",
-        "urn:cap:exec:git",
+        "urn:cap:exec:read:git",
     ]));
     let grant = homes.grant("chris");
     assert_eq!(
-        grant.iter().filter(|s| *s == "urn:cap:exec:git").count(),
+        grant
+            .iter()
+            .filter(|s| *s == "urn:cap:exec:read:git")
+            .count(),
         1,
         "{grant:?}"
     );
@@ -191,7 +202,7 @@ fn a_repeated_scope_and_one_a_flag_already_grants_are_stored_once() {
         "--ledger",
         "default=write",
         "--scope",
-        "urn:cap:exec:git",
+        "urn:cap:exec:read:git",
         "--scope",
         &from_flag,
     ]));
@@ -209,7 +220,7 @@ fn passkey_list_shows_the_grant_scopes_as_stored() {
         "--ledger",
         "default=write",
         "--scope",
-        "urn:cap:exec:git",
+        "urn:cap:exec:read:git",
     ]));
     // A passkey enrolled under it, as `clients.json` holds one (enrolling needs a browser).
     std::fs::write(
