@@ -319,8 +319,10 @@ ikigai-ledger = "0.24.0"
 # Its writer appends through `FileSink` with `std::fs`, never by resolving, so a write is never a
 # trace event of its own (the log's T5 recursion hazard), and gonk installs no tracer at all.
 #
-# 0.11.0 is the true floor: `AccessLog` first ships in it (ledger #3390). `"0.11.0"` is `<0.12.0`.
-ikigai-log = "0.11.0"
+# ★ 0.12.0 is the true floor now, an API one (ledger #3830): `Access::needs`, the `needs=` column
+# a refused line names its missing capabilities in (`crate::access`), first ships in it.
+# `"0.12.0"` is `<0.13.0`. (0.11.0 was the floor for `AccessLog` itself, ledger #3390.)
+ikigai-log = "0.12.0"
 # ★ Scripts as resources (ledger #939): `urn:script:*` — a published SPARQL query or plan is a
 # resource with content-addressed versions, run as a READ at `…:result` and for EFFECTS at
 # `…:runs`, every run recorded with the principal the door minted (`crate::script`). 0.2.1 is the

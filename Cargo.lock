@@ -2320,9 +2320,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-log"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad418a3c00a06dfb4890721c55f1148f6bdf4116f95c9369a75e1e5bee41a5d5"
+checksum = "72a98dd6587257902ea8c19bad3b8a6451a47c693eae6a991e672f2656ab520c"
 dependencies = [
  "async-trait",
  "futures-util",
