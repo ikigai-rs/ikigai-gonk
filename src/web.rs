@@ -4843,6 +4843,23 @@ fn with_cookie(repr: Representation, cookie: &str) -> Result<Representation> {
         .map_err(|e| Error::Endpoint(format!("the session cookie: {e}")))
 }
 
+/// What `session` answers about `who` at `now` (ledger #3815): the scopes it holds now,
+/// `seconds` until the session ends, `writeSeconds` of write left (0 once the write bound has
+/// passed, or for a grant that only reads), and `restore`, the scopes a fresh sign-in by the
+/// same passkey would give back. A page grays out its write controls when `writeSeconds`
+/// reaches 0, and tells "write lapsed" (`restore` not empty) from "this passkey never could".
+pub fn session_answer(who: &identity::Identity, now: u64) -> Value {
+    json!({
+        "label": who.enrolled.label,
+        "grant": who.enrolled.grant_names(),
+        "grants": who.enrolled.grants,
+        "scopes": who.scopes,
+        "seconds": who.expires.saturating_sub(now),
+        "writeSeconds": who.write_seconds(now),
+        "restore": who.restore,
+    })
+}
+
 fn json_repr(value: Value) -> Representation {
     Representation::new(
         ReprType::new("application/json"),
@@ -5021,13 +5038,7 @@ impl Endpoint for PasskeyDoor {
                 "" => self.passkeys.signed_in(SignedIn::Principal(principal), now),
                 token => self.passkeys.identity(token, now),
             } {
-                Some(who) => Ok(json_repr(json!({
-                    "label": who.enrolled.label,
-                    "grant": who.enrolled.grant_names(),
-                    "grants": who.enrolled.grants,
-                    "scopes": who.scopes,
-                    "seconds": who.expires.saturating_sub(now),
-                }))),
+                Some(who) => Ok(json_repr(session_answer(&who, now))),
                 None => Err(Error::NotFound(
                     "no live session for that token".to_string(),
                 )),
@@ -5055,7 +5066,9 @@ impl Endpoint for PasskeyDoor {
                  its grant to that passkey, against a fresh assertion by it, and re-open the \
                  session; `session`, `logout` and \
                  `logout-all` (every session of that token's passkey) take the session token as \
-                 the body. Public by design — this is how a caller with no \
+                 the body. `session` answers `seconds` until the session ends, `writeSeconds` \
+                 until its write lapses (12 h after the sign-in at most; past it only its read \
+                 scopes are left) and `restore`, the scopes a fresh sign-in would give back. Public by design — this is how a caller with no \
                  grant gets one — so it declares no capability. The HTTP door refuses a foreign \
                  Host or a cross-site POST before it reaches this resource (crate::admit), \
                  which is what keeps another site from filling the challenge table.",

@@ -190,13 +190,17 @@ What you will see:
    `passkey logout --all`, `passkey revoke` and removing the passkey still end its sessions,
    in the file as well, even when run while gonk is stopped.
 
-   **Only a read-only grant gets a long session.** `gonk.http.session_max_hours` takes 1 to
-   720 (30 days). A session whose grant holds nothing but `urn:cap:…:read:…` scopes lasts
-   that long; a session whose grant can do anything more (write, claim, comment, …) ends
-   after 12 hours whatever the setting says, and so does a read-only session whose grant is
-   later widened. The cap never goes away: a stolen cookie for a read-only session still reads
-   everything its grant covers. A value outside 1 to 720 is refused when gonk starts, with a
-   sentence naming the setting, the value and the range.
+   **Write lapses at 12 hours; reads go on.** `gonk.http.session_max_hours` takes 1 to 720
+   (30 days), and every session ends that long after its sign-in (or at the idle bound). Its
+   write does not last that long: 12 hours after the sign-in (or at the setting, if shorter)
+   the session keeps only its `urn:cap:…:read:…` scopes, so it can still read but no longer
+   write, claim or comment, until a fresh sign-in restores the rest. A grant with no read
+   scope ends there. Both bounds count from the sign-in and are never moved by use: an open
+   page polls, so a sliding bound would keep write alive in any open tab, or for a stolen
+   cookie that polls. `/auth/session` answers `writeSeconds`, the write left (0 once it has
+   lapsed), and `restore`, the scopes a fresh sign-in would give back. The cap never goes
+   away: a stolen cookie still reads everything its grant covers. A value outside 1 to 720 is
+   refused when gonk starts, with a sentence naming the setting, the value and the range.
 
 The second click is deliberate. When the creation sheet closes it still holds the window's
 focus, and a browser refuses a sign-in prompt from a page without focus, so gonk waits for
@@ -4920,7 +4924,7 @@ gonk.backup.every = "24h"
 # gonk.log.access = false             # no door lines in the log segment (ON by default)
 # gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
 # gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in, 1..720;
-                                      # one whose grant can write ends after 12 h whatever this says
+                                      # its write lapses after 12 h whatever this says, reads go on
 # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long ends,
                                       # 1..(60 × session_max_hours)
 # gonk.toolbox.dist = "~/.local/share/ikigai-toolbox/dist"  # the RDF Toolbox's build; unset, no /toolbox
