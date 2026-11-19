@@ -3483,7 +3483,10 @@ fn the_badge_poll_does_not_clear_the_flash() {
         .expect("the clearing listener");
     let body = &shell[at..at + shell[at..].find("\n  });").expect("the listener ends")];
     assert!(
-        body.contains("if (!quiet(d.elt)) status(\"\", false);"),
+        // ikigai-ui 0.5.1 (ledger #3810) also keeps its "Reconnecting…" while a retry is pending.
+        body.contains(
+            "if (!quiet(d.elt) && !(sessions.length && reconnectShown())) status(\"\", false);"
+        ),
         "{body}"
     );
     assert!(shell.contains("elt.closest(\"[data-ui-quiet]\")"));
