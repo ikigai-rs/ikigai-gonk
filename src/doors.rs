@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use ikigai_core::{
     Bindings, Body, CachePolicy, Capability, Description, Endpoint, EndpointSpace, EntryFacts,
     Expiry, Fallback, Invocation, Iri, Kernel, Representation, Request, Resolution, Resolved,
-    Result, Scope, Space, SpaceEntry, SystemClock, Topology, Verb,
+    Result, Scope, Space, SpaceEntry, SpaceKind, SystemClock, Topology, Verb,
 };
 use ikigai_vocab::TurtleRenderer;
 use ikigai_web::{
@@ -559,7 +559,8 @@ pub const UI_SERVED: [&str; 8] = [
 /// compilers). This door maps a path to any name it can resolve, so binding the space whole would
 /// have opened all of them to every caller of the HTTP door, anonymous ones included, in a pin
 /// taken for the shell's retry. gonk's pages use none of them; anything else misses here and
-/// falls through to the next layer, as it did under 0.5.0.
+/// falls through to the next layer, as it did under 0.5.0. Its entries and its topology (what
+/// `urn:kernel:topology` reports of the door) list the same names, and nothing it does not serve.
 struct UiShared(EndpointSpace);
 
 impl Space for UiShared {
@@ -587,7 +588,11 @@ impl Space for UiShared {
     }
 
     fn topology(&self) -> Topology {
-        self.0.topology()
+        let mut topology = self.0.topology();
+        if let SpaceKind::EndpointSpace { doors } = &mut topology.kind {
+            doors.retain(|door| UI_SERVED.contains(&door.endpoint.as_str()));
+        }
+        topology
     }
 }
 
@@ -1649,4 +1654,31 @@ fn browse_routes() -> Vec<Route> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use ikigai_core::{Space, SpaceKind};
+
+    use super::{UiShared, UI_SERVED};
+
+    /// The UI layer's topology describes the doors it answers, [`UI_SERVED`], and none of the
+    /// other resources `ikigai_ui::space()` binds (ledger #3824).
+    #[test]
+    fn the_ui_layer_topology_lists_exactly_what_it_serves() {
+        let ui = UiShared(ikigai_ui::space());
+        let topology = ui.topology();
+        assert_eq!(topology.id, ui.id());
+        let SpaceKind::EndpointSpace { doors } = topology.kind else {
+            panic!("the UI layer is an endpoint space: {:?}", topology.kind);
+        };
+        let names: Vec<&str> = doors.iter().map(|door| door.endpoint.as_str()).collect();
+        assert_eq!(
+            names.iter().copied().collect::<BTreeSet<_>>(),
+            UI_SERVED.into_iter().collect::<BTreeSet<_>>(),
+        );
+        assert_eq!(names.len(), UI_SERVED.len(), "one door per name: {names:?}");
+    }
 }
