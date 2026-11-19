@@ -234,9 +234,10 @@ fn header(page: &str) -> &str {
 /// Whether `response` is gonk's page shell: its stylesheet, its script and its sign-in header.
 fn is_gonk_shell(response: &Response) -> bool {
     response.body.starts_with("<!DOCTYPE html>")
-        && response
-            .body
-            .contains("<html data-theme=\"auto\" lang=\"en\">")
+        && response.body.contains(
+            "<html data-theme=\"auto\" data-ui-retry-limit=\"90000\" \
+                 data-ui-retry-base=\"1000\" lang=\"en\">",
+        )
         && response.body.contains("href=\"/static/tokens.css\"")
         && response.body.contains("src=\"/static/shell.js\"")
         && response.body.contains("id=\"ui-theme\"")
