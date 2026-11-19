@@ -1133,6 +1133,65 @@
     if (target && document.activeElement !== target) target.focus();
   }
 
+  // ★ AN ERROR PAGE A RESTART CAUSED RELOADS ITSELF (ledger #3811). A navigation that met a 502,
+  // 503 or 504 gets a page marked `data-reload` (src/refusal.rs::reloads), whose #status says it
+  // is waiting. This asks the same address again with a GET, by the backoff ikigai-ui's shell uses
+  // for htmx (a random part of base x 2^n, capped at 30 s, never sooner than a Retry-After), and
+  // reloads once it answers anything else, so a person is not left on a page that is wrong
+  // a minute later. It gives up at the limit (both read from <html>, gonk.ui.retry.*), counted
+  // from the first failure across reloads, and says so. A 500 page carries no mark. Only GETs
+  // are sent: a form's write is never sent again.
+  function reloadWhenBack() {
+    const page = document.querySelector("[data-reload]");
+    if (!page) return;
+    const root = document.documentElement;
+    const setting = (name, fallback) => {
+      const n = parseInt(root.getAttribute(name), 10);
+      return Number.isFinite(n) && n >= 0 ? n : fallback;
+    };
+    const limit = setting("data-ui-retry-limit", 90000);
+    const base = Math.max(1, setting("data-ui-retry-base", 1000));
+    const stop = () =>
+      flash("The server is still not answering, so this page stopped waiting. Reload it to try again.", "error");
+    if (limit === 0) return stop();
+    const key = "gonk:reload:" + location.href;
+    const now = Date.now();
+    let first = now;
+    try {
+      const saved = parseInt(sessionStorage.getItem(key), 10);
+      if (Number.isFinite(saved) && now - saved < 2 * limit) first = saved;
+      sessionStorage.setItem(key, String(first));
+    } catch (_) {}
+    const afterOf = (response) => {
+      const raw = response && response.headers.get("Retry-After");
+      if (!raw) return 0;
+      const seconds = Number(raw);
+      if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+      const at = Date.parse(raw);
+      return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
+    };
+    let attempt = 0;
+    const wait = (floor) => {
+      const ceiling = Math.min(30000, base * Math.pow(2, attempt));
+      attempt += 1;
+      const delay = Math.max(floor, Math.random() * ceiling);
+      if (Date.now() + delay - first > limit) return stop();
+      setTimeout(ask, delay);
+    };
+    const ask = () => {
+      fetch(location.href, { method: "GET", cache: "no-store", credentials: "same-origin" })
+        .then((response) => {
+          if (response.status >= 502 && response.status <= 504) return wait(afterOf(response));
+          try {
+            sessionStorage.removeItem(key);
+          } catch (_) {}
+          location.reload();
+        })
+        .catch(() => wait(0));
+    };
+    wait(parseInt(page.getAttribute("data-reload-after"), 10) || 0);
+  }
+
   document.addEventListener("htmx:afterSettle", (e) => drawNotices(e.detail && e.detail.target));
   document.addEventListener("click", (e) => {
     if (canSignIn && e.target.closest && e.target.closest(".signin-here")) signIn();
@@ -1699,6 +1758,7 @@
     // about what it was parsed with, so the sentence is said now.
     const verdict = document.querySelector("main [data-announce]");
     if (verdict) announce(verdict.textContent);
+    reloadWhenBack();
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page
     if (location.hostname !== "localhost") {

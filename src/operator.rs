@@ -831,9 +831,27 @@ async fn json_of(inv: &Invocation<'_>, target: &str) -> Result<Value> {
     serde_json::from_slice(&bytes).map_err(|e| Error::Endpoint(format!("{target}: {e}")))
 }
 
-/// A part's body, under the viewer's capability. Its own failure is said here, in the part.
+/// A part's body, under the viewer's capability. Its own failure is said here, in the part,
+/// once a read the store's restart or a short outage failed has been asked again inside the
+/// request's time ([`crate::ui_retry::reread`], ledger #3811).
 async fn body_of(web: &Web, inv: &Invocation<'_>, part: Part) -> String {
-    let answer = match part {
+    settled(part, inv.time_left(), || read_part(web, inv, part)).await
+}
+
+/// `read`, retried while a short wait may cure it, or the part's note for its last failure.
+async fn settled<F, Fut>(part: Part, time_left: Option<std::time::Duration>, read: F) -> String
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    crate::ui_retry::reread(time_left, read)
+        .await
+        .unwrap_or_else(|error| unread(part.heading(), &error))
+}
+
+/// A part's body, or the failure that kept it from being read.
+async fn read_part(web: &Web, inv: &Invocation<'_>, part: Part) -> Result<String> {
+    match part {
         Part::Entries => hub_read(web, inv, "urn:kernel:cache")
             .await
             .map(|text| entries_html(&parse_cache(&text))),
@@ -858,8 +876,7 @@ async fn body_of(web: &Web, inv: &Invocation<'_>, part: Part) -> String {
         Part::Gonk => json_of(inv, system::GONK).await.map(|g| gonk_html(&g)),
         Part::Workers => json_of(inv, WORKERS).await.map(|w| workers_html(&w)),
         Part::Claimed => json_of(inv, WORKERS).await.map(|w| claimed_html(&w)),
-    };
-    answer.unwrap_or_else(|error| unread(part.heading(), &error))
+    }
 }
 
 /// A part with its heading, as its fragment. `data-live="readout"` because these change on every
@@ -1077,6 +1094,37 @@ impl Endpoint for Workers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger #3811: a store read that fails once with `Unavailable` (a restart) and then
+    /// answers draws the part, not "the store is unavailable right now". Through #3809 the first
+    /// failure was the note.
+    #[test]
+    fn a_part_whose_read_fails_once_then_answers_shows_the_answer() {
+        let asked = std::cell::Cell::new(0);
+        let body = futures::executor::block_on(settled(Part::Gonk, None, || {
+            asked.set(asked.get() + 1);
+            let first = asked.get() == 1;
+            async move {
+                if first {
+                    Err(Error::Unavailable("store: restarting".into()))
+                } else {
+                    Ok(gonk_html(&serde_json::json!({"version": "9.9.9"})))
+                }
+            }
+        }));
+        assert_eq!(asked.get(), 2);
+        assert!(body.contains("9.9.9"), "{body}");
+        assert!(!body.contains("could not be read"), "{body}");
+
+        // One that stays down is the note, after a few asks.
+        let down = futures::executor::block_on(settled(Part::Gonk, None, || async {
+            Err(Error::Unavailable("store: down".into()))
+        }));
+        assert!(
+            down.contains("the store is unavailable right now. Try again shortly"),
+            "{down}"
+        );
+    }
 
     #[test]
     fn the_graphs_a_grant_cannot_read_are_one_count_in_words() {

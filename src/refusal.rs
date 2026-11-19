@@ -68,6 +68,25 @@ impl Kind {
 /// The page's heading when signing in may cure the refusal.
 pub const SIGN_IN_HEADING: &str = "Sign in to see this page";
 
+/// What `#status` says on a page that reloads itself ([`reloads`]).
+pub const WAITING: &str =
+    "The server is not answering right now. Waiting for it: this page reloads itself when it does.";
+
+/// Whether a navigation's error page reloads itself (ledger #3811): a `502`, `503` or `504`, what
+/// a restart or a short outage answers, may answer next time. A `500`, a `4xx` and the rest do
+/// not, as a reload would only show them again. Only a navigation gets this page, and a
+/// navigation that is not a GET is a form's write, which the page never sends again:
+/// `web/gonk.js` asks the address with a GET and reloads only once that answers.
+///
+/// ```
+/// use ikigai_gonk::refusal::reloads;
+/// assert!(reloads(502) && reloads(503) && reloads(504));
+/// assert!(!reloads(500) && !reloads(429) && !reloads(404));
+/// ```
+pub fn reloads(status: u16) -> bool {
+    matches!(status, 502..=504)
+}
+
 /// The page's heading when the caller is signed in and its grant does not reach the page.
 pub const GRANT_HEADING: &str = "Your grant doesn't include this page";
 
@@ -130,6 +149,42 @@ pub fn page(
     view: &ErrorView<'_>,
 ) -> Result<String, String> {
     let kind = kind(capability, passkeys, view);
+    // An edge refusal draws no navigation, and still the deployment's assets and the footer.
+    let children = capability
+        .map(|capability| web::nav_for(web, capability))
+        .unwrap_or_else(|| web.page_assets.view());
+    drawn(children, kind, view, safe)
+}
+
+/// The fields of an [`ErrorView`] [`drawn`] reads: the library's type is `#[non_exhaustive]`, so a
+/// test builds this instead.
+struct Seen<'a> {
+    status: u16,
+    reason: &'a str,
+    message: &'a str,
+    error: Option<&'a Error>,
+}
+
+impl<'a> From<&ErrorView<'a>> for Seen<'a> {
+    fn from(view: &ErrorView<'a>) -> Self {
+        Seen {
+            status: view.status,
+            reason: view.reason,
+            message: view.message,
+            error: view.error,
+        }
+    }
+}
+
+/// The page of `kind` around `children` (the header's navigation, or only the deployment's
+/// assets).
+fn drawn<'a>(
+    mut children: String,
+    kind: Kind,
+    view: impl Into<Seen<'a>>,
+    safe: bool,
+) -> Result<String, String> {
+    let view: Seen<'a> = view.into();
     let status = format!("{} {}", view.status, view.reason);
     let status = status.trim();
     let (heading, sentence, grant) = match (kind, view.error) {
@@ -150,10 +205,19 @@ pub fn page(
     if let Some(grant) = grant.as_deref() {
         attributes.push(("grant", grant));
     }
-    // An edge refusal draws no navigation, and still the deployment's assets and the footer.
-    let mut children = capability
-        .map(|capability| web::nav_for(web, capability))
-        .unwrap_or_else(|| web.page_assets.view());
+    // The page's own `Retry-After` cannot be read by its script, so a delay the error carries is
+    // written on the page for it.
+    let reload = kind == Kind::Error && reloads(view.status);
+    let after = match view.error {
+        Some(Error::RetryAfter {
+            delay: Some(delay), ..
+        }) => delay.as_millis().to_string(),
+        _ => "0".to_string(),
+    };
+    if reload {
+        attributes.push(("reload", "true"));
+        attributes.push(("reload-after", after.as_str()));
+    }
     children.push_str(&element("refusal", &attributes, ""));
     let document = envelope(
         "page",
@@ -162,6 +226,7 @@ pub fn page(
             ("full", "true"),
             ("title", &heading),
             ("safe", crate::page_assets::flag(safe)),
+            ("page-status", if reload { WAITING } else { "" }),
         ],
         &children,
     );
@@ -203,4 +268,55 @@ pub fn sentences(text: &str) -> (String, Option<String>) {
         .unwrap_or(&sentence)
         .to_string();
     (sentence, grant)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_page(status: u16, reason: &str, error: Error) -> String {
+        let seen = Seen {
+            status,
+            reason,
+            message: "the store is restarting",
+            error: Some(&error),
+        };
+        drawn(String::new(), Kind::Error, seen, false).expect("the page renders")
+    }
+
+    /// ★ Ledger #3811: the page a navigation that met a `503` gets waits for the server and says
+    /// so in `#status`; `web/gonk.js` reloads it. Through #3809 it stayed until a person reloaded.
+    #[test]
+    fn a_503_page_reloads_itself_and_a_500_page_does_not() {
+        for (status, reason, error) in [
+            (
+                503,
+                "Service Unavailable",
+                Error::Unavailable("down".into()),
+            ),
+            (504, "Gateway Timeout", Error::Timeout("slow".into())),
+            (502, "Bad Gateway", Error::Refused("upstream".into())),
+        ] {
+            let page = error_page(status, reason, error);
+            assert!(page.contains("data-reload='true'"), "{status}: {page}");
+            assert!(page.contains("data-reload-after='0'"), "{status}: {page}");
+            let region = page.split("id='status'").nth(1).unwrap_or_default();
+            let region = region.split("</div>").next().unwrap_or_default();
+            assert!(region.contains(WAITING), "{status}: {region}");
+            assert!(page.contains("data-ui-retry-limit='"), "{page}");
+        }
+        let later = error_page(
+            503,
+            "Service Unavailable",
+            Error::RetryAfter {
+                delay: Some(std::time::Duration::from_secs(3)),
+                detail: "busy".into(),
+            },
+        );
+        assert!(later.contains("data-reload-after='3000'"), "{later}");
+
+        let failed = error_page(500, "Internal Server Error", Error::Endpoint("bug".into()));
+        assert!(!failed.contains("data-reload"), "{failed}");
+        assert!(!failed.contains(WAITING), "{failed}");
+    }
 }

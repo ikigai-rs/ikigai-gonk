@@ -161,7 +161,8 @@
             </section>
             <!-- A page may state what it shows in the one live region (`@page-status`): the
                  Harness page's filtered rules (ledger #3787). Or what a form's POST did, when the
-                 page it answers with says (an inquiry action, ledger #3695). Empty otherwise. -->
+                 page it answers with says (an inquiry action, ledger #3695). Or that an error
+                 page is waiting for the server to come back (ledger #3811). Empty otherwise. -->
             <div id="status" class="flash-area" role="status" aria-live="polite"><xsl:choose><xsl:when test="@status-message"><p><xsl:attribute name="class">flash <xsl:value-of select="@status-kind"/></xsl:attribute><xsl:value-of select="@status-message"/></p></xsl:when><xsl:when test="@page-status != ''"><p class="flash"><xsl:value-of select="@page-status"/></p></xsl:when></xsl:choose></div>
             <main id="main">
               <xsl:call-template name="body"/>
@@ -501,6 +502,12 @@
   <xsl:template match="view:refusal">
     <section class="panel refusal" data-refusal="true" aria-labelledby="refusal-title">
       <xsl:attribute name="data-kind"><xsl:value-of select="@kind"/></xsl:attribute>
+      <!-- A 502, 503 or 504 (ledger #3811, src/refusal.rs::reloads): web/gonk.js asks the
+           address again with backoff and reloads once it answers; #status says it is waiting. -->
+      <xsl:if test="@reload = 'true'">
+        <xsl:attribute name="data-reload">true</xsl:attribute>
+        <xsl:attribute name="data-reload-after"><xsl:value-of select="@reload-after"/></xsl:attribute>
+      </xsl:if>
       <h1 id="refusal-title" tabindex="-1" autofocus="autofocus">
         <xsl:if test="@sentence"><xsl:attribute name="aria-describedby">refusal-sentence</xsl:attribute></xsl:if>
         <xsl:value-of select="@heading"/>
