@@ -18,8 +18,8 @@
 //! # ledgers the HTTP door's anonymous loopback caller may READ; repeatable
 //! gonk.http.ledger = "default"
 //! # gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in
-//!                                       # (this IS the default; 1 to 720), but one whose grant
-//!                                       # can write ends after 12 h whatever this says
+//!                                       # (this IS the default; 1 to 720); its write scopes
+//!                                       # lapse after 12 h whatever this says, and it reads on
 //! # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long
 //!                                       # ends (this IS the default; 1 to 60 × the line above)
 //! # a browsable repository; repeatable
@@ -810,7 +810,7 @@ pub struct Settings {
     pub session_idle_seconds: u64,
     /// How long a passkey session lasts after its sign-in at most, in seconds
     /// (`gonk.http.session_max_hours`, default [`crate::identity::SESSION_SECONDS`]): see
-    /// [`session_max_seconds`]. A session whose grant can write is held to 12 h whatever this is.
+    /// [`session_max_seconds`]. A session's write scopes lapse after 12 h whatever this is.
     pub session_max_seconds: u64,
     /// The browsable roots, `(name, directory)`, `~/`-expanded and validated. Empty means
     /// the browse family is not composed at all.
@@ -2489,10 +2489,16 @@ fn toolbox(text: &str, homes: &Homes) -> Result<Option<crate::toolbox::Toolbox>,
 /// 720 (30 days), absent meaning [`crate::identity::SESSION_SECONDS`] (12 h). Ledger
 /// [#3229](http://localhost:1062/l/default/item/3229).
 ///
-/// It is the absolute lifetime of a session whose grant only READS
-/// ([`crate::identity::read_only`]). A session whose grant can write ends after 12 h whatever
-/// this says. Never unbounded: a stolen cookie for a read-only session still reads everything
-/// its grant covers, so past 720 is refused, and so is `0`.
+/// It is one of a passkey session's two bounds (ledger #3815), both absolute from the sign-in:
+///
+/// - **the session**, which ends this long after its sign-in (or at the idle bound, whichever
+///   comes first);
+/// - **its write**: past [`crate::identity::Passkeys::write_seconds`] (12 h, or this when it
+///   is shorter) the session holds only the scopes [`crate::identity::read_only`] passes one
+///   by one, and a grant with no read scope ends there. Use never moves either bound.
+///
+/// Never unbounded: a stolen cookie still reads everything its grant covers, so past 720 is
+/// refused, and so is `0`.
 ///
 /// ```
 /// use ikigai_gonk::config::session_max_seconds;
@@ -2520,8 +2526,8 @@ pub fn session_max_seconds(value: Option<&str>) -> Result<u64, String> {
         Ok(hours) if (1..=most).contains(&hours) => Ok(hours * 3600),
         _ => Err(format!(
             "gonk.http.session_max_hours = `{value}` is not a whole number of hours from 1 to \
-             {most} (a passkey session ends that long after its sign-in; one whose grant can \
-             write ends after {write} hours whatever this says)"
+             {most} (a passkey session ends that long after its sign-in; its write scopes \
+             lapse after {write} hours whatever this says)"
         )),
     }
 }

@@ -646,6 +646,15 @@ fn the_sign_in_sets_an_http_only_cookie_and_the_page_needs_no_token() {
     assert_eq!(who.status, 200, "{who:?}");
     let who: serde_json::Value = serde_json::from_str(&who.body).unwrap();
     assert_eq!(who["label"], v["label"]);
+    // Ledger #3815: a fresh sign-in under a Write grant has its write ahead of it, and
+    // nothing withheld for a fresh sign-in to restore.
+    let write_left = who["writeSeconds"].as_u64().expect("writeSeconds");
+    assert!(
+        write_left > 0 && write_left <= identity::SESSION_SECONDS,
+        "{who}"
+    );
+    assert_eq!(v["writeSeconds"].as_u64(), Some(identity::SESSION_SECONDS));
+    assert_eq!(who["restores"], serde_json::json!([]), "{who}");
     // No cookie, no session.
     assert_eq!(server.json("/auth/session", "").status, 404);
 

@@ -59,11 +59,26 @@
 //! (sign-out, sign out everywhere, a revoke, an expired lifetime) is written before the
 //! request that caused it answers, so nothing ended comes back after a restart.
 //!
-//! A session whose grant can only READ may run up to [`READ_ONLY_SESSION_SECONDS`] (30 days)
-//! when the setting says so; one whose grant can do anything else ends after
-//! [`SESSION_SECONDS`] (12 h) whatever the setting says. The grant is re-read on every
-//! request, so a read-only grant widened to write ends its long sessions 12 h after their
-//! sign-in.
+//! # Two bounds: write lapses, reads continue (ledger [#3815](http://localhost:1062/l/default/item/3815))
+//!
+//! Both are absolute from the sign-in, and use moves neither:
+//!
+//! - **The session** ends at `issued + max_seconds` (`gonk.http.session_max_hours`, up to
+//!   [`READ_ONLY_SESSION_SECONDS`], 30 days) or at the idle bound, whichever comes first.
+//! - **Its write** lapses at `issued + write_seconds` ([`Passkeys::write_seconds`]:
+//!   [`SESSION_SECONDS`], 12 h, or the setting when that is shorter). From then on the
+//!   session's scopes are the grant's scopes [`read_only`] passes one by one; a grant with no
+//!   read scope ends there. A sliding write bound would keep write alive in any open tab, or
+//!   for a stolen cookie that polls, so it never slides.
+//!
+//! `session` answers `writeSeconds` (the seconds of write left, 0 once it has lapsed) and
+//! `restores` (the scopes a fresh sign-in by the same passkey would bring back), so a page can
+//! gray out its write controls on time and tell "write lapsed" from "this passkey never could"
+//! ([`Identity::session_answer`]). `sessions.json` keeps no new field: each sign-in opens a new
+//! session, so `issued` is the last one. An older gonk still ends a session at
+//! `issued + lifetime(scopes)`, its 12 h for a grant that can write, so a rollback is safe.
+//! The grant is re-read on every request, so a read-only grant widened to write writes only
+//! until the write bound of the session's sign-in.
 //!
 //! # Ending a session (ledger [#1824](http://localhost:1062/l/default/item/1824))
 //!
@@ -154,17 +169,18 @@ pub enum SignedIn<'a> {
     Principal(Option<&'a str>),
 }
 
-/// How long a session whose grant can WRITE (anything beyond read) lasts at most, however
+/// How long a session may WRITE (anything beyond read) after its sign-in at most, however
 /// busy it is and whatever `gonk.http.session_max_hours` says; also that setting's default.
+/// Past it the session only reads ([`Passkeys::write_seconds`]).
 pub const SESSION_SECONDS: u64 = 12 * 60 * 60;
 
-/// The longest `gonk.http.session_max_hours` may make a session, which only a READ-ONLY grant
-/// gets: 30 days. Never unbounded: a stolen cookie still reads everything its grant covers.
+/// The longest `gonk.http.session_max_hours` may make a session, which past
+/// [`SESSION_SECONDS`] only reads: 30 days. Never unbounded: a stolen cookie still reads everything its grant covers.
 pub const READ_ONLY_SESSION_SECONDS: u64 = 720 * 60 * 60;
 
 /// Whether every scope in `scopes` only reads (`urn:cap:<family>:read:…`). Anything else —
 /// write, claim, comment, an alias scheme, a token this rule does not know — can write, and
-/// so is held to [`SESSION_SECONDS`]. An empty list is not read-only: it grants nothing, and
+/// so lapses at [`Passkeys::write_seconds`]. An empty list is not read-only: it grants nothing, and
 /// gains nothing from a longer session.
 ///
 /// ```
@@ -186,6 +202,15 @@ pub fn read_only(scopes: &[String]) -> bool {
                 && parts.next().is_some()
                 && parts.next() == Some("read")
         })
+}
+
+/// The scopes in `scopes` that [`read_only`] passes one by one: what a session keeps past
+/// its write bound.
+fn reads_of(scopes: &[String]) -> Vec<&String> {
+    scopes
+        .iter()
+        .filter(|s| read_only(std::slice::from_ref(*s)))
+        .collect()
 }
 
 /// How long a session lasts with no request carrying it (the idle bound), when no
@@ -1201,6 +1226,38 @@ pub struct Identity {
     /// When the session ends at the latest (the absolute bound), in seconds since the epoch.
     /// It ends sooner if no request carries it for the idle bound.
     pub expires: u64,
+    /// The write bound ([`Passkeys::write_seconds`] after the sign-in, never moved by use):
+    /// from then on [`Identity::scopes`] holds only the grant's [`read_only`] scopes. Equal to
+    /// the sign-in for a grant that only reads, which has no write to lapse.
+    pub write_expires: u64,
+    /// The scopes the write bound has withheld, which a fresh sign-in by the same passkey
+    /// restores: empty before the write bound, and always for a grant that only reads.
+    pub restores: Vec<String>,
+}
+
+impl Identity {
+    /// The seconds of write left at `now`: 0 once the write bound has passed, and for a grant
+    /// that never could write.
+    pub fn write_seconds(&self, now: u64) -> u64 {
+        self.write_expires.saturating_sub(now)
+    }
+
+    /// The passkey door's `session` answer at `now`: who, the grant, the scopes held now,
+    /// `seconds` to the absolute bound, `writeSeconds` of write left (0 once it lapsed, and for
+    /// a grant that only reads) and `restores`, the scopes a fresh sign-in by this passkey would
+    /// bring back. A page grays out its write controls when `writeSeconds` reaches 0, and tells
+    /// "write lapsed" (`restores` not empty) from "this passkey never could" (empty).
+    pub fn session_answer(&self, now: u64) -> Value {
+        json!({
+            "label": self.enrolled.label,
+            "grant": self.enrolled.grant_names(),
+            "grants": self.enrolled.grants,
+            "scopes": self.scopes,
+            "seconds": self.expires.saturating_sub(now),
+            "writeSeconds": self.write_seconds(now),
+            "restores": self.restores,
+        })
+    }
 }
 
 impl Passkeys {
@@ -1250,8 +1307,9 @@ impl Passkeys {
     }
 
     /// The same relying party with `gonk.http.session_max_hours` at `seconds`: the absolute
-    /// lifetime of a session whose grant is read-only, capped at [`SESSION_SECONDS`] for any
-    /// other. Clamped to [`READ_ONLY_SESSION_SECONDS`]; the setting refuses more at load.
+    /// lifetime of every session that holds a read scope; its write scopes lapse sooner, at
+    /// [`Passkeys::write_seconds`]. Clamped to [`READ_ONLY_SESSION_SECONDS`]; the setting
+    /// refuses more at load.
     pub fn with_max_seconds(mut self, seconds: u64) -> Passkeys {
         self.max_seconds = seconds.clamp(1, READ_ONLY_SESSION_SECONDS);
         self
@@ -1262,14 +1320,45 @@ impl Passkeys {
         self.max_seconds
     }
 
-    /// How long a session whose grant holds `scopes` lasts at most: the setting if every scope
-    /// only reads ([`read_only`]), and never more than [`SESSION_SECONDS`] otherwise.
+    /// How long a session may WRITE after its sign-in: [`SESSION_SECONDS`], or the setting
+    /// when that is shorter. Past it the session's scopes narrow to the ones [`read_only`]
+    /// passes (ledger #3815). Absolute from the sign-in: an open page polls, so a bound that
+    /// use moved would keep write alive in any open tab, or for a stolen cookie that polls.
+    pub fn write_seconds(&self) -> u64 {
+        self.max_seconds.min(SESSION_SECONDS)
+    }
+
+    /// How long a session whose grant holds `scopes` lasts at most: the setting if any scope
+    /// only reads ([`read_only`]), since the reads outlive the write bound; and
+    /// [`Passkeys::write_seconds`] for a grant with no read scope, which has nothing left then.
     pub fn lifetime(&self, scopes: &[String]) -> u64 {
-        if read_only(scopes) {
-            self.max_seconds
+        if reads_of(scopes).is_empty() {
+            self.write_seconds()
         } else {
-            self.max_seconds.min(SESSION_SECONDS)
+            self.max_seconds
         }
+    }
+
+    /// What a session issued at `issued` holding the grant `scopes` may do at `now`: its
+    /// scopes (narrowed to the reads past the write bound), the scopes withheld, and the
+    /// write bound itself.
+    fn narrowed(
+        &self,
+        scopes: Vec<String>,
+        issued: u64,
+        now: u64,
+    ) -> (Vec<String>, Vec<String>, u64) {
+        if read_only(&scopes) {
+            return (scopes, Vec::new(), issued);
+        }
+        let write_expires = issued.saturating_add(self.write_seconds());
+        if now < write_expires {
+            return (scopes, Vec::new(), write_expires);
+        }
+        let (reads, withheld) = scopes
+            .into_iter()
+            .partition(|s| read_only(std::slice::from_ref(s)));
+        (reads, withheld, write_expires)
     }
 
     /// Write `gonk/sessions.json` if anything in it changed. A failure is said on stderr and
@@ -1736,12 +1825,15 @@ impl Passkeys {
         );
         state.dirty = true;
         self.save(&mut state);
+        let (scopes, restores, write_expires) = self.narrowed(scopes, now, now);
         Ok((
             token,
             Identity {
                 enrolled,
                 scopes,
                 expires,
+                write_expires,
+                restores,
             },
         ))
     }
@@ -2105,9 +2197,12 @@ impl Passkeys {
             return None;
         };
         let scopes = scopes_of_all(&self.layout, &enrolled.grants).ok()?;
-        // ★ The grant is re-read NOW: a session opened read-only whose grant has since been
-        // widened to write ends where a write session would have, 12 h after its sign-in.
+        // ★ The grant is re-read NOW, and so is the narrowing (ledger #3815): past the write
+        // bound only the grant's read scopes remain, and a grant with none ends there. A
+        // session opened read-only whose grant has since been widened writes only until the
+        // write bound of its sign-in.
         let expires = expires.min(issued.saturating_add(self.lifetime(&scopes)));
+        let (scopes, restores, write_expires) = self.narrowed(scopes, issued, now);
         {
             let mut state = self.state.lock().ok()?;
             if expires <= now {
@@ -2143,6 +2238,8 @@ impl Passkeys {
             enrolled,
             scopes,
             expires,
+            write_expires,
+            restores,
         })
     }
 
@@ -2442,9 +2539,10 @@ mod tests {
 
     /// ★ `gonk.http.session_max_hours = 240` (ledger #3229): a read-only grant's session runs
     /// past 12 h, to 240 h, across a restart; a write grant's session under the same setting
-    /// ends at 12 h; and a read-only grant widened to write ends its session at 12 h too.
+    /// writes only until 12 h, then only reads (ledger #3815); and a read-only grant widened to
+    /// write writes only until 12 h after the sign-in too.
     #[test]
-    fn only_a_read_only_session_outlives_twelve_hours() {
+    fn only_reads_outlive_twelve_hours() {
         let dir = tempfile::tempdir().unwrap();
         let hours = crate::config::session_max_seconds(Some("240")).unwrap();
         let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000)
@@ -2455,11 +2553,18 @@ mod tests {
         let widened = session_as(&rp, "d2lkZQ", "widened", Authority::Read, 1_000);
 
         let twelve = 1_000 + SESSION_SECONDS;
-        assert!(rp.identity(&writer, twelve - 1).is_some());
-        assert!(
-            rp.identity(&writer, twelve).is_none(),
-            "a write grant ends at 12 h"
-        );
+        let reads: Vec<String> = grants_for("default", Authority::Write)
+            .unwrap()
+            .into_iter()
+            .filter(|s| read_only(std::slice::from_ref(s)))
+            .collect();
+        let wrote = rp.identity(&writer, twelve - 1).unwrap();
+        assert!(!read_only(&wrote.scopes), "{:?}", wrote.scopes);
+        let narrowed = rp
+            .identity(&writer, twelve)
+            .expect("a write grant's session reads on past 12 h");
+        assert_eq!(narrowed.scopes, reads, "a write grant writes until 12 h");
+        assert!(!narrowed.restores.is_empty());
         let who = rp
             .identity(&reader, twelve + 3_600)
             .expect("read-only past 12 h");
@@ -2472,14 +2577,99 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(
-            rp.identity(&widened, twelve + 3_600).is_none(),
-            "a grant that can write now ends at 12 h after the sign-in"
+        let who = rp.identity(&widened, twelve + 3_600).unwrap();
+        assert_eq!(
+            who.scopes, reads,
+            "a grant that can write now writes only until 12 h after the sign-in"
         );
+        assert_eq!(who.write_seconds(twelve + 3_600), 0);
 
         let rp = restart(&rp, twelve + 7_200);
         assert!(rp.identity(&reader, 1_000 + 239 * 3_600).is_some());
         assert!(rp.identity(&reader, 1_000 + 240 * 3_600).is_none());
+    }
+
+    /// ★ Ledger #3815: under `gonk.http.session_max_hours = 240` a session whose grant holds
+    /// reads AND writes keeps writing until 12 h after its sign-in, is then narrowed to its
+    /// read scopes (a write refused, a read answered) and reads on to 240 h. Use does not move
+    /// the write bound; a grant with no read scope ends at 12 h, as before.
+    #[test]
+    fn write_lapses_at_twelve_hours_and_reads_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let hours = crate::config::session_max_seconds(Some("240")).unwrap();
+        let rp = Passkeys::new_at(Layout::in_config_home(dir.path()), 1060, 1_000)
+            .with_idle_seconds(hours)
+            .with_max_seconds(hours);
+        assert_eq!(rp.write_seconds(), SESSION_SECONDS);
+        let full = grants_for("default", Authority::Write).unwrap();
+        let reads: Vec<String> = full
+            .iter()
+            .filter(|s| read_only(std::slice::from_ref(*s)))
+            .cloned()
+            .collect();
+        let writes: Vec<String> = full
+            .iter()
+            .filter(|s| !reads.contains(s))
+            .cloned()
+            .collect();
+        assert!(!reads.is_empty() && !writes.is_empty(), "{full:?}");
+        quic::put_grant(&rp.layout, "write-only", &writes, false).unwrap();
+
+        let both = session_as(&rp, "Ym90aA", "brian", Authority::Write, 1_000);
+        let only = session_as(&rp, "b25seQ", "write-only", Authority::Write, 1_000);
+        let twelve = 1_000 + SESSION_SECONDS;
+        let max = 1_000 + hours;
+
+        // Busy all along, a request every 30 min: use never moves the write bound.
+        let mut now = 1_000;
+        while now + 1_800 < twelve {
+            now += 1_800;
+            let who = rp.identity(&both, now).expect("live before 12 h");
+            assert_eq!(who.scopes, full, "writes before the write bound, at {now}");
+            assert_eq!(who.write_expires, twelve, "the write bound never moves");
+            assert!(who.restores.is_empty());
+            assert!(
+                rp.identity(&only, now).is_some(),
+                "write-only lives to 12 h"
+            );
+        }
+        let who = rp.identity(&both, twelve - 1).unwrap();
+        assert_eq!(who.scopes, full);
+        assert_eq!(who.write_expires.saturating_sub(twelve - 1), 1);
+        assert_eq!(who.expires, max);
+        let answer = who.session_answer(twelve - 1);
+        assert_eq!(answer["writeSeconds"], 1, "{answer}");
+        assert_eq!(answer["seconds"], max - (twelve - 1));
+        assert_eq!(answer["restores"], json!([]));
+        let early = rp.identity(&both, 1_000 + 3_600).unwrap();
+        assert_eq!(
+            early.session_answer(1_000 + 3_600)["writeSeconds"],
+            SESSION_SECONDS - 3_600,
+            "counting down"
+        );
+
+        let who = rp
+            .identity(&both, twelve)
+            .expect("reads continue past 12 h");
+        assert_eq!(who.scopes, reads, "write refused: only the reads remain");
+        assert_eq!(who.restores, writes, "a fresh sign-in restores the writes");
+        assert_eq!(who.write_expires.saturating_sub(twelve), 0);
+        assert_eq!(who.expires, max);
+        let answer = who.session_answer(twelve);
+        assert_eq!(answer["writeSeconds"], 0, "{answer}");
+        assert_eq!(answer["scopes"], json!(reads));
+        assert_eq!(answer["restores"], json!(writes));
+        assert_eq!(answer["seconds"], hours - SESSION_SECONDS);
+        assert!(
+            rp.identity(&only, twelve).is_none(),
+            "a grant with no read scope ends at the write bound"
+        );
+
+        // Narrowed across a restart too, and over at the absolute bound.
+        let rp = restart(&rp, twelve + 3_600);
+        let who = rp.identity(&both, max - 1).expect("reads until 240 h");
+        assert_eq!(who.scopes, reads);
+        assert!(rp.identity(&both, max).is_none(), "the absolute bound");
     }
 
     /// ★ **The point of the exec split** (ledger #3820): a passkey whose grant is a ledger's

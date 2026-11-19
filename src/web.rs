@@ -4955,7 +4955,8 @@ impl Endpoint for PasskeyDoor {
                 with_cookie(
                     json_repr(json!({
                         "session": token,
-                        "seconds": who.expires.saturating_sub(now),
+                        "seconds": seconds,
+                        "writeSeconds": who.write_seconds(now),
                         "label": who.enrolled.label,
                         "grant": who.enrolled.grant_names(),
                         "grants": who.enrolled.grants,
@@ -4974,6 +4975,7 @@ impl Endpoint for PasskeyDoor {
                     json_repr(json!({
                         "session": token,
                         "seconds": seconds,
+                        "writeSeconds": who.write_seconds(now),
                         "label": who.enrolled.label,
                         "grant": who.enrolled.grant_names(),
                         "grants": who.enrolled.grants,
@@ -5021,13 +5023,7 @@ impl Endpoint for PasskeyDoor {
                 "" => self.passkeys.signed_in(SignedIn::Principal(principal), now),
                 token => self.passkeys.identity(token, now),
             } {
-                Some(who) => Ok(json_repr(json!({
-                    "label": who.enrolled.label,
-                    "grant": who.enrolled.grant_names(),
-                    "grants": who.enrolled.grants,
-                    "scopes": who.scopes,
-                    "seconds": who.expires.saturating_sub(now),
-                }))),
+                Some(who) => Ok(json_repr(who.session_answer(now))),
                 None => Err(Error::NotFound(
                     "no live session for that token".to_string(),
                 )),
