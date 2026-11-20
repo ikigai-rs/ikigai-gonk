@@ -1531,6 +1531,24 @@ and says whether it would be refused without `--force`. It mints no bundle and w
 ikigai-gonk client add chris --ledger default=purge --scope urn:cap:exec:read:git --print
 ```
 
+**To change a grant and mint nothing else**, use `grant set` (ledger
+[#3852](http://localhost:1060/l/default/item/3852)). It takes the same grant flags as `client
+add` and `passkey invite`, which resolve to scopes through the same code, and writes only that
+grant in `grants.json`. It makes no certificate, bundle, enrollment or invite link, and leaves
+`clients.json` alone. Say a viewer grant a passkey already holds has to gain a ledger:
+
+```sh
+ikigai-gonk grant set viewer --ledger default=read --ledger notes=read --print   # what it would remove and add
+ikigai-gonk grant set viewer --ledger default=read --ledger notes=read --force
+```
+
+A new grant is written without `--force`. An existing one with different scopes is refused,
+and the refusal names every scope the write would remove and add. With `--force` the grant is
+written whole. `--print` writes nothing. The write is the one `client refresh --write` makes:
+`grants.json` is backed up beside itself as `grants.json.bak-<UTC stamp>-grant-set`, then
+replaced atomically. Every certificate and passkey enrolled under the grant holds the new
+list from its next request (HTTP) or connection (QUIC), with no restart.
+
 ⚠ **A click on Explain spends inference.** The per-face token ceilings
 (`gonk.explain.*.max_tokens`) bound ONE call; what bounds them over time is one window on the
 mount, `gonk.mount.calls_per_hour` (2,000 by default; [explaining](#explaining-what-it-browses)
@@ -2628,6 +2646,7 @@ ikigai-gonk client add laptop --rotate       # a NEW IDENTITY under the SAME gra
 ikigai-gonk client remove laptop             # the bundle and its enrolment (grants.json is left alone)
 ikigai-gonk client remove --fingerprint <fp> # an enrolment with no bundle
 ikigai-gonk client refresh [--write]         # every grant gains what its ledger roles mint now; nothing removed (ledger #3776)
+ikigai-gonk grant set laptop --ledger default=delete --force  # the grant alone: no bundle, enrollment or invite (ledger #3852)
 ```
 
 ⚠ `--force` replaces a client's GRANT and never its key pair. Until ledger #864 (R7) it did

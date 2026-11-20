@@ -515,6 +515,111 @@ pub fn respell_exec(
     Ok(Some((moved, backup)))
 }
 
+/// What [`set_grant`] did (or, refused, would have done) to one grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantSet {
+    /// What the write changes against the grant already there ([`quic::GrantChange`]).
+    pub change: quic::GrantChange,
+    /// Whether `grants.json` was written. An existing grant already holding exactly these
+    /// scopes is left alone: nothing to write, no backup.
+    pub wrote: bool,
+    /// The copy of the file as it was, when there was a file to copy.
+    pub backup: Option<PathBuf>,
+}
+
+/// ★ **`grant set`** (ledger #3852): write `scopes` as grant `grant` in `layout`'s
+/// `grants.json` and touch nothing else — no bundle, no enrollment, no invite, and
+/// `clients.json` is never read.
+///
+/// The exact-scope rules of every grant writer ([`quic::put_grant`], [`quic::enrol`]): a scope
+/// [`quic::grant_refusal`] refuses is refused; a NEW grant is written; an existing grant with a
+/// different set is refused without `force`, naming every scope it would remove and add
+/// ([`quic::GrantChange::refusal`]); with `force` its scopes are written whole. A grant stored as
+/// an object (`{"scopes": [...]}`) keeps its other fields.
+///
+/// The write is [`refresh`]'s: under the grants lock, the file backed up beside itself as
+/// `grants.json.bak-{stamp}-grant-set` (`stamp` from `now_millis`, UTC), the result checked as
+/// the server would check it at startup, then written through a temporary renamed over it.
+/// The running server reads `grants.json` per request and per connection, so no restart.
+///
+/// # Errors
+///
+/// A name that cannot be a grant, a refused scope, an unreadable or unparsable file, a
+/// rewrite without `force`, or a failed write. On any error nothing is written.
+pub fn set_grant(
+    layout: &Layout,
+    grant: &str,
+    scopes: &[String],
+    force: bool,
+    now_millis: u64,
+) -> Result<GrantSet, String> {
+    quic::valid_name(grant)?;
+    if scopes.is_empty() {
+        return Err(format!(
+            "grant set {grant}: these flags name no scope; nothing was written. Name one with \
+             --ledger, --browse, --browse-graph, --script or --scope"
+        ));
+    }
+    if let Some(refusal) = quic::grant_refusal(grant, scopes) {
+        return Err(refusal);
+    }
+    let file = layout.grants_json();
+    // The directory first: with none there is no lock to take (a first grant on a fresh home).
+    quic::private_dir(layout.dir())?;
+    let _lock = layout.lock_grants()?;
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("reading {}: {e}", file.display())),
+    };
+    let mut doc = match &text {
+        None => serde_json::Map::new(),
+        Some(text) => match serde_json::from_str(text)
+            .map_err(|e| format!("{}: not valid JSON: {e}", file.display()))?
+        {
+            Value::Object(doc) => doc,
+            _ => return Err(format!("{}: must be a JSON object", file.display())),
+        },
+    };
+    let change = quic::GrantChange::against(doc.get(grant), scopes);
+    if change.changes() && !force {
+        return Err(change.refusal(grant, &file));
+    }
+    if change.existed && !change.changes() {
+        return Ok(GrantSet {
+            change,
+            wrote: false,
+            backup: None,
+        });
+    }
+    let list = Value::Array(scopes.iter().cloned().map(Value::String).collect());
+    match doc.get_mut(grant) {
+        Some(Value::Object(fields)) => {
+            fields.insert("scopes".to_string(), list);
+        }
+        _ => {
+            doc.insert(grant.to_string(), list);
+        }
+    }
+    let written = quic::pretty(&Value::Object(doc))?;
+    // What is written must be what the server will read, and start on.
+    quic::check_grants(&quic::parse_grants(&written)?)?;
+    let backup = match &text {
+        Some(text) => {
+            let backup = backup_path(&file, now_millis, "grant-set");
+            quic::write_private(&backup, text)?;
+            Some(backup)
+        }
+        None => None,
+    };
+    quic::write_private(&file, &written)?;
+    Ok(GrantSet {
+        change,
+        wrote: true,
+        backup,
+    })
+}
+
 /// `grants.json.bak-2026-11-15T231500Z-{why}` beside `file`, or with `-2`, `-3`, … when a run
 /// in the same second already made one.
 fn backup_path(file: &Path, now_millis: u64, why: &str) -> PathBuf {
