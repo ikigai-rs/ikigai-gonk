@@ -708,7 +708,23 @@ pub fn http_cap(door: HttpDoor) -> CapFn {
     Arc::new(move |request: &HttpRequest| {
         let now = identity::now_seconds();
         let identity = http_identity(&door, request, now);
-        let capability = Capability::scoped(http_scopes_for(&door, request, identity.as_ref()));
+        let mut scopes = http_scopes_for(&door, request, identity.as_ref());
+        // ★ Ledger #3816: a WRITE to the passkey resource from a live session also names that
+        // session ([`identity::session_marker`]), so `/auth/reassert` replaces the one session
+        // this cookie holds and no other of the passkey's. On writes only, so no cached read
+        // is partitioned by session, and on `/auth/` only, so no other resource sees it.
+        if identity.is_some()
+            && !matches!(request.method.as_str(), "GET" | "HEAD")
+            && request.path.starts_with("/auth/")
+            && !scopes
+                .iter()
+                .any(|s| s.starts_with(crate::admit::REFUSED_PREFIX))
+        {
+            if let Some(token) = session_token(request) {
+                scopes.push(identity::session_marker(&token));
+            }
+        }
+        let capability = Capability::scoped(scopes);
         match identity.map(|who| identity::passkey_iri(&who.enrolled.credential_id)) {
             // A passkey IRI is always an absolute IRI with no `*`, so this cannot fail; if it
             // ever did, the request keeps its authority and names nobody, which is the

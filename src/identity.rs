@@ -126,6 +126,17 @@
 //! `http://localhost:*` page (cookies are scoped by host, not port) can read the token. The page
 //! names no token: `session`, `logout`, `logout-all` and `add-grant` read the passkey from the
 //! capability's principal, which the door derives from the cookie.
+//!
+//! # Re-asserting to re-open write (ledger [#3816](http://localhost:1062/l/default/item/3816))
+//!
+//! Once a session's write has lapsed, a fresh assertion by the SAME passkey re-opens it
+//! ([`Passkeys::reassert`], `/auth/reassert-options` and `/auth/reassert`): a challenge of its
+//! own ([`Purpose::Reassert`]), answered by the session's own credential only, with user
+//! verification and the signature counter checked as a sign-in checks them. It ends the ONE
+//! session the cookie names and opens a new one with fresh bounds; the passkey's other
+//! sessions stand. The page cannot read the cookie, so the HTTP door names that session to
+//! the passkey resource with a door marker ([`session_marker`]), computed from the cookie
+//! like the principal is.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -154,6 +165,40 @@ pub const SESSION_COOKIE: &str = "gonk_session";
 /// once the door is served over TLS.
 pub fn session_cookie(token: &str, seconds: u64) -> String {
     format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}")
+}
+
+/// Every session marker starts here: a door marker ([`crate::admit::DOOR_PREFIX`], so no grant
+/// may name one), followed by the SHA-256 of the session's token — the key the session table
+/// and `sessions.json` already hold, never the token.
+pub const SESSION_MARKER_PREFIX: &str = "urn:iki:gonk:door:session:";
+
+/// The marker the HTTP door's capability carries on a write to the passkey resource, naming
+/// the session its cookie holds ([`Passkeys::reassert`]). Not authority: nothing requires it,
+/// and only a door computes one.
+///
+/// ```
+/// let marker = ikigai_gonk::identity::session_marker("token");
+/// assert!(marker.starts_with(ikigai_gonk::identity::SESSION_MARKER_PREFIX));
+/// assert!(!marker.contains("token"));
+/// ```
+pub fn session_marker(token: &str) -> String {
+    format!("{SESSION_MARKER_PREFIX}{}", session_key(token))
+}
+
+/// The key a session is held under: the SHA-256 of its token, as [`session_marker`] names it.
+pub fn session_key(token: &str) -> String {
+    sha256_hex(token.as_bytes())
+}
+
+/// The session key a [`session_marker`] among `scopes` names, if there is exactly one.
+pub fn marked_session<'a>(scopes: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let mut marked = scopes
+        .into_iter()
+        .filter_map(|scope| scope.strip_prefix(SESSION_MARKER_PREFIX));
+    match (marked.next(), marked.next()) {
+        (Some(key), None) => Some(key),
+        _ => None,
+    }
 }
 
 /// The `Set-Cookie` value that ends the session in this browser.
@@ -985,6 +1030,10 @@ pub enum Purpose {
     /// passkey ([`Passkeys::add_grant`]): a sign-in challenge cannot be spent on it, nor it on
     /// a sign-in.
     AddGrant,
+    /// `navigator.credentials.get`, answered to re-open the signed-in session with fresh
+    /// bounds ([`Passkeys::reassert`], ledger #3816): no other ceremony's challenge can be
+    /// spent on it, nor it on another.
+    Reassert,
 }
 
 impl Purpose {
@@ -994,9 +1043,14 @@ impl Purpose {
             Purpose::Register => b'r',
             Purpose::Login => b'l',
             Purpose::AddGrant => b'g',
+            Purpose::Reassert => b'a',
         }
     }
 }
+
+/// The refusal of a re-assertion with no live session to re-open.
+const NOT_SIGNED_IN_TO_REASSERT: &str =
+    "you are not signed in, or this session has ended — sign in with your passkey instead";
 
 /// A sealed challenge's random part, in bytes.
 const NONCE_BYTES: usize = 16;
@@ -1989,6 +2043,130 @@ impl Passkeys {
         drop(lock);
         let (token, identity) = self.open_session(current, now)?;
         Ok((token, identity, redeemed))
+    }
+
+    /// What re-asserting the session `key` (the SHA-256 of its token, as
+    /// [`session_marker`] carries it) needs before the ceremony, spending nothing: a fresh
+    /// [`Purpose::Reassert`] challenge, and the credential id of the session's own passkey (so
+    /// the page can ask the authenticator for that passkey only). Refused when `key` names no
+    /// live session.
+    pub fn reassert_options(&self, key: &str, now: u64) -> Result<(String, String), String> {
+        let who = self
+            .identity_at(key.to_string(), now)
+            .ok_or(NOT_SIGNED_IN_TO_REASSERT)?;
+        let challenge = self.challenge(Purpose::Reassert, now)?;
+        Ok((challenge, who.enrolled.credential_id))
+    }
+
+    /// Re-open a session's write with a fresh assertion by the SAME passkey (ledger
+    /// [#3816](http://localhost:1062/l/default/item/3816)). The body: `{session?, challenge, id,
+    /// authenticatorData, clientDataJSON, signature}`, the last five a fresh
+    /// `navigator.credentials.get` answer to a [`Purpose::Reassert`] challenge. Returns the new
+    /// session's token (the only copy) and identity.
+    ///
+    /// ★ **The session's own passkey only.** The assertion must be signed, with user
+    /// verification and the signature counter checked as a sign-in checks them, by the
+    /// passkey the session signs in as: a free choice would let a re-assertion change whom the
+    /// later writes are attributed to.
+    ///
+    /// ★ **Only that one session is replaced.** It is ended and a new one opened with fresh
+    /// bounds; every other session of the passkey (another browser, another device) stands, as
+    /// it would not on a sign-out.
+    ///
+    /// Writes one [`LOGIN_CLASS`] line, `urn:iki:gonk:passkey:reassert`, either way, and on
+    /// success one [`LOGOUT_CLASS`] line for the session it replaced (`why=reasserted`).
+    pub fn reassert(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
+        self.reassert_as(body, None, now)
+    }
+
+    /// [`Passkeys::reassert`], where a body with no `session` re-asserts the session `marked`
+    /// names (the key the HTTP door's [`session_marker`] carries, from the HttpOnly cookie the
+    /// page cannot read).
+    pub fn reassert_as(
+        &self,
+        body: &[u8],
+        marked: Option<&str>,
+        now: u64,
+    ) -> Result<(String, Identity), String> {
+        let answer = self.reopen(body, marked, now);
+        let claimed = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
+        self.audit(
+            LOGIN_CLASS,
+            AuditLine {
+                op: "reassert",
+                door: "http",
+                outcome: if answer.is_ok() { "ok" } else { "denied" },
+                credential: claimed.as_deref(),
+                authenticated: answer.is_ok(),
+                sessions: usize::from(answer.is_ok()),
+                why: None,
+            },
+        );
+        answer
+    }
+
+    fn reopen(
+        &self,
+        body: &[u8],
+        marked: Option<&str>,
+        now: u64,
+    ) -> Result<(String, Identity), String> {
+        let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
+        let key = match v.get("session").and_then(Value::as_str) {
+            Some(token) => sha256_hex(token.trim().as_bytes()),
+            None => marked.ok_or(NOT_SIGNED_IN_TO_REASSERT)?.to_string(),
+        };
+        let who = self
+            .identity_at(key.clone(), now)
+            .ok_or(NOT_SIGNED_IN_TO_REASSERT)?;
+        let verified = self.verify_assertion(&v, Purpose::Reassert, now)?;
+        if verified.enrolled.credential_id != who.enrolled.credential_id {
+            return Err(format!(
+                "the passkey that answered is not the one this session signed in with (`{}`)",
+                who.enrolled.label
+            ));
+        }
+        // Answered only now that the session's own passkey signed it ([`MAX_PENDING`]).
+        self.answer_challenge(&verified.challenge, verified.expires, now)?;
+        // As a sign-in does: the entry written is the one read NOW, under the lock.
+        let lock = self.layout.lock_clients()?;
+        let mut enrolled = read_passkeys(&self.layout)?
+            .remove(&verified.enrolled.credential_id)
+            .filter(|now| now.public_key == verified.enrolled.public_key)
+            .ok_or("this passkey is not enrolled on this server")?;
+        if verified.count > enrolled.sign_count {
+            enrolled.sign_count = verified.count;
+            write_passkey(&self.layout, &lock, &enrolled)?;
+        }
+        drop(lock);
+        // ★ The one session the cookie names, and no other of this passkey's.
+        let ended = {
+            let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+            let ended = state.sessions.remove(&key);
+            state.dirty |= ended.is_some();
+            self.save(&mut state);
+            ended
+        };
+        if ended.is_none() {
+            return Err(
+                "this session ended while the passkey was answering; sign in again".to_string(),
+            );
+        }
+        self.audit(
+            LOGOUT_CLASS,
+            AuditLine {
+                op: "session",
+                door: "http",
+                outcome: "ok",
+                credential: Some(&enrolled.credential_id),
+                authenticated: true,
+                sessions: 1,
+                why: Some("reasserted"),
+            },
+        );
+        self.open_session(enrolled, now)
     }
 
     /// End a session. Unknown tokens are not an error: signing out twice is still signed out.

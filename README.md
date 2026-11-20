@@ -280,13 +280,23 @@ the passkey was created with until it is re-created.
   `gonk:PasskeySessionsEnded` line to `gonk/passkeys.log`, and the server ends the sessions at
   its next signed-in request or sign-in, with no restart. A signed-in page can do the same for
   its own passkey with `POST /auth/logout-all` and its session token as the body.
+- **Re-open write with the same passkey** (ledger #3816). Once a session's 12 h of write have
+  lapsed, `POST /auth/reassert-options` answers a challenge of its own and the credential id of
+  the session's passkey (for `allowCredentials`), and `POST /auth/reassert` with a fresh
+  assertion by THAT passkey (user verification required, signature counter checked as a sign-in
+  checks it) ends the one session the cookie names, opens a new one with fresh bounds and sets
+  its cookie. The passkey's other sessions, in other browsers, stay open. A sign-in's or an
+  add-grant's challenge is refused there, and the reverse. The page names no token: the door
+  names the cookie's session to the passkey resource with a door marker
+  (`urn:iki:gonk:door:session:<SHA-256 of the token>`), on writes to `/auth/` only.
 - **Sign-ins and sign-outs are logged** (ledger #1824), in the log segment beside the door
   lines (ledger #383), whatever `gonk.log.access` says: `urn:iki:gonk:class:Login` or
   `…:Logout`, the passkey resource, then `door`, `outcome`, `principal` (the passkey IRI,
   `anon` for a refused sign-in), `credential=https://ikigai-rs.dev/ns/log#passkey`, `passkey` (the credential id),
   `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`, `unenrolled`,
-  `expired`, `idle`, `widened`). Adding an invite's grant while signed in is a Login entry for the
-  resource `add-grant` (ledger #3388). A session token is never written. `gonk/passkeys.log` is not a second
+  `expired`, `idle`, `widened`, `reasserted`). Adding an invite's grant while signed in is a Login
+  entry for the resource `add-grant` (ledger #3388), and re-opening write one for `reassert`
+  (ledger #3816). A session token is never written. `gonk/passkeys.log` is not a second
   copy: it is the channel `passkey revoke` and `passkey logout --all` use to tell a running
   server, and `gonk/sessions.json` is the live session table, state rather than history.
 - **A ledger page your grant does not reach is a `403`, in one of two sentences** (ledger

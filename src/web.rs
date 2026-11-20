@@ -4820,13 +4820,15 @@ fn require_graph(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
 
 // ----------------------------------------------------------------------------- passkeys
 
-const PASSKEY_OPS: [&str; 9] = [
+const PASSKEY_OPS: [&str; 11] = [
     "register-options",
     "register",
     "login-options",
     "login",
     "add-grant-options",
     "add-grant",
+    "reassert-options",
+    "reassert",
     "logout",
     "logout-all",
     "session",
@@ -4885,6 +4887,11 @@ impl Endpoint for PasskeyDoor {
         // The passkey the door's capability names, from the HttpOnly session cookie.
         let principal = inv.capability.principal();
         let credential = principal.and_then(|p| p.strip_prefix(identity::PASSKEY_IRI_PREFIX));
+        // The one session that cookie holds, on a write (ledger #3816).
+        let marked = inv
+            .capability
+            .scopes()
+            .and_then(|scopes| identity::marked_session(scopes.iter().map(String::as_str)));
         match op.as_str() {
             "register-options" | "login-options" => {
                 let purpose = if op == "login-options" {
@@ -4998,6 +5005,48 @@ impl Endpoint for PasskeyDoor {
                     &identity::session_cookie(&token, seconds),
                 )
             }
+            // Re-open the cookie's own session with a fresh assertion by its own passkey
+            // (ledger #3816). The page names no token: the door names the session the cookie
+            // holds with a marker (`identity::session_marker`); a `session` token in the body
+            // (the socket, a script) names it instead.
+            "reassert-options" => {
+                let asked = match content.trim() {
+                    "" => serde_json::Value::Null,
+                    body => serde_json::from_str::<serde_json::Value>(body)
+                        .map_err(|e| refused(format!("not JSON: {e}")))?,
+                };
+                let key = match asked.get("session").and_then(serde_json::Value::as_str) {
+                    Some(token) => identity::session_key(token.trim()),
+                    None => marked.map(str::to_string).unwrap_or_default(),
+                };
+                let (challenge, credential) = self
+                    .passkeys
+                    .reassert_options(&key, now)
+                    .map_err(Error::Denied)?;
+                Ok(json_repr(json!({
+                    "challenge": challenge,
+                    "rpId": identity::RP_ID,
+                    "credential": credential,
+                })))
+            }
+            "reassert" => {
+                let (token, who) = self
+                    .passkeys
+                    .reassert_as(content.as_bytes(), marked, now)
+                    .map_err(Error::Denied)?;
+                let seconds = who.expires.saturating_sub(now);
+                with_cookie(
+                    json_repr(json!({
+                        "session": token,
+                        "seconds": seconds,
+                        "writeSeconds": who.write_seconds(now),
+                        "label": who.enrolled.label,
+                        "grant": who.enrolled.grant_names(),
+                        "grants": who.enrolled.grants,
+                    })),
+                    &identity::session_cookie(&token, seconds),
+                )
+            }
             // ★ A page cannot read its HttpOnly cookie (ledger #1591), so it names no token:
             // the door's principal, derived from that cookie, says whose sessions end, and
             // every one of them does. A token in the body (the socket, a script) still ends
@@ -5064,7 +5113,9 @@ impl Endpoint for PasskeyDoor {
                  whose capability is the union of its passkey's grants in gonk/grants.json; \
                  `add-grant-options` and `add-grant` redeem an invite while signed in by adding \
                  its grant to that passkey, against a fresh assertion by it, and re-open the \
-                 session; `session`, `logout` and \
+                 session; `reassert-options` and `reassert` replace the caller's own session \
+                 with a fresh one, against a fresh assertion by its own passkey, leaving the \
+                 passkey's other sessions open; `session`, `logout` and \
                  `logout-all` (every session of that token's passkey) take the session token as \
                  the body. `session` answers `seconds` until the session ends, `writeSeconds` \
                  until its write lapses (12 h after the sign-in at most; past it only its read \
