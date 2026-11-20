@@ -34,6 +34,8 @@
 
 #[path = "support/body_conformance.rs"]
 mod body_conformance;
+#[allow(dead_code)]
+mod common;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -433,6 +435,33 @@ const UI_IDS: [&str; 8] = [
     "ui-theme-chooser",
 ];
 
+/// A live passkey session's token in the config home at `config`: a software authenticator
+/// enrolled on a read grant and signed in, through the same `Passkeys` steps the `/auth/*`
+/// door takes. `sessions.json` keeps it, so the door opened after this restores it.
+fn live_session(config: &std::path::Path) -> String {
+    use ikigai_gonk::identity::{self, Passkeys, Purpose};
+    let layout = ikigai_gonk::quic::Layout::in_config_home(config);
+    let passkeys = Passkeys::new(layout.clone(), 1060);
+    let now = identity::now_seconds();
+    let scopes =
+        ikigai_gonk::grants::grants_for("default", ikigai_gonk::grants::Authority::Read).unwrap();
+    let invite = identity::invite(&layout, "conformance", &scopes, false, 30, now).unwrap();
+    let authenticator = common::Authenticator::new();
+    let origin = passkeys.origin().to_string();
+    let c = passkeys.challenge(Purpose::Register, now).unwrap();
+    passkeys
+        .register(
+            authenticator.register_body(&c, &invite, &origin).as_bytes(),
+            now,
+        )
+        .unwrap();
+    let c = passkeys.challenge(Purpose::Login, now).unwrap();
+    let (token, _) = passkeys
+        .login(authenticator.login_body(&c, &origin, 1).as_bytes(), now)
+        .unwrap();
+    token
+}
+
 fn http_door(hub: Arc<Kernel>, config: &std::path::Path) -> Kernel {
     http_door_with_space(hub, config).0
 }
@@ -495,6 +524,7 @@ fn the_http_door_adds_exactly_its_pages() {
 #[test]
 fn the_http_door_conforms() {
     let config = tempfile::tempdir().unwrap();
+    let session = live_session(config.path());
     let (door, space) = http_door_with_space(hub(), config.path());
     let (door, suite) = body_conformance::wire(door, space, fixtures());
     let a = seed(&door);
@@ -742,6 +772,17 @@ fn the_http_door_conforms() {
             Fixture::new("gonk-page-group", Verb::Source)
                 .binding("ledger", "default")
                 .binding("label", ikigai_gonk::display::group_key("test:group")),
+        )
+        // ★ `session` is the one passkey step that is also a Source (ledger #3841): the shell's
+        // GET /auth/session. The default `op` is a Sink step, so the walk is given this one.
+        // With no session cookie it answers `{}`, the shell's "nothing changes". A binding
+        // names the ENTRY for every verb, so the Sink walk is at `session` too: it is given a
+        // live session's token, minted before the door opened, and answers that session.
+        .fixture(Fixture::new("gonk-passkey", Verb::Source).binding("op", "session"))
+        .fixture(
+            Fixture::new("gonk-passkey", Verb::Sink)
+                .binding("op", "session")
+                .arg("content", &session),
         )
         .opt_out_check(
             "gonk-passkey",

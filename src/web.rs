@@ -4872,13 +4872,43 @@ fn json_repr(value: Value) -> Representation {
 #[async_trait]
 impl Endpoint for PasskeyDoor {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        if inv.request.verb != Verb::Sink {
-            return Err(Error::Endpoint(
-                "the passkey resources answer Sink only".to_string(),
-            ));
-        }
         let op = binding(inv, "op")?;
         let now = identity::now_seconds();
+        // ★ `session` is also a READ (ledger #3841): ikigai-ui's shell reads the page family's
+        // session answer with a GET (`<meta name="ikigai-ui-session">`) to gray out the
+        // `data-ui-write` controls once write lapses. It answers the request's OWN session
+        // only, named by the capability's principal (the HttpOnly cookie through
+        // `doors::http_cap`), never a token, and uncacheable, so no answer outlives the
+        // request or reaches another caller. No session (an anonymous or socket-owner
+        // caller) answers an empty object: it has no numeric `writeSeconds`, which the shell
+        // reads as "nothing changes". Not a 404, which every browser logs as a console error
+        // on every page an anonymous reader opens.
+        if inv.request.verb == Verb::Source && op == "session" {
+            if inv
+                .inline_str("content")
+                .is_ok_and(|c| !c.trim().is_empty())
+            {
+                return Err(Error::InvalidArgument {
+                    name: "content".to_string(),
+                    detail: "a GET of `session` answers the request's own session; \
+                             POST a token to ask about another"
+                        .to_string(),
+                });
+            }
+            return match self
+                .passkeys
+                .signed_in(SignedIn::Principal(inv.capability.principal()), now)
+            {
+                Some(who) => Ok(json_repr(session_answer(&who, now))),
+                None => Ok(json_repr(json!({}))),
+            };
+        }
+        if inv.request.verb != Verb::Sink {
+            return Err(Error::Endpoint(
+                "the passkey resources answer Sink only, except `session`, which is also a Source"
+                    .to_string(),
+            ));
+        }
         let refused = |detail: String| Error::InvalidArgument {
             name: "content".to_string(),
             detail,
@@ -5110,12 +5140,16 @@ impl Endpoint for PasskeyDoor {
                  `logout-all` (every session of that token's passkey) take the session token as \
                  the body. `session` answers `seconds` until the session ends, `writeSeconds` \
                  until its write lapses (12 h after the sign-in at most; past it only its read \
-                 scopes are left) and `restore`, the scopes a fresh sign-in would give back. Public by design — this is how a caller with no \
+                 scopes are left) and `restore`, the scopes a fresh sign-in would give back; \
+                 a Source of `session` (GET /auth/session) answers the same for the request's \
+                 own session, and is what ikigai-ui's shell reads to gray out write controls \
+                 once write lapses. Public by design — this is how a caller with no \
                  grant gets one — so it declares no capability. The HTTP door refuses a foreign \
                  Host or a cross-site POST before it reaches this resource (crate::admit), \
                  which is what keeps another site from filling the challenge table.",
             )
             .verb(Verb::Sink)
+            .verb(Verb::Source)
             .verb(Verb::Meta)
             .input(
                 arg("op", "Which step.")

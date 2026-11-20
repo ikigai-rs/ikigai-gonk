@@ -782,6 +782,9 @@ pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static s
     if !host_is_ours(request.header("host"), door.bind) {
         return Some(crate::admit::REFUSED_FOREIGN_HOST);
     }
+    if carries_token_in_url(request) {
+        return Some(crate::admit::REFUSED_TOKEN_IN_URL);
+    }
     let read = matches!(request.method.as_str(), "GET" | "HEAD");
     if !read && !same_origin(request, door.bind) {
         return Some(crate::admit::REFUSED_CROSS_SITE);
@@ -790,6 +793,31 @@ pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static s
         return Some(crate::admit::REFUSED_FOREIGN_LOAD);
     }
     None
+}
+
+/// Whether `request` is a passkey request (`/auth/…`) naming `content` in its query string:
+/// refused as [`crate::admit::REFUSED_TOKEN_IN_URL`] whatever its method (ledger #3841).
+///
+/// ```
+/// use ikigai_gonk::doors::carries_token_in_url;
+/// use ikigai_web::HttpRequest;
+/// let at = |method: &str, path: &str, query: &[(&str, &str)]| HttpRequest {
+///     method: method.to_string(),
+///     headers: Vec::new(),
+///     path: path.to_string(),
+///     raw_target: path.to_string(),
+///     query: query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+///     body: Vec::new(),
+///     peer: None,
+/// };
+/// assert!(carries_token_in_url(&at("GET", "/auth/session", &[("content", "tok")])));
+/// assert!(carries_token_in_url(&at("POST", "/auth/logout", &[("content", "")])));
+/// assert!(!carries_token_in_url(&at("GET", "/auth/session", &[])));
+/// assert!(!carries_token_in_url(&at("GET", "/l/default", &[("content", "x")])));
+/// ```
+pub fn carries_token_in_url(request: &HttpRequest) -> bool {
+    (request.path == "/auth" || request.path.starts_with("/auth/"))
+        && request.query.iter().any(|(k, _)| k == "content")
 }
 
 /// Which page a request came from, as the browser labels it — the second half of ledger
@@ -1024,7 +1052,8 @@ pub fn edge_subject(path: &str) -> String {
 /// the authority for that name and declines. A DNS-rebinding page learns nothing more from
 /// either — the refusal comes before `OPTIONS`, `?description` and dispatch alike — but a
 /// person reading a log or a status line can tell "wrong name" from "not allowed" without
-/// opening the body. Everything else this door refuses is a `403`: the name was right and the
+/// opening the body. A passkey request with a token-shaped `content` in its URL is a `400`: the
+/// request is malformed whoever sends it (ledger #3841). Everything else this door refuses is a `403`: the name was right and the
 /// request was not allowed (a cross-site write, a read another page loads).
 ///
 /// ```
@@ -1032,10 +1061,13 @@ pub fn edge_subject(path: &str) -> String {
 /// assert_eq!(refusal_status(admit::REFUSED_FOREIGN_HOST), 421);
 /// assert_eq!(refusal_status(admit::REFUSED_CROSS_SITE), 403);
 /// assert_eq!(refusal_status(admit::REFUSED_FOREIGN_LOAD), 403);
+/// assert_eq!(refusal_status(admit::REFUSED_TOKEN_IN_URL), 400);
 /// ```
 pub fn refusal_status(marker: &str) -> u16 {
     if marker == crate::admit::REFUSED_FOREIGN_HOST {
         421
+    } else if marker == crate::admit::REFUSED_TOKEN_IN_URL {
+        400
     } else {
         403
     }
@@ -1659,6 +1691,7 @@ fn browse_routes() -> Vec<Route> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
 
     use ikigai_core::{Space, SpaceKind};
 
@@ -1680,5 +1713,58 @@ mod tests {
             UI_SERVED.into_iter().collect::<BTreeSet<_>>(),
         );
         assert_eq!(names.len(), UI_SERVED.len(), "one door per name: {names:?}");
+    }
+
+    /// ★ A GET of `/auth/session?content=<token>` is refused at the edge, and the access line
+    /// the refusal writes carries neither the token nor the `content` name (ledger #3841).
+    #[test]
+    fn a_token_in_an_auth_url_is_refused_and_never_logged() {
+        let token = "s3cr3t-session-token-0123456789";
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let into = Arc::clone(&lines);
+        let log = crate::access::AccessLog::to(
+            crate::access::Door::Http,
+            Arc::new(move |l: &str| into.lock().unwrap().push(l.to_string())),
+        );
+        let bind: std::net::SocketAddr = "127.0.0.1:1062".parse().unwrap();
+        let door = super::HttpDoor {
+            anonymous: Vec::new(),
+            public: Vec::new(),
+            bind,
+            passkeys: None,
+            anonymous_sparql_budget_ms: 1_000,
+        };
+        let admit = super::http_admit_with(door, Some(log));
+        for method in ["GET", "HEAD", "POST", "DELETE"] {
+            let request = ikigai_web::HttpRequest {
+                method: method.to_string(),
+                headers: vec![
+                    ("host".to_string(), "127.0.0.1:1062".to_string()),
+                    ("sec-fetch-site".to_string(), "same-origin".to_string()),
+                    ("origin".to_string(), "http://127.0.0.1:1062".to_string()),
+                ],
+                path: "/auth/session".to_string(),
+                raw_target: format!("/auth/session?as=json&content={token}"),
+                query: vec![
+                    ("as".to_string(), "json".to_string()),
+                    ("content".to_string(), token.to_string()),
+                ],
+                body: Vec::new(),
+                peer: None,
+            };
+            let refused = admit(&request).expect("refused at the edge");
+            assert_eq!(refused.status, 400, "{method}");
+            assert!(!refused.reason.contains(token), "{method}");
+        }
+        let lines = lines.lock().unwrap();
+        let access: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains(" log:Access "))
+            .collect();
+        assert_eq!(access.len(), 4, "{lines:?}");
+        for line in lines.iter() {
+            assert!(!line.contains(token), "a token in the log: {line}");
+            assert!(!line.contains("content"), "{line}");
+        }
     }
 }

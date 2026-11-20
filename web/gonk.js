@@ -127,6 +127,24 @@
     e.detail.path = "/k?c=" + encodeURIComponent(path.slice(3));
   });
 
+  // ------------------------------------------------- write that lapses (ledger #3841)
+  //
+  // ikigai-ui's shell disables every control inside a [data-ui-write] mark once the session's
+  // write lapses. gonk's own write forms carry the mark in web/gonk.xsl; markup a face swaps in
+  // (ikigai-browse's annotation and revise forms, hx-post at the /k/ adapter) is not gonk's to
+  // write, so a write in it is marked here as it arrives. htmx fires htmx:afterSwap before the
+  // htmx:load the shell marks on, so the shell sees these marks in the same swap.
+  const WRITES =
+    "[hx-post], [hx-put], [hx-patch], [hx-delete], [data-hx-post], [data-hx-put], " +
+    "[data-hx-patch], [data-hx-delete], form[method='post' i]";
+  function markWrites(root) {
+    if (!root || !root.querySelectorAll) return;
+    if (root.matches && root.matches(WRITES)) root.setAttribute("data-ui-write", "");
+    root.querySelectorAll(WRITES).forEach((el) => el.setAttribute("data-ui-write", ""));
+  }
+  document.addEventListener("htmx:afterSwap", (e) => markWrites(e.target));
+  markWrites(document);
+
   // ------------------------------------------------- the queue's news, and who is mid-decision
   //
   // ★ THE FINDINGS LIST HAS NO CLOCK (ledger #469). The header badge already polls the
