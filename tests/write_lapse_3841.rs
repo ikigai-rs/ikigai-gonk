@@ -332,7 +332,6 @@ fn a_lapsed_session_reads_on_and_its_write_forms_are_marked() {
         "the item's write forms are marked: {before:?}"
     );
     assert_eq!(unmarked_writes(&before.body), Vec::<String>::new());
-    drop(server);
 
     backdate(&layout, 13 * 3_600);
     let server = Server::start(hub, &layout);
