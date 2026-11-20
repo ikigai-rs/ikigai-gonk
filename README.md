@@ -198,7 +198,12 @@ What you will see:
    scope ends there. Both bounds count from the sign-in and are never moved by use: an open
    page polls, so a sliding bound would keep write alive in any open tab, or for a stolen
    cookie that polls. `/auth/session` answers `writeSeconds`, the write left (0 once it has
-   lapsed), and `restore`, the scopes a fresh sign-in would give back. The cap never goes
+   lapsed), and `restore`, the scopes a fresh sign-in would give back. A fresh assertion by
+   the SAME passkey reopens write without signing out (`/auth/reassert-options`, then
+   `/auth/reassert`, ledger #3816): it replaces only the session the body names (`session`,
+   or the `sessionId` the sign-in answered; with neither, the passkey's only session) with
+   one of fresh bounds, leaves the passkey's other sessions as they are, and logs
+   `op=reassert`. The cap never goes
    away: a stolen cookie still reads everything its grant covers. A value outside 1 to 720 is
    refused when gonk starts, with a sentence naming the setting, the value and the range.
 
