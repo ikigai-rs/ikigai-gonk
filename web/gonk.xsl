@@ -79,6 +79,11 @@
             <xsl:if test="@layout-stylesheet">
               <link rel="stylesheet"><xsl:attribute name="href"><xsl:value-of select="@layout-stylesheet"/></xsl:attribute></link>
             </xsl:if>
+            <!-- Ledger #3841: the session answer ikigai-ui's shell reads (Pages::session's meta).
+                 Once its writeSeconds is 0 the shell disables every control inside a
+                 [data-ui-write] mark below, with a note; a caller with no passkey session gets a
+                 404 there, and nothing changes. -->
+            <meta name="ikigai-ui-session" content="/auth/session"/>
             <!-- Without defer, so the theme is on <html> before the first paint (D14). -->
             <script src="/static/shell.js"></script>
             <script src="/static/htmx.min.js" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" defer="defer"></script>
@@ -146,7 +151,7 @@
                    (ledger #3388), confirmed by that passkey; creating a new one is the other
                    choice. web/gonk.js shows this, and the Label field only for a new passkey. -->
               <p id="enrol-signed-in" hidden="hidden">You are signed in. Adding the invite's grant to the passkey you are signed in with keeps its other grants and asks that passkey to confirm (its fingerprint, face or PIN), then signs you in again with the wider grant. No other passkey changes.</p>
-              <form id="enrol-form" class="row">
+              <form id="enrol-form" class="row" data-ui-write="">
                 <fieldset id="enrol-choice" hidden="hidden">
                   <legend>What should this invite do?</legend>
                   <label><input type="radio" name="enrol-mode" id="enrol-add" value="add" checked="checked"/> Add its grant to the passkey you are signed in with</label>
@@ -895,7 +900,7 @@
   <!-- The say form: a message or a question, and the entry it answers when one was chosen.
        It posts with htmx and is replaced by the answer: a fresh form, and the flash. -->
   <xsl:template match="view:say">
-    <form id="say" class="say panel" method="post" hx-target="this" hx-swap="outerHTML" aria-labelledby="say-title">
+    <form data-ui-write="" id="say" class="say panel" method="post" hx-target="this" hx-swap="outerHTML" aria-labelledby="say-title">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
       <h2 id="say-title">Post to <xsl:value-of select="@label"/></h2>
@@ -939,7 +944,7 @@
   </xsl:template>
 
   <xsl:template match="view:ask" mode="form">
-      <form class="say" method="post" hx-target="this" hx-swap="outerHTML">
+      <form data-ui-write="" class="say" method="post" hx-target="this" hx-swap="outerHTML">
         <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
         <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
         <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@feed"/></xsl:attribute></input>
@@ -991,7 +996,7 @@
   <!-- Join or leave a host's public feeds (ledger #3291): a plain POST, one sentence saying what
        it does, the button's name its visible words. -->
   <xsl:template match="view:feeds-join">
-    <form class="feed-toggle" method="post">
+    <form data-ui-write="" class="feed-toggle" method="post">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:if test="@note != ''"><p class="note"><xsl:value-of select="@note"/></p></xsl:if>
       <button type="submit"><xsl:choose><xsl:when test="@state = 'joined'">Leave the public feeds</xsl:when><xsl:otherwise>Join the public feeds</xsl:otherwise></xsl:choose></button>
@@ -1019,14 +1024,14 @@
           <xsl:otherwise>Nothing has been published yet.</xsl:otherwise>
         </xsl:choose>
       </p>
-      <form class="feed-toggle" method="post">
+      <form data-ui-write="" class="feed-toggle" method="post">
         <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
         <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
         <input type="hidden" name="action"><xsl:attribute name="value"><xsl:choose><xsl:when test="@subscribed = 'true'">unsubscribe</xsl:when><xsl:otherwise>subscribe</xsl:otherwise></xsl:choose></xsl:attribute></input>
         <button type="submit"><xsl:choose><xsl:when test="@subscribed = 'true'">Unsubscribe<span class="sr-only"> from <xsl:value-of select="@label"/></span></xsl:when><xsl:otherwise>Subscribe<span class="sr-only"> to <xsl:value-of select="@label"/></span></xsl:otherwise></xsl:choose></button>
       </form>
       <xsl:if test="view:concept">
-        <form class="feed-filter" method="post">
+        <form data-ui-write="" class="feed-filter" method="post">
           <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
           <input type="hidden" name="feed"><xsl:attribute name="value"><xsl:value-of select="@name"/></xsl:attribute></input>
           <input type="hidden" name="action" value="filter"/>
@@ -1147,7 +1152,7 @@
        Enter in a field presses the first button, Save. -->
   <xsl:template match="view:view-rule" mode="edit">
     <xsl:if test="@editable = 'true'">
-    <form class="panel view-form" method="post">
+    <form data-ui-write="" class="panel view-form" method="post">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <fieldset>
         <legend><xsl:attribute name="id">view-<xsl:value-of select="@index"/></xsl:attribute><xsl:value-of select="@name"/></legend>
@@ -1181,7 +1186,7 @@
   </xsl:template>
 
   <xsl:template match="view:views-add">
-    <form class="panel view-form" method="post" aria-labelledby="views-add-title">
+    <form data-ui-write="" class="panel view-form" method="post" aria-labelledby="views-add-title">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <h2 id="views-add-title">Add a view</h2>
       <input type="hidden" name="op" value="add"/>
@@ -1226,7 +1231,7 @@
   <xsl:template match="view:save-filter">
     <details class="panel save-filter">
       <summary>Save this filter</summary>
-      <form method="post" aria-label="Save this filter">
+      <form data-ui-write="" method="post" aria-label="Save this filter">
         <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
         <input type="hidden" name="op" value="save-filter"/>
         <input type="hidden" name="base"><xsl:attribute name="value"><xsl:value-of select="@base"/></xsl:attribute></input>
@@ -1852,7 +1857,7 @@
         <xsl:value-of select="@problem"/>
       </p>
     </xsl:if>
-    <form class="decide revise" method="post" hx-target="#queue" hx-swap="outerHTML">
+    <form data-ui-write="" class="decide revise" method="post" hx-target="#queue" hx-swap="outerHTML">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:if test="@refused = 'true'"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
@@ -1891,7 +1896,7 @@
       </div>
     </form>
     <xsl:if test="view:withdraw-option">
-      <form class="decide withdraw" method="post" hx-target="#queue" hx-swap="outerHTML">
+      <form data-ui-write="" class="decide withdraw" method="post" hx-target="#queue" hx-swap="outerHTML">
         <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
         <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
         <xsl:call-template name="revise-hidden"/>
@@ -1959,7 +1964,7 @@
        `data-refused` marks a form drawn back that way: it is a decision in progress, which
        web/gonk.js will not let a news refresh replace. -->
   <xsl:template match="view:batch">
-    <form class="batch" method="post" hx-target="#queue" hx-swap="outerHTML">
+    <form data-ui-write="" class="batch" method="post" hx-target="#queue" hx-swap="outerHTML">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:attribute name="data-key"><xsl:value-of select="@key"/></xsl:attribute>
@@ -2420,7 +2425,7 @@
         <xsl:value-of select="@problem"/>
       </p>
     </xsl:if>
-    <form class="decide" method="post" hx-target="#queue" hx-swap="outerHTML">
+    <form data-ui-write="" class="decide" method="post" hx-target="#queue" hx-swap="outerHTML">
       <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
       <xsl:if test="@refused = 'true'"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
@@ -2515,7 +2520,7 @@
           <xsl:value-of select="@problem"/>
         </p>
       </xsl:if>
-      <form class="decide reproduce" method="post" hx-target="#queue" hx-swap="outerHTML">
+      <form data-ui-write="" class="decide reproduce" method="post" hx-target="#queue" hx-swap="outerHTML">
         <xsl:attribute name="action"><xsl:value-of select="@action"/></xsl:attribute>
         <xsl:attribute name="hx-post"><xsl:value-of select="@action"/></xsl:attribute>
         <xsl:if test="@problem"><xsl:attribute name="data-refused">true</xsl:attribute></xsl:if>
@@ -2639,7 +2644,7 @@
       <xsl:apply-templates select="view:slot[@name = 'chart']"/>
       <xsl:apply-templates select="view:flash"/>
       <xsl:if test="@can-write = 'true'">
-        <form class="panel file" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
+        <form data-ui-write="" class="panel file" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
           <input type="hidden" name="_action" value="append"/>
           <input type="hidden" name="_then" value="items"/>
           <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="@ledger"/></xsl:attribute></input>
@@ -2859,7 +2864,7 @@
       </span>
       <xsl:if test="view:canWrite = 'true' and not(view:linked)">
         <xsl:if test="view:status = 'open'">
-          <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
+          <form data-ui-write="" class="inline" method="post" action="/act" hx-post="/act" hx-target="#ledger" hx-swap="outerHTML">
             <input type="hidden" name="_action" value="close"/>
             <input type="hidden" name="_then" value="items"/>
             <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
@@ -2882,7 +2887,7 @@
         </xsl:if>
       </xsl:if>
       <xsl:if test="view:canUnlink = 'true'">
-        <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+        <form data-ui-write="" class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
           <input type="hidden" name="_action" value="link"/>
           <input type="hidden" name="_verb" value="Delete"/>
           <input type="hidden" name="_then" value="card"/>
@@ -3153,7 +3158,7 @@
         <xsl:otherwise><code class="iri"><xsl:value-of select="view:text"/></code></xsl:otherwise>
       </xsl:choose>
       <xsl:if test="view:canUnlink = 'true'">
-        <form class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+        <form data-ui-write="" class="inline" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
           <input type="hidden" name="_action" value="link"/>
           <input type="hidden" name="_verb" value="Delete"/>
           <input type="hidden" name="_then" value="card"/>
@@ -3195,7 +3200,7 @@
       <section class="panel actions" aria-labelledby="act-title">
         <h2 id="act-title">Work on it</h2>
 
-        <form class="stack" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+        <form data-ui-write="" class="stack" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
           <xsl:call-template name="hidden"><xsl:with-param name="action" select="'comment'"/></xsl:call-template>
           <label for="comment-content">Comment</label>
           <textarea id="comment-content" name="content" rows="3" required="required"></textarea>
@@ -3205,7 +3210,7 @@
         <div class="row wrap">
           <xsl:choose>
             <xsl:when test="view:status = 'open'">
-              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+              <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'close'"/></xsl:call-template>
                 <!-- The words are urn:iki:ledger:close's own `reason` set, in contract order
                      (ledger #505, src/web.rs::enrich_close_reasons): this file spells none. -->
@@ -3219,7 +3224,7 @@
               </form>
             </xsl:when>
             <xsl:otherwise>
-              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+              <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'reopen'"/></xsl:call-template>
                 <button type="submit">Reopen</button>
               </form>
@@ -3228,13 +3233,13 @@
 
           <xsl:choose>
             <xsl:when test="ledger:claimedBy">
-              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+              <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'claim'"/><xsl:with-param name="verb" select="'Delete'"/></xsl:call-template>
                 <button type="submit" class="quiet">Release claim</button>
               </form>
             </xsl:when>
             <xsl:otherwise>
-              <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+              <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'claim'"/></xsl:call-template>
                 <label for="claim-holder">Claim for</label>
                 <input id="claim-holder" type="text" name="content" required="required" autocomplete="off"/>
@@ -3246,7 +3251,7 @@
             </xsl:otherwise>
           </xsl:choose>
 
-          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
             <xsl:choose>
               <xsl:when test="view:deferred = 'true'">
                 <xsl:call-template name="hidden"><xsl:with-param name="action" select="'defer'"/><xsl:with-param name="verb" select="'Delete'"/></xsl:call-template>
@@ -3262,7 +3267,7 @@
 
         <details>
           <summary>Edit title, body and priority</summary>
-          <form class="stack" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <form data-ui-write="" class="stack" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
             <input type="hidden" name="_action" value="item"/>
             <input type="hidden" name="_then" value="card"/>
             <input type="hidden" name="_ledger"><xsl:attribute name="value"><xsl:value-of select="view:ledger"/></xsl:attribute></input>
@@ -3283,19 +3288,19 @@
         </details>
 
         <div class="row wrap">
-          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
             <xsl:call-template name="hidden"><xsl:with-param name="action" select="'label'"/></xsl:call-template>
             <label for="label-add">Label</label>
             <input id="label-add" type="text" name="content" required="required" autocomplete="off"/>
             <button type="submit" class="quiet">Add</button>
           </form>
-          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
             <xsl:call-template name="hidden"><xsl:with-param name="action" select="'label'"/><xsl:with-param name="verb" select="'Delete'"/></xsl:call-template>
             <label for="label-remove">Remove label</label>
             <input id="label-remove" type="text" name="content" required="required" autocomplete="off"/>
             <button type="submit" class="quiet">Remove</button>
           </form>
-          <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+          <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
             <xsl:call-template name="hidden"><xsl:with-param name="action" select="'link'"/></xsl:call-template>
             <label for="link-type">Link</label>
             <select id="link-type" name="type">
@@ -3314,7 +3319,7 @@
       <section class="panel danger" aria-labelledby="delete-title">
         <h2 id="delete-title">Delete</h2>
         <p>Moves the item, its comments and the links pointing at it into this ledger's graveyard graph, and leaves a tombstone. Recoverable by hand; it leaves every listing now.</p>
-        <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+        <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
           <xsl:attribute name="hx-confirm">Delete <xsl:value-of select="view:short"/>? It can be recovered from the graveyard graph.</xsl:attribute>
           <input type="hidden" name="_action" value="item"/>
           <input type="hidden" name="_verb" value="Delete"/>
@@ -3332,7 +3337,7 @@
       <section class="panel danger purge" aria-labelledby="purge-title">
         <h2 id="purge-title">Purge</h2>
         <p>Destroys the content in both the live graph and the graveyard. Only a tombstone remains: the number, the time, the reason, the quad count and a hash of what was destroyed. This is not the same act as Delete and cannot be undone.</p>
-        <form class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
+        <form data-ui-write="" class="row" method="post" action="/act" hx-post="/act" hx-target="#item" hx-swap="outerHTML">
           <xsl:attribute name="hx-confirm">Purge <xsl:value-of select="view:short"/> permanently? This cannot be undone.</xsl:attribute>
           <input type="hidden" name="_action" value="purge"/>
           <input type="hidden" name="_verb" value="Delete"/>
