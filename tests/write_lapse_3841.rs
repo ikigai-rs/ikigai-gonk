@@ -358,14 +358,16 @@ fn a_lapsed_session_reads_on_and_its_write_forms_are_marked() {
 }
 
 /// A caller with no passkey session (the anonymous loopback reader, or the socket owner, who
-/// never comes through the HTTP door's sign-in) gets a 404 from the session answer, which the
-/// shell reads as "nothing changes"; a live writer's answer still has write left. A GET
+/// never comes through the HTTP door's sign-in) gets `{}` from the session answer: a 200, so
+/// the browser logs no error, with no numeric `writeSeconds`, which the shell reads as
+/// "nothing changes"; a live writer's answer still has write left. A GET
 /// cannot ask about another session by naming its token.
 #[test]
 fn no_session_and_a_live_writer_see_no_change() {
     let (_config, _layout, _hub, server, token) = signed_in_writer();
     let anonymous = server.session(None);
-    assert_eq!(anonymous.status, 404, "{anonymous:?}");
+    assert_eq!(anonymous.status, 200, "{anonymous:?}");
+    assert_eq!(anonymous.json(), serde_json::json!({}), "{anonymous:?}");
 
     let live = server.session(Some(&token));
     assert_eq!(live.status, 200, "{live:?}");

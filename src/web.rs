@@ -4878,7 +4878,9 @@ impl Endpoint for PasskeyDoor {
         // only, named by the capability's principal (the HttpOnly cookie through
         // `doors::http_cap`), never a token, and uncacheable, so no answer outlives the
         // request or reaches another caller. No session (an anonymous or socket-owner
-        // caller) is a 404, which the shell reads as "nothing changes".
+        // caller) answers an empty object: it has no numeric `writeSeconds`, which the shell
+        // reads as "nothing changes". Not a 404, which every browser logs as a console error
+        // on every page an anonymous reader opens.
         if inv.request.verb == Verb::Source && op == "session" {
             if inv
                 .inline_str("content")
@@ -4896,12 +4898,13 @@ impl Endpoint for PasskeyDoor {
                 .signed_in(SignedIn::Principal(inv.capability.principal()), now)
             {
                 Some(who) => Ok(json_repr(session_answer(&who, now))),
-                None => Err(Error::NotFound("no live session".to_string())),
+                None => Ok(json_repr(json!({}))),
             };
         }
         if inv.request.verb != Verb::Sink {
             return Err(Error::Endpoint(
-                "the passkey resources answer Sink only, but `session` also a Source".to_string(),
+                "the passkey resources answer Sink only, except `session`, which is also a Source"
+                    .to_string(),
             ));
         }
         let refused = |detail: String| Error::InvalidArgument {

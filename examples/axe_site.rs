@@ -945,6 +945,13 @@ fn main() {
     ));
     // A browser asks for one on every first load; the checker fails on a 404 in the console.
     bodies.push(("favicon.ico".to_string(), "image/x-icon", Vec::new()));
+    // Ledger #3841: every page names its session answer, and the shell reads it on load. The
+    // server's own anonymous answer (`{}`, "nothing changes") is exported, so CI's static
+    // server answers it as gonk does.
+    let (status, body) = get(addr, "/auth/session");
+    assert_eq!(status, 200, "/auth/session");
+    assert_eq!(body, b"{}", "the anonymous session answer");
+    bodies.push(("auth/session".to_string(), "application/json", body));
     let files: Vec<(&str, &str, &[u8])> = bodies
         .iter()
         .map(|(name, media, body)| (name.as_str(), *media, body.as_slice()))
