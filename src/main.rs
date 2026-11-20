@@ -94,7 +94,7 @@ fn main() {
                 &browse_scopes,
             );
             if print {
-                client_add_print(&name, &scopes, force, &flags);
+                grant_print("client add", &name, &scopes, force, &flags);
             } else {
                 client_add(
                     &name,
@@ -164,6 +164,44 @@ fn main() {
             minutes,
             &flags,
         ),
+        Command::GrantSet {
+            name,
+            ledgers,
+            browse_graph,
+            ledger_graphs,
+            across,
+            browse,
+            scripts,
+            nl_draft,
+            scopes: extra,
+            print,
+            force,
+            flags,
+        } => {
+            // The settings are read only when a role needs this server's roots and mount, as
+            // `client add` does, so a ledger-only grant needs no config.toml.
+            let browse_scopes = if browse.is_some() || nl_draft {
+                role_tokens(browse.as_ref(), nl_draft, &read_settings(&flags))
+            } else {
+                Vec::new()
+            };
+            let scopes = scopes_for(
+                &Subjects {
+                    ledgers: &ledgers,
+                    browse_graph,
+                    ledger_graphs: &ledger_graphs,
+                    across: &across,
+                    scripts: &scripts,
+                    scopes: &extra,
+                },
+                &browse_scopes,
+            );
+            if print {
+                grant_print("grant set", &name, &scopes, force, &flags);
+            } else {
+                grant_set(&name, &scopes, force, &flags);
+            }
+        }
         Command::Onboard(args) => onboard_command(&args),
         Command::Feeds { op, flags } => feeds_command(op, &flags),
         Command::RoborevFile(args) => {
@@ -2065,12 +2103,18 @@ fn client_add(
 /// would refuse it. A change to an existing grant is described, not refused, with or without
 /// `--force`: saying what it would do is the point. The identity is not looked at, so
 /// `--cert` and `--rotate` change nothing here.
-fn client_add_print(name: &str, scopes: &[String], force: bool, flags: &config::Flags) {
+///
+/// `grant set … --print` (ledger #3852) prints the same, under its own verb.
+fn grant_print(verb: &str, name: &str, scopes: &[String], force: bool, flags: &config::Flags) {
     let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
     let layout = quic::Layout::in_config_home(&homes.config);
-    println!("client add `{name}` --print: no bundle was minted and nothing was written");
+    println!("{verb} `{name}` --print: no bundle was minted and nothing was written");
     if scopes.is_empty() {
-        println!("  no scopes: these flags name no grant, so the client would not be enrolled");
+        if verb == "client add" {
+            println!("  no scopes: these flags name no grant, so the client would not be enrolled");
+        } else {
+            println!("  no scopes: these flags name no grant, so there is nothing to write");
+        }
         return;
     }
     // The same refusals the write makes before it mints anything, but never the rewrite
@@ -2108,6 +2152,47 @@ fn client_add_print(name: &str, scopes: &[String], force: bool, flags: &config::
             }
         );
     }
+}
+
+/// `ikigai-gonk grant set <name> …` (ledger #3852): write one grant's scopes into
+/// `grants.json` ([`ikigai_gonk::refresh::set_grant`]) and mint nothing else — no bundle, no
+/// enrollment, no invite.
+fn grant_set(name: &str, scopes: &[String], force: bool, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let set = ikigai_gonk::refresh::set_grant(&layout, name, scopes, force, now_ms)
+        .unwrap_or_else(|e| fail(&e));
+    let grants_json = layout.grants_json();
+    if !set.wrote {
+        println!(
+            "grant `{name}` in {} already holds exactly these {} scope(s): nothing was written",
+            grants_json.display(),
+            scopes.len()
+        );
+        return;
+    }
+    println!(
+        "grant `{name}` ({} scopes) {} in {}",
+        scopes.len(),
+        if set.change.existed {
+            "written"
+        } else {
+            "added"
+        },
+        grants_json.display()
+    );
+    print_change(name, &set.change);
+    if let Some(backup) = &set.backup {
+        println!("  backup       {}", backup.display());
+    }
+    println!(
+        "  no certificate, bundle, enrollment or invite was made; a running gonk holds the new \
+         list from the next request (HTTP) or connection (QUIC), with no restart"
+    );
 }
 
 /// `ikigai-gonk client list` — every bundle and every enrolled fingerprint, joined.

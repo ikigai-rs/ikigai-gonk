@@ -1235,8 +1235,10 @@ impl GrantChange {
         let Some(existing) = existing else {
             return GrantChange::default();
         };
+        // A grant stored as an object holds its list under `scopes` ([`parse_grants`]).
         let held: Vec<String> = existing
             .as_array()
+            .or_else(|| existing.get("scopes").and_then(Value::as_array))
             .map(|scopes| {
                 scopes
                     .iter()
@@ -1544,7 +1546,7 @@ pub(crate) fn pretty(value: &Value) -> Result<String, String> {
 }
 
 /// A bundle name is a directory name and a grant name: lowercase letters, digits, `-`, `_`.
-fn valid_name(name: &str) -> Result<(), String> {
+pub(crate) fn valid_name(name: &str) -> Result<(), String> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -1654,7 +1656,7 @@ fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)
 }
 
-fn private_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
     restrict(path, 0o700)
 }

@@ -254,6 +254,21 @@ usage:
                                    beside itself (grants.json.bak-<UTC stamp>-refresh) and
                                    writes it atomically. Effective at the next request (HTTP)
                                    or connection (QUIC), with no restart
+  ikigai-gonk grant set <name> [--ledger <ledger>=<read|audit|worker|write|delete|purge>]... [--worker <ledger>]...
+                     [--browse-graph <read|write>] [--ledger-graph <ledger>]... [--script <name>=<read|run|publish>]...
+                     [--alias <ledger>=<scheme>]... [--link-in <ledger>]... [--mirror-to <ledger>]...
+                     [--browse <read|derive> [--root <root>]...] [--nl draft] [--scope <urn:cap:…>]...
+                     [--force] [--print] [--config PATH]
+                                   write grant <name>'s scopes into grants.json and nothing
+                                   else: no certificate, bundle, enrollment or invite link;
+                                   clients.json is untouched. The flags resolve to scopes as
+                                   client add's and passkey invite's do. A new grant is written
+                                   without --force; an existing one is refused or replaced as
+                                   below. The write backs grants.json up beside itself
+                                   (grants.json.bak-<UTC stamp>-grant-set) and is atomic.
+                                   --print prints the scopes and, for an existing grant, what
+                                   it would remove and add, and writes nothing. Effective at
+                                   the next request (HTTP) or connection (QUIC), with no restart
   ikigai-gonk passkey list [--config PATH]
                                    every enrolled passkey: its label, grants, credential id
                                    and IRI, each grant's scopes as grants.json stores them,
@@ -670,6 +685,35 @@ pub enum Command {
         /// How long the invite is valid.
         minutes: u64,
         /// `--config` / `--port`, so the printed URL names the port the server serves on.
+        flags: Flags,
+    },
+    /// Write one grant's scopes into `grants.json` and nothing else: no certificate, bundle,
+    /// enrollment or invite (`grant set`, ledger #3852).
+    GrantSet {
+        /// The grant name, a key of `grants.json`.
+        name: String,
+        /// Ledgers and authorities the grant holds.
+        ledgers: Vec<(String, Authority)>,
+        /// `--browse-graph`: the browse graph's store tokens at this authority.
+        browse_graph: Option<Authority>,
+        /// `--ledger-graph`: RAW writes to each named ledger's graph.
+        ledger_graphs: Vec<String>,
+        /// `--alias`, `--link-in` and `--mirror-to`.
+        across: Vec<crate::grants::Across>,
+        /// `--browse <read|derive>` and its `--root`s.
+        browse: Option<BrowseGrant>,
+        /// `--script <name>=<read|run|publish>`.
+        scripts: Vec<(String, ScriptAuthority)>,
+        /// `--nl draft`.
+        nl_draft: bool,
+        /// `--scope <urn>` ([`scope_spec`]). Repeats are kept once.
+        scopes: Vec<String>,
+        /// `--print`: print the resolved scopes and, for an existing grant, what would be
+        /// removed and added; write nothing.
+        print: bool,
+        /// Replace an existing grant with different scopes, whole.
+        force: bool,
+        /// `--config`.
         flags: Flags,
     },
     /// Print the tokens for one ledger, or for the browse graph.
@@ -1254,6 +1298,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Command, St
             args.next();
             return parse_passkey(args);
         }
+        Some("grant") => {
+            args.next();
+            return parse_grant_set(args);
+        }
         Some("review") => {
             args.next();
             return parse_review(args);
@@ -1651,24 +1699,16 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         .next()
         .filter(|name| !name.starts_with('-'))
         .ok_or("client add: expected <name>")?;
-    let (mut cert, mut ledgers, mut browse_graph, mut force) = (None, Vec::new(), None, false);
-    let (mut role, mut roots, mut flags, mut rotate) = (None, Vec::new(), Flags::default(), false);
-    let (mut ledger_graphs, mut scripts, mut nl_draft) = (Vec::new(), Vec::new(), false);
-    let (mut across, mut scopes, mut print) = (Vec::new(), Vec::new(), false);
+    let (mut cert, mut grant, mut force, mut flags) =
+        (None, GrantFlags::default(), false, Flags::default());
+    let (mut rotate, mut print) = (false, false);
     while let Some(arg) = args.next() {
+        if grant.take(&name, &arg, &mut args)? {
+            continue;
+        }
         match arg.as_str() {
             "--cert" => cert = Some(PathBuf::from(value(&mut args, "--cert")?)),
-            "--scope" => {
-                let scope = scope_spec(&name, &value(&mut args, "--scope")?)?;
-                if !scopes.contains(&scope) {
-                    scopes.push(scope);
-                }
-            }
             "--print" => print = true,
-            "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
-            "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
-            "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
-            "--root" => roots.push(value(&mut args, "--root")?),
             flag @ ("--config" | "--config-home" | "--data-home") => {
                 home_flag(flag, &mut args, &mut flags)?
             }
@@ -1680,33 +1720,22 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
                 );
             }
             "--quic-bind" => flags.quic_bind = Some(value(&mut args, "--quic-bind")?),
-            "--ledger" => {
-                let spec = value(&mut args, "--ledger")?;
-                let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
-                    format!(
-                        "--ledger: expected <ledger>=<read|audit|worker|write|delete|purge>, got \
-                         `{spec}`"
-                    )
-                })?;
-                ledgers.push((ledger.to_string(), authority.parse()?));
-            }
-            "--browse-graph" => {
-                browse_graph = Some(browse_graph_authority(&value(
-                    &mut args,
-                    "--browse-graph",
-                )?)?);
-            }
-            // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
-            "--worker" => ledgers.push((value(&mut args, "--worker")?, Authority::Worker)),
-            "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
-            flag @ ("--alias" | "--link-in" | "--mirror-to") => {
-                across.push(across_spec(flag, &value(&mut args, flag)?)?);
-            }
             "--force" => force = true,
             "--rotate" => rotate = true,
             other => return Err(format!("client add: unknown argument `{other}`")),
         }
     }
+    let GrantFlags {
+        ledgers,
+        browse_graph,
+        ledger_graphs,
+        across,
+        role,
+        roots,
+        scripts,
+        nl_draft,
+        scopes,
+    } = grant;
     Ok(Command::ClientAdd {
         name,
         cert,
@@ -1721,6 +1750,126 @@ fn parse_client(mut args: impl Iterator<Item = String>) -> Result<Command, Strin
         print,
         force,
         rotate,
+        flags,
+    })
+}
+
+/// The grant flags `client add`, `passkey invite` and `grant set` share (ledger #3852): one
+/// parser for all three, so a flag means the same scope whichever verb writes it. What they
+/// resolve to is computed by one function too (`scopes_for` in the binary).
+#[derive(Debug, Default)]
+struct GrantFlags {
+    ledgers: Vec<(String, Authority)>,
+    browse_graph: Option<Authority>,
+    ledger_graphs: Vec<String>,
+    across: Vec<crate::grants::Across>,
+    role: Option<BrowseRole>,
+    roots: Vec<String>,
+    scripts: Vec<(String, ScriptAuthority)>,
+    nl_draft: bool,
+    scopes: Vec<String>,
+}
+
+impl GrantFlags {
+    /// Take `arg` (and its value) when it is a grant flag; `Ok(false)` leaves it to the verb.
+    fn take(
+        &mut self,
+        name: &str,
+        arg: &str,
+        args: &mut impl Iterator<Item = String>,
+    ) -> Result<bool, String> {
+        match arg {
+            "--scope" => {
+                let scope = scope_spec(name, &value(args, "--scope")?)?;
+                if !self.scopes.contains(&scope) {
+                    self.scopes.push(scope);
+                }
+            }
+            "--nl" => self.nl_draft = nl_role(&value(args, "--nl")?)?,
+            "--script" => self.scripts.push(script_spec(&value(args, "--script")?)?),
+            "--browse" => self.role = Some(value(args, "--browse")?.parse()?),
+            "--root" => self.roots.push(value(args, "--root")?),
+            "--ledger" => {
+                let spec = value(args, "--ledger")?;
+                let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
+                    format!(
+                        "--ledger: expected <ledger>=<read|audit|worker|write|delete|purge>, got \
+                         `{spec}`"
+                    )
+                })?;
+                self.ledgers.push((ledger.to_string(), authority.parse()?));
+            }
+            "--browse-graph" => {
+                self.browse_graph = Some(browse_graph_authority(&value(args, "--browse-graph")?)?);
+            }
+            // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
+            "--worker" => self
+                .ledgers
+                .push((value(args, "--worker")?, Authority::Worker)),
+            "--ledger-graph" => self.ledger_graphs.push(value(args, "--ledger-graph")?),
+            flag @ ("--alias" | "--link-in" | "--mirror-to") => {
+                self.across.push(across_spec(flag, &value(args, flag)?)?);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
+/// `grant set <name> [grant flags]... [--force] [--print] [--config PATH]` (ledger #3852):
+/// one grant's scopes into `grants.json`, and nothing else.
+fn parse_grant_set(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    match args.next().as_deref() {
+        Some("set") => {}
+        Some(other) => {
+            return Err(format!(
+                "grant: unknown subcommand `{other}` (expected `set <name>`)"
+            ))
+        }
+        None => return Err("grant: expected `set <name>`".to_string()),
+    }
+    let name = args
+        .next()
+        .filter(|name| !name.starts_with('-'))
+        .ok_or("grant set: expected <name>")?;
+    let (mut grant, mut force, mut print, mut flags) =
+        (GrantFlags::default(), false, false, Flags::default());
+    while let Some(arg) = args.next() {
+        if grant.take(&name, &arg, &mut args)? {
+            continue;
+        }
+        match arg.as_str() {
+            "--force" => force = true,
+            "--print" => print = true,
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other => return Err(format!("grant set: unknown argument `{other}`")),
+        }
+    }
+    let GrantFlags {
+        ledgers,
+        browse_graph,
+        ledger_graphs,
+        across,
+        role,
+        roots,
+        scripts,
+        nl_draft,
+        scopes,
+    } = grant;
+    Ok(Command::GrantSet {
+        name,
+        ledgers,
+        browse_graph,
+        ledger_graphs,
+        across,
+        browse: browse_grant(role, roots)?,
+        scripts,
+        nl_draft,
+        scopes,
+        print,
+        force,
         flags,
     })
 }
@@ -1960,50 +2109,17 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         .next()
         .filter(|name| !name.starts_with('-'))
         .ok_or("passkey invite: expected <name>")?;
-    let (mut ledgers, mut browse_graph, mut force, mut minutes, mut flags) = (
-        Vec::new(),
-        None,
+    let (mut grant, mut force, mut minutes, mut flags) = (
+        GrantFlags::default(),
         false,
         crate::identity::INVITE_MINUTES,
         Flags::default(),
     );
-    let (mut role, mut roots, mut ledger_graphs) = (None, Vec::new(), Vec::new());
-    let mut across = Vec::new();
-    let (mut scripts, mut nl_draft, mut scopes) = (Vec::new(), false, Vec::new());
     while let Some(arg) = args.next() {
+        if grant.take(&name, &arg, &mut args)? {
+            continue;
+        }
         match arg.as_str() {
-            "--browse" => role = Some(value(&mut args, "--browse")?.parse()?),
-            "--nl" => nl_draft = nl_role(&value(&mut args, "--nl")?)?,
-            "--scope" => {
-                let scope = scope_spec(&name, &value(&mut args, "--scope")?)?;
-                if !scopes.contains(&scope) {
-                    scopes.push(scope);
-                }
-            }
-            "--script" => scripts.push(script_spec(&value(&mut args, "--script")?)?),
-            "--root" => roots.push(value(&mut args, "--root")?),
-            "--ledger" => {
-                let spec = value(&mut args, "--ledger")?;
-                let (ledger, authority) = spec.split_once('=').ok_or_else(|| {
-                    format!(
-                        "--ledger: expected <ledger>=<read|audit|worker|write|delete|purge>, got \
-                         `{spec}`"
-                    )
-                })?;
-                ledgers.push((ledger.to_string(), authority.parse()?));
-            }
-            "--browse-graph" => {
-                browse_graph = Some(browse_graph_authority(&value(
-                    &mut args,
-                    "--browse-graph",
-                )?)?);
-            }
-            // ★ The worker grant (ledger #1143): `--worker L` is `--ledger L=worker`.
-            "--worker" => ledgers.push((value(&mut args, "--worker")?, Authority::Worker)),
-            "--ledger-graph" => ledger_graphs.push(value(&mut args, "--ledger-graph")?),
-            flag @ ("--alias" | "--link-in" | "--mirror-to") => {
-                across.push(across_spec(flag, &value(&mut args, flag)?)?);
-            }
             "--force" => force = true,
             "--minutes" => {
                 let spelled = value(&mut args, "--minutes")?;
@@ -2026,6 +2142,17 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             other => return Err(format!("passkey invite: unknown argument `{other}`")),
         }
     }
+    let GrantFlags {
+        ledgers,
+        browse_graph,
+        ledger_graphs,
+        across,
+        role,
+        roots,
+        scripts,
+        nl_draft,
+        scopes,
+    } = grant;
     Ok(Command::PasskeyInvite {
         name,
         ledgers,
