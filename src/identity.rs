@@ -2061,9 +2061,10 @@ impl Passkeys {
     /// Reopen write with a fresh assertion by the SAME passkey (ledger #3816), once a session's
     /// write has lapsed (#3815). The body: `{session?, sessionId?, challenge, id,
     /// authenticatorData, clientDataJSON, signature}`, the last five a fresh
-    /// `navigator.credentials.get` answer to a [`Purpose::Reassert`] challenge; which session it
-    /// replaces is [`Passkeys::reassert_target`]'s. Returns the new token (the only copy) and
-    /// the identity.
+    /// `navigator.credentials.get` answer to a [`Purpose::Reassert`] challenge. It replaces the
+    /// session `session` (a token) names; else the one `sessionId` ([`session_id`]) names, of
+    /// the passkey `principal` names; else that passkey's only session. Returns the new token
+    /// (the only copy) and the identity.
     ///
     /// ★ **The same passkey, verified as a sign-in is.** The assertion must be by the
     /// passkey the session signs in as, with user verification, and its signature counter is
