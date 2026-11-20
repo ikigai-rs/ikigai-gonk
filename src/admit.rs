@@ -133,6 +133,15 @@ pub const REFUSED_CROSS_SITE: &str = "urn:iki:gonk:door:refused:cross-site";
 /// embedded in or fetched by another page.
 pub const REFUSED_FOREIGN_LOAD: &str = "urn:iki:gonk:door:refused:foreign-load";
 
+/// The HTTP door's answer to a passkey request (`/auth/…`) that carries `content` in its URL
+/// (ledger [#3841](http://localhost:1060/l/default/item/3841)). `content` is where a session
+/// token goes, and a URL is written to browser history, proxy logs and gonk's own access log
+/// (`q=`), so a token is taken only from a POST body or the session cookie, never a query
+/// string. `ikigai-web` drops a `content` query argument before dispatch, so without this
+/// refusal a GET carrying one would be answered as if it had none, teaching a caller that the
+/// URL is a place a token may go.
+pub const REFUSED_TOKEN_IN_URL: &str = "urn:iki:gonk:door:refused:token-in-url";
+
 /// Every door marker starts here: the refusals ([`REFUSED_PREFIX`]) and [`FOREIGN_PAGE`]. A
 /// grant naming a scope under it is refused (`quic::grant_refusal`), so only a door computes one.
 pub const DOOR_PREFIX: &str = "urn:iki:gonk:door:";
@@ -242,6 +251,12 @@ pub fn refusal(capability: &Capability) -> Option<&'static str> {
             "a page that is not this server's own may only NAVIGATE here (a link, or a typed \
              address); it may not load this server's resources as an image, script, frame or \
              fetch",
+        )
+    } else if held.contains(REFUSED_TOKEN_IN_URL) {
+        Some(
+            "a passkey request may not carry `content` in its URL: a session token goes in a \
+             POST body or the session cookie, never a query string, which browser history and \
+             logs keep",
         )
     } else {
         held.iter()
