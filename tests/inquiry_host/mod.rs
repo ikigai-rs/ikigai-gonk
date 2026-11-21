@@ -31,6 +31,18 @@ pub const INTENT: &str = "inquiry-intent-brian";
 /// Who holds what at the host: Brian (a person) uses every view and action, the edge drops
 /// arrivals, the auditor reads everything for the tests' own checks, and `plasma-gonk` is a
 /// machine holding Brian's verbs.
+/// A stand-in for the edge's keyed sender hash: 64 lowercase hex digits, distinct per inquiry
+/// id (the id's bytes in hex, zero-padded on the left). Ids in these tests are well under 32
+/// bytes, so no two collide.
+fn sender_of(id: &str) -> String {
+    let hex: String = id.bytes().map(|b| format!("{b:02x}")).collect();
+    assert!(
+        hex.len() <= 64,
+        "test inquiry id `{id}` is too long for a stand-in key"
+    );
+    format!("{hex:0>64}")
+}
+
 fn verbs(slug: &str, layer: &str) -> &'static [&'static str] {
     match (slug, layer) {
         ("brian" | "plasma-gonk", INQUIRY | SPAM) => &["read", "out", "take"],
@@ -216,7 +228,10 @@ impl Host {
             format!("{inq}site"): site,
             format!("{inq}text"): text,
             format!("{inq}replyTo"): "ada@example.org",
-            format!("{inq}sender"): format!("hash-of-{id}"),
+            // The edge's keyed hash: 64 lowercase hex digits, which the shapes require since
+            // ikigai-inquiry 0.1.2 (ledger #3850). A stand-in derived from the id, so each
+            // inquiry has its own.
+            format!("{inq}sender"): sender_of(id),
             format!("{inq}reason"): "score",
             format!("{inq}received"): {
                 "@value": received,
