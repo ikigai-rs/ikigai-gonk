@@ -40,6 +40,12 @@
 //! `content`, which is skipped, as are the transport's provenance stamps (`received`,
 //! `client`, `principal`) — `principal` gets its own column, from the capability.
 //!
+//! | `needs` | on `outcome=denied` only: every capability the endpoint DECLARES for the verb (its `requires`) that the request's capability does not satisfy, space-separated (ledger [#3830](http://localhost:1062/l/default/item/3830)). Absent when nothing declared was missing — a refusal by the endpoint's own rule, or at the HTTP edge — rather than guessed |
+//!
+//! ```text
+//! 2026-11-19T20:01:44.120Z log:Access urn:repo:status seq=14 door=quic verb=source outcome=denied dur=0 principal=urn:iki:host:gonk:client:ab12 credential=https://ikigai-rs.dev/ns/log#clientCertificate needs=urn:cap:exec:read:git
+//! ```
+//!
 //! ⚠ **No `grant=` yet.** The helper has the column; what a door has in hand per request is
 //! the capability's scopes, not the NAME of the grant they came from (that is in
 //! `clients.json` / the passkey enrollment, read by the admission). Threading it to this
@@ -84,8 +90,9 @@
 //! - **who an anonymous request is from.** `anon`, and nothing that identifies the caller: no
 //!   address. A `?principal=` a reader typed is never taken for one (ledger #864, R6).
 //! - **a refusal the door kernel makes before dispatch** (a refusal the HTTP EDGE makes is
-//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — a capability
-//!   floor's denial, a name nothing binds (`404`), a nesting refusal — and the kernel's own
+//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — a name nothing
+//!   binds (`404`), a nesting refusal, a declared-floor refusal of an endpoint that declares
+//!   its existence sensitive (answered as a miss) — and the kernel's own
 //!   `urn:kernel:*` operations and Meta answers, which no endpoint of this server's spaces
 //!   handles.
 //!
@@ -120,8 +127,8 @@
 //! names no long poll now.) A subject
 //! named by [`AccessLog::sampling_long_polls`] writes when it FAILED or once per
 //! [`POLL_SAMPLE_EVERY`]; its duration is the wait, not a symptom, and says nothing. A refusal is
-//! an outcome other than `ok`, so it is always written (a capability floor's refusal is the
-//! kernel's, before dispatch, and is not a line at all: see above).
+//! an outcome other than `ok`, so it is always written, a declared-floor refusal included
+//! (since ledger #3830 this overlay holds that floor, so the refusal is a line: see `Timed`).
 //! [`AccessLog::gonk_polls`] names gonk's polls for every door.
 //!
 //! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
@@ -500,6 +507,7 @@ impl Space for Logged {
             Arc::new(Timed {
                 inner: endpoint,
                 log: self.log.clone(),
+                verb: request.verb,
             }) as Arc<dyn Endpoint>
         })
     }
@@ -527,12 +535,62 @@ impl Space for Logged {
 /// cheapest read a door serves, a cached `urn:iki:ledger:items` over the socket door's kernel,
 /// 4.6 µs off and 5.8 µs on — about a microsecond per request, the line's formatting and its
 /// one write.
+///
+/// ★ **It holds the declared floor** (ledger [#3830](http://localhost:1062/l/default/item/3830)).
+/// The kernel refuses a capability its endpoint's `requires` does not satisfy BEFORE dispatch,
+/// so a refusal there entered no endpoint, and no line was written for it at all. For a verb
+/// other than `Meta`, `Timed` hands the kernel the contract without its `requires`
+/// ([`Timed::floor_is_ours`]) and refuses here instead, at every depth, on core's own predicate
+/// ([`Description::unsatisfied_scopes`], the table and test the kernel's floor runs): the same
+/// refusal, before the same endpoint, and now a line that names what was missing. `Meta` (so
+/// the contract a caller reads, the catalog and every probe) keeps the whole declaration, and
+/// an endpoint that declares its existence sensitive keeps the kernel's floor, which answers
+/// such a refusal as a miss.
 struct Timed {
     inner: Arc<dyn Endpoint>,
     log: AccessLog,
+    /// The verb of the request this endpoint was resolved for.
+    verb: Verb,
 }
 
 impl Timed {
+    /// Whether this overlay, not the kernel, holds the declared floor for its request: every
+    /// verb but `Meta`, unless the endpoint declares its existence sensitive (the kernel then
+    /// answers a refusal as a miss, which a line here would contradict).
+    fn floor_is_ours(&self, description: &Description) -> bool {
+        self.verb != Verb::Meta
+            && !description.existence_sensitive
+            && !description.actions.iter().any(|a| a.existence_sensitive)
+    }
+
+    /// The declared floor, for an invocation the kernel let through because
+    /// [`Endpoint::describe`] left it to this overlay: `Some` with every required scope the
+    /// capability does not satisfy, in declaration order, when it refuses.
+    fn lacking(&self, inv: &Invocation<'_>) -> Option<Vec<String>> {
+        let description = self.inner.describe();
+        if !self.floor_is_ours(&description) {
+            return None;
+        }
+        let lacking = description.unsatisfied_scopes(inv.request.verb, inv.capability);
+        (!lacking.is_empty()).then_some(lacking)
+    }
+
+    /// Refuse an invocation the declared floor does not admit, as the kernel words it, and
+    /// write its line with the scopes it lacked.
+    fn refuse(&self, inv: &Invocation<'_>, lacking: Vec<String>) -> Error {
+        let refused = Error::Denied(denial(&lacking[0], inv.request.target.as_str()));
+        if inv.depth() == 0 {
+            self.record(
+                inv,
+                SystemTime::now(),
+                Instant::now(),
+                Err(&refused),
+                &lacking,
+            );
+        }
+        refused
+    }
+
     /// Write the line for one request that arrived at the door, when the log takes it.
     fn record(
         &self,
@@ -540,6 +598,7 @@ impl Timed {
         started: SystemTime,
         clock: Instant,
         answer: std::result::Result<usize, &Error>,
+        lacking: &[String],
     ) {
         let dur_ms = clock.elapsed().as_millis();
         if self
@@ -554,14 +613,36 @@ impl Timed {
                 answer,
                 dur_ms,
             );
+            // `needs` is what the declared floor found missing, and nothing else: a refusal
+            // the endpoint made on its own rule (a path ACL, an author rule) lacked nothing
+            // declared, and the line does not guess.
+            let access = lacking.iter().fold(access, |line, scope| line.needs(scope));
             self.log.record.access(&access);
         }
+    }
+}
+
+/// The kernel's sentence for a declared-floor refusal of `target` that lacked `scope`.
+fn denial(scope: &str, target: &str) -> String {
+    match scope.strip_suffix('*') {
+        None => format!("capability does not grant `{scope}` (declared by `{target}`)"),
+        Some("") => format!(
+            "capability does not grant `{scope}` (declared by `{target}`; any grant at all \
+             satisfies it)"
+        ),
+        Some(prefix) => format!(
+            "capability does not grant `{scope}` (declared by `{target}`; any grant under \
+             `{prefix}` satisfies it)"
+        ),
     }
 }
 
 #[async_trait]
 impl Endpoint for Timed {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        if let Some(lacking) = self.lacking(inv) {
+            return Err(self.refuse(inv, lacking));
+        }
         // A sub-request a page issues is part of the request that page answers, not a line.
         if inv.depth() > 0 {
             return self.inner.invoke(inv).await;
@@ -569,7 +650,13 @@ impl Endpoint for Timed {
         let started = SystemTime::now();
         let clock = Instant::now();
         let answer = self.inner.invoke(inv).await;
-        self.record(inv, started, clock, answer.as_ref().map(|r| r.bytes.len()));
+        self.record(
+            inv,
+            started,
+            clock,
+            answer.as_ref().map(|r| r.bytes.len()),
+            &[],
+        );
         answer
     }
 
@@ -578,6 +665,9 @@ impl Endpoint for Timed {
     /// the body's length when it is known before reading, and `0` for a one-shot stream; the
     /// duration is the time to the answer, not to its last byte.
     async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        if let Some(lacking) = self.lacking(inv) {
+            return Err(self.refuse(inv, lacking));
+        }
         if inv.depth() > 0 {
             return self.inner.invoke_body(inv).await;
         }
@@ -587,7 +677,7 @@ impl Endpoint for Timed {
         let bytes = answer
             .as_ref()
             .map(|r| r.bytes.len_hint().map_or(0, |n| n as usize));
-        self.record(inv, started, clock, bytes);
+        self.record(inv, started, clock, bytes, &[]);
         answer
     }
 
@@ -595,8 +685,18 @@ impl Endpoint for Timed {
         self.inner.name()
     }
 
+    /// The endpoint's contract, without its `requires` when this overlay holds the floor
+    /// ([`Timed::floor_is_ours`]): the kernel then dispatches, and [`invoke`](Self::invoke)
+    /// refuses, before the endpoint, what the kernel would have refused.
     fn describe(&self) -> Description {
-        self.inner.describe()
+        let mut description = self.inner.describe();
+        if self.floor_is_ours(&description) {
+            description.requires.clear();
+            for action in &mut description.actions {
+                action.requires.clear();
+            }
+        }
+        description
     }
 
     fn forwards(&self) -> Option<ikigai_core::Forward> {
