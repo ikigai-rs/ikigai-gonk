@@ -2184,7 +2184,7 @@ dependencies = [
  "ikigai-ui",
  "ikigai-vocab",
  "ikigai-web",
- "ikigai-xslt 0.10.0",
+ "ikigai-xslt 0.10.1",
  "libc",
  "notify",
  "oxigraph",
@@ -2662,9 +2662,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-xrust"
-version = "2.3.0-ikigai.2"
+version = "2.3.0-ikigai.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "868917941cfa5f3bb7b4bb99240e394b3b0cea66dd42f441a495fee89cf0afa5"
+checksum = "40208c02f9650d7f4076aaa1274fcee7b3a91ceca8f2d76b7c58707f10eb821a"
 dependencies = [
  "chrono",
  "english-numbers",
@@ -2697,9 +2697,9 @@ dependencies = [
 
 [[package]]
 name = "ikigai-xslt"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67da1e3f6d872532cad645f46773c58889930e39507072d69a3eed107f7d1181"
+checksum = "5517bd8420d93f4d3cf5bd87cba0a555c1f181e44e8d7d5965861109e2ef6818"
 dependencies = [
  "async-trait",
  "ikigai-core 0.4.1",
@@ -3595,7 +3595,6 @@ dependencies = [
  "oxrdfio",
  "oxrocksdb-sys",
  "oxsdatatypes",
- "rand 0.8.8",
  "rand 0.9.5",
  "rustc-hash 2.1.3",
  "siphasher",

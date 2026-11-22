@@ -1294,8 +1294,12 @@ toml = "0.8"
 # `stylesheet_compiles` (strings and a count), so no core type crosses, and the graph links
 # core 0.3 (gonk) and core 0.4 (this crate) side by side until gonk moves to core 0.4.
 # Behavior changes from 0.7 that gonk's pages meet are listed in the PR for ledger #4054.
-# `"0.10.0"` is `<0.11.0`.
-ikigai-xslt = "0.10.0"
+# ★ 0.10.1 (ikigai-xrust 2.3.0-ikigai.3, ledger #4052, #4053): a PERFORMANCE floor, like 0.1.3
+# above, not an API one. xrust deep-cloned the compiled stylesheet's named templates, keys and
+# pre-vars on every path step; ikigai-xrust now shares them, and gonk's stylesheet has 37 named
+# templates. Measured with `examples/render-cost` (release) over 400 synthetic open items: the
+# PR for ledger #4054 has the table. `"0.10.1"` is `<0.11.0`.
+ikigai-xslt = "0.10.1"
 # Read the RDF/XML render projection's attributes without rewriting literal text.
 quick-xml = "0.37.5"
 # The ecosystem's one HTML helper (`ikigai_fn::html`): the header's ledger menu and the `/l`
