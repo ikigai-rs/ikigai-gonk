@@ -800,7 +800,7 @@ fn main() {
         inquiry_host.arrive(layer, id, site, text, received);
     }
     let inquiry =
-        ikigai_gonk::inquiry::Inquiry::new(inquiry_host::OWNER, inquiry_host.door("brian"))
+        ikigai_gonk::inquiry::Inquiry::new(inquiry_host::OWNER, None, inquiry_host.door("brian"))
             .expect("the inquiry client");
     let http = Arc::new(doors::http_kernel_serving(
         Arc::clone(&hub),

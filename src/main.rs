@@ -733,8 +733,12 @@ fn serve(flags: &config::Flags) -> ! {
     // own, in a kernel mounted into nothing, and dialled by nothing until a view is first opened.
     let inquiry = match (&settings.inquiry, &settings.layers_view) {
         (Some(owner), Some(view)) => Some(
-            ikigai_gonk::inquiry::Inquiry::new(owner, ikigai_gonk::layers_view::dial(view))
-                .unwrap_or_else(|e| fail(&e)),
+            ikigai_gonk::inquiry::Inquiry::new(
+                owner,
+                settings.inquiry_layers.clone(),
+                ikigai_gonk::layers_view::dial(view),
+            )
+            .unwrap_or_else(|e| fail(&e)),
         ),
         _ => None,
     };

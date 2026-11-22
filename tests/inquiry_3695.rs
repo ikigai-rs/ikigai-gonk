@@ -17,6 +17,7 @@
 //! - [`an_unconfigured_gonk_serves_the_not_configured_page`]
 //! - [`the_client_writes_only_as_a_person`]
 //! - [`another_pages_navigation_keeps_no_inquiry_token`]
+//! - [`explicit_layer_names_are_the_ones_the_view_reads`] (ledger #3980)
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -127,7 +128,7 @@ impl Gonk {
 
     /// Over `host`'s door as `slug`, its views and actions under `owner`.
     fn over(host: &Host, slug: &str) -> Gonk {
-        let inquiry = Inquiry::new(OWNER, host.door(slug)).unwrap();
+        let inquiry = Inquiry::new(OWNER, None, host.door(slug)).unwrap();
         Gonk::start(Some(inquiry), anonymous())
     }
 
@@ -598,4 +599,32 @@ fn another_pages_navigation_keeps_no_inquiry_token() {
     ]);
     let kept = ikigai_gonk::admit::foreign_page_scopes(&all);
     assert_eq!(kept, [ikigai_gonk::admit::FOREIGN_PAGE], "{kept:?}");
+}
+
+/// Ledger #3980: with `gonk.inquiry.layers` naming the edge's layers (`inquiry`, not
+/// `inquiry-brian`), the pending view's sub-requests go to `urn:layer:inquiry:` through the
+/// fixture door, and none to the owner-suffixed names `for_owner` would make.
+#[test]
+fn explicit_layer_names_are_the_ones_the_view_reads() {
+    let host = seeded();
+    let edge = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold \
+                examples=inquiry-example intents=inquiry-intent";
+    let layers = ikigai_gonk::inquiry::parse_layers(&[edge.to_string()], true)
+        .unwrap()
+        .unwrap();
+    let inquiry = Inquiry::new(OWNER, Some(layers), host.door("brian")).unwrap();
+    let gonk = Gonk::start(Some(inquiry), anonymous());
+    let session = gonk.sign_in("brian", &tokens(&[Token::Read]));
+    gonk.page("/inquiry/view/name/pending", Some(&session));
+    let targets = host.targets();
+    assert!(
+        targets.iter().any(|t| t.contains("urn:layer:inquiry:")),
+        "the view never read urn:layer:inquiry: {targets:?}"
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|t| t.contains(&format!("urn:layer:{INQUIRY}:"))),
+        "the view read the owner-suffixed layer: {targets:?}"
+    );
 }
