@@ -212,7 +212,7 @@ fn totals(rows: &[(&str, String)]) -> String {
 
 /// A table in the frame that scrolls at phone width. Most hold no link, so the frame is itself a
 /// stop on the keyboard's way (WCAG 2.1.1). `rows` is already written; `columns` are plain text.
-fn table(label: &str, columns: &[&str], rows: &str) -> String {
+pub(crate) fn table(label: &str, columns: &[&str], rows: &str) -> String {
     let head: String = columns
         .iter()
         .map(|column| format!("<th scope=\"col\">{}</th>", html_text(column)))

@@ -13,7 +13,7 @@ use ikigai_gonk::grants::{self, Authority};
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::watch::Watched;
 use ikigai_gonk::{
-    access, browse, compose_serving_with_lifecycles, doors, layer, mount, queue, quic, roots,
+    access, browse, compose_serving_with_ledger_routes, doors, layer, mount, queue, quic, roots,
     trigger, verdict, watch, web,
 };
 // ★ No `SharerWrites` here any more, and that absence is the shape of ledger #282's fix: the
@@ -633,7 +633,7 @@ fn serve(flags: &config::Flags) -> ! {
     // from the declaration graph whenever its own Sink writes it.
     let views = ikigai_gonk::views::Views::new();
     let hub = Arc::new(
-        compose_serving_with_lifecycles(
+        compose_serving_with_ledger_routes(
             store,
             browse_space,
             mounted,
@@ -648,6 +648,7 @@ fn serve(flags: &config::Flags) -> ! {
             Some(&nl),
             Some(&views),
             settings.lifecycles.clone(),
+            &settings.lapse_labels,
         )
         .0,
     );

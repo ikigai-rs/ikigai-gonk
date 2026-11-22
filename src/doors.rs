@@ -1391,6 +1391,12 @@ fn routes() -> Vec<Route> {
             "/dashboard/panel/agents",
             crate::dashboard::AGENTS_PANEL_IRI,
         ),
+        // Ledger #3717: the stalled claims, a tab of their own.
+        route("/dashboard/stalled", crate::dashboard::STALLED_PAGE_IRI),
+        route(
+            "/dashboard/panel/stalled",
+            crate::dashboard::STALLED_PANEL_IRI,
+        ),
         // Ledger #2972: the operator's two, each declaring what it requires, and their parts.
         route("/dashboard/cache", crate::dashboard::CACHE_PAGE_IRI),
         route("/dashboard/system", crate::dashboard::SYSTEM_PAGE_IRI),

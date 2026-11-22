@@ -93,7 +93,7 @@ try {
 
   await page.goto(`${base}/dashboard/cache`);
   const tabs = page.locator('#dashboard-tabs [role="tab"]');
-  check(await tabs.count() === 4, "an operator has four tabs");
+  check(await tabs.count() === 5, "an operator has five tabs (Stalled claims is everyone's, ledger #3717)");
   check(
     await page.locator("#dashboard-tab-cache").getAttribute("aria-selected") === "true",
     "/dashboard/cache selects the Cache tab",

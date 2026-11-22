@@ -30,6 +30,12 @@
 //! no timer to hold back and its questions are not asked, on a load or a poll. With no script the
 //! tabs are plain links between the pages; `web/gonk.js` turns them into the ARIA pattern.
 //!
+//! ★ **A third, Stalled claims** (ledger [#3717](http://localhost:1062/l/default/item/3717)).
+//! [`Tab::Stalled`] lists every open item held on a lease that has run out, from each readable
+//! ledger's `stalled` list. It is its own tab, under the same contract, so a load of the Ledgers or
+//! Agents tab never reads a `stalled` list: those hang on the store-wide write threads, and a
+//! write anywhere would make every ledger's reread.
+//!
 //! ★ **Two more, for the operator** (ledger [#2972](http://localhost:1062/l/default/item/2972)).
 //! [`Tab::Cache`] and [`Tab::System`] are built the same way and hold [`crate::operator`]'s parts.
 //! A viewer whose grant does not include one never sees it (`offered`), and asking its URL answers
@@ -94,6 +100,11 @@ pub const LEDGERS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:ledge
 /// The Agents tab's panel, as a fragment.
 pub const AGENTS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:agents";
 
+/// The Stalled claims tab, as a page (ledger #3717).
+pub const STALLED_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:stalled";
+/// The Stalled claims tab's panel, as a fragment.
+pub const STALLED_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:stalled";
+
 /// The Cache tab, as a page.
 pub const CACHE_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:cache";
 /// The System tab, as a page.
@@ -108,6 +119,8 @@ pub const SYSTEM_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:system
 pub enum Tab {
     Ledgers,
     Agents,
+    /// Open items held on a lease that has run out (ledger #3717).
+    Stalled,
     /// An operator's ([`crate::operator`]): needs `urn:cap:kernel:inspect`.
     Cache,
     /// An operator's ([`crate::system`]): needs `urn:cap:gonk:system:read`.
@@ -116,9 +129,15 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the page lists them.
-    pub const ALL: [Tab; 4] = [Tab::Ledgers, Tab::Agents, Tab::Cache, Tab::System];
+    pub const ALL: [Tab; 5] = [
+        Tab::Ledgers,
+        Tab::Agents,
+        Tab::Stalled,
+        Tab::Cache,
+        Tab::System,
+    ];
     /// The tabs anyone who may read a ledger is offered.
-    pub const EVERYONE: [Tab; 2] = [Tab::Ledgers, Tab::Agents];
+    pub const EVERYONE: [Tab; 3] = [Tab::Ledgers, Tab::Agents, Tab::Stalled];
     /// The tabs only their grant's holder is offered, or may ask for.
     pub const OPERATOR: [Tab; 2] = [Tab::Cache, Tab::System];
 
@@ -127,6 +146,7 @@ impl Tab {
         match self {
             Tab::Ledgers => "ledgers",
             Tab::Agents => "agents",
+            Tab::Stalled => "stalled",
             Tab::Cache => "cache",
             Tab::System => "system",
         }
@@ -137,6 +157,7 @@ impl Tab {
         match self {
             Tab::Ledgers => "Ledgers",
             Tab::Agents => "Agents",
+            Tab::Stalled => "Stalled claims",
             Tab::Cache => "Cache",
             Tab::System => "System",
         }
@@ -145,7 +166,7 @@ impl Tab {
     /// What its page, panel and parts require, or `None` for a tab anyone may ask for.
     pub fn capability(self) -> Option<&'static str> {
         match self {
-            Tab::Ledgers | Tab::Agents => None,
+            Tab::Ledgers | Tab::Agents | Tab::Stalled => None,
             Tab::Cache => Some(crate::operator::CAP_INSPECT),
             Tab::System => Some(crate::system::CAP_READ),
         }
@@ -756,6 +777,7 @@ async fn panel_html(
                 charts.concat()
             )
         }
+        Tab::Stalled => stalled_section(inv, ledgers).await?,
         Tab::Agents => {
             let agents = fetch(inv, request(Verb::Source, crate::agents::VIEW_IRI)?).await?;
             format!(
@@ -767,12 +789,218 @@ async fn panel_html(
     })
 }
 
+/// One stalled claim, as the Dashboard lists it (ledger #3717): from
+/// `urn:iki:ledger:{ledger}:stalled as=application/json`, read under the viewer's capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StalledRow {
+    pub(crate) ledger: Ledger,
+    pub(crate) number: String,
+    pub(crate) display: String,
+    pub(crate) title: String,
+    pub(crate) holder: String,
+    pub(crate) epoch: Option<i64>,
+    pub(crate) lapsed: String,
+    pub(crate) recorded: bool,
+    /// How long before the ledger's `checked_at` the lease ran out, in milliseconds.
+    pub(crate) ago_ms: Option<u64>,
+}
+
+/// `YYYY-MM-DDTHH:MM:SS(.fff)Z` as milliseconds since the epoch, or `None` for anything else.
+fn instant_ms(iso: &str) -> Option<u64> {
+    let bare = iso.strip_suffix('Z')?;
+    let (whole, fraction) = bare.split_once('.').unwrap_or((bare, ""));
+    if whole.len() != 19 || !whole.is_ascii() || whole.as_bytes()[10] != b'T' {
+        return None;
+    }
+    let num = |range: std::ops::Range<usize>| whole.get(range)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let millis: i64 = match fraction.get(..3.min(fraction.len())) {
+        Some(digits) if !digits.is_empty() => format!("{digits:0<3}").parse().ok()?,
+        _ => 0,
+    };
+    u64::try_from(((days * 24 + hh) * 60 + mm) * 60 + ss)
+        .ok()
+        .map(|seconds| seconds * 1000 + millis as u64)
+}
+
+/// The rows of one ledger's stalled document, oldest lapse first as the ledger orders them.
+pub(crate) fn stalled_rows(ledger: &Ledger, doc: &serde_json::Value) -> Vec<StalledRow> {
+    let checked = doc["checked_at"].as_str().and_then(instant_ms);
+    let Some(rows) = doc["stalled"].as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let number = row["item"]["number"].as_i64()?.to_string();
+            let lapsed = row["lapsed"].as_str()?.to_string();
+            let ago_ms = match (checked, instant_ms(&lapsed)) {
+                (Some(now), Some(then)) => Some(now.saturating_sub(then)),
+                _ => None,
+            };
+            Some(StalledRow {
+                ledger: ledger.clone(),
+                display: row["item"]["display"]
+                    .as_str()
+                    .map_or_else(|| format!("{}#{number}", ledger.name()), str::to_string),
+                number,
+                title: row["title"].as_str().unwrap_or_default().to_string(),
+                holder: row["holder"].as_str().unwrap_or_default().to_string(),
+                epoch: row["epoch"].as_i64(),
+                lapsed,
+                recorded: row["recorded"].as_bool().unwrap_or(false),
+                ago_ms,
+            })
+        })
+        .collect()
+}
+
+/// The Stalled claims tab's panel (ledger #3717): every open item, in a ledger this
+/// viewer may read, held on a lease that has run out. An expired lease is never freed by the
+/// ledger, so each row stays until its holder renews or another takes it over. A ledger whose
+/// stalled list this viewer may not read is left out, the rule the charts keep; one that fails
+/// otherwise is named in a sentence. Read only when this tab is shown, once per load or switch: `stalled` is cached under the
+/// store's write threads and until the next running lease ends, so a load between writes asks
+/// the store nothing for it.
+async fn stalled_section(inv: &Invocation<'_>, ledgers: &[Ledger]) -> Result<String> {
+    let mut rows = Vec::new();
+    let mut unread = Vec::new();
+    let mut checked = Vec::new();
+    for ledger in menu_order(ledgers) {
+        let read = with(
+            request(Verb::Source, &format!("{}stalled", ledger.prefix()))?,
+            "as",
+            "application/json",
+        );
+        match crate::ui_retry::read(inv, read, crate::ui_retry::Via::Run).await {
+            Ok(answer) => match serde_json::from_slice::<serde_json::Value>(&answer.bytes) {
+                Ok(doc) => {
+                    checked.push(ledger.clone());
+                    rows.extend(stalled_rows(ledger, &doc));
+                }
+                Err(_) => unread.push(ledger.name().to_string()),
+            },
+            Err(Error::Denied(_)) => {}
+            Err(_) => unread.push(ledger.name().to_string()),
+        }
+    }
+    Ok(stalled_html(&checked, &rows, &unread))
+}
+
+/// [`stalled_section`]'s markup: a heading, the ledgers it checked, a sentence, and a table when
+/// there are rows.
+pub(crate) fn stalled_html(checked: &[Ledger], rows: &[StalledRow], unread: &[String]) -> String {
+    let mut out = String::from(
+        "<h2 class=\"sr-only\" id=\"dashboard-stalled\">Stalled claims</h2>\
+         <section class=\"readout\" aria-labelledby=\"dashboard-stalled\">",
+    );
+    let links: Vec<String> = checked
+        .iter()
+        .map(|ledger| {
+            format!(
+                "<a href=\"{}\">{}</a>",
+                attr(&ledger_href(ledger)),
+                html_text(ledger.name())
+            )
+        })
+        .collect();
+    out.push_str(&match links.len() {
+        0 => "<p class=\"note\">0 ledgers you may read were checked.</p>".to_string(),
+        1 => format!(
+            "<p class=\"note\">Checked 1 ledger you may read: {}.</p>",
+            links[0]
+        ),
+        n => format!(
+            "<p class=\"note\">Checked {n} ledgers you may read: {}.</p>",
+            links.join(", ")
+        ),
+    });
+    let sentence = match rows.len() {
+        0 => "No claim has stalled: no open item in a ledger you may read is held on a lease \
+              that has run out. As of this page load."
+            .to_string(),
+        n => format!(
+            "{} held on a lease that has run out, the oldest first, as of this page load. A \
+             lease that runs out is never freed by itself: the holder renews it, or another \
+             holder takes it over.",
+            if n == 1 {
+                "1 open item is".to_string()
+            } else {
+                format!("{n} open items are")
+            }
+        ),
+    };
+    out.push_str(&format!("<p class=\"note\">{}</p>", html_text(&sentence)));
+    if !unread.is_empty() {
+        out.push_str(&format!(
+            "<p class=\"note\">{}</p>",
+            html_text(&format!(
+                "The stalled claims of {} could not be read just now; they are not listed.",
+                unread.join(", ")
+            ))
+        ));
+    }
+    if !rows.is_empty() {
+        let body: String = rows
+            .iter()
+            .map(|row| {
+                let href = format!(
+                    "{}/item/{}",
+                    ledger_href(&row.ledger),
+                    url_segment(&row.number)
+                );
+                let ago = row.ago_ms.map_or_else(String::new, |ms| {
+                    format!(
+                        "{} ago, ",
+                        crate::backup::humanize(std::time::Duration::from_millis(ms))
+                    )
+                });
+                format!(
+                    "<tr><th scope=\"row\"><a href=\"{href}\">{display}</a> {title}</th>\
+                     <td>{holder}</td><td>{epoch}</td>\
+                     <td>{ago}<time datetime=\"{lapsed_attr}\">{lapsed}</time></td>\
+                     <td>{recorded}</td></tr>",
+                    href = attr(&href),
+                    display = html_text(&row.display),
+                    title = html_text(&row.title),
+                    holder = html_text(&row.holder),
+                    epoch = row
+                        .epoch
+                        .map_or_else(|| "none".to_string(), |e| e.to_string()),
+                    ago = html_text(&ago),
+                    lapsed_attr = attr(&row.lapsed),
+                    lapsed = html_text(&crate::web::when(&row.lapsed)),
+                    recorded = if row.recorded { "Yes" } else { "Not yet" },
+                )
+            })
+            .collect();
+        out.push_str(&crate::operator::table(
+            "Stalled claims",
+            &["Item", "Holder", "Epoch", "Lease ran out", "Lapse recorded"],
+            &body,
+        ));
+    }
+    out.push_str("</section>");
+    out
+}
+
 /// Whether this viewer is offered `tab`. An operator tab they may not read is not on their page at
 /// all, the rule for a ledger they may not read; nor is the System tab on a server that does not
 /// bind its resources, the rule `onboard::offers_page` keeps for a page with nothing behind it.
 pub(crate) fn offered(web: &Web, capability: &Capability, tab: Tab) -> bool {
     match tab {
-        Tab::Ledgers | Tab::Agents => true,
+        Tab::Ledgers | Tab::Agents | Tab::Stalled => true,
         Tab::Cache => capability.allows(crate::operator::CAP_INSPECT),
         Tab::System => {
             capability.allows(crate::system::CAP_READ)
@@ -883,7 +1111,7 @@ impl Endpoint for DashboardPage {
         match self.tab {
             Tab::Cache => "gonk-page-dashboard-cache",
             Tab::System => "gonk-page-dashboard-system",
-            Tab::Ledgers | Tab::Agents => "gonk-page-dashboard",
+            Tab::Ledgers | Tab::Agents | Tab::Stalled => "gonk-page-dashboard",
         }
     }
 
@@ -893,7 +1121,8 @@ impl Endpoint for DashboardPage {
             .summary(
                 "One tab of the Dashboard as an HTML page: a chart of the daily open and closed \
                  counts of every ledger this caller may read, each linking to its ledger, or a \
-                 table of each ledger's agents. A ledger the caller may not read is absent. A \
+                 table of each ledger's agents, or the open items held on a lease that has run \
+                 out. A ledger the caller may not read is absent. A \
                  caller who may read none is told how to get one. An open page refreshes the \
                  shown tab's charts or tables from their own fragments, and the other tab asks \
                  nothing.",
@@ -927,7 +1156,7 @@ impl Endpoint for PanelFragment {
         match self.tab {
             Tab::Cache => "gonk-fragment-dashboard-panel-cache",
             Tab::System => "gonk-fragment-dashboard-panel-system",
-            Tab::Ledgers | Tab::Agents => "gonk-fragment-dashboard-panel",
+            Tab::Ledgers | Tab::Agents | Tab::Stalled => "gonk-fragment-dashboard-panel",
         }
     }
 
@@ -936,7 +1165,7 @@ impl Endpoint for PanelFragment {
             .title("One Dashboard tab's panel, as a fragment")
             .summary(
                 "What the Dashboard's page draws under this tab, with no page around it: the \
-                 charts or the agent tables of every ledger this caller may read, each of which \
+                 charts, the agent tables or the stalled claims of every ledger this caller may read, each of which \
                  then polls its own fragment.",
             )
             .verb(Verb::Source)
@@ -947,9 +1176,11 @@ impl Endpoint for PanelFragment {
     }
 }
 
-/// [`Tab::OPERATOR`]'s pages, panels and parts, and the workers' resource: what `web::space` binds.
+/// [`Tab::Stalled`]'s page and panel (ledger #3717), [`Tab::OPERATOR`]'s pages, panels and parts,
+/// and the workers' resource: what `web::space` binds here.
 pub(crate) fn bind_operator(mut space: EndpointSpace, web: &Arc<Web>) -> EndpointSpace {
     for (tab, page, panel) in [
+        (Tab::Stalled, STALLED_PAGE_IRI, STALLED_PANEL_IRI),
         (Tab::Cache, CACHE_PAGE_IRI, CACHE_PANEL_IRI),
         (Tab::System, SYSTEM_PAGE_IRI, SYSTEM_PANEL_IRI),
     ] {
