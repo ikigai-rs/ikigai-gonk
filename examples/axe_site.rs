@@ -27,10 +27,12 @@ use ikigai_store::DurableStore;
 #[path = "../tests/inquiry_host/mod.rs"]
 mod inquiry_host;
 
-const PAGES: [(&str, &str); 39] = [
+const PAGES: [(&str, &str); 40] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
+    // Ledger #3717: the Stalled claims tab.
+    ("dashboard-stalled.html", "/dashboard/stalled"),
     ("ledger.html", "/l/default"),
     (
         "display-group.html",

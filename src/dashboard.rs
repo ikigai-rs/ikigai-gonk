@@ -30,6 +30,12 @@
 //! no timer to hold back and its questions are not asked, on a load or a poll. With no script the
 //! tabs are plain links between the pages; `web/gonk.js` turns them into the ARIA pattern.
 //!
+//! ★ **A third, Stalled claims** (ledger [#3717](http://localhost:1062/l/default/item/3717)).
+//! [`Tab::Stalled`] lists every open item held on a lease that has run out, from each readable
+//! ledger's `stalled` list. It is its own tab, under the same contract, so a load of the Ledgers or
+//! Agents tab never reads a `stalled` list: those hang on the store-wide write threads, and a
+//! write anywhere would make every ledger's reread.
+//!
 //! ★ **Two more, for the operator** (ledger [#2972](http://localhost:1062/l/default/item/2972)).
 //! [`Tab::Cache`] and [`Tab::System`] are built the same way and hold [`crate::operator`]'s parts.
 //! A viewer whose grant does not include one never sees it (`offered`), and asking its URL answers
@@ -94,6 +100,11 @@ pub const LEDGERS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:ledge
 /// The Agents tab's panel, as a fragment.
 pub const AGENTS_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:agents";
 
+/// The Stalled claims tab, as a page (ledger #3717).
+pub const STALLED_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:stalled";
+/// The Stalled claims tab's panel, as a fragment.
+pub const STALLED_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:stalled";
+
 /// The Cache tab, as a page.
 pub const CACHE_PAGE_IRI: &str = "urn:iki:gonk:page:dashboard:cache";
 /// The System tab, as a page.
@@ -108,6 +119,8 @@ pub const SYSTEM_PANEL_IRI: &str = "urn:iki:gonk:fragment:dashboard-panel:system
 pub enum Tab {
     Ledgers,
     Agents,
+    /// Open items held on a lease that has run out (ledger #3717).
+    Stalled,
     /// An operator's ([`crate::operator`]): needs `urn:cap:kernel:inspect`.
     Cache,
     /// An operator's ([`crate::system`]): needs `urn:cap:gonk:system:read`.
@@ -116,9 +129,15 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the order the page lists them.
-    pub const ALL: [Tab; 4] = [Tab::Ledgers, Tab::Agents, Tab::Cache, Tab::System];
+    pub const ALL: [Tab; 5] = [
+        Tab::Ledgers,
+        Tab::Agents,
+        Tab::Stalled,
+        Tab::Cache,
+        Tab::System,
+    ];
     /// The tabs anyone who may read a ledger is offered.
-    pub const EVERYONE: [Tab; 2] = [Tab::Ledgers, Tab::Agents];
+    pub const EVERYONE: [Tab; 3] = [Tab::Ledgers, Tab::Agents, Tab::Stalled];
     /// The tabs only their grant's holder is offered, or may ask for.
     pub const OPERATOR: [Tab; 2] = [Tab::Cache, Tab::System];
 
@@ -127,6 +146,7 @@ impl Tab {
         match self {
             Tab::Ledgers => "ledgers",
             Tab::Agents => "agents",
+            Tab::Stalled => "stalled",
             Tab::Cache => "cache",
             Tab::System => "system",
         }
@@ -137,6 +157,7 @@ impl Tab {
         match self {
             Tab::Ledgers => "Ledgers",
             Tab::Agents => "Agents",
+            Tab::Stalled => "Stalled claims",
             Tab::Cache => "Cache",
             Tab::System => "System",
         }
@@ -145,7 +166,7 @@ impl Tab {
     /// What its page, panel and parts require, or `None` for a tab anyone may ask for.
     pub fn capability(self) -> Option<&'static str> {
         match self {
-            Tab::Ledgers | Tab::Agents => None,
+            Tab::Ledgers | Tab::Agents | Tab::Stalled => None,
             Tab::Cache => Some(crate::operator::CAP_INSPECT),
             Tab::System => Some(crate::system::CAP_READ),
         }
@@ -750,13 +771,13 @@ async fn panel_html(
                 1 => "1 ledger you may read".to_string(),
                 n => format!("{n} ledgers you may read"),
             };
-            let stalled = stalled_section(inv, ledgers).await?;
             format!(
                 "<h2 class=\"sr-only\" id=\"dashboard-ledgers\">Ledgers</h2>\
-                 <p class=\"note\">{count}</p>{stalled}<div class=\"chart-grid\">{}</div>",
+                 <p class=\"note\">{count}</p><div class=\"chart-grid\">{}</div>",
                 charts.concat()
             )
         }
+        Tab::Stalled => stalled_section(inv, ledgers).await?,
         Tab::Agents => {
             let agents = fetch(inv, request(Verb::Source, crate::agents::VIEW_IRI)?).await?;
             format!(
@@ -845,16 +866,17 @@ pub(crate) fn stalled_rows(ledger: &Ledger, doc: &serde_json::Value) -> Vec<Stal
         .collect()
 }
 
-/// The Ledgers tab's "Stalled claims" section (ledger #3717): every open item, in a ledger this
+/// The Stalled claims tab's panel (ledger #3717): every open item, in a ledger this
 /// viewer may read, held on a lease that has run out. An expired lease is never freed by the
 /// ledger, so each row stays until its holder renews or another takes it over. A ledger whose
 /// stalled list this viewer may not read is left out, the rule the charts keep; one that fails
-/// otherwise is named in a sentence. Read once per page load: `stalled` is cached under the
+/// otherwise is named in a sentence. Read only when this tab is shown, once per load or switch: `stalled` is cached under the
 /// store's write threads and until the next running lease ends, so a load between writes asks
 /// the store nothing for it.
 async fn stalled_section(inv: &Invocation<'_>, ledgers: &[Ledger]) -> Result<String> {
     let mut rows = Vec::new();
     let mut unread = Vec::new();
+    let mut checked = Vec::new();
     for ledger in menu_order(ledgers) {
         let read = with(
             request(Verb::Source, &format!("{}stalled", ledger.prefix()))?,
@@ -863,22 +885,47 @@ async fn stalled_section(inv: &Invocation<'_>, ledgers: &[Ledger]) -> Result<Str
         );
         match crate::ui_retry::read(inv, read, crate::ui_retry::Via::Run).await {
             Ok(answer) => match serde_json::from_slice::<serde_json::Value>(&answer.bytes) {
-                Ok(doc) => rows.extend(stalled_rows(ledger, &doc)),
+                Ok(doc) => {
+                    checked.push(ledger.clone());
+                    rows.extend(stalled_rows(ledger, &doc));
+                }
                 Err(_) => unread.push(ledger.name().to_string()),
             },
             Err(Error::Denied(_)) => {}
             Err(_) => unread.push(ledger.name().to_string()),
         }
     }
-    Ok(stalled_html(&rows, &unread))
+    Ok(stalled_html(&checked, &rows, &unread))
 }
 
-/// [`stalled_section`]'s markup: a heading, a sentence, and a table when there are rows.
-pub(crate) fn stalled_html(rows: &[StalledRow], unread: &[String]) -> String {
+/// [`stalled_section`]'s markup: a heading, the ledgers it checked, a sentence, and a table when
+/// there are rows.
+pub(crate) fn stalled_html(checked: &[Ledger], rows: &[StalledRow], unread: &[String]) -> String {
     let mut out = String::from(
-        "<section class=\"readout\" aria-labelledby=\"dashboard-stalled\">\
-         <h3 id=\"dashboard-stalled\">Stalled claims</h3>",
+        "<h2 class=\"sr-only\" id=\"dashboard-stalled\">Stalled claims</h2>\
+         <section class=\"readout\" aria-labelledby=\"dashboard-stalled\">",
     );
+    let links: Vec<String> = checked
+        .iter()
+        .map(|ledger| {
+            format!(
+                "<a href=\"{}\">{}</a>",
+                attr(&ledger_href(ledger)),
+                html_text(ledger.name())
+            )
+        })
+        .collect();
+    out.push_str(&match links.len() {
+        0 => "<p class=\"note\">0 ledgers you may read were checked.</p>".to_string(),
+        1 => format!(
+            "<p class=\"note\">Checked 1 ledger you may read: {}.</p>",
+            links[0]
+        ),
+        n => format!(
+            "<p class=\"note\">Checked {n} ledgers you may read: {}.</p>",
+            links.join(", ")
+        ),
+    });
     let sentence = match rows.len() {
         0 => "No claim has stalled: no open item in a ledger you may read is held on a lease \
               that has run out. As of this page load."
@@ -953,7 +1000,7 @@ pub(crate) fn stalled_html(rows: &[StalledRow], unread: &[String]) -> String {
 /// bind its resources, the rule `onboard::offers_page` keeps for a page with nothing behind it.
 pub(crate) fn offered(web: &Web, capability: &Capability, tab: Tab) -> bool {
     match tab {
-        Tab::Ledgers | Tab::Agents => true,
+        Tab::Ledgers | Tab::Agents | Tab::Stalled => true,
         Tab::Cache => capability.allows(crate::operator::CAP_INSPECT),
         Tab::System => {
             capability.allows(crate::system::CAP_READ)
@@ -1064,7 +1111,7 @@ impl Endpoint for DashboardPage {
         match self.tab {
             Tab::Cache => "gonk-page-dashboard-cache",
             Tab::System => "gonk-page-dashboard-system",
-            Tab::Ledgers | Tab::Agents => "gonk-page-dashboard",
+            Tab::Ledgers | Tab::Agents | Tab::Stalled => "gonk-page-dashboard",
         }
     }
 
@@ -1074,7 +1121,8 @@ impl Endpoint for DashboardPage {
             .summary(
                 "One tab of the Dashboard as an HTML page: a chart of the daily open and closed \
                  counts of every ledger this caller may read, each linking to its ledger, or a \
-                 table of each ledger's agents. A ledger the caller may not read is absent. A \
+                 table of each ledger's agents, or the open items held on a lease that has run \
+                 out. A ledger the caller may not read is absent. A \
                  caller who may read none is told how to get one. An open page refreshes the \
                  shown tab's charts or tables from their own fragments, and the other tab asks \
                  nothing.",
@@ -1108,7 +1156,7 @@ impl Endpoint for PanelFragment {
         match self.tab {
             Tab::Cache => "gonk-fragment-dashboard-panel-cache",
             Tab::System => "gonk-fragment-dashboard-panel-system",
-            Tab::Ledgers | Tab::Agents => "gonk-fragment-dashboard-panel",
+            Tab::Ledgers | Tab::Agents | Tab::Stalled => "gonk-fragment-dashboard-panel",
         }
     }
 
@@ -1117,7 +1165,7 @@ impl Endpoint for PanelFragment {
             .title("One Dashboard tab's panel, as a fragment")
             .summary(
                 "What the Dashboard's page draws under this tab, with no page around it: the \
-                 charts or the agent tables of every ledger this caller may read, each of which \
+                 charts, the agent tables or the stalled claims of every ledger this caller may read, each of which \
                  then polls its own fragment.",
             )
             .verb(Verb::Source)
@@ -1128,9 +1176,11 @@ impl Endpoint for PanelFragment {
     }
 }
 
-/// [`Tab::OPERATOR`]'s pages, panels and parts, and the workers' resource: what `web::space` binds.
+/// [`Tab::Stalled`]'s page and panel (ledger #3717), [`Tab::OPERATOR`]'s pages, panels and parts,
+/// and the workers' resource: what `web::space` binds here.
 pub(crate) fn bind_operator(mut space: EndpointSpace, web: &Arc<Web>) -> EndpointSpace {
     for (tab, page, panel) in [
+        (Tab::Stalled, STALLED_PAGE_IRI, STALLED_PANEL_IRI),
         (Tab::Cache, CACHE_PAGE_IRI, CACHE_PANEL_IRI),
         (Tab::System, SYSTEM_PAGE_IRI, SYSTEM_PANEL_IRI),
     ] {

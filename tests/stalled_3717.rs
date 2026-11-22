@@ -206,8 +206,13 @@ fn dashboard_kernels(configured: &[&str]) -> (Arc<Kernel>, Kernel, tempfile::Tem
     (hub, http, config)
 }
 
+/// The Dashboard's Stalled claims tab, as a page.
 fn dashboard(http: &Kernel, reader: &Capability) -> String {
-    let page = request(Verb::Source, ikigai_gonk::dashboard::PAGE_IRI, &[]);
+    page_of(http, reader, ikigai_gonk::dashboard::STALLED_PAGE_IRI)
+}
+
+fn page_of(http: &Kernel, reader: &Capability, iri: &str) -> String {
+    let page = request(Verb::Source, iri, &[]);
     let html = futures::executor::block_on(Kernel::issue(http, page, reader))
         .expect("the Dashboard renders");
     String::from_utf8_lossy(&html.bytes).into_owned()
@@ -222,7 +227,15 @@ fn a_dashboard_with_no_stalled_claim_says_so() {
         Capability::scoped(grants_for_all(&["default".to_string()], Authority::Read).unwrap());
     let page = dashboard(&http, &reader);
     assert!(
-        page.contains("<h3 id=\"dashboard-stalled\">Stalled claims</h3>"),
+        page.contains("<h2 class=\"sr-only\" id=\"dashboard-stalled\">Stalled claims</h2>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("<title>Dashboard: Stalled claims · gonk</title>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("Checked 1 ledger you may read: <a href=\"/l/default\">default</a>."),
         "{page}"
     );
     assert!(page.contains("No claim has stalled"), "{page}");
@@ -261,7 +274,7 @@ fn the_dashboard_lists_a_stalled_claim_with_its_holder_epoch_and_age() {
 
     std::thread::sleep(Duration::from_millis(1500));
     let page = dashboard(&http, &reader);
-    let section = &page[page.find("dashboard-stalled").expect("the section")..];
+    let section = &page[page.find("id=\"dashboard-stalled\"").expect("the section")..];
     let section = &section[..section.find("</section>").expect("its end")];
     assert!(
         section.contains("1 open item is held on a lease that has run out"),
@@ -296,4 +309,65 @@ fn the_dashboard_lists_a_stalled_claim_with_its_holder_epoch_and_age() {
     issue("urn:iki:ledger:default:lapse", &[]);
     let page = dashboard(&http, &reader);
     assert!(page.contains("<td>Yes</td>"), "{page}");
+}
+
+/// ★ The stalled claims are a tab of their own (ledger #2971's contract): the Ledgers and Agents
+/// pages hold an empty, hidden Stalled claims panel and read no `stalled` list, and the Stalled
+/// claims page holds neither of theirs.
+#[test]
+fn the_stalled_claims_are_their_own_tab_and_read_only_when_shown() {
+    let (hub, http, _config) = dashboard_kernels(&["default"]);
+    let root = Capability::root();
+    for (verb_iri, args) in [
+        (
+            "urn:iki:ledger:default:append",
+            vec![("content", "held too long")],
+        ),
+        (
+            "urn:iki:ledger:default:claim",
+            vec![("item", "1"), ("content", "worker-1"), ("lease", "1s")],
+        ),
+    ] {
+        futures::executor::block_on(Kernel::issue(
+            &hub,
+            request(Verb::Sink, verb_iri, &args),
+            &root,
+        ))
+        .unwrap_or_else(|e| panic!("{verb_iri}: {e}"));
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    let reader =
+        Capability::scoped(grants_for_all(&["default".to_string()], Authority::Read).unwrap());
+    for iri in [
+        ikigai_gonk::dashboard::PAGE_IRI,
+        ikigai_gonk::dashboard::LEDGERS_PAGE_IRI,
+        ikigai_gonk::dashboard::AGENTS_PAGE_IRI,
+    ] {
+        let page = page_of(&http, &reader, iri);
+        assert!(
+            page.contains("id=\"dashboard-tab-stalled\""),
+            "{iri}: {page}"
+        );
+        assert!(
+            page.contains("href=\"/dashboard/stalled\""),
+            "{iri}: the tab is a plain link: {page}"
+        );
+        assert!(!page.contains("worker-1"), "{iri}: {page}");
+        assert!(!page.contains("id=\"dashboard-stalled\""), "{iri}: {page}");
+        let at = page
+            .find("id=\"dashboard-panel-stalled\"")
+            .expect("its panel");
+        let open = &page[..at].rfind("<section").expect("its element");
+        let close = at + page[at..].find('>').expect("its tag's end");
+        assert!(page[*open..close].contains("hidden="), "{iri}: {page}");
+        assert!(
+            page[close + 1..].starts_with("</section>"),
+            "{iri}: the hidden panel holds nothing: {page}"
+        );
+    }
+    let page = dashboard(&http, &reader);
+    assert!(page.contains("worker-1"), "{page}");
+    assert!(page.contains("aria-current=\"page\""), "{page}");
+    assert!(!page.contains("hx-get=\"/dashboard/chart"), "{page}");
+    assert!(!page.contains("hx-get=\"/dashboard/agents"), "{page}");
 }

@@ -169,17 +169,31 @@ try {
     JSON.stringify(since(from)) === JSON.stringify(["/dashboard/panel/agents"]),
     `a switch fetches its panel once: ${since(from)}`,
   );
+  // The third tab, Stalled claims (ledger #3717), is read once on a switch and polls nothing.
+  const stalledReady = () => page.locator("#dashboard-panel-stalled #dashboard-stalled").waitFor();
+  from = asks.length;
+  await page.keyboard.press("ArrowRight");
+  check(await focusId() === "dashboard-tab-stalled", "ArrowRight moves to Stalled claims");
+  await stalledReady();
+  check(
+    JSON.stringify(since(from)) === JSON.stringify(["/dashboard/panel/stalled"]),
+    `a switch to Stalled claims fetches its panel once: ${since(from)}`,
+  );
+  check(await agentsPanel.isHidden() && await agentsPanel.innerHTML() === "", "Agents is emptied");
   await page.keyboard.press("ArrowRight");
   check(await focusId() === "dashboard-tab-ledgers", "ArrowRight wraps round to Ledgers");
   await shownReady("ledgers");
   await page.keyboard.press("ArrowLeft");
-  check(await focusId() === "dashboard-tab-agents", "ArrowLeft wraps back to Agents");
-  await shownReady("agents");
+  check(await focusId() === "dashboard-tab-stalled", "ArrowLeft wraps back to Stalled claims");
+  await stalledReady();
   await page.keyboard.press("Home");
   check(await focusId() === "dashboard-tab-ledgers", "Home goes to the first");
   await shownReady("ledgers");
   await page.keyboard.press("End");
-  check(await focusId() === "dashboard-tab-agents", "End goes to the last");
+  check(await focusId() === "dashboard-tab-stalled", "End goes to the last");
+  await stalledReady();
+  await page.keyboard.press("ArrowLeft");
+  check(await focusId() === "dashboard-tab-agents", "ArrowLeft goes back to Agents");
   await shownReady("agents");
   const scrolled = await page.evaluate(() => window.scrollY);
   await page.keyboard.press("Space");
