@@ -399,6 +399,37 @@ pub fn compose_serving_with_lifecycles(
     views: Option<&crate::views::Views>,
     lifecycles: ikigai_ledger::lifecycle::Lifecycles,
 ) -> (Kernel, Arc<dyn Space>) {
+    compose_serving_with_ledger_routes(
+        store,
+        browse,
+        mounted,
+        trigger,
+        backups,
+        scripts,
+        nl,
+        views,
+        lifecycles,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// [`compose_serving_with_lifecycles`] with each ledger's lapse label too (ledger #3717,
+/// `gonk.ledger.lapse.label`, [`crate::lapse::labels`]): passed to
+/// `ikigai_ledger::SpaceConfig::lapse_label`, so the lapse Sink labels the item whose lapse it
+/// records. An empty map, the default, routes nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_serving_with_ledger_routes(
+    store: DurableStore,
+    browse: Option<Arc<crate::browse::CachedReads>>,
+    mounted: Vec<Arc<dyn Space>>,
+    trigger: Vec<Arc<dyn Space>>,
+    backups: Option<crate::backup::Backups>,
+    scripts: Option<&crate::script::Scripts>,
+    nl: Option<&crate::nl::Nl>,
+    views: Option<&crate::views::Views>,
+    lifecycles: ikigai_ledger::lifecycle::Lifecycles,
+    lapse_labels: &std::collections::BTreeMap<String, String>,
+) -> (Kernel, Arc<dyn Space>) {
     // ★ Bounded before anything parses caller SPARQL (ledger #915): a query nested or chained
     // deep enough overflows the parser's or the evaluator's stack, and that ABORTS the
     // process. In the hub, so it holds for every door: nesting at every depth, length for a
@@ -426,12 +457,15 @@ pub fn compose_serving_with_lifecycles(
     // ★ And who may CLAIM an author (ledger #2836): `crate::participants` names the graph that
     // enrolls a delegate or an import principal. The committer itself is the ledger's to stamp,
     // from the capability's principal.
-    spaces.push(Arc::new(ikigai_ledger::space_with(
+    // Each ledger's lapse label (ledger #3717), checked by `crate::lapse::labels` at start.
+    let ledger_config = lapse_labels.iter().fold(
         ikigai_ledger::SpaceConfig::default()
             .claim_kind(crate::admit::claim_kind())
             .lifecycles(lifecycles)
             .participants(crate::participants::GRAPH),
-    )));
+        |config, (ledger, label)| config.lapse_label(ledger, label),
+    );
+    spaces.push(Arc::new(ikigai_ledger::space_with(ledger_config)));
     // ★ The page renderer's chunk resource (`urn:iki:gonk:render`, ledger #519) lives HERE
     // and not in the HTTP door's page space, because the hub holds the one cache in the
     // process (`crate::doors`): a chunk is a pure, cacheable function of its document, and

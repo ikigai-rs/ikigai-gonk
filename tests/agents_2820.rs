@@ -875,7 +875,9 @@ fn a_load_between_writes_asks_the_store_nothing() {
     // by holder (ledger #3678), and the seven again across all of them for the totals row (ledger
     // #3178): the same whatever `AGENTS` is.
     let tabs = [
-        ("urn:iki:gonk:page:dashboard:ledgers", 1),
+        // Plus every ledger's Stalled claims (ledger #3717): `stalled` hangs on the store-wide
+        // write threads, so a write anywhere rereads it, two store queries a ledger.
+        ("urn:iki:gonk:page:dashboard:ledgers", 1 + 2 * NAMES.len()),
         ("urn:iki:gonk:page:dashboard:agents", 1 + 7 + 7),
     ];
     // Per-graph freshness keeps other ledgers warm: only this ledger's answers are read.

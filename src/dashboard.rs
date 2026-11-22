@@ -750,9 +750,10 @@ async fn panel_html(
                 1 => "1 ledger you may read".to_string(),
                 n => format!("{n} ledgers you may read"),
             };
+            let stalled = stalled_section(inv, ledgers).await?;
             format!(
                 "<h2 class=\"sr-only\" id=\"dashboard-ledgers\">Ledgers</h2>\
-                 <p class=\"note\">{count}</p><div class=\"chart-grid\">{}</div>",
+                 <p class=\"note\">{count}</p>{stalled}<div class=\"chart-grid\">{}</div>",
                 charts.concat()
             )
         }
@@ -765,6 +766,186 @@ async fn panel_html(
             )
         }
     })
+}
+
+/// One stalled claim, as the Dashboard lists it (ledger #3717): from
+/// `urn:iki:ledger:{ledger}:stalled as=application/json`, read under the viewer's capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StalledRow {
+    pub(crate) ledger: Ledger,
+    pub(crate) number: String,
+    pub(crate) display: String,
+    pub(crate) title: String,
+    pub(crate) holder: String,
+    pub(crate) epoch: Option<i64>,
+    pub(crate) lapsed: String,
+    pub(crate) recorded: bool,
+    /// How long before the ledger's `checked_at` the lease ran out, in milliseconds.
+    pub(crate) ago_ms: Option<u64>,
+}
+
+/// `YYYY-MM-DDTHH:MM:SS(.fff)Z` as milliseconds since the epoch, or `None` for anything else.
+fn instant_ms(iso: &str) -> Option<u64> {
+    let bare = iso.strip_suffix('Z')?;
+    let (whole, fraction) = bare.split_once('.').unwrap_or((bare, ""));
+    if whole.len() != 19 || !whole.is_ascii() || whole.as_bytes()[10] != b'T' {
+        return None;
+    }
+    let num = |range: std::ops::Range<usize>| whole.get(range)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let millis: i64 = match fraction.get(..3.min(fraction.len())) {
+        Some(digits) if !digits.is_empty() => format!("{digits:0<3}").parse().ok()?,
+        _ => 0,
+    };
+    u64::try_from(((days * 24 + hh) * 60 + mm) * 60 + ss)
+        .ok()
+        .map(|seconds| seconds * 1000 + millis as u64)
+}
+
+/// The rows of one ledger's stalled document, oldest lapse first as the ledger orders them.
+pub(crate) fn stalled_rows(ledger: &Ledger, doc: &serde_json::Value) -> Vec<StalledRow> {
+    let checked = doc["checked_at"].as_str().and_then(instant_ms);
+    let Some(rows) = doc["stalled"].as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let number = row["item"]["number"].as_i64()?.to_string();
+            let lapsed = row["lapsed"].as_str()?.to_string();
+            let ago_ms = match (checked, instant_ms(&lapsed)) {
+                (Some(now), Some(then)) => Some(now.saturating_sub(then)),
+                _ => None,
+            };
+            Some(StalledRow {
+                ledger: ledger.clone(),
+                display: row["item"]["display"]
+                    .as_str()
+                    .map_or_else(|| format!("{}#{number}", ledger.name()), str::to_string),
+                number,
+                title: row["title"].as_str().unwrap_or_default().to_string(),
+                holder: row["holder"].as_str().unwrap_or_default().to_string(),
+                epoch: row["epoch"].as_i64(),
+                lapsed,
+                recorded: row["recorded"].as_bool().unwrap_or(false),
+                ago_ms,
+            })
+        })
+        .collect()
+}
+
+/// The Ledgers tab's "Stalled claims" section (ledger #3717): every open item, in a ledger this
+/// viewer may read, held on a lease that has run out. An expired lease is never freed by the
+/// ledger, so each row stays until its holder renews or another takes it over. A ledger whose
+/// stalled list this viewer may not read is left out, the rule the charts keep; one that fails
+/// otherwise is named in a sentence. Read once per page load: `stalled` is cached under the
+/// store's write threads and until the next running lease ends, so a load between writes asks
+/// the store nothing for it.
+async fn stalled_section(inv: &Invocation<'_>, ledgers: &[Ledger]) -> Result<String> {
+    let mut rows = Vec::new();
+    let mut unread = Vec::new();
+    for ledger in menu_order(ledgers) {
+        let read = with(
+            request(Verb::Source, &format!("{}stalled", ledger.prefix()))?,
+            "as",
+            "application/json",
+        );
+        match crate::ui_retry::read(inv, read, crate::ui_retry::Via::Run).await {
+            Ok(answer) => match serde_json::from_slice::<serde_json::Value>(&answer.bytes) {
+                Ok(doc) => rows.extend(stalled_rows(ledger, &doc)),
+                Err(_) => unread.push(ledger.name().to_string()),
+            },
+            Err(Error::Denied(_)) => {}
+            Err(_) => unread.push(ledger.name().to_string()),
+        }
+    }
+    Ok(stalled_html(&rows, &unread))
+}
+
+/// [`stalled_section`]'s markup: a heading, a sentence, and a table when there are rows.
+pub(crate) fn stalled_html(rows: &[StalledRow], unread: &[String]) -> String {
+    let mut out = String::from(
+        "<section class=\"readout\" aria-labelledby=\"dashboard-stalled\">\
+         <h3 id=\"dashboard-stalled\">Stalled claims</h3>",
+    );
+    let sentence = match rows.len() {
+        0 => "No claim has stalled: no open item in a ledger you may read is held on a lease \
+              that has run out. As of this page load."
+            .to_string(),
+        n => format!(
+            "{} held on a lease that has run out, the oldest first, as of this page load. A \
+             lease that runs out is never freed by itself: the holder renews it, or another \
+             holder takes it over.",
+            if n == 1 {
+                "1 open item is".to_string()
+            } else {
+                format!("{n} open items are")
+            }
+        ),
+    };
+    out.push_str(&format!("<p class=\"note\">{}</p>", html_text(&sentence)));
+    if !unread.is_empty() {
+        out.push_str(&format!(
+            "<p class=\"note\">{}</p>",
+            html_text(&format!(
+                "The stalled claims of {} could not be read just now; they are not listed.",
+                unread.join(", ")
+            ))
+        ));
+    }
+    if !rows.is_empty() {
+        let body: String = rows
+            .iter()
+            .map(|row| {
+                let href = format!(
+                    "{}/item/{}",
+                    ledger_href(&row.ledger),
+                    url_segment(&row.number)
+                );
+                let ago = row.ago_ms.map_or_else(String::new, |ms| {
+                    format!(
+                        "{} ago, ",
+                        crate::backup::humanize(std::time::Duration::from_millis(ms))
+                    )
+                });
+                format!(
+                    "<tr><th scope=\"row\"><a href=\"{href}\">{display}</a> {title}</th>\
+                     <td>{holder}</td><td>{epoch}</td>\
+                     <td>{ago}<time datetime=\"{lapsed_attr}\">{lapsed}</time></td>\
+                     <td>{recorded}</td></tr>",
+                    href = attr(&href),
+                    display = html_text(&row.display),
+                    title = html_text(&row.title),
+                    holder = html_text(&row.holder),
+                    epoch = row
+                        .epoch
+                        .map_or_else(|| "none".to_string(), |e| e.to_string()),
+                    ago = html_text(&ago),
+                    lapsed_attr = attr(&row.lapsed),
+                    lapsed = html_text(&crate::web::when(&row.lapsed)),
+                    recorded = if row.recorded { "Yes" } else { "Not yet" },
+                )
+            })
+            .collect();
+        out.push_str(&crate::operator::table(
+            "Stalled claims",
+            &["Item", "Holder", "Epoch", "Lease ran out", "Lapse recorded"],
+            &body,
+        ));
+    }
+    out.push_str("</section>");
+    out
 }
 
 /// Whether this viewer is offered `tab`. An operator tab they may not read is not on their page at

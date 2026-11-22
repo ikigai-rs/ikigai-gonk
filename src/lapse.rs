@@ -42,6 +42,12 @@ use crate::backup::{humanize, stamp_iso, BackupTimer, NextRun, CATCH_UP};
 /// (or `off`) means no sweep.
 pub const EVERY_KEY: &str = "gonk.ledger.lapse.every";
 
+/// The config line routing a ledger's recorded lapses to a label (ledger #3717):
+/// `gonk.ledger.lapse.label = "ledger label"`, one line per ledger, passed to
+/// `ikigai_ledger::SpaceConfig::lapse_label`. With no line for a ledger (the default), a lapse
+/// is recorded and listed in `…:stalled`, and its item's labels are left alone.
+pub const LABEL_KEY: &str = "gonk.ledger.lapse.label";
+
 /// The job's one target, resolved only by the registry's own resolver (`Sweeper`): bound in no
 /// space, so no door reaches it.
 pub const SWEEP: &str = "urn:iki:gonk:lapse";
@@ -93,6 +99,51 @@ pub fn every(spelled: Option<&str>) -> std::result::Result<Option<Duration>, Str
         ));
     }
     Ok(Some(interval))
+}
+
+/// Each [`LABEL_KEY`] line as `ledger → label`, checked here so a line the ledger would refuse
+/// stops the server at start with the line named, never a panic in the ledger's space.
+///
+/// ```
+/// use ikigai_gonk::lapse::labels;
+/// let routes = labels(&["default needs-person".to_string()]).unwrap();
+/// assert_eq!(routes.get("default").map(String::as_str), Some("needs-person"));
+/// assert!(labels(&[]).unwrap().is_empty());
+/// assert!(labels(&["default".to_string()]).is_err());
+/// assert!(labels(&["default needs person".to_string()]).is_err());
+/// assert!(labels(&["default a".to_string(), "default b".to_string()]).is_err());
+/// assert!(labels(&["not/a/ledger x".to_string()]).is_err());
+/// ```
+pub fn labels(lines: &[String]) -> std::result::Result<BTreeMap<String, String>, String> {
+    let mut routes = BTreeMap::new();
+    for line in lines {
+        let mut words = line.split_whitespace();
+        let (Some(ledger), Some(label), None) = (words.next(), words.next(), words.next()) else {
+            return Err(format!(
+                "{LABEL_KEY}: expected `ledger label`, got `{line}` — for example \
+                 `default needs-person`"
+            ));
+        };
+        let ledger = Ledger::parse(ledger).map_err(|e| format!("{LABEL_KEY}: {e}"))?;
+        if !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+        {
+            return Err(format!(
+                "{LABEL_KEY}: `{label}` is not a label: letters, digits and `. _ : -` only"
+            ));
+        }
+        if routes
+            .insert(ledger.name().to_string(), label.to_string())
+            .is_some()
+        {
+            return Err(format!(
+                "{LABEL_KEY}: ledger `{}` is given a lapse label more than once",
+                ledger.name()
+            ));
+        }
+    }
+    Ok(routes)
 }
 
 /// How long after startup the first sweep runs: one cadence, but never more than

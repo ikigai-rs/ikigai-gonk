@@ -139,7 +139,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 64] = [
+const KEYS: [&str; 65] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -190,6 +190,7 @@ const KEYS: [&str; 64] = [
     crate::sensor::EVERY_KEY,
     crate::sensor::LEDGER_KEY,
     crate::lapse::EVERY_KEY,
+    crate::lapse::LABEL_KEY,
     "gonk.nl.ask",
     "gonk.review.space",
     "gonk.review.grant",
@@ -919,6 +920,9 @@ pub struct Settings {
     /// (`gonk.ledger.lapse.every`), or `None` when the line is absent: off, as before ledger
     /// #3790 — see [`crate::lapse`].
     pub lapse_every: Option<Duration>,
+    /// Each ledger's lapse label (`gonk.ledger.lapse.label = "ledger label"`, ledger #3717):
+    /// the label the lapse Sink adds to an item whose lapse it records. Empty by default: off.
+    pub lapse_labels: std::collections::BTreeMap<String, String>,
     /// The model door `urn:nl:sparql` drafts through (`gonk.nl.ask`, default
     /// [`crate::nl::DEFAULT_ASK`]) — a provider under `urn:llm:`, like every one here.
     pub nl_ask: String,
@@ -2570,6 +2574,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, crate::sensor::LEDGER_KEY).as_deref(),
         )?,
         lapse_every: crate::lapse::every(value_for(text, crate::lapse::EVERY_KEY).as_deref())?,
+        lapse_labels: crate::lapse::labels(&values_for(text, crate::lapse::LABEL_KEY))?,
         nl_ask: nl_ask(text)?,
         model_calls_per_hour: crate::budget::model_calls_per_hour(
             value_for(text, "gonk.mount.calls_per_hour").as_deref(),

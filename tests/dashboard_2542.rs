@@ -198,7 +198,9 @@ fn lines(html: &str) -> Vec<&str> {
 /// The ledger names the Dashboard titled charts with, in order.
 fn charted(page: &str) -> Vec<String> {
     // The section the charts are in: the agent panels after it have headings of their own.
+    // The Stalled claims section before the charts has a heading too (ledger #3717).
     let charts = page.split("id=\"dashboard-agents\"").next().unwrap();
+    let charts = charts.split("class=\"chart-grid\"").nth(1).unwrap_or("");
     charts
         .split("<h3 ")
         .skip(1)
@@ -506,12 +508,15 @@ fn a_load_between_writes_asks_the_store_nothing_and_a_write_redraws_one_chart() 
 
     // Cold: each ledger's counts, one store query each, and one transform each for its chart. The
     // agents are the other tab's (ledger #2971; `tests/agents_2820.rs` holds that tab's cost).
-    assert_eq!(one_load(&server, &reader), (4, 4, 4));
+    // Plus each ledger's Stalled claims read (ledger #3717): `stalled` and its next-lease query,
+    // two store queries a ledger.
+    assert_eq!(one_load(&server, &reader), (12, 4, 4));
     // Between writes: four cached reads, and nothing below them.
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
     // Store 0.5 and ledger 0.21.1 hang counts on each ledger's graph thread: a write
     // rereads only that ledger. Only its chart is redrawn, keyed on its changed document.
     server.seed("beta", 1, 0);
-    assert_eq!(one_load(&server, &reader), (1, 1, 4));
+    // `stalled` hangs on the store-wide write threads, so every ledger's is reread: eight more.
+    assert_eq!(one_load(&server, &reader), (9, 1, 4));
     assert_eq!(one_load(&server, &reader), (0, 0, 4));
 }
