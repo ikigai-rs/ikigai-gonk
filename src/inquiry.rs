@@ -11,6 +11,17 @@
 //! [`crate::layers_view`]), so a line without that one is refused at start, as is an owner the
 //! crate refuses. Without the line nothing is mounted, and the pages say how to configure it.
 //!
+//! A host whose layers were named explicitly, not after the owner, names them on a second line
+//! (ledger [#3980](http://localhost:1062/l/default/item/3980)), all five keys required:
+//!
+//! ```toml
+//! gonk.inquiry.layers = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold examples=inquiry-example intents=inquiry-intent"
+//! ```
+//!
+//! An unknown key, a missing one, one given twice, a name the crate refuses
+//! ([`Layers::checked`]) or the line without [`KEY`] stops gonk at start. Without it the
+//! names are [`Layers::for_owner`]'s.
+//!
 //! ```text
 //! /inquiry/view/name/{view}                       urn:iki:gonk:page:inquiry:view:name:{view}                     Source  the client's view, in gonk's chrome
 //! /inquiry/view/name/{view}/action/name/{action}  urn:iki:gonk:inquiry:view:name:{view}:action:name:{action}  Sink    one action on `inquiry=<id>`, then the view again
@@ -72,6 +83,10 @@ use crate::web::{self, Web};
 
 /// The config key.
 pub const KEY: &str = "gonk.inquiry.owner";
+/// The optional key naming the owner's five layers explicitly (ledger #3980).
+pub const LAYERS_KEY: &str = "gonk.inquiry.layers";
+/// [`LAYERS_KEY`]'s keys, in the order [`Layers`] holds them.
+pub const LAYER_KEYS: [&str; 5] = ["inquiry", "spam", "holding", "examples", "intents"];
 
 /// A view's page.
 pub const VIEW_TEMPLATE: &str = "urn:iki:gonk:page:inquiry:view:name:{view}";
@@ -233,6 +248,104 @@ pub fn parse_config(
     Ok(Some(line.to_string()))
 }
 
+/// Parse the [`LAYERS_KEY`] lines: none, or one naming all five layers as
+/// `inquiry=… spam=… holding=… examples=… intents=…`. `has_owner` is whether a [`KEY`] line
+/// names the owner they belong to.
+///
+/// ```
+/// use ikigai_gonk::inquiry::parse_layers;
+/// assert_eq!(parse_layers(&[], false).unwrap(), None);
+/// let line = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold \
+///             examples=inquiry-example intents=inquiry-intent";
+/// let layers = parse_layers(&[line.into()], true).unwrap().unwrap();
+/// assert_eq!(layers.holding, "inquiry-hold");
+/// assert!(parse_layers(&[line.into()], false).is_err());
+/// ```
+///
+/// # Errors
+///
+/// The key given twice, a word that is not `key=name`, an unknown key, a key missing or given
+/// twice, a name [`Layers::checked`] refuses, or no [`KEY`] line: each sentence names the key.
+pub fn parse_layers(
+    lines: &[String],
+    has_owner: bool,
+) -> std::result::Result<Option<Layers>, String> {
+    let line = match lines {
+        [] => return Ok(None),
+        [line] => line.trim(),
+        _ => {
+            return Err(format!(
+                "{LAYERS_KEY} is given {} times: one line names the owner's five layers",
+                lines.len()
+            ))
+        }
+    };
+    if !has_owner {
+        return Err(format!(
+            "{LAYERS_KEY} is set and no {KEY} line is: the layers belong to the owner that line \
+             names"
+        ));
+    }
+    let mut names: [Option<String>; 5] = Default::default();
+    for word in line.split_whitespace() {
+        let Some((key, name)) = word.split_once('=') else {
+            return Err(format!(
+                "{LAYERS_KEY}: `{word}` is not key=name (the keys are {})",
+                LAYER_KEYS.join(", ")
+            ));
+        };
+        let Some(at) = LAYER_KEYS.iter().position(|k| *k == key) else {
+            return Err(format!(
+                "{LAYERS_KEY}: `{key}` is not a key (the keys are {})",
+                LAYER_KEYS.join(", ")
+            ));
+        };
+        if names[at].is_some() {
+            return Err(format!("{LAYERS_KEY}: `{key}` is given twice"));
+        }
+        // The crate's own rule, asked of this one name, so the sentence can name its key.
+        let one = name.to_string();
+        let alone = Layers {
+            inquiry: one.clone(),
+            spam: one.clone(),
+            holding: one.clone(),
+            examples: one.clone(),
+            intents: one,
+        };
+        if let Err(e) = alone.checked() {
+            let detail = match e {
+                Error::InvalidArgument { detail, .. } => detail,
+                other => other.to_string(),
+            };
+            return Err(format!("{LAYERS_KEY}: `{key}`: {detail}"));
+        }
+        names[at] = Some(name.to_string());
+    }
+    let missing: Vec<&str> = LAYER_KEYS
+        .iter()
+        .zip(&names)
+        .filter(|(_, name)| name.is_none())
+        .map(|(key, _)| *key)
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{LAYERS_KEY}: `{}` is missing: the line names all five layers",
+            missing.join("`, `")
+        ));
+    }
+    let [inquiry, spam, holding, examples, intents] = names.map(Option::unwrap_or_default);
+    Layers {
+        inquiry,
+        spam,
+        holding,
+        examples,
+        intents,
+    }
+    .checked()
+    .map(Some)
+    .map_err(|e| format!("{LAYERS_KEY}: {e}"))
+}
+
 // ------------------------------------------------------------------------------ the door
 
 /// The client's `urn:layer:`, `urn:layers:` and `urn:collab:` sub-requests, sent to the door and
@@ -330,13 +443,22 @@ pub struct Inquiry {
 impl Inquiry {
     /// The client for `owner`, reaching its layers through `door`: the Layers page's door in
     /// production ([`crate::layers_view::dial`]), which is confined here again to
-    /// [`crate::layers_view::PREFIXES`] and writes only as a person.
+    /// [`crate::layers_view::PREFIXES`] and writes only as a person. The layers are `layers`
+    /// when a [`LAYERS_KEY`] line names them ([`parse_layers`]), else [`Layers::for_owner`]'s.
     ///
     /// # Errors
     ///
-    /// An owner the crate refuses.
-    pub fn new(owner: &str, door: Arc<dyn Door>) -> std::result::Result<Arc<Inquiry>, String> {
-        let layers = Layers::for_owner(owner).map_err(|e| format!("{KEY} `{owner}`: {e}"))?;
+    /// An owner the crate refuses, or a layer name [`Layers::checked`] refuses.
+    pub fn new(
+        owner: &str,
+        layers: Option<Layers>,
+        door: Arc<dyn Door>,
+    ) -> std::result::Result<Arc<Inquiry>, String> {
+        Layers::for_owner(owner).map_err(|e| format!("{KEY} `{owner}`: {e}"))?;
+        let layers = match layers {
+            Some(layers) => layers.checked().map_err(|e| format!("{LAYERS_KEY}: {e}"))?,
+            None => Layers::for_owner(owner).map_err(|e| format!("{KEY} `{owner}`: {e}"))?,
+        };
         let door = crate::layers_view::confined(Arc::new(PersonWrites {
             door,
             person: OnceLock::new(),

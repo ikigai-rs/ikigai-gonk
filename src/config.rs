@@ -139,7 +139,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 63] = [
+const KEYS: [&str; 64] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -153,6 +153,7 @@ const KEYS: [&str; 63] = [
     "gonk.layers.view",
     "gonk.layers.local",
     crate::inquiry::KEY,
+    crate::inquiry::LAYERS_KEY,
     "gonk.feeds.door",
     "gonk.queue.serious",
     "gonk.bind",
@@ -879,6 +880,10 @@ pub struct Settings {
     /// [`crate::inquiry`]), through the Layers page's door and identity, or `None`: the client's
     /// pages say it is not configured.
     pub inquiry: Option<String>,
+    /// The owner's five layers when a `gonk.inquiry.layers` line names them explicitly
+    /// ([`crate::inquiry::parse_layers`], ledger #3980), or `None`: the client names them
+    /// after the owner ([`ikigai_inquiry::Layers::for_owner`]).
+    pub inquiry_layers: Option<ikigai_inquiry::Layers>,
     /// The host whose public feeds this server may join (`gonk.feeds.door`, ledger #3291).
     pub feeds_door: String,
     /// The per-kind providers and spend ceilings the explanation families derive under.
@@ -2452,6 +2457,10 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         &values_for(text, crate::inquiry::KEY),
         layers_view.is_some(),
     )?;
+    let inquiry_layers = crate::inquiry::parse_layers(
+        &values_for(text, crate::inquiry::LAYERS_KEY),
+        inquiry.is_some(),
+    )?;
     let feeds_door = match values_for(text, crate::feeds_join::DOOR_KEY).as_slice() {
         [] => crate::feeds_join::DEFAULT_DOOR.to_string(),
         [line] => crate::feeds_join::parse_door(line)?,
@@ -2538,6 +2547,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         layers,
         layers_view,
         inquiry,
+        inquiry_layers,
         feeds_door,
         explain,
         backup,
@@ -4507,6 +4517,102 @@ mod tests {
         refused(
             format!("gonk.layers.view = \"quic://h:1 /nowhere/at/all\"\n{owner}"),
             "not a directory",
+        );
+    }
+
+    /// Ledger #3980: `gonk.inquiry.layers` names the owner's five layers explicitly, as a host
+    /// that named them so (the edge's `inquiry`, `inquiry-spam`, …) needs; each bad line stops
+    /// gonk at start with a sentence naming the key. Without it the names are the owner's.
+    #[test]
+    fn the_inquiry_layers_line_names_all_five_or_stops_gonk() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["client.crt", "client.key", "server.crt"] {
+            std::fs::write(dir.path().join(file), "pem").unwrap();
+        }
+        let view = format!(
+            "gonk.layers.view = \"quic://h:1 {}\"\n",
+            dir.path().display()
+        );
+        let owner = "gonk.inquiry.owner = \"brian\"\n";
+        let edge = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold \
+                    examples=inquiry-example intents=inquiry-intent";
+        let line = |names: &str| format!("gonk.inquiry.layers = \"{names}\"\n");
+        let got = settings(
+            &Flags::default(),
+            &format!("{view}{owner}{}", line(edge)),
+            &homes(),
+        )
+        .unwrap();
+        assert_eq!(
+            got.inquiry_layers,
+            Some(ikigai_inquiry::Layers {
+                inquiry: "inquiry".into(),
+                spam: "inquiry-spam".into(),
+                holding: "inquiry-hold".into(),
+                examples: "inquiry-example".into(),
+                intents: "inquiry-intent".into(),
+            })
+        );
+        assert_eq!(
+            settings(&Flags::default(), &format!("{view}{owner}"), &homes())
+                .unwrap()
+                .inquiry_layers,
+            None
+        );
+
+        let refused = |names: &str, says: &[&str]| {
+            let text = format!("{view}{owner}{}", line(names));
+            let e = settings(&Flags::default(), &text, &homes()).unwrap_err();
+            for word in says {
+                assert!(e.contains(word), "{names}: {e}");
+            }
+            assert!(e.contains("gonk.inquiry.layers"), "{names}: {e}");
+        };
+        refused(&format!("{edge} extra=x"), &["`extra`", "not a key"]);
+        refused(
+            "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold examples=inquiry-example",
+            &["`intents`", "missing"],
+        );
+        refused(&format!("{edge} spam=again"), &["`spam`", "twice"]);
+        refused(
+            &edge.replace("holding=inquiry-hold", "holding=Inquiry-Hold"),
+            &["`holding`", "lowercase"],
+        );
+        refused(
+            &edge.replace(
+                "examples=inquiry-example",
+                "examples=a-name-longer-than-24-chars",
+            ),
+            &["`examples`", "24"],
+        );
+        refused(
+            &edge.replace("intents=inquiry-intent", "intents="),
+            &["`intents`"],
+        );
+        refused(
+            &edge.replace("spam=inquiry-spam", "inquiry-spam"),
+            &["`inquiry-spam`", "key=name"],
+        );
+        // The line without the owner it belongs to, and the line twice.
+        let e = settings(
+            &Flags::default(),
+            &format!("{view}{}", line(edge)),
+            &homes(),
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("gonk.inquiry.layers") && e.contains("gonk.inquiry.owner"),
+            "{e}"
+        );
+        let e = settings(
+            &Flags::default(),
+            &format!("{view}{owner}{}{}", line(edge), line(edge)),
+            &homes(),
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("gonk.inquiry.layers") && e.contains("2 times"),
+            "{e}"
         );
     }
 

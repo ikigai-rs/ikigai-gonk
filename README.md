@@ -3381,6 +3381,17 @@ page's door, as the identity its `gonk.layers.view` line names**, so that line i
 owner the crate refuses (1 to 12 of `a-z`, `0-9` and `-`) or a missing `gonk.layers.view` stops
 gonk at start. Without the line the pages say the client is not configured and show it.
 
+```toml
+gonk.inquiry.layers = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold examples=inquiry-example intents=inquiry-intent"
+```
+
+A second, optional line names the five layers explicitly (ledger #3980). It is needed on a host
+whose layers were named explicitly rather than after the owner, as the edge's are (`inquiry`,
+`inquiry-spam`, … for `brian`, above). All five keys are required; an unknown key, a missing one,
+one given twice, a name that is not a layer name (`a-z`, `0-9` and `-`, at most 24) or the line
+without `gonk.inquiry.owner` stops gonk at start with a sentence naming the key. Without it the
+layers are named after the owner as above.
+
 | path | what |
 |---|---|
 | `/inquiry/view/name/pending` | the pending inquiries, by site, newest first, each with a reply link and its buttons |
