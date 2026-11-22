@@ -134,7 +134,7 @@
   // leaves htmx and is the form's ordinary GET navigation (form.submit() fires no submit event,
   // so htmx does not take it back). Focus and history are the browser's, as for any link.
   const ITEM_NUMBER = /^\s*#?\d+\s*$/;
-  document.addEventListener("htmx:beforeRequest", (e) => {
+  document.addEventListener("htmx:configRequest", (e) => {
     const form = e.detail && e.detail.elt;
     if (!form || form.tagName !== "FORM" || !form.classList.contains("search")) return;
     const text = form.querySelector("#search-text");
