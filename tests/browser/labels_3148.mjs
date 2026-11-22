@@ -45,7 +45,7 @@ try {
           assert.equal(await labels.inputValue(), file === "label-filter.html" ? "needs-person" : file === "label-empty.html" ? "missing" : "");
           assert.equal(await without.inputValue(), file === "ledger.html" ? "" : "blocked");
           // Tab reaches both fields, their submit button, then the plain filter links.
-          await page.getByRole("searchbox", { name: "Search titles", exact: true }).focus();
+          await page.getByRole("searchbox", { name: "Search titles or go to an item number", exact: true }).focus();
           await page.keyboard.press("Tab");
           assert.ok(await labels.evaluate((node) => node === document.activeElement));
           await page.keyboard.press("Tab");

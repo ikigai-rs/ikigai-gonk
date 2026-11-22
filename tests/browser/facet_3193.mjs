@@ -46,7 +46,7 @@ try {
           await page.goto(`http://127.0.0.1:${server.addr.port}/${file}?theme=${theme}`, { waitUntil: "domcontentloaded" });
           assert.equal(await page.locator("html").getAttribute("data-theme"), theme);
           if (file !== "facet-page.html") {
-            const search = page.getByRole("searchbox", { name: "Search titles", exact: true });
+            const search = page.getByRole("searchbox", { name: "Search titles or go to an item number", exact: true });
             await search.focus();
             if (javaScriptEnabled) {
               // The list is already visible while its counts are still in flight.
