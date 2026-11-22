@@ -139,7 +139,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 63] = [
+const KEYS: [&str; 64] = [
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -153,6 +153,7 @@ const KEYS: [&str; 63] = [
     "gonk.layers.view",
     "gonk.layers.local",
     crate::inquiry::KEY,
+    crate::inquiry::LAYERS_KEY,
     "gonk.feeds.door",
     "gonk.queue.serious",
     "gonk.bind",
@@ -876,9 +877,10 @@ pub struct Settings {
     /// `None`: the page says it is not configured.
     pub layers_view: Option<crate::layers_view::ViewConfig>,
     /// The owner whose inquiry layers client this server mounts (`gonk.inquiry.owner`,
-    /// [`crate::inquiry`]), through the Layers page's door and identity, or `None`: the client's
-    /// pages say it is not configured.
-    pub inquiry: Option<String>,
+    /// [`crate::inquiry`]), and its layers' names when `gonk.inquiry.layers` gives them, through
+    /// the Layers page's door and identity, or `None`: the client's pages say it is not
+    /// configured.
+    pub inquiry: Option<crate::inquiry::Config>,
     /// The host whose public feeds this server may join (`gonk.feeds.door`, ledger #3291).
     pub feeds_door: String,
     /// The per-kind providers and spend ceilings the explanation families derive under.
@@ -2450,6 +2452,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     };
     let inquiry = crate::inquiry::parse_config(
         &values_for(text, crate::inquiry::KEY),
+        &values_for(text, crate::inquiry::LAYERS_KEY),
         layers_view.is_some(),
     )?;
     let feeds_door = match values_for(text, crate::feeds_join::DOOR_KEY).as_slice() {
@@ -4478,7 +4481,7 @@ mod tests {
         );
         let owner = "gonk.inquiry.owner = \"brian\"\n";
         let got = settings(&Flags::default(), &format!("{view}{owner}"), &homes()).unwrap();
-        assert_eq!(got.inquiry.as_deref(), Some("brian"));
+        assert_eq!(got.inquiry.map(|c| c.owner).as_deref(), Some("brian"));
         assert_eq!(
             settings(&Flags::default(), &view, &homes())
                 .unwrap()
@@ -4508,6 +4511,120 @@ mod tests {
             format!("gonk.layers.view = \"quic://h:1 /nowhere/at/all\"\n{owner}"),
             "not a directory",
         );
+    }
+
+    /// Ledger #3980: `gonk.inquiry.layers` names the owner's five layers explicitly (the edge's
+    /// are not owner-suffixed), and a bad line stops gonk at start with a sentence naming the
+    /// key. Without it, `for_owner` names them as before.
+    #[test]
+    fn the_inquiry_layers_line_names_all_five_or_stops_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["client.crt", "client.key", "server.crt"] {
+            std::fs::write(dir.path().join(file), "pem").unwrap();
+        }
+        let view = format!(
+            "gonk.layers.view = \"quic://h:1 {}\"\n",
+            dir.path().display()
+        );
+        let owner = "gonk.inquiry.owner = \"brian\"\n";
+        let edge = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold \
+                    examples=inquiry-example intents=inquiry-intent";
+        let line = |names: &str| format!("gonk.inquiry.layers = \"{names}\"\n");
+
+        let got = settings(
+            &Flags::default(),
+            &format!("{view}{owner}{}", line(edge)),
+            &homes(),
+        )
+        .unwrap()
+        .inquiry
+        .unwrap();
+        assert_eq!(got.owner, "brian");
+        let layers = got.layers().unwrap();
+        assert_eq!(
+            [
+                layers.inquiry.as_str(),
+                &layers.spam,
+                &layers.holding,
+                &layers.examples,
+                &layers.intents
+            ],
+            [
+                "inquiry",
+                "inquiry-spam",
+                "inquiry-hold",
+                "inquiry-example",
+                "inquiry-intent"
+            ]
+        );
+        // Without the line, the owner's conventional names, as before.
+        let plain = settings(&Flags::default(), &format!("{view}{owner}"), &homes())
+            .unwrap()
+            .inquiry
+            .unwrap();
+        assert_eq!(plain.layers, None);
+        assert_eq!(plain.layers().unwrap().inquiry, "inquiry-brian");
+
+        let refused = |names: &str, says: &[&str]| {
+            let text = format!("{view}{owner}{}", line(names));
+            let e = settings(&Flags::default(), &text, &homes()).unwrap_err();
+            for word in says {
+                assert!(e.contains(word), "{names}: {e}");
+            }
+        };
+        // A missing key.
+        refused(
+            "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold examples=inquiry-example",
+            &["gonk.inquiry.layers", "`intents`"],
+        );
+        // An unknown key.
+        refused(
+            &format!("{edge} archive=inquiry-archive"),
+            &["gonk.inquiry.layers", "`archive`"],
+        );
+        // A key given twice.
+        refused(
+            &format!("{edge} spam=inquiry-spam"),
+            &["gonk.inquiry.layers", "`spam`", "twice"],
+        );
+        // A name the crate refuses: uppercase, and too long.
+        refused(
+            &edge.replace("holding=inquiry-hold", "holding=Inquiry-Hold"),
+            &["gonk.inquiry.layers", "`holding`", "not a layer name"],
+        );
+        refused(
+            &edge.replace(
+                "examples=inquiry-example",
+                "examples=inquiry-example-of-spam-x",
+            ),
+            &["gonk.inquiry.layers", "`examples`", "not a layer name"],
+        );
+        refused(
+            &edge.replace("intents=inquiry-intent", "intents="),
+            &["gonk.inquiry.layers", "`intents`"],
+        );
+        // Not a pair.
+        refused(
+            &format!("{edge} inquiry"),
+            &["gonk.inquiry.layers", "`inquiry`"],
+        );
+        // The line twice.
+        let e = settings(
+            &Flags::default(),
+            &format!("{view}{owner}{}{}", line(edge), line(edge)),
+            &homes(),
+        )
+        .unwrap_err();
+        assert!(e.contains("gonk.inquiry.layers is given 2 times"), "{e}");
+        // The line without an owner.
+        let e = settings(
+            &Flags::default(),
+            &format!("{view}{}", line(edge)),
+            &homes(),
+        )
+        .unwrap_err();
+        assert!(e.contains("gonk.inquiry.layers"), "{e}");
+        assert!(e.contains("gonk.inquiry.owner"), "{e}");
     }
 
     #[test]

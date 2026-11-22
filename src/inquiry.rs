@@ -11,6 +11,14 @@
 //! [`crate::layers_view`]), so a line without that one is refused at start, as is an owner the
 //! crate refuses. Without the line nothing is mounted, and the pages say how to configure it.
 //!
+//! ```toml
+//! gonk.inquiry.layers = "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold examples=inquiry-example intents=inquiry-intent"
+//! ```
+//!
+//! A host whose layers were named explicitly, not as `for_owner` names them (the edge's are not
+//! owner-suffixed), names all five on a second line ([`LAYERS_KEY`], ledger
+//! [#3980](http://localhost:1062/l/default/item/3980)); [`parse_layers`] says what it refuses.
+//!
 //! ```text
 //! /inquiry/view/name/{view}                       urn:iki:gonk:page:inquiry:view:name:{view}                     Source  the client's view, in gonk's chrome
 //! /inquiry/view/name/{view}/action/name/{action}  urn:iki:gonk:inquiry:view:name:{view}:action:name:{action}  Sink    one action on `inquiry=<id>`, then the view again
@@ -72,6 +80,10 @@ use crate::web::{self, Web};
 
 /// The config key.
 pub const KEY: &str = "gonk.inquiry.owner";
+/// The optional key naming the owner's five layers explicitly (ledger #3980).
+pub const LAYERS_KEY: &str = "gonk.inquiry.layers";
+/// The keys a [`LAYERS_KEY`] line names, every one of them, in the crate's field order.
+pub const LAYER_KEYS: [&str; 5] = ["inquiry", "spam", "holding", "examples", "intents"];
 
 /// A view's page.
 pub const VIEW_TEMPLATE: &str = "urn:iki:gonk:page:inquiry:view:name:{view}";
@@ -187,26 +199,161 @@ fn action_base(view: View) -> String {
 
 // ------------------------------------------------------------------------------ config
 
-/// Parse the [`KEY`] lines: none, or one naming an owner. `has_view` is whether a
-/// `gonk.layers.view` line gives the door and identity the client reaches the layers through.
+/// What the [`KEY`] and [`LAYERS_KEY`] lines configure: the owner, and its layers' names when
+/// they are given explicitly (`None`: [`Layers::for_owner`] names them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config {
+    /// The owner whose layers the client works on, and whose inquiry tokens gate it.
+    pub owner: String,
+    /// The five layer names from a [`LAYERS_KEY`] line, already [`Layers::checked`].
+    pub layers: Option<Layers>,
+}
+
+impl Config {
+    /// The layers the client reaches: the explicit ones, or the owner's conventional names.
+    ///
+    /// # Errors
+    ///
+    /// An owner or a name the crate refuses.
+    pub fn layers(&self) -> std::result::Result<Layers, String> {
+        match &self.layers {
+            Some(layers) => layers
+                .clone()
+                .checked()
+                .map_err(|e| format!("{LAYERS_KEY}: {}", detail(e))),
+            None => Layers::for_owner(&self.owner)
+                .map_err(|e| format!("{KEY} `{}`: {}", self.owner, detail(e))),
+        }
+    }
+}
+
+fn detail(e: Error) -> String {
+    match e {
+        Error::InvalidArgument { detail, .. } => detail,
+        other => other.to_string(),
+    }
+}
+
+/// Parse a [`LAYERS_KEY`] line: `key=name` pairs separated by whitespace, one for each of
+/// [`LAYER_KEYS`].
 ///
 /// ```
-/// use ikigai_gonk::inquiry::parse_config;
-/// assert_eq!(parse_config(&[], false).unwrap(), None);
-/// assert_eq!(parse_config(&["brian".into()], true).unwrap(), Some("brian".to_string()));
-/// assert!(parse_config(&["Brian".into()], true).is_err());
-/// assert!(parse_config(&["brian".into()], false).is_err());
-/// assert!(parse_config(&["a".into(), "b".into()], true).is_err());
+/// use ikigai_gonk::inquiry::parse_layers;
+/// let layers = parse_layers(
+///     "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold \
+///      examples=inquiry-example intents=inquiry-intent",
+/// )
+/// .unwrap();
+/// assert_eq!(layers.inquiry, "inquiry");
+/// assert_eq!(layers.intents, "inquiry-intent");
+/// assert!(parse_layers("inquiry=inquiry").is_err());
 /// ```
 ///
 /// # Errors
 ///
-/// The key given twice, an owner the crate refuses, or no `gonk.layers.view` to reach it by.
+/// A pair without `=`, an unknown key, a key given twice, a missing key, or a name
+/// [`Layers::checked`] refuses; each sentence names the key.
+pub fn parse_layers(line: &str) -> std::result::Result<Layers, String> {
+    let mut names: [Option<String>; 5] = Default::default();
+    for pair in line.split_whitespace() {
+        let Some((key, name)) = pair.split_once('=') else {
+            return Err(format!(
+                "{LAYERS_KEY}: `{pair}` is not `key=name`; the keys are {}",
+                LAYER_KEYS.join(", ")
+            ));
+        };
+        let Some(at) = LAYER_KEYS.iter().position(|k| *k == key) else {
+            return Err(format!(
+                "{LAYERS_KEY}: `{key}` is not a layer key; the keys are {}",
+                LAYER_KEYS.join(", ")
+            ));
+        };
+        if names[at].is_some() {
+            return Err(format!(
+                "{LAYERS_KEY}: `{key}` is given twice: each layer has one name"
+            ));
+        }
+        // Each name alone, so the refusal names the key it was given for.
+        let one = Layers {
+            inquiry: name.to_string(),
+            spam: name.to_string(),
+            holding: name.to_string(),
+            examples: name.to_string(),
+            intents: name.to_string(),
+        };
+        if let Err(e) = one.checked() {
+            return Err(format!("{LAYERS_KEY}: `{key}`: {}", detail(e)));
+        }
+        names[at] = Some(name.to_string());
+    }
+    let missing: Vec<&str> = LAYER_KEYS
+        .iter()
+        .zip(&names)
+        .filter(|(_, n)| n.is_none())
+        .map(|(k, _)| *k)
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{LAYERS_KEY}: no `{}`: the line names all five layers ({})",
+            missing.join("`, `"),
+            LAYER_KEYS.join(", ")
+        ));
+    }
+    let [Some(inquiry), Some(spam), Some(holding), Some(examples), Some(intents)] = names else {
+        unreachable!("every key is present");
+    };
+    Layers {
+        inquiry,
+        spam,
+        holding,
+        examples,
+        intents,
+    }
+    .checked()
+    .map_err(|e| format!("{LAYERS_KEY}: {}", detail(e)))
+}
+
+/// Parse the [`KEY`] lines (none, or one naming an owner) and the [`LAYERS_KEY`] lines (none, or
+/// one naming the owner's layers). `has_view` is whether a `gonk.layers.view` line gives the
+/// door and identity the client reaches the layers through.
+///
+/// ```
+/// use ikigai_gonk::inquiry::parse_config;
+/// assert_eq!(parse_config(&[], &[], false).unwrap(), None);
+/// let got = parse_config(&["brian".into()], &[], true).unwrap().unwrap();
+/// assert_eq!((got.owner.as_str(), got.layers), ("brian", None));
+/// assert!(parse_config(&["Brian".into()], &[], true).is_err());
+/// assert!(parse_config(&["brian".into()], &[], false).is_err());
+/// assert!(parse_config(&["a".into(), "b".into()], &[], true).is_err());
+/// assert!(parse_config(&[], &["inquiry=inquiry".into()], true).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Either key given twice, an owner the crate refuses, a layers line [`parse_layers`] refuses or
+/// one without an owner, or no `gonk.layers.view` to reach them by.
 pub fn parse_config(
     lines: &[String],
+    layer_lines: &[String],
     has_view: bool,
-) -> std::result::Result<Option<String>, String> {
+) -> std::result::Result<Option<Config>, String> {
+    let layers = match layer_lines {
+        [] => None,
+        [line] => Some(parse_layers(line)?),
+        _ => {
+            return Err(format!(
+                "{LAYERS_KEY} is given {} times: one line names all five layers",
+                layer_lines.len()
+            ))
+        }
+    };
     let line = match lines {
+        [] if layers.is_some() => {
+            return Err(format!(
+                "{LAYERS_KEY} is set and no {KEY} line is: the layers are the owner's, whose \
+                 inquiry tokens gate the client"
+            ))
+        }
         [] => return Ok(None),
         [line] => line.trim(),
         _ => {
@@ -217,11 +364,7 @@ pub fn parse_config(
         }
     };
     if let Err(e) = Layers::for_owner(line) {
-        let detail = match e {
-            Error::InvalidArgument { detail, .. } => detail,
-            other => other.to_string(),
-        };
-        return Err(format!("{KEY} `{line}`: {detail}"));
+        return Err(format!("{KEY} `{line}`: {}", detail(e)));
     }
     if !has_view {
         return Err(format!(
@@ -230,7 +373,10 @@ pub fn parse_config(
             crate::layers_view::KEY
         ));
     }
-    Ok(Some(line.to_string()))
+    Ok(Some(Config {
+        owner: line.to_string(),
+        layers,
+    }))
 }
 
 // ------------------------------------------------------------------------------ the door
@@ -336,7 +482,28 @@ impl Inquiry {
     ///
     /// An owner the crate refuses.
     pub fn new(owner: &str, door: Arc<dyn Door>) -> std::result::Result<Arc<Inquiry>, String> {
-        let layers = Layers::for_owner(owner).map_err(|e| format!("{KEY} `{owner}`: {e}"))?;
+        Inquiry::configured(
+            &Config {
+                owner: owner.to_string(),
+                layers: None,
+            },
+            door,
+        )
+    }
+
+    /// The client [`Config`] describes: the owner's tokens, and its explicit layers when a
+    /// [`LAYERS_KEY`] line named them (`for_owner`'s names otherwise), through `door` as
+    /// [`Inquiry::new`] reaches them.
+    ///
+    /// # Errors
+    ///
+    /// An owner or a layer name the crate refuses.
+    pub fn configured(
+        config: &Config,
+        door: Arc<dyn Door>,
+    ) -> std::result::Result<Arc<Inquiry>, String> {
+        let owner = config.owner.as_str();
+        let layers = config.layers()?;
         let door = crate::layers_view::confined(Arc::new(PersonWrites {
             door,
             person: OnceLock::new(),

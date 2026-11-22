@@ -17,6 +17,7 @@
 //! - [`an_unconfigured_gonk_serves_the_not_configured_page`]
 //! - [`the_client_writes_only_as_a_person`]
 //! - [`another_pages_navigation_keeps_no_inquiry_token`]
+//! - [`explicit_layer_names_are_the_ones_the_view_reads`] (ledger #3980)
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -30,7 +31,7 @@ use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_fn::html::url_segment as encode;
 use ikigai_gonk::identity::{self, Passkeys};
-use ikigai_gonk::inquiry::{Inquiry, Token};
+use ikigai_gonk::inquiry::{Config, Inquiry, Token};
 use ikigai_gonk::{compose, doors, quic, web};
 use ikigai_store::DurableStore;
 use inquiry_host::{Host, INQUIRY, INTENT, OWNER, SPAM};
@@ -598,4 +599,55 @@ fn another_pages_navigation_keeps_no_inquiry_token() {
     ]);
     let kept = ikigai_gonk::admit::foreign_page_scopes(&all);
     assert_eq!(kept, [ikigai_gonk::admit::FOREIGN_PAGE], "{kept:?}");
+}
+
+/// Ledger #3980: with `gonk.inquiry.layers` naming the edge's layers (not owner-suffixed), the
+/// pending view's sub-requests go to `urn:layer:inquiry:`, never `urn:layer:inquiry-brian:`.
+#[test]
+fn explicit_layer_names_are_the_ones_the_view_reads() {
+    let host = seeded();
+    let layers = ikigai_gonk::inquiry::parse_layers(
+        "inquiry=inquiry spam=inquiry-spam holding=inquiry-hold \
+         examples=inquiry-example intents=inquiry-intent",
+    )
+    .unwrap();
+    let config = Config {
+        owner: OWNER.to_string(),
+        layers: Some(layers),
+    };
+    let inquiry = Inquiry::configured(&config, host.door("brian")).unwrap();
+    let gonk = Gonk::start(Some(inquiry), anonymous());
+    let session = gonk.sign_in("brian", &tokens(&[Token::Read]));
+    // The scratch host holds only the suffixed layers, so the view does not find the explicit
+    // one; what matters is where it asked.
+    let _ = gonk.page("/inquiry/view/name/pending", Some(&session));
+    let targets = host.targets();
+    assert!(
+        targets.iter().any(|t| t.contains(" urn:layer:inquiry:")),
+        "the view read the explicit layer: {targets:?}"
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|t| t.contains(&format!("urn:layer:{INQUIRY}:"))),
+        "the view read the owner-suffixed layer: {targets:?}"
+    );
+
+    // And without the line, the owner-suffixed one, as before.
+    let host = seeded();
+    let gonk = Gonk::over(&host, "brian");
+    let session = gonk.sign_in("brian", &tokens(&[Token::Read]));
+    let pending = gonk.page("/inquiry/view/name/pending", Some(&session));
+    assert_eq!(pending.status, 200, "{pending:?}");
+    let targets = host.targets();
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.contains(&format!(" urn:layer:{INQUIRY}:"))),
+        "{targets:?}"
+    );
+    assert!(
+        !targets.iter().any(|t| t.contains(" urn:layer:inquiry:")),
+        "{targets:?}"
+    );
 }

@@ -732,8 +732,8 @@ fn serve(flags: &config::Flags) -> ! {
     // ★ The inquiry client (ledger #3695): the Layers page's door and identity, on a door of its
     // own, in a kernel mounted into nothing, and dialled by nothing until a view is first opened.
     let inquiry = match (&settings.inquiry, &settings.layers_view) {
-        (Some(owner), Some(view)) => Some(
-            ikigai_gonk::inquiry::Inquiry::new(owner, ikigai_gonk::layers_view::dial(view))
+        (Some(config), Some(view)) => Some(
+            ikigai_gonk::inquiry::Inquiry::configured(config, ikigai_gonk::layers_view::dial(view))
                 .unwrap_or_else(|e| fail(&e)),
         ),
         _ => None,
@@ -1019,7 +1019,7 @@ fn serve(flags: &config::Flags) -> ! {
             // which only holds code other faces import (ledger #3778).
             faces: ikigai_gonk::face::listed(&settings.faces),
             // The header offers the inquiry client to a holder of its read token (ledger #3695).
-            inquiry: settings.inquiry.clone(),
+            inquiry: settings.inquiry.as_ref().map(|c| c.owner.clone()),
         });
         let pages = web::door_space_with(
             Arc::clone(&face),
