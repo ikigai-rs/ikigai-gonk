@@ -1285,7 +1285,17 @@ toml = "0.8"
 # ★ 0.5.1 (ledger #2846): concurrent calls for one stylesheet share one warm thread
 # and compile once per process. This replaces render::TRANSFORM_TURN; the 0.4 caret
 # excluded the 0.5 line. The 0.5 numeric-conversion adapter is covered by the page tests.
-ikigai-xslt = "0.7.0"
+# ★ 0.10.0 (ledger #4054): onto ikigai-xrust, off upstream xrust. Through 0.7.0 this crate took
+# `xrust = "2.3"`, which admits xrust 2.4, and 2.4 added required `Node` methods 0.7.0's `IdNode`
+# does not implement: a FRESH resolve of gonk failed with E0046, and only our lock (xrust 2.3.0)
+# built it. 0.8 and later depend on ikigai-xrust (xrust 2.3.0 plus fixes) by its prerelease
+# version, so no upstream release can reach this graph. 0.9.0 was never published, and 0.10.0's
+# API types are ikigai-core 0.4's. gonk calls only `transform_xml_within` and
+# `stylesheet_compiles` (strings and a count), so no core type crosses, and the graph links
+# core 0.3 (gonk) and core 0.4 (this crate) side by side until gonk moves to core 0.4.
+# Behavior changes from 0.7 that gonk's pages meet are listed in the PR for ledger #4054.
+# `"0.10.0"` is `<0.11.0`.
+ikigai-xslt = "0.10.0"
 # Read the RDF/XML render projection's attributes without rewriting literal text.
 quick-xml = "0.37.5"
 # The ecosystem's one HTML helper (`ikigai_fn::html`): the header's ledger menu and the `/l`
