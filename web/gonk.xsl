@@ -167,7 +167,7 @@
             <!-- A page may state what it shows in the one live region (`@page-status`): the
                  Harness page's filtered rules (ledger #3787). Or what a form's POST did, when the
                  page it answers with says (an inquiry action, ledger #3695). Empty otherwise. -->
-            <div id="status" class="flash-area" role="status" aria-live="polite"><xsl:choose><xsl:when test="@status-message"><p><xsl:attribute name="class">flash <xsl:value-of select="@status-kind"/></xsl:attribute><xsl:value-of select="@status-message"/></p></xsl:when><xsl:when test="@page-status != ''"><p class="flash"><xsl:value-of select="@page-status"/></p></xsl:when></xsl:choose></div>
+            <div id="status" class="flash-area" role="status" aria-live="polite"><xsl:choose><xsl:when test="@status-message"><p><xsl:attribute name="class">flash <xsl:value-of select="@status-kind"/></xsl:attribute><xsl:value-of select="@status-message"/></p></xsl:when><xsl:when test="@page-status != ''"><p class="flash"><xsl:if test="@page-status-announce = 'true'"><xsl:attribute name="data-announce"></xsl:attribute></xsl:if><xsl:value-of select="@page-status"/></p></xsl:when></xsl:choose></div>
             <main id="main">
               <xsl:call-template name="body"/>
             </main>
@@ -403,6 +403,7 @@
       <xsl:when test="@view = 'doctor'"><xsl:apply-templates select="view:doctor"/></xsl:when>
       <xsl:when test="@view = 'gone'"><xsl:call-template name="gone"/></xsl:when>
       <xsl:when test="@view = 'resolution'"><xsl:apply-templates select="view:resolution"/></xsl:when>
+      <xsl:when test="@view = 'jump'"><xsl:apply-templates select="view:jump"/></xsl:when>
       <xsl:when test="@view = 'refusal'"><xsl:apply-templates select="view:refusal"/></xsl:when>
       <xsl:when test="@view = 'sparql'"><xsl:call-template name="sparql"/></xsl:when>
       <xsl:when test="@view = 'browse'"><xsl:call-template name="browse"/></xsl:when>
@@ -2606,8 +2607,8 @@
             <input type="hidden" name="ledgers"><xsl:attribute name="value"><xsl:value-of select="@ledgers"/></xsl:attribute></input>
           </xsl:if>
           <div class="search-field">
-            <label for="search-text">Search titles</label>
-            <input id="search-text" type="search" name="text" placeholder="Search titles">
+            <label for="search-text">Search titles or go to an item number</label>
+            <input id="search-text" type="search" name="text" aria-describedby="search-text-help">
               <xsl:attribute name="value"><xsl:value-of select="@text"/></xsl:attribute>
             </input>
           </div>
@@ -2632,6 +2633,7 @@
             <input id="search-sort" name="sort" type="text" aria-describedby="sort-filter-help"><xsl:attribute name="value"><xsl:value-of select="@sort"/></xsl:attribute></input>
           </div>
           <button type="submit" class="quiet">Search</button>
+          <p id="search-text-help" class="note">Enter an item number, such as 42 or #42, to go to that item.</p>
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
           <p id="priority-filter-help" class="note">Separate priorities with commas: 0, 1, 2, 3, 4 or none (unset).</p>
           <p id="sort-filter-help" class="note">Separate sort keys with commas: priority, created, modified, number or landing. Prefix a key with - for descending order. Default: -modified.</p>
@@ -3378,6 +3380,15 @@
     <section class="panel">
       <h1>Name resolved</h1>
       <p>This name, <code class="iri"><xsl:value-of select="@iri"/></code>, resolves to <a><xsl:attribute name="href"><xsl:value-of select="@target"/></xsl:attribute><xsl:value-of select="@target"/></a>.</p>
+    </section>
+  </xsl:template>
+
+  <!-- Ledger #4051: a search that was an item's number. The page refreshes at once to the item
+       (WCAG H76, `@refresh` above); the link is for a browser that does not. -->
+  <xsl:template match="view:jump">
+    <section class="panel">
+      <h1>Item #<xsl:value-of select="@number"/></h1>
+      <p>Going to item #<xsl:value-of select="@number"/> in ledger <xsl:value-of select="@ledger"/>: <a><xsl:attribute name="href"><xsl:value-of select="@target"/></xsl:attribute><xsl:value-of select="@item-title"/></a>.</p>
     </section>
   </xsl:template>
 

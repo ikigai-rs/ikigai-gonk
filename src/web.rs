@@ -2086,6 +2086,7 @@ async fn ledger_listing(
     listing: &Listing<'_>,
     full: bool,
     flash: Option<(&str, &str)>,
+    said: Option<&str>,
 ) -> Result<Representation> {
     let Listing {
         status,
@@ -2392,6 +2393,11 @@ async fn ledger_listing(
             // ⚠ The shell holds no rows, so it cannot count them: this is what decides
             // "No items match." against the list, evaluated once here.
             ("has-rows", flag(count.shown > 0)),
+            // A number search this ledger holds no item for (ledger #4051), in #status and
+            // said once on load by web/gonk.js (a live region does not speak what it was
+            // parsed with).
+            ("page-status", said.unwrap_or("")),
+            ("page-status-announce", flag(said.is_some())),
         ],
         &children,
     );
@@ -2408,6 +2414,87 @@ async fn ledger_listing(
         )
         .map_err(render_err)?,
     ))
+}
+
+/// The item number a ledger search names (ledger #4051): exactly `N` or `#N`, whitespace
+/// trimmed. Anything else, digits among other text included, is a title search.
+fn item_number(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let digits = text.strip_prefix('#').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|n| *n > 0)
+}
+
+/// Item `number`'s title in `ledger`, or `None` when the ledger holds no such item.
+async fn item_title(inv: &Invocation<'_>, ledger: &Ledger, number: u64) -> Result<Option<String>> {
+    let read = with(
+        request(Verb::Source, &ledger.item(&number.to_string()))?,
+        "as",
+        "text/turtle",
+    );
+    let bytes = match fetch(inv, read).await {
+        Ok(bytes) => bytes,
+        Err(Error::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let graph = Graph::from_turtle(&bytes).map_err(render_err)?;
+    let item = graph
+        .subjects_of_type(&format!("{LEDGER_NS}Item"))
+        .into_iter()
+        .next();
+    Ok(item.map(|item| {
+        graph
+            .value(&item, &format!("{DCTERMS}title"))
+            .unwrap_or_default()
+    }))
+}
+
+/// The answer to a search for an item this ledger holds: `200`, an instant refresh to the
+/// item's page (WCAG H76; an ikigai-web read cannot redirect) and a visible link to it, never
+/// stored by a shared cache (whether the item is readable is the viewer's).
+fn item_jump(
+    web: &Web,
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    number: u64,
+    title: &str,
+) -> Result<Representation> {
+    let target = format!("{}/item/{number}", ledger_href(ledger));
+    let ledgers = readable_ledgers(web, inv.capability);
+    let children = format!(
+        "{}{}",
+        nav(web, inv.capability, &ledgers, Some(ledger.name())),
+        element(
+            "jump",
+            &[
+                ("number", &number.to_string()),
+                ("ledger", ledger.name()),
+                ("target", &target),
+                ("item-title", title),
+            ],
+            ""
+        )
+    );
+    let doc = envelope(
+        "page",
+        &[
+            ("view", "jump"),
+            ("full", "true"),
+            ("title", &format!("Item #{number}")),
+            ("refresh", &target),
+            ("ui-theme", render::theme_of(inv)),
+            (
+                "safe",
+                crate::page_assets::flag(crate::page_assets::safe_of(inv)),
+            ),
+        ],
+        &children,
+    );
+    let page = html(render::render(&doc, true).map_err(render_err)?);
+    ikigai_web::with_headers(page, &[("Cache-Control", "private, no-store")])
+        .map_err(|e| Error::Endpoint(format!("the item jump's headers: {}", e.why)))
 }
 
 /// What a listing rendered, and out of what.
@@ -2621,6 +2708,23 @@ impl Endpoint for LedgerView {
             },
             _ => Ledger::parse(&binding(inv, "ledger")?)?,
         };
+        // ★ A search that is an item's number goes to that item (ledger #4051), whatever its
+        // status; one this ledger does not hold is said in the status region, over the list
+        // the search would otherwise have emptied. The htmx fragment keeps the title search:
+        // web/gonk.js sends a number search as a navigation, so it never reaches the fragment.
+        let mut missing = None;
+        let mut text = text;
+        if self.shape != Shape::Fragment {
+            if let Some(number) = text.as_deref().and_then(item_number) {
+                match item_title(inv, &ledger, number).await? {
+                    Some(title) => return item_jump(&self.web, inv, &ledger, number, &title),
+                    None => {
+                        missing = Some(format!("No item #{number} in ledger {}.", ledger.name()));
+                        text = None;
+                    }
+                }
+            }
+        }
         ledger_listing(
             &self.web,
             inv,
@@ -2639,6 +2743,7 @@ impl Endpoint for LedgerView {
             },
             self.shape != Shape::Fragment,
             None,
+            missing.as_deref(),
         )
         .await
     }
@@ -3846,7 +3951,7 @@ impl Endpoint for Act {
                     sort: list_sort.as_deref(),
                 };
                 let page = list_ledger.as_ref().unwrap_or(&ledger);
-                ledger_listing(&self.web, inv, page, &listing, false, flash).await
+                ledger_listing(&self.web, inv, page, &listing, false, flash, None).await
             }
         }
     }

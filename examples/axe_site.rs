@@ -27,7 +27,7 @@ use ikigai_store::DurableStore;
 #[path = "../tests/inquiry_host/mod.rs"]
 mod inquiry_host;
 
-const PAGES: [(&str, &str); 38] = [
+const PAGES: [(&str, &str); 39] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -45,6 +45,10 @@ const PAGES: [(&str, &str); 38] = [
         "/l/default?labels=missing&without=blocked",
     ),
     ("closed.html", "/l/default?status=closed"),
+    // Ledger #4051: a number search the ledger holds no item for, said in #status over the
+    // list. (A number it holds answers a page that refreshes away at once, which a static
+    // site cannot follow, so it is not here: tests/item_jump_4051.rs pins it.)
+    ("item-missing.html", "/l/default?text=%2399999"),
     ("item.html", "/l/default/item/1"),
     ("linked-item.html", "/l/default/item/4"),
     // Ledger #3217: an item blocked from three ledgers, with its inbound links panel.

@@ -127,6 +127,22 @@
     e.detail.path = "/k?c=" + encodeURIComponent(path.slice(3));
   });
 
+  // ------------------------------------------- a search for an item number (ledger #4051)
+  //
+  // The ledger page's search swaps the list with htmx. A search that is exactly N or #N is a
+  // request for item N, which the server answers with a page that goes there: so that search
+  // leaves htmx and is the form's ordinary GET navigation (form.submit() fires no submit event,
+  // so htmx does not take it back). Focus and history are the browser's, as for any link.
+  const ITEM_NUMBER = /^\s*#?\d+\s*$/;
+  document.addEventListener("htmx:beforeRequest", (e) => {
+    const form = e.detail && e.detail.elt;
+    if (!form || form.tagName !== "FORM" || !form.classList.contains("search")) return;
+    const text = form.querySelector("#search-text");
+    if (!text || !ITEM_NUMBER.test(text.value)) return;
+    e.preventDefault();
+    form.submit();
+  });
+
   // ------------------------------------------------- write that lapses (ledger #3841)
   //
   // ikigai-ui's shell disables every control inside a [data-ui-write] mark once the session's
@@ -1804,6 +1820,10 @@
     // about what it was parsed with, so the sentence is said now.
     const verdict = document.querySelector("main [data-announce]");
     if (verdict) announce(verdict.textContent);
+    // The same for a sentence the page put in #status itself: a number search the ledger
+    // holds no item for (ledger #4051).
+    const said = document.querySelector("#status [data-announce]");
+    if (said) announce(said.textContent);
     const login = $("auth-login");
     if (!login) return; // a fragment, not a page
     if (location.hostname !== "localhost") {
