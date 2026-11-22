@@ -343,7 +343,8 @@ fn the_stalled_claims_are_their_own_tab_and_read_only_when_shown() {
         ikigai_gonk::dashboard::LEDGERS_PAGE_IRI,
         ikigai_gonk::dashboard::AGENTS_PAGE_IRI,
     ] {
-        let page = page_of(&http, &reader, iri);
+        // The stylesheet's own attributes are single-quoted; read them either way.
+        let page = page_of(&http, &reader, iri).replace('\'', "\"");
         assert!(
             page.contains("id=\"dashboard-tab-stalled\""),
             "{iri}: {page}"
@@ -352,7 +353,10 @@ fn the_stalled_claims_are_their_own_tab_and_read_only_when_shown() {
             page.contains("href=\"/dashboard/stalled\""),
             "{iri}: the tab is a plain link: {page}"
         );
-        assert!(!page.contains("worker-1"), "{iri}: {page}");
+        assert!(
+            !page.contains("Lease ran out"),
+            "{iri}: no stalled table: {page}"
+        );
         assert!(!page.contains("id=\"dashboard-stalled\""), "{iri}: {page}");
         let at = page
             .find("id=\"dashboard-panel-stalled\"")
@@ -365,8 +369,9 @@ fn the_stalled_claims_are_their_own_tab_and_read_only_when_shown() {
             "{iri}: the hidden panel holds nothing: {page}"
         );
     }
-    let page = dashboard(&http, &reader);
-    assert!(page.contains("worker-1"), "{page}");
+    let page = dashboard(&http, &reader).replace('\'', "\"");
+    assert!(page.contains("<td>worker-1</td>"), "{page}");
+    assert!(page.contains("Lease ran out"), "{page}");
     assert!(page.contains("aria-current=\"page\""), "{page}");
     assert!(!page.contains("hx-get=\"/dashboard/chart"), "{page}");
     assert!(!page.contains("hx-get=\"/dashboard/agents"), "{page}");
