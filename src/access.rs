@@ -269,6 +269,16 @@ impl Record {
         Arc::clone(&self.handle)
     }
 
+    /// The space `urn:log:*` is served from: `ikigai-log`'s own
+    /// ([`ikigai_log::endpoints::space`]) over this record's handle, with the open segment read
+    /// as one snapshot ([`LiveSegment`], ledger #4100).
+    pub fn space(&self) -> Arc<dyn Space> {
+        Arc::new(LiveSegment {
+            inner: Arc::new(ikigai_log::endpoints::space(self.handle())),
+            handle: self.handle(),
+        })
+    }
+
     /// Write one door line. A line that does not land is said on stderr, and the request
     /// it describes is not failed.
     pub fn access(&self, access: &Access) {
@@ -589,6 +599,89 @@ impl Endpoint for Timed {
             .map(|r| r.bytes.len_hint().map_or(0, |n| n as usize));
         self.record(inv, started, clock, bytes);
         answer
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn describe(&self) -> Description {
+        self.inner.describe()
+    }
+
+    fn forwards(&self) -> Option<ikigai_core::Forward> {
+        self.inner.forwards()
+    }
+
+    fn confinement(&self) -> Option<Topology> {
+        self.inner.confinement()
+    }
+}
+
+/// `ikigai-log`'s space, except that a Source of the segment this process is writing NOW is read
+/// as one snapshot (ledger [#4100](http://localhost:1062/l/default/item/4100)).
+///
+/// `ikigai-log` streams a segment's body from its file and pins the file's version: a body
+/// whose file changed between the answer and its last byte is refused, `conflict: log segment
+/// changed while reading its body`. That is right for a sealed segment, which nothing will
+/// append to again. The open one is appended to by every request, and first by the read
+/// itself: its door line is written when the answer is returned ([`Timed::invoke_body`]),
+/// before the door reads the body. So the live segment never read as a graph, through any
+/// door, however small. Reproduced by `tests/live_segment_4100.rs`.
+///
+/// So for the open segment (and only that one) this resolves to an endpoint whose
+/// `invoke_body` takes `ikigai-log`'s bytes path, which reads the file ONCE, into memory,
+/// bounded by the segment's own size cap: the reader sees the prefix that was on disk when it
+/// read, and a line appended after that (its own door line included) is in the next read. A
+/// sealed segment still streams under the version pin, unchanged. The fix that belongs
+/// upstream is a length-pinned live body in `ikigai-log`'s `segment_body.rs`; this overlay is
+/// gonk's until then.
+struct LiveSegment {
+    inner: Arc<dyn Space>,
+    handle: Arc<LogHandle>,
+}
+
+impl Space for LiveSegment {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let live = request.verb == Verb::Source
+            && self
+                .handle
+                .open_segment()
+                .is_some_and(|(open, _)| open == request.target.as_str());
+        let resolution = self.inner.resolve(request, scope);
+        if !live {
+            return resolution;
+        }
+        resolution
+            .map_endpoint(|endpoint| Arc::new(Snapshot { inner: endpoint }) as Arc<dyn Endpoint>)
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.inner.entries()
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
+    }
+}
+
+/// The open segment's endpoint, read as bytes even when the door asks for a body.
+struct Snapshot {
+    inner: Arc<dyn Endpoint>,
+}
+
+#[async_trait]
+impl Endpoint for Snapshot {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        self.inner.invoke(inv).await
+    }
+
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        self.inner.invoke(inv).await.map(Representation::into_body)
     }
 
     fn name(&self) -> &str {
