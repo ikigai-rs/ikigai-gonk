@@ -47,6 +47,7 @@ pub mod browse;
 pub mod budget;
 pub mod checkout;
 pub mod config;
+pub mod constraint;
 pub mod dashboard;
 pub mod display;
 pub mod doors;

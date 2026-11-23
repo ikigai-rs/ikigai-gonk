@@ -70,6 +70,12 @@
 //! # gonk.sensor.ledger = "default"     # file an item there when one fires (default: record only)
 //! # gonk.ledger.lapse.every = "5m"   # record every ledger's lapsed leases on a timer; records,
 //!                                       # never releases (default: no line, no sweep)
+//! # the constraint sampler (ledger #4094): `urn:kernel:constraint` into the log every 15 minutes
+//! # and at shutdown (default: off; `src/constraint.rs`)
+//! # gonk.constraint.sample = true
+//! # gonk.constraint.every = "15m"      # this IS the default; a minute or more
+//! # gonk.constraint.host = "gonk"      # the host's configured name (this IS the default)
+//! # gonk.constraint.deny = "user-inbox"   # an endpoint id whose rows are dropped; repeatable
 //! # gonk.nl.ask = "urn:llm:coder:ask"  # the model door urn:nl:sparql drafts through
 //!                                       # (default urn:llm:ask, the peer's default backend)
 //! # one `log:Access` entry per request in gonk/log/ (this IS the default; `false` for none)
@@ -139,7 +145,11 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 65] = [
+const KEYS: [&str; 69] = [
+    crate::constraint::SAMPLE_KEY,
+    crate::constraint::EVERY_KEY,
+    crate::constraint::HOST_KEY,
+    crate::constraint::DENY_KEY,
     crate::packs::DESCRIPTION_KEY,
     crate::packs::PACK_KEY,
     crate::packs::FIRINGS_KEY,
@@ -920,6 +930,9 @@ pub struct Settings {
     /// (`gonk.ledger.lapse.every`), or `None` when the line is absent: off, as before ledger
     /// #3790 — see [`crate::lapse`].
     pub lapse_every: Option<Duration>,
+    /// The constraint sampler (`gonk.constraint.sample = true`, ledger #4094), or `None`: off,
+    /// the default — see [`crate::constraint`].
+    pub constraint: Option<crate::constraint::Settings>,
     /// Each ledger's lapse label (`gonk.ledger.lapse.label = "ledger label"`, ledger #3717):
     /// the label the lapse Sink adds to an item whose lapse it records. Empty by default: off.
     pub lapse_labels: std::collections::BTreeMap<String, String>,
@@ -2574,6 +2587,12 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
             value_for(text, crate::sensor::LEDGER_KEY).as_deref(),
         )?,
         lapse_every: crate::lapse::every(value_for(text, crate::lapse::EVERY_KEY).as_deref())?,
+        constraint: crate::constraint::settings(
+            value_for(text, crate::constraint::SAMPLE_KEY).as_deref(),
+            value_for(text, crate::constraint::EVERY_KEY).as_deref(),
+            value_for(text, crate::constraint::HOST_KEY).as_deref(),
+            &values_for(text, crate::constraint::DENY_KEY),
+        )?,
         lapse_labels: crate::lapse::labels(&values_for(text, crate::lapse::LABEL_KEY))?,
         nl_ask: nl_ask(text)?,
         model_calls_per_hour: crate::budget::model_calls_per_hour(

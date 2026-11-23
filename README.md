@@ -1397,6 +1397,40 @@ $ curl -X POST -b 'gonk_session=…' --data-binary @src/sensors/lapsed-claim.rq 
     'http://localhost:1062/script/harness-lapsed-claim?language=sparql'
 ```
 
+### The kernel's constraint, sampled into the log (ledger #4094)
+
+Off by default. With `gonk.constraint.sample = true` in the config home, gonk reads
+`urn:kernel:constraint` (its Turtle face, under `urn:cap:kernel:inspect` and nothing else, as
+`urn:iki:gonk:recorder:constraint`) every 15 minutes and once at shutdown (SIGTERM or SIGINT),
+and writes one `ik:ConstraintSample` entry per reading into gonk's log segment (`gonk/log/`).
+This is build step 1 of ikigai-core's `docs/design/constraint-history.md`: a sampler over the
+kernel's window, with no core change.
+
+```toml
+gonk.constraint.sample = true
+# gonk.constraint.every = "15m"          # this IS the default; a minute or more
+# gonk.constraint.host = "gonk"          # the host's configured name (this IS the default)
+# gonk.constraint.deny = "user-inbox"    # an endpoint id whose rows are dropped; repeatable
+```
+
+A malformed value stops the server at start. Each entry names its host, the sampler's first
+reading as `kernelStarted` (the window carries no start), the interval (`sampleSince`,
+`sampleUntil`), `sampleSource=window`, and per listed target its rank, endpoint id, target
+shape, uncached and cached counts and uncached milliseconds. `src/constraint.rs` maps every
+column to its vocabulary term.
+
+**What a window sample can say.** The window is the last 512 resolutions, top five only. A
+reading says "this was the constraint when we looked", not how much it cost over the 15 minutes.
+
+**Privacy: shapes, never values.** The window holds each target's full IRI, and a template
+target's IRI carries its argument (`urn:file:/home/alice/notes.md`). That IRI is never written.
+A row records the endpoint id and the target's shape, found in the hub's binding table: an
+exactly bound name as it is bound, or the ONE template pattern bound to that endpoint
+(`urn:file:{path}`). **A template target with no such shape (two templates on one endpoint, a
+prefix binding, a name the hub no longer resolves) is recorded as nothing**: the row is dropped
+and counted in `droppedUnshaped`. Nothing is hashed. A row whose endpoint id is on
+`gonk.constraint.deny` is dropped and counted in `droppedDenied`.
+
 ### A root's git history as weekly series (ledger #1631)
 
 The delivery dashboard's git source (ledger [#1630](http://localhost:1062/l/default/item/1630)):
