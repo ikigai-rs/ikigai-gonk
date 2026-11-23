@@ -1,5 +1,6 @@
 //! `cargo run --release --example render-cost -- <items.ttl> [rows|all]` — split the ledger
-//! list page's render cost into its stages, over a REAL graph face dumped from a live ledger:
+//! list page's render cost into its stages, over a REAL graph face dumped from a live ledger.
+//! Its document mirrors the page path, using `Graph::view_xml()` before rendering:
 //!
 //! ```sh
 //! curl -H 'Accept: text/turtle' \
@@ -85,9 +86,9 @@ fn main() {
     );
 
     let t = Instant::now();
-    let xml = graph.rdfxml().expect("RDF/XML");
+    let xml = graph.view_xml().expect("view XML");
     println!(
-        "rdfxml           {:>9.1?}   {} bytes",
+        "view xml         {:>9.1?}   {} bytes",
         t.elapsed(),
         xml.len()
     );
