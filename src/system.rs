@@ -65,6 +65,22 @@ pub const DISK_FLOOR_BYTES: u64 = 30 * (1 << 30);
 /// newest archive and then takes its own time, so the moment a cadence ends is not yet late.
 const BACKUP_GRACE: Duration = Duration::from_secs(15 * 60);
 
+/// How long [`STORE`] reuses the dataset's quad total (ledger #4103). `urn:iki:store:info` counts
+/// it by scanning every quad, a second or more on a live store, and every write cuts the threads
+/// its cache entry hangs from, so before this an open tab's poll scanned the whole dataset every
+/// 30 seconds. The total is a size, read for its order of magnitude, so it is counted at most this
+/// often and said with its age; what is cheap (the size on disk, the backup) stays live.
+pub const QUADS_EVERY: Duration = Duration::from_secs(10 * 60);
+
+/// The dataset's total as last counted, and when.
+#[derive(Clone)]
+struct Counted {
+    at: Instant,
+    at_ms: u64,
+    quads: u64,
+    backing: Option<String>,
+}
+
 /// A door this process has open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Door {
@@ -83,6 +99,9 @@ pub struct System {
     started: Instant,
     doors: Mutex<Vec<Door>>,
     hub: OnceLock<Weak<Kernel>>,
+    /// Held across a count, so tabs polling together wait for one scan instead of each starting
+    /// their own.
+    counted: tokio::sync::Mutex<Option<Counted>>,
 }
 
 impl System {
@@ -100,6 +119,7 @@ impl System {
             started: Instant::now(),
             doors: Mutex::new(Vec::new()),
             hub: OnceLock::new(),
+            counted: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -127,6 +147,30 @@ impl System {
 
     fn doors(&self) -> Vec<Door> {
         self.doors.lock().expect("the doors lock").clone()
+    }
+
+    /// The dataset's quad total and backing, counted at most once per [`QUADS_EVERY`]. A count that
+    /// failed is not kept: the next poll tries again.
+    async fn counted(&self, now_ms: u64) -> Result<Counted> {
+        let mut held = self.counted.lock().await;
+        if let Some(counted) = held.as_ref().filter(|c| c.at.elapsed() < QUADS_EVERY) {
+            return Ok(counted.clone());
+        }
+        let bytes = self
+            .read_as("urn:iki:store:info", &store_scopes(), None)
+            .await?;
+        let text = String::from_utf8_lossy(&bytes);
+        let quads = info_line(&text, "quads")
+            .and_then(|n| n.parse::<u64>().ok())
+            .ok_or_else(|| Error::Endpoint("urn:iki:store:info: no quads line".to_string()))?;
+        let counted = Counted {
+            at: Instant::now(),
+            at_ms: now_ms,
+            quads,
+            backing: info_line(&text, "backing").map(str::to_string),
+        };
+        *held = Some(counted.clone());
+        Ok(counted)
     }
 
     /// `(what, how)` for a read of `target` under `scopes`.
@@ -330,10 +374,7 @@ struct StoreEndpoint(Arc<System>);
 impl StoreEndpoint {
     async fn answer(&self, now_ms: u64, capability: &Capability) -> Value {
         let system = &self.0;
-        let info = system
-            .read_as("urn:iki:store:info", &store_scopes(), None)
-            .await
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        let counted = system.counted(now_ms).await;
         let status: Option<Value> = system
             .read_as(crate::backup::STATUS, &store_scopes(), Some(JSON))
             .await
@@ -346,14 +387,15 @@ impl StoreEndpoint {
             .as_ref()
             .and_then(|s| s["timer"]["failures_in_a_row"].as_u64())
             .unwrap_or(0);
-        let (quads, backing, unread) = match &info {
-            Ok(text) => (
-                info_line(text, "quads").and_then(|n| n.parse::<u64>().ok()),
-                info_line(text, "backing").map(str::to_string),
+        let (quads, counted_at, backing, unread) = match counted {
+            Ok(counted) => (
+                Some(counted.quads),
+                Some(counted.at_ms),
+                counted.backing,
                 None,
             ),
             // Said by class: what an error carries is written for a log.
-            Err(error) => (None, None, Some(error.class().to_string())),
+            Err(error) => (None, None, None, Some(error.class().to_string())),
         };
         let (graphs, graphs_hidden) = seen_graphs(
             newest.map_or(Value::Null, |n| n["graphs"].clone()),
@@ -361,6 +403,7 @@ impl StoreEndpoint {
         );
         json!({
             "quads": quads,
+            "quads_counted_at_ms": counted_at,
             "backing": backing,
             "unread": unread,
             "size_bytes": size_on_disk(&system.store_path),
@@ -394,8 +437,8 @@ impl Endpoint for StoreEndpoint {
         described(
             self.name(),
             "How large the store is, and how old its last backup",
-            "The dataset's total quads and backing from urn:iki:store:info, the store's bytes on \
-             disk, the quads per graph the newest backup recorded for the graphs this caller may \
+            "The dataset's total quads and backing from urn:iki:store:info, counted at most every \
+             ten minutes and said with when, the store's bytes on disk, the quads per graph the newest backup recorded for the graphs this caller may \
              read with a count of the rest, and that backup's time and age with whether it is \
              older than its schedule allows. Counts and times, never a quad.",
         )
