@@ -843,6 +843,7 @@ fn serve(flags: &config::Flags) -> ! {
         &settings.socket,
     );
     let lapse_line = start_lapses(&hub, &lapses, &handle, &settings.socket);
+    let (sampler, constraint_line) = start_constraint(&hub, settings.constraint.clone(), &record);
 
     // Both watchers, now that there is a kernel to cut threads on. `urn:repo:style` declares
     // a thread per `a11y.toml` candidate and browse ships the watch for them; the roots'
@@ -943,6 +944,7 @@ fn serve(flags: &config::Flags) -> ! {
             let drain = ikigai_quic::Drain::new();
             let draining = drain.clone();
             let closing = record.clone();
+            let sampling = sampler.clone();
             std::thread::spawn(move || {
                 let served = ikigai_quic::serve_draining_on(
                     Arc::new(door),
@@ -966,6 +968,9 @@ fn serve(flags: &config::Flags) -> ! {
                                  calls still running at the cap"
                             );
                         }
+                        if let Some(sampler) = &sampling {
+                            sampler.shutdown();
+                        }
                         if let Some(record) = &closing {
                             record.close();
                         }
@@ -977,7 +982,7 @@ fn serve(flags: &config::Flags) -> ! {
             (line, Some(drain))
         }
     };
-    stop_on_signal(quic_drain, record.clone());
+    stop_on_signal(quic_drain, record.clone(), sampler);
 
     // The HTTP door's workers and blocking pool, sized explicitly rather than through the
     // default `stack::enlarge_default` set: a request recurses on these threads (ledger #915).
@@ -1125,6 +1130,7 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  onboard {onboard_line}");
         eprintln!("  sensors {sensor_line}");
         eprintln!("  lapses  {lapse_line}");
+        eprintln!("  constraint  {constraint_line}");
         eprintln!("  review  {review_line}");
         eprintln!("  judge   {judge_line}");
         eprintln!("  queue   {queue_line}");
@@ -1237,6 +1243,52 @@ fn start_backups(
     }
     let first_line = format!(", the first in {}", humanize(first));
     scheduled_line(every, &settings.dir, settings.keep, &first_line, socket)
+}
+
+/// Start the constraint sampler on `hub` (ledger #4094), returning it and the banner's line.
+/// Off unless `gonk.constraint.sample = true`; not started, and said loudly, when the log's
+/// destination is off, because its readings would go nowhere.
+fn start_constraint(
+    hub: &Arc<ikigai_core::Kernel>,
+    settings: Option<ikigai_gonk::constraint::Settings>,
+    record: &Option<Arc<access::Record>>,
+) -> (Option<Arc<ikigai_gonk::constraint::Sampler>>, String) {
+    use ikigai_gonk::constraint;
+    let Some(settings) = settings else {
+        return (
+            None,
+            format!("off (no `{} = true` line)", constraint::SAMPLE_KEY),
+        );
+    };
+    let Some(record) = record else {
+        eprintln!("ikigai-gonk: THE CONSTRAINT SAMPLER IS NOT STARTED: the log is off");
+        return (
+            None,
+            "NOT STARTED: the log's destination is off".to_string(),
+        );
+    };
+    let line = format!(
+        "every {} and at shutdown, as `{}`: {} into the log (sampleSource=window){}",
+        backup::humanize(settings.every),
+        settings.host,
+        constraint::WINDOW,
+        if settings.deny.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; drops rows of {}",
+                settings.deny.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        },
+    );
+    let sampler = constraint::Sampler::over_hub(settings, Arc::clone(hub), Arc::clone(record));
+    match sampler.start() {
+        Ok(_) => (Some(sampler), line),
+        Err(e) => {
+            eprintln!("ikigai-gonk: THE CONSTRAINT SAMPLER IS NOT STARTED: {e}");
+            (None, format!("NOT STARTED: {e}"))
+        }
+    }
 }
 
 /// Schedule the lapse sweep on `hub`, returning the banner's lapse line. Not fatal when the
@@ -2528,7 +2580,11 @@ fn passkey_invite(
 /// The drain waits for calls, not work, and re-queues nothing: a claim stays as it is, its
 /// holder and lease intact. The other doors are not drained. Handlers are installed before this
 /// returns, so the banner printing means a signal is caught.
-fn stop_on_signal(drain: Option<ikigai_quic::Drain>, record: Option<Arc<access::Record>>) {
+fn stop_on_signal(
+    drain: Option<ikigai_quic::Drain>,
+    record: Option<Arc<access::Record>>,
+    sampler: Option<Arc<ikigai_gonk::constraint::Sampler>>,
+) {
     use signal_hook::consts::{SIGINT, SIGTERM};
     let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT])
         .unwrap_or_else(|e| fail(&format!("cannot catch SIGTERM and SIGINT: {e}")));
@@ -2540,6 +2596,10 @@ fn stop_on_signal(drain: Option<ikigai_quic::Drain>, record: Option<Arc<access::
         } else {
             "SIGINT"
         };
+        // The constraint sampler's last reading (ledger #4094), before the segment closes.
+        if let Some(sampler) = &sampler {
+            sampler.shutdown();
+        }
         let Some(drain) = drain else {
             eprintln!("ikigai-gonk: {name}: no QUIC door to drain; exiting");
             // `log:ProcessStop`, so the segment ends as a stop and not as a crash.
