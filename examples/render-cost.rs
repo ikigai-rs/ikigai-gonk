@@ -8,6 +8,9 @@
 //! cargo run --release --example render-cost -- /tmp/items.ttl 50    # what it costs now
 //! ```
 //!
+//! The example mirrors the page's graph-to-document path by calling `Graph::view_xml()`
+//! before wrapping the projected XML in the page envelope.
+//!
 //! # ★ What this measured, and what it ruled out (ledger #443)
 //!
 //! The page cost ~6 s and the question was which stage. Over 410 open items, 798 KB of
@@ -85,9 +88,9 @@ fn main() {
     );
 
     let t = Instant::now();
-    let xml = graph.rdfxml().expect("RDF/XML");
+    let xml = graph.view_xml().expect("view XML");
     println!(
-        "rdfxml           {:>9.1?}   {} bytes",
+        "view XML         {:>9.1?}   {} bytes",
         t.elapsed(),
         xml.len()
     );
