@@ -271,7 +271,7 @@ impl Record {
 
     /// The space `urn:log:*` is served from: `ikigai-log`'s own
     /// ([`ikigai_log::endpoints::space`]) over this record's handle, with the open segment read
-    /// as one snapshot ([`LiveSegment`], ledger #4100).
+    /// as one snapshot (`LiveSegment`, ledger #4100).
     pub fn space(&self) -> Arc<dyn Space> {
         Arc::new(LiveSegment {
             inner: Arc::new(ikigai_log::endpoints::space(self.handle())),
