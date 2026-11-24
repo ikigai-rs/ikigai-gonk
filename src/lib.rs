@@ -50,6 +50,7 @@ pub mod checkout;
 pub mod config;
 pub mod constraint;
 pub mod dashboard;
+pub mod dispatch;
 pub mod display;
 pub mod doors;
 pub mod egress;
@@ -203,6 +204,8 @@ pub mod spaces {
     pub const PAGES: &str = "urn:iki:gonk:space:pages";
     /// The page renderer's chunk transform ([`render::space`](crate::render::space)).
     pub const RENDER: &str = "urn:iki:gonk:space:render";
+    /// Private acknowledged dispatcher views ([`dispatch::space`](crate::dispatch::space)).
+    pub const DISPATCH: &str = "urn:iki:gonk:space:dispatch";
     /// The backup family ([`backup::space`](crate::backup::space)).
     pub const BACKUP: &str = "urn:iki:gonk:space:backup";
     /// The `urn:sparql:*` query face over the store ([`sparql::space`](crate::sparql::space)).
@@ -522,7 +525,21 @@ pub fn compose_serving_with_ledger_routes(
         spaces.push(browse as Arc<dyn Space>);
         spaces.extend(repo);
     }
+    // Production supplies this family with a private durable sidecar. Embedded kernels
+    // get an in-memory cursor store unless their host supplied the family already.
+    let has_dispatch = trigger.iter().any(|space| {
+        space.entries().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.pattern == "urn:iki:gonk:dispatch:{ledger}:item:{id}")
+        })
+    });
     spaces.extend(trigger);
+    if !has_dispatch {
+        spaces.push(Arc::new(
+            dispatch::space(None).expect("in-memory dispatcher cursors"),
+        ));
+    }
     if let Some(backups) = backups {
         spaces.push(Arc::new(backup::space(backups)));
         spaces.push(Arc::new(ikigai_compress::space()));
