@@ -324,6 +324,22 @@ impl LiveRoots {
             .map(|(name, _)| name.clone())
             .collect();
         live.browse.replace(&hub, &next, &removed);
+        // The watch touched only the roots that arrived, left or moved (ledger #4138). A root
+        // whose `gonk.browse.github` line changed has a different pull-request source, and a
+        // PR finding's state is read from it, so its findings may have moved too. After the
+        // swap, so a read stamped with the moved epoch reads the new source.
+        let pr_source = |github: &[(String, String)], root: &str| {
+            github
+                .iter()
+                .filter(|(name, _)| name == root)
+                .map(|(_, repo)| repo.clone())
+                .collect::<Vec<_>>()
+        };
+        for (root, _) in &reading.roots {
+            if pr_source(&github, root) != pr_source(&state.github, root) {
+                live.epochs.touch(root);
+            }
+        }
         self.names
             .set(reading.roots.iter().map(|(n, _)| n.clone()).collect());
         state.held = Some(watch.spawn_held(Arc::clone(&hub)));

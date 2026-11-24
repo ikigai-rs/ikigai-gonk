@@ -100,7 +100,7 @@
 //! meant is confirmed, withdrawn or reversed. Every decision this module forwards is stamped
 //! `made=single` at the door, and a form that names `made` or `batch` is refused.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -650,8 +650,10 @@ pub const PARALLEL_READS: usize = 8;
 /// One memo slot: `(root, the capability's scopes, the narrowing argument as name=value)`.
 type Slot = (String, String, String);
 
-/// What a slot holds: the root's epoch when the read started, and what it answered.
-type Held = (u64, Arc<Value>);
+/// What a slot holds: the root's epoch when the read started, what it answered, and the
+/// wall-clock time the read started — the age the badge states when it answers from a slot
+/// whose epoch has moved (ledger [#4138](http://localhost:1060/l/default/item/4138)).
+type Held = (u64, Arc<Value>, std::time::SystemTime);
 
 /// What one root's read answered: the parsed JSON, shared with [`Reads`], or why not.
 pub(crate) type Answer = std::result::Result<Arc<Value>, String>;
@@ -689,6 +691,9 @@ pub(crate) type Answer = std::result::Result<Arc<Value>, String>;
 pub struct Reads {
     memo: Mutex<HashMap<Slot, Held>>,
     flights: Mutex<HashMap<Slot, Arc<tokio::sync::Mutex<()>>>>,
+    /// The slots a background recount is reading now ([`read_answers_or_last`]), so a poll
+    /// that arrives during one starts no second.
+    refreshing: Mutex<HashSet<Slot>>,
 }
 
 impl std::fmt::Debug for Reads {
@@ -703,13 +708,37 @@ impl Reads {
     fn hit(&self, slot: &Slot, epoch: u64) -> Option<Arc<Value>> {
         let memo = self.memo.lock().ok()?;
         memo.get(slot)
-            .filter(|(read_at, _)| *read_at == epoch)
-            .map(|(_, answer)| Arc::clone(answer))
+            .filter(|(read_at, _, _)| *read_at == epoch)
+            .map(|(_, answer, _)| Arc::clone(answer))
     }
 
-    fn keep(&self, slot: Slot, epoch: u64, answer: Arc<Value>) {
+    /// What `slot` last answered, whatever epoch it was read at, and when that read started.
+    fn last(&self, slot: &Slot) -> Option<(Arc<Value>, std::time::SystemTime)> {
+        let memo = self.memo.lock().ok()?;
+        memo.get(slot)
+            .map(|(_, answer, at)| (Arc::clone(answer), *at))
+    }
+
+    fn keep(&self, slot: Slot, epoch: u64, answer: Arc<Value>, at: std::time::SystemTime) {
         if let Ok(mut memo) = self.memo.lock() {
-            memo.insert(slot, (epoch, answer));
+            memo.insert(slot, (epoch, answer, at));
+        }
+    }
+
+    /// Mark the slots in `slots` that no recount is reading yet as being read, and return
+    /// them; the caller must [`Self::refreshed`] them when its recount ends.
+    fn start_refresh(&self, slots: Vec<Slot>) -> Vec<Slot> {
+        let mut refreshing = self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .into_iter()
+            .filter(|slot| refreshing.insert(slot.clone()))
+            .collect()
+    }
+
+    fn refreshed(&self, slots: &[Slot]) {
+        let mut refreshing = self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
+        for slot in slots {
+            refreshing.remove(slot);
         }
     }
 
@@ -763,37 +792,13 @@ pub(crate) async fn read_answers(
         })
         .collect();
     let missing: Vec<usize> = (0..roots.len()).filter(|&i| out[i].is_none()).collect();
-    let runtime = tokio::runtime::Handle::try_current().ok();
-    for batch in missing.chunks(PARALLEL_READS) {
-        let reads = batch.iter().map(|&i| {
-            read_through(
-                Arc::clone(&web.hub),
-                inv.capability.clone(),
-                epochs.clone(),
-                slot(&roots[i]),
-                findings_request(&roots[i], arg),
-            )
-        });
-        match &runtime {
-            // ★ Spawned, so the reads run on different workers at once: each is synchronous
-            // CPU work inside the store, and futures joined on one task would take turns.
-            Some(runtime) => {
-                let spawned: Vec<_> = reads.map(|read| runtime.spawn(read)).collect();
-                for (&i, handle) in batch.iter().zip(spawned) {
-                    out[i] =
-                        Some(handle.await.unwrap_or_else(|e| {
-                            Err(format!("the findings read did not finish: {e}"))
-                        }));
-                }
-            }
-            // No runtime (an embedding that drives the kernel with its own executor, and the
-            // in-process tests): one at a time, the same reads.
-            None => {
-                for (&i, read) in batch.iter().zip(reads) {
-                    out[i] = Some(read.await);
-                }
-            }
-        }
+    let jobs = missing
+        .iter()
+        .map(|&i| (slot(&roots[i]), findings_request(&roots[i], arg)))
+        .collect();
+    let read = read_slots(Arc::clone(&web.hub), inv.capability.clone(), epochs, jobs).await;
+    for (i, answer) in missing.into_iter().zip(read) {
+        out[i] = Some(answer);
     }
     roots
         .iter()
@@ -803,6 +808,165 @@ pub(crate) async fn read_answers(
                 .map(|answer| answer.expect("every root read or held")),
         )
         .collect()
+}
+
+/// Read each job's slot through [`read_through`], [`PARALLEL_READS`] at a time, in order.
+///
+/// Every argument is owned, so a background recount ([`read_answers_or_last`]) can run it on a
+/// task of its own after the poll that started it has answered.
+async fn read_slots(
+    hub: Arc<Kernel>,
+    capability: Capability,
+    epochs: Option<Arc<crate::watch::Epochs>>,
+    jobs: Vec<(Slot, std::result::Result<Request, String>)>,
+) -> Vec<Answer> {
+    let mut out = Vec::with_capacity(jobs.len());
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let mut jobs = jobs.into_iter().peekable();
+    while jobs.peek().is_some() {
+        let reads: Vec<_> = jobs
+            .by_ref()
+            .take(PARALLEL_READS)
+            .map(|(slot, request)| {
+                read_through(
+                    Arc::clone(&hub),
+                    capability.clone(),
+                    epochs.clone(),
+                    slot,
+                    request,
+                )
+            })
+            .collect();
+        match &runtime {
+            // ★ Spawned, so the reads run on different workers at once: each is synchronous
+            // CPU work inside the store, and futures joined on one task would take turns.
+            Some(runtime) => {
+                let spawned: Vec<_> = reads.into_iter().map(|read| runtime.spawn(read)).collect();
+                for handle in spawned {
+                    out.push(
+                        handle.await.unwrap_or_else(|e| {
+                            Err(format!("the findings read did not finish: {e}"))
+                        }),
+                    );
+                }
+            }
+            // No runtime (an embedding that drives the kernel with its own executor, and the
+            // in-process tests): one at a time, the same reads.
+            None => {
+                for read in reads {
+                    out.push(read.await);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// ★★ **[`read_answers`] for the badge: a root whose epoch has moved is answered from what it
+/// last answered while a recount runs in the background** (ledger
+/// [#4138](http://localhost:1060/l/default/item/4138)) — stale-while-revalidate. Also returns
+/// when the OLDEST answer given that way was read, which the badge states as its age; `None`
+/// when every answer is current.
+///
+/// Several events move every root's epoch at once — a write through the store's door that
+/// can reach browse's graph, a browse write naming no root, a decision on a finding id no
+/// listing has taught the epochs, a change to the set of roots — and with [`read_answers`]
+/// the next poll then re-read every readable root before it answered: ~0.85 s a root on the
+/// live dataset, [`PARALLEL_READS`] at a time, the 19 s outliers in the door log. Now that poll
+/// answers at once from the last count and says how old it is; the recount lands in
+/// [`Reads`] for the next poll, the Queue page and every other caller of the memo.
+///
+/// ⚠ What it still reads before answering, stated:
+///
+/// - a root it has NEVER read under this capability and argument (a cold badge): there is no
+///   last count to answer from, and a count that left the root out would be a wrong number
+///   rather than an old one;
+/// - every moved root when there is no tokio runtime to recount on (the in-process tests and
+///   an embedding with its own executor): nothing would run a background recount, so it reads
+///   now, exactly as [`read_answers`] does.
+///
+/// A recount that fails is not kept ([`read_through`]), so the last answer goes on being
+/// served — older each poll, and saying so — and the next poll starts another recount.
+async fn read_answers_or_last(
+    web: &Web,
+    inv: &Invocation<'_>,
+    roots: &[String],
+    arg: (&str, &str),
+) -> (Vec<(String, Answer)>, Option<std::time::SystemTime>) {
+    let (Some(epochs), Ok(runtime)) = (web.epochs.clone(), tokio::runtime::Handle::try_current())
+    else {
+        return (read_answers(web, inv, roots, arg).await, None);
+    };
+    let key = scopes_key(inv);
+    let narrowed = format!("{}={}", arg.0, arg.1);
+    let slot = |root: &str| (root.to_string(), key.clone(), narrowed.clone());
+    let mut oldest: Option<std::time::SystemTime> = None;
+    let mut stale = Vec::new();
+    let mut out: Vec<Option<Answer>> = Vec::with_capacity(roots.len());
+    for root in roots {
+        let slot = slot(root);
+        let Some(stamp) = epochs.stamp(root) else {
+            out.push(None);
+            continue;
+        };
+        if let Some(answer) = epochs.reads.hit(&slot, stamp) {
+            out.push(Some(Ok(answer)));
+        } else if let Some((answer, at)) = epochs.reads.last(&slot) {
+            oldest = Some(oldest.map_or(at, |o| o.min(at)));
+            stale.push((slot, findings_request(root, arg)));
+            out.push(Some(Ok(answer)));
+        } else {
+            out.push(None);
+        }
+    }
+    // The recount, on a task of its own: the poll does not wait for it.
+    let starting = epochs
+        .reads
+        .start_refresh(stale.iter().map(|(slot, _)| slot.clone()).collect());
+    if !starting.is_empty() {
+        let jobs: Vec<_> = stale
+            .into_iter()
+            .filter(|(slot, _)| starting.contains(slot))
+            .collect();
+        let (hub, capability, held) = (
+            Arc::clone(&web.hub),
+            inv.capability.clone(),
+            Arc::clone(&epochs),
+        );
+        runtime.spawn(async move {
+            // Released however the recount ends, a panic included.
+            struct Refreshed(Arc<crate::watch::Epochs>, Vec<Slot>);
+            impl Drop for Refreshed {
+                fn drop(&mut self) {
+                    self.0.reads.refreshed(&self.1);
+                }
+            }
+            let _refreshed = Refreshed(Arc::clone(&held), starting);
+            read_slots(hub, capability, Some(held), jobs).await;
+        });
+    }
+    // What has no last answer (a cold root, or one the epochs do not hold) is read now.
+    let cold: Vec<String> = roots
+        .iter()
+        .zip(&out)
+        .filter(|(_, answer)| answer.is_none())
+        .map(|(root, _)| root.clone())
+        .collect();
+    let mut read = read_answers(web, inv, &cold, arg).await.into_iter();
+    let answers = roots
+        .iter()
+        .cloned()
+        .zip(out)
+        .map(|(root, answer)| {
+            let answer = answer.unwrap_or_else(|| {
+                read.next()
+                    .map(|(_, answer)| answer)
+                    .expect("every cold root read")
+            });
+            (root, answer)
+        })
+        .collect();
+    (answers, oldest)
 }
 
 /// [`read_answers`] for one root.
@@ -890,6 +1054,7 @@ async fn read_through(
     if let Some(answer) = epochs.reads.hit(&slot, stamp) {
         return Ok(answer);
     }
+    let started = std::time::SystemTime::now();
     let answer = read().await?;
     // A listing teaches the epochs which root a finding id belongs to, so a decision that
     // names only the id moves only its root.
@@ -900,7 +1065,7 @@ async fn read_through(
                 .filter_map(|row| row.get("id").and_then(Value::as_str)),
         );
     }
-    epochs.reads.keep(slot, stamp, Arc::clone(&answer));
+    epochs.reads.keep(slot, stamp, Arc::clone(&answer), started);
     Ok(answer)
 }
 
@@ -940,6 +1105,10 @@ struct Counts {
     verdicts: usize,
     /// Roots whose findings could not be read under this caller.
     refused: usize,
+    /// When the oldest of the answers counted was read, when one was a root's LAST answer
+    /// given while a recount runs (ledger #4138, [`read_answers_or_last`]); `None` when every
+    /// answer counted is current.
+    counted_at: Option<std::time::SystemTime>,
 }
 
 impl Counts {
@@ -962,7 +1131,26 @@ impl Counts {
                 if self.refused == 1 { "y" } else { "ies" }
             ));
         }
+        if let Some(at) = self.counted_at {
+            let age = std::time::SystemTime::now()
+                .duration_since(at)
+                .unwrap_or_default();
+            out.push_str(&format!(
+                " Counted {} ago; a recount is running.",
+                age_words(age)
+            ));
+        }
         out
+    }
+}
+
+/// An age in the badge's words: `under a second`, `12 s`, `3 min`, `2 h`.
+fn age_words(age: std::time::Duration) -> String {
+    match age.as_secs() {
+        0 => "under a second".to_string(),
+        s @ 1..=59 => format!("{s} s"),
+        s @ 60..=3599 => format!("{} min", s / 60),
+        s => format!("{} h", s / 3600),
     }
 }
 
@@ -981,9 +1169,15 @@ async fn pending_counts(web: &Web, inv: &Invocation<'_>) -> Counts {
         other: 0,
         verdicts: 0,
         refused: 0,
+        counted_at: None,
     };
     let roots = crate::k::readable_roots(web, inv.capability);
-    for (_, answer) in read_answers(web, inv, &roots, ("state", "pending")).await {
+    // ★ The badge answers from each moved root's last rows while a recount runs (ledger
+    // #4138); the Queue page still reads before it answers, so a list is never older than
+    // what its reader asked for.
+    let (answers, counted_at) = read_answers_or_last(web, inv, &roots, ("state", "pending")).await;
+    counts.counted_at = counted_at;
+    for (_, answer) in answers {
         let Some(rows) = answer.as_deref().ok().and_then(Value::as_array) else {
             counts.refused += 1;
             continue;
@@ -2299,7 +2493,10 @@ impl Endpoint for Badge {
         // badge took 49 s. So a root is re-read only when its epoch has moved — a file change
         // the watch cut, or a write through the browse family — a poll after no change reads
         // nothing, the misses are read several at once, and the Queue page reads the same
-        // memo ([`read_answers`]). A count face on the findings resource, and a listing that
+        // memo ([`read_answers`]). And since ledger #4138 a poll after an event that moved
+        // EVERY root's epoch no longer waits for them all: it answers from the last count,
+        // says how old it is, and the recount runs behind it ([`read_answers_or_last`]).
+        // A count face on the findings resource, and a listing that
         // reads one repository's findings, would still be cheaper per miss; both are
         // browse's to offer.
         let counts = pending_counts(&self.web, inv).await;
@@ -2866,7 +3063,16 @@ impl Endpoint for Decide {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_sentence, meaning, split_decision_words, SCOPE_ALL};
+    use super::{age_words, count_sentence, meaning, split_decision_words, SCOPE_ALL};
+
+    #[test]
+    fn the_badge_states_an_age_in_words() {
+        use std::time::Duration;
+        assert_eq!(age_words(Duration::from_millis(400)), "under a second");
+        assert_eq!(age_words(Duration::from_secs(12)), "12 s");
+        assert_eq!(age_words(Duration::from_secs(185)), "3 min");
+        assert_eq!(age_words(Duration::from_secs(7300)), "2 h");
+    }
 
     #[test]
     fn paged_reads_keep_only_complete_answers_and_restore_triage_order() {
