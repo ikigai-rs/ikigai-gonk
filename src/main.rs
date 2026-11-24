@@ -623,7 +623,7 @@ fn serve(flags: &config::Flags) -> ! {
     let lapses = ikigai_gonk::lapse::Lapses::new(settings.lapse_every, backup::NextRun::default());
     trigger_spaces.push(Arc::new(ikigai_gonk::lapse::space(lapses.clone())));
     if let Some(record) = &record {
-        trigger_spaces.push(Arc::new(ikigai_log::endpoints::space(record.handle())));
+        trigger_spaces.push(record.space());
         // ★ The activity graph over the closed segments (ledger #4104), owner only like them.
         trigger_spaces.push(Arc::new(ikigai_gonk::activity::space()));
     }

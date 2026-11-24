@@ -619,9 +619,17 @@ fn store_html(store: &Value, now_ms: u64) -> String {
         )
     };
     let mut out = verdict(attention, &fine, &wrong);
-    let quads = store["quads"]
-        .as_u64()
-        .map_or("could not be read".to_string(), |q| q.to_string());
+    let quads = match (
+        store["quads"].as_u64(),
+        store["quads_counted_at_ms"].as_u64(),
+    ) {
+        (Some(quads), Some(at)) => format!(
+            "{quads}, counted {} ago",
+            humanize(Duration::from_millis(now_ms.saturating_sub(at)))
+        ),
+        (Some(quads), None) => quads.to_string(),
+        (None, _) => "could not be read".to_string(),
+    };
     let backup_at = taken.map_or("none".to_string(), |at| {
         format!(
             "{} UTC, {} ago",
