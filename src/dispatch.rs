@@ -79,10 +79,9 @@ impl Endpoint for Dispatch {
                 .ok_or_else(|| Error::MissingArgument("ledger".into()))?,
         )?;
         if !inv.capability.allows(&ledger.cap_read()) {
-            return Err(Error::Denied(format!(
-                "dispatch: requires {}",
-                ledger.cap_read()
-            )));
+            return Err(Error::Denied(
+                format!("dispatch: requires {}", ledger.cap_read()).into(),
+            ));
         }
         let principal = match inv.capability.principal() {
             Some(principal) => principal,
