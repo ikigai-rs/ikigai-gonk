@@ -310,6 +310,8 @@ impl Endpoint for Facet {
             projects: projects.as_deref(),
             priority: priority.as_deref(),
             sort: sort.as_deref(),
+            // The facet counts by its own pattern, which has no phrase search.
+            phrase: None,
         };
         // ★ Two plain groupings (ledger #4140): an item's labels, and its priorities with
         // `unset` for none. COUNT(DISTINCT) keeps a second value of an item's title, number
@@ -369,6 +371,7 @@ impl Endpoint for Facet {
             projects: listing.projects,
             priority: listing.priority,
             sort: listing.sort,
+            phrase: None,
         };
         let page = ledger_href(&ledger);
         // Two lists under their own headings, so a row starts with its term and count and

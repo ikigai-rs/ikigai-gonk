@@ -142,6 +142,43 @@ pub fn with_stream_budget(kernel: Kernel) -> Kernel {
     kernel.with_stream_memory(STREAM_MEMORY_BASE, STREAM_MEMORY_CEILING)
 }
 
+/// The IRI every ledger's own graph starts with (`ikigai-ledger`'s `ledger.rs`).
+pub const LEDGER_GRAPH_PREFIX: &str = "urn:iki:ledger:graph:";
+
+/// What the store's text index covers (ledger #4130, ikigai-ledger `docs/design/text-index.md`):
+/// every ledger's own graph, with `dcterms:title` at twice the weight of `ledger:body`.
+/// `graphs_starting_with` leaves out graveyards (`…:deleted`) and session summaries
+/// (`…:session`), so a deleted item's text and a session's summary are never indexed.
+#[must_use]
+pub fn ledger_text_enrollment() -> ikigai_store::TextEnrollment {
+    use ikigai_ledger::vocabulary as v;
+    ikigai_store::TextEnrollment::new()
+        .graphs_starting_with(LEDGER_GRAPH_PREFIX)
+        .predicate_weighted(v::ext::TITLE, 2.0)
+        .predicate(v::BODY)
+}
+
+/// How many bytes the text index holds on disk, under `<store>/text-index`; `0` when there is
+/// none yet. The index is derived, so this is space a rebuild would take again, never data.
+#[must_use]
+#[allow(clippy::disallowed_methods)] // ambient: fs: sizes a subdirectory of the store's own directory
+pub fn text_index_bytes(store: &std::path::Path) -> u64 {
+    fn walk(dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => walk(&entry.path()),
+                Ok(_) => entry.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => 0,
+            })
+            .sum()
+    }
+    walk(&store.join("text-index"))
+}
+
 /// The store's directory, made owner-only (`0700`) before the store opens it (ledger
 /// [#2801](http://localhost:1062/l/default/item/2801)).
 ///

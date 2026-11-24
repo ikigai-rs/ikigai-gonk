@@ -403,6 +403,35 @@ fn serve(flags: &config::Flags) -> ! {
         Some(quads) => store.with_max_scoped_copy_quads(quads),
         None => store,
     };
+    // The text index over every ledger's own graph (ledger #4130), before any space captures
+    // the store. It is derived: one missing, of another format, or not closed cleanly is
+    // rebuilt in the background, and searches scan meanwhile.
+    let store = if settings.text_index {
+        let before = ikigai_gonk::text_index_bytes(&store_path);
+        let store = store
+            .with_text_index(ikigai_gonk::ledger_text_enrollment())
+            .unwrap_or_else(|e| {
+                fail(&format!(
+                    "cannot open the text index under {}: {e}\n  It is derived from the store: \
+                     remove that directory to rebuild it, or set {} = false to run without it.",
+                    store_path.join("text-index").display(),
+                    ikigai_gonk::config::TEXT_INDEX_KEY
+                ))
+            });
+        eprintln!(
+            "ikigai-gonk: text index over every ledger's titles and bodies at {} ({before} bytes \
+             on disk); it rebuilds itself in the background after an unclean shutdown, and \
+             searches scan until it is ready",
+            store_path.join("text-index").display()
+        );
+        store
+    } else {
+        eprintln!(
+            "ikigai-gonk: no text index ({} = false): searches scan, and sort=relevance is refused",
+            ikigai_gonk::config::TEXT_INDEX_KEY
+        );
+        store
+    };
     let explains = settings.explains();
     // ★★ Obligation 1, checked before a single door opens. The choice above confines browse's
     // reads to one graph; quads it wrote into another are still on disk and no longer visible

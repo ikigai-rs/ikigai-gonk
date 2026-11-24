@@ -2655,6 +2655,12 @@
             </input>
           </div>
           <div class="search-field">
+            <label for="search-phrase">Exact phrase (these words, in this order)</label>
+            <input id="search-phrase" type="search" name="phrase" aria-describedby="search-phrase-help">
+              <xsl:attribute name="value"><xsl:value-of select="@phrase"/></xsl:attribute>
+            </input>
+          </div>
+          <div class="search-field">
             <label for="search-labels">Labels (all must match)</label>
             <input id="search-labels" name="labels" type="text" aria-describedby="label-filter-help">
               <xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute>
@@ -2678,8 +2684,15 @@
           <p id="search-text-help" class="note">Enter an item number, such as 42 or #42, to go to that item.</p>
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
           <p id="priority-filter-help" class="note">Separate priorities with commas: 0, 1, 2, 3, 4 or none (unset).</p>
-          <p id="sort-filter-help" class="note">Separate sort keys with commas: priority, created, modified, number or landing. Prefix a key with - for descending order. Default: -modified.</p>
+          <p id="search-phrase-help" class="note">Matches titles, bodies and comments.</p>
+          <p id="sort-filter-help" class="note">Separate sort keys with commas: priority, created, modified, number or landing. Prefix a key with - for descending order. Default: -modified.<xsl:if test="@relevance = 'ready'"> Or enter relevance by itself to list the items that best match your search first.</xsl:if></p>
+          <xsl:if test="@relevance-note != ''">
+            <p id="relevance-note" class="note"><xsl:value-of select="@relevance-note"/></p>
+          </xsl:if>
         </form>
+        <xsl:if test="@relevance-url != ''">
+          <p class="relevance-offer"><a><xsl:attribute name="href"><xsl:value-of select="@relevance-url"/></xsl:attribute>List the most relevant first</a></p>
+        </xsl:if>
       </header>
       <xsl:apply-templates select="view:project-views"/>
       <xsl:apply-templates select="view:save-filter"/>

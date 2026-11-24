@@ -8,6 +8,8 @@
 //!
 //! ```toml
 //! # gonk.store.max_scoped_copy_quads = 1000000  # scoped updates; default 250000; see README cost
+//! # gonk.store.text_index = true   # index each ledger's titles and bodies for search and
+//!                                  # relevance (this IS the default; `false` for none)
 //! # the HTTP door (loopback only; this IS the default)
 //! gonk.bind = "127.0.0.1:1062"
 //! # gonk.port = 1062                    # shorthand for gonk.bind = "127.0.0.1:<port>"
@@ -145,7 +147,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 69] = [
+const KEYS: [&str; 70] = [
     crate::constraint::SAMPLE_KEY,
     crate::constraint::EVERY_KEY,
     crate::constraint::HOST_KEY,
@@ -155,6 +157,7 @@ const KEYS: [&str; 69] = [
     crate::packs::FIRINGS_KEY,
     "gonk.holder.alias",
     "gonk.store.max_scoped_copy_quads",
+    TEXT_INDEX_KEY,
     "gonk.log.access",
     "gonk.onboard",
     "gonk.onboard.door",
@@ -844,6 +847,10 @@ pub struct Settings {
     /// Optional override of the store's scoped-update copy bound, in quads.
     /// Applied before store spaces are composed; absent preserves the store default.
     pub max_scoped_copy_quads: Option<usize>,
+    /// Whether the store indexes each ledger's own graph (`dcterms:title` and `ledger:body`)
+    /// for search and `sort=relevance` (`gonk.store.text_index`, default `true`, ledger #4130).
+    /// Never the graveyard or session-summary graphs.
+    pub text_index: bool,
     /// The HTTP door's address. Always loopback — see [`refuse_non_loopback`].
     pub http: SocketAddr,
     /// The socket path.
@@ -2545,6 +2552,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         session_max_seconds(value_for(text, "gonk.http.session_max_hours").as_deref())?;
     Ok(Settings {
         max_scoped_copy_quads: max_scoped_copy_quads(text)?,
+        text_index: text_index(text)?,
         http,
         socket,
         quic,
@@ -2610,6 +2618,29 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         )?,
         onboard,
     })
+}
+
+/// The key that turns the store's text index over the ledgers on or off (ledger #4130).
+pub const TEXT_INDEX_KEY: &str = "gonk.store.text_index";
+
+/// `gonk.store.text_index`: `true` (the default, also no line) or `false`; anything else, or
+/// two lines, fails the start, since a misspelled `flase` that indexed anyway would look like
+/// a setting in effect.
+fn text_index(text: &str) -> Result<bool, String> {
+    match values_for(text, TEXT_INDEX_KEY).as_slice() {
+        [] => Ok(true),
+        [value] => match value.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(format!(
+                "{TEXT_INDEX_KEY} = `{other}` is neither `true` nor `false`"
+            )),
+        },
+        lines => Err(format!(
+            "{TEXT_INDEX_KEY} is given {} times; set it once.",
+            lines.len()
+        )),
+    }
 }
 
 /// One positive, platform-sized quad count; no line preserves the store's own default.
@@ -3645,6 +3676,26 @@ mod tests {
         let zero = settings(&Flags::default(), "gonk.backup.keep = \"0\"\n", &homes())
             .expect_err("a rotation that keeps nothing");
         assert!(zero.contains("delete the backup it just took"), "{zero}");
+    }
+
+    #[test]
+    fn text_index_is_on_by_default_and_a_malformed_line_fails_the_start() {
+        let read = |text: &str| settings(&Flags::default(), text, &homes());
+        assert!(read("").unwrap().text_index);
+        assert!(read("gonk.store.text_index = true\n").unwrap().text_index);
+        assert!(!read("gonk.store.text_index = false\n").unwrap().text_index);
+        assert!(
+            !read("gonk.store.text_index = \"false\"\n")
+                .unwrap()
+                .text_index
+        );
+        for value in ["yes", "1", "\"\"", "flase"] {
+            let error = read(&format!("gonk.store.text_index = {value}\n")).unwrap_err();
+            assert!(error.contains("neither `true` nor `false`"), "{error}");
+        }
+        let error =
+            read("gonk.store.text_index = true\ngonk.store.text_index = false\n").unwrap_err();
+        assert!(error.contains("given 2 times"), "{error}");
     }
 
     #[test]

@@ -5062,6 +5062,39 @@ Choose a bound the host can afford; updates exceeding it are refused without app
 partial changes. Zero, invalid or overflowing values, and repeated lines are refused
 at startup with an explanation.
 
+### The text index: search and "most relevant first" (ledger #4130)
+
+The store keeps a full-text index (ikigai-store's `text-index`, design in ikigai-ledger's
+`docs/design/text-index.md`) over **every ledger's own graph**, `urn:iki:ledger:graph:{name}`:
+its `dcterms:title` (at twice the weight) and `ledger:body` literals, which bodies and comments
+share. Graveyards (`…:deleted`) and session summaries (`…:session`) are never indexed. It is on
+by default; turn it off with one line, then restart:
+
+```toml
+gonk.store.text_index = false   # `true` is the default; anything else, or two lines, fails the start
+```
+
+With the index, `text=`, `search=` and `whole_word=` answer exactly as the scan does (the ledger
+checks every candidate), `phrase=` matches words in order, and `sort=relevance` lists the best
+matches first. The ledger page offers both: an "Exact phrase" field, and a "List the most
+relevant first" link after a search. Without a ready index, the page says so in words and the
+ledger refuses `sort=relevance`; every other search and sort still works by scanning.
+
+**Size.** The index lives in `<store directory>/text-index`, one subdirectory per ledger, and
+stores no text, only terms, positions and trigrams. Startup prints its size on disk. On the
+generated 10,000-item ledger below (one title and one body each) see the measurement below.
+
+**It rebuilds itself.** The index is derived and never backed up. One that is missing, of
+another format or enrollment, or was not closed cleanly (a crash, a `kill -9`, a power loss) is
+rebuilt in the background from the store when gonk starts; until it is ready, searches scan and
+only `sort=relevance` is refused. An unclean shutdown costs a rebuild, never data. A backup
+restore replaces the store's directory and the index with it.
+
+**Measured** (`cargo test --release --test text_index_4130 -- --ignored --nocapture`, a scratch
+durable store, never a live gonk; one `items` read plus one `count` read per search):
+
+The before-and-after numbers are in the pull request that added this section (ledger #4130).
+
 A `gonk.browse.root` line is what composes `urn:repo:*` and `ikigai-repo`'s facades at all.
 The name is spliced into `urn:repo:<name>:…`, so it may not contain `:`, `/`, `{` or `}`, may
 not repeat, and may not be `pr` or `style` (those read as the other family's names); the
