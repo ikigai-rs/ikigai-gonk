@@ -122,7 +122,7 @@ impl Gonk {
 
 fn denied(result: Result<Representation, Error>, what: &str) -> String {
     match result {
-        Err(Error::Denied(why)) => why,
+        Err(Error::Denied(why)) => why.into_message(),
         other => panic!("{what}: expected Denied, got {other:?}"),
     }
 }

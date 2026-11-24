@@ -311,11 +311,14 @@ impl KAdapter {
             .strip_prefix(crate::queue::FINDING_PREFIX)
             .is_some_and(|id| !id.is_empty() && !id.contains(':'));
         if !annotation && !finding {
-            return Err(Error::Denied(format!(
-                "`{uri}`: this adapter sinks the annotation family (`{ANNOTATION_ROOT}`, or \
+            return Err(Error::Denied(
+                format!(
+                    "`{uri}`: this adapter sinks the annotation family (`{ANNOTATION_ROOT}`, or \
                  `{ANNOTATION_ROOT}:{{id}}`) and one finding (`{}{{id}}`), nothing else",
-                crate::queue::FINDING_PREFIX
-            )));
+                    crate::queue::FINDING_PREFIX
+                )
+                .into(),
+            ));
         }
         let content_type = inv.inline_str("content-type").unwrap_or_default();
         // ⚠ Read as BYTES and refused loudly when they are not text. This adapter's

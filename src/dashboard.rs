@@ -183,10 +183,13 @@ impl Tab {
     /// Enforce [`Tab::capability`], as well as declaring it.
     pub(crate) fn require(self, capability: &Capability) -> Result<()> {
         match self.capability() {
-            Some(needed) if !capability.allows(needed) => Err(Error::Denied(format!(
-                "the Dashboard's {} tab needs {needed} in the grant",
-                self.label()
-            ))),
+            Some(needed) if !capability.allows(needed) => Err(Error::Denied(
+                format!(
+                    "the Dashboard's {} tab needs {needed} in the grant",
+                    self.label()
+                )
+                .into(),
+            )),
             _ => Ok(()),
         }
     }

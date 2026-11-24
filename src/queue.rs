@@ -1044,12 +1044,15 @@ impl QueuePage {
             .map(str::to_string);
         if let Some(repo) = &only {
             if !roots.iter().any(|r| r == repo) {
-                return Err(Error::Denied(format!(
-                    "`{repo}` is not a repository this grant may read. A grant names one root \
+                return Err(Error::Denied(
+                    format!(
+                        "`{repo}` is not a repository this grant may read. A grant names one root \
                      as `{}{repo}`, or every root as `{}`.",
-                    ikigai_browse::CAP_PREFIX,
-                    ikigai_browse::CAP_WILDCARD
-                )));
+                        ikigai_browse::CAP_PREFIX,
+                        ikigai_browse::CAP_WILDCARD
+                    )
+                    .into(),
+                ));
             }
         }
         let chosen: Vec<String> = match &only {

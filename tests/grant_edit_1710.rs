@@ -146,7 +146,7 @@ impl Door {
 
 fn denied(answer: Result<Representation, Error>, what: &str) -> String {
     match answer {
-        Err(Error::Denied(why)) => why,
+        Err(Error::Denied(why)) => why.into_message(),
         other => panic!("{what} must be Denied, got {other:?}"),
     }
 }

@@ -418,7 +418,7 @@ fn require_read(inv: &Invocation<'_>) -> Result<()> {
         return Ok(());
     }
     let signed_in = inv.capability.principal().is_some();
-    Err(Error::Denied(lacking().plain(signed_in)))
+    Err(Error::Denied(lacking().plain(signed_in).into()))
 }
 
 /// The local part of a view's name, for its form and its `/view/{name}` link.

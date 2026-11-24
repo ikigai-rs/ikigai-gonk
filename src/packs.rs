@@ -554,10 +554,13 @@ fn reads_root(inv: &Invocation<'_>, root: &str) -> bool {
 }
 
 fn lacking(root: &str) -> Error {
-    Error::Denied(format!(
-        "this grant does not read the repository `{root}` (`{}{root}`)",
-        ikigai_browse::CAP_PREFIX
-    ))
+    Error::Denied(
+        format!(
+            "this grant does not read the repository `{root}` (`{}{root}`)",
+            ikigai_browse::CAP_PREFIX
+        )
+        .into(),
+    )
 }
 
 async fn present(inv: &Invocation<'_>, root: &str, name: &str) -> bool {

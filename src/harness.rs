@@ -406,7 +406,9 @@ impl Harness {
             // `root=` cannot reach one the picker does not offer.
             if !crate::k::reads_root(inv.capability, root) {
                 let signed_in = inv.capability.principal().is_some();
-                return Err(Error::Denied(web::Lacking::repositories().plain(signed_in)));
+                return Err(Error::Denied(
+                    web::Lacking::repositories().plain(signed_in).into(),
+                ));
             }
         }
         let roots = match asked {
@@ -422,7 +424,9 @@ impl Harness {
         }
         if roots.is_empty() {
             let signed_in = inv.capability.principal().is_some();
-            return Err(Error::Denied(web::Lacking::repositories().plain(signed_in)));
+            return Err(Error::Denied(
+                web::Lacking::repositories().plain(signed_in).into(),
+            ));
         }
         for root in roots {
             let own = read_file(inv, &root, GRAPH_FILE).await?;

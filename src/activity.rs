@@ -77,9 +77,10 @@ fn source_only(inv: &Invocation<'_>, what: &str) -> Result<()> {
         )));
     }
     if !inv.capability.allows(CAP_READ) {
-        return Err(Error::Denied(format!(
-            "the activity graph requires `{CAP_READ}`: it names every caller and resource"
-        )));
+        return Err(Error::Denied(
+            format!("the activity graph requires `{CAP_READ}`: it names every caller and resource")
+                .into(),
+        ));
     }
     Ok(())
 }

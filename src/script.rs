@@ -645,14 +645,17 @@ pub fn publish_refusal(endpoint: &str, request: &Request) -> Option<Error> {
 }
 
 fn read_only(what: &str) -> Error {
-    Error::Denied(format!(
-        "{what} cannot be published here: this server's scripts are READ-ONLY. Every run is \
+    Error::Denied(
+        format!(
+            "{what} cannot be published here: this server's scripts are READ-ONLY. Every run is \
          held to a ceiling of the ledgers' reads (`{}`), because the ledger's own write door \
          and a raw write of its graph need the same store token, and gonk tells them apart \
          only where a request arrives, which a script's steps never do. Write through the \
          ledger's own doors (`urn:iki:ledger:*`)",
-        CEILING.join("`, `")
-    ))
+            CEILING.join("`, `")
+        )
+        .into(),
+    )
 }
 
 /// Why `urn:plan:eval` (the endpoint `plan-eval`) may not run the plan in `in` under
@@ -690,11 +693,14 @@ pub fn plan_refusal(
         return None;
     }
     let refuse = |why: String| {
-        Some(Error::Denied(format!(
+        Some(Error::Denied(
+            format!(
             "{why}. A plan's steps run inside this server as sub-requests, out of sight of the \
              author and raw-write rules every door applies, so below root (the owner's socket) \
              only a plan whose every step reads may run here"
-        )))
+        )
+            .into(),
+        ))
     };
     match request.args.get("in") {
         // No plan: the door refuses that itself, naming the argument.

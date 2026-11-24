@@ -640,9 +640,9 @@ fn owner(inv: &Invocation<'_>) -> Result<()> {
     if inv.capability.allows(CAP_ROOTS) {
         Ok(())
     } else {
-        Err(Error::Denied(format!(
-            "the browse roots are the owner's: {CAP_ROOTS}"
-        )))
+        Err(Error::Denied(
+            format!("the browse roots are the owner's: {CAP_ROOTS}").into(),
+        ))
     }
 }
 

@@ -58,9 +58,9 @@ impl Endpoint for Summary {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let grant = format!("{}{}", ikigai_browse::CAP_PREFIX, self.root);
         if !inv.capability.allows(&grant) && !inv.capability.allows(ikigai_browse::CAP_WILDCARD) {
-            return Err(Error::Denied(format!(
-                "findings-summary: capability does not grant `{grant}`"
-            )));
+            return Err(Error::Denied(
+                format!("findings-summary: capability does not grant `{grant}`").into(),
+            ));
         }
         let encoded = inv.bindings.get("path");
         let path = encoded
