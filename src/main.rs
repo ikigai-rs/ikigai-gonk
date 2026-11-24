@@ -624,6 +624,8 @@ fn serve(flags: &config::Flags) -> ! {
     trigger_spaces.push(Arc::new(ikigai_gonk::lapse::space(lapses.clone())));
     if let Some(record) = &record {
         trigger_spaces.push(record.space());
+        // ★ The activity graph over the closed segments (ledger #4104), owner only like them.
+        trigger_spaces.push(Arc::new(ikigai_gonk::activity::space()));
     }
     trigger_spaces.push(Arc::new(ikigai_gonk::git_object::space(
         "configured",
