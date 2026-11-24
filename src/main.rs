@@ -623,7 +623,7 @@ fn serve(flags: &config::Flags) -> ! {
     let lapses = ikigai_gonk::lapse::Lapses::new(settings.lapse_every, backup::NextRun::default());
     trigger_spaces.push(Arc::new(ikigai_gonk::lapse::space(lapses.clone())));
     if let Some(record) = &record {
-        trigger_spaces.push(Arc::new(ikigai_log::endpoints::space(record.handle())));
+        trigger_spaces.push(record.space());
     }
     trigger_spaces.push(Arc::new(ikigai_gonk::git_object::space(
         "configured",
