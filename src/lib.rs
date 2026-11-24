@@ -37,6 +37,7 @@ mod file_cache;
 mod findings_pages;
 
 pub mod access;
+pub mod activity;
 pub mod admit;
 pub mod agents;
 pub mod backfill;

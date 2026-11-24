@@ -1,0 +1,202 @@
+# The activity graph: gonk's door lines (ikigai-log segments) as caller -> activity -> resource.
+# Ledger #3391.
+#
+# Run it with one segment as its `graph=` source (`urn:log:segments` lists them; each resolves
+# to Turtle at its own IRI), and union the answers. Per segment because a closed segment never
+# changes, so its derived graph could be cached for good and only the live one recomputes.
+#
+# Three kinds of node, each skolemized at a stable IRI built from NAMED keys:
+#
+# 1. act:Rollup, one per (segment, hour, caller, door, resource, verb, outcome): the
+#    AUTHENTICATED callers' requests, counted, with total, maximum and slow (>= 1 s)
+#    durations and total bytes. One node per request was tried first and abandoned: 220,000
+#    activities over 11 days is about 3 million triples (333 MB of N-Triples), which no
+#    single CLI run can read (64 MiB stream budget) or answer (100,000 triples). The rollup
+#    is about 10,000 nodes for the same 11 days, because 58% of authenticated requests are workers
+#    polling `urn:iki:ledger:default:next`.
+# 2. act:Write, one per authenticated Sink or Delete, at the entry's own IRI
+#    (urn:log:<segment>:<seq>, already skolemized), with its exact time: the requests a
+#    ledger event can be joined to (a claim, a comment, a close). About 8,500 in 11 days.
+# 3. act:AnonymousLoad, one per (segment, day, door, resource kind, outcome): ANONYMOUS
+#    requests only as counts. No resource, no time finer than a day, no identifier (the log
+#    carries none for anon, and this graph adds none), so no sequence can be rebuilt. The
+#    segment is in the key so per-segment runs never mint one IRI with two counts; sum the
+#    buckets across segments.
+#
+# Never carried: query strings (log:servedQuery), bodies, tokens, cookies.
+#
+# act:kind classifies the resource. act:sampled marks the polls gonk SAMPLES (one quiet line
+# per ten minutes per resource, plus failures and slow ones; ledger #767, #1718): their counts
+# are lines, never request volume. act:ledger / act:itemKey normalize the spellings of a ledger
+# item (urn:iki:ledger:item:N, urn:iki:ledger:{ledger}:item:N, an item's own id, and any
+# :history or other part after it) so an activity can be joined with the ledger graph.
+#
+# Size: the busiest closed segment (21,792 entries) answers about 45,000 triples, under the
+# CLI's 100,000-triple SPARQL bound (ikigai-sparql's default, ledger #970). If a segment ever
+# outgrows it, add FILTER(?hour >= "A" && ?hour < "B") in the rollup's and the writes' WHERE
+# and run it in windows: every node's key holds its hour, so windows never overlap.
+PREFIX log:  <https://ikigai-rs.dev/ns/log#>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>
+PREFIX act:  <urn:iki:gonk:activity:vocab#>
+
+CONSTRUCT {
+  ?rollup a act:Rollup, prov:Activity ;
+     log:segment ?seg ;
+     act:hour ?hour ;
+     prov:wasAssociatedWith ?who ;
+     log:door ?door ;
+     prov:used ?res ;
+     log:verb ?verb ;
+     log:outcome ?outcome ;
+     act:kind ?kind ;
+     act:sampled ?sampled ;
+     act:ledger ?ledger ;
+     act:itemKey ?itemKey ;
+     act:count ?n ;
+     act:totalDurationMs ?totalMs ;
+     act:maxDurationMs ?maxMs ;
+     act:slowCount ?slow ;
+     act:totalBytes ?totalBytes .
+  ?write a act:Write, prov:Activity ;
+     prov:startedAtTime ?wt ;
+     act:hour ?whour ;
+     prov:wasAssociatedWith ?wwho ;
+     log:door ?wdoor ;
+     prov:used ?wres ;
+     log:verb ?wverb ;
+     log:outcome ?woutcome ;
+     log:durationMs ?wdur ;
+     act:kind ?wkind ;
+     act:ledger ?wledger ;
+     act:itemKey ?witemKey .
+  ?bucket a act:AnonymousLoad ;
+     log:segment ?aseg ;
+     act:day ?aday ;
+     log:door ?adoor ;
+     act:kind ?akind ;
+     log:outcome ?aoutcome ;
+     act:count ?an ;
+     act:totalDurationMs ?atotalMs .
+}
+WHERE {
+  {
+    # 1. The rollup.
+    {
+      SELECT ?seg ?hour ?who ?door ?res ?verb ?outcome
+             (COUNT(*) AS ?n) (SUM(COALESCE(?dur, 0)) AS ?totalMs) (MAX(?dur) AS ?maxMs)
+             (SUM(IF(COALESCE(?dur, 0) >= 1000, 1, 0)) AS ?slow)
+             (SUM(COALESCE(?bytes, 0)) AS ?totalBytes)
+      WHERE {
+        GRAPH ?g {
+          ?e a log:Access ;
+             log:segment ?seg ;
+             prov:startedAtTime ?t ;
+             log:subject ?res ;
+             log:door ?door ;
+             log:outcome ?outcome ;
+             log:onBehalfOf ?who .
+          OPTIONAL { ?e log:verb ?verb }
+          OPTIONAL { ?e log:durationMs ?dur }
+          OPTIONAL { ?e log:byteCount ?bytes }
+        }
+        FILTER(isIRI(?who))
+        BIND(SUBSTR(STR(?t), 1, 13) AS ?hour)
+      }
+      GROUP BY ?seg ?hour ?who ?door ?res ?verb ?outcome
+    }
+    BIND(STR(?res) AS ?r)
+    BIND(IRI(CONCAT("urn:iki:gonk:activity:rollup:segment:", STRAFTER(STR(?seg), "urn:log:"),
+                    ":hour:", ?hour, ":caller:", ENCODE_FOR_URI(STR(?who)),
+                    ":door:", ?door, ":verb:", COALESCE(?verb, "none"),
+                    ":outcome:", ?outcome, ":resource:", ENCODE_FOR_URI(?r))) AS ?rollup)
+  }
+  UNION
+  {
+    # 2. The writes, one node each.
+    GRAPH ?g {
+      ?write a log:Access ;
+             prov:startedAtTime ?wt ;
+             log:subject ?wres ;
+             log:door ?wdoor ;
+             log:verb ?wverb ;
+             log:outcome ?woutcome ;
+             log:onBehalfOf ?wwho .
+      OPTIONAL { ?write log:durationMs ?wdur }
+    }
+    FILTER(isIRI(?wwho) && ?wverb != "source")
+    BIND(SUBSTR(STR(?wt), 1, 13) AS ?whour)
+    BIND(STR(?wres) AS ?r)
+  }
+  UNION
+  {
+    # 3. Anonymous load, in aggregate only.
+    SELECT ?aseg ?aday ?adoor ?akind ?aoutcome (COUNT(*) AS ?an)
+           (SUM(COALESCE(?adur0, 0)) AS ?atotalMs)
+    WHERE {
+      GRAPH ?g {
+        ?ae a log:Access ;
+            log:segment ?aseg ;
+            prov:startedAtTime ?at ;
+            log:subject ?ares ;
+            log:door ?adoor ;
+            log:outcome ?aoutcome ;
+            log:onBehalfOf ?awho .
+        OPTIONAL { ?ae log:durationMs ?adur0 }
+      }
+      FILTER(!isIRI(?awho))
+      BIND(STR(?ares) AS ?ar)
+      BIND(SUBSTR(STR(?at), 1, 10) AS ?aday)
+      BIND(
+        IF(REGEX(?ar, "^urn:iki:gonk:(fragment:(queue-depth|layers-count|layers-wait)|instance)$"), "poll",
+        IF(REGEX(?ar, "^urn:iki:(gonk:asset|ui):"), "asset",
+        IF(STRSTARTS(?ar, "urn:iki:gonk:passkey:"), "passkey",
+        IF(STRSTARTS(?ar, "urn:face:"), "face",
+        IF(STRSTARTS(?ar, "urn:iki:gonk:page:"), "page",
+        IF(STRSTARTS(?ar, "urn:iki:ledger:"), "ledger",
+        "other"))))))
+        AS ?akind)
+    }
+    GROUP BY ?aseg ?aday ?adoor ?akind ?aoutcome
+  }
+
+  # The resource's kind, its sampling, and its ledger item, for the rollup and the writes.
+  # An unbound ?none makes IF answer an error, which leaves the variable unbound.
+  BIND(REGEX(?r, "^urn:iki:gonk:(fragment:(queue-depth|layers-count|layers-wait)|instance)$") AS ?s0)
+  BIND(
+    IF(REGEX(?r, "^urn:iki:ledger:([a-z0-9_-]+:)?next$"), "ledger-next",
+    IF(REGEX(?r, "^urn:iki:ledger:([a-z0-9_-]+:)?item:[^:]+:"), "ledger-item-part",
+    IF(REGEX(?r, "^urn:iki:ledger:([a-z0-9_-]+:)?item:"), "ledger-item",
+    IF(REGEX(?r, "^urn:iki:ledger:([a-z0-9_-]+:)?items$"), "ledger-items",
+    IF(REGEX(?r, "^urn:iki:ledger:([a-z0-9_-]+:)?(claim|release|renew|lapse|comment|close|reopen|append|label|unlabel|link|unlink|state|defer|resume)$"), "ledger-write",
+    IF(STRSTARTS(?r, "urn:iki:ledger:"), "ledger-other",
+    IF(?s0, "poll",
+    IF(STRSTARTS(?r, "urn:iki:gonk:fragment:dashboard"), "dashboard",
+    IF(STRSTARTS(?r, "urn:iki:gonk:fragment:"), "fragment",
+    IF(STRSTARTS(?r, "urn:iki:gonk:page:"), "page",
+    IF(REGEX(?r, "^urn:iki:(gonk:asset|ui):"), "asset",
+    IF(STRSTARTS(?r, "urn:iki:gonk:passkey:"), "passkey",
+    IF(REGEX(?r, "^urn:repo:[^:]+:(findings|annotations)"), "review",
+    IF(STRSTARTS(?r, "urn:repo:"), "repo",
+    IF(STRSTARTS(?r, "urn:iki:store:"), "store-query",
+    IF(STRSTARTS(?r, "urn:log:"), "log",
+    IF(STRSTARTS(?r, "urn:face:"), "face",
+    IF(REGEX(?r, "^urn:iki:(layer|layers)[:]"), "layer",
+    "other"))))))))))))))))))
+    AS ?k0)
+  BIND(REGEX(?r, "^urn:iki:ledger:([a-z0-9_-]+:)?item:") AS ?isItem)
+  BIND(IF(?isItem, REPLACE(?r, "^urn:iki:ledger:(([a-z0-9_-]+):)?item:([^:]+).*$", "$2"), ?none) AS ?l0)
+  BIND(IF(?l0 = "", "default", ?l0) AS ?l1)
+  BIND(IF(?isItem, REPLACE(?r, "^urn:iki:ledger:(([a-z0-9_-]+):)?item:([^:]+).*$", "$3"), ?none) AS ?k1)
+  BIND(IF(BOUND(?rollup), ?s0, ?none) AS ?sampled)
+  BIND(IF(BOUND(?rollup), ?k0, ?none) AS ?kind)
+  BIND(IF(BOUND(?rollup), ?l1, ?none) AS ?ledger)
+  BIND(IF(BOUND(?rollup), ?k1, ?none) AS ?itemKey)
+  BIND(IF(BOUND(?write), ?k0, ?none) AS ?wkind)
+  BIND(IF(BOUND(?write), ?l1, ?none) AS ?wledger)
+  BIND(IF(BOUND(?write), ?k1, ?none) AS ?witemKey)
+  BIND(IF(BOUND(?an),
+          IRI(CONCAT("urn:iki:gonk:activity:anonymous:segment:", STRAFTER(STR(?aseg), "urn:log:"),
+                     ":day:", ?aday, ":door:", ?adoor, ":kind:", ?akind, ":outcome:", ?aoutcome)),
+          ?none) AS ?bucket)
+}
