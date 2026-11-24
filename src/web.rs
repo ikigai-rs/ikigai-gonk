@@ -2081,6 +2081,7 @@ fn item_chips(
     String::from_utf8(writer.into_inner()).map_err(|e| render_err(e.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)] // `readable` spares the home page a second read (#4140).
 async fn ledger_listing(
     web: &Web,
     inv: &Invocation<'_>,
@@ -2089,6 +2090,7 @@ async fn ledger_listing(
     full: bool,
     flash: Option<(&str, &str)>,
     said: Option<&str>,
+    readable: Option<Vec<Ledger>>,
 ) -> Result<Representation> {
     let Listing {
         status,
@@ -2219,7 +2221,8 @@ async fn ledger_listing(
         }
     }
     enrich_authors(&mut graph, &web.passkeys);
-    let ledgers = readable_ledgers(web, inv.capability);
+    // The home page has already read them to pick its ledger (ledger #4140): once a request.
+    let ledgers = readable.unwrap_or_else(|| readable_ledgers(web, inv.capability));
     let mut children = nav(web, inv.capability, &ledgers, Some(ledger.name()));
     if let Some((kind, message)) = flash {
         children.push_str(&element("flash", &[("kind", kind)], message));
@@ -2677,12 +2680,13 @@ impl Endpoint for LedgerView {
         let projects = optional(inv, "projects");
         let priority = optional(inv, "priority");
         let sort = optional(inv, "sort");
+        let mut readable = None;
         let ledger = match self.shape {
-            Shape::Home => match readable_ledgers(&self.web, inv.capability)
-                .into_iter()
-                .next()
+            Shape::Home => match readable
+                .insert(readable_ledgers(&self.web, inv.capability))
+                .first()
             {
-                Some(ledger) => ledger,
+                Some(ledger) => ledger.clone(),
                 None => {
                     // ⚠ The nav still renders: a grant may carry browse roots and no
                     // ledger at all, and such a caller used to land here with a header
@@ -2746,6 +2750,7 @@ impl Endpoint for LedgerView {
             self.shape != Shape::Fragment,
             None,
             missing.as_deref(),
+            readable,
         )
         .await
     }
@@ -3953,7 +3958,7 @@ impl Endpoint for Act {
                     sort: list_sort.as_deref(),
                 };
                 let page = list_ledger.as_ref().unwrap_or(&ledger);
-                ledger_listing(&self.web, inv, page, &listing, false, flash, None).await
+                ledger_listing(&self.web, inv, page, &listing, false, flash, None, None).await
             }
         }
     }

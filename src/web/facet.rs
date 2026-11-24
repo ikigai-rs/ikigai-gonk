@@ -1,13 +1,14 @@
 //! Whole-match facets, fetched after the bounded listing has been drawn (#3193).
 //!
-//! One grouped SELECT, scoped to one ledger graph and the viewer's capability. No item
-//! documents or other ledgers are read. `pattern` mirrors the ledger's listing pattern;
-//! HTTP tests compare the two over status, text, intersecting labels and exclusions.
+//! Two grouped SELECTs, one for labels and one for priorities, scoped to one ledger graph and
+//! the viewer's capability. No item documents or other ledgers are read. `pattern` mirrors the
+//! ledger's listing pattern; HTTP tests compare the two over status, text, intersecting labels
+//! and exclusions.
 //!
-//! Under `ledgers=` (ledger #3216) the same SELECT runs once per ledger of the union, and
-//! the ledger itself says which those are: its `count` face lists the ledgers it read under
-//! the viewer's grants, so the counts cover exactly the listing's rows. An item is in one
-//! graph only, so the per-graph counts add up.
+//! Under `ledgers=` (ledger #3216) the same SELECTs run for each ledger of the union, at the
+//! same time (ledger #4140), and the ledger itself says which those are: its `count` face
+//! lists the ledgers it read under the viewer's grants, so the counts cover exactly the
+//! listing's rows. An item is in one graph only, so the per-graph counts add up.
 //!
 //! # The JSON face (ledger #3782)
 //!
@@ -101,23 +102,27 @@ pub(super) struct Facet {
 /// The same base requirements and label/title/status semantics as ikigai-ledger 0.18.
 /// Values are SPARQL literals, never query syntax.
 fn pattern(listing: &Listing<'_>) -> Result<String> {
-    let mut body = format!(
-        "?item a <{LEDGER_NS}Item> ; <{LEDGER_NS}number> ?number ; \
-         <{DCTERMS}title> ?title ; <{LEDGER_NS}status> ?status .\n"
-    );
-    match listing.status {
-        "open" | "closed" => body.push_str(&format!(
-            "?item <{LEDGER_NS}status> <{LEDGER_NS}{}> .\n",
-            listing.status
-        )),
-        "all" => {}
+    // ★ Only the title a text filter reads is bound (ledger #4140); the item must still have
+    // a number, a title and a status, as a listed one does, so those stay as `[]`.
+    let title = if listing.text.is_some() {
+        "?title"
+    } else {
+        "[]"
+    };
+    let status = match listing.status {
+        "open" | "closed" => format!("<{LEDGER_NS}{}>", listing.status),
+        "all" => "[]".to_string(),
         status => {
             return Err(Error::InvalidArgument {
                 name: "status".into(),
                 detail: format!("`{status}` is not one of open, closed, all"),
             })
         }
-    }
+    };
+    let mut body = format!(
+        "?item a <{LEDGER_NS}Item> ; <{LEDGER_NS}number> [] ; \
+         <{DCTERMS}title> {title} ; <{LEDGER_NS}status> {status} .\n"
+    );
     if let Some(priority) = listing.priority {
         let mut clauses = Vec::new();
         for value in priority.split(',').map(str::trim) {
@@ -204,20 +209,61 @@ async fn union(
         .map(Some)
 }
 
-async fn query(inv: &Invocation<'_>, ledger: &Ledger, query: &str) -> Result<Vec<u8>> {
-    fetch(
-        inv,
+fn select(ledger: &Ledger, query: &str) -> Result<Request> {
+    Ok(with(
         with(
-            with(
-                with(request(Verb::Source, "urn:sparql:select")?, "query", query),
-                "graph",
-                &ledger.graph(),
-            ),
-            "as",
-            "application/sparql-results+json",
+            with(request(Verb::Source, "urn:sparql:select")?, "query", query),
+            "graph",
+            &ledger.graph(),
         ),
-    )
-    .await
+        "as",
+        "application/sparql-results+json",
+    ))
+}
+
+/// Each of `reads` answered, in order, [`crate::queue::PARALLEL_READS`] at a time when there is
+/// a runtime to run them on (ledger #4140): the store evaluates a query synchronously, so
+/// futures joined on one task would take turns, as [`crate::queue::read_answers`] found.
+///
+/// ⚠ A spawned read goes to the hub directly, as the door's forwarding space sends a page's
+/// sub-request, so it is stamped here with the anonymous SPARQL budget exactly as that space
+/// stamps it ([`crate::budget::stamp`]). It is not recorded as a dependency of this
+/// invocation, which costs nothing: the facet's answer is never cached (`html` and
+/// `document` keep the default `Expiry::Always`), so no cached answer could outlive a write.
+/// Without a runtime (an embedding that drives the kernel itself) the reads are issued
+/// one at a time through the invocation.
+async fn read_all(web: &Web, inv: &Invocation<'_>, reads: Vec<Request>) -> Result<Vec<Vec<u8>>> {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let mut out = Vec::with_capacity(reads.len());
+        for read in reads {
+            out.push(fetch(inv, read).await?);
+        }
+        return Ok(out);
+    };
+    let mut out = Vec::with_capacity(reads.len());
+    let mut reads = reads.into_iter().peekable();
+    while reads.peek().is_some() {
+        let spawned: Vec<_> = reads
+            .by_ref()
+            .take(crate::queue::PARALLEL_READS)
+            .map(|read| {
+                let hub = Arc::clone(&web.hub);
+                let capability = inv.capability.clone();
+                let read = match crate::budget::door_budget(&capability) {
+                    Some(door) => crate::budget::stamp_budget(read, door),
+                    None => read,
+                };
+                runtime.spawn(async move { hub.issue(read, &capability).await })
+            })
+            .collect();
+        for handle in spawned {
+            let answer = handle
+                .await
+                .map_err(|e| Error::Endpoint(format!("a facet count did not finish: {e}")))??;
+            out.push(answer.bytes);
+        }
+    }
+    Ok(out)
 }
 
 fn bindings(bytes: &[u8]) -> Result<Vec<Value>> {
@@ -265,29 +311,34 @@ impl Endpoint for Facet {
             priority: priority.as_deref(),
             sort: sort.as_deref(),
         };
-        // Expand each match into label/priority buckets, including an absent priority.
-        // The OPTIONALs join the matched items before expansion: an OPTIONAL standing
-        // alone in a UNION would omit unset priorities whenever any other item has one.
-        // DISTINCT prevents labels or extra property values multiplying an item's count.
-        let q = format!(
-            "SELECT ?kind ?value (COUNT(DISTINCT ?item) AS ?count) WHERE {{ {} \
-             OPTIONAL {{ ?item <{LEDGER_NS}label> ?label }} \
+        // ★ Two plain groupings (ledger #4140): an item's labels, and its priorities with
+        // `unset` for none. COUNT(DISTINCT) keeps a second value of an item's title, number
+        // or status from counting it twice. Crossing labels with priorities and a `VALUES
+        // ?kind` in one query gave the same counts for far more rows.
+        let pattern = pattern(&listing)?;
+        let labels_q = format!(
+            "SELECT ?value (COUNT(DISTINCT ?item) AS ?count) WHERE {{ {pattern}\
+             ?item <{LEDGER_NS}label> ?value . }} GROUP BY ?value"
+        );
+        let priorities_q = format!(
+            "SELECT ?value (COUNT(DISTINCT ?item) AS ?count) WHERE {{ {pattern}\
              OPTIONAL {{ ?item <{LEDGER_NS}priority> ?p }} \
-             VALUES ?kind {{ \"label\" \"priority\" }} \
-             BIND(IF(?kind = \"label\", ?label, COALESCE(STR(?p), \"unset\")) AS ?value) \
-             FILTER(BOUND(?value)) \
-             }} GROUP BY ?kind ?value ORDER BY ?kind ?value",
-            pattern(&listing)?
+             BIND(COALESCE(STR(?p), \"unset\") AS ?value) }} GROUP BY ?value"
         );
         let mut counted: BTreeMap<(String, String), u64> = BTreeMap::new();
         let selected = union(inv, &ledger, &listing, &self.web.projects).await?;
         let graphs = selected.clone().unwrap_or_else(|| vec![ledger.clone()]);
-        for graph in graphs {
-            for row in bindings(&query(inv, &graph, &q).await?)? {
-                let kind = row["kind"]["value"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+        let mut reads = Vec::with_capacity(graphs.len() * 2);
+        for graph in &graphs {
+            reads.push(select(graph, &labels_q)?);
+            reads.push(select(graph, &priorities_q)?);
+        }
+        let answers = read_all(&self.web, inv, reads).await?;
+        let kinds = graphs
+            .iter()
+            .flat_map(|graph| [(graph, "label"), (graph, "priority")]);
+        for ((graph, kind), answer) in kinds.zip(answers) {
+            for row in bindings(&answer)? {
                 let term = row["value"]["value"]
                     .as_str()
                     .ok_or_else(|| Error::Endpoint("facet has no value".into()))?
@@ -305,7 +356,7 @@ impl Endpoint for Facet {
                 {
                     continue;
                 }
-                *counted.entry((kind, term)).or_default() += count;
+                *counted.entry((kind.to_string(), term)).or_default() += count;
             }
         }
         if json {
