@@ -781,8 +781,9 @@ impl ikigai_core::Tracer for FacetTrace {
     }
 }
 
+/// Two grouped reads, labels and priorities (ledger #4140; one crossed read before it).
 #[test]
-fn facets_issue_one_grouped_store_read_and_no_item_reads() {
+fn facets_issue_two_grouped_store_reads_and_no_item_reads() {
     use ikigai_core::{Capability, Iri, Request, Verb};
     let server = Server::start();
     load(
@@ -812,8 +813,13 @@ fn facets_issue_one_grouped_store_read_and_no_item_reads() {
         .iter()
         .filter(|e| e.target.starts_with("urn:iki:store:"))
         .collect();
-    assert_eq!(reads.len(), 1, "{reads:?}");
-    assert_eq!(reads[0].target, "urn:iki:store:graph-select");
+    assert_eq!(reads.len(), 2, "{reads:?}");
+    assert!(
+        reads
+            .iter()
+            .all(|r| r.target == "urn:iki:store:graph-select"),
+        "{reads:?}"
+    );
     assert!(
         events
             .iter()
