@@ -202,9 +202,9 @@ pub(crate) fn require(capability: &Capability) -> Result<()> {
     if capability.allows(CAP_READ) {
         Ok(())
     } else {
-        Err(Error::Denied(format!(
-            "reading this server's health needs {CAP_READ} in the grant"
-        )))
+        Err(Error::Denied(
+            format!("reading this server's health needs {CAP_READ} in the grant").into(),
+        ))
     }
 }
 

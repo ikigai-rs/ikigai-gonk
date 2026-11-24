@@ -407,10 +407,13 @@ impl Door for Confined {
     fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
         let target = request.target.as_str();
         if !PREFIXES.iter().any(|p| target.starts_with(p)) {
-            return Err(Error::Denied(format!(
-                "the Layers page sends only names under {} to its door, not {target}",
-                PREFIXES.join(", ")
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "the Layers page sends only names under {} to its door, not {target}",
+                    PREFIXES.join(", ")
+                )
+                .into(),
+            ));
         }
         self.0.call(request)
     }
@@ -445,7 +448,7 @@ impl Door for ReadOnly {
     fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
         if request.verb != Verb::Source {
             return Err(Error::Denied(
-                "the identity that joined the public feeds only reads".to_string(),
+                "the identity that joined the public feeds only reads".into(),
             ));
         }
         self.0.call(request)
@@ -460,7 +463,7 @@ impl Door for NoOwnDoor {
         Err(Error::Denied(format!(
             "this server has no {KEY} line, and the identity that joined the public feeds does              not read {}",
             request.target.as_str()
-        )))
+        ).into()))
     }
 }
 
@@ -1973,7 +1976,10 @@ fn hex(bytes: &[u8]) -> String {
 /// `prefix` before its sentence.
 fn door_refusal(e: Error, prefix: &str) -> Error {
     match e {
-        Error::Denied(m) => Error::Denied(format!("{prefix}{m}")),
+        Error::Denied(m) => {
+            let message = format!("{prefix}{m}");
+            Error::Denied(m.reworded(message))
+        }
         Error::NotFound(m) => Error::NotFound(format!("{prefix}{m}")),
         Error::Conflict(m) => Error::Conflict(format!("{prefix}{m}")),
         Error::Timeout(m) => Error::Timeout(format!("{prefix}{m}")),
@@ -3634,9 +3640,9 @@ impl Endpoint for Count {
         // The floor refuses first (`describe` requires it); said again here so the count can
         // never answer a caller the Layers page would not.
         if !inv.capability.allows(CAP_READ) {
-            return Err(Error::Denied(format!(
-                "the layers' unread count needs {CAP_READ}"
-            )));
+            return Err(Error::Denied(
+                format!("the layers' unread count needs {CAP_READ}").into(),
+            ));
         }
         let seen: Option<u64> = optional_arg(inv, "seen").and_then(|v| v.parse().ok());
         let open = optional_arg(inv, "open");
@@ -3742,7 +3748,8 @@ impl Endpoint for Say {
         if !view.own {
             return Err(Error::Denied(
                 "this server reads the public feeds with a joined identity, which never posts"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             ));
         }
         let layer = layer_binding(inv)?;
@@ -3759,27 +3766,36 @@ impl Endpoint for Say {
                 ))
             })?;
         if info.is_feed() {
-            return Err(Error::Denied(format!(
-                "`{layer}` is a feed and this page never posts to one: it is read-only here, \
+            return Err(Error::Denied(
+                format!(
+                    "`{layer}` is a feed and this page never posts to one: it is read-only here, \
                  publishers included"
-            )));
+                )
+                .into(),
+            ));
         }
         if !info.holds("say") || info.model != Model::Channel {
-            return Err(Error::Denied(format!(
+            return Err(Error::Denied(
+                format!(
                 "the identity this page posts as holds no `say` on the channel `{layer}`, so the \
                  page does not offer it"
-            )));
+            )
+                .into(),
+            ));
         }
         if !may_post(&snapshot, &info) {
-            return Err(Error::Denied(format!(
-                "the door says the identity this page is configured with is {}, not a person; \
+            return Err(Error::Denied(
+                format!(
+                    "the door says the identity this page is configured with is {}, not a person; \
                  the page posts only as a person",
-                snapshot
-                    .me
-                    .as_ref()
-                    .and_then(|m| m.kind.clone())
-                    .unwrap_or_else(|| "unknown".to_string())
-            )));
+                    snapshot
+                        .me
+                        .as_ref()
+                        .and_then(|m| m.kind.clone())
+                        .unwrap_or_else(|| "unknown".to_string())
+                )
+                .into(),
+            ));
         }
         let kind = fields
             .get("kind")
@@ -4160,7 +4176,9 @@ impl Endpoint for Subscribe {
             ));
         }
         if !inv.capability.allows(CAP_READ) {
-            return Err(Error::Denied(format!("a subscription needs {CAP_READ}")));
+            return Err(Error::Denied(
+                format!("a subscription needs {CAP_READ}").into(),
+            ));
         }
         let current = self.view.current();
         let view = current
@@ -4295,7 +4313,7 @@ impl Endpoint for JoinFeeds {
             return Err(Error::Endpoint("a join answers Sink only".to_string()));
         }
         if !inv.capability.allows(CAP_JOIN) {
-            return Err(Error::Denied(format!("joining needs {CAP_JOIN}")));
+            return Err(Error::Denied(format!("joining needs {CAP_JOIN}").into()));
         }
         let feeds =
             self.view.feeds.clone().ok_or_else(|| {
@@ -4357,7 +4375,7 @@ impl Endpoint for LeaveFeeds {
             return Err(Error::Endpoint("leaving answers Sink only".to_string()));
         }
         if !inv.capability.allows(CAP_JOIN) {
-            return Err(Error::Denied(format!("leaving needs {CAP_JOIN}")));
+            return Err(Error::Denied(format!("leaving needs {CAP_JOIN}").into()));
         }
         let feeds =
             self.view.feeds.clone().ok_or_else(|| {
@@ -4434,9 +4452,9 @@ impl Endpoint for Ask {
         }
         let channels = own_channels(&snapshot);
         let Some((_, label)) = channels.iter().find(|(name, _)| *name == channel) else {
-            return Err(Error::Denied(format!(
-                "`{channel}` is not a channel this page may ask a question in"
-            )));
+            return Err(Error::Denied(
+                format!("`{channel}` is not a channel this page may ask a question in").into(),
+            ));
         };
         let subject = format!("urn:layer:{feed}:entry:{id}");
         let turtle = ask_turtle(fields.get("body").map_or("", String::as_str), &subject)?;
@@ -4542,10 +4560,9 @@ mod tests {
 
     impl Door for Expired {
         fn call(&self, request: Request) -> std::result::Result<Representation, Error> {
-            Err(Error::Denied(format!(
-                "no grant on {}",
-                request.target.as_str()
-            )))
+            Err(Error::Denied(
+                format!("no grant on {}", request.target.as_str()).into(),
+            ))
         }
     }
 

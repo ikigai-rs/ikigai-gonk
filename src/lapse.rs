@@ -458,10 +458,13 @@ impl Endpoint for Status {
             )));
         }
         if !inv.capability.allows(crate::system::CAP_READ) {
-            return Err(Error::Denied(format!(
-                "{STATUS} names every ledger and what was recorded in it, so it needs `{}`",
-                crate::system::CAP_READ
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "{STATUS} names every ledger and what was recorded in it, so it needs `{}`",
+                    crate::system::CAP_READ
+                )
+                .into(),
+            ));
         }
         if matches!(inv.inline_str("as"), Ok(JSON)) {
             let mut bytes = serde_json::to_vec(&self.json()).unwrap_or_default();

@@ -101,7 +101,9 @@ impl Endpoint for Take {
         }
         for scope in [CAP_BACKUP, ikigai_store::CAP_READ] {
             if !inv.capability.allows(scope) {
-                return Err(Error::Denied(format!("a chunked backup needs {scope}")));
+                return Err(Error::Denied(
+                    format!("a chunked backup needs {scope}").into(),
+                ));
             }
         }
         backup(&self.backups, inv).await
@@ -128,9 +130,9 @@ impl Endpoint for RestoreChunks {
             return Err(unsupported(self.name(), inv.request.verb));
         }
         if !inv.capability.allows(CAP_RESTORE) {
-            return Err(Error::Denied(format!(
-                "a chunked restore needs {CAP_RESTORE}"
-            )));
+            return Err(Error::Denied(
+                format!("a chunked restore needs {CAP_RESTORE}").into(),
+            ));
         }
         let name = inv.inline_str("content")?.to_string();
         if !own_name(&name) {

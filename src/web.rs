@@ -623,7 +623,9 @@ pub(crate) fn require_read(capability: &Capability, ledger: &Ledger) -> Result<(
             // two it is (ledger #2021).
             let signed_in = capability.principal().is_some();
             return Err(Error::Denied(
-                Lacking::ledger(ledger.name(), &scope).plain(signed_in),
+                Lacking::ledger(ledger.name(), &scope)
+                    .plain(signed_in)
+                    .into(),
             ));
         }
     }
@@ -4916,10 +4918,13 @@ fn require_graph(inv: &Invocation<'_>, ledger: &Ledger) -> Result<()> {
     if inv.capability.allows(&scope) {
         Ok(())
     } else {
-        Err(Error::Denied(format!(
-            "this capability does not hold `{scope}`, so it cannot query `{}`",
-            ledger.graph()
-        )))
+        Err(Error::Denied(
+            format!(
+                "this capability does not hold `{scope}`, so it cannot query `{}`",
+                ledger.graph()
+            )
+            .into(),
+        ))
     }
 }
 
@@ -5104,7 +5109,7 @@ impl Endpoint for PasskeyDoor {
                 let (token, who, added) = self
                     .passkeys
                     .add_grant_as(content.as_bytes(), principal, now)
-                    .map_err(Error::Denied)?;
+                    .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
                     json_repr(json!({
@@ -5123,7 +5128,7 @@ impl Endpoint for PasskeyDoor {
                 let (token, who) = self
                     .passkeys
                     .login(content.as_bytes(), now)
-                    .map_err(Error::Denied)?;
+                    .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
                     json_repr(json!({
@@ -5163,7 +5168,7 @@ impl Endpoint for PasskeyDoor {
                 let (token, who) = self
                     .passkeys
                     .reassert(content.as_bytes(), principal, now)
-                    .map_err(Error::Denied)?;
+                    .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 let mut answer = session_answer(&who, now);
                 answer["session"] = json!(token);

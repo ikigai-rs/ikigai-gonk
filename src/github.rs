@@ -289,9 +289,9 @@ fn granted(inv: &Invocation<'_>, root: &str) -> Result<()> {
     if inv.capability.allows(&scope) || inv.capability.allows(ikigai_browse::CAP_WILDCARD) {
         return Ok(());
     }
-    Err(Error::Denied(format!(
-        "github: capability does not grant `{scope}`"
-    )))
+    Err(Error::Denied(
+        format!("github: capability does not grant `{scope}`").into(),
+    ))
 }
 
 fn iri(text: &str) -> Result<Iri> {

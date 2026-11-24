@@ -935,15 +935,18 @@ pub fn net_grant(target: &Target, capability: &Capability) -> Result<(), Error> 
                 .collect()
         })
         .unwrap_or_default();
-    Err(Error::Denied(format!(
-        "reaching the mounted peer at {target} needs `{needed}` — a net grant names the host \
+    Err(Error::Denied(
+        format!(
+            "reaching the mounted peer at {target} needs `{needed}` — a net grant names the host \
          the mount dials, exactly{}",
-        if held.is_empty() {
-            String::new()
-        } else {
-            format!(", and this capability names {}", held.join(", "))
-        }
-    )))
+            if held.is_empty() {
+                String::new()
+            } else {
+                format!(", and this capability names {}", held.join(", "))
+            }
+        )
+        .into(),
+    ))
 }
 
 /// Dial `target`, with `describe` as the peer's self-description deadline

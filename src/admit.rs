@@ -984,7 +984,7 @@ impl Endpoint for Admitted {
         let network = self.door != Door::Socket;
         if arrived && network {
             if let Some(why) = refusal(inv.capability) {
-                return Err(Error::Denied(why.to_string()));
+                return Err(Error::Denied(why.to_string().into()));
             }
         }
         // Rule 5 (ledger #1710): the client's authority as its files read NOW. Refused here
@@ -992,7 +992,7 @@ impl Endpoint for Admitted {
         // rule has read the request as it arrived.
         let narrowed = match &self.grants {
             Some(layout) if arrived && self.door == Door::Quic => {
-                standing_scopes(layout, inv.capability).map_err(Error::Denied)?
+                standing_scopes(layout, inv.capability).map_err(|m| Error::Denied(m.into()))?
             }
             _ => None,
         };
@@ -1003,7 +1003,7 @@ impl Endpoint for Admitted {
             None if raw_read_applies(self.inner.name(), inv) => {
                 if let Some(why) = raw_read_refusal(inv.request, self.inner.name(), inv.capability)
                 {
-                    return Err(Error::Denied(why));
+                    return Err(Error::Denied(why.into()));
                 }
                 raw_read_scopes(inv.capability)
             }
@@ -1020,15 +1020,15 @@ impl Endpoint for Admitted {
         // one would otherwise be a way round the door.
         let description = self.inner.describe();
         if let Some(why) = raw_write_refusal(inv.request, &description.id, inv.capability) {
-            return Err(Error::Denied(why));
+            return Err(Error::Denied(why.into()));
         }
         if arrived && network {
             if let Some(why) = author_refusal(self.door, inv.capability, inv.request) {
-                return Err(Error::Denied(why));
+                return Err(Error::Denied(why.into()));
             }
             if self.door == Door::Quic {
                 if let Some(why) = machine_publish_refusal(&description.id, inv.request) {
-                    return Err(Error::Denied(why));
+                    return Err(Error::Denied(why.into()));
                 }
             }
         }
@@ -1090,7 +1090,9 @@ fn foreign_page_explained<T>(
                     .scopes()
                     .is_some_and(|held| held.contains(FOREIGN_PAGE)) =>
         {
-            Err(Error::Denied(format!("{why}. {FOREIGN_PAGE_SENTENCE}")))
+            Err(Error::Denied(
+                format!("{why}. {FOREIGN_PAGE_SENTENCE}").into(),
+            ))
         }
         other => other,
     }

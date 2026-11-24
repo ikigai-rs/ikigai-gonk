@@ -307,7 +307,8 @@ fn a_script_that_writes_or_is_lisp_is_refused_at_publish() {
         ("lisp", "(+ 1 2)", "no Lisp"),
     ] {
         match publish(&hub, &Capability::root(), "w", language, content, &[]) {
-            Err(Error::Denied(why)) | Err(Error::InvalidArgument { detail: why, .. }) => {
+            Err(Error::Denied(why)) => assert!(why.contains(says), "{language}: {why}"),
+            Err(Error::InvalidArgument { detail: why, .. }) => {
                 assert!(why.contains(says), "{language}: {why}")
             }
             other => panic!("{language}: {other:?}"),

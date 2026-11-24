@@ -137,10 +137,13 @@ pub fn publish_refusal(name: &str, language: &str, content: &str) -> Option<Erro
         return None;
     }
     let refuse = |why: String| {
-        Some(Error::Denied(format!(
-            "`{name}` is a query sensor (a script named `{PREFIX}*`), which gonk runs on its \
+        Some(Error::Denied(
+            format!(
+                "`{name}` is a query sensor (a script named `{PREFIX}*`), which gonk runs on its \
              tick: {why}"
-        )))
+            )
+            .into(),
+        ))
     };
     if language != "sparql" {
         return refuse(format!(

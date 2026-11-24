@@ -575,7 +575,7 @@ impl Endpoint for Agents {
                 .collect();
             if readable.is_empty() {
                 return Err(Error::Denied(
-                    "this capability may read no ledger, so it has no agents to list".to_string(),
+                    "this capability may read no ledger, so it has no agents to list".into(),
                 ));
             }
             readable.join(" ")

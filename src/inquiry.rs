@@ -412,11 +412,14 @@ impl PersonWrites {
                 let _ = self.person.set(());
                 Ok(())
             }
-            kind => Err(Error::Denied(format!(
+            kind => Err(Error::Denied(
+                format!(
                 "the door says the identity the inquiry client is configured with is {}, not a \
                  person; the client writes only as a person",
                 kind.unwrap_or("of no kind it names")
-            ))),
+            )
+                .into(),
+            )),
         }
     }
 }
@@ -511,7 +514,7 @@ impl Inquiry {
                 .collect(),
         };
         Err(Error::Denied(
-            lacking.plain(capability.principal().is_some()),
+            lacking.plain(capability.principal().is_some()).into(),
         ))
     }
 

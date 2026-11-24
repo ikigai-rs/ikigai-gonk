@@ -1057,9 +1057,9 @@ impl TakeBackup {
         // checked again here because the dump reads the store through a handle, not a door.
         for scope in [CAP_BACKUP, ikigai_store::CAP_READ] {
             if !inv.capability.allows(scope) {
-                return Err(Error::Denied(format!(
-                    "a backup reads every graph, which needs {scope}"
-                )));
+                return Err(Error::Denied(
+                    format!("a backup reads every graph, which needs {scope}").into(),
+                ));
             }
         }
         // ★ Streamed (ledger #1699): the N-Quads go straight into a gzip encoder with the

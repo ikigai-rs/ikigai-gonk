@@ -478,7 +478,7 @@ impl AccessLog {
             self.door,
             request,
             &Capability::scoped(Vec::<String>::new()),
-            Err(&Error::Denied(why.to_string())),
+            Err(&Error::Denied(why.to_string().into())),
             0,
         );
         self.record.access(&access);
@@ -1099,7 +1099,7 @@ mod tests {
     #[test]
     fn an_error_is_its_kind_and_carries_no_bytes() {
         let r = request(Verb::Source, "urn:iki:ledger:default:item:9", &[]);
-        let denied = Error::Denied("no".to_string());
+        let denied = Error::Denied("no".into());
         let e = entry(Door::Socket, &r, &nobody(), Err(&denied), 4);
         assert_eq!(e.get("outcome"), Some("denied"));
         assert_eq!(e.get("bytes"), None);
