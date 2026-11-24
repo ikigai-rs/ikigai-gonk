@@ -141,11 +141,18 @@ impl Endpoint for SlowDescribe {
     }
 }
 
-/// A socket path short enough for `sun_path` (104 bytes on macOS) — the session scratchpad
-/// is not, and the failure surfaces at `bind` as a permission error rather than a length.
-fn socket(tag: &str) -> PathBuf {
-    let dir = PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string()));
-    dir.join(format!("i479{tag}{}.s", std::process::id()))
+/// A socket in a fresh PRIVATE directory under `/tmp`, kept alive by the returned guard.
+/// ikigai-ipc 0.6.0 refuses to bind unless the socket's own directory is this user's and
+/// not writable by others (ledger #3634), so `/tmp` itself (root's, as on a Linux CI runner)
+/// is refused. `/tmp` also keeps the path short enough for `sun_path` (104 bytes on macOS),
+/// which the session scratchpad is not. The same pattern as `tests/mount_1300.rs`.
+fn socket(tag: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix("i479")
+        .tempdir_in("/tmp")
+        .expect("a private directory under /tmp");
+    let path = dir.path().join(format!("{tag}.s"));
+    (dir, path)
 }
 
 fn client_for(path: &std::path::Path, deadline: Duration) -> ikigai_ipc::IpcResolver {
@@ -180,8 +187,7 @@ fn read(client: &ikigai_ipc::IpcResolver, name: &str) -> Result<String, String> 
 fn a_timed_out_ipc_call_no_longer_poisons_the_connection() {
     conclusively("a timed-out call", |scale| {
         let (deadline, slow) = (DEADLINE * scale, SLOW * scale);
-        let path = socket(&format!("a{scale}"));
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = socket(&format!("a{scale}"));
         let serving = path.clone();
         std::thread::spawn(move || {
             let kernel = Kernel::new(Arc::new(space(&[
@@ -189,7 +195,12 @@ fn a_timed_out_ipc_call_no_longer_poisons_the_connection() {
                 ("b", slow.as_millis() as u64),
                 ("c", 0),
             ])));
-            let _ = ikigai_ipc::serve(kernel, &serving);
+            if let Err(e) = ikigai_ipc::serve(kernel, &serving) {
+                eprintln!(
+                    "the test server could not serve at {}: {e}",
+                    serving.display()
+                );
+            }
         });
         let client = client_for(&path, deadline);
 
@@ -231,8 +242,7 @@ fn a_timed_out_ipc_call_no_longer_poisons_the_connection() {
 fn a_timed_out_describe_no_longer_poisons_the_connection() {
     conclusively("a timed-out describe", |scale| {
         let (deadline, slow) = (DEADLINE * scale, SLOW * scale);
-        let path = socket(&format!("m{scale}"));
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = socket(&format!("m{scale}"));
         let serving = path.clone();
         std::thread::spawn(move || {
             let space = EndpointSpace::new()
@@ -250,7 +260,12 @@ fn a_timed_out_describe_no_longer_poisons_the_connection() {
                     },
                 );
             let kernel = Kernel::with_meta_renderer(Arc::new(space), Arc::new(TurtleRenderer));
-            let _ = ikigai_ipc::serve(kernel, &serving);
+            if let Err(e) = ikigai_ipc::serve(kernel, &serving) {
+                eprintln!(
+                    "the test server could not serve at {}: {e}",
+                    serving.display()
+                );
+            }
         });
         // The connection's own deadline is left long, so only the DESCRIBE bound can fire.
         let client =
