@@ -258,11 +258,17 @@ struct Forward {
 ///   door's floor answers as a name bound nowhere; that is a miss, not a refusal, so nothing
 ///   is lost from the log.
 ///
-/// ⚠ The order moves for a forwarded request: the door's admission ([`crate::admit`]) now reads
+/// - for a mutating verb (`Sink`, `Delete`): the door kernel cuts a target's thread after
+///   any write it dispatched that failed (core ledger #1105), and a refusal by the hub's
+///   floor would come back as exactly that. A refused write must cut nothing, so the door's
+///   own floor refuses it before dispatch, as before; such a refusal writes no access line
+///   (hub review of PR 426, finding 3).
+///
+/// ⚠ The order moves for a forwarded read: the door's admission ([`crate::admit`]) now reads
 /// it before the floor does, so a request both rules refuse is refused by the admission's
 /// sentence. Both are `denied`, and neither runs the endpoint.
 fn floor_at_the_hub(mut description: Description, verb: Verb) -> Description {
-    if verb == Verb::Meta || description.hides_existence() {
+    if verb == Verb::Meta || verb.is_mutating() || description.hides_existence() {
         return description;
     }
     description.requires.clear();
