@@ -31,6 +31,7 @@
 //! | `principal` | who, as THIS door authenticated them: [`OWNER_PRINCIPAL`] on the socket; the client's `urn:iki:host:gonk:client:<fingerprint>` on QUIC; a signed-in passkey's IRI on HTTP; `anon` for anyone the door did not authenticate, on a read as on a write — explicit, so "nobody said who" is in the record |
 //! | `credential` | how the door knew: `log:socketOwner`, `log:clientCertificate`, `log:passkey`, `log:anonymous` |
 //! | `q` | HTTP only: the request's arguments AS SERVED, percent-encoded; absent when none. The caller's query, plus every declared default the kernel filled in before dispatch (core 0.1.104+, ledger #19) |
+//! | `needs` | on `outcome=denied` only: every capability scope the kernel's declared floor found the request lacked, space-separated, read from the refusal itself (`Error::lacking`, core 0.4, ledger #3840). Absent when the refusal is an endpoint's or the door's own rule, with nothing declared missing: never guessed (ledger #3830) |
 //!
 //! Past [`MAX_FIELD`] bytes the subject and `q` are cut and end in `…`, a character the
 //! encoding never writes, so a cut is unambiguous.
@@ -84,10 +85,12 @@
 //! - **who an anonymous request is from.** `anon`, and nothing that identifies the caller: no
 //!   address. A `?principal=` a reader typed is never taken for one (ledger #864, R6).
 //! - **a refusal the door kernel makes before dispatch** (a refusal the HTTP EDGE makes is
-//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — a capability
-//!   floor's denial, a name nothing binds (`404`), a nesting refusal — and the kernel's own
-//!   `urn:kernel:*` operations and Meta answers, which no endpoint of this server's spaces
-//!   handles.
+//!   written by the edge itself, [`AccessLog::refused_at_edge`], ledger #894) — the capability
+//!   floor of a name gonk's own pages bind on the HTTP door, a name nothing binds (`404`), a
+//!   nesting refusal — and the kernel's own `urn:kernel:*` operations and Meta answers, which
+//!   no endpoint of this server's spaces handles. ★ The floor of every name the HUB binds IS a
+//!   line, with its `needs`: the hub's kernel runs it when the door forwards the request, not
+//!   the door kernel before dispatch (`doors::floor_at_the_hub`, ledger #3830).
 //!
 //! # ★ A poll is sampled, not logged every time (ledger [#767](http://localhost:1060/l/default/item/767))
 //!
@@ -120,8 +123,8 @@
 //! names no long poll now.) A subject
 //! named by [`AccessLog::sampling_long_polls`] writes when it FAILED or once per
 //! [`POLL_SAMPLE_EVERY`]; its duration is the wait, not a symptom, and says nothing. A refusal is
-//! an outcome other than `ok`, so it is always written (a capability floor's refusal is the
-//! kernel's, before dispatch, and is not a line at all: see above).
+//! an outcome other than `ok`, so it is always written (the floor of a name only gonk's pages
+//! bind is refused before dispatch and is not a line at all: see above).
 //! [`AccessLog::gonk_polls`] names gonk's polls for every door.
 //!
 //! ⚠ **What this does not bound.** The rest of the log grows with what people do, which is
@@ -774,8 +777,16 @@ pub fn access(
         caller(door, capability),
     )
     .duration_ms(u64::try_from(dur_ms).unwrap_or(u64::MAX));
-    if let Ok(bytes) = answer {
-        line = line.bytes(bytes as u64);
+    match answer {
+        Ok(bytes) => line = line.bytes(bytes as u64),
+        // What the refusal lacked, as the KERNEL's declared floor found it (`Error::lacking`,
+        // core 0.4, ledger #3840): never worked out here. An endpoint's own run-time refusal
+        // lacks nothing declared, so its line has no `needs` column rather than a guess.
+        Err(e) => {
+            for scope in e.lacking() {
+                line = line.needs(scope.as_str());
+            }
+        }
     }
     // `q` is the HTTP door's: the other two doors' arguments are a client's protocol, not a
     // reader's query.
