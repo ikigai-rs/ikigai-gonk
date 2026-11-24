@@ -636,6 +636,7 @@
     <xsl:if test="@announce">
       <div id="status" hx-swap-oob="beforeend"><p class="ui-sr-only"><xsl:value-of select="@announce"/></p></div>
     </xsl:if>
+    <xsl:apply-templates select="view:kind-new"/>
   </xsl:template>
 
   <xsl:template match="view:notice">
@@ -723,22 +724,63 @@
     </li>
   </xsl:template>
 
+  <!-- The Layers page as tabs by kind (ledger #3883, src/layers_view.rs, src/layer_kinds.rs):
+       each tab is a resource and a plain link, `aria-current` on the one shown, in a `nav`
+       landmark, so the page works with no script and every tab has a URL. No ARIA tablist.
+       A tab's "new" mark is words in its name (", new messages", `sr-only`) and a dot that is
+       `aria-hidden`: the dot's presence is the signal, never its color (WCAG 1.4.1). The marks
+       are updated by the header's count, out of band (`view:kind-new` below). -->
   <xsl:template name="layers">
     <section class="panel layers" aria-labelledby="layers-title">
-      <h1 id="layers-title"><xsl:value-of select="@title"/></h1>
+      <h1 id="layers-title"><xsl:choose><xsl:when test="@heading"><xsl:value-of select="@heading"/></xsl:when><xsl:otherwise><xsl:value-of select="@title"/></xsl:otherwise></xsl:choose></h1>
       <xsl:apply-templates select="view:signin"/>
       <div id="layers-banner"><xsl:apply-templates select="view:notice"/></div>
       <xsl:if test="@me">
         <p class="note">The door says this page reads and posts as <code class="iri"><xsl:value-of select="@me"/></code>, <xsl:value-of select="@me-kind"/>.</p>
       </xsl:if>
+      <xsl:if test="view:layer-kind">
+        <nav class="layer-kinds" aria-label="Layer kinds">
+          <ul>
+            <xsl:apply-templates select="view:layer-kind"/>
+          </ul>
+        </nav>
+      </xsl:if>
       <xsl:if test="@empty"><p class="empty"><xsl:value-of select="@empty"/></p></xsl:if>
       <ul id="layers-list" class="layer-list">
+        <xsl:if test="@tab"><xsl:attribute name="aria-label"><xsl:value-of select="@tab"/> layers</xsl:attribute></xsl:if>
         <xsl:apply-templates select="view:layer-row"/>
       </ul>
       <p id="layers-live" class="note live"></p>
       <p id="layers-reconnect" class="note live"></p>
       <xsl:apply-templates select="view:watch"/>
     </section>
+  </xsl:template>
+
+  <xsl:template match="view:layer-kind">
+    <li>
+      <a>
+        <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:if test="@current = 'true'"><xsl:attribute name="aria-current">page</xsl:attribute></xsl:if>
+        <xsl:value-of select="@label"/>
+        <span>
+          <xsl:attribute name="id">layers-kind-new-<xsl:value-of select="@key"/></xsl:attribute>
+          <xsl:call-template name="kind-new-mark"/>
+        </span>
+      </a>
+    </li>
+  </xsl:template>
+
+  <!-- A tab's "new" mark, from the header count's answer on the Layers page (`kinds=1`):
+       swapped into the tab's own span, so the link and its focus stay where they are. -->
+  <xsl:template match="view:kind-new">
+    <span hx-swap-oob="true">
+      <xsl:attribute name="id">layers-kind-new-<xsl:value-of select="@key"/></xsl:attribute>
+      <xsl:call-template name="kind-new-mark"/>
+    </span>
+  </xsl:template>
+
+  <xsl:template name="kind-new-mark">
+    <xsl:if test="@new = 'true'"><span class="sr-only">, new messages</span><span class="kind-new" aria-hidden="true"></span></xsl:if>
   </xsl:template>
 
   <xsl:template match="view:layer-row">

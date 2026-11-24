@@ -1535,6 +1535,12 @@ fn routes() -> Vec<Route> {
             crate::layers_view::COUNT_IRI,
         ),
         route(crate::layers_view::PAGE_PATH, crate::layers_view::PAGE_IRI),
+        // Ledger #3883: one tab of the Layers page. Before `/layers/{layer}/say`, which a
+        // two-segment path could also match.
+        route(
+            crate::layers_view::KIND_PAGE_PATH,
+            crate::layers_view::KIND_PAGE_TEMPLATE,
+        ),
         // Onboarding (ledger #2009): read-only; approval is the owner's socket alone.
         route(crate::onboard::PAGE_PATH, crate::onboard::PAGE_IRI),
         // Ledger #3285: the feeds, and what a person does there.

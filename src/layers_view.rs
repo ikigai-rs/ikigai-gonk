@@ -11,10 +11,11 @@
 //! configured and how to configure it.
 //!
 //! ```text
-//! /layers                    urn:iki:gonk:page:layers                    Source  every layer the identity reads
+//! /layers                    urn:iki:gonk:page:layers                    Source  the first tab with unread entries, else the first
+//! /layers/kind/{key}         urn:iki:gonk:page:layers:kind:{key}         Source  one tab: the layers of one kind
 //! /layers/{layer}            urn:iki:gonk:page:layer:{layer}             Source  one layer: entries, or tuples and takes
 //! /layers/~/wait             urn:iki:gonk:fragment:layers-wait           Source  an open page's short poll (layer=, after=, door=)
-//! /layers/~/count            urn:iki:gonk:fragment:layers-count          Source  the header's unread count (seen=, open=, quiet=)
+//! /layers/~/count            urn:iki:gonk:fragment:layers-count          Source  the header's unread count (seen=, open=, quiet=, kinds=)
 //! /layers/{layer}/say        urn:iki:gonk:layers:say:{layer}             Sink    a form → one entry, said as the identity
 //! /layers/{layer}/file/{id}  urn:iki:gonk:layers:file:{layer}:{id}       Source  a file entry's bytes, checked first
 //! ```
@@ -79,6 +80,16 @@
 //! holds none. The cost is up to ten seconds of latency, which a header indicator can afford;
 //! the open layer's own page polls every three seconds (above).
 //!
+//! # ★ Tabs by kind (ledger [#3883](http://localhost:1062/l/default/item/3883))
+//!
+//! The overview is a tabbed list: one tab per kind of layer ([`crate::layer_kinds`]: the
+//! definition's `ik:layerKind`, named and ordered by the vocabulary) of which the viewer sees at
+//! least one layer, and "Other" last for a layer whose definition names no kind. A tab is a
+//! resource ([`KIND_PAGE_PATH`]) and a plain link in a `nav` labeled "Layer kinds",
+//! `aria-current="page"` on the one shown, so the page works without a script. Each tab carries a
+//! "new" mark when any of its layers has unread entries, and the mark comes from the header's
+//! count (`kinds=1`), out of band: still one request per open page per poll.
+//!
 //! # ★ Public feeds without a configured identity (ledger [#3291](http://localhost:1062/l/default/item/3291))
 //!
 //! [`crate::feeds_join`] adds a second identity beside this view's, or instead of it. It reads
@@ -132,6 +143,7 @@ use sha2::{Digest, Sha256};
 
 use crate::feeds_join::{PublicFeeds, CAP_JOIN, JOIN_IRI, JOIN_PATH, LEAVE_IRI, LEAVE_PATH};
 use crate::layer::Door;
+use crate::layer_kinds;
 use crate::mount::{LazyMount, Target};
 use crate::render::{self, element, envelope, wrap};
 use crate::web::{self, Web};
@@ -164,6 +176,10 @@ pub const PAGE_IRI: &str = "urn:iki:gonk:page:layers";
 pub const PAGE_PATH: &str = "/layers";
 /// One layer's page.
 pub const LAYER_PAGE_TEMPLATE: &str = "urn:iki:gonk:page:layer:{layer}";
+/// One tab of the Layers page, the layers of one kind (ledger #3883).
+pub const KIND_PAGE_TEMPLATE: &str = "urn:iki:gonk:page:layers:kind:{key}";
+/// Its path.
+pub const KIND_PAGE_PATH: &str = "/layers/kind/{key}";
 /// What an open Layers page asks every few seconds.
 pub const WAIT_IRI: &str = "urn:iki:gonk:fragment:layers-wait";
 /// Its path: `~` is not a layer-name character, so no layer's page can shadow it.
@@ -576,6 +592,9 @@ pub struct LayerInfo {
     pub feed: Option<Scheme>,
     /// Whether the host's definition says this feed is public (`public = true`).
     pub public: bool,
+    /// The definition's `ik:layerKind`: a concept of `ik:LayerKinds`, or `None` when it names
+    /// none (ledger #3883, [`crate::layer_kinds`]).
+    pub kind: Option<String>,
 }
 
 impl LayerInfo {
@@ -1223,6 +1242,48 @@ impl LayersView {
         }
     }
 
+    /// The tabs of `viewer`'s Layers page, in `ik:LayerKindOrder`'s order and "Other" last:
+    /// one per kind of which the viewer sees at least one layer, with its unread total. `None`
+    /// until the door has been read once. Read from this process's copy and the cursors, as
+    /// [`LayersView::unread`] is, never the door.
+    pub fn tabs(&self, viewer: &str) -> Option<Vec<Tab>> {
+        let state = lock(&self.state);
+        if !state.discovered {
+            return None;
+        }
+        Some(self.tabs_of(state.layers.values(), viewer))
+    }
+
+    fn tabs_of<'a>(
+        &self,
+        layers: impl IntoIterator<Item = &'a LayerView>,
+        viewer: &str,
+    ) -> Vec<Tab> {
+        let mut unread: BTreeMap<&'static str, u64> = BTreeMap::new();
+        for layer in layers {
+            if self.shown(viewer, &layer.info) {
+                *unread.entry(tab_key(&layer.info)).or_default() += self.unread_of(viewer, layer);
+            }
+        }
+        let tab = |key: &str, label: &str, unread: u64| Tab {
+            key: key.to_string(),
+            label: label.to_string(),
+            unread,
+        };
+        let mut tabs: Vec<Tab> = layer_kinds::order()
+            .iter()
+            .filter_map(|k| {
+                unread
+                    .get(k.key.as_str())
+                    .map(|n| tab(&k.key, &k.label, *n))
+            })
+            .collect();
+        if let Some(n) = unread.get(layer_kinds::OTHER_KEY) {
+            tabs.push(tab(layer_kinds::OTHER_KEY, layer_kinds::OTHER_LABEL, *n));
+        }
+        tabs
+    }
+
     /// Whether the follower reads this layer: anything but a feed nobody here subscribes to.
     pub fn followed(&self, info: &LayerInfo) -> bool {
         !info.is_feed() || self.subscriptions.anyone(&info.name)
@@ -1527,6 +1588,7 @@ impl LayersView {
                 None
             };
             let public = is_feed && self.says_public(&iri);
+            let kind = graph.value(&iri, &layer_kinds::layer_kind_predicate());
             infos.push(LayerInfo {
                 label: graph
                     .value(&iri, RDFS_LABEL)
@@ -1536,6 +1598,7 @@ impl LayersView {
                 verbs: held,
                 feed,
                 public,
+                kind,
             });
         }
         Ok(infos)
@@ -2864,6 +2927,15 @@ pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: impl Into<Views>) -> End
             Overview {
                 web: Arc::clone(web),
                 view: view.clone(),
+                by_kind: false,
+            },
+        )
+        .bind(
+            template(KIND_PAGE_TEMPLATE),
+            Overview {
+                web: Arc::clone(web),
+                view: view.clone(),
+                by_kind: true,
             },
         )
         .bind(
@@ -2914,13 +2986,78 @@ pub fn bind(space: EndpointSpace, web: &Arc<Web>, view: impl Into<Views>) -> End
         )
 }
 
-/// The rows of the overview, and the total unread across them.
-fn overview_rows(snapshot: &Snapshot, view: &LayersView, viewer: &str) -> (String, u64) {
+/// One tab of the Layers page (ledger #3883): a kind of which the viewer sees a layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    /// The kind's `skos:notation`, or [`layer_kinds::OTHER_KEY`]: `/layers/kind/{key}`.
+    pub key: String,
+    /// The kind's `skos:prefLabel`, or [`layer_kinds::OTHER_LABEL`].
+    pub label: String,
+    /// How many entries of its layers the viewer has not been shown.
+    pub unread: u64,
+}
+
+impl Tab {
+    fn href(&self) -> String {
+        KIND_PAGE_PATH.replace("{key}", &ikigai_fn::html::url_segment(&self.key))
+    }
+}
+
+/// The tab a layer is under: its kind's key, or "other" for a kind the vocabulary does not list
+/// or none at all, so that no layer is ever hidden.
+fn tab_key(info: &LayerInfo) -> &'static str {
+    info.kind
+        .as_deref()
+        .and_then(layer_kinds::of_iri)
+        .map_or(layer_kinds::OTHER_KEY, |k| k.key.as_str())
+}
+
+/// The tab `/layers` shows: the first with unread entries, else the first.
+fn landing(tabs: &[Tab]) -> Option<&Tab> {
+    tabs.iter().find(|t| t.unread > 0).or(tabs.first())
+}
+
+/// The tabs, as the page's elements: the selected one is `current`, and each says whether any of
+/// its layers has unread entries.
+fn tab_elements(tabs: &[Tab], selected: Option<&str>) -> String {
+    tabs.iter()
+        .map(|tab| {
+            element(
+                "layer-kind",
+                &[
+                    ("key", &tab.key),
+                    ("label", &tab.label),
+                    ("href", &tab.href()),
+                    (
+                        "current",
+                        if Some(tab.key.as_str()) == selected {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    ),
+                    ("new", if tab.unread > 0 { "true" } else { "false" }),
+                ],
+                "",
+            )
+        })
+        .collect()
+}
+
+/// The rows of the overview (of the tab `kind`, or every layer), and the total unread across
+/// them.
+fn overview_rows(
+    snapshot: &Snapshot,
+    view: &LayersView,
+    viewer: &str,
+    kind: Option<&str>,
+) -> (String, u64) {
     let mut total = 0;
     let rows = snapshot
         .layers
         .values()
         .filter(|layer| view.shown(viewer, &layer.info))
+        .filter(|layer| kind.is_none_or(|k| tab_key(&layer.info) == k))
         .map(|layer| {
             let unread = view.unread_of(viewer, layer);
             total += unread;
@@ -2977,10 +3114,13 @@ fn me_attributes(snapshot: &Snapshot) -> Vec<(&'static str, String)> {
     }
 }
 
-/// `urn:iki:gonk:page:layers`: every layer the identity reads.
+/// `urn:iki:gonk:page:layers`, and `urn:iki:gonk:page:layers:kind:{key}` when `by_kind`: the
+/// layers the identity reads, as tabs by kind (ledger #3883). The overview shows the first tab
+/// with unread entries, else the first.
 struct Overview {
     web: Arc<Web>,
     view: Views,
+    by_kind: bool,
 }
 
 #[async_trait]
@@ -2992,9 +3132,16 @@ impl Endpoint for Overview {
             ));
         }
         web::html_only(inv)?;
+        let asked = if self.by_kind {
+            Some(web::binding(inv, "key")?)
+        } else {
+            None
+        };
         let ledgers = web::readable_ledgers(&self.web, inv.capability);
-        // The overview announces what is new itself, so the header's count stays quiet here.
-        let mut children = web::nav_on_layers(&self.web, inv.capability, &ledgers, "quiet=1");
+        // The overview announces what is new itself, so the header's count stays quiet here;
+        // and it answers each tab's "new" mark too, so the tabs ask nothing of their own.
+        let mut children =
+            web::nav_on_layers(&self.web, inv.capability, &ledgers, "quiet=1&kinds=1");
         let mut attributes = vec![
             ("view", "layers".to_string()),
             ("full", "true".to_string()),
@@ -3004,6 +3151,7 @@ impl Endpoint for Overview {
                 crate::page_assets::flag(crate::page_assets::safe_of(inv)).to_string(),
             ),
             ("title", "Layers".to_string()),
+            ("heading", "Layers".to_string()),
         ];
         if !inv.capability.allows(CAP_READ) {
             children.push_str(&lacking().element());
@@ -3015,24 +3163,49 @@ impl Endpoint for Overview {
             };
             children.push_str(&notices(current.as_deref(), &snapshot));
             if let Some(view) = &current {
-                let (rows, total) = overview_rows(&snapshot, view, &viewer(inv));
+                let who_views = viewer(inv);
+                let tabs = view.tabs_of(snapshot.layers.values(), &who_views);
+                let selected = match &asked {
+                    Some(key) => match tabs.iter().find(|t| &t.key == key) {
+                        Some(tab) => Some(tab),
+                        // A kind none of whose layers this viewer sees has no tab, and no page.
+                        None if snapshot.discovered => {
+                            return Err(Error::NotFound(format!(
+                                "the Layers page has no `{key}` tab for this viewer"
+                            )))
+                        }
+                        None => None,
+                    },
+                    None => landing(&tabs),
+                };
+                let (rows, total) = match selected {
+                    Some(tab) => overview_rows(&snapshot, view, &who_views, Some(&tab.key)),
+                    None => (String::new(), 0),
+                };
                 let nothing = rows.is_empty();
+                children.push_str(&tab_elements(&tabs, selected.map(|t| t.key.as_str())));
                 children.push_str(&rows);
                 attributes.extend(me_attributes(&snapshot));
+                if let Some(tab) = selected {
+                    attributes.retain(|(k, _)| *k != "title");
+                    attributes.push(("title", format!("{} · Layers", tab.label)));
+                    attributes.push(("tab", tab.label.clone()));
+                }
                 if snapshot.discovered && nothing {
                     attributes.push((
                         "empty",
                         "The door names no layer this identity may read.".to_string(),
                     ));
                 }
-                children.push_str(&watch(
-                    format!(
-                        "{WAIT_PATH}?after={}&seen={total}&door={}",
-                        snapshot.epoch,
-                        door_state(&snapshot)
-                    ),
-                    snapshot.down.is_some(),
-                ));
+                let mut url = format!(
+                    "{WAIT_PATH}?after={}&seen={total}&door={}",
+                    snapshot.epoch,
+                    door_state(&snapshot)
+                );
+                if let Some(tab) = selected {
+                    url.push_str(&format!("&kind={}", ikigai_fn::html::url_segment(&tab.key)));
+                }
+                children.push_str(&watch(url, snapshot.down.is_some()));
             }
         }
         let attributes: Vec<(&str, &str)> =
@@ -3044,17 +3217,32 @@ impl Endpoint for Overview {
     }
 
     fn name(&self) -> &str {
-        "gonk-layers"
+        if self.by_kind {
+            "gonk-layers-kind"
+        } else {
+            "gonk-layers"
+        }
     }
 
     fn describe(&self) -> Description {
-        Description::new("gonk-layers")
-            .title("Layers")
-            .summary(
-                "Every layer the configured identity may read at its layer door, with what is \
-                 new since this viewer last looked. Shows the grant it needs to a caller \
-                 without urn:cap:gonk:layers:read.",
+        let description = if self.by_kind {
+            Description::new("gonk-layers-kind")
+                .title("Layers, one kind")
+                .summary(
+                    "One tab of the Layers page: the layers of one kind (`ik:layerKind`'s \
+                     `skos:notation`, or `other` for a layer whose definition names none) that \
+                     the configured identity may read, with what is new since this viewer last \
+                     looked. A kind none of whose layers this viewer sees has no tab: 404.",
+                )
+                .input(arg("key", "the kind's `skos:notation`, or `other`").binding())
+        } else {
+            Description::new("gonk-layers").title("Layers").summary(
+                "The layers the configured identity may read at its layer door, as one tab per \
+                 kind: the first tab with unread entries, else the first. Shows the grant it \
+                 needs to a caller without urn:cap:gonk:layers:read.",
             )
+        };
+        description
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .input(web::as_html_arg())
@@ -3469,7 +3657,8 @@ impl Endpoint for Wait {
                 let seen_before: u64 = optional_arg(inv, "seen")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
-                let (rows, total) = overview_rows(&snapshot, view, &who_views);
+                let kind = optional_arg(inv, "kind");
+                let (rows, total) = overview_rows(&snapshot, view, &who_views, kind.as_deref());
                 // ★ The rows are replaced only when they changed: the copy moved (`after` is
                 // the epoch the page shows; a restarted gonk counts from 0 again, so any
                 // difference counts), or the viewer's unread total did, which is how a layer
@@ -3482,13 +3671,14 @@ impl Endpoint for Wait {
                 if total > seen_before {
                     attributes.push(("announce", format!("{total} new in the layers.")));
                 }
-                children.push_str(&watch(
-                    format!(
-                        "{WAIT_PATH}?after={}&seen={total}&door={door_now}",
-                        snapshot.epoch
-                    ),
-                    down,
-                ));
+                let mut url = format!(
+                    "{WAIT_PATH}?after={}&seen={total}&door={door_now}",
+                    snapshot.epoch
+                );
+                if let Some(kind) = &kind {
+                    url.push_str(&format!("&kind={}", ikigai_fn::html::url_segment(kind)));
+                }
+                children.push_str(&watch(url, down));
             }
             Some(name) => {
                 let found = snapshot
@@ -3602,6 +3792,13 @@ impl Endpoint for Wait {
                     .optional(),
             )
             .input(arg("seen", "the overview's unread total as the page shows it").optional())
+            .input(
+                arg(
+                    "kind",
+                    "the overview's tab: its rows only (ledger #3883); absent for every layer",
+                )
+                .optional(),
+            )
             .output("text/html")
     }
 }
@@ -3615,7 +3812,7 @@ struct Count {
 }
 
 /// The URL the header's count polls: `seen` is the count the page shows (`None`: none known).
-fn count_url(seen: Option<u64>, open: Option<&str>, quiet: bool) -> String {
+fn count_url(seen: Option<u64>, open: Option<&str>, quiet: bool, kinds: bool) -> String {
     let mut url = format!(
         "{COUNT_PATH}?seen={}",
         seen.map_or_else(|| "-".to_string(), |n| n.to_string())
@@ -3625,6 +3822,9 @@ fn count_url(seen: Option<u64>, open: Option<&str>, quiet: bool) -> String {
     }
     if quiet {
         url.push_str("&quiet=1");
+    }
+    if kinds {
+        url.push_str("&kinds=1");
     }
     url
 }
@@ -3655,13 +3855,31 @@ impl Endpoint for Count {
             }
         }
         let quiet = optional_arg(inv, "quiet").as_deref() == Some("1");
+        let kinds = optional_arg(inv, "kinds").as_deref() == Some("1");
         let mut attributes: Vec<(&str, String)> = vec![("view", "layers-count".to_string())];
+        let mut children = String::new();
         // Not configured: an inert badge, and no next poll.
         if let Some(view) = &self.view.current() {
             // The first count a reader of the layers asks for starts the follower; until it
             // has read the door once there is no count to show.
             view.start();
             let count = view.unread(&viewer(inv), open.as_deref());
+            // ★ The Layers page's tabs (ledger #3883): each tab's "new" mark rides on this same
+            // answer, out of band, so an open Layers page asks ONE request per poll whatever the
+            // number of tabs. Never a poll of their own: see the module docs on the six
+            // connections.
+            if kinds {
+                for tab in view.tabs(&viewer(inv)).unwrap_or_default() {
+                    children.push_str(&element(
+                        "kind-new",
+                        &[
+                            ("key", tab.key.as_str()),
+                            ("new", if tab.unread > 0 { "true" } else { "false" }),
+                        ],
+                        "",
+                    ));
+                }
+            }
             if let Some(n) = count.filter(|n| *n > 0) {
                 attributes.push(("count", n.to_string()));
             }
@@ -3676,12 +3894,12 @@ impl Endpoint for Count {
                     ));
                 }
             }
-            attributes.push(("url", count_url(count, open.as_deref(), quiet)));
+            attributes.push(("url", count_url(count, open.as_deref(), quiet, kinds)));
             attributes.push(("every", crate::queue::BADGE_EVERY.to_string()));
         }
         let attributes: Vec<(&str, &str)> =
             attributes.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let doc = envelope("page", &attributes, "");
+        let doc = envelope("page", &attributes, &children);
         Ok(web::html(
             render::render(&doc, false).map_err(web::render_err)?,
         ))
@@ -3722,6 +3940,13 @@ impl Endpoint for Count {
                 arg(
                     "quiet",
                     "`1` on the overview, which announces what is new itself",
+                )
+                .optional(),
+            )
+            .input(
+                arg(
+                    "kinds",
+                    "`1` on the Layers page: each tab's \"new\" mark too, out of band",
                 )
                 .optional(),
             )

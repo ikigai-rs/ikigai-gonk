@@ -26,6 +26,10 @@ use ikigai_store::DurableStore;
 // `ikigai-inquiry` ships, the one `tests/inquiry_3695.rs` reads.
 #[path = "../tests/inquiry_host/mod.rs"]
 mod inquiry_host;
+// Ledger #3883: the Layers page as tabs by kind, over a scratch layer host whose layers declare
+// kinds, the one `tests/layers_tabs_3883.rs` reads.
+#[path = "../tests/kinds_host/mod.rs"]
+mod kinds_host;
 
 const PAGES: [(&str, &str); 40] = [
     ("home.html", "/"),
@@ -333,6 +337,97 @@ fn unconfigured_inquiry(face: &web::Web) -> Vec<u8> {
     let (status, body) = get(addr, "/inquiry/view/name/pending");
     assert_eq!(status, 200, "the unconfigured inquiry page");
     body
+}
+
+/// The Layers page as tabs by kind (ledger #3883), from its own door over `face`'s hub and a
+/// scratch layer host whose layers declare kinds: a tab with a "new" mark on another, and the
+/// "Other" tab, with the header's count and the page's poll exported at the paths they ask, so
+/// the static server answers them as gonk does.
+///
+/// ⚠ The fixture: the door's anonymous caller holds the Layers page's read token, which the real
+/// server mints for no anonymous caller, so a static page can show it.
+fn tabbed_layers(face: &web::Web) -> Vec<(String, &'static str, Vec<u8>)> {
+    let host = kinds_host::Host::open();
+    host.message("bobby", "talk", "The tabs are in.");
+    host.message("bobby", "misc", "Something of no kind.");
+    let view = ikigai_gonk::layers_view::LayersView::new(
+        host.door("brian"),
+        "scratch-door".to_string(),
+        None,
+        ikigai_gonk::layers_view::Waits { feed_secs: 1 },
+    );
+    view.refresh().expect("the scratch door answers");
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("its address");
+    let face = Arc::new(web::Web {
+        hub: Arc::clone(&face.hub),
+        ledgers: face.ledgers.clone(),
+        browse_roots: Vec::new().into(),
+        passkeys: Arc::clone(&face.passkeys),
+        rules: Arc::clone(&face.rules),
+        queue: face.queue.clone(),
+        epochs: None,
+        holder_aliases: Default::default(),
+        display: Default::default(),
+        page_assets: Default::default(),
+        projects: Default::default(),
+        toolbox: false,
+        faces: Vec::new(),
+        inquiry: None,
+    });
+    let pages = ikigai_gonk::layers_view::bind(web::space(Arc::clone(&face)), &face, Some(view));
+    let http = Arc::new(doors::http_kernel_serving(
+        Arc::clone(&face.hub),
+        pages,
+        Vec::new(),
+        None,
+    ));
+    let door = doors::HttpDoor {
+        anonymous: anonymous_http_grants(&face.ledgers)
+            .expect("the anonymous grant")
+            .into_iter()
+            .chain([ikigai_gonk::layers_view::CAP_READ.to_string()])
+            .collect(),
+        bind: addr,
+        passkeys: Some(Arc::clone(&face.passkeys)),
+        public: Vec::new(),
+        anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+    };
+    let edge = doors::edge_config(door.clone());
+    std::thread::spawn(move || {
+        runtime.block_on(ikigai_web::serve_with_listener(
+            http,
+            doors::http_cap(door),
+            listener,
+            edge,
+        ))
+    });
+    let mut out = Vec::new();
+    for (name, path) in [
+        // Unread on Talk and Other: the overview lands on Talk, and Other carries its mark.
+        ("layers-tabs.html", "/layers"),
+        ("layers-tab-other.html", "/layers/kind/other"),
+        ("layers/~/count", "/layers/~/count?quiet=1&kinds=1"),
+        (
+            "layers/~/wait",
+            "/layers/~/wait?after=0&seen=0&door=ok&kind=talk",
+        ),
+    ] {
+        let (status, body) = get(addr, path);
+        assert_eq!(status, 200, "{path}");
+        let page = String::from_utf8_lossy(&body);
+        if name == "layers-tabs.html" {
+            assert!(
+                page.contains("aria-label='Layer kinds'") && page.contains(", new messages"),
+                "the fixture is a tabbed page with a new mark: {page}"
+            );
+        }
+        out.push((name.to_string(), "text/html; charset=utf-8", body));
+    }
+    out
 }
 
 /// The page a browser lands on while gonk's store is briefly down (ledger #3811): a `503` in
@@ -884,6 +979,7 @@ fn main() {
         "text/html; charset=utf-8",
         unconfigured_inquiry(&face),
     ));
+    bodies.extend(tabbed_layers(&face));
     bodies.push((
         "outage.html".to_string(),
         "text/html; charset=utf-8",

@@ -124,7 +124,10 @@ ikigai-core = { version = "0.4.2", features = ["declare"] }
 # pin meant `<0.2.0` under 0.x rules. `"0.2.0"` is `<0.3.0`.
 # ★ 0.4.0 (ledger #4069, the core 0.4.0 cascade): the first release on ikigai-core 0.4, so the graph
 # links ONE core. `"0.4.0"` is `<0.5.0`.
-ikigai-vocab = "0.4.0"
+# ★ 0.4.2 is the floor now, a BEHAVIOR one (ledger #3883): the first release carrying
+# `ik:layerKind`, `ik:LayerKinds` and `ik:LayerKindOrder`, which the Layers page's tabs read from
+# `ikigai_vocab::VOCABULARY` (`crate::layer_kinds`). Under 0.4.0 every layer is under "Other".
+ikigai-vocab = "0.4.2"
 # The durable dataset. `persistent` is the RocksDB backend, and it is the reason this
 # binary exists: gonk is the one process on a machine that holds `~/.ikigai/store`.
 # 0.2.4 is where the freshness half of this pin comes from, and it is the whole of what
