@@ -314,6 +314,10 @@ pub struct Epochs {
     /// mounted while the server runs gains a counter ([`Epochs::track`]). Never shrunk — see
     /// there.
     roots: RwLock<BTreeMap<String, AtomicU64>>,
+    /// Each root in force and the canonical directory it is mounted at, as the last
+    /// [`Epochs::track`] said — what tells a root that stayed from one that arrived, left or
+    /// moved (ledger [#4138](http://localhost:1060/l/default/item/4138)). Empty until the first.
+    mounted: Mutex<BTreeMap<String, PathBuf>>,
     /// Finding id → root, learned from the rows the badge counted: a decision posts
     /// `urn:iki:finding:{id}`, which does not say which repository it belongs to.
     owners: Mutex<HashMap<String, String>>,
@@ -327,6 +331,7 @@ impl Epochs {
     pub fn new<I: IntoIterator<Item = String>>(roots: I) -> Epochs {
         Epochs {
             roots: RwLock::new(roots.into_iter().map(|r| (r, AtomicU64::new(0))).collect()),
+            mounted: Mutex::default(),
             owners: Mutex::default(),
             reads: crate::queue::Reads::default(),
         }
@@ -359,22 +364,34 @@ impl Epochs {
 
     /// The set of roots changed while the server runs (ledger
     /// [#2154](http://localhost:1062/l/default/item/2154)): give each root in `roots` a counter
-    /// when it has none, and TOUCH every one it already has.
+    /// when it has none, and TOUCH every root that arrived, left, or is now mounted at another
+    /// directory. `roots` is the set in force now, each with its canonical directory.
     ///
     /// ⚠ A counter is never removed, and a re-added root's is never reset. The Queue's memo
     /// keeps rows stamped with an epoch; a root removed and mounted again at a fresh `0` could
-    /// match rows stamped `0` before it left, and serve them. Touching instead moves every
-    /// stamp past whatever was memoized, and a removed root's counter costs one integer.
-    pub fn track(&self, roots: &[String]) {
+    /// match rows stamped `0` before it left, and serve them. Touching instead moves its stamp
+    /// past whatever was memoized, and a removed root's counter costs one integer.
+    ///
+    /// ★ A root that stayed, at the same directory, is NOT touched (ledger
+    /// [#4138](http://localhost:1060/l/default/item/4138)): nothing about its findings moved
+    /// by mounting another root beside it, and touching every root made the next badge poll
+    /// re-read them all. A root whose directory this table never learned (one [`Epochs::new`]
+    /// counted before any `track`) is touched — the conservative answer.
+    pub fn track(&self, roots: &[(String, PathBuf)]) {
         let mut counters = self.roots.write().unwrap_or_else(|p| p.into_inner());
-        for epoch in counters.values() {
-            epoch.fetch_add(1, Ordering::SeqCst);
-        }
-        for root in roots {
+        let mut mounted = self.mounted.lock().unwrap_or_else(|p| p.into_inner());
+        let next: BTreeMap<String, PathBuf> = roots.iter().cloned().collect();
+        for root in &next {
             counters
-                .entry(root.clone())
+                .entry(root.0.clone())
                 .or_insert_with(|| AtomicU64::new(0));
         }
+        for (root, epoch) in counters.iter() {
+            if mounted.get(root) != next.get(root) {
+                epoch.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        *mounted = next;
     }
 
     /// A finding was written: its root if this table has seen the id, every root if not.
@@ -454,14 +471,14 @@ impl RootWatch {
                 }),
             }
         }
-        let names: Vec<String> = watched.iter().map(|w| w.name.clone()).collect();
-        let epochs = match epochs {
-            Some(epochs) => {
-                epochs.track(&names);
-                epochs
-            }
-            None => Arc::new(Epochs::new(names)),
-        };
+        let mounted: Vec<(String, PathBuf)> = watched
+            .iter()
+            .map(|w| (w.name.clone(), w.dir.clone()))
+            .collect();
+        let epochs = epochs.unwrap_or_default();
+        // A fresh table learns its roots and their directories here; a live one is told
+        // which arrived, left or moved, and touches only those.
+        epochs.track(&mounted);
         (
             RootWatch {
                 watched,
