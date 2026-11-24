@@ -848,7 +848,7 @@ pub struct Settings {
     pub max_scoped_copy_quads: Option<usize>,
     /// Whether the store keeps a word index of every ledger's own graph (titles and bodies),
     /// which `items sort=relevance` needs (`gonk.store.text_index`, on unless a line says
-    /// `false`) — see [`text_index`].
+    /// `false`) — see [`crate::text_index`].
     pub text_index: bool,
     /// The HTTP door's address. Always loopback — see [`refuse_non_loopback`].
     pub http: SocketAddr,
