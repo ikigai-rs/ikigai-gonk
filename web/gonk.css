@@ -586,10 +586,21 @@ a.cell-link:hover { text-decoration-thickness: 2px; }
  * sentence arrives in it. */
 .live { margin: 0.25rem 0; }
 /* The header's unread count (ledger #1700): a number in a pill, inside the Layers link. The
- * number is the message and "new" is in the link's name, so the accent only repeats it; no
- * animation, so there is nothing for reduced motion to stop. Collapsed when there is no count. */
+ * number is the message and "new" is in the link's name; no animation, so there is nothing for
+ * reduced motion to stop. Collapsed when there is no count. ★ The number and its ring are the
+ * nav link's OWN color, `currentColor`, in every theme (ledger #3883), never a rule per theme;
+ * the ring has no fill, so the number stands on the header's --surface exactly as the link's
+ * text does (`tests/layers_tabs_3883.rs` holds that pair to the text floor in every palette). */
 .layers-badge:empty { display: none; }
-.layers-count { display: inline-block; padding: 0 0.35rem; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font-size: 0.8em; font-weight: 600; line-height: 1.3; }
+.layers-count { display: inline-block; padding: 0 0.35rem; border: 1px solid currentColor; border-radius: 999px; color: currentColor; background: none; font-size: 0.8em; font-weight: 600; line-height: 1.3; }
+/* The Layers page's tabs (ledger #3883): links with no script, as the Dashboard's are. The bar and
+ * the weight say which is shown, not the color alone; the ring is the global :focus-visible. A
+ * tab's "new" mark is a dot in the link's own color beside words in its name: the dot's presence
+ * is the signal (WCAG 1.4.1), and it is `aria-hidden`. */
+.layer-kinds ul { display: flex; flex-wrap: wrap; gap: 0 var(--gap); list-style: none; margin: 0 0 var(--gap); padding: 0; border-bottom: 1px solid var(--rule); }
+.layer-kinds a { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.5rem 0.75rem; border-bottom: 3px solid transparent; }
+.layer-kinds a[aria-current="page"] { border-bottom-color: var(--accent); font-weight: 600; text-decoration: none; }
+.kind-new { display: inline-block; width: 0.5em; height: 0.5em; border-radius: 50%; background: currentColor; }
 
 /* The header's ledger picker (ledger #1888): a <details> without a script, a disclosure button
  * with one (web/gonk.js). No new color token: every pair here is one the contrast test holds
