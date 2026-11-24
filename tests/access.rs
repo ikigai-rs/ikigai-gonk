@@ -426,3 +426,139 @@ fn an_edge_refusal_writes_a_denied_line() {
     assert_eq!(value(&load, "principal"), "anon", "{load}");
     assert_eq!(lines.lock().unwrap().len(), 3, "one line per refusal");
 }
+
+/// A repository facade in the shape ikigai-repo 0.6 gives `urn:repo:status`: it declares
+/// `urn:cap:exec:read:git` (no longer `urn:cap:exec:git`), and refuses at run time whatever
+/// the `refuse` argument names, with nothing declared missing.
+struct RepoStatus;
+
+#[async_trait::async_trait]
+impl ikigai_core::Endpoint for RepoStatus {
+    async fn invoke(
+        &self,
+        inv: &ikigai_core::Invocation<'_>,
+    ) -> ikigai_core::Result<ikigai_core::Representation> {
+        if inv.request.args.contains_key("refuse") {
+            return Err(ikigai_core::Error::Denied(
+                "the endpoint's own rule refuses this path".into(),
+            ));
+        }
+        Ok(ikigai_core::Representation::new(
+            ikigai_core::ReprType::new("text/plain"),
+            "clean\n",
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "repo-status"
+    }
+
+    fn describe(&self) -> ikigai_core::Description {
+        ikigai_core::Description::new(self.name())
+            .verb(Verb::Source)
+            .requires("urn:cap:exec:read:git")
+            .input(ikigai_core::ArgSpec::new("refuse").optional())
+    }
+}
+
+/// A hub that binds [`RepoStatus`] at `urn:repo:status`.
+fn repo_hub() -> Arc<Kernel> {
+    let space = ikigai_core::EndpointSpace::new()
+        .bind(ikigai_core::Exact::new("urn:repo:status"), RepoStatus);
+    Arc::new(Kernel::new(Arc::new(space)))
+}
+
+/// A socket door over [`repo_hub`], with the access log on.
+fn repo_door(sink: ikigai_gonk::access::Sink) -> Kernel {
+    doors::door_kernel_with(repo_hub(), Some(AccessLog::to(Door::Socket, sink)))
+}
+
+fn issue(door: &Kernel, request: Request, capability: &Capability) -> ikigai_core::Result<()> {
+    futures::executor::block_on(Kernel::issue(door, request, capability)).map(|_| ())
+}
+
+/// ★ Ledger #3830: a grant that still says `urn:cap:exec:git` asking a facade that needs
+/// `urn:cap:exec:read:git` is refused, and the refusal's line says what it lacked.
+#[test]
+fn a_denied_line_names_the_capability_it_lacked() {
+    let (lines, sink) = collector();
+    let door = repo_door(sink);
+    let old = Capability::scoped(["urn:cap:exec:git"]);
+    let refused = issue(
+        &door,
+        Request::new(Verb::Source, Iri::parse("urn:repo:status").unwrap()),
+        &old,
+    );
+    assert!(
+        matches!(refused, Err(ikigai_core::Error::Denied(_))),
+        "{refused:?}"
+    );
+    let line = line_for(&lines, "urn:repo:status");
+    eprintln!("example (needs): {line}");
+    assert!(
+        line.contains(" outcome=denied ") && line.ends_with(" needs=urn:cap:exec:read:git"),
+        "{line}"
+    );
+}
+
+/// ★ Ledger #3830: an endpoint that refuses on its own rule, with every declared requirement
+/// held, writes `outcome=denied` and no `needs` column: nothing declared is missing, so the
+/// line does not guess.
+#[test]
+fn a_runtime_refusal_with_nothing_declared_missing_names_no_need() {
+    let (lines, sink) = collector();
+    let door = repo_door(sink);
+    let new = Capability::scoped(["urn:cap:exec:read:git"]);
+    let refused = issue(
+        &door,
+        Request::new(Verb::Source, Iri::parse("urn:repo:status").unwrap())
+            .with_arg("refuse", ArgRef::Inline(b"yes".to_vec())),
+        &new,
+    );
+    assert!(
+        matches!(refused, Err(ikigai_core::Error::Denied(_))),
+        "{refused:?}"
+    );
+    let line = line_for(&lines, "urn:repo:status");
+    assert_eq!(value(&line, "outcome"), "denied", "{line}");
+    assert_eq!(column(&line, "needs"), None, "{line}");
+}
+
+/// ★ Ledger #3830: the refusal is the KERNEL's. A door refuses with the hub kernel's own
+/// floor sentence, word for word, carrying the scopes it found missing, with the log on or
+/// off; and the contract a caller reads (`Meta`) still declares what it requires.
+#[test]
+fn the_refusal_is_the_kernels_and_the_contract_is_whole() {
+    let hub = repo_hub();
+    let plain = doors::door_kernel(Arc::clone(&hub));
+    let (_, sink) = collector();
+    let logged = repo_door(sink);
+    let status = Iri::parse("urn:repo:status").unwrap();
+    let old = Capability::scoped(["urn:cap:exec:git"]);
+    let refusal = |door: &Kernel| {
+        futures::executor::block_on(Kernel::issue(
+            door,
+            Request::new(Verb::Source, status.clone()),
+            &old,
+        ))
+        .expect_err("refused")
+    };
+    let own = refusal(&hub);
+    for door in [&logged, &plain] {
+        let refused = refusal(door);
+        assert_eq!(refused.to_string(), own.to_string());
+        assert_eq!(refused.lacking(), ["urn:cap:exec:read:git"]);
+    }
+    let contract = |door: &Kernel| {
+        futures::executor::block_on(Kernel::issue(
+            door,
+            Request::new(Verb::Meta, status.clone()),
+            &Capability::root(),
+        ))
+        .expect("the contract")
+        .bytes
+    };
+    let read = String::from_utf8(contract(&logged)).unwrap();
+    assert_eq!(contract(&logged), contract(&plain));
+    assert!(read.contains("urn:cap:exec:read:git"), "{read}");
+}

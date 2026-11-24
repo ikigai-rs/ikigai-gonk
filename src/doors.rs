@@ -183,7 +183,7 @@ impl Space for HubSpace {
                 let resolved = Resolved::new(
                     Arc::new(Forward {
                         hub: Arc::clone(&self.hub),
-                        description,
+                        description: floor_at_the_hub(description, request.verb),
                         target: (request.verb != Verb::Meta).then(|| request.target.clone()),
                         wire: self.wire,
                         nobody: self.nobody,
@@ -237,10 +237,45 @@ struct Forward {
     nobody: bool,
 }
 
+/// The contract a door kernel holds a forwarded request to: the hub's, without its declared
+/// floor (`requires`), because the HUB's kernel runs that floor on the same description when
+/// [`Forward`] issues the request, under the same capability (ledger
+/// [#3830](http://localhost:1062/l/default/item/3830)).
+///
+/// The door kernel used to run it first, so a refusal was made before dispatch, out of sight
+/// of the access log's overlay ([`crate::access::Logged`]): a capability that held only
+/// `urn:cap:exec:git` asking `urn:repo:status` wrote no line at all. Made by the hub's kernel,
+/// the same refusal comes back through the overlay as an [`Error::Denied`] carrying the scopes
+/// it found missing (`Error::lacking`, core 0.4, ledger #3840), and the line names them as
+/// `needs=`. The check stays the kernel's and its sentence is the kernel's, word for word; the
+/// door no longer makes the same check twice.
+///
+/// Kept whole:
+///
+/// - for `Meta`, which the door kernel answers from this description: a caller still reads
+///   what the name requires;
+/// - for a contract that hides its existence from a caller who may not reach it, which the
+///   door's floor answers as a name bound nowhere; that is a miss, not a refusal, so nothing
+///   is lost from the log.
+///
+/// ⚠ The order moves for a forwarded request: the door's admission ([`crate::admit`]) now reads
+/// it before the floor does, so a request both rules refuse is refused by the admission's
+/// sentence. Both are `denied`, and neither runs the endpoint.
+fn floor_at_the_hub(mut description: Description, verb: Verb) -> Description {
+    if verb == Verb::Meta || description.hides_existence() {
+        return description;
+    }
+    description.requires.clear();
+    for action in &mut description.actions {
+        action.requires.clear();
+    }
+    description
+}
+
 impl Forward {
-    /// The request the hub is issued: the door's, with the CALLER's capability unchanged (the
-    /// door kernel has already checked the declared floor against the same description, and
-    /// the hub checks it again along with everything the endpoint enforces inside).
+    /// The request the hub is issued: the door's, with the CALLER's capability unchanged. The
+    /// hub's kernel checks the declared floor ([`floor_at_the_hub`]) along with everything the
+    /// endpoint enforces inside.
     ///
     /// ★ The one rewrite: an ANONYMOUS HTTP caller's SPARQL is stamped with the door's time
     /// budget (ledger #964/#979, [`crate::budget`]). Here because every request any door

@@ -1090,9 +1090,10 @@ fn foreign_page_explained<T>(
                     .scopes()
                     .is_some_and(|held| held.contains(FOREIGN_PAGE)) =>
         {
-            Err(Error::Denied(
-                format!("{why}. {FOREIGN_PAGE_SENTENCE}").into(),
-            ))
+            // Reworded, so a refusal by the hub's declared floor keeps the scopes it found
+            // missing (`Error::lacking`), which the access log writes as `needs=`.
+            let sentence = format!("{why}. {FOREIGN_PAGE_SENTENCE}");
+            Err(Error::Denied(why.reworded(sentence)))
         }
         other => other,
     }
