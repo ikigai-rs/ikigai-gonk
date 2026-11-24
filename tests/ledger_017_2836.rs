@@ -378,7 +378,8 @@ fn an_import_principal_names_a_foreign_actor() {
             &[
                 ("item", "1"),
                 ("author", "urn:example:github:user:octocat"),
-                ("created", "2020-01-02T03:04:05Z"),
+                // No back-dated `created`: since ikigai-ledger 0.26 a comment may not be dated
+                // before the item it is on, and this item was filed just now.
                 ("content", "From before"),
             ],
         ),
