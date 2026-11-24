@@ -359,6 +359,23 @@
     </option>
   </xsl:template>
 
+  <!-- Ledger #4130: under a search, the order the ledger's word index can give, as a link
+       that says what it does; or, when the index cannot answer, a sentence that says so. -->
+  <xsl:template match="view:relevance">
+    <p class="relevance">
+      <a hx-target="#ledger" hx-swap="outerHTML">
+        <xsl:attribute name="href"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:attribute name="hx-get"><xsl:value-of select="@items-url"/></xsl:attribute>
+        <xsl:attribute name="hx-push-url"><xsl:value-of select="@href"/></xsl:attribute>
+        <xsl:value-of select="."/>
+      </a>
+    </p>
+  </xsl:template>
+
+  <xsl:template match="view:relevance-off">
+    <p class="note relevance-off"><xsl:value-of select="."/></p>
+  </xsl:template>
+
   <xsl:template match="view:flash">
     <p>
       <xsl:attribute name="class">flash <xsl:value-of select="@kind"/></xsl:attribute>
@@ -2655,6 +2672,12 @@
             </input>
           </div>
           <div class="search-field">
+            <label for="search-phrase">Exact phrase in the title</label>
+            <input id="search-phrase" type="search" name="phrase" aria-describedby="search-phrase-help">
+              <xsl:attribute name="value"><xsl:value-of select="@phrase"/></xsl:attribute>
+            </input>
+          </div>
+          <div class="search-field">
             <label for="search-labels">Labels (all must match)</label>
             <input id="search-labels" name="labels" type="text" aria-describedby="label-filter-help">
               <xsl:attribute name="value"><xsl:value-of select="@labels"/></xsl:attribute>
@@ -2678,8 +2701,10 @@
           <p id="search-text-help" class="note">Enter an item number, such as 42 or #42, to go to that item.</p>
           <p id="label-filter-help" class="note">Separate labels with commas.</p>
           <p id="priority-filter-help" class="note">Separate priorities with commas: 0, 1, 2, 3, 4 or none (unset).</p>
-          <p id="sort-filter-help" class="note">Separate sort keys with commas: priority, created, modified, number or landing. Prefix a key with - for descending order. Default: -modified.</p>
+          <p id="search-phrase-help" class="note">The words must appear in this order, next to each other. Case does not matter.</p>
+          <p id="sort-filter-help" class="note">Separate sort keys with commas: priority, created, modified, number or landing. Prefix a key with - for descending order. Default: -modified. With a search or a phrase, enter relevance by itself for the most relevant items first.</p>
         </form>
+        <xsl:apply-templates select="view:relevance | view:relevance-off"/>
       </header>
       <xsl:apply-templates select="view:project-views"/>
       <xsl:apply-templates select="view:save-filter"/>
@@ -2730,7 +2755,12 @@
            apart from this shell (ledger #519), so the shell holds none of them and the
            count is the Rust side's (`web::Count`), evaluated once. -->
       <xsl:if test="@has-rows = 'false'">
-        <p class="empty">No items match.</p>
+        <!-- Ledger #4130: a refused "most relevant" order lists nothing, and says why rather
+             than "No items match", which would be false. -->
+        <xsl:choose>
+          <xsl:when test="@refused != ''"><p class="empty"><xsl:value-of select="@count"/></p></xsl:when>
+          <xsl:otherwise><p class="empty">No items match.</p></xsl:otherwise>
+        </xsl:choose>
       </xsl:if>
       <!-- ⚠ What this page rendered and what the filter MATCHED are different numbers, and
            the page says both: a listing that reports its own length as the total is the

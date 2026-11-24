@@ -106,6 +106,7 @@ pub mod sparql;
 pub mod stack;
 pub mod system;
 pub mod taker;
+pub mod text_index;
 pub mod toolbox;
 pub mod trigger;
 pub mod ui_retry;

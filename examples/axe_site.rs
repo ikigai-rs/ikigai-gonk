@@ -31,7 +31,7 @@ mod inquiry_host;
 #[path = "../tests/kinds_host/mod.rs"]
 mod kinds_host;
 
-const PAGES: [(&str, &str); 40] = [
+const PAGES: [(&str, &str); 43] = [
     ("home.html", "/"),
     ("ledgers.html", "/l"),
     ("dashboard.html", "/dashboard"),
@@ -55,6 +55,11 @@ const PAGES: [(&str, &str); 40] = [
     // list. (A number it holds answers a page that refreshes away at once, which a static
     // site cannot follow, so it is not here: tests/item_jump_4051.rs pins it.)
     ("item-missing.html", "/l/default?text=%2399999"),
+    // Ledger #4130: a search with its "most relevant first" link (or the sentence saying it is
+    // not available), that order in effect and said in words, and a phrase search.
+    ("search.html", "/l/default?text=a"),
+    ("search-relevance.html", "/l/default?text=a&sort=relevance"),
+    ("search-phrase.html", "/l/default?phrase=a"),
     ("item.html", "/l/default/item/1"),
     ("linked-item.html", "/l/default/item/4"),
     // Ledger #3217: an item blocked from three ledgers, with its inbound links panel.
@@ -601,6 +606,10 @@ fn main() {
     let graph = ikigai_gonk::browse::Graph::chosen();
     let (store, _shared) =
         DurableStore::in_memory_shared_declaring(graph.sharer_writes()).expect("a store");
+    // The ledgers' word index, as `main` enrolls it (ledger #4130).
+    let store = store
+        .with_text_index(ikigai_gonk::text_index::enrollment())
+        .expect("the ledgers' word index");
     let browsed = ikigai_gonk::browse::wire(
         vec![("fixture".to_string(), repository.clone())],
         store.shared_writer().expect("the store's writer"),
