@@ -222,7 +222,21 @@ fn a_search_offers_most_relevant_first_and_lists_the_best_match_first() {
         "{plain}"
     );
 
-    let ranked = server.page("/l/default?text=lease&sort=relevance");
+    // The ledger ranks only once the index has committed every write and its document count
+    // matches the graph (ikigai-ledger 0.26's `complete`); for a moment after the seed's writes
+    // it refuses, in words, and the page shows that refusal. Wait it out, as for the offer.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let ranked = loop {
+        let ranked = server.page("/l/default?text=lease&sort=relevance");
+        if ranked.contains("Most relevant items first.") || Instant::now() > deadline {
+            break ranked;
+        }
+        assert!(
+            ranked.contains("none are listed. Most relevant ordering is not available:"),
+            "while it cannot rank, the page says so and lists nothing: {ranked}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
     assert!(
         ranked.contains("Most relevant items first."),
         "the order is said in words: {ranked}"
