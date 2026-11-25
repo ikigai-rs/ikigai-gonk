@@ -519,7 +519,7 @@ pub struct Migration {
 }
 
 /// Give every enrollment from before people its person (ledger #4305), under the clients
-/// lock: [`migrate_locked`]. Returns how many passkeys were migrated.
+/// lock (`migrate_locked`). Returns how many passkeys were migrated.
 pub fn migrate_people(layout: &Layout) -> Result<usize, String> {
     migrate(layout).map(|m| m.migrated)
 }
