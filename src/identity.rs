@@ -2831,8 +2831,7 @@ mod tests {
         });
         let refused = rp
             .login(body.to_string().as_bytes(), 11)
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert!(
             refused.contains("registered for the site `gonk.example.org`")
                 && refused.contains("only at the site it was registered for"),
