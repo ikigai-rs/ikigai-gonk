@@ -19,11 +19,13 @@
 //! ★ **People** (ledger [#4305](http://localhost:1062/l/default/item/4305)): `clients.json`
 //! also holds `"people": { "<id>": { "label": "brian", "grants": ["brian"] } }`, and each
 //! passkey entry names `"person": "urn:iki:gonk:person:id:<id>"` and `"rp_id": "localhost"`
-//! in place of its own grants. People live in `clients.json`, not a file of their own, so a
+//! in place of its own grants (its `grants`, and `grant` for a person with one, stay as a
+//! copy of its person's that only an older gonk reads, so a downgrade still starts, ledger
+//! #4368). People live in `clients.json`, not a file of their own, so a
 //! passkey and the person it names are written together, under the one clients lock, in one
 //! rename: no reader ever sees a passkey naming a person who is not there yet. An entry from
 //! before people is read as a person of its own (`parse_passkeys`) and written so at the
-//! next start ([`migrate_people`]). What follows says "a passkey's grants": they are its
+//! next start, or before the next write ([`migrate_people`]). What follows says "a passkey's grants": they are its
 //! person's.
 //!
 //! A passkey holds a LIST of grant names (ledger [#3388](http://localhost:1062/l/default/item/3388);
@@ -428,7 +430,12 @@ pub(crate) fn parse_passkeys(
                 // its grants, exactly as [`migrate_people`] writes it.
                 let grants = entry_grants(id, entry)?;
                 let label = field("label").unwrap_or_else(|_| grants[0].clone());
-                (person_iri(&migrated_person_id(id)), grants, label)
+                let pid = migrated_person_id(id);
+                // ★ Unless that person already exists (ledger #4368): an old-form entry put
+                // back by hand, or rewritten by an older gonk, holds its PERSON's grants, as
+                // the migration will make it, never a list of its own beside the person's.
+                let grants = people.get(&pid).map_or(grants, |p| p.grants.clone());
+                (person_iri(&pid), grants, label)
             }
             Some(Value::String(iri)) => {
                 let who = person_id(iri)
@@ -498,33 +505,104 @@ pub fn people_backup(layout: &Layout) -> std::path::PathBuf {
         .with_file_name("clients.json.before-people")
 }
 
+/// What one [`migrate`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Migration {
+    /// How many passkey entries from before people now name a person.
+    pub migrated: usize,
+    /// The file holding `clients.json` as it was before them: [`people_backup`], or a
+    /// stamped `clients.json.before-people-<UTC>` beside it when that one already held an
+    /// older file (a re-upgrade after a rollback, ledger #4368). `None` when none migrated.
+    pub backup: Option<std::path::PathBuf>,
+    /// How many migrated entries' compatibility `grants` were rewritten to their person's.
+    pub mirrored: usize,
+}
+
+/// Give every enrollment from before people its person (ledger #4305), under the clients
+/// lock: [`migrate_locked`]. Returns how many passkeys were migrated.
+pub fn migrate_people(layout: &Layout) -> Result<usize, String> {
+    migrate(layout).map(|m| m.migrated)
+}
+
+/// [`migrate_people`], saying what it did and which backup holds the file before.
+pub fn migrate(layout: &Layout) -> Result<Migration, String> {
+    match std::fs::metadata(layout.clients_json()) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Migration::default()),
+        _ => {}
+    }
+    let lock = layout.lock_clients()?;
+    migrate_locked(layout, &lock)
+}
+
+/// The sentence a start (or a cli write) prints after a migration that did something.
+pub fn migration_line(layout: &Layout, done: &Migration) -> Option<String> {
+    let backup = done.backup.as_ref()?;
+    Some(format!(
+        "gonk: gave {} passkey(s) a person each in {} (the file before is {})",
+        done.migrated,
+        layout.clients_json().display(),
+        backup.display()
+    ))
+}
+
+/// Set a passkey entry's compatibility grants to its person's (ledger #4368): `grants`, and
+/// `grant` too when the person holds exactly one. This server ignores both on an entry that
+/// names a person; every gonk from before people reads them (ledger-v0.18.0 through v0.24.x
+/// read `grant`, v0.25.0 `grants`, refusing the two when they disagree), so a downgrade
+/// starts and signs each passkey in with its person's grants. Returns whether it changed.
+fn mirror_grants(object: &mut Map<String, Value>, grants: &[String]) -> bool {
+    let before = (object.get("grants").cloned(), object.get("grant").cloned());
+    object.insert("grants".to_string(), json!(grants));
+    match grants {
+        [one] => object.insert("grant".to_string(), Value::String(one.clone())),
+        _ => object.remove("grant"),
+    };
+    before != (object.get("grants").cloned(), object.get("grant").cloned())
+}
+
 /// Give every enrollment from before people its own person (ledger #4305): a new `people`
 /// entry carrying that passkey's label and grants, and `person` and `rp_id = "localhost"` on
 /// the passkey. Nothing is merged: two passkeys become two people, and `passkey attach` is how
-/// an operator makes them one. The file as it was is kept as [`people_backup`] (never
-/// overwritten once there), and the new one is written whole and renamed into place. Returns
-/// how many passkeys were migrated; a file with none to migrate is not written, so a second
-/// run changes nothing.
-pub fn migrate_people(layout: &Layout) -> Result<usize, String> {
+/// an operator makes them one. The new file is written whole and renamed into place. A file
+/// with nothing to change is not written, so a second run changes nothing.
+///
+/// ★ **The backup is always a file from before people** (ledger #4368). Every writer of
+/// `clients.json` runs this first, under the lock it holds, so no new-form entry is written
+/// before the first backup. The first is [`people_backup`], never overwritten; when it is
+/// there and differs from the file being migrated now (a rollback restored it, an older gonk
+/// changed it, and this is the re-upgrade), the file is kept as a stamped one beside it and
+/// that is the one [`Migration::backup`] names.
+///
+/// ★ **An old-form entry whose person already exists** (put back by hand from a backup, or
+/// written by `passkey attach` or an older gonk) is pointed at that person: its own grants are
+/// dropped, never copied over the person's, and a difference is reported.
+///
+/// ★ **Every migrated entry keeps its person's grants as `grants`** ([`mirror_grants`]), so
+/// an older gonk still starts on the file. A mirror that differs from its person's list is
+/// rewritten here, with a warning.
+pub(crate) fn migrate_locked(layout: &Layout, _lock: &quic::FileLock) -> Result<Migration, String> {
     let path = layout.clients_json();
-    match std::fs::metadata(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        _ => {}
-    }
-    let _lock = layout.lock_clients()?;
-    let before =
-        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let before = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Migration::default()),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
     let mut doc = quic::read_object(&path)?;
     let enrolled = parse_passkeys(&doc)?;
     let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
-        return Ok(0);
+        return Ok(Migration::default());
     };
     let mut people = match doc.remove("people") {
         None => Map::new(),
         Some(Value::Object(map)) => map,
         Some(_) => return Err("`people` in clients.json must be an object".to_string()),
     };
-    let mut migrated = 0;
+    let mut done = Migration::default();
+    let had_person: std::collections::BTreeSet<String> = passkeys
+        .iter()
+        .filter(|(_, entry)| entry.get("person").is_some_and(|p| !p.is_null()))
+        .map(|(id, _)| id.clone())
+        .collect();
     for (id, entry) in passkeys.iter_mut() {
         let Some(object) = entry.as_object_mut() else {
             continue;
@@ -534,43 +612,94 @@ pub fn migrate_people(layout: &Layout) -> Result<usize, String> {
         }
         let e = &enrolled[id];
         let pid = person_id(&e.person).unwrap_or_default().to_string();
-        // ★ Never overwrite a person (ledger #4363): an old-form entry put back by hand for a
-        // credential whose person already exists would otherwise replace that person's
-        // grants for every passkey attached to it. The entry is left as written.
         if people.contains_key(&pid) {
-            eprintln!(
-                "ikigai-gonk: passkey `{id}` in {} was not migrated: its person `{}` is already \
-                 in `people`, whose grants are kept; attach it with `ikigai-gonk passkey attach`, \
-                 or remove the entry",
-                path.display(),
-                e.person
-            );
-            continue;
+            // `e.grants` are already the person's (`parse_passkeys`); the entry's own are
+            // reported when they differ, then dropped.
+            let own = entry_grants(id, &Value::Object(object.clone())).unwrap_or_default();
+            if own != e.grants {
+                eprintln!(
+                    "ikigai-gonk: passkey `{id}` in {} was an entry from before people (put back \
+                     by hand, or written by an older gonk) whose person `{}` already exists: it \
+                     now names that person and holds its grants ({}); its own ({}) were dropped",
+                    path.display(),
+                    e.person,
+                    e.grant_names(),
+                    own.join(", ")
+                );
+            }
+        } else {
+            people.insert(pid, json!({ "label": e.label, "grants": e.grants }));
         }
-        people.insert(pid, json!({ "label": e.label, "grants": e.grants }));
-        object.remove("grant");
-        object.remove("grants");
         object.insert("person".to_string(), Value::String(e.person.clone()));
         object.insert("rp_id".to_string(), Value::String(e.rp_id.clone()));
-        migrated += 1;
+        done.migrated += 1;
     }
-    if migrated == 0 {
-        return Ok(0);
+    // The mirror on every entry naming a person, the just-migrated ones included.
+    let lists = parse_people(&Map::from_iter([(
+        "people".to_string(),
+        Value::Object(people.clone()),
+    )]))?;
+    for (id, entry) in passkeys.iter_mut() {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(person) = object
+            .get("person")
+            .and_then(Value::as_str)
+            .and_then(person_id)
+            .and_then(|pid| lists.get(pid))
+        else {
+            continue;
+        };
+        let had = object.get("grants").cloned();
+        if mirror_grants(object, &person.grants) {
+            if had.is_some() && had_person.contains(id) {
+                eprintln!(
+                    "ikigai-gonk: passkey `{id}`'s `grants` in {} differed from its person's; \
+                     rewrote them to {} (only an older gonk reads them)",
+                    path.display(),
+                    person.grants.join(", ")
+                );
+            }
+            done.mirrored += 1;
+        }
+    }
+    if done.migrated == 0 && done.mirrored == 0 {
+        return Ok(done);
     }
     doc.insert("people".to_string(), Value::Object(people));
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
     let text = quic::pretty(&Value::Object(doc))?;
     quic::parse_enrolment(&text)?;
-    let backup = people_backup(layout);
-    if !backup.exists() {
-        quic::write_private(&backup, &before)?;
+    if done.migrated > 0 {
+        let first = people_backup(layout);
+        let backup = match std::fs::read_to_string(&first) {
+            Ok(kept) if kept == before => first,
+            Ok(_) => {
+                let stamp = crate::backup::stamp_compact(now_seconds() * 1000);
+                let mut fresh = first.with_file_name(format!("clients.json.before-people-{stamp}"));
+                let mut n = 1;
+                while fresh.exists() {
+                    n += 1;
+                    fresh = first.with_file_name(format!("clients.json.before-people-{stamp}-{n}"));
+                }
+                quic::write_private(&fresh, &before)?;
+                fresh
+            }
+            Err(_) => {
+                quic::write_private(&first, &before)?;
+                first
+            }
+        };
+        done.backup = Some(backup);
     }
     quic::write_private(&path, &text)?;
-    Ok(migrated)
+    Ok(done)
 }
 
 /// A passkey entry's grant names: the list form `"grants": ["a", "b"]` this server writes, or
-/// the single-name form `"grant": "a"` every earlier one wrote (still read, never written).
+/// the single-name form `"grant": "a"` every earlier one wrote (still read; written only as the
+/// mirror an older gonk reads, [`mirror_grants`]).
 /// Refused when it names none, when a name is not a string, or when both forms disagree.
 fn entry_grants(id: &str, entry: &Value) -> Result<Vec<String>, String> {
     let single = match entry.get("grant") {
@@ -612,7 +741,10 @@ fn entry_grants(id: &str, entry: &Value) -> Result<Vec<String>, String> {
 /// Write one passkey entry into `clients.json`, keeping every other key (the QUIC clients,
 /// the default) exactly as it was. The caller holds `_lock` from the read it decided on to
 /// here, so no other change to the file lands in between and is undone (ledger #2776).
-fn write_passkey(layout: &Layout, _lock: &quic::FileLock, entry: &Enrolled) -> Result<(), String> {
+fn write_passkey(layout: &Layout, lock: &quic::FileLock, entry: &Enrolled) -> Result<(), String> {
+    // ★ The migration first, under this lock (ledger #4368), so the backup it keeps is the
+    // file from before people, never one this write already changed.
+    migrated_by_cli(layout, lock)?;
     let mut doc = quic::read_object(&layout.clients_json())?;
     let mut passkeys = match doc.remove("passkeys") {
         None => Map::new(),
@@ -648,12 +780,29 @@ fn write_passkey(layout: &Layout, _lock: &quic::FileLock, entry: &Enrolled) -> R
             "sign_count": entry.sign_count,
         }),
     );
+    // Every passkey of the person keeps its grants as an older gonk reads them.
+    for other in passkeys.values_mut() {
+        if let Some(object) = other.as_object_mut() {
+            if object.get("person").and_then(Value::as_str) == Some(entry.person.as_str()) {
+                mirror_grants(object, &entry.grants);
+            }
+        }
+    }
     doc.insert("people".to_string(), Value::Object(people));
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
     let text = quic::pretty(&Value::Object(doc))?;
     // What is written must still be what the QUIC door reads.
     quic::parse_enrolment(&text)?;
     quic::write_private(&layout.clients_json(), &text)
+}
+
+/// [`migrate_locked`] from a writer, printing what it did as a start does.
+fn migrated_by_cli(layout: &Layout, lock: &quic::FileLock) -> Result<(), String> {
+    let done = migrate_locked(layout, lock)?;
+    if let Some(line) = migration_line(layout, &done) {
+        eprintln!("{line}");
+    }
+    Ok(())
 }
 
 /// Which passkey `passkey revoke` names: its label (a display name, so possibly shared) or its
@@ -706,6 +855,7 @@ pub fn checked_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, S
 /// happen; if it cannot be written the change stands and the error says so.
 pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
+    migrated_by_cli(layout, &lock)?;
     let target = pick(layout, which)?;
     let mut doc = quic::read_object(&layout.clients_json())?;
     let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
@@ -1721,13 +1871,12 @@ impl Passkeys {
     pub fn new_at(layout: Layout, port: u16, now: u64) -> Passkeys {
         // ★ Enrollments from before people get theirs now (ledger #4305). A file this cannot
         // migrate is read as it is (`parse_passkeys` reads the old form) and reported here.
-        match migrate_people(&layout) {
-            Ok(0) => {}
-            Ok(n) => eprintln!(
-                "gonk: gave {n} passkey(s) a person each in {} (the file before is {})",
-                layout.clients_json().display(),
-                people_backup(&layout).display()
-            ),
+        match migrate(&layout) {
+            Ok(done) => {
+                if let Some(line) = migration_line(&layout, &done) {
+                    eprintln!("{line}");
+                }
+            }
             Err(e) => eprintln!("gonk: passkeys were not given people: {e}"),
         }
         let log_len = std::fs::metadata(audit_log(&layout))
@@ -3068,9 +3217,18 @@ mod tests {
             .is_ok());
         let migrated = std::fs::read_to_string(layout.clients_json()).unwrap();
         let doc = quic::read_object(&layout.clients_json()).unwrap();
+        assert_eq!(
+            doc["passkeys"]["bGFwdG9w"]["grants"],
+            json!(["brian", "reviewer"]),
+            "grants are the person's, mirrored for an older gonk (ledger #4368)"
+        );
         assert!(
-            doc["passkeys"]["bGFwdG9w"].get("grants").is_none(),
-            "grants moved to the person"
+            doc["passkeys"]["bGFwdG9w"].get("grant").is_none(),
+            "two: no `grant`"
+        );
+        assert_eq!(
+            doc["passkeys"]["cGhvbmU"]["grant"], "brian",
+            "one: `grant` too"
         );
         assert_eq!(
             migrate_people(&layout).unwrap(),
@@ -3088,7 +3246,8 @@ mod tests {
     }
 
     /// ★ Ledger #4363: an old-form entry put back by hand for a credential whose person is
-    /// already in `people` leaves that person, and its grants, as they are.
+    /// already in `people` leaves that person, and its grants, as they are. Ledger #4368: the
+    /// entry is pointed at that person, and holds its grants, not its own.
     #[test]
     fn a_hand_edited_old_entry_never_overwrites_its_person() {
         let dir = tempfile::tempdir().unwrap();
@@ -3106,12 +3265,22 @@ mod tests {
         });
         let edited = quic::pretty(&Value::Object(doc)).unwrap();
         std::fs::write(layout.clients_json(), &edited).unwrap();
-        assert_eq!(migrate_people(&layout).unwrap(), 0, "nothing migrated");
         assert_eq!(
-            std::fs::read_to_string(layout.clients_json()).unwrap(),
-            edited,
-            "the file is left as written"
+            read_passkeys(&layout).unwrap()["bGFwdG9w"].grants,
+            ["brian", "reviewer"],
+            "read before its migration, the entry already holds its person's grants"
         );
+        assert_eq!(migrate_people(&layout).unwrap(), 1, "pointed at its person");
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        assert_eq!(
+            doc["passkeys"]["bGFwdG9w"]["person"],
+            laptop.person.as_str()
+        );
+        assert_eq!(
+            doc["passkeys"]["bGFwdG9w"]["grants"],
+            json!(["brian", "reviewer"])
+        );
+        assert!(doc["passkeys"]["bGFwdG9w"].get("grant").is_none());
         let doc = quic::read_object(&layout.clients_json()).unwrap();
         assert_eq!(
             parse_people(&doc).unwrap()[&pid].grants,

@@ -230,22 +230,37 @@ the passkey was created with until it is re-created.
   and each passkey entry names its `person` and the relying party it was registered at
   (`rp_id`, `localhost` for every passkey so far). A passkey's grants are its person's, so
   every passkey of one person holds the same authority. A `clients.json` from before this is
-  migrated when the server starts: each passkey gets a person of its own carrying its label
-  and grants (nothing is merged), the file is rewritten whole and the old one is kept as
-  `gonk/clients.json.before-people`; a second start changes nothing. An author naming a
+  migrated when the server starts, and before any `ikigai-gonk passkey` command writes it
+  (under the same lock, so the backup never holds an entry that command already changed):
+  each passkey gets a person of its own carrying its label and grants (nothing is merged),
+  the file is rewritten whole and the old one is kept as `gonk/clients.json.before-people`;
+  a second start changes nothing. An entry from before people for a credential whose person
+  already exists (put back by hand from a backup, or rewritten by an older gonk) is pointed at
+  that person and holds its grants: its own are dropped, with one stderr line naming them.
+  An author naming a
   passkey (every write from before) and one naming its person both read as the person's
   label. A passkey registered at another relying party is refused at sign-in, with a
   sentence saying which site it belongs to. A person IRI is principal-shaped like a passkey
   IRI: no caller may type one as an author, and one stored as typed text (no committer) reads
   as that text, never as the person.
 
-  ⚠ **The migration is one way.** A gonk binary from before people finds no grants on the
-  migrated passkey entries (its `entry_grants` reads `grant` or `grants` there, and they are
-  now on the person), so after a downgrade every passkey sign-in fails closed. Rolling back
-  means restoring `gonk/clients.json.before-people` over `gonk/clients.json`, which loses
-  every enrollment, revocation and grant change made since the upgrade. The backup is
-  written once, at the first migration, and never again: after a downgrade and a re-upgrade
-  it is stale, and still holds the file from before the first one. A draft saved by
+  **A downgrade still starts.** Every migrated passkey entry keeps a copy of its person's
+  grants (`grants`, and `grant` when the person holds one), rewritten whenever the person's
+  grants change; this server ignores it on an entry that names a person (a start rewrites
+  one that differs, saying so), and a gonk from before people (ledger-v0.18.0 through
+  v0.25.0) reads it, so it starts and signs each passkey in with its person's grants, and a
+  `passkey` command run by this binary while an older server still runs leaves a file that
+  server reads. What a downgrade does lose: a live claim this server moved to a person
+  (below) names the person IRI, which an older gonk never stamps, so its holder cannot renew
+  or release it under the older binary until it lapses on its own (a re-upgrade makes it
+  theirs again); and an older gonk drops `person` from any entry it rewrites (a sign-in that
+  raises the counter, a grant change), which the next start of this one points back at its
+  first person. Rolling back the file itself means restoring `gonk/clients.json.before-people`
+  over `gonk/clients.json`, which loses every enrollment, revocation and grant change made
+  since the upgrade. That first backup is never overwritten; when a later migration (a
+  re-upgrade after a rollback) finds it holding a different file, the file it migrates is kept
+  as `gonk/clients.json.before-people-<UTC stamp>` beside it, and the start line names that
+  one. A draft saved by
   `ikigai-script` or `urn:nl:sparql` under a passkey IRI is not migrated: it stays under that
   passkey IRI and invisible to the person (it fails closed) until it is published.
 
