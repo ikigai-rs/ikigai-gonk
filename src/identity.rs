@@ -934,6 +934,92 @@ pub fn add_grant(
     Ok(target)
 }
 
+/// The person `key` names (ledger #4305): a person IRI (`urn:iki:gonk:person:id:…`, as
+/// `passkey list` prints it), or the label of exactly one person. Returns the IRI and the
+/// person.
+pub fn resolve_person(layout: &Layout, key: &str) -> Result<(String, Person), String> {
+    let doc = quic::read_object(&layout.clients_json())?;
+    // Read through the passkeys too, so a person is found even in a file not yet migrated.
+    let mut people: BTreeMap<String, Person> = parse_people(&doc)?
+        .into_iter()
+        .map(|(id, p)| (person_iri(&id), p))
+        .collect();
+    for e in parse_passkeys(&doc)?.into_values() {
+        people.entry(e.person.clone()).or_insert(Person {
+            label: e.label.clone(),
+            grants: e.grants.clone(),
+        });
+    }
+    let key = key.trim();
+    if person_id(key).is_some() {
+        return people.remove_entry(key).ok_or_else(|| {
+            format!("no person is `{key}` — `ikigai-gonk passkey list` shows who there is")
+        });
+    }
+    let mut named: Vec<(String, Person)> =
+        people.into_iter().filter(|(_, p)| p.label == key).collect();
+    match named.len() {
+        1 => Ok(named.remove(0)),
+        0 => Err(format!(
+            "no person is labeled `{key}` — `ikigai-gonk passkey list` shows who there is"
+        )),
+        n => Err(format!(
+            "{n} people are labeled `{key}` ({}): name one by its IRI, and nothing was written",
+            named
+                .iter()
+                .map(|(iri, _)| iri.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The class of the [`audit_log`] line [`attach`] writes.
+pub const ATTACHED: &str = "gonk:PasskeyAttached";
+
+/// Attach the enrolled passkey `which` names to the person `person` names ([`resolve_person`]),
+/// in place of the person it named — what `ikigai-gonk passkey attach` runs (ledger
+/// [#4305](http://localhost:1062/l/default/item/4305)), and how two passkeys enrolled as two
+/// people become one. The passkey then holds that person's grants, and its writes from now on
+/// are that person's. The person it named before is kept, with its label and grants, even when
+/// no passkey names it any more: the record still names it, and nothing can sign in as it.
+/// Takes effect at the passkey's next request, as [`add_grant`] does.
+pub fn attach(
+    layout: &Layout,
+    which: Which<'_>,
+    person: &str,
+    now_ms: u64,
+) -> Result<(Enrolled, String), String> {
+    let lock = layout.lock_clients()?;
+    let mut target = pick(layout, which)?;
+    let (iri, to) = resolve_person(layout, person)?;
+    if target.person == iri {
+        return Err(format!(
+            "passkey `{}` already names person `{}` ({iri}); nothing was written",
+            target.label, to.label
+        ));
+    }
+    let before = target.clone();
+    target.person = iri;
+    target.grants = to.grants;
+    write_passkey(layout, &lock, &target)?;
+    let extra = format!(
+        " person={} before={} by={BY_OWNER}",
+        encoded(&target.person),
+        encoded(&before.person)
+    );
+    if let Err(e) = record_with(layout, ATTACHED, &target, now_ms, &extra) {
+        write_passkey(layout, &lock, &before)?;
+        return Err(format!(
+            "passkey `{}` was NOT attached: its line could not be written to {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        ));
+    }
+    drop(lock);
+    Ok((target, before.person))
+}
+
 /// The ONE enrolled passkey `which` names, from a file that is whole ([`checked_passkeys`]).
 fn pick(layout: &Layout, which: Which<'_>) -> Result<Enrolled, String> {
     let enrolled = checked_passkeys(layout)?;
@@ -1063,6 +1149,42 @@ pub fn invite(
     Ok(code)
 }
 
+/// An invite that enrolls a new passkey of an EXISTING person (`passkey invite --person`,
+/// ledger #4305) instead of a person of its own: the enrollment names that person and holds
+/// its grants, at once. Returns the code, the person's IRI and the person. No grant is
+/// written; the invite records the person's first grant beside it, which is what an unlabeled
+/// enrollment is labeled and what the sign-in page shows.
+pub fn invite_person(
+    layout: &Layout,
+    person: &str,
+    minutes: u64,
+    now: u64,
+) -> Result<(String, String, Person), String> {
+    let (iri, who) = resolve_person(layout, person)?;
+    let code = random_b64(24)?;
+    let _lock = layout.lock_invites()?;
+    let mut doc = quic::read_object(&layout.invites_json())?;
+    doc.retain(|_, entry| entry.get("expires").and_then(Value::as_u64).unwrap_or(0) > now);
+    doc.insert(
+        sha256_hex(code.as_bytes()),
+        json!({ "grant": who.grants[0], "person": iri, "expires": now + minutes * 60 }),
+    );
+    quic::write_private(&layout.invites_json(), &quic::pretty(&Value::Object(doc))?)?;
+    Ok((code, iri, who))
+}
+
+/// The person an invite enrolls under ([`invite_person`]), read without redeeming it, or
+/// `None` for an invite that makes a person of its own.
+fn invite_person_of(layout: &Layout, code: &str) -> Result<Option<String>, String> {
+    let _lock = layout.lock_invites()?;
+    let doc = quic::read_object(&layout.invites_json())?;
+    Ok(doc
+        .get(&sha256_hex(code.as_bytes()))
+        .and_then(|entry| entry.get("person"))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
 /// Consume an invite: its grant, if the code is live. Single use — removed on success, under
 /// the invites lock from the read to the rename, so no concurrent [`invite`] writes it back
 /// (ledger #2777). [`Passkeys::register`] calls this holding the clients lock, which is the
@@ -1102,6 +1224,17 @@ fn invite_grant(layout: &Layout, code: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "the invite names no grant".to_string())
+}
+
+/// Refuse redeeming a person's invite ([`invite_person`]) to widen a signed-in passkey: it
+/// enrolls a new passkey of that person, and widens nobody.
+fn refuse_person_invite(layout: &Layout, code: &str) -> Result<(), String> {
+    match invite_person_of(layout, code)? {
+        Some(iri) => Err(format!(
+            "this invite enrolls a new passkey of person {iri}, and adds no grant to one already              enrolled — sign out and create the passkey with it; the invite is still good"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Refuse a passkey registered at a relying party other than this server's [`RP_ID`] (ledger
@@ -1464,6 +1597,25 @@ impl Identity {
     }
 }
 
+/// [`Passkeys::labels`], for a caller with a layout and no server: the CURRENT label of every
+/// person IRI and passkey IRI this config home names, each as its PERSON's label.
+pub fn author_labels(layout: &Layout) -> BTreeMap<String, String> {
+    let Ok(doc) = quic::read_object(&layout.clients_json()) else {
+        return BTreeMap::new();
+    };
+    let mut out: BTreeMap<String, String> = parse_people(&doc)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, p)| (person_iri(&id), p.label))
+        .collect();
+    for e in parse_passkeys(&doc).unwrap_or_default().into_values() {
+        let label = out.get(&e.person).cloned().unwrap_or(e.label);
+        out.entry(e.person.clone()).or_insert_with(|| label.clone());
+        out.insert(passkey_iri(&e.credential_id), label);
+    }
+    out
+}
+
 impl Passkeys {
     /// A relying party for the page served at `http://localhost:{port}`, with the
     /// [`DEFAULT_IDLE_SECONDS`] idle bound, a [`SESSION_SECONDS`] lifetime and no audit lines,
@@ -1749,20 +1901,7 @@ impl Passkeys {
     /// other use of that file, so a relabel shows on the next request; an unreadable file
     /// is an empty map here, and a caller falls back to the IRI's tail.
     pub fn labels(&self) -> BTreeMap<String, String> {
-        let Ok(doc) = quic::read_object(&self.layout.clients_json()) else {
-            return BTreeMap::new();
-        };
-        let mut out: BTreeMap<String, String> = parse_people(&doc)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(id, p)| (person_iri(&id), p.label))
-            .collect();
-        for e in parse_passkeys(&doc).unwrap_or_default().into_values() {
-            let label = out.get(&e.person).cloned().unwrap_or(e.label);
-            out.entry(e.person.clone()).or_insert_with(|| label.clone());
-            out.insert(passkey_iri(&e.credential_id), label);
-        }
-        out
+        author_labels(&self.layout)
     }
 
     /// A fresh single-use challenge, base64url: a random nonce, `purpose` and the expiry,
@@ -1883,15 +2022,25 @@ impl Passkeys {
         refuse_taken_label(&enrolled, &label)?;
         // The invite is redeemed LAST, after everything that could refuse the credential:
         // a malformed key or a taken label must not burn a single-use code.
+        // ★ An invite made for a person (ledger #4305) binds this passkey to that person, who
+        // must still be there, and it holds that person's grants from its first request.
+        let person = match invite_person_of(&self.layout, &invite)? {
+            Some(iri) => Some(resolve_person(&self.layout, &iri)?),
+            None => None,
+        };
         let grant = redeem(&self.layout, &invite, now)?;
         scopes_of(&self.layout, &grant)?;
         // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
         self.answer_challenge(&challenge, expires, now)?;
+        let (person, grants) = match person {
+            Some((iri, who)) => (iri, who.grants),
+            None => (person_iri(&new_person_id()?), vec![grant]),
+        };
         let entry = Enrolled {
             credential_id: id,
-            person: person_iri(&new_person_id()?),
+            person,
             rp_id: RP_ID.to_string(),
-            grants: vec![grant],
+            grants,
             label,
             public_key: URL_SAFE_NO_PAD.encode(&key),
             sign_count: 0,
@@ -2070,6 +2219,7 @@ impl Passkeys {
         let who = self.signed_in(signed_in, now).ok_or(
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
+        refuse_person_invite(&self.layout, invite)?;
         let grant = invite_grant(&self.layout, invite)?;
         refuse_held(&who.enrolled, &grant)?;
         Ok((grant, who.enrolled.credential_id))
@@ -2169,6 +2319,7 @@ impl Passkeys {
             .ok_or("this passkey is not enrolled on this server")?;
         // Everything that could refuse comes before the invite is spent: a grant already held
         // or one that does not resolve must not burn a single-use code.
+        refuse_person_invite(&self.layout, &invite)?;
         let grant = invite_grant(&self.layout, &invite)?;
         refuse_held(&current, &grant)?;
         scopes_of(&self.layout, &grant)?;

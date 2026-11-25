@@ -282,8 +282,8 @@ usage:
                                    it would remove and add, and writes nothing. Effective at
                                    the next request (HTTP) or connection (QUIC), with no restart
   ikigai-gonk passkey list [--config PATH]
-                                   every enrolled passkey: its label, grants, credential id
-                                   and IRI, each grant's scopes as grants.json stores them,
+                                   every enrolled passkey: its label, its person (IRI and
+                                   label), grants, credential id and IRI, each grant's scopes as grants.json stores them,
                                    and each grant an invite added to it (or that was
                                    removed), with the invite's hash
   ikigai-gonk passkey grant add <label> | --credential <id> <grant> [--config PATH]
@@ -323,6 +323,19 @@ usage:
                                    --scope adds a scope no other flag names (urn:cap:exec:read:git),
                                    in the same write; a repeat, or one a flag already grants, is
                                    stored once
+  ikigai-gonk passkey invite --person <person IRI | label> [--minutes N] [--port N] [--config PATH]
+                                   print a one-time link that enrolls a NEW passkey of an
+                                   existing person (a second device), instead of a person of
+                                   its own: it holds that person's grants from its first
+                                   request, and its writes are that person's. No grant is
+                                   written
+  ikigai-gonk passkey attach <label> | --credential <id> --person <person IRI | label> [--config PATH]
+                                   make an enrolled passkey name another person: it then
+                                   holds that person's grants and writes as that person.
+                                   This is how two passkeys enrolled as two people become
+                                   one. The person it named before is kept (the record still
+                                   names it), and appends a gonk:PasskeyAttached line to
+                                   gonk/passkeys.log
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
   remove and add; --force writes it and prints the same list. --force writes the grant WHOLE
@@ -666,6 +679,26 @@ pub enum Command {
         key: String,
         /// Whether `key` is a label (`true`) or a credential id.
         by_label: bool,
+        /// `--config`.
+        flags: Flags,
+    },
+    /// Invite a browser to enroll a new passkey of an existing person (ledger #4305).
+    PasskeyInvitePerson {
+        /// `--person`: the person's IRI, or its label.
+        person: String,
+        /// How long the invite is valid.
+        minutes: u64,
+        /// `--config` / `--port`, so the printed URL names the port the server serves on.
+        flags: Flags,
+    },
+    /// Make one enrolled passkey name another person, and record it (ledger #4305).
+    PasskeyAttach {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// `--person`: the person's IRI, or its label.
+        person: String,
         /// `--config`.
         flags: Flags,
     },
@@ -2048,12 +2081,14 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             return Ok(Command::PasskeyList { flags });
         }
         Some("grant") => return parse_passkey_grant(args),
-        Some(sub @ ("revoke" | "logout" | "remove-grant")) => {
+        Some(sub @ ("revoke" | "logout" | "remove-grant" | "attach")) => {
             let mut flags = Flags::default();
             let (mut label, mut credential, mut all, mut grant) = (None, None, false, None);
+            let mut person = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    "--person" if sub == "attach" => person = Some(value(&mut args, "--person")?),
                     "--grant" if sub == "remove-grant" => {
                         grant = Some(value(&mut args, "--grant")?)
                     }
@@ -2087,6 +2122,18 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                     ))
                 }
             };
+            if sub == "attach" {
+                let person = person.ok_or(
+                    "passkey attach: expected --person <person IRI | label> (as `passkey list` \
+                     prints it)",
+                )?;
+                return Ok(Command::PasskeyAttach {
+                    key,
+                    by_label,
+                    person,
+                    flags,
+                });
+            }
             if sub == "remove-grant" {
                 let grant = grant.ok_or(
                     "passkey remove-grant: expected --grant <name> (as `passkey list` prints it)",
@@ -2115,22 +2162,26 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some(other) => {
             return Err(format!(
                 "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke`, \
-                 `grant add`, `grant remove` or `logout --all`)"
+                 `grant add`, `grant remove`, `attach` or `logout --all`)"
             ))
         }
         None => {
             return Err(
                 "passkey: expected `invite <name>`, `list`, `revoke <label>`, \
-                        `grant add <label> <grant>`, `grant remove <label> <grant>` or \
-                        `logout --all <label>`"
+                        `grant add <label> <grant>`, `grant remove <label> <grant>`, \
+                        `attach <label> --person <person>` or `logout --all <label>`"
                     .to_string(),
             )
         }
     }
+    let mut args = args.peekable();
+    if args.peek().map(String::as_str) == Some("--person") {
+        return parse_invite_person(args);
+    }
     let name = args
         .next()
         .filter(|name| !name.starts_with('-'))
-        .ok_or("passkey invite: expected <name>")?;
+        .ok_or("passkey invite: expected <name>, or --person <person IRI | label>")?;
     let (mut grant, mut force, mut minutes, mut flags) = (
         GrantFlags::default(),
         false,
@@ -2186,6 +2237,48 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         nl_draft,
         scopes,
         force,
+        minutes,
+        flags,
+    })
+}
+
+/// `passkey invite --person <person IRI | label> [--minutes N] [--port N] [--config PATH]`
+/// (ledger #4305): an invite for a new passkey of an existing person. It writes no grant, so
+/// the grant flags are refused rather than ignored.
+fn parse_invite_person(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let (mut person, mut minutes, mut flags) =
+        (None, crate::identity::INVITE_MINUTES, Flags::default());
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--person" => person = Some(value(&mut args, "--person")?),
+            "--minutes" => {
+                let spelled = value(&mut args, "--minutes")?;
+                minutes = spelled
+                    .parse()
+                    .ok()
+                    .filter(|m| (1..=24 * 60).contains(m))
+                    .ok_or_else(|| format!("--minutes: `{spelled}` is not 1 to 1440"))?;
+            }
+            "--port" => {
+                let port = value(&mut args, "--port")?;
+                flags.port = Some(
+                    port.parse()
+                        .map_err(|_| format!("--port: `{port}` is not a port number"))?,
+                );
+            }
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other => {
+                return Err(format!(
+                    "passkey invite --person: unexpected argument `{other}` — the new passkey \
+                     holds the person's grants, so this invite takes no name and no grant flags"
+                ))
+            }
+        }
+    }
+    Ok(Command::PasskeyInvitePerson {
+        person: person.ok_or("passkey invite --person: expected <person IRI | label>")?,
         minutes,
         flags,
     })
@@ -4135,6 +4228,59 @@ mod tests {
         ] {
             assert!(parse_args(args(line)).is_ok(), "{line}");
         }
+    }
+
+    /// Ledger #4305: `passkey invite --person` and `passkey attach … --person`.
+    #[test]
+    fn a_person_is_named_to_invite_for_and_attach_to() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        match parse_args(args(
+            "passkey invite --person brian --minutes 5 --port 1070",
+        ))
+        .unwrap()
+        {
+            Command::PasskeyInvitePerson {
+                person,
+                minutes,
+                flags,
+            } => {
+                assert_eq!(person, "brian");
+                assert_eq!(minutes, 5);
+                assert_eq!(flags.port, Some(1070));
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused =
+            parse_args(args("passkey invite --person brian --ledger default=write")).unwrap_err();
+        assert!(
+            refused.contains("takes no name and no grant flags"),
+            "{refused}"
+        );
+        match parse_args(args(
+            "passkey attach --credential cGhvbmU --person urn:iki:gonk:person:id:x",
+        ))
+        .unwrap()
+        {
+            Command::PasskeyAttach {
+                key,
+                by_label,
+                person,
+                ..
+            } => {
+                assert_eq!((key.as_str(), by_label), ("cGhvbmU", false));
+                assert_eq!(person, "urn:iki:gonk:person:id:x");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(args("passkey attach phone --person brian")).unwrap() {
+            Command::PasskeyAttach { key, by_label, .. } => {
+                assert_eq!((key.as_str(), by_label), ("phone", true))
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused = parse_args(args("passkey attach phone")).unwrap_err();
+        assert!(refused.contains("expected --person"), "{refused}");
+        assert!(parse_args(args("passkey revoke phone --person brian")).is_err());
     }
 
     /// ★ The browse graph is a SUBJECT of a grant, not a ledger — every spelling, because

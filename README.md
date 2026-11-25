@@ -235,8 +235,20 @@ the passkey was created with until it is re-created.
   `gonk/clients.json.before-people`; a second start changes nothing. An author naming a
   passkey (every write from before) and one naming its person both read as the person's
   label. A passkey registered at another relying party is refused at sign-in, with a
-  sentence saying which site it belongs to. Still to come (ledger #4305): requests stamped
-  with the person rather than the passkey, `passkey invite --person` and `passkey attach`.
+  sentence saying which site it belongs to. A person IRI is principal-shaped like a passkey
+  IRI: no caller may type one as an author, and one stored as typed text (no committer) reads
+  as that text, never as the person.
+
+  A second device for one person: `ikigai-gonk passkey invite --person <person IRI | label>`
+  prints a one-time link whose passkey names that person and holds its grants from its first
+  request (no grant is written; it cannot be redeemed to widen a passkey already signed in).
+  Two passkeys enrolled as two people become one with `ikigai-gonk passkey attach <label> |
+  --credential <id> --person <person IRI | label>`: the passkey then holds that person's
+  grants, and the person it named before is kept, so what was written as it still reads.
+  Revoking a person's last passkey leaves the person: the record names it, and nothing can
+  sign in as it. `passkey list` prints each passkey's person. Still to come (ledger #4305):
+  requests stamped with the person rather than the passkey, and with it the continuity of
+  claims and cursors held under a passkey IRI.
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under
   `clients`, passkeys under `passkeys`), and the grant name maps to scopes in
