@@ -159,6 +159,19 @@ impl Cursors {
         Ok(token)
     }
 
+    /// Move the cursor one of `former` keys holds to `key`, when `key` holds none (ledger
+    /// #4305): a reader whose principal changed — a passkey IRI that is now its person's —
+    /// keeps the cursor it acknowledged before. In memory only; the next acknowledgement
+    /// writes it under `key`, and until then a restart adopts it again.
+    pub(super) fn adopt(&mut self, key: &str, former: &[String]) {
+        if self.entries.contains_key(key) {
+            return;
+        }
+        if let Some(entry) = former.iter().find_map(|old| self.entries.remove(old)) {
+            self.entries.insert(key.to_string(), entry);
+        }
+    }
+
     pub(super) fn acknowledge(&mut self, key: &str, token: &str, now: u64) -> Result<()> {
         self.prune(now);
         let pending = self

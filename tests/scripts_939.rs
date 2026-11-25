@@ -715,8 +715,9 @@ fn every_door_reaches_the_scripts_and_each_run_names_its_principal() {
     let record = gonk.run_record(&person_run);
     let principal = record["principal"].as_str().unwrap_or_default().to_string();
     assert!(
-        principal.starts_with(identity::PASSKEY_IRI_PREFIX),
-        "a person's run names the passkey: {record}"
+        // Its passkey's PERSON since ledger #4305.
+        principal.starts_with(identity::PERSON_IRI_PREFIX),
+        "a person's run names the person: {record}"
     );
 
     // ── QUIC, a machine WITHOUT a script grant: refused, though the script is public — a

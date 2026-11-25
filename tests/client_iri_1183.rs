@@ -338,3 +338,25 @@ fn a_stored_old_form_author_still_renders_as_that_machine() {
         );
     }
 }
+
+/// ★ Ledger #4305, sent back from review: a person IRI is principal-shaped too. The item page
+/// renders one as that person's label, so no caller without a principal may type one as an
+/// author, at either door, in any case.
+#[test]
+fn no_caller_may_type_a_person_iri_as_an_author() {
+    let anonymous = Capability::scoped(grants_for("default", Authority::Write).unwrap());
+    for typed in [
+        ikigai_gonk::identity::person_iri("mSR27WSXo2kx"),
+        " URN:IKI:GONK:PERSON:ID:mSR27WSXo2kx".to_string(),
+    ] {
+        let append = request(
+            Verb::Sink,
+            "urn:iki:ledger:append",
+            &[("author", typed.as_str())],
+        );
+        assert!(ikigai_gonk::admit::is_principal_iri(&typed), "{typed}");
+        let refused = ikigai_gonk::admit::author_refusal(Door::Http, &anonymous, &append);
+        assert!(refused.is_some(), "{typed}");
+        assert!(ikigai_gonk::admit::author_refusal(Door::Socket, &anonymous, &append).is_some());
+    }
+}

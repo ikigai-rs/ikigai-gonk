@@ -360,7 +360,8 @@ fn a_signed_in_read_is_logged_as_its_passkey_and_an_anonymous_one_as_anon() {
         "an anonymous read is anon, whatever it typed: {lines:#?}"
     );
     assert!(
-        lines[1].contains(&format!(" principal={}", identity::PASSKEY_IRI_PREFIX))
+        // ★ Its passkey's PERSON since ledger #4305.
+        lines[1].contains(&format!(" principal={}", identity::PERSON_IRI_PREFIX))
             && !lines[1].contains("Uk9HVUU"),
         "a signed-in read is named by the door: {lines:#?}"
     );

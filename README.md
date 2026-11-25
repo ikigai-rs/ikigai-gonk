@@ -225,6 +225,55 @@ after creation, so where the browser supports WebAuthn's
 tells the passkey manager the current label and grant. Elsewhere the picker keeps the names
 the passkey was created with until it is re-created.
 
+- **A person is what passkeys name** (ledger #4305). `clients.json` holds a `people` section
+  beside `passkeys`: each person (`urn:iki:gonk:person:id:<id>`) has a label and the grant list,
+  and each passkey entry names its `person` and the relying party it was registered at
+  (`rp_id`, `localhost` for every passkey so far). A passkey's grants are its person's, so
+  every passkey of one person holds the same authority. A `clients.json` from before this is
+  migrated when the server starts: each passkey gets a person of its own carrying its label
+  and grants (nothing is merged), the file is rewritten whole and the old one is kept as
+  `gonk/clients.json.before-people`; a second start changes nothing. An author naming a
+  passkey (every write from before) and one naming its person both read as the person's
+  label. A passkey registered at another relying party is refused at sign-in, with a
+  sentence saying which site it belongs to. A person IRI is principal-shaped like a passkey
+  IRI: no caller may type one as an author, and one stored as typed text (no committer) reads
+  as that text, never as the person.
+
+  ⚠ **The migration is one way.** A gonk binary from before people finds no grants on the
+  migrated passkey entries (its `entry_grants` reads `grant` or `grants` there, and they are
+  now on the person), so after a downgrade every passkey sign-in fails closed. Rolling back
+  means restoring `gonk/clients.json.before-people` over `gonk/clients.json`, which loses
+  every enrollment, revocation and grant change made since the upgrade. The backup is
+  written once, at the first migration, and never again: after a downgrade and a re-upgrade
+  it is stale, and still holds the file from before the first one. A draft saved by
+  `ikigai-script` or `urn:nl:sparql` under a passkey IRI is not migrated: it stays under that
+  passkey IRI and invisible to the person (it fails closed) until it is published.
+
+  A second device for one person: `ikigai-gonk passkey invite --person <person IRI | label>`
+  prints a one-time link whose passkey names that person and holds its grants from its first
+  request (no grant is written; it cannot be redeemed to widen a passkey already signed in).
+  Two passkeys enrolled as two people become one with `ikigai-gonk passkey attach <label> |
+  --credential <id> --person <person IRI | label>`: the passkey then holds that person's
+  grants, and the person it named before is kept, so what was written as it still reads.
+  Revoking a person's last passkey leaves the person: the record names it, and nothing can
+  sign in as it. `passkey list` prints each passkey's person.
+
+  A signed-in request is stamped with its passkey's **person** IRI: the author of a write,
+  the `principal=` of its log lines, the holder of a claim and of a dispatcher cursor. A write
+  signed by any of one person's passkeys is that person's. Writes from before keep the passkey
+  IRI they were stamped with (the ledger is append-only) and read as the person's label. What
+  is *held* under a passkey IRI stays its person's: at every start gonk moves each live claim
+  whose `ledger:claimPrincipal` is an enrolled passkey's IRI to that passkey's person, so the
+  person renews, releases and closes it (one stderr line says how many moved; release and
+  takeover events keep the principal they recorded), and a person with no dispatcher cursor
+  of its own reads on from the one its passkey acknowledged. **Signing out from a page ends
+  every device's session of the person**, not just this browser's (the button says "Sign out
+  on all devices"); a sign-out that cannot read the person's passkeys ends nothing and says
+  so, rather than answering as signed out. The page's `session` answer, its idle clock, the
+  passkey add-grant asks the authenticator for, and a re-assertion are the request's own
+  session's, never another device's: the door hands the passkey resource the session its
+  cookie names beside the person. A sign-in or sign-out line names the person while the passkey is enrolled, and the
+  passkey IRI once it is revoked.
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under
   `clients`, passkeys under `passkeys`), and the grant name maps to scopes in
@@ -287,8 +336,8 @@ the passkey was created with until it is re-created.
   its own passkey with `POST /auth/logout-all` and its session token as the body.
 - **Sign-ins and sign-outs are logged** (ledger #1824), in the log segment beside the door
   lines (ledger #383), whatever `gonk.log.access` says: `urn:iki:gonk:class:Login` or
-  `…:Logout`, the passkey resource, then `door`, `outcome`, `principal` (the passkey IRI,
-  `anon` for a refused sign-in), `credential=https://ikigai-rs.dev/ns/log#passkey`, `passkey` (the credential id),
+  `…:Logout`, the passkey resource, then `door`, `outcome`, `principal` (the passkey's person
+  IRI, ledger #4305; the passkey IRI once it is revoked; `anon` for a refused sign-in), `credential=https://ikigai-rs.dev/ns/log#passkey`, `passkey` (the credential id),
   `sessions` and, on a logout, `why` (`logout`, `logout-all`, `revoked`, `unenrolled`,
   `expired`, `idle`, `widened`). Adding an invite's grant while signed in is a Login entry for the
   resource `add-grant` (ledger #3388). A session token is never written. `gonk/passkeys.log` is not a second
@@ -317,12 +366,12 @@ the passkey was created with until it is re-created.
   grant includes running and reading PUBLIC scripts; publishing one takes
   `--script <name>=publish` ([scripts](#scripts-saved-queries-and-plans-ledger-939)).
 - **A signed-in write carries its author.** The door mints the session's principal — the
-  passkey's stable IRI `urn:iki:gonk:passkey:<credential id>`, never the label — into the
+  stable IRI of the passkey's person `urn:iki:gonk:person:id:<id>` (ledger #4305; before it,
+  the passkey's own `urn:iki:gonk:passkey:<credential id>`), never the label — into the
   request's capability (`urn:cap:principal:<iri>`, ikigai-core 0.1.93, ledger #1077), on
   reads and writes alike, and the ledger stamps it as the write's committer and verified author
   (file, comment, close, reopen, delete, purge). The page renders that IRI as the
-  passkey's *current* label from `clients.json`, or its credential id once the passkey is
-  gone; the store holds only the IRI, so a relabel rewrites nothing. A form field named
+  person's *current* label from `clients.json`, or its id once the person is gone; the store holds only the IRI, so a relabel rewrites nothing. A form field named
   `author` is refused: the door names the author, a submitter may not. An anonymous caller
   is nobody and its writes stay unattributed, as before. The mechanical route
   (`POST /iki/ledger/append`) is unchanged — it carries the `principal` too, and the ledger,
@@ -5761,7 +5810,7 @@ Turtle as it stands:
 
 ```text
 2026-11-10T04:57:53.855Z log:Access urn:iki:gonk:page:ledger:default seq=7 door=http verb=source outcome=ok bytes=3943 dur=1468 principal=anon credential=https://ikigai-rs.dev/ns/log#anonymous q=as=text/html&status=all
-2026-11-10T04:57:55.323Z log:Access urn:iki:ledger:append seq=8 door=http verb=sink outcome=ok bytes=48 dur=2 principal=urn:iki:gonk:passkey:… credential=https://ikigai-rs.dev/ns/log#passkey
+2026-11-10T04:57:55.323Z log:Access urn:iki:ledger:append seq=8 door=http verb=sink outcome=ok bytes=48 dur=2 principal=urn:iki:gonk:person:id:… credential=https://ikigai-rs.dev/ns/log#passkey
 2026-11-10T04:57:53.886Z log:Access urn:iki:ledger:items seq=9 door=socket verb=source outcome=ok bytes=46 dur=2 principal=urn:iki:host:gonk:owner credential=https://ikigai-rs.dev/ns/log#socketOwner
 ```
 

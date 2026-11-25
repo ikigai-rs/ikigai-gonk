@@ -1718,7 +1718,8 @@ fn enrich_repo_labels(graph: &mut Graph, web: &Web, capability: &Capability) {
 /// `view:author` for every item and comment that carries `ledger:author`, in place.
 ///
 /// An author that is a passkey IRI ([`identity::passkey_iri`] — what the door stamps on a
-/// signed-in write, forwarded by [`Act`]) renders as that passkey's CURRENT label, read
+/// signed-in write, forwarded by [`Act`]) or a person IRI ([`identity::person_iri`], ledger
+/// #4305) renders as its PERSON's CURRENT label, read
 /// from `clients.json` the way the header's "Signed in as" is; a passkey since deleted
 /// renders as the IRI's tail, so the attribution never vanishes. A QUIC client's name renders
 /// in its CURRENT spelling ([`quic::client_iri`]) whichever one the store holds, so a machine
@@ -1748,17 +1749,30 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
     }
     let labels = attributed
         .iter()
-        .any(|(_, who)| identity::passkey_credential(who).is_some())
+        .any(|(_, who)| {
+            identity::passkey_credential(who).is_some() || identity::person_id(who).is_some()
+        })
         .then(|| passkeys.labels());
-    let shown = |who: String| match (identity::passkey_credential(&who), &labels) {
-        (Some(id), Some(labels)) => labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
+    let tail = |who: &str| {
+        identity::passkey_credential(who)
+            .or_else(|| identity::person_id(who))
+            .map(str::to_string)
+    };
+    // `stamped`: the write carries a committer, so a door stamped it. ★ A person IRI with no
+    // committer can only be text someone typed before admission refused it as principal-shaped
+    // (ledger #4305: every write since a door first stamped a person carries its committer),
+    // so it reads as the text it is, never as that person's label.
+    let shown = |who: String, stamped: bool| match (tail(&who), &labels) {
+        (Some(_), _) if !stamped && identity::person_id(&who).is_some() => who,
+        (Some(id), Some(labels)) => labels.get(&who).cloned().unwrap_or(id),
         _ => match quic::client_fingerprint(&who) {
             Some(fingerprint) => quic::client_iri(fingerprint),
             None => who,
         },
     };
     for (subject, who) in attributed {
-        graph.view(&subject, "author", shown(who));
+        let stamped = graph.value(&subject, &committer).is_some();
+        graph.view(&subject, "author", shown(who, stamped));
         let Some(words) = graph.value(&subject, &source).filter(|s| s != "committer") else {
             continue;
         };
@@ -1768,7 +1782,7 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
             ikigai_ledger::attribution::author_status(Some(&words)).to_string(),
         );
         if let Some(by) = graph.value(&subject, &committer) {
-            graph.view(&subject, "committer", shown(by));
+            graph.view(&subject, "committer", shown(by, true));
         }
     }
 }
@@ -4989,6 +5003,16 @@ impl Endpoint for PasskeyDoor {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let op = binding(inv, "op")?;
         let now = identity::now_seconds();
+        // Who the request is, as the HTTP door derived it from the HttpOnly cookie: the
+        // principal (a PERSON since ledger #4305, which says nothing of which device), and the
+        // key of the request's own session ([`crate::doors::session_key`], ledger #4363), so
+        // the `session` answer, the idle clock, add-grant's passkey and a re-assertion are
+        // this session's and never another device's session of the same person.
+        let principal = inv.capability.principal();
+        let door = match crate::doors::session_key(inv.capability) {
+            Some(key) => SignedIn::Session { key, principal },
+            None => SignedIn::Principal(principal),
+        };
         // ★ `session` is also a READ (ledger #3841): ikigai-ui's shell reads the page family's
         // session answer with a GET (`<meta name="ikigai-ui-session">`) to gray out the
         // `data-ui-write` controls once write lapses. It answers the request's OWN session
@@ -5010,10 +5034,7 @@ impl Endpoint for PasskeyDoor {
                         .to_string(),
                 });
             }
-            return match self
-                .passkeys
-                .signed_in(SignedIn::Principal(inv.capability.principal()), now)
-            {
+            return match self.passkeys.signed_in(door, now) {
                 Some(who) => Ok(json_repr(session_answer(&who, now))),
                 None => Ok(json_repr(json!({}))),
             };
@@ -5029,9 +5050,11 @@ impl Endpoint for PasskeyDoor {
             detail,
         };
         let content = inv.inline_str("content").unwrap_or("");
-        // The passkey the door's capability names, from the HttpOnly session cookie.
-        let principal = inv.capability.principal();
-        let credential = principal.and_then(|p| p.strip_prefix(identity::PASSKEY_IRI_PREFIX));
+        // The passkeys the door's capability names, from the HttpOnly session cookie: its
+        // person's (ledger #4305), or the one passkey a session from before people names.
+        let credentials: Vec<String> = principal
+            .map(|p| self.passkeys.credentials_of(p))
+            .unwrap_or_default();
         match op.as_str() {
             "register-options" | "login-options" => {
                 let purpose = if op == "login-options" {
@@ -5076,10 +5099,11 @@ impl Endpoint for PasskeyDoor {
                     json!({ "label": enrolled.label, "grant": enrolled.grant_names() }),
                 ))
             }
-            // Redeeming an invite while signed in adds its grant to THAT passkey (ledger #3388).
-            // The options answer what would be added, spending nothing, and a challenge only a
-            // fresh assertion by the signed-in passkey can answer; the session alone is never
-            // enough.
+            // Redeeming an invite while signed in adds its grant to the signed-in PERSON (ledger
+            // #3388, #4305), and so to every passkey of that person. The options answer what
+            // would be added, spending nothing, the passkey this session signs in with, and a
+            // challenge only a fresh assertion by a passkey of the same person can answer; the
+            // session alone is never enough.
             "add-grant-options" => {
                 let asked = serde_json::from_str::<serde_json::Value>(content)
                     .map_err(|e| refused(format!("not JSON: {e}")))?;
@@ -5093,7 +5117,7 @@ impl Endpoint for PasskeyDoor {
                 let token = field("session").ok();
                 let signed_in = match token.as_deref() {
                     Some(token) => SignedIn::Token(token.trim()),
-                    None => SignedIn::Principal(principal),
+                    None => door,
                 };
                 let (grant, credential) = self
                     .passkeys
@@ -5113,7 +5137,7 @@ impl Endpoint for PasskeyDoor {
             "add-grant" => {
                 let (token, who, added) = self
                     .passkeys
-                    .add_grant_as(content.as_bytes(), principal, now)
+                    .add_grant_as(content.as_bytes(), door, now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
@@ -5160,7 +5184,7 @@ impl Endpoint for PasskeyDoor {
                 let field = |name: &str| asked.get(name).and_then(serde_json::Value::as_str);
                 let (credential, challenge) = self
                     .passkeys
-                    .reassert_options(field("session"), field("sessionId"), principal, now)
+                    .reassert_options(field("session"), field("sessionId"), door, now)
                     .map_err(refused)?;
                 Ok(json_repr(json!({
                     "challenge": challenge,
@@ -5172,7 +5196,7 @@ impl Endpoint for PasskeyDoor {
             "reassert" => {
                 let (token, who) = self
                     .passkeys
-                    .reassert(content.as_bytes(), principal, now)
+                    .reassert(content.as_bytes(), door, now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 let mut answer = session_answer(&who, now);
@@ -5188,9 +5212,23 @@ impl Endpoint for PasskeyDoor {
             // every one of them does. A token in the body (the socket, a script) still ends
             // that one session.
             "logout" => {
-                match (content.trim(), credential) {
-                    ("", Some(credential)) => {
-                        self.passkeys.logout_credential(credential, "logout");
+                match (content.trim(), credentials.is_empty()) {
+                    // Every session of the person, on every device: signing out from a page
+                    // signs the person out, and ending more is the safe direction.
+                    ("", false) => {
+                        for credential in &credentials {
+                            self.passkeys.logout_credential(credential, "logout");
+                        }
+                    }
+                    // ★ A person whose passkeys cannot be resolved (`clients.json` unreadable)
+                    // ends nothing, so it must not answer `signedOut` (ledger #4363).
+                    ("", true) if principal.is_some_and(|p| identity::person_id(p).is_some()) => {
+                        return Err(Error::Unavailable(
+                            "the sign-out did not happen: the passkeys of this person could not \
+                             be read, so no session was ended. Try again; if it keeps failing, \
+                             the operator can end them with `ikigai-gonk passkey logout --all <label>`"
+                                .to_string(),
+                        ));
                     }
                     (token, _) => self.passkeys.logout(token),
                 }
@@ -5199,14 +5237,16 @@ impl Endpoint for PasskeyDoor {
                     identity::CLEAR_SESSION_COOKIE,
                 )
             }
-            // Every session of the caller's own passkey, this one included (ledger #1824).
+            // Every session of the caller's own person, this one included (ledger #1824, #4305).
             // The token is the proof of whose: a token that is no live session ends nothing.
             "logout-all" => {
-                let ended = match (content.trim(), credential) {
-                    ("", Some(credential)) => self
-                        .passkeys
-                        .identity_of(credential, now)
-                        .map(|_| self.passkeys.logout_credential(credential, "logout-all")),
+                let ended = match (content.trim(), credentials.is_empty()) {
+                    ("", false) => self.passkeys.signed_in(door, now).map(|_| {
+                        credentials
+                            .iter()
+                            .map(|c| self.passkeys.logout_credential(c, "logout-all"))
+                            .sum()
+                    }),
                     (token, _) => self.passkeys.logout_all(token, now),
                 };
                 match ended {
@@ -5220,7 +5260,7 @@ impl Endpoint for PasskeyDoor {
                 }
             }
             "session" => match match content.trim() {
-                "" => self.passkeys.signed_in(SignedIn::Principal(principal), now),
+                "" => self.passkeys.signed_in(door, now),
                 token => self.passkeys.identity(token, now),
             } {
                 Some(who) => Ok(json_repr(session_answer(&who, now))),
@@ -5248,12 +5288,15 @@ impl Endpoint for PasskeyDoor {
                  against a one-time invite; `login` verifies an assertion and opens a session \
                  whose capability is the union of its passkey's grants in gonk/grants.json; \
                  `add-grant-options` and `add-grant` redeem an invite while signed in by adding \
-                 its grant to that passkey, against a fresh assertion by it, and re-open the \
-                 session; `reassert-options` and `reassert` reopen write with a fresh \
+                 its grant to the signed-in person (so to every passkey of that person), against \
+                 a fresh assertion by a passkey of that person, end every session of the \
+                 person's passkeys and open one new session; `reassert-options` and `reassert` reopen write with a fresh \
                  assertion by the SAME passkey, replacing only the session the body names \
-                 (`session`, or the `sessionId` a sign-in answered); `session`, `logout` and \
-                 `logout-all` (every session of that token's passkey) take the session token as \
-                 the body. `session` answers `seconds` until the session ends, `writeSeconds` \
+                 (`session`, or the `sessionId` a sign-in answered; with neither, the request's \
+                 own session); `session`, `logout` and `logout-all` (every session of that \
+                 token's passkey) take the session token as the body, and with no body answer \
+                 for the request's own session, except that a page's `logout` and `logout-all` \
+                 end every session of the signed-in person, on every device. `session` answers `seconds` until the session ends, `writeSeconds` \
                  until its write lapses (12 h after the sign-in at most; past it only its read \
                  scopes are left) and `restore`, the scopes a fresh sign-in would give back; \
                  a Source of `session` (GET /auth/session) answers the same for the request's \
@@ -5444,6 +5487,51 @@ impl Endpoint for DisplayRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger #4305, sent back from review: a person IRI renders as the person's label only
+    /// on a write a door stamped (it carries a committer). The same IRI as committer-less free
+    /// text — typed before admission refused it — reads as the text it is, never as the
+    /// person, so nobody's words can be dressed as theirs.
+    #[test]
+    fn a_typed_person_iri_is_not_dressed_as_that_persons_label() {
+        let config = tempfile::tempdir().unwrap();
+        let layout = crate::quic::Layout::in_config_home(config.path());
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        std::fs::write(
+            layout.clients_json(),
+            r#"{"passkeys": {"bGFwdG9w": {"grant": "brian", "label": "Brian", "public_key": "AAAA"}}}"#,
+        )
+        .unwrap();
+        let passkeys = Passkeys::new(layout.clone(), 1062);
+        let person = identity::read_passkeys(&layout).unwrap()["bGFwdG9w"]
+            .person
+            .clone();
+        let turtle = format!(
+            "<urn:x:typed> a <{LEDGER_NS}Item> ; <{LEDGER_NS}author> \"{person}\" .\n\
+             <urn:x:stamped> a <{LEDGER_NS}Item> ; <{LEDGER_NS}author> <{person}> ; \
+             <{LEDGER_NS}committer> <{person}> ; <{LEDGER_NS}authorSource> \"committer\" .\n\
+             <urn:x:before> a <{LEDGER_NS}Item> ; <{LEDGER_NS}author> \
+             <urn:iki:gonk:passkey:bGFwdG9w> .\n"
+        );
+        let mut graph = Graph::from_turtle(turtle.as_bytes()).unwrap();
+        enrich_authors(&mut graph, &passkeys);
+        let shown = |s: &str| {
+            graph
+                .value(s, &format!("{}author", render::VIEW_NS))
+                .unwrap()
+        };
+        assert_eq!(shown("urn:x:typed"), person, "typed text stays text");
+        assert_eq!(
+            shown("urn:x:stamped"),
+            "Brian",
+            "a stamped person reads as its label"
+        );
+        assert_eq!(
+            shown("urn:x:before"),
+            "Brian",
+            "a pre-upgrade passkey author too"
+        );
+    }
 
     /// The header can be drawn before any kernel invocation exists (ledger #2032).
     #[test]

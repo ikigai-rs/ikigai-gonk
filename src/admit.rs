@@ -279,8 +279,15 @@ pub fn refusal(capability: &Capability) -> Option<&'static str> {
 /// ★ And a layer binding's mirror ([`crate::layer::MIRROR_PRINCIPAL_PREFIX`], ledger
 /// [#1190](http://localhost:1060/l/default/item/1190)): this process's own actor, minted by no
 /// door, so no caller at any door can write as it.
-pub const PRINCIPAL_PREFIXES: [&str; 4] = [
+///
+/// ★ And a person ([`crate::identity::PERSON_IRI_PREFIX`], ledger
+/// [#4305](http://localhost:1062/l/default/item/4305)), which the item page renders as that
+/// person's label exactly as it renders a passkey: so it must not be writable as plain text
+/// either, or `urn:iki:gonk:person:id:<someone's id>` typed by an anonymous caller would read
+/// as that person.
+pub const PRINCIPAL_PREFIXES: [&str; 5] = [
     crate::identity::PASSKEY_IRI_PREFIX,
+    crate::identity::PERSON_IRI_PREFIX,
     crate::quic::CLIENT_IRI_PREFIX,
     crate::quic::LEGACY_CLIENT_IRI_PREFIX,
     crate::layer::MIRROR_PRINCIPAL_PREFIX,
@@ -293,6 +300,8 @@ pub const PRINCIPAL_PREFIXES: [&str; 4] = [
 /// use ikigai_gonk::admit::is_principal_iri;
 /// assert!(is_principal_iri("urn:iki:gonk:passkey:Q1JFRC1CUklBTg"));
 /// assert!(is_principal_iri(" URN:IKI:GONK:PASSKEY:x"));
+/// assert!(is_principal_iri("urn:iki:gonk:person:id:mSR27WSXo2kx"));
+/// assert!(is_principal_iri(" URN:IKI:GONK:PERSON:ID:x"));
 /// assert!(is_principal_iri("urn:iki:host:gonk:client:ab12"));
 /// // The old spelling, recognized for ever: see `PRINCIPAL_PREFIXES`.
 /// assert!(is_principal_iri("urn:iki:gonk:client:ab12"));
@@ -386,6 +395,7 @@ pub fn principal(door: Door, capability: &Capability) -> Option<String> {
 ///     stamp(&Invocation::detached(&request, &bindings, &cap))
 /// };
 /// assert_eq!(kind(Some("urn:iki:gonk:passkey:Q1JFRC1CUklBTg")), ClaimKind::Person);
+/// assert_eq!(kind(Some("urn:iki:gonk:person:id:mSR27WSXo2kx")), ClaimKind::Person);
 /// assert_eq!(kind(Some("urn:iki:host:gonk:client:6f1c")), ClaimKind::Machine);
 /// assert_eq!(kind(Some("urn:iki:gonk:client:6f1c")), ClaimKind::Machine);
 /// assert_eq!(kind(None), ClaimKind::Machine);
@@ -402,11 +412,18 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
         }
         let person = match inv.request.args.get(PRINCIPAL_ARG) {
             Some(ArgRef::Inline(bytes)) => std::str::from_utf8(bytes).is_ok_and(|p| {
-                let prefix = crate::identity::PASSKEY_IRI_PREFIX;
                 let p = p.trim();
-                p.len() > prefix.len()
-                    && p.is_char_boundary(prefix.len())
-                    && p[..prefix.len()].eq_ignore_ascii_case(prefix)
+                // A passkey, or the person several passkeys name (ledger #4305).
+                [
+                    crate::identity::PASSKEY_IRI_PREFIX,
+                    crate::identity::PERSON_IRI_PREFIX,
+                ]
+                .iter()
+                .any(|prefix| {
+                    p.len() > prefix.len()
+                        && p.is_char_boundary(prefix.len())
+                        && p[..prefix.len()].eq_ignore_ascii_case(prefix)
+                })
             }),
             _ => false,
         };

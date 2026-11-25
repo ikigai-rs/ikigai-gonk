@@ -198,7 +198,8 @@ fn every_door_writes_its_caller_into_the_segment_and_nothing_onto_stderr() {
     );
     let passkey = column(&http[1], "principal").unwrap();
     assert!(
-        passkey.starts_with(identity::PASSKEY_IRI_PREFIX),
+        // Its passkey's PERSON since ledger #4305.
+        passkey.starts_with(identity::PERSON_IRI_PREFIX),
         "{}",
         http[1]
     );
