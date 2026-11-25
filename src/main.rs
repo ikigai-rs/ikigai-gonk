@@ -713,7 +713,23 @@ fn serve(flags: &config::Flags) -> ! {
     ));
     let sensor_line = match settings.sensor_every {
         Some(every) => {
-            sensors.start(Arc::downgrade(&hub), every);
+            // The last tick's time, so a restart phases the first tick to it (ledger #4364).
+            let dir = homes.data.join("sensors");
+            let stamp = match ikigai_gonk::private_store_dir(&dir) {
+                Ok(()) => Some(dir.join("last-tick")),
+                Err(e) => {
+                    eprintln!(
+                        "ikigai-gonk: {}: {e}; each start ticks the sensors at once",
+                        dir.display()
+                    );
+                    None
+                }
+            };
+            sensors.start(
+                Arc::downgrade(&hub),
+                every,
+                ikigai_gonk::sensor::Pace::system(stamp),
+            );
             format!(
                 "every {} the published urn:script:{}* run as {} reads; a firing is a {} line{}",
                 humanize(every),
