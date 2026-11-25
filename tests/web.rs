@@ -182,6 +182,7 @@ impl Server {
             passkeys: Some(passkeys),
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         let http_for_test = Arc::clone(&http);
         std::thread::spawn(move || {

@@ -264,6 +264,7 @@ fn over_http_an_anonymous_run_is_refused_at_the_door_budget() {
         passkeys: Some(passkeys),
         public: Vec::new(),
         anonymous_sparql_budget_ms: DOOR_MS,
+        public_origin: None,
     };
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(

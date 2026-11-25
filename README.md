@@ -416,6 +416,44 @@ uses inline script or style, and htmx's injected indicator `<style>` is turned o
 row replace the CSP with their own, on that row alone: a layer file (a sandbox) and the toolbox
 (below). `tests/html_door_2137.rs` pins all three.
 
+### A phone through a TLS proxy: the public origin
+
+The HTTP door is plain `http://localhost`, and its passkeys are bound to `localhost`. To act
+from a phone that reaches this machine through a TLS proxy — `tailscale serve` gives
+`https://<host>.<tailnet>.ts.net` and forwards it to loopback — give gonk a SECOND loopback
+listener that only the proxy points at, and the origin it answers as:
+
+```toml
+gonk.http.public_origin = "https://box.tail1.ts.net"
+gonk.http.public_bind   = "127.0.0.1:1063"
+```
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:1063
+```
+
+Proxied traffic is told apart by the PORT it arrives on, never by its `Host` header: behind a
+loopback proxy every peer is loopback, so the public listener trusts no peer.
+
+- **No anonymous grant at all** there: a caller holds only what its signed-in person holds,
+  whatever `Host` it sends (`Host: localhost` at the public port is answered `421`).
+- `Host` must be the origin's host, and a write's `Origin` must be the origin (a write with no
+  `Origin` is refused there).
+- The session cookie carries `Secure`.
+- The relying party is the origin's full host (`box.tail1.ts.net`; never a parent domain,
+  since `ts.net` is a public suffix). Each passkey's stored `rp_id` decides where it signs in:
+  the local listener takes only `localhost` passkeys, the public one only passkeys registered
+  at its host.
+- A phone's passkey joins an EXISTING person: `ikigai-gonk passkey invite --person <person>`
+  makes the invite, opened at `https://box.tail1.ts.net/…`, so the phone's writes, claims and
+  cursors are the same person's as the laptop's.
+
+The local listener is unchanged (`localhost`, anonymous read for local processes, no
+`Secure`), as are the QUIC door and the loopback-only bind rule; gonk does not terminate TLS
+itself. Both keys or neither: a malformed or non-`https://` origin, a non-loopback bind, a bind
+on the HTTP door's own port, or one key without the other refuses the start with a sentence
+saying why. `tests/public_origin_4367.rs` pins all of it.
+
 ### What the HTTP door refuses a browser
 
 A door that grants writes to whatever reaches loopback also grants them to any web page open
@@ -5115,6 +5153,8 @@ gonk.backup.every = "24h"
 # gonk.http.session_idle_minutes = 60   # a passkey session with no request for this long ends,
                                       # 1..(60 × session_max_hours)
 # gonk.toolbox.dist = "~/.local/share/ikigai-toolbox/dist"  # the RDF Toolbox's build; unset, no /toolbox
+# gonk.http.public_origin = "https://box.tail1.ts.net"  # a TLS proxy's origin (`tailscale serve`),
+# gonk.http.public_bind = "127.0.0.1:1063"              # and the loopback port it forwards to: both or neither
 ```
 
 `gonk.store.max_scoped_copy_quads` sets the store's scoped-update copy bound at boot,

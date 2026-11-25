@@ -116,6 +116,7 @@ impl Fixture {
             passkeys: Some(Arc::clone(&passkeys)),
             public: Vec::new(),
             anonymous_sparql_budget_ms: 5000,
+            public_origin: None,
         };
         let request = ikigai_web::HttpRequest {
             method: "GET".into(),

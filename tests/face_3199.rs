@@ -130,6 +130,7 @@ impl Server {
             passkeys: Some(passkeys),
             public,
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         let edge = doors::edge_config(door.clone());
         let edge = if with_face { face::route(edge) } else { edge };

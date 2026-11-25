@@ -74,6 +74,7 @@ fn gonk(idle_seconds: Option<u64>) -> Gonk {
         bind: "127.0.0.1:1062".parse().unwrap(),
         passkeys: Some(Arc::clone(&rp)),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     Gonk {
         kernel: doors::http_kernel(hub, web::space(face)),

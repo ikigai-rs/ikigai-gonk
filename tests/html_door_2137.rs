@@ -108,6 +108,7 @@ impl Server {
             passkeys: Some(passkeys),
             public: toolbox.grants(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         let edge = toolbox::route(doors::edge_config(door.clone()));
         std::thread::spawn(move || {
@@ -195,6 +196,7 @@ fn the_preset_is_the_one_ikigai_web_names() {
         passkeys: None,
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     });
     let security = config.security.expect("the door sends security headers");
     assert_eq!(security.csp.as_deref(), Some(HTML_DOOR_CSP));

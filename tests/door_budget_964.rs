@@ -118,6 +118,7 @@ impl Server {
             passkeys: Some(passkeys),
             public: Vec::new(),
             anonymous_sparql_budget_ms: door_ms,
+            public_origin: None,
         };
         let served = Arc::clone(&http);
         let served_door = door.clone();

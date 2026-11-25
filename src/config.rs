@@ -145,7 +145,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 69] = [
+const KEYS: [&str; 71] = [
     crate::constraint::SAMPLE_KEY,
     crate::constraint::EVERY_KEY,
     crate::constraint::HOST_KEY,
@@ -175,6 +175,8 @@ const KEYS: [&str; 69] = [
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.http.session_idle_minutes",
     "gonk.http.session_max_hours",
+    "gonk.http.public_origin",
+    "gonk.http.public_bind",
     "gonk.browse.root",
     "gonk.browse.github",
     "gonk.repository",
@@ -880,6 +882,10 @@ pub struct Settings {
     pub max_scoped_copy_quads: Option<usize>,
     /// The HTTP door's address. Always loopback — see [`refuse_non_loopback`].
     pub http: SocketAddr,
+    /// The public listener behind a TLS proxy (`gonk.http.public_origin` and
+    /// `gonk.http.public_bind`, ledger #4367), or `None` — and then the server behaves exactly
+    /// as it did before the keys existed.
+    pub public_http: Option<PublicHttp>,
     /// The socket path.
     pub socket: PathBuf,
     /// The QUIC door's address, and whether anyone asked for it. Whether it actually opens
@@ -2491,6 +2497,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     check_keys(text)?;
     let http = resolve_bind(flags.bind.as_deref(), flags.port, text)?;
     refuse_non_loopback(http)?;
+    let public_http = public_http(text, http)?;
     let socket = socket_for(flags, text, homes);
     let quic = quic_bind(flags, text, http)?;
     // ⚠ The socket's LENGTH is not checked here (ledger #1093): every subcommand reads these
@@ -2640,6 +2647,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     Ok(Settings {
         max_scoped_copy_quads: max_scoped_copy_quads(text)?,
         http,
+        public_http,
         socket,
         quic,
         http_ledgers,
@@ -3263,6 +3271,112 @@ pub fn resolve_bind(
     Ok(SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)))
 }
 
+/// The public HTTP listener (ledger #4367): a SECOND loopback listener only a TLS proxy points
+/// at (`tailscale serve`), answering as `origin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicHttp {
+    /// The `https://` origin a browser reaches through the proxy, normalized: lowercase, no
+    /// trailing `/`, no path (`https://box.tail1.ts.net`).
+    pub origin: String,
+    /// The loopback address the proxy forwards to.
+    pub bind: SocketAddr,
+}
+
+/// `gonk.http.public_origin` and `gonk.http.public_bind`, both or neither: an `https://` origin
+/// with a host and nothing else, and a loopback address that is not the local door's.
+///
+/// ```
+/// use ikigai_gonk::config::public_http;
+/// let local = "127.0.0.1:1062".parse().unwrap();
+/// assert_eq!(public_http("", local), Ok(None));
+/// let both = "gonk.http.public_origin = \"https://Box.tail1.ts.net/\"\n\
+///             gonk.http.public_bind = \"127.0.0.1:1063\"\n";
+/// let public = public_http(both, local).unwrap().unwrap();
+/// assert_eq!(public.origin, "https://box.tail1.ts.net");
+/// assert!(public_http("gonk.http.public_bind = \"127.0.0.1:1063\"\n", local).is_err());
+/// ```
+pub fn public_http(text: &str, local: SocketAddr) -> Result<Option<PublicHttp>, String> {
+    let origin = value_for(text, "gonk.http.public_origin");
+    let bind = value_for(text, "gonk.http.public_bind");
+    let (origin, bind) = match (origin, bind) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => {
+            return Err(
+                "gonk.http.public_origin is set without gonk.http.public_bind: the \
+                 public origin is served on its own loopback port, the one the TLS proxy \
+                 forwards to — add `gonk.http.public_bind = \"127.0.0.1:<port>\"`"
+                    .to_string(),
+            )
+        }
+        (None, Some(_)) => {
+            return Err(
+                "gonk.http.public_bind is set without gonk.http.public_origin: the \
+                 public listener needs the `https://` origin browsers reach it at — add \
+                 `gonk.http.public_origin = \"https://<host>\"`"
+                    .to_string(),
+            )
+        }
+        (Some(origin), Some(bind)) => (origin, bind),
+    };
+    let origin = public_origin(&origin)?;
+    let bind: SocketAddr = bind.trim().parse().map_err(|_| {
+        format!(
+            "gonk.http.public_bind: `{bind}` is not an address and port such as \
+             `127.0.0.1:1063`"
+        )
+    })?;
+    if !crate::doors::is_loopback(bind.ip()) {
+        return Err(format!(
+            "gonk.http.public_bind: refusing {bind}, which is not loopback — the public \
+             listener is reached only through a TLS proxy on this machine (`tailscale serve`), \
+             so it binds 127.0.0.1 or [::1] like the HTTP door"
+        ));
+    }
+    if bind.port() == 0 || bind == local {
+        return Err(format!(
+            "gonk.http.public_bind: `{bind}` must be a port of its own, not 0 and not the HTTP \
+             door's {local}: the listener a request arrives on is what tells a proxied request \
+             from a local process"
+        ));
+    }
+    Ok(Some(PublicHttp { origin, bind }))
+}
+
+/// `spelled` as an `https://<host>[:port]` origin, or why it is not one.
+fn public_origin(spelled: &str) -> Result<String, String> {
+    let lower = spelled.trim().to_ascii_lowercase();
+    let Some(authority) = lower.strip_prefix("https://") else {
+        return Err(format!(
+            "gonk.http.public_origin: `{spelled}` is not an `https://` origin — a passkey and \
+             the `Secure` session cookie need TLS, which the proxy in front of gonk provides"
+        ));
+    };
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let host_ok = !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+        && host.parse::<std::net::IpAddr>().is_err()
+        && host != "localhost";
+    let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok_and(|p| p != 0));
+    if !host_ok || !port_ok {
+        return Err(format!(
+            "gonk.http.public_origin: `{spelled}` is not an origin such as \
+             `https://box.tail1.ts.net` — a scheme and a DNS host name (not an IP address, \
+             not `localhost`), an optional port, and no path, query or user"
+        ));
+    }
+    Ok(format!("https://{authority}"))
+}
+
 /// ★ **The HTTP door binds loopback, or the server does not start.**
 ///
 /// It is unauthenticated: it grants READ on its ledgers to whatever reaches it (and write to
@@ -3277,7 +3391,7 @@ pub fn refuse_non_loopback(addr: SocketAddr) -> Result<(), String> {
     }
     Err(format!(
         "refusing to serve HTTP on {addr}: the HTTP door is unauthenticated — it grants read \
-         and write on its ledgers to whoever reaches it — so it binds loopback only \
+         on its ledgers to whoever reaches it — so it binds loopback only \
          (127.0.0.1 or [::1]). To reach gonk from another machine, use the QUIC door, which \
          admits a connection only by a client certificate enrolled with `ikigai-gonk client \
          add`."

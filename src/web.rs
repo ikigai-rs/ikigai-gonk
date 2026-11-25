@@ -5009,6 +5009,16 @@ impl Endpoint for PasskeyDoor {
         // the `session` answer, the idle clock, add-grant's passkey and a re-assertion are
         // this session's and never another device's session of the same person.
         let principal = inv.capability.principal();
+        // ★ The listener's own site (ledger #4367): the public listener marks its requests
+        // ([`crate::doors::PUBLIC_SITE_MARKER`]), and its ceremonies run at its relying party,
+        // with a `Secure` cookie; every other request is the local listener's `localhost`.
+        let site = if crate::doors::at_public_site(inv.capability) {
+            self.passkeys.public_site().cloned().ok_or_else(|| {
+                Error::Unavailable("this server has no public origin configured".to_string())
+            })?
+        } else {
+            self.passkeys.local_site().clone()
+        };
         let door = match crate::doors::session_key(inv.capability) {
             Some(key) => SignedIn::Session { key, principal },
             None => SignedIn::Principal(principal),
@@ -5084,7 +5094,7 @@ impl Endpoint for PasskeyDoor {
                     .passkeys
                     .challenge(purpose, now)
                     .map_err(Error::Unavailable)?;
-                let mut answer = json!({ "challenge": challenge, "rpId": identity::RP_ID });
+                let mut answer = json!({ "challenge": challenge, "rpId": site.rp_id });
                 if let Some(grant) = grant {
                     answer["grant"] = json!(grant);
                 }
@@ -5093,7 +5103,7 @@ impl Endpoint for PasskeyDoor {
             "register" => {
                 let enrolled = self
                     .passkeys
-                    .register(content.as_bytes(), now)
+                    .register_at(&site, content.as_bytes(), now)
                     .map_err(refused)?;
                 Ok(json_repr(
                     json!({ "label": enrolled.label, "grant": enrolled.grant_names() }),
@@ -5129,7 +5139,7 @@ impl Endpoint for PasskeyDoor {
                     .map_err(Error::Unavailable)?;
                 Ok(json_repr(json!({
                     "challenge": challenge,
-                    "rpId": identity::RP_ID,
+                    "rpId": site.rp_id,
                     "grant": grant,
                     "credential": credential,
                 })))
@@ -5137,7 +5147,7 @@ impl Endpoint for PasskeyDoor {
             "add-grant" => {
                 let (token, who, added) = self
                     .passkeys
-                    .add_grant_as(content.as_bytes(), door, now)
+                    .add_grant_at(&site, content.as_bytes(), door, now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
@@ -5150,13 +5160,13 @@ impl Endpoint for PasskeyDoor {
                         "grants": who.enrolled.grants,
                         "added": added,
                     })),
-                    &identity::session_cookie(&token, seconds),
+                    &site.session_cookie(&token, seconds),
                 )
             }
             "login" => {
                 let (token, who) = self
                     .passkeys
-                    .login(content.as_bytes(), now)
+                    .login_at(&site, content.as_bytes(), now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
@@ -5168,7 +5178,7 @@ impl Endpoint for PasskeyDoor {
                         "grant": who.enrolled.grant_names(),
                         "grants": who.enrolled.grants,
                     })),
-                    &identity::session_cookie(&token, seconds),
+                    &site.session_cookie(&token, seconds),
                 )
             }
             // Reopen write with a fresh assertion by the SAME passkey (ledger #3816). The
@@ -5188,7 +5198,7 @@ impl Endpoint for PasskeyDoor {
                     .map_err(refused)?;
                 Ok(json_repr(json!({
                     "challenge": challenge,
-                    "rpId": identity::RP_ID,
+                    "rpId": site.rp_id,
                     "credential": credential,
                     "userVerification": "required",
                 })))
@@ -5196,16 +5206,13 @@ impl Endpoint for PasskeyDoor {
             "reassert" => {
                 let (token, who) = self
                     .passkeys
-                    .reassert(content.as_bytes(), door, now)
+                    .reassert_at(&site, content.as_bytes(), door, now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 let mut answer = session_answer(&who, now);
                 answer["session"] = json!(token);
                 answer["sessionId"] = json!(identity::session_id(&token));
-                with_cookie(
-                    json_repr(answer),
-                    &identity::session_cookie(&token, seconds),
-                )
+                with_cookie(json_repr(answer), &site.session_cookie(&token, seconds))
             }
             // ★ A page cannot read its HttpOnly cookie (ledger #1591), so it names no token:
             // the door's principal, derived from that cookie, says whose sessions end, and
@@ -5234,7 +5241,7 @@ impl Endpoint for PasskeyDoor {
                 }
                 with_cookie(
                     json_repr(json!({ "signedOut": true })),
-                    identity::CLEAR_SESSION_COOKIE,
+                    &site.clear_session_cookie(),
                 )
             }
             // Every session of the caller's own person, this one included (ledger #1824, #4305).
@@ -5252,7 +5259,7 @@ impl Endpoint for PasskeyDoor {
                 match ended {
                     Some(ended) => with_cookie(
                         json_repr(json!({ "signedOut": true, "sessions": ended })),
-                        identity::CLEAR_SESSION_COOKIE,
+                        &site.clear_session_cookie(),
                     ),
                     None => Err(Error::NotFound(
                         "no live session for that token".to_string(),
