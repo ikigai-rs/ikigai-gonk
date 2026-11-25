@@ -22,7 +22,7 @@
 //! in place of its own grants. People live in `clients.json`, not a file of their own, so a
 //! passkey and the person it names are written together, under the one clients lock, in one
 //! rename: no reader ever sees a passkey naming a person who is not there yet. An entry from
-//! before people is read as a person of its own ([`parse_passkeys`]) and written so at the
+//! before people is read as a person of its own (`parse_passkeys`) and written so at the
 //! next start ([`migrate_people`]). What follows says "a passkey's grants": they are its
 //! person's.
 //!
@@ -1481,7 +1481,7 @@ impl Passkeys {
     /// replaced, and is read from its start, which can only end sessions.)
     pub fn new_at(layout: Layout, port: u16, now: u64) -> Passkeys {
         // ★ Enrollments from before people get theirs now (ledger #4305). A file this cannot
-        // migrate is read as it is ([`parse_passkeys`] reads the old form) and reported here.
+        // migrate is read as it is (`parse_passkeys` reads the old form) and reported here.
         match migrate_people(&layout) {
             Ok(0) => {}
             Ok(n) => eprintln!(
