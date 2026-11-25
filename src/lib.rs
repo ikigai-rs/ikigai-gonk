@@ -110,6 +110,7 @@ pub mod taker;
 pub mod toolbox;
 pub mod trigger;
 pub mod ui_retry;
+pub mod upgrade;
 pub mod verdict;
 pub mod views;
 pub mod views_page;

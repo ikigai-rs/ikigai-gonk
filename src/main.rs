@@ -632,6 +632,17 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    // ★ What an upgraded install still needs (ledger #4369, `upgrade`): planned read-only once
+    // the hub exists, one line per plan that found something, and kept at its status.
+    let upgrade = ikigai_gonk::upgrade::Upgrade::new(
+        layout.clone(),
+        Arc::clone(&handle),
+        ikigai_gonk::upgrade::Commands {
+            config_home: homes.config.clone(),
+            socket: settings.socket.clone(),
+        },
+    );
+    trigger_spaces.push(Arc::new(upgrade.space()));
     // ★ The lapse sweep (ledger #3790, `lapse`): off unless `gonk.ledger.lapse.every` is set.
     // Its registry is built here, over the backup's timer, so its status can be bound; it is
     // started once the hub exists, and reads the ledgers out of the store each sweep.
@@ -684,6 +695,10 @@ fn serve(flags: &config::Flags) -> ! {
     scripts.attach(&hub);
     system.attach(&hub);
     move_passkey_claims(&hub, &layout);
+    upgrade.attach(&hub);
+    for line in upgrade.lines() {
+        eprintln!("{line}");
+    }
     let onboard_line = match (&onboard, &settings.onboard) {
         (Some(onboard), Some(config)) => {
             onboard.attach(&hub);
