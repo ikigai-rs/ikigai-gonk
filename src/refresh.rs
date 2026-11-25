@@ -57,6 +57,10 @@
 //! does not touch that, because widening a published script past what its publisher held when
 //! they published is exactly what the rule forbids. Republish such a script under the refreshed
 //! grant.
+//!
+//! Nothing here runs on its own except the exec respelling: the server only SAYS at startup
+//! which grants a refresh would widen and which published scripts still grant a retired
+//! spelling, with the command for each ([`crate::upgrade`], ledger #4369).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

@@ -5865,6 +5865,30 @@ header's Layers count, an open Layers page's three-second poll and every page's 
 `/instance` check (ledger #375) each write one quiet line per ten minutes, however many pages ask. Every other request is still one line. Rotation is the
 segment's (`[rotation]` in `gonk.log.toml`), sealed and verified by `ikigai-log`.
 
+## What an upgraded install still needs (ledger #4369)
+
+At startup, once the store is open, gonk checks three things an older install keeps and a fresh
+one does not, and prints ONE line per check that finds something, naming the command that fixes
+it. It applies none of them: each widens authority or rewrites ledger data, so the operator runs
+it.
+
+- **Grants missing what their roles mint now** (a grant from before `ikigai-ledger` 0.22 or 0.23
+  lacks the session graph, so a worker's session-summary writes are refused):
+  `ikigai-gonk client refresh --write`.
+- **Published scripts granted a retired exec spelling** (`urn:cap:exec:git` / `urn:cap:exec:gh`,
+  which grant nothing since the exec split): republish each from a grant holding
+  `urn:cap:exec:read:git` / `urn:cap:exec:read:gh`.
+- **Findings naming a file in browse's old form** (`urn:repo:{root}:file:{path}`, missing from
+  the file page's item list): `ikigai-gonk ledger canonical-file-iris --ledger L --apply`.
+
+An install that needs nothing prints nothing. The same check, computed afresh on each read, is
+`urn:iki:gonk:upgrade:status` (text, or `as=application/json`), for a holder of
+`urn:cap:gonk:system:read` or the owner on the socket:
+
+```sh
+ikigai --connect ~/.ikigai/gonk.sock -c 'source urn:iki:gonk:upgrade:status'
+```
+
 ## Upgrading past audit round 4 (ledger #864)
 
 What changed for an operator, in one place (ledger #864, #805, #816, #799):

@@ -632,6 +632,17 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    // ★ What an upgraded install still needs (ledger #4369, `upgrade`): computed read-only once
+    // the hub holds the store, said one line per plan, and served as `urn:iki:gonk:upgrade:status`.
+    let upgrade = ikigai_gonk::upgrade::Upgrade::new(
+        layout.clone(),
+        scripts.backend(),
+        ikigai_gonk::upgrade::Commands {
+            config_home: homes.config.clone(),
+            socket: settings.socket.clone(),
+        },
+    );
+    trigger_spaces.push(Arc::new(upgrade.space()));
     // ★ The lapse sweep (ledger #3790, `lapse`): off unless `gonk.ledger.lapse.every` is set.
     // Its registry is built here, over the backup's timer, so its status can be bound; it is
     // started once the hub exists, and reads the ledgers out of the store each sweep.
@@ -684,6 +695,7 @@ fn serve(flags: &config::Flags) -> ! {
     scripts.attach(&hub);
     system.attach(&hub);
     move_passkey_claims(&hub, &layout);
+    say_upgrade_needs(&hub, &upgrade);
     let onboard_line = match (&onboard, &settings.onboard) {
         (Some(onboard), Some(config)) => {
             onboard.attach(&hub);
@@ -1771,6 +1783,26 @@ fn move_passkey_claims(hub: &Arc<ikigai_core::Kernel>, layout: &quic::Layout) {
         Ok(0) => {}
         Ok(n) => eprintln!("ikigai-gonk: moved {n} claim(s) from a passkey to its person"),
         Err(e) => eprintln!("ikigai-gonk: claims were not moved to people: {e}"),
+    }
+}
+
+/// Say, one line per plan, what this upgraded install still needs to match a fresh one, and the
+/// command that fixes each (ledger #4369, `upgrade`). Read-only: nothing is applied.
+fn say_upgrade_needs(hub: &Arc<ikigai_core::Kernel>, upgrade: &ikigai_gonk::upgrade::Upgrade) {
+    upgrade.attach(hub);
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("ikigai-gonk: upgrade: could not check: no runtime: {e}");
+            return;
+        }
+    };
+    let status = runtime.block_on(upgrade.check());
+    for line in status.lines(upgrade.commands()) {
+        eprintln!("ikigai-gonk: {line}");
     }
 }
 

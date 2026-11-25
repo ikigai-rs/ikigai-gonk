@@ -191,12 +191,17 @@ fn plan(
     issue: &dyn Fn(Request) -> Result<Vec<u8>, String>,
     graph: &str,
 ) -> Result<Vec<Rewrite>, String> {
+    rewrites(select(issue, graph, &plan_query(graph))?)
+}
+
+/// The SELECT [`plan`] asks of `graph`: every finding's `about` under `urn:repo:`.
+pub(crate) fn plan_query(graph: &str) -> String {
     let bridges = [crate::roborev::KEY_PREFIX, crate::queue::FINDING_PREFIX]
         .iter()
         .map(|p| format!("STRSTARTS(STR(?bridge), \"{p}\")"))
         .collect::<Vec<_>>()
         .join(" || ");
-    let query = format!(
+    format!(
         "SELECT DISTINCT ?item ?number ?about WHERE {{ GRAPH <{graph}> {{ \
          ?item <{type_}> <{item}> ; <{number}> ?number ; <{about}> ?about ; <{about}> ?bridge . \
          FILTER(STRSTARTS(STR(?about), \"urn:repo:\")) FILTER({bridges}) }} }} \
@@ -205,9 +210,15 @@ fn plan(
         item = v::ITEM_CLASS,
         number = v::NUMBER,
         about = v::ABOUT,
-    );
+    )
+}
+
+/// The rewrites in [`plan_query`]'s rows: each `about` that is browse's old form.
+pub(crate) fn rewrites(
+    rows: Vec<std::collections::BTreeMap<String, String>>,
+) -> Result<Vec<Rewrite>, String> {
     let mut rewrites = Vec::new();
-    for row in select(issue, graph, &query)? {
+    for row in rows {
         let from = need(&row, "about")?;
         if let Some(to) = canonical(&from) {
             rewrites.push(Rewrite {

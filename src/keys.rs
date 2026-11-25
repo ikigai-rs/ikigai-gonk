@@ -463,15 +463,22 @@ pub(crate) fn select(
     graph: &str,
     query: &str,
 ) -> Result<Vec<BTreeMap<String, String>>, String> {
-    let bytes = issue(
-        Request::new(
-            Verb::Source,
-            Iri::parse(GRAPH_SELECT).expect("a constant IRI"),
-        )
-        .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
-        .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec())),
-    )?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes)
+    parse_select(&issue(select_request(graph, query))?)
+}
+
+/// The graph-scoped SELECT [`select`] issues: `query` over `graph` alone.
+pub(crate) fn select_request(graph: &str, query: &str) -> Request {
+    Request::new(
+        Verb::Source,
+        Iri::parse(GRAPH_SELECT).expect("a constant IRI"),
+    )
+    .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
+    .with_arg("graph", ArgRef::Inline(graph.as_bytes().to_vec()))
+}
+
+/// The rows of a SPARQL JSON SELECT answer, each variable to its value's text.
+pub(crate) fn parse_select(bytes: &[u8]) -> Result<Vec<BTreeMap<String, String>>, String> {
+    let json: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| format!("the store's SELECT answer is not JSON: {e}"))?;
     let bindings = json
         .pointer("/results/bindings")
