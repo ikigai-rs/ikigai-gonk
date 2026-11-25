@@ -1231,7 +1231,8 @@ fn invite_grant(layout: &Layout, code: &str) -> Result<String, String> {
 fn refuse_person_invite(layout: &Layout, code: &str) -> Result<(), String> {
     match invite_person_of(layout, code)? {
         Some(iri) => Err(format!(
-            "this invite enrolls a new passkey of person {iri}, and adds no grant to one already              enrolled — sign out and create the passkey with it; the invite is still good"
+            "this invite enrolls a new passkey of person {iri}, and adds no grant to one already \
+             enrolled — sign out and create the passkey with it; the invite is still good"
         )),
         None => Ok(()),
     }
@@ -1616,6 +1617,36 @@ pub fn author_labels(layout: &Layout) -> BTreeMap<String, String> {
     out
 }
 
+/// Every enrolled passkey's IRI and the person IRI it names now (ledger #4305): what a
+/// principal recorded before people ([`passkey_iri`]) is read as since. Read through the old
+/// form too, which names the person the migration writes ([`migrate_people`]).
+pub fn passkey_people(layout: &Layout) -> Result<BTreeMap<String, String>, String> {
+    Ok(read_passkeys(layout)?
+        .into_values()
+        .map(|e| (passkey_iri(&e.credential_id), e.person))
+        .collect())
+}
+
+/// The principals `principal` was known by before people (ledger #4305): for a person IRI,
+/// the [`passkey_iri`] of each passkey that names it; nothing for any other principal. What a
+/// dispatcher cursor kept under a passkey IRI is adopted through
+/// ([`crate::dispatch::space_with_former`]).
+pub fn former_principals(layout: &Layout, principal: &str) -> Vec<String> {
+    if person_id(principal).is_none() {
+        return Vec::new();
+    }
+    layout
+        .current_passkeys()
+        .map(|enrolled| {
+            enrolled
+                .values()
+                .filter(|e| e.person == principal)
+                .map(|e| passkey_iri(&e.credential_id))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl Passkeys {
     /// A relying party for the page served at `http://localhost:{port}`, with the
     /// [`DEFAULT_IDLE_SECONDS`] idle bound, a [`SESSION_SECONDS`] lifetime and no audit lines,
@@ -1762,8 +1793,15 @@ impl Passkeys {
         // names the credential it CLAIMED, and nobody. It is built from the whole id, never
         // the cut `passkey` column, so it is the IRI the door lines of the same session carry
         // (ledger #3414); an enrolled id always fits one ([`principal_refusal`]).
+        // ★ The PERSON the passkey names (ledger #4305), as the door stamps it; a passkey
+        // no longer enrolled is named by its own IRI.
         let principal = match line.credential {
-            Some(id) if line.authenticated => passkey_iri(id),
+            Some(id) if line.authenticated => self
+                .layout
+                .current_passkeys()
+                .ok()
+                .and_then(|enrolled| enrolled.get(id).map(|e| e.person.clone()))
+                .unwrap_or_else(|| passkey_iri(id)),
             _ => ikigai_log::ANONYMOUS_PRINCIPAL.to_string(),
         };
         let mut entry = ikigai_log::Entry::new(
@@ -2305,7 +2343,9 @@ impl Passkeys {
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
         let verified = self.verify_assertion(&v, Purpose::AddGrant, now)?;
-        if verified.enrolled.credential_id != who.enrolled.credential_id {
+        // ★ The same PERSON (ledger #4305): a grant is added to the person, so any of its
+        // passkeys may answer for it, whichever of them the session was opened with.
+        if verified.enrolled.person != who.enrolled.person {
             return Err(format!(
                 "the passkey that answered is not the one you are signed in with (`{}`); the \
                  invite is still good",
@@ -2331,24 +2371,32 @@ impl Passkeys {
         // `clients.json` and then finds its session gone, so no session but the fresh one below
         // ever reads the wider grant, even while the line is written or the change undone
         // (ledger #3413).
-        let ended = {
-            let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
-            let ended = state.end_sessions(&current.credential_id);
-            self.save(&mut state);
-            ended
-        };
-        self.audit(
-            LOGOUT_CLASS,
-            AuditLine {
-                op: "session",
-                door: "http",
-                outcome: "ok",
-                credential: Some(&current.credential_id),
-                authenticated: true,
-                sessions: ended,
-                why: Some("widened"),
-            },
-        );
+        // ★ And every session of every OTHER passkey of this person (ledger #4305): the grant
+        // is the person's, so each of them would read it.
+        let mut credentials = self.credentials_of(&current.person);
+        if !credentials.contains(&current.credential_id) {
+            credentials.push(current.credential_id.clone());
+        }
+        for credential in &credentials {
+            let ended = {
+                let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+                let ended = state.end_sessions(credential);
+                self.save(&mut state);
+                ended
+            };
+            self.audit(
+                LOGOUT_CLASS,
+                AuditLine {
+                    op: "session",
+                    door: "http",
+                    outcome: "ok",
+                    credential: Some(credential),
+                    authenticated: true,
+                    sessions: ended,
+                    why: Some("widened"),
+                },
+            );
+        }
         let before = current.clone();
         current.grants.push(redeemed.clone());
         current.sign_count = current.sign_count.max(verified.count);
@@ -2388,15 +2436,16 @@ impl Passkeys {
         if let Some(token) = token {
             return Ok(sha256_hex(token.trim().as_bytes()));
         }
-        let credential = principal
-            .and_then(|p| p.strip_prefix(PASSKEY_IRI_PREFIX))
+        let credentials = principal
+            .map(|p| self.credentials_of(p))
+            .filter(|c| !c.is_empty())
             .ok_or_else(not_signed_in)?;
         let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
         self.read_log(&mut state);
         let mine: Vec<&String> = state
             .sessions
             .iter()
-            .filter(|(_, s)| s.credential_id == credential)
+            .filter(|(_, s)| credentials.contains(&s.credential_id))
             .map(|(key, _)| key)
             .collect();
         match session_id {
@@ -2592,9 +2641,32 @@ impl Passkeys {
         match who {
             SignedIn::Token(token) => self.identity(token, now),
             SignedIn::Principal(principal) => {
-                self.identity_of(principal?.strip_prefix(PASSKEY_IRI_PREFIX)?, now)
+                self.identity_of_any(&self.credentials_of(principal?), now)
             }
         }
+    }
+
+    /// The credential ids a door's principal stands for (ledger #4305): the one passkey a
+    /// [`passkey_iri`] names (a session restored from before people), or every enrolled
+    /// passkey of the person a [`person_iri`] names, as the door now stamps. Empty for any
+    /// other principal, or a person no passkey names any more.
+    pub fn credentials_of(&self, principal: &str) -> Vec<String> {
+        if let Some(credential) = passkey_credential(principal) {
+            return vec![credential.to_string()];
+        }
+        if person_id(principal).is_none() {
+            return Vec::new();
+        }
+        self.layout
+            .current_passkeys()
+            .map(|enrolled| {
+                enrolled
+                    .values()
+                    .filter(|e| e.person == principal)
+                    .map(|e| e.credential_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The identity behind a session token, re-resolved NOW: a session whose passkey was
@@ -2614,13 +2686,19 @@ impl Passkeys {
     /// cookie is HttpOnly and the door has already named the passkey from it (the
     /// capability's principal, [`passkey_iri`]).
     pub fn identity_of(&self, credential_id: &str, now: u64) -> Option<Identity> {
+        self.identity_of_any(&[credential_id.to_string()], now)
+    }
+
+    /// [`Passkeys::identity_of`] over several passkeys — a person's ([`Passkeys::credentials_of`]):
+    /// the newest live session of any of them.
+    pub fn identity_of_any(&self, credential_ids: &[String], now: u64) -> Option<Identity> {
         let mut keys: Vec<(u64, String)> = {
             let mut state = self.state.lock().ok()?;
             self.read_log(&mut state);
             state
                 .sessions
                 .iter()
-                .filter(|(_, s)| s.credential_id == credential_id)
+                .filter(|(_, s)| credential_ids.contains(&s.credential_id))
                 .map(|(key, s)| (s.issued, key.clone()))
                 .collect()
         };

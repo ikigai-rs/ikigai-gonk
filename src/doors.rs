@@ -709,8 +709,8 @@ pub fn http_cap(door: HttpDoor) -> CapFn {
         let now = identity::now_seconds();
         let identity = http_identity(&door, request, now);
         let capability = Capability::scoped(http_scopes_for(&door, request, identity.as_ref()));
-        match identity.map(|who| identity::passkey_iri(&who.enrolled.credential_id)) {
-            // A passkey IRI is always an absolute IRI with no `*`, so this cannot fail; if it
+        match identity.map(|who| who.enrolled.person) {
+            // A person IRI is always an absolute IRI with no `*`, so this cannot fail; if it
             // ever did, the request keeps its authority and names nobody, which is the
             // anonymous reading, never a wider one.
             Some(who) => capability.with_principal(&who).unwrap_or(capability),
@@ -723,8 +723,12 @@ pub fn http_cap(door: HttpDoor) -> CapFn {
 /// [`http_cap`] reads — the identity twin of the capability, wired through
 /// [`EdgeConfig::principal_fn`] by [`edge_config`].
 ///
-/// A live passkey session names its passkey's stable IRI ([`identity::passkey_iri`] — the
-/// credential id, never the label, so a relabel keeps its history). An anonymous loopback
+/// A live passkey session names its passkey's PERSON ([`identity::person_iri`], ledger
+/// [#4305](http://localhost:1062/l/default/item/4305)): every passkey of one person — a
+/// laptop's, a phone's — is one principal, and a write signed by either is that person's. It
+/// is a generated id, never the label, so a relabel keeps its history. Writes from before
+/// people keep the passkey IRI they were stamped with ([`identity::passkey_iri`]), which the
+/// faces read as the same person. An anonymous loopback
 /// caller is nobody, exactly as before: `None`, and the transport stamps nothing. The
 /// transport attaches it to WRITES only, as the argument `principal`, and drops a
 /// `?principal=…` a submitter sends — so a value that reaches an endpoint under that name
@@ -744,7 +748,7 @@ pub fn http_principal(door: HttpDoor) -> PrincipalFn {
 /// [`http_principal`], with the clock as an argument.
 pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<String> {
     let identity = http_identity(door, request, now)?;
-    Some(identity::passkey_iri(&identity.enrolled.credential_id))
+    Some(identity.enrolled.person)
 }
 
 fn http_identity(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<identity::Identity> {

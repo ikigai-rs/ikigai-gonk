@@ -5043,9 +5043,12 @@ impl Endpoint for PasskeyDoor {
             detail,
         };
         let content = inv.inline_str("content").unwrap_or("");
-        // The passkey the door's capability names, from the HttpOnly session cookie.
+        // The passkeys the door's capability names, from the HttpOnly session cookie: its
+        // person's (ledger #4305), or the one passkey a session from before people names.
         let principal = inv.capability.principal();
-        let credential = principal.and_then(|p| p.strip_prefix(identity::PASSKEY_IRI_PREFIX));
+        let credentials: Vec<String> = principal
+            .map(|p| self.passkeys.credentials_of(p))
+            .unwrap_or_default();
         match op.as_str() {
             "register-options" | "login-options" => {
                 let purpose = if op == "login-options" {
@@ -5202,9 +5205,13 @@ impl Endpoint for PasskeyDoor {
             // every one of them does. A token in the body (the socket, a script) still ends
             // that one session.
             "logout" => {
-                match (content.trim(), credential) {
-                    ("", Some(credential)) => {
-                        self.passkeys.logout_credential(credential, "logout");
+                match (content.trim(), credentials.is_empty()) {
+                    // Every session of the person: its principal does not say which passkey
+                    // this browser signed in with, and ending more is the safe direction.
+                    ("", false) => {
+                        for credential in &credentials {
+                            self.passkeys.logout_credential(credential, "logout");
+                        }
                     }
                     (token, _) => self.passkeys.logout(token),
                 }
@@ -5216,11 +5223,13 @@ impl Endpoint for PasskeyDoor {
             // Every session of the caller's own passkey, this one included (ledger #1824).
             // The token is the proof of whose: a token that is no live session ends nothing.
             "logout-all" => {
-                let ended = match (content.trim(), credential) {
-                    ("", Some(credential)) => self
-                        .passkeys
-                        .identity_of(credential, now)
-                        .map(|_| self.passkeys.logout_credential(credential, "logout-all")),
+                let ended = match (content.trim(), credentials.is_empty()) {
+                    ("", false) => self.passkeys.identity_of_any(&credentials, now).map(|_| {
+                        credentials
+                            .iter()
+                            .map(|c| self.passkeys.logout_credential(c, "logout-all"))
+                            .sum()
+                    }),
                     (token, _) => self.passkeys.logout_all(token, now),
                 };
                 match ended {

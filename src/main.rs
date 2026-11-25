@@ -642,8 +642,12 @@ fn serve(flags: &config::Flags) -> ! {
     ikigai_gonk::private_store_dir(dispatch_cursor_path.parent().expect("cursor directory"))
         .unwrap_or_else(|e| fail(&format!("cannot create private dispatch directory: {e}")));
     trigger_spaces.push(Arc::new(
-        ikigai_gonk::dispatch::space(Some(dispatch_cursor_path))
-            .unwrap_or_else(|e| fail(&e.to_string())),
+        ikigai_gonk::dispatch::space_with_former(Some(dispatch_cursor_path), {
+            // ★ A person keeps the cursor its passkey acknowledged before people (#4305).
+            let layout = layout.clone();
+            Arc::new(move |principal: &str| identity::former_principals(&layout, principal))
+        })
+        .unwrap_or_else(|e| fail(&e.to_string())),
     ));
     if let Some(record) = &record {
         trigger_spaces.push(record.space());
@@ -679,6 +683,7 @@ fn serve(flags: &config::Flags) -> ! {
     );
     scripts.attach(&hub);
     system.attach(&hub);
+    move_passkey_claims(&hub, &layout);
     let onboard_line = match (&onboard, &settings.onboard) {
         (Some(onboard), Some(config)) => {
             onboard.attach(&hub);
@@ -1715,6 +1720,42 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
     let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
+}
+
+/// ★ Claims held under a passkey IRI move to its person (ledger #4305,
+/// [`ikigai_gonk::person_claims`]) before any door opens, so the person the door now stamps
+/// can renew, release and close what its passkey took. Not fatal: a claim not moved stays
+/// its passkey's, and the line says so.
+fn move_passkey_claims(hub: &Arc<ikigai_core::Kernel>, layout: &quic::Layout) {
+    let people = match identity::passkey_people(layout) {
+        Ok(people) => people,
+        Err(e) => {
+            eprintln!("ikigai-gonk: claims were not moved to people: {e}");
+            return;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("ikigai-gonk: claims were not moved to people: no runtime: {e}");
+            return;
+        }
+    };
+    let issue = |request: ikigai_core::Request| {
+        let iri = request.target.as_str().to_string();
+        runtime
+            .block_on(hub.issue(request, &ikigai_core::Capability::root()))
+            .map(|answer| answer.bytes.to_vec())
+            .map_err(|e| format!("{iri}: {e}"))
+    };
+    match ikigai_gonk::person_claims::run(&issue, &people) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("ikigai-gonk: moved {n} claim(s) from a passkey to its person"),
+        Err(e) => eprintln!("ikigai-gonk: claims were not moved to people: {e}"),
+    }
 }
 
 /// `ikigai-gonk ledger canonical-file-iris` — over the socket of the gonk this config describes

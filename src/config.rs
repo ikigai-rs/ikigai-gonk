@@ -334,8 +334,9 @@ usage:
                                    holds that person's grants and writes as that person.
                                    This is how two passkeys enrolled as two people become
                                    one. The person it named before is kept (the record still
-                                   names it), and appends a gonk:PasskeyAttached line to
-                                   gonk/passkeys.log
+                                   names it), and so is what that person holds (a claim
+                                   taken as it stays its own); appends a gonk:PasskeyAttached
+                                   line to gonk/passkeys.log
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
   remove and add; --force writes it and prints the same list. --force writes the grant WHOLE

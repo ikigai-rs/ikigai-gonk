@@ -89,6 +89,7 @@ pub mod operator;
 pub mod packs;
 pub mod page_assets;
 pub mod participants;
+pub mod person_claims;
 pub mod projects;
 pub mod queue;
 pub mod quic;
