@@ -1427,6 +1427,12 @@ line in gonk's sealed log segment, its subject the control (`urn:script:harness-
 version digest and the row count, never a row. With `gonk.sensor.ledger` set, a firing also files
 one item labeled `sensor` and `harness-{id}`. Nothing more is filed while that item is open.
 
+The first tick after a start is phased to the last one (ledger #4364): each tick stamps its time
+in the data home's `sensors/last-tick` (`~/.ikigai/sensors/last-tick`), and a start waits only what
+is left of the cadence since that stamp, so a restart never pushes a tick more than one cadence past
+the last. With no stamp, or one a cadence old, the first tick runs at once: a tick is read-only
+queries and a filing the open-item rule guards, so an extra one after a restart files nothing twice.
+
 Two refusals at publish: the library refuses a script that reads a graph its publisher cannot,
 and gonk refuses a `harness-*` script that is not a SPARQL ASK or SELECT, or that reads beyond the
 ceiling (a browse graph, `GRAPH ?g`), since no tick could run it.
