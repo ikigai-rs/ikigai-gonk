@@ -256,7 +256,8 @@ fn a_redemption_without_a_fresh_assertion_is_refused() {
 }
 
 /// A `clients.json` every earlier server wrote — `"grant": "<name>"` — still loads and signs
-/// in; the next write of that entry is in the list form.
+/// in; the entry is then written in the list form, on the PERSON it now names (ledger #4305:
+/// grants moved from the passkey to its person, and the passkey keeps none of its own).
 #[test]
 fn the_single_name_form_still_loads_and_the_list_form_is_written() {
     use base64::Engine;
@@ -289,12 +290,21 @@ fn the_single_name_form_still_loads_and_the_list_form_is_written() {
     let (_, who) = sign_in(&rp, &auth, 1);
     assert_eq!(who.enrolled.grants, ["alice"]);
 
-    // The sign-in moved the counter, so the entry was written: in the list form.
+    // The entry was written (migrated at start, and again as the sign-in moved the counter):
+    // the list form, on its person.
     let written: Value =
         serde_json::from_str(&std::fs::read_to_string(layout.clients_json()).unwrap()).unwrap();
     let entry = &written["passkeys"][base64_id(&auth)];
-    assert_eq!(entry["grants"], json!(["alice"]), "{written}");
     assert!(entry.get("grant").is_none(), "{written}");
+    assert!(entry.get("grants").is_none(), "{written}");
+    let person = entry["person"].as_str().expect("names its person");
+    let id = identity::person_id(person).expect("a person IRI");
+    assert_eq!(
+        written["people"][id]["grants"],
+        json!(["alice"]),
+        "{written}"
+    );
+    assert!(written["people"][id].get("grant").is_none(), "{written}");
 }
 
 /// Taking one grant off one passkey leaves its other grants, every other passkey and

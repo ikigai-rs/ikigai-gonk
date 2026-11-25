@@ -1758,7 +1758,12 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
             .or_else(|| identity::person_id(who))
             .map(str::to_string)
     };
-    let shown = |who: String| match (tail(&who), &labels) {
+    // `stamped`: the write carries a committer, so a door stamped it. ★ A person IRI with no
+    // committer can only be text someone typed before admission refused it as principal-shaped
+    // (ledger #4305: every write since a door first stamped a person carries its committer),
+    // so it reads as the text it is, never as that person's label.
+    let shown = |who: String, stamped: bool| match (tail(&who), &labels) {
+        (Some(_), _) if !stamped && identity::person_id(&who).is_some() => who,
         (Some(id), Some(labels)) => labels.get(&who).cloned().unwrap_or(id),
         _ => match quic::client_fingerprint(&who) {
             Some(fingerprint) => quic::client_iri(fingerprint),
@@ -1766,7 +1771,8 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
         },
     };
     for (subject, who) in attributed {
-        graph.view(&subject, "author", shown(who));
+        let stamped = graph.value(&subject, &committer).is_some();
+        graph.view(&subject, "author", shown(who, stamped));
         let Some(words) = graph.value(&subject, &source).filter(|s| s != "committer") else {
             continue;
         };
@@ -1776,7 +1782,7 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
             ikigai_ledger::attribution::author_status(Some(&words)).to_string(),
         );
         if let Some(by) = graph.value(&subject, &committer) {
-            graph.view(&subject, "committer", shown(by));
+            graph.view(&subject, "committer", shown(by, true));
         }
     }
 }
@@ -5452,6 +5458,51 @@ impl Endpoint for DisplayRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ Ledger #4305, sent back from review: a person IRI renders as the person's label only
+    /// on a write a door stamped (it carries a committer). The same IRI as committer-less free
+    /// text — typed before admission refused it — reads as the text it is, never as the
+    /// person, so nobody's words can be dressed as theirs.
+    #[test]
+    fn a_typed_person_iri_is_not_dressed_as_that_persons_label() {
+        let config = tempfile::tempdir().unwrap();
+        let layout = crate::quic::Layout::in_config_home(config.path());
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        std::fs::write(
+            layout.clients_json(),
+            r#"{"passkeys": {"bGFwdG9w": {"grant": "brian", "label": "Brian", "public_key": "AAAA"}}}"#,
+        )
+        .unwrap();
+        let passkeys = Passkeys::new(layout.clone(), 1062);
+        let person = identity::read_passkeys(&layout).unwrap()["bGFwdG9w"]
+            .person
+            .clone();
+        let turtle = format!(
+            "<urn:x:typed> a <{LEDGER_NS}Item> ; <{LEDGER_NS}author> \"{person}\" .\n\
+             <urn:x:stamped> a <{LEDGER_NS}Item> ; <{LEDGER_NS}author> <{person}> ; \
+             <{LEDGER_NS}committer> <{person}> ; <{LEDGER_NS}authorSource> \"committer\" .\n\
+             <urn:x:before> a <{LEDGER_NS}Item> ; <{LEDGER_NS}author> \
+             <urn:iki:gonk:passkey:bGFwdG9w> .\n"
+        );
+        let mut graph = Graph::from_turtle(turtle.as_bytes()).unwrap();
+        enrich_authors(&mut graph, &passkeys);
+        let shown = |s: &str| {
+            graph
+                .value(s, &format!("{}author", render::VIEW_NS))
+                .unwrap()
+        };
+        assert_eq!(shown("urn:x:typed"), person, "typed text stays text");
+        assert_eq!(
+            shown("urn:x:stamped"),
+            "Brian",
+            "a stamped person reads as its label"
+        );
+        assert_eq!(
+            shown("urn:x:before"),
+            "Brian",
+            "a pre-upgrade passkey author too"
+        );
+    }
 
     /// The header can be drawn before any kernel invocation exists (ledger #2032).
     #[test]
