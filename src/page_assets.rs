@@ -152,6 +152,7 @@ pub fn check_path(path: &str) -> Result<String, String> {
 
 /// Whether `?safe=1` asks for this page without the deployment's assets.
 pub fn safe_of(inv: &Invocation<'_>) -> bool {
+    // optional-arg: deliberate: this presentation toggle is on only for an explicit 1, as on refusal pages.
     inv.inline_str(SAFE_ARG).is_ok_and(|asked| asked == "1")
 }
 

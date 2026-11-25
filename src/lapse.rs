@@ -466,7 +466,7 @@ impl Endpoint for Status {
                 .into(),
             ));
         }
-        if matches!(inv.inline_str("as"), Ok(JSON)) {
+        if crate::web::response_face(inv, "text/plain", &["text/plain", JSON])? == JSON {
             let mut bytes = serde_json::to_vec(&self.json()).unwrap_or_default();
             bytes.push(b'\n');
             Ok(Representation::new(

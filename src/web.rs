@@ -578,8 +578,8 @@ pub(crate) fn as_html_arg() -> ArgSpec {
 
 /// Refuse any `as` but HTML — a page is HTML, and a different answer is not a better one.
 pub(crate) fn html_only(inv: &Invocation<'_>) -> Result<()> {
-    match inv.inline_str("as") {
-        Ok(asked) if bare(asked) != HTML => Err(Error::InvalidArgument {
+    match inv.optional_str("as")? {
+        Some(asked) if bare(asked) != HTML => Err(Error::InvalidArgument {
             name: "as".to_string(),
             detail: format!("`{asked}` is not a face this page serves; it serves {HTML}"),
         }),
@@ -598,12 +598,36 @@ pub(crate) fn binding(inv: &Invocation<'_>, name: &str) -> Result<String> {
         .ok_or_else(|| Error::Endpoint(format!("no `{name}` captured by this resource's grammar")))
 }
 
-fn optional(inv: &Invocation<'_>, name: &str) -> Option<String> {
-    inv.inline_str(name)
-        .ok()
+/// Read a text form field whose blank value clears the field. Decode before trimming so
+/// a broken value never has the same meaning as a blank field.
+pub(crate) fn optional_nonblank(inv: &Invocation<'_>, name: &str) -> Result<Option<String>> {
+    Ok(inv
+        .optional_str(name)?
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .map(str::to_string)
+        .map(str::to_string))
+}
+
+/// Select a face for endpoints with a fixed set of representations.
+pub(crate) fn response_face<'a>(
+    inv: &Invocation<'_>,
+    default: &'a str,
+    served: &[&'a str],
+) -> Result<&'a str> {
+    let Some(asked) = inv.optional_str("as")?.map(bare) else {
+        return Ok(default);
+    };
+    if let Some(face) = served.iter().copied().find(|face| bare(face) == asked) {
+        Ok(face)
+    } else {
+        Err(Error::InvalidArgument {
+            name: "as".to_string(),
+            detail: format!(
+                "`{asked}` is not a face this resource serves: {}",
+                served.join(", ")
+            ),
+        })
+    }
 }
 
 pub(crate) fn render_err(e: String) -> Error {
@@ -2684,16 +2708,16 @@ fn newest_rows(graph: &mut Graph, rows: usize) -> (usize, Vec<String>) {
 impl Endpoint for LedgerView {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         html_only(inv)?;
-        let status = optional(inv, "status").unwrap_or_else(|| "open".to_string());
-        let text = optional(inv, "text");
-        let labels = optional(inv, "labels");
-        let without = optional(inv, "without");
-        let limit = optional(inv, "limit");
-        let offset = optional(inv, "offset");
-        let ledgers = optional(inv, "ledgers");
-        let projects = optional(inv, "projects");
-        let priority = optional(inv, "priority");
-        let sort = optional(inv, "sort");
+        let status = optional_nonblank(inv, "status")?.unwrap_or_else(|| "open".to_string());
+        let text = optional_nonblank(inv, "text")?;
+        let labels = optional_nonblank(inv, "labels")?;
+        let without = optional_nonblank(inv, "without")?;
+        let limit = optional_nonblank(inv, "limit")?;
+        let offset = optional_nonblank(inv, "offset")?;
+        let ledgers = optional_nonblank(inv, "ledgers")?;
+        let projects = optional_nonblank(inv, "projects")?;
+        let priority = optional_nonblank(inv, "priority")?;
+        let sort = optional_nonblank(inv, "sort")?;
         let mut readable = None;
         let ledger = match self.shape {
             Shape::Home => match readable
@@ -3906,7 +3930,7 @@ impl Endpoint for Act {
         // person's claim through this form is a person's. It is the transport's value — a form
         // field of that name is refused below as undeclared — and the ledger ignores it
         // everywhere else.
-        if let Ok(principal) = inv.inline_str(crate::admit::PRINCIPAL_ARG) {
+        if let Some(principal) = inv.optional_str(crate::admit::PRINCIPAL_ARG)? {
             request = with(request, crate::admit::PRINCIPAL_ARG, principal);
         }
         for (name, value) in fields {
@@ -4607,10 +4631,10 @@ struct Asked {
 impl Asked {
     fn read(inv: &Invocation<'_>) -> Result<Asked> {
         let mut asked = Asked {
-            ledger: optional(inv, "ledger"),
-            query: optional(inv, "query"),
-            face: inv.inline_str("as").ok().map(bare).map(str::to_string),
-            graph: optional(inv, "graph"),
+            ledger: optional_nonblank(inv, "ledger")?,
+            query: optional_nonblank(inv, "query")?,
+            face: inv.optional_str("as")?.map(bare).map(str::to_string),
+            graph: optional_nonblank(inv, "graph")?,
         };
         let mut dataset_params: Vec<String> = DATASET_PARAMS
             .iter()
@@ -4618,8 +4642,9 @@ impl Asked {
             .map(|name| name.to_string())
             .collect();
         if inv.request.verb == Verb::Sink {
-            let body = inv.inline_str("content").unwrap_or("");
-            let kind = optional(inv, "content-type").map(|t| bare(&t).to_ascii_lowercase());
+            let body = inv.optional_str("content")?.unwrap_or("");
+            let kind =
+                optional_nonblank(inv, "content-type")?.map(|t| bare(&t).to_ascii_lowercase());
             match kind.as_deref() {
                 Some("application/sparql-query") => {
                     asked.query = Some(body.to_string()).filter(|q| !q.trim().is_empty());
@@ -4652,6 +4677,14 @@ impl Asked {
                 }
             }
         }
+        if let Some(face) = &asked.face {
+            if face != HTML && !PROTOCOL_FACES.contains(&face.as_str()) {
+                return Err(Error::InvalidArgument {
+                    name: "as".to_string(),
+                    detail: format!("`{face}` is not a face this SPARQL endpoint serves"),
+                });
+            }
+        }
         if let Some(name) = dataset_params.first() {
             return Err(Error::InvalidArgument {
                 name: name.clone(),
@@ -4681,6 +4714,12 @@ impl Endpoint for Sparql {
             ));
         }
         let asked = Asked::read(inv)?;
+        if self.fragment && asked.face.as_deref().is_some_and(|face| face != HTML) {
+            return Err(Error::InvalidArgument {
+                name: "as".to_string(),
+                detail: format!("this SPARQL results fragment serves only {HTML}"),
+            });
+        }
         // ★ Before `query_form`, which parses the text with spargebra on THIS thread: a query
         // past the bound is a `400`, not a parse (ledger #915). On `b16f79c` one GET of
         // `/sparql/results` nested 3000 parentheses deep aborted the process here.
@@ -5034,8 +5073,8 @@ impl Endpoint for PasskeyDoor {
         // on every page an anonymous reader opens.
         if inv.request.verb == Verb::Source && op == "session" {
             if inv
-                .inline_str("content")
-                .is_ok_and(|c| !c.trim().is_empty())
+                .optional_str("content")?
+                .is_some_and(|c| !c.trim().is_empty())
             {
                 return Err(Error::InvalidArgument {
                     name: "content".to_string(),
@@ -5059,7 +5098,7 @@ impl Endpoint for PasskeyDoor {
             name: "content".to_string(),
             detail,
         };
-        let content = inv.inline_str("content").unwrap_or("");
+        let content = inv.optional_str("content")?.unwrap_or("");
         // The passkeys the door's capability names, from the HttpOnly session cookie: its
         // person's (ledger #4305), or the one passkey a session from before people names.
         let credentials: Vec<String> = principal
@@ -5076,17 +5115,19 @@ impl Endpoint for PasskeyDoor {
                 // the authenticator is asked to create anything (ledger #3384), and its invite,
                 // so the answer carries the grant the passkey's display name shows (#3387).
                 let mut grant = None;
-                if purpose == Purpose::Register {
-                    let asked = serde_json::from_str::<serde_json::Value>(content).ok();
-                    let field = |name: &str| {
-                        asked
-                            .as_ref()
-                            .and_then(|v| v.get(name)?.as_str().map(str::to_string))
-                    };
-                    if let Some(label) = field("label") {
+                if purpose == Purpose::Register && !content.trim().is_empty() {
+                    #[derive(serde::Deserialize)]
+                    struct RegisterOptions {
+                        label: Option<String>,
+                        invite: Option<String>,
+                    }
+                    let asked: RegisterOptions = serde_json::from_str(content).map_err(|e| {
+                        refused(format!("expected registration options as JSON: {e}"))
+                    })?;
+                    if let Some(label) = asked.label {
                         self.passkeys.check_label(&label).map_err(refused)?;
                     }
-                    if let Some(invite) = field("invite") {
+                    if let Some(invite) = asked.invite {
                         grant = Some(self.passkeys.invite_grant(&invite).map_err(refused)?);
                     }
                 }
@@ -5346,7 +5387,7 @@ struct RenderRules {
 #[async_trait]
 impl Endpoint for RenderRules {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        if let Ok(asked) = inv.inline_str("as") {
+        if let Some(asked) = inv.optional_str("as")? {
             if !matches!(bare(asked), "text/turtle" | "text/plain") {
                 return Err(Error::InvalidArgument {
                     name: "as".to_string(),
@@ -5405,6 +5446,7 @@ const ASSETS: [(&str, &str, &str); 3] = [
 /// [#3379](http://localhost:1062/l/default/item/3379)): `newest` first when asked, else `oldest`
 /// first, the order they were written in. gonk's own control, so it needs no deployment script.
 fn comment_order(inv: &Invocation<'_>) -> &'static str {
+    // optional-arg: deliberate: comment order is a page preference; an unreadable or unknown hint keeps the written order.
     match inv.inline_str("comments") {
         Ok("newest") => "newest",
         _ => "oldest",
@@ -5839,5 +5881,22 @@ mod tests {
         );
         assert_eq!(lexical_form("DELETE WHERE {"), None);
         assert_eq!(lexical_form(""), None);
+    }
+}
+
+#[cfg(test)]
+mod optional_argument_tests {
+    use super::*;
+
+    #[test]
+    fn html_page_refuses_unreadable_face() {
+        let req = Request::new(Verb::Source, Iri::parse("urn:page").unwrap())
+            .with_arg("as", ArgRef::Inline(vec![0xff]));
+        let bindings = ikigai_core::Bindings::new();
+        let capability = ikigai_core::Capability::root();
+        let inv = Invocation::detached(&req, &bindings, &capability);
+        assert!(
+            matches!(html_only(&inv), Err(Error::InvalidArgument { name, .. }) if name == "as")
+        );
     }
 }

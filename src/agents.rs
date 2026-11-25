@@ -470,7 +470,7 @@ fn asked_ledger(inv: &Invocation<'_>) -> Result<Ledger> {
 /// `query` through the SPARQL face, under the caller's capability, over the graphs in `graph`.
 async fn asked(inv: &Invocation<'_>, graph: &str, query: &str) -> Result<Representation> {
     let read = with(request(Verb::Source, "urn:sparql:select")?, "query", query);
-    let read = with(read, "as", inv.inline_str("as").unwrap_or(RESULTS_JSON));
+    let read = with(read, "as", inv.optional_str("as")?.unwrap_or(RESULTS_JSON));
     inv.issue(with(read, "graph", graph)).await
 }
 
@@ -664,7 +664,7 @@ fn since_arg() -> ArgSpec {
 
 /// The `since` argument, checked, or this minute's window when it is absent.
 fn asked_since(inv: &Invocation<'_>, question: &Question) -> Result<Option<String>> {
-    let given = inv.inline_str("since").ok();
+    let given = inv.optional_str("since")?;
     Ok(match (question.window_ms, given) {
         (Some(_), Some(since)) if is_instant(since) => Some(since.to_string()),
         (None, None) => None,

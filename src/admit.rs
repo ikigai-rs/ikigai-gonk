@@ -407,6 +407,7 @@ pub fn claim_kind() -> ikigai_ledger::claim::ClaimKindStamper {
             .principal()
             .filter(|p| p.starts_with(crate::layer::MIRROR_PRINCIPAL_PREFIX))
         {
+            // optional-arg: deliberate: this infallible stamp cannot grant person attribution without a readable holder.
             let holder = inv.inline_str("content").unwrap_or_default().trim();
             return crate::layer::kind_for(mirror, holder);
         }

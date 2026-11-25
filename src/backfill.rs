@@ -612,6 +612,7 @@ struct BackfillEndpoint {
 #[async_trait]
 impl Endpoint for BackfillEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let face = crate::web::response_face(inv, TEXT, &[TEXT, JSON])?;
         match inv.request.verb {
             Verb::Source => {}
             Verb::Sink => {
@@ -638,7 +639,7 @@ impl Endpoint for BackfillEndpoint {
         }
         let run = self.backfill.status();
         let now = inv.now().map(|t| t.as_millis()).unwrap_or_else(now_ms);
-        if matches!(inv.inline_str("as"), Ok(JSON)) {
+        if face == JSON {
             return Ok(Representation::new(
                 ReprType::new(JSON).with_param("charset", "utf-8"),
                 run.json(self.backfill.judge.as_deref(), now)

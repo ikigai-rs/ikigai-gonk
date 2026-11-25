@@ -191,7 +191,7 @@ impl Filters {
     pub fn from_inv(inv: &Invocation<'_>) -> Result<Filters> {
         let mut out = Filters::default();
         for facet in Facet::ALL {
-            let Ok(given) = inv.inline_str(facet.param()) else {
+            let Some(given) = inv.optional_str(facet.param())? else {
                 continue;
             };
             let mut values: Vec<String> = Vec::new();
@@ -212,7 +212,7 @@ impl Filters {
                 out.chosen.insert(facet, values);
             }
         }
-        if let Ok(given) = inv.inline_str("q") {
+        if let Some(given) = inv.optional_str("q")? {
             for value in ListSeparator::Newline.split(given) {
                 let words = value.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !words.is_empty() && !out.q.contains(&words) {

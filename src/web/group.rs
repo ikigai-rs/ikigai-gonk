@@ -133,15 +133,15 @@ impl Endpoint for Group {
                 detail: "This label has no grouping rule.".into(),
             });
         }
-        let status = optional(inv, "status").unwrap_or_else(|| "all".into());
+        let status = optional_nonblank(inv, "status")?.unwrap_or_else(|| "all".into());
         if !matches!(status.as_str(), "all" | "open" | "closed") {
             return Err(Error::InvalidArgument {
                 name: "status".into(),
                 detail: "Use open, closed or all.".into(),
             });
         }
-        let limit = rows::rows_wanted(optional(inv, "limit").as_deref())?;
-        let offset = rows::offset_wanted(optional(inv, "offset").as_deref())?;
+        let limit = rows::rows_wanted(optional_nonblank(inv, "limit")?.as_deref())?;
+        let offset = rows::offset_wanted(optional_nonblank(inv, "offset")?.as_deref())?;
         let status_pattern = if status == "all" {
             String::new()
         } else {

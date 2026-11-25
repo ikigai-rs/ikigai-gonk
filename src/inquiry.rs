@@ -697,6 +697,18 @@ fn not_configured(web: &Web, inv: &Invocation<'_>, view: View) -> Result<Represe
     )
 }
 
+fn spam_day(inv: &Invocation<'_>, view: View) -> Result<Option<String>> {
+    let day = crate::web::optional_nonblank(inv, "day")?;
+    match day {
+        Some(day) if !is_day(&day) => Err(Error::InvalidArgument {
+            name: "day".to_string(),
+            detail: "expected a day in YYYY-MM-DD format".to_string(),
+        }),
+        day if view == View::Spam => Ok(day),
+        _ => Ok(None),
+    }
+}
+
 fn view_binding(inv: &Invocation<'_>) -> Result<View> {
     let name = web::binding(inv, "view")?;
     view_of(&name).ok_or_else(|| {
@@ -704,14 +716,6 @@ fn view_binding(inv: &Invocation<'_>) -> Result<View> {
             "no inquiry view `{name}`: the views are pending and spam"
         ))
     })
-}
-
-fn optional_arg(inv: &Invocation<'_>, name: &str) -> Option<String> {
-    inv.inline_str(name)
-        .ok()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
 }
 
 /// Bind the client's pages into the HTTP face's page space. `None` binds them all the same, and
@@ -755,10 +759,7 @@ impl Endpoint for ViewPage {
             return not_configured(&self.web, inv, view);
         };
         inquiry.require(inv.capability, &[Token::Read], "read the inquiries")?;
-        let day = match view {
-            View::Spam => optional_arg(inv, "day"),
-            View::Pending => None,
-        };
+        let day = spam_day(inv, view)?;
         let html = inquiry.view(view, day.as_deref(), inv.capability).await?;
         let (title, body) = parts(&html)?;
         let body = match day_of(&title) {
@@ -817,7 +818,8 @@ impl Endpoint for ActionPost {
             needs(action),
             &format!("{} an inquiry", action.name()),
         )?;
-        let fields = web::form(inv.inline_str("content").unwrap_or_default());
+        let day = spam_day(inv, view)?;
+        let fields = web::form(inv.inline_str("content")?);
         let id = fields
             .get("inquiry")
             .map(String::as_str)
@@ -829,11 +831,6 @@ impl Endpoint for ActionPost {
                 Status { ok: false, message }
             }
             Err(e) => return Err(e),
-        };
-        // Back to the view the button was on: the spam view's buttons carry its day.
-        let day = match view {
-            View::Spam => optional_arg(inv, "day").filter(|d| is_day(d)),
-            View::Pending => None,
         };
         let html = inquiry.view(view, day.as_deref(), inv.capability).await?;
         let (title, body) = parts(&html)?;

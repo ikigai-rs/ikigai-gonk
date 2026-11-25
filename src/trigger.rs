@@ -920,9 +920,7 @@ impl Endpoint for PassEndpoint {
         let pass = self.activity.begin(now_ms())?;
         // The tuple arrives as `content` — the name a pipe's value lands in, and the name
         // `ikigai-intray`'s reactor passes it under.
-        let bytes = inv
-            .inline_arg("content")
-            .map_err(|_| Error::MissingArgument("content".to_string()))?;
+        let bytes = inv.inline_arg("content")?;
         let tuple = parse_tuple(bytes)?;
         let request = review_request(&tuple.repo, &tuple.path)?;
         // ★ THE ONE CALL. Nothing before it builds a prompt; nothing after it touches a
@@ -1896,7 +1894,7 @@ impl Endpoint for DepthEndpoint {
         }
         let status = self.status();
         let now = inv.now().map(|t| t.as_millis()).unwrap_or_else(now_ms);
-        if matches!(inv.inline_str("as"), Ok(JSON)) {
+        if crate::web::response_face(inv, "text/plain", &["text/plain", JSON])? == JSON {
             return Ok(Representation::new(
                 ReprType::new(JSON).with_param("charset", "utf-8"),
                 status.json(now).into_bytes(),
