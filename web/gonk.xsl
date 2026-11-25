@@ -124,7 +124,7 @@
                 <xsl:apply-templates select="view:withheld"/>
                 <span id="auth-who" class="who" hidden="hidden"></span>
                 <button id="auth-login" type="button" class="quiet" hidden="hidden">Sign in with passkey</button>
-                <button id="auth-logout" type="button" class="quiet" hidden="hidden">Sign out</button>
+                <button id="auth-logout" type="button" class="quiet" hidden="hidden">Sign out on all devices</button>
                 <a id="auth-localhost" class="note" hidden="hidden">Passkeys need localhost</a>
               </div>
               <!-- ikigai-ui's theme chooser: src/render.rs::render puts its markup here. -->

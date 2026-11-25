@@ -1287,11 +1287,16 @@
     }
   }
 
+  // Sign-out ends every session of the person, on every device (ledger #4305). A refusal
+  // means nothing was ended (ledger #4363), so the page says so and stays signed in, with
+  // focus kept on the button, rather than reloading as if it had worked.
   async function signOut() {
     try {
       await post("/auth/logout", "");
-    } catch (_) {
-      // The server session expires on its own.
+    } catch (err) {
+      flash("Sign-out did not happen: " + ((err && err.message) || String(err)), "error");
+      $("auth-logout").focus();
+      return;
     }
     location.reload();
   }

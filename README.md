@@ -239,6 +239,16 @@ the passkey was created with until it is re-created.
   IRI: no caller may type one as an author, and one stored as typed text (no committer) reads
   as that text, never as the person.
 
+  ⚠ **The migration is one way.** A gonk binary from before people finds no grants on the
+  migrated passkey entries (its `entry_grants` reads `grant` or `grants` there, and they are
+  now on the person), so after a downgrade every passkey sign-in fails closed. Rolling back
+  means restoring `gonk/clients.json.before-people` over `gonk/clients.json`, which loses
+  every enrollment, revocation and grant change made since the upgrade. The backup is
+  written once, at the first migration, and never again: after a downgrade and a re-upgrade
+  it is stale, and still holds the file from before the first one. A draft saved by
+  `ikigai-script` or `urn:nl:sparql` under a passkey IRI is not migrated: it stays under that
+  passkey IRI and invisible to the person (it fails closed) until it is published.
+
   A second device for one person: `ikigai-gonk passkey invite --person <person IRI | label>`
   prints a one-time link whose passkey names that person and holds its grants from its first
   request (no grant is written; it cannot be redeemed to widen a passkey already signed in).
@@ -256,9 +266,13 @@ the passkey was created with until it is re-created.
   whose `ledger:claimPrincipal` is an enrolled passkey's IRI to that passkey's person, so the
   person renews, releases and closes it (one stderr line says how many moved; release and
   takeover events keep the principal they recorded), and a person with no dispatcher cursor
-  of its own reads on from the one its passkey acknowledged. Signing out from a page ends
-  every session of the person, since its principal does not say which passkey the browser
-  used. A sign-in or sign-out line names the person while the passkey is enrolled, and the
+  of its own reads on from the one its passkey acknowledged. **Signing out from a page ends
+  every device's session of the person**, not just this browser's (the button says "Sign out
+  on all devices"); a sign-out that cannot read the person's passkeys ends nothing and says
+  so, rather than answering as signed out. The page's `session` answer, its idle clock, the
+  passkey add-grant asks the authenticator for, and a re-assertion are the request's own
+  session's, never another device's: the door hands the passkey resource the session its
+  cookie names beside the person. A sign-in or sign-out line names the person while the passkey is enrolled, and the
   passkey IRI once it is revoked.
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under

@@ -160,6 +160,9 @@ fn a_signed_in_redemption_adds_the_grant_to_that_passkey_only() {
     assert!(line.contains(" added=writer"), "{line}");
     assert!(line.contains(" grant=viewer,writer"), "{line}");
     assert!(line.contains(" invite=sha256:"), "{line}");
+    // ★ Ledger #4363: the person whose grants these are.
+    let person = &who.enrolled.person;
+    assert!(line.ends_with(&format!(" person={person}")), "{line}");
     assert!(
         !log.contains(&code),
         "the code itself is never written: {log}"
@@ -215,7 +218,7 @@ fn a_redemption_without_a_fresh_assertion_is_refused() {
         .add_grant(body.as_bytes(), NOW)
         .expect_err("another passkey");
     assert!(
-        refused.contains("not the one you are signed in with"),
+        refused.contains("not a passkey of the person you are signed in as"),
         "{refused}"
     );
 
@@ -345,9 +348,10 @@ fn removing_one_grant_from_a_passkey_touches_nothing_else() {
     let who = rp.identity(&session, NOW).expect("still signed in");
     assert_eq!(who.enrolled.grants, ["writer"]);
     assert!(log(&layout).contains(&format!(
-        "{} {} label=software-laptop grant=writer removed=viewer",
+        "{} {} label=software-laptop grant=writer removed=viewer person={}",
         identity::GRANT_REMOVED,
-        identity::passkey_iri(&laptop_id)
+        identity::passkey_iri(&laptop_id),
+        now.person
     )));
 
     let refused =

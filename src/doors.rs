@@ -1138,7 +1138,49 @@ fn http_scopes_for(
             door.anonymous_sparql_budget_ms,
         ));
     }
+    // ★ Ledger #4363: the principal names a PERSON, which no longer says which session this
+    // is, so a request to the passkey resource also carries its own session's key
+    // ([`session_marker`]). Only there: on every other route it would split the cache per
+    // session, and nothing else reads it. It is not authority: no resource is named by it.
+    if signed_in && is_auth_path(request) {
+        if let Some(token) = session_token(request) {
+            scopes.push(session_marker(&identity::session_id(&token)));
+        }
+    }
     scopes
+}
+
+/// Every session marker starts here: under [`crate::admit::DOOR_PREFIX`], so no grant may name
+/// one, and a caller of the HTTP door cannot add one to the capability the door computes.
+pub const SESSION_MARKER_PREFIX: &str = "urn:iki:gonk:door:session:";
+
+/// The marker naming the session whose key ([`identity::session_id`], the SHA-256 of its
+/// token) is `key`: what the HTTP door adds to a signed-in request to the passkey resource
+/// (`/auth/…`), so that resource answers for the request's OWN session and not another
+/// device's session of the same person (ledger #4363).
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_gonk::doors::{session_key, session_marker};
+/// let cap = Capability::scoped([session_marker("ab12")]);
+/// assert_eq!(session_key(&cap), Some("ab12"));
+/// assert_eq!(session_key(&Capability::scoped(["urn:cap:ledger:read:default"])), None);
+/// assert_eq!(session_key(&Capability::root()), None);
+/// ```
+pub fn session_marker(key: &str) -> String {
+    format!("{SESSION_MARKER_PREFIX}{key}")
+}
+
+/// The session key [`session_marker`] put in `capability`, if any.
+pub fn session_key(capability: &Capability) -> Option<&str> {
+    capability
+        .scopes()?
+        .iter()
+        .find_map(|scope| scope.strip_prefix(SESSION_MARKER_PREFIX))
+}
+
+fn is_auth_path(request: &HttpRequest) -> bool {
+    request.path == "/auth" || request.path.starts_with("/auth/")
 }
 
 /// The names this door answers to: the three loopback names, and the bound address's own IP
