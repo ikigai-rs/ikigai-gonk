@@ -580,18 +580,126 @@ fn mirror_grants(object: &mut Map<String, Value>, grants: &[String]) -> bool {
 /// ★ **Every migrated entry keeps its person's grants as `grants`** ([`mirror_grants`]), so
 /// an older gonk still starts on the file. A mirror that differs from its person's list is
 /// rewritten here, with a warning.
-pub(crate) fn migrate_locked(layout: &Layout, _lock: &quic::FileLock) -> Result<Migration, String> {
-    let path = layout.clients_json();
-    let before = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Migration::default()),
-        Err(e) => return Err(format!("reading {}: {e}", path.display())),
-    };
-    let mut doc = quic::read_object(&path)?;
+pub(crate) fn migrate_locked(layout: &Layout, lock: &quic::FileLock) -> Result<Migration, String> {
+    let staged = Staged::read(layout, lock)?;
+    if !staged.due() {
+        return Ok(staged.done);
+    }
+    let doc = staged.doc.clone();
+    staged.commit(layout, doc)
+}
+
+/// `clients.json` read under the clients lock and migrated IN MEMORY ([`migrate_doc`]), not
+/// yet written (ledger #4432). A command validates itself against [`Staged::doc`], the file
+/// as the migration leaves it, and only a command that will succeed calls [`Staged::commit`]:
+/// ONE write of the file, the migration and the change together, with the pre-people backup
+/// taken just before it. A refusal returns before any write, so it leaves the file
+/// byte-identical and takes no backup.
+struct Staged {
+    /// The file as it is on disk; `None` when there is none.
+    before: Option<String>,
+    /// The file as the migration leaves it (unchanged when none is due).
+    doc: Map<String, Value>,
+    /// What the migration will have done once committed (no backup yet).
+    done: Migration,
+}
+
+impl Staged {
+    fn read(layout: &Layout, _lock: &quic::FileLock) -> Result<Staged, String> {
+        let path = layout.clients_json();
+        let before = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Staged {
+                    before: None,
+                    doc: Map::new(),
+                    done: Migration::default(),
+                })
+            }
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        let doc = quic::read_object(&path)?;
+        let (doc, done) = migrate_doc(&path, doc)?;
+        Ok(Staged {
+            before: Some(before),
+            doc,
+            done,
+        })
+    }
+
+    /// Whether the migration has anything to write.
+    fn due(&self) -> bool {
+        self.done.migrated > 0 || self.done.mirrored > 0
+    }
+
+    /// The enrolled passkeys of the migrated file, checked as [`checked_passkeys`] checks
+    /// the file on disk: the file as it is must parse as the QUIC door reads it.
+    fn checked_passkeys(&self, layout: &Layout) -> Result<BTreeMap<String, Enrolled>, String> {
+        let path = layout.clients_json();
+        if let Some(text) = &self.before {
+            quic::parse_enrolment(text).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        parse_passkeys(&self.doc).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Write `doc` (the migrated file with the command's change) as the new `clients.json`:
+    /// checked first, then the pre-people backup when this write migrates, then the file.
+    fn commit(self, layout: &Layout, doc: Map<String, Value>) -> Result<Migration, String> {
+        let text = quic::pretty(&Value::Object(doc))?;
+        // What is written must still be what the QUIC door reads.
+        quic::parse_enrolment(&text)?;
+        let mut done = self.done;
+        if done.migrated > 0 {
+            if let Some(before) = &self.before {
+                done.backup = Some(people_backup_of(layout, before)?);
+            }
+        }
+        quic::write_private(&layout.clients_json(), &text)?;
+        Ok(done)
+    }
+}
+
+/// Keep `before` (the file from before people) as [`people_backup`], or as a stamped file
+/// beside it when that one already holds a different file. Returns the file it is in.
+fn people_backup_of(layout: &Layout, before: &str) -> Result<std::path::PathBuf, String> {
+    let first = people_backup(layout);
+    match std::fs::read_to_string(&first) {
+        Ok(kept) if kept == before => Ok(first),
+        Ok(_) => {
+            let stamp = crate::backup::stamp_compact(now_seconds() * 1000);
+            let mut fresh = first.with_file_name(format!("clients.json.before-people-{stamp}"));
+            let mut n = 1;
+            while fresh.exists() {
+                n += 1;
+                fresh = first.with_file_name(format!("clients.json.before-people-{stamp}-{n}"));
+            }
+            quic::write_private(&fresh, before)?;
+            Ok(fresh)
+        }
+        Err(_) => {
+            quic::write_private(&first, before)?;
+            Ok(first)
+        }
+    }
+}
+
+/// The migration [`migrate_locked`] describes, on `doc` in memory: returns the file as it
+/// leaves it and what it did. Writes nothing.
+fn migrate_doc(
+    path: &std::path::Path,
+    mut doc: Map<String, Value>,
+) -> Result<(Map<String, Value>, Migration), String> {
     let enrolled = parse_passkeys(&doc)?;
-    let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
-        return Ok(Migration::default());
+    let mut passkeys = match doc.remove("passkeys") {
+        Some(Value::Object(map)) => map,
+        other => {
+            if let Some(value) = other {
+                doc.insert("passkeys".to_string(), value);
+            }
+            return Ok((doc, Migration::default()));
+        }
     };
+    let had_people = doc.contains_key("people");
     let mut people = match doc.remove("people") {
         None => Map::new(),
         Some(Value::Object(map)) => map,
@@ -664,37 +772,11 @@ pub(crate) fn migrate_locked(layout: &Layout, _lock: &quic::FileLock) -> Result<
             done.mirrored += 1;
         }
     }
-    if done.migrated == 0 && done.mirrored == 0 {
-        return Ok(done);
+    if done.migrated > 0 || done.mirrored > 0 || had_people {
+        doc.insert("people".to_string(), Value::Object(people));
     }
-    doc.insert("people".to_string(), Value::Object(people));
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
-    let text = quic::pretty(&Value::Object(doc))?;
-    quic::parse_enrolment(&text)?;
-    if done.migrated > 0 {
-        let first = people_backup(layout);
-        let backup = match std::fs::read_to_string(&first) {
-            Ok(kept) if kept == before => first,
-            Ok(_) => {
-                let stamp = crate::backup::stamp_compact(now_seconds() * 1000);
-                let mut fresh = first.with_file_name(format!("clients.json.before-people-{stamp}"));
-                let mut n = 1;
-                while fresh.exists() {
-                    n += 1;
-                    fresh = first.with_file_name(format!("clients.json.before-people-{stamp}-{n}"));
-                }
-                quic::write_private(&fresh, &before)?;
-                fresh
-            }
-            Err(_) => {
-                quic::write_private(&first, &before)?;
-                first
-            }
-        };
-        done.backup = Some(backup);
-    }
-    quic::write_private(&path, &text)?;
-    Ok(done)
+    Ok((doc, done))
 }
 
 /// A passkey entry's grant names: the list form `"grants": ["a", "b"]` this server writes, or
@@ -743,9 +825,21 @@ fn entry_grants(id: &str, entry: &Value) -> Result<Vec<String>, String> {
 /// here, so no other change to the file lands in between and is undone (ledger #2776).
 fn write_passkey(layout: &Layout, lock: &quic::FileLock, entry: &Enrolled) -> Result<(), String> {
     // ★ The migration first, under this lock (ledger #4368), so the backup it keeps is the
-    // file from before people, never one this write already changed.
-    migrated_by_cli(layout, lock)?;
-    let mut doc = quic::read_object(&layout.clients_json())?;
+    // file from before people, never one this write already changed; and in the same write
+    // as the change (ledger #4432).
+    let staged = Staged::read(layout, lock)?;
+    write_staged(layout, staged, entry)
+}
+
+/// [`write_passkey`] on a file already [`Staged`]: the migration and this entry, one write.
+fn write_staged(layout: &Layout, staged: Staged, entry: &Enrolled) -> Result<(), String> {
+    let mut doc = staged.doc.clone();
+    put_passkey(&mut doc, entry)?;
+    committed_by_cli(layout, staged, doc)
+}
+
+/// Put one passkey entry, and its person's grants, into a `clients.json` document.
+fn put_passkey(doc: &mut Map<String, Value>, entry: &Enrolled) -> Result<(), String> {
     let mut passkeys = match doc.remove("passkeys") {
         None => Map::new(),
         Some(Value::Object(map)) => map,
@@ -790,15 +884,16 @@ fn write_passkey(layout: &Layout, lock: &quic::FileLock, entry: &Enrolled) -> Re
     }
     doc.insert("people".to_string(), Value::Object(people));
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
-    let text = quic::pretty(&Value::Object(doc))?;
-    // What is written must still be what the QUIC door reads.
-    quic::parse_enrolment(&text)?;
-    quic::write_private(&layout.clients_json(), &text)
+    Ok(())
 }
 
-/// [`migrate_locked`] from a writer, printing what it did as a start does.
-fn migrated_by_cli(layout: &Layout, lock: &quic::FileLock) -> Result<(), String> {
-    let done = migrate_locked(layout, lock)?;
+/// [`Staged::commit`] from a writer, printing what the migration did as a start does.
+fn committed_by_cli(
+    layout: &Layout,
+    staged: Staged,
+    doc: Map<String, Value>,
+) -> Result<(), String> {
+    let done = staged.commit(layout, doc)?;
     if let Some(line) = migration_line(layout, &done) {
         eprintln!("{line}");
     }
@@ -855,17 +950,16 @@ pub fn checked_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, S
 /// happen; if it cannot be written the change stands and the error says so.
 pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
-    migrated_by_cli(layout, &lock)?;
-    let target = pick(layout, which)?;
-    let mut doc = quic::read_object(&layout.clients_json())?;
+    // ★ Migrated in memory, checked, and written only if it will succeed (ledger #4432).
+    let staged = Staged::read(layout, &lock)?;
+    let target = pick_from(&staged.checked_passkeys(layout)?, which)?;
+    let mut doc = staged.doc.clone();
     let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
         return Err("`passkeys` in clients.json must be an object".to_string());
     };
     passkeys.remove(&target.credential_id);
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
-    let text = quic::pretty(&Value::Object(doc))?;
-    quic::parse_enrolment(&text)?;
-    quic::write_private(&layout.clients_json(), &text)?;
+    committed_by_cli(layout, staged, doc)?;
     drop(lock);
     record(layout, REVOKED, &target, now_ms).map_err(|e| {
         format!(
@@ -1036,7 +1130,8 @@ pub fn remove_grant(
     now_ms: u64,
 ) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
-    let mut target = pick(layout, which)?;
+    let staged = Staged::read(layout, &lock)?;
+    let mut target = pick_from(&staged.checked_passkeys(layout)?, which)?;
     if !target.grants.iter().any(|g| g == grant) {
         return Err(format!(
             "passkey `{}` does not hold grant `{grant}` (it holds {}); nothing was written",
@@ -1052,7 +1147,7 @@ pub fn remove_grant(
         ));
     }
     target.grants.retain(|g| g != grant);
-    write_passkey(layout, &lock, &target)?;
+    write_staged(layout, staged, &target)?;
     drop(lock);
     record_with(
         layout,
@@ -1106,7 +1201,8 @@ pub fn add_grant(
     now_ms: u64,
 ) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
-    let mut target = pick(layout, which)?;
+    let staged = Staged::read(layout, &lock)?;
+    let mut target = pick_from(&staged.checked_passkeys(layout)?, which)?;
     if target.grants.iter().any(|g| g == grant) {
         return Err(format!(
             "passkey `{}` already holds grant `{grant}` (it holds {}); nothing was written",
@@ -1124,7 +1220,7 @@ pub fn add_grant(
     })?;
     let before = target.clone();
     target.grants.push(grant.to_string());
-    write_passkey(layout, &lock, &target)?;
+    write_staged(layout, staged, &target)?;
     let extra = format!(" added={} by={BY_OWNER}", encoded(grant));
     if let Err(e) = record_with(layout, GRANT_ADDED, &target, now_ms, &extra) {
         // ★ No widening goes unrecorded: undone, under the same lock.
@@ -1144,13 +1240,17 @@ pub fn add_grant(
 /// `passkey list` prints it), or the label of exactly one person. Returns the IRI and the
 /// person.
 pub fn resolve_person(layout: &Layout, key: &str) -> Result<(String, Person), String> {
-    let doc = quic::read_object(&layout.clients_json())?;
+    resolve_person_in(&quic::read_object(&layout.clients_json())?, key)
+}
+
+/// [`resolve_person`] in a `clients.json` document.
+fn resolve_person_in(doc: &Map<String, Value>, key: &str) -> Result<(String, Person), String> {
     // Read through the passkeys too, so a person is found even in a file not yet migrated.
-    let mut people: BTreeMap<String, Person> = parse_people(&doc)?
+    let mut people: BTreeMap<String, Person> = parse_people(doc)?
         .into_iter()
         .map(|(id, p)| (person_iri(&id), p))
         .collect();
-    for e in parse_passkeys(&doc)?.into_values() {
+    for e in parse_passkeys(doc)?.into_values() {
         people.entry(e.person.clone()).or_insert(Person {
             label: e.label.clone(),
             grants: e.grants.clone(),
@@ -1197,8 +1297,9 @@ pub fn attach(
     now_ms: u64,
 ) -> Result<(Enrolled, String), String> {
     let lock = layout.lock_clients()?;
-    let mut target = pick(layout, which)?;
-    let (iri, to) = resolve_person(layout, person)?;
+    let staged = Staged::read(layout, &lock)?;
+    let mut target = pick_from(&staged.checked_passkeys(layout)?, which)?;
+    let (iri, to) = resolve_person_in(&staged.doc, person)?;
     if target.person == iri {
         return Err(format!(
             "passkey `{}` already names person `{}` ({iri}); nothing was written",
@@ -1208,7 +1309,7 @@ pub fn attach(
     let before = target.clone();
     target.person = iri;
     target.grants = to.grants;
-    write_passkey(layout, &lock, &target)?;
+    write_staged(layout, staged, &target)?;
     let extra = format!(
         " person={} before={} by={BY_OWNER}",
         encoded(&target.person),
@@ -1228,7 +1329,11 @@ pub fn attach(
 
 /// The ONE enrolled passkey `which` names, from a file that is whole ([`checked_passkeys`]).
 fn pick(layout: &Layout, which: Which<'_>) -> Result<Enrolled, String> {
-    let enrolled = checked_passkeys(layout)?;
+    pick_from(&checked_passkeys(layout)?, which)
+}
+
+/// The ONE passkey of `enrolled` that `which` names.
+fn pick_from(enrolled: &BTreeMap<String, Enrolled>, which: Which<'_>) -> Result<Enrolled, String> {
     let matches: Vec<&Enrolled> = enrolled
         .values()
         .filter(|entry| match which {

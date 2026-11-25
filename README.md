@@ -231,7 +231,9 @@ the passkey was created with until it is re-created.
   (`rp_id`, `localhost` for every passkey so far). A passkey's grants are its person's, so
   every passkey of one person holds the same authority. A `clients.json` from before this is
   migrated when the server starts, and before any `ikigai-gonk passkey` command writes it
-  (under the same lock, so the backup never holds an entry that command already changed):
+  (under the same lock, so the backup never holds an entry that command already changed, and
+  in the same write as the command's change: a command that is refused writes nothing, not
+  the migration and not a backup):
   each passkey gets a person of its own carrying its label and grants (nothing is merged),
   the file is rewritten whole and the old one is kept as `gonk/clients.json.before-people`;
   a second start changes nothing. An entry from before people for a credential whose person

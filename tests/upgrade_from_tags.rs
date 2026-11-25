@@ -383,3 +383,160 @@ fn a_re_upgrade_names_a_fresh_backup() {
         .unwrap()
         .contains_key("dGFibGV0"));
 }
+
+/// Every `clients.json.before-people*` file beside `clients.json`.
+fn backups(layout: &Layout) -> Vec<std::path::PathBuf> {
+    let dir = layout.clients_json().parent().unwrap().to_path_buf();
+    let mut out: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("clients.json.before-people"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// One passkey command run on a layout, named for the assertion messages.
+type Refusal = (&'static str, fn(&Layout) -> Result<(), String>);
+type Success = (&'static str, fn(&Layout));
+
+/// ★ Round 2 (ledger #4432): a REFUSED passkey command writes nothing, even on a file the
+/// people migration is due on: not the change, not the migration, not a backup.
+#[test]
+fn a_refused_command_on_an_old_form_file_writes_nothing() {
+    let refusals: [Refusal; 9] = [
+        ("grant add, already held", |l| {
+            identity::add_grant(l, Which::Label("laptop"), "brian", NOW * 1000).map(drop)
+        }),
+        ("grant add, undefined grant", |l| {
+            identity::add_grant(l, Which::Label("laptop"), "nosuch", NOW * 1000).map(drop)
+        }),
+        ("grant add, no such passkey", |l| {
+            identity::add_grant(l, Which::Label("nobody"), "agent", NOW * 1000).map(drop)
+        }),
+        ("remove-grant, not held", |l| {
+            identity::remove_grant(l, Which::Label("laptop"), "agent", NOW * 1000).map(drop)
+        }),
+        ("remove-grant, the last one", |l| {
+            identity::remove_grant(l, Which::Credential("cGhvbmU"), "reviewer", NOW * 1000)
+                .map(drop)
+        }),
+        ("attach, no such person", |l| {
+            identity::attach(l, Which::Label("laptop"), "nobody", NOW * 1000).map(drop)
+        }),
+        ("attach, already that person", |l| {
+            identity::attach(l, Which::Label("laptop"), "laptop", NOW * 1000).map(drop)
+        }),
+        ("revoke, no such label", |l| {
+            identity::revoke(l, Which::Label("nobody"), NOW * 1000).map(drop)
+        }),
+        ("revoke, no such credential", |l| {
+            identity::revoke(l, Which::Credential("bm9ib2R5"), NOW * 1000).map(drop)
+        }),
+    ];
+    for tag in TAGS {
+        for (what, run) in refusals {
+            let (_dir, layout) = seeded(tag);
+            let before = std::fs::read(layout.clients_json()).unwrap();
+            assert!(run(&layout).is_err(), "{tag} {what}: refused");
+            assert_eq!(
+                std::fs::read(layout.clients_json()).unwrap(),
+                before,
+                "{tag} {what}: clients.json byte-identical"
+            );
+            assert_eq!(
+                backups(&layout),
+                Vec::<std::path::PathBuf>::new(),
+                "{tag} {what}"
+            );
+            assert!(
+                !identity::audit_log(&layout).exists(),
+                "{tag} {what}: no audit line"
+            );
+        }
+    }
+}
+
+/// ★ Round 2: an ambiguous label, as `passkey_313` refuses it, on an old-form file.
+#[test]
+fn a_refused_ambiguous_revoke_on_an_old_form_file_writes_nothing() {
+    let (_dir, layout) = seeded("v0.24.2");
+    let mut doc = read(&layout.clients_json());
+    doc["passkeys"]["cGhvbmU"]["label"] = json!("laptop");
+    write(&layout.clients_json(), &doc);
+    let before = std::fs::read(layout.clients_json()).unwrap();
+    let why = identity::revoke(&layout, Which::Label("laptop"), NOW * 1000).unwrap_err();
+    assert!(why.contains("--credential"), "{why}");
+    assert_eq!(std::fs::read(layout.clients_json()).unwrap(), before);
+    assert!(backups(&layout).is_empty());
+}
+
+/// ★ Round 2: the same commands SUCCEEDING on an old-form file write the migrated file, the
+/// change with it, and the pre-people backup.
+#[test]
+fn a_command_that_succeeds_on_an_old_form_file_writes_the_migration_and_the_backup() {
+    let successes: [Success; 4] = [
+        ("grant add", |l| {
+            identity::add_grant(l, Which::Label("laptop"), "agent", NOW * 1000).unwrap();
+            assert!(identity::read_passkeys(l).unwrap()["bGFwdG9w"]
+                .grants
+                .contains(&"agent".to_string()));
+        }),
+        ("remove-grant", |l| {
+            identity::add_grant(l, Which::Credential("cGhvbmU"), "agent", NOW * 1000).unwrap();
+            identity::remove_grant(l, Which::Credential("cGhvbmU"), "agent", NOW * 1000).unwrap();
+            assert_eq!(
+                identity::read_passkeys(l).unwrap()["cGhvbmU"].grants,
+                ["reviewer"]
+            );
+        }),
+        ("attach", |l| {
+            identity::attach(l, Which::Credential("cGhvbmU"), "laptop", NOW * 1000).unwrap();
+            let got = identity::read_passkeys(l).unwrap();
+            assert_eq!(got["cGhvbmU"].person, got["bGFwdG9w"].person);
+        }),
+        ("revoke", |l| {
+            identity::revoke(l, Which::Credential("cGhvbmU"), NOW * 1000).unwrap();
+            assert!(!identity::read_passkeys(l).unwrap().contains_key("cGhvbmU"));
+        }),
+    ];
+    for tag in TAGS {
+        for (what, run) in successes {
+            let (_dir, layout) = seeded(tag);
+            let before = std::fs::read_to_string(layout.clients_json()).unwrap();
+            run(&layout);
+            assert_eq!(
+                backups(&layout),
+                [identity::people_backup(&layout)],
+                "{tag} {what}: one backup"
+            );
+            assert_eq!(
+                std::fs::read_to_string(identity::people_backup(&layout)).unwrap(),
+                before,
+                "{tag} {what}: the backup is the file before people"
+            );
+            let doc = read(&layout.clients_json());
+            assert!(doc["people"].is_object(), "{tag} {what}: {doc}");
+            for (id, entry) in doc["passkeys"].as_object().unwrap() {
+                assert!(
+                    entry["person"].is_string() && entry["rp_id"].is_string(),
+                    "{tag} {what}: {id} migrated: {doc}"
+                );
+            }
+            assert!(
+                old_reader_list(&doc).is_ok(),
+                "{tag} {what}: an old gonk starts"
+            );
+            // Nothing left for a start to migrate.
+            assert_eq!(
+                identity::migrate_people(&layout).unwrap(),
+                0,
+                "{tag} {what}"
+            );
+        }
+    }
+}
