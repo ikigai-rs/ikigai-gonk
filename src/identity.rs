@@ -16,6 +16,16 @@
 //! gonk/invites.json   { "<sha256 of an invite code>": { "grant": "brian", "expires": 1757… } }
 //! ```
 //!
+//! ★ **People** (ledger [#4305](http://localhost:1062/l/default/item/4305)): `clients.json`
+//! also holds `"people": { "<id>": { "label": "brian", "grants": ["brian"] } }`, and each
+//! passkey entry names `"person": "urn:iki:gonk:person:id:<id>"` and `"rp_id": "localhost"`
+//! in place of its own grants. People live in `clients.json`, not a file of their own, so a
+//! passkey and the person it names are written together, under the one clients lock, in one
+//! rename: no reader ever sees a passkey naming a person who is not there yet. An entry from
+//! before people is read as a person of its own ([`parse_passkeys`]) and written so at the
+//! next start ([`migrate_people`]). What follows says "a passkey's grants": they are its
+//! person's.
+//!
 //! A passkey holds a LIST of grant names (ledger [#3388](http://localhost:1062/l/default/item/3388);
 //! the single-name `"grant": "brian"` earlier servers wrote is still read) and its scopes are
 //! their union. A grant is shared, so one person is widened by adding a grant to their passkey
@@ -293,6 +303,38 @@ pub fn principal_refusal(id: &str) -> Option<String> {
         })
 }
 
+/// The prefix of a person's IRI (ledger [#4305](http://localhost:1062/l/default/item/4305)):
+/// `urn:iki:gonk:person:id:<id>`. A person is what several passkeys name — a laptop's, a
+/// phone's, one registered at another origin — and holds the label and the grant list they
+/// share. The `<id>` is short, generated and base64url, so it needs no escaping and leaves the
+/// IRI far under core's principal length limit.
+pub const PERSON_IRI_PREFIX: &str = "urn:iki:gonk:person:id:";
+
+/// The IRI of the person `id` names.
+pub fn person_iri(id: &str) -> String {
+    format!("{PERSON_IRI_PREFIX}{id}")
+}
+
+/// The id a [`person_iri`] names, or `None` for any other text.
+pub fn person_id(iri: &str) -> Option<&str> {
+    iri.strip_prefix(PERSON_IRI_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
+/// The person id an enrollment from before people existed is migrated to: the first 9 bytes
+/// of the SHA-256 of its credential id, base64url (12 characters). Derived, not random, so a
+/// file read before its migration is written names the same person the migration writes, and
+/// a second migration has nothing to decide.
+fn migrated_person_id(credential_id: &str) -> String {
+    let digest = Sha256::digest(credential_id.as_bytes());
+    URL_SAFE_NO_PAD.encode(&digest[..9])
+}
+
+/// A fresh person id: 9 random bytes, base64url (12 characters).
+fn new_person_id() -> Result<String, String> {
+    random_b64(9)
+}
+
 /// The credential id a [`passkey_iri`] names, or `None` for any other text — a plain-name
 /// author written by hand, or by the cli.
 pub fn passkey_credential(author: &str) -> Option<&str> {
@@ -304,7 +346,13 @@ pub fn passkey_credential(author: &str) -> Option<&str> {
 pub struct Enrolled {
     /// base64url of the credential id.
     pub credential_id: String,
-    /// The grant names — keys of `grants.json` — this passkey holds, in the order they were
+    /// The person this passkey names ([`person_iri`]). Several passkeys may name one person.
+    pub person: String,
+    /// The WebAuthn relying-party id this passkey was registered at ([`RP_ID`] for every
+    /// passkey so far). A passkey signs in only at that relying party.
+    pub rp_id: String,
+    /// ★ Its PERSON's grant names (ledger #4305): grants live on the person, so every passkey
+    /// of one person holds the same list. The grant names — keys of `grants.json` — this passkey holds, in the order they were
     /// added, never empty. Its scopes are the union of theirs ([`scopes_of_all`]). A grant is
     /// shared by every passkey that holds it, so a passkey is WIDENED by adding a grant to its
     /// own list ([`Passkeys::add_grant`]), never by editing a shared grant (ledger
@@ -341,6 +389,7 @@ pub(crate) fn parse_passkeys(
     let map = map
         .as_object()
         .ok_or("`passkeys` in clients.json must be an object of credential id → entry")?;
+    let people = parse_people(doc)?;
     for (id, entry) in map {
         let field = |name: &str| {
             entry
@@ -349,12 +398,32 @@ pub(crate) fn parse_passkeys(
                 .map(str::to_string)
                 .ok_or_else(|| format!("passkey `{id}` has no `{name}`"))
         };
-        let grants = entry_grants(id, entry)?;
+        let (person, grants, label) = match entry.get("person") {
+            None | Some(Value::Null) => {
+                // An enrollment from before people (ledger #4305): its own person, carrying
+                // its grants, exactly as [`migrate_people`] writes it.
+                let grants = entry_grants(id, entry)?;
+                let label = field("label").unwrap_or_else(|_| grants[0].clone());
+                (person_iri(&migrated_person_id(id)), grants, label)
+            }
+            Some(Value::String(iri)) => {
+                let who = person_id(iri)
+                    .and_then(|pid| people.get(pid))
+                    .ok_or_else(|| {
+                        format!("passkey `{id}` names person `{iri}`, who is not in `people`")
+                    })?;
+                let label = field("label").unwrap_or_else(|_| who.label.clone());
+                (iri.clone(), who.grants.clone(), label)
+            }
+            Some(_) => return Err(format!("passkey `{id}`'s `person` must be a person IRI")),
+        };
         out.insert(
             id.clone(),
             Enrolled {
                 credential_id: id.clone(),
-                label: field("label").unwrap_or_else(|_| grants[0].clone()),
+                person,
+                rp_id: field("rp_id").unwrap_or_else(|_| RP_ID.to_string()),
+                label,
                 grants,
                 public_key: field("public_key")?,
                 sign_count: entry
@@ -366,6 +435,101 @@ pub(crate) fn parse_passkeys(
         );
     }
     Ok(out)
+}
+
+/// One person, as the `people` section of `clients.json` holds it (ledger #4305).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    /// The person's label: what an author naming the person, or any of its passkeys, reads as.
+    pub label: String,
+    /// The grant names every passkey of this person holds, never empty.
+    pub grants: Vec<String>,
+}
+
+/// The `people` section of `clients.json`, by person id. Absent: none.
+pub(crate) fn parse_people(doc: &Map<String, Value>) -> Result<BTreeMap<String, Person>, String> {
+    let mut out = BTreeMap::new();
+    let Some(map) = doc.get("people") else {
+        return Ok(out);
+    };
+    let map = map
+        .as_object()
+        .ok_or("`people` in clients.json must be an object of person id → entry")?;
+    for (id, entry) in map {
+        let grants = entry_grants(id, entry).map_err(|e| e.replacen("passkey", "person", 1))?;
+        let label = entry
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| grants[0].clone());
+        out.insert(id.clone(), Person { label, grants });
+    }
+    Ok(out)
+}
+
+/// The file [`migrate_people`] keeps the pre-migration `clients.json` in.
+pub fn people_backup(layout: &Layout) -> std::path::PathBuf {
+    layout
+        .clients_json()
+        .with_file_name("clients.json.before-people")
+}
+
+/// Give every enrollment from before people its own person (ledger #4305): a new `people`
+/// entry carrying that passkey's label and grants, and `person` and `rp_id = "localhost"` on
+/// the passkey. Nothing is merged: two passkeys become two people, and `passkey attach` is how
+/// an operator makes them one. The file as it was is kept as [`people_backup`] (never
+/// overwritten once there), and the new one is written whole and renamed into place. Returns
+/// how many passkeys were migrated; a file with none to migrate is not written, so a second
+/// run changes nothing.
+pub fn migrate_people(layout: &Layout) -> Result<usize, String> {
+    let path = layout.clients_json();
+    match std::fs::metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        _ => {}
+    }
+    let _lock = layout.lock_clients()?;
+    let before =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut doc = quic::read_object(&path)?;
+    let enrolled = parse_passkeys(&doc)?;
+    let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
+        return Ok(0);
+    };
+    let mut people = match doc.remove("people") {
+        None => Map::new(),
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err("`people` in clients.json must be an object".to_string()),
+    };
+    let mut migrated = 0;
+    for (id, entry) in passkeys.iter_mut() {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        if object.get("person").is_some_and(|p| !p.is_null()) {
+            continue;
+        }
+        let e = &enrolled[id];
+        let pid = person_id(&e.person).unwrap_or_default().to_string();
+        people.insert(pid, json!({ "label": e.label, "grants": e.grants }));
+        object.remove("grant");
+        object.remove("grants");
+        object.insert("person".to_string(), Value::String(e.person.clone()));
+        object.insert("rp_id".to_string(), Value::String(e.rp_id.clone()));
+        migrated += 1;
+    }
+    if migrated == 0 {
+        return Ok(0);
+    }
+    doc.insert("people".to_string(), Value::Object(people));
+    doc.insert("passkeys".to_string(), Value::Object(passkeys));
+    let text = quic::pretty(&Value::Object(doc))?;
+    quic::parse_enrolment(&text)?;
+    let backup = people_backup(layout);
+    if !backup.exists() {
+        quic::write_private(&backup, &before)?;
+    }
+    quic::write_private(&path, &text)?;
+    Ok(migrated)
 }
 
 /// A passkey entry's grant names: the list form `"grants": ["a", "b"]` this server writes, or
@@ -418,15 +582,36 @@ fn write_passkey(layout: &Layout, _lock: &quic::FileLock, entry: &Enrolled) -> R
         Some(Value::Object(map)) => map,
         Some(_) => return Err("`passkeys` in clients.json must be an object".to_string()),
     };
+    let mut people = match doc.remove("people") {
+        None => Map::new(),
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err("`people` in clients.json must be an object".to_string()),
+    };
+    let pid = person_id(&entry.person)
+        .ok_or_else(|| format!("passkey `{}` names no person", entry.label))?;
+    // ★ Grants are the person's (ledger #4305): writing this passkey's list writes its
+    // person's, which every other passkey of that person reads. The person's label stays.
+    let label = people
+        .get(pid)
+        .and_then(|p| p.get("label"))
+        .and_then(Value::as_str)
+        .unwrap_or(&entry.label)
+        .to_string();
+    people.insert(
+        pid.to_string(),
+        json!({ "label": label, "grants": entry.grants }),
+    );
     passkeys.insert(
         entry.credential_id.clone(),
         json!({
-            "grants": entry.grants,
+            "person": entry.person,
+            "rp_id": entry.rp_id,
             "label": entry.label,
             "public_key": entry.public_key,
             "sign_count": entry.sign_count,
         }),
     );
+    doc.insert("people".to_string(), Value::Object(people));
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
     let text = quic::pretty(&Value::Object(doc))?;
     // What is written must still be what the QUIC door reads.
@@ -919,6 +1104,20 @@ fn invite_grant(layout: &Layout, code: &str) -> Result<String, String> {
         .ok_or_else(|| "the invite names no grant".to_string())
 }
 
+/// Refuse a passkey registered at a relying party other than this server's [`RP_ID`] (ledger
+/// #4305): a passkey is bound to the site it was made for, and one made for another origin
+/// must not sign in here, whatever its signature says.
+fn refuse_other_rp(enrolled: &Enrolled) -> Result<(), String> {
+    if enrolled.rp_id != RP_ID {
+        return Err(format!(
+            "passkey `{}` was registered for the site `{}`, and this page is `{RP_ID}`: a \
+             passkey signs in only at the site it was registered for",
+            enrolled.label, enrolled.rp_id
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse adding `grant` to a passkey that already holds it: nothing would change, and the
 /// invite is better kept for someone it would widen.
 fn refuse_held(enrolled: &Enrolled, grant: &str) -> Result<(), String> {
@@ -1281,6 +1480,17 @@ impl Passkeys {
     /// written while no server ran still ends what it names. (A log now shorter than that was
     /// replaced, and is read from its start, which can only end sessions.)
     pub fn new_at(layout: Layout, port: u16, now: u64) -> Passkeys {
+        // ★ Enrollments from before people get theirs now (ledger #4305). A file this cannot
+        // migrate is read as it is ([`parse_passkeys`] reads the old form) and reported here.
+        match migrate_people(&layout) {
+            Ok(0) => {}
+            Ok(n) => eprintln!(
+                "gonk: gave {n} passkey(s) a person each in {} (the file before is {})",
+                layout.clients_json().display(),
+                people_backup(&layout).display()
+            ),
+            Err(e) => eprintln!("gonk: passkeys were not given people: {e}"),
+        }
         let log_len = std::fs::metadata(audit_log(&layout))
             .map(|m| m.len())
             .unwrap_or(0);
@@ -1532,14 +1742,27 @@ impl Passkeys {
         read_passkeys(&self.layout).is_ok_and(|enrolled| enrolled.is_empty())
     }
 
-    /// Every enrolled passkey's CURRENT label, by credential id — what a page renders a
-    /// [`passkey_iri`] author as. Re-read from `clients.json` on every call, like every
+    /// The CURRENT label of every author IRI this server names, keyed by the IRI: each
+    /// [`person_iri`] and each enrolled [`passkey_iri`], both as their PERSON's label (ledger
+    /// #4305), so an author written before people existed (a passkey IRI) and one written
+    /// since (a person IRI) read alike — what a page renders an author as. Re-read from `clients.json` on every call, like every
     /// other use of that file, so a relabel shows on the next request; an unreadable file
     /// is an empty map here, and a caller falls back to the IRI's tail.
     pub fn labels(&self) -> BTreeMap<String, String> {
-        read_passkeys(&self.layout)
-            .map(|m| m.into_iter().map(|(id, e)| (id, e.label)).collect())
+        let Ok(doc) = quic::read_object(&self.layout.clients_json()) else {
+            return BTreeMap::new();
+        };
+        let mut out: BTreeMap<String, String> = parse_people(&doc)
             .unwrap_or_default()
+            .into_iter()
+            .map(|(id, p)| (person_iri(&id), p.label))
+            .collect();
+        for e in parse_passkeys(&doc).unwrap_or_default().into_values() {
+            let label = out.get(&e.person).cloned().unwrap_or(e.label);
+            out.entry(e.person.clone()).or_insert_with(|| label.clone());
+            out.insert(passkey_iri(&e.credential_id), label);
+        }
+        out
     }
 
     /// A fresh single-use challenge, base64url: a random nonce, `purpose` and the expiry,
@@ -1666,6 +1889,8 @@ impl Passkeys {
         self.answer_challenge(&challenge, expires, now)?;
         let entry = Enrolled {
             credential_id: id,
+            person: person_iri(&new_person_id()?),
+            rp_id: RP_ID.to_string(),
             grants: vec![grant],
             label,
             public_key: URL_SAFE_NO_PAD.encode(&key),
@@ -1740,6 +1965,7 @@ impl Passkeys {
         let enrolled = read_passkeys(&self.layout)?
             .remove(&id)
             .ok_or("this passkey is not enrolled on this server")?;
+        refuse_other_rp(&enrolled)?;
         let credential = RegisteredCredential::from_spki_der(
             b64(&id, "id")?,
             &b64(&enrolled.public_key, "public_key")?,
@@ -2471,6 +2697,149 @@ mod tests {
     use super::*;
     use crate::grants::{grants_for, Authority};
 
+    /// An old `clients.json`: two passkeys, each with its own grants and no person.
+    fn old_clients(layout: &Layout) -> String {
+        let text = r#"{
+  "passkeys": {
+    "bGFwdG9w": { "grants": ["brian", "reviewer"], "label": "laptop", "public_key": "AAAA", "sign_count": 3 },
+    "cGhvbmU": { "grant": "brian", "label": "phone", "public_key": "BBBB" }
+  }
+}
+"#;
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        std::fs::write(layout.clients_json(), text).unwrap();
+        text.to_string()
+    }
+
+    /// ★ Ledger #4305: an old file migrates to one person per passkey, carrying its label and
+    /// grants, at `rp_id = "localhost"`; the old file is kept beside it; a second run is a no-op.
+    #[test]
+    fn an_old_file_migrates_to_one_person_per_passkey_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let before = old_clients(&layout);
+        let read_before = read_passkeys(&layout).unwrap();
+        assert_eq!(migrate_people(&layout).unwrap(), 2);
+        assert_eq!(
+            std::fs::read_to_string(people_backup(&layout)).unwrap(),
+            before
+        );
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        let people = parse_people(&doc).unwrap();
+        assert_eq!(people.len(), 2, "nothing is merged");
+        let passkeys = read_passkeys(&layout).unwrap();
+        assert_eq!(
+            passkeys, read_before,
+            "the old form reads as the migrated one"
+        );
+        let laptop = &passkeys["bGFwdG9w"];
+        let phone = &passkeys["cGhvbmU"];
+        assert_ne!(laptop.person, phone.person);
+        assert_eq!(laptop.rp_id, "localhost");
+        assert_eq!(phone.rp_id, "localhost");
+        assert_eq!(laptop.sign_count, 3);
+        let mine = &people[person_id(&laptop.person).unwrap()];
+        assert_eq!(mine.label, "laptop");
+        assert_eq!(mine.grants, ["brian", "reviewer"]);
+        assert_eq!(people[person_id(&phone.person).unwrap()].grants, ["brian"]);
+        assert!(laptop.person.len() < 64, "short: {}", laptop.person);
+        assert!(ikigai_core::Capability::scoped(Vec::<String>::new())
+            .with_principal(&laptop.person)
+            .is_ok());
+        let migrated = std::fs::read_to_string(layout.clients_json()).unwrap();
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        assert!(
+            doc["passkeys"]["bGFwdG9w"].get("grants").is_none(),
+            "grants moved to the person"
+        );
+        assert_eq!(
+            migrate_people(&layout).unwrap(),
+            0,
+            "a second run changes nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(layout.clients_json()).unwrap(),
+            migrated
+        );
+        assert_eq!(
+            std::fs::read_to_string(people_backup(&layout)).unwrap(),
+            before
+        );
+    }
+
+    /// ★ Ledger #4305: a passkey's grants are its person's, so two passkeys naming one person
+    /// hold one list, and an author naming either passkey or the person reads as the person's
+    /// label — an author written before the upgrade (a passkey IRI) included.
+    #[test]
+    fn two_passkeys_of_one_person_share_its_grants_and_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        old_clients(&layout);
+        migrate_people(&layout).unwrap();
+        let mut doc = quic::read_object(&layout.clients_json()).unwrap();
+        let laptop = read_passkeys(&layout).unwrap()["bGFwdG9w"].clone();
+        let passkeys = doc.get_mut("passkeys").unwrap().as_object_mut().unwrap();
+        passkeys["cGhvbmU"]["person"] = Value::String(laptop.person.clone());
+        std::fs::write(
+            layout.clients_json(),
+            quic::pretty(&Value::Object(doc)).unwrap(),
+        )
+        .unwrap();
+        let phone = read_passkeys(&layout).unwrap()["cGhvbmU"].clone();
+        assert_eq!(phone.person, laptop.person);
+        assert_eq!(phone.grants, ["brian", "reviewer"], "the person's grants");
+        let rp = Passkeys::new(layout.clone(), 1060);
+        let labels = rp.labels();
+        assert_eq!(labels[&laptop.person], "laptop");
+        assert_eq!(labels[&passkey_iri("bGFwdG9w")], "laptop");
+        assert_eq!(
+            labels[&passkey_iri("cGhvbmU")],
+            "laptop",
+            "a pre-upgrade author"
+        );
+    }
+
+    /// ★ Ledger #4305: a passkey registered at another relying party is refused at sign-in,
+    /// before its signature is looked at, with a sentence that says why.
+    #[test]
+    fn a_passkey_from_another_relying_party_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        let rp = Passkeys::new(layout.clone(), 1060);
+        write_passkey(
+            &layout,
+            &layout.lock_clients().unwrap(),
+            &Enrolled {
+                credential_id: "ZWxzZXdoZXJl".to_string(),
+                person: person_iri("cGVyc29u"),
+                rp_id: "gonk.example.org".to_string(),
+                grants: vec!["brian".to_string()],
+                label: "elsewhere".to_string(),
+                public_key: "AAAA".to_string(),
+                sign_count: 0,
+            },
+        )
+        .unwrap();
+        let challenge = rp.challenge(Purpose::Login, 10).unwrap();
+        let body = json!({
+            "challenge": challenge,
+            "id": "ZWxzZXdoZXJl",
+            "authenticatorData": "AAAA",
+            "clientDataJSON": "AAAA",
+            "signature": "AAAA",
+        });
+        let refused = rp
+            .login(body.to_string().as_bytes(), 11)
+            .err()
+            .expect("refused");
+        assert!(
+            refused.contains("registered for the site `gonk.example.org`")
+                && refused.contains("only at the site it was registered for"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn an_invite_is_single_use_and_expires() {
         let dir = tempfile::tempdir().unwrap();
@@ -2530,6 +2899,8 @@ mod tests {
             &rp.layout.lock_clients().unwrap(),
             &Enrolled {
                 credential_id: id.to_string(),
+                person: person_iri(&migrated_person_id(id)),
+                rp_id: RP_ID.to_string(),
                 grants: vec![grant.to_string()],
                 label: id.to_string(),
                 public_key: "AAAA".to_string(),
@@ -2663,6 +3034,8 @@ mod tests {
                 &layout.lock_clients().unwrap(),
                 &Enrolled {
                     credential_id: id.to_string(),
+                    person: person_iri(&migrated_person_id(id)),
+                    rp_id: RP_ID.to_string(),
                     grants: vec!["brian".to_string()],
                     label: id.to_string(),
                     public_key: "AAAA".to_string(),
@@ -2970,6 +3343,8 @@ mod tests {
         std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
         let old = Enrolled {
             credential_id: "b2xk".to_string(),
+            person: person_iri(&migrated_person_id("b2xk")),
+            rp_id: RP_ID.to_string(),
             grants: vec!["brian".to_string()],
             label: "old".to_string(),
             public_key: "AAAA".to_string(),

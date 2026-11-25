@@ -225,6 +225,18 @@ after creation, so where the browser supports WebAuthn's
 tells the passkey manager the current label and grant. Elsewhere the picker keeps the names
 the passkey was created with until it is re-created.
 
+- **A person is what passkeys name** (ledger #4305). `clients.json` holds a `people` section
+  beside `passkeys`: each person (`urn:iki:gonk:person:id:<id>`) has a label and the grant list,
+  and each passkey entry names its `person` and the relying party it was registered at
+  (`rp_id`, `localhost` for every passkey so far). A passkey's grants are its person's, so
+  every passkey of one person holds the same authority. A `clients.json` from before this is
+  migrated when the server starts: each passkey gets a person of its own carrying its label
+  and grants (nothing is merged), the file is rewritten whole and the old one is kept as
+  `gonk/clients.json.before-people`; a second start changes nothing. An author naming a
+  passkey (every write from before) and one naming its person both read as the person's
+  label. A passkey registered at another relying party is refused at sign-in, with a
+  sentence saying which site it belongs to. Still to come (ledger #4305): requests stamped
+  with the person rather than the passkey, `passkey invite --person` and `passkey attach`.
 - **One grant table for both identity doors.** A passkey is an identity the way a client
   certificate is. Both map to a grant name in `gonk/clients.json` (certificates under
   `clients`, passkeys under `passkeys`), and the grant name maps to scopes in

@@ -1718,7 +1718,8 @@ fn enrich_repo_labels(graph: &mut Graph, web: &Web, capability: &Capability) {
 /// `view:author` for every item and comment that carries `ledger:author`, in place.
 ///
 /// An author that is a passkey IRI ([`identity::passkey_iri`] — what the door stamps on a
-/// signed-in write, forwarded by [`Act`]) renders as that passkey's CURRENT label, read
+/// signed-in write, forwarded by [`Act`]) or a person IRI ([`identity::person_iri`], ledger
+/// #4305) renders as its PERSON's CURRENT label, read
 /// from `clients.json` the way the header's "Signed in as" is; a passkey since deleted
 /// renders as the IRI's tail, so the attribution never vanishes. A QUIC client's name renders
 /// in its CURRENT spelling ([`quic::client_iri`]) whichever one the store holds, so a machine
@@ -1748,10 +1749,17 @@ fn enrich_authors(graph: &mut Graph, passkeys: &Passkeys) {
     }
     let labels = attributed
         .iter()
-        .any(|(_, who)| identity::passkey_credential(who).is_some())
+        .any(|(_, who)| {
+            identity::passkey_credential(who).is_some() || identity::person_id(who).is_some()
+        })
         .then(|| passkeys.labels());
-    let shown = |who: String| match (identity::passkey_credential(&who), &labels) {
-        (Some(id), Some(labels)) => labels.get(id).cloned().unwrap_or_else(|| id.to_string()),
+    let tail = |who: &str| {
+        identity::passkey_credential(who)
+            .or_else(|| identity::person_id(who))
+            .map(str::to_string)
+    };
+    let shown = |who: String| match (tail(&who), &labels) {
+        (Some(id), Some(labels)) => labels.get(&who).cloned().unwrap_or(id),
         _ => match quic::client_fingerprint(&who) {
             Some(fingerprint) => quic::client_iri(fingerprint),
             None => who,
