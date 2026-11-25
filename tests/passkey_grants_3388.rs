@@ -294,12 +294,13 @@ fn the_single_name_form_still_loads_and_the_list_form_is_written() {
     assert_eq!(who.enrolled.grants, ["alice"]);
 
     // The entry was written (migrated at start, and again as the sign-in moved the counter):
-    // the list form, on its person.
+    // the list form, on its person. The entry keeps only the mirror an older gonk reads
+    // (ledger #4368): its person's grants, and `grant` too since the person holds one.
     let written: Value =
         serde_json::from_str(&std::fs::read_to_string(layout.clients_json()).unwrap()).unwrap();
     let entry = &written["passkeys"][base64_id(&auth)];
-    assert!(entry.get("grant").is_none(), "{written}");
-    assert!(entry.get("grants").is_none(), "{written}");
+    assert_eq!(entry["grants"], json!(["alice"]), "{written}");
+    assert_eq!(entry["grant"], json!("alice"), "{written}");
     let person = entry["person"].as_str().expect("names its person");
     let id = identity::person_id(person).expect("a person IRI");
     assert_eq!(
