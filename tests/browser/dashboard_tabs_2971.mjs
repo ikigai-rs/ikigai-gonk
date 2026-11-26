@@ -330,10 +330,12 @@ try {
   await tabs.waitFor();
   const [opened] = await Promise.all([
     context.waitForEvent("page"),
-    agentsTab.click({ modifiers: ["Control"] }),
+    // The platform's new-tab modifier: Ctrl+click on macOS is a context click and opens nothing,
+    // so the test waited for a page that never came there. gonk.js leaves both to the link.
+    agentsTab.click({ modifiers: ["ControlOrMeta"] }),
   ]);
   await opened.waitForURL("**/dashboard/agents", { timeout: 5_000 });
-  check(true, "Ctrl+click opens the tab's URL");
+  check(true, "Ctrl+click (Cmd+click on macOS) opens the tab's URL");
   check(await ledgersTab.getAttribute("aria-selected") === "true", "and this page stays put");
   await opened.close();
 
