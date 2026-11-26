@@ -366,8 +366,9 @@ pub const INVITE_MINUTES: u64 = 30;
 pub const MAX_PENDING: usize = 256;
 
 /// The most sessions one passkey holds at once. ★ Past it, a sign-in by that passkey ENDS its
-/// own oldest session (in `Passkeys::open_session`), so the person signing in again is the only
-/// one signed out, on a device they used least recently. Without it [`MAX_PENDING`] counted
+/// own least recently used session (the oldest `last_seen`, then the oldest sign-in; in
+/// `Passkeys::open_session`), so the person signing in again is the only one signed out, on a
+/// device they used least recently. Without it [`MAX_PENDING`] counted
 /// every passkey's sessions together, and one passkey signing in that many times (an enrolled
 /// collaborator's, read-only included) refused every other passkey's sign-in. With it, filling
 /// [`MAX_PENDING`] takes `MAX_PENDING / MAX_SESSIONS_PER_PASSKEY` enrolled passkeys, and
@@ -2563,7 +2564,7 @@ impl Passkeys {
             write_passkey(&self.layout, &lock, &enrolled)?;
         }
         drop(lock);
-        self.open_session(enrolled, now)
+        self.open_session(enrolled, "login", now)
     }
 
     /// Check a `navigator.credentials.get` answer in `v` (`{challenge, id, authenticatorData,
@@ -2627,8 +2628,15 @@ impl Passkeys {
     }
 
     /// Open a session for `enrolled`, as its grants resolve now: the token (the only copy) and
-    /// the identity.
-    fn open_session(&self, enrolled: Enrolled, now: u64) -> Result<(String, Identity), String> {
+    /// the identity. `op` is the passkey resource operation that opens it (`login`, `add-grant`,
+    /// `reassert`), named in the log line for any session it ends to stay within
+    /// [`MAX_SESSIONS_PER_PASSKEY`].
+    fn open_session(
+        &self,
+        enrolled: Enrolled,
+        op: &'static str,
+        now: u64,
+    ) -> Result<(String, Identity), String> {
         let scopes = scopes_of_all(&self.layout, &enrolled.grants)?;
         let token = random_b64(32)?;
         let expires = now + self.lifetime(&scopes);
@@ -2641,14 +2649,15 @@ impl Passkeys {
         let before = state.sessions.len();
         state.sessions.retain(|_, s| s.over(now, idle).is_none());
         state.dirty |= state.sessions.len() != before;
-        // ★ This passkey's own oldest sessions make room for this one
-        // ([`MAX_SESSIONS_PER_PASSKEY`]); every other passkey's are untouched. A table an older
-        // release wrote with more than the bound shrinks here, at this passkey's next sign-in.
+        // ★ This passkey's own least recently used sessions (oldest `last_seen`, then oldest
+        // sign-in) make room for this one ([`MAX_SESSIONS_PER_PASSKEY`]); every other passkey's
+        // are untouched. A table an older release wrote with more than the bound shrinks here,
+        // at this passkey's next sign-in.
         let mut own: Vec<(u64, u64, String)> = state
             .sessions
             .iter()
             .filter(|(_, s)| s.credential_id == enrolled.credential_id)
-            .map(|(key, s)| (s.issued, s.last_seen, key.clone()))
+            .map(|(key, s)| (s.last_seen, s.issued, key.clone()))
             .collect();
         let surplus = (own.len() + 1).saturating_sub(MAX_SESSIONS_PER_PASSKEY);
         let mut replaced = 0;
@@ -2662,7 +2671,7 @@ impl Passkeys {
         if state.sessions.len() >= MAX_PENDING {
             self.save(&mut state);
             drop(state);
-            self.log_replaced(&enrolled.credential_id, replaced);
+            self.log_replaced(&enrolled.credential_id, op, replaced);
             return Err(format!("{MAX_PENDING} sessions are already open"));
         }
         state.sessions.insert(
@@ -2679,7 +2688,7 @@ impl Passkeys {
         state.dirty = true;
         self.save(&mut state);
         drop(state);
-        self.log_replaced(&enrolled.credential_id, replaced);
+        self.log_replaced(&enrolled.credential_id, op, replaced);
         Ok((
             token,
             Identity {
@@ -2692,16 +2701,16 @@ impl Passkeys {
         ))
     }
 
-    /// The `gonk:Logout` line for the `replaced` sessions of `credential_id` a sign-in ended to
+    /// The `gonk:Logout` line for the `replaced` sessions of `credential_id` that `op` ended to
     /// stay within [`MAX_SESSIONS_PER_PASSKEY`]; none when it ended none.
-    fn log_replaced(&self, credential_id: &str, replaced: usize) {
+    fn log_replaced(&self, credential_id: &str, op: &'static str, replaced: usize) {
         if replaced == 0 {
             return;
         }
         self.audit(
             LOGOUT_CLASS,
             AuditLine {
-                op: "login",
+                op,
                 door: "http",
                 outcome: "ok",
                 credential: Some(credential_id),
@@ -2913,7 +2922,7 @@ impl Passkeys {
             ));
         }
         drop(lock);
-        let (token, identity) = self.open_session(current, now)?;
+        let (token, identity) = self.open_session(current, "add-grant", now)?;
         Ok((token, identity, redeemed))
     }
 
@@ -3103,7 +3112,7 @@ impl Passkeys {
                 why: Some("reasserted"),
             },
         );
-        self.open_session(enrolled, now)
+        self.open_session(enrolled, "reassert", now)
     }
 
     /// End a session. Unknown tokens are not an error: signing out twice is still signed out.
@@ -3816,7 +3825,7 @@ mod tests {
                 .and_then(|mut p| p.remove("cmVhZGVy"));
             match reader {
                 Some(reader) => {
-                    rp.open_session(reader, 1_000).unwrap();
+                    rp.open_session(reader, "login", 1_000).unwrap();
                 }
                 None => {
                     session_as(&rp, "cmVhZGVy", "reader", Authority::Read, 1_000);
@@ -3828,7 +3837,7 @@ mod tests {
             .unwrap()
             .remove("b3duZXI")
             .unwrap();
-        let opened = rp.open_session(owner, 1_010);
+        let opened = rp.open_session(owner, "login", 1_010);
         assert!(
             opened.is_ok(),
             "the owner cannot sign in: {}",
@@ -3850,11 +3859,15 @@ mod tests {
             .unwrap();
         let mut tokens = vec![first];
         for n in 1..MAX_SESSIONS_PER_PASSKEY as u64 {
-            tokens.push(rp.open_session(reader.clone(), 1_000 + n).unwrap().0);
+            tokens.push(
+                rp.open_session(reader.clone(), "login", 1_000 + n)
+                    .unwrap()
+                    .0,
+            );
         }
         let now = 1_000 + MAX_SESSIONS_PER_PASSKEY as u64;
         assert!(tokens.iter().all(|t| rp.identity(t, now).is_some()));
-        let (newest, _) = rp.open_session(reader, now).unwrap();
+        let (newest, _) = rp.open_session(reader, "login", now).unwrap();
         assert!(rp.identity(&tokens[0], now).is_none(), "the oldest ended");
         assert!(tokens[1..].iter().all(|t| rp.identity(t, now).is_some()));
         assert!(
@@ -3874,6 +3887,42 @@ mod tests {
             .filter(|s| s.credential_id == "cmVhZGVy")
             .count();
         assert_eq!(held, MAX_SESSIONS_PER_PASSKEY);
+    }
+
+    /// The session a sign-in past [`MAX_SESSIONS_PER_PASSKEY`] ends is the one used least
+    /// recently, not the oldest sign-in: a device signed in first but used every day stays
+    /// signed in, and a newer session nobody has used since is the one that ends.
+    #[test]
+    fn a_passkeys_sign_in_past_its_bound_ends_its_least_recently_used_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
+        let daily = session_as(&rp, "cmVhZGVy", "reader", Authority::Read, 1_000);
+        let reader = read_passkeys(&rp.layout)
+            .unwrap()
+            .remove("cmVhZGVy")
+            .unwrap();
+        let mut idle = Vec::new();
+        for n in 1..MAX_SESSIONS_PER_PASSKEY as u64 {
+            idle.push(
+                rp.open_session(reader.clone(), "login", 1_000 + n)
+                    .unwrap()
+                    .0,
+            );
+        }
+        // The first sign-in is used again; none of the later ones is.
+        let now = 1_100;
+        assert!(rp.identity(&daily, now).is_some());
+        let (newest, _) = rp.open_session(reader, "login", now + 1).unwrap();
+        assert!(
+            rp.identity(&daily, now + 1).is_some(),
+            "the session signed in first but used just now stays"
+        );
+        assert!(
+            rp.identity(&idle[0], now + 1).is_none(),
+            "the least recently used session ended"
+        );
+        assert!(idle[1..].iter().all(|t| rp.identity(t, now + 1).is_some()));
+        assert!(rp.identity(&newest, now + 1).is_some());
     }
 
     /// A NEW relying party over the same state directory: what a restarted gonk builds.

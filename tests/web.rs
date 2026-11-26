@@ -5743,4 +5743,39 @@ fn the_passkey_resource_never_answers_for_another_session_of_the_person() {
         !other_route.body.contains("\"phone\""),
         "the laptop's request was answered for the phone's session: {other_route:?}"
     );
+    assert_eq!(other_route.status, 200, "{other_route:?}");
+    assert_eq!(
+        other_route.body.trim(),
+        "{}",
+        "answered as signed in as nobody: {other_route:?}"
+    );
+
+    // A sign-out by that route ends nothing, and says which route does.
+    let ended = server.raw(
+        "POST",
+        "/iki/gonk/passkey/logout-all",
+        &[
+            ("Accept", "application/json".to_string()),
+            ("Content-Type", "application/json".to_string()),
+            ("Origin", server.origin()),
+            ("Sec-Fetch-Site", "same-origin".to_string()),
+            (
+                "Cookie",
+                format!("{}={at_laptop}", identity::SESSION_COOKIE),
+            ),
+        ],
+        "",
+    );
+    assert_eq!(ended.status, 404, "{ended:?}");
+    assert!(ended.body.contains("POST /auth/logout-all"), "{ended:?}");
+    assert!(
+        !ended.body.contains("for that token"),
+        "no token was sent: {ended:?}"
+    );
+    let own = get("/auth/session");
+    assert!(
+        own.body.contains("\"laptop\""),
+        "still signed in: {}",
+        own.body
+    );
 }

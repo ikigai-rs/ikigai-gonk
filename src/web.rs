@@ -5215,6 +5215,20 @@ impl Endpoint for PasskeyDoor {
             Some(key) => SignedIn::Session { key, principal },
             None => SignedIn::Principal(principal),
         };
+        // What a `logout-all` or `session` POST with no body is told when `door` names no live
+        // session: a request that carries a principal but no session key reached this resource
+        // by a route other than `/auth/{op}`, so it is told which route answers for its session.
+        let no_session = |route: &str| {
+            Error::NotFound(match door {
+                SignedIn::Principal(Some(_)) => format!(
+                    "this request does not say which of your sessions it is: use {route}, \
+                     which answers for the session your browser's cookie names, or send a \
+                     session token as the body"
+                ),
+                _ => "you are not signed in; sign in first, or send a session token as the body"
+                    .to_string(),
+            })
+        };
         // ★ `session` is also a READ (ledger #3841): ikigai-ui's shell reads the page family's
         // session answer with a GET (`<meta name="ikigai-ui-session">`) to gray out the
         // `data-ui-write` controls once write lapses. It answers the request's OWN session
@@ -5455,6 +5469,7 @@ impl Endpoint for PasskeyDoor {
                         json_repr(json!({ "signedOut": true, "sessions": ended })),
                         &site.clear_session_cookie(),
                     ),
+                    None if content.trim().is_empty() => Err(no_session("POST /auth/logout-all")),
                     None => Err(Error::NotFound(
                         "no live session for that token".to_string(),
                     )),
@@ -5465,6 +5480,7 @@ impl Endpoint for PasskeyDoor {
                 token => self.passkeys.identity(token, now),
             } {
                 Some(who) => Ok(json_repr(session_answer(&who, now))),
+                None if content.trim().is_empty() => Err(no_session("GET /auth/session")),
                 None => Err(Error::NotFound(
                     "no live session for that token".to_string(),
                 )),
@@ -5496,8 +5512,11 @@ impl Endpoint for PasskeyDoor {
                  (`session`, or the `sessionId` a sign-in answered; with neither, the request's \
                  own session); `session`, `logout` and `logout-all` (every session of that \
                  token's passkey) take the session token as the body, and with no body answer \
-                 for the request's own session, except that a page's `logout` and `logout-all` \
-                 end every session of the signed-in person, on every device. `session` answers `seconds` until the session ends, `writeSeconds` \
+                 for the request's own session when it comes through /auth/{op} (through any \
+                 other route, `session` and `logout-all` name no session and say which route \
+                 to use), except that a \
+                 page's `logout` and `logout-all` end every session of the signed-in person, on \
+                 every device. `session` answers `seconds` until the session ends, `writeSeconds` \
                  until its write lapses (12 h after the sign-in at most; past it only its read \
                  scopes are left) and `restore`, the scopes a fresh sign-in would give back; \
                  a Source of `session` (GET /auth/session) answers the same for the request's \
